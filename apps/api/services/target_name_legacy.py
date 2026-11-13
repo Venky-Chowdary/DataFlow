@@ -25,6 +25,7 @@ acknowledged ``legacy_field_policy=write_new`` (recorded on the run).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -183,6 +184,46 @@ def _bounded_probe(dest: Any) -> dict[str, Any]:
     )
 
 
+_INTROSPECT_MEMO: dict[tuple, tuple[float, dict[str, Any]]] = {}
+
+
+#: Attribute on a run's destination endpoint naming that run, so the memo of
+#: destination probes is shared by the run's own checks only (deepcopies of
+#: the endpoint for each stream keep it); other runs and requests never hit it.
+_RUN_TOKEN = "_g11_run_token"
+
+
+def begin_run(dest: Any) -> None:
+    """Mark ``dest`` as one run (idempotent)."""
+    import uuid
+
+    if dest is not None and not getattr(dest, _RUN_TOKEN, ""):
+        try:
+            setattr(dest, _RUN_TOKEN, uuid.uuid4().hex)
+        except (AttributeError, TypeError):
+            pass
+
+
+def _run_key(dest: Any, *parts: Any) -> tuple | None:
+    token = str(getattr(dest, _RUN_TOKEN, "") or "")
+    return (token, *parts) if token else None
+
+
+def _memo_probe(dest: Any) -> dict[str, Any]:
+    """``_bounded_probe``, once per run and table: a multi-stream Execute checks
+    each stream up front and again in its stream loop (re-review M1)."""
+    key = _run_key(dest, *(str(getattr(dest, f, "") or "") for f in (
+        "format", "table", "collection", "database", "schema")))
+    if key is None:
+        return _bounded_probe(dest)
+    hit = _INTROSPECT_MEMO.get(key)
+    if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
+        return hit[1]
+    info = _bounded_probe(dest)
+    _INTROSPECT_MEMO[key] = (time.monotonic(), info)
+    return info
+
+
 def adopt_for_request(request: Any) -> list[dict[str, str]]:
     """Execute: retarget ``request.mappings`` onto an existing table's legacy columns.
 
@@ -194,6 +235,7 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     from connectors.destination_naming import _mapped_targets, target_name_issues
 
     dest = getattr(request, "destination", None)
+    begin_run(dest)
     kind = dest_kind(str(getattr(dest, "format", "") or ""))
     mappings = [dict(_as_dict(m)) for m in (getattr(request, "mappings", None) or [])]
     if dest is None or not _applies(kind) or not _needs_probe(kind, mappings):
@@ -202,7 +244,7 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     if any(i["code"] != "target_name_too_long" for i in raw_issues):
         return []
     try:
-        info = _bounded_probe(dest)
+        info = _memo_probe(dest)
     except Exception as exc:  # noqa: BLE001 - no adoption; Execute's own checks still run
         logger.warning("existing-column probe failed: %s", exc)
         return []
@@ -393,6 +435,32 @@ def _renamed_pairs(mappings: Iterable[Any] | None) -> list[tuple[str, str]]:
     return [(t, old) for t in _mapped_targets(mappings) for old in old_field_spellings(t)]
 
 
+#: Stores holding named fields per record, where an old renamed field can sit
+#: stale beside the new one.
+_FIELD_STORES = DOCUMENT_STORES | SEARCH_STORES | KEY_VALUE_STORES
+_SAMPLE_RECORDS = 200
+_REDIS_SCAN_CALLS = 50
+
+
+class LegacyFieldsUnverified(RuntimeError):
+    """The old-field check could not finish within its budget."""
+
+
+def _probe_seconds() -> float:
+    from services.brand_env import getenv_brand
+
+    try:
+        return max(0.1, float(getenv_brand("LEGACY_FIELD_PROBE_SECONDS", "5") or 5))
+    except ValueError:
+        return 5.0
+
+
+#: Short-lived memo of old-field probes: Execute's up-front multi-stream check
+#: and the stream loop ask the same question seconds apart (re-review M1).
+_PROBE_MEMO: dict[tuple, tuple[float, list[tuple[str, str]]]] = {}
+_PROBE_MEMO_SECONDS = 30.0
+
+
 def mongo_fields_present(cfg: Mapping[str, Any], collection: str, names: Iterable[str]) -> set[str]:
     """Which of ``names`` at least one stored document holds (``$exists``)."""
     from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
@@ -410,16 +478,30 @@ def mongo_fields_present(cfg: Mapping[str, Any], collection: str, names: Iterabl
     coll = _mongo_client(conn)[str(cfg.get("database") or "test")][
         sanitize_identifier(collection, preserve_case=True)
     ]
-    return {
-        name for name in dict.fromkeys(names)
-        if coll.find_one({name: {"$exists": True}}, {"_id": 1}) is not None
-    }
+    # One bounded query per collection (re-review M1): a single $or over every
+    # old name, a projection of just those names, a document cap and a server
+    # time limit. Per-name find_one scanned the whole collection once per target.
+    wanted = list(dict.fromkeys(names))
+    found: set[str] = set()
+    from pymongo.errors import ExecutionTimeout
+
+    try:
+        cursor = (
+            coll.find({"$or": [{n: {"$exists": True}} for n in wanted]}, {n: 1 for n in wanted})
+            .limit(_SAMPLE_RECORDS)
+            .max_time_ms(int(_probe_seconds() * 1000))
+        )
+        for doc in cursor:
+            found.update(n for n in wanted if n in doc)
+            if len(found) == len(wanted):
+                break
+    except ExecutionTimeout as exc:
+        raise LegacyFieldsUnverified(
+            f"MongoDB did not answer the old-field check within {_probe_seconds():g}s"
+        ) from exc
+    return found
 
 
-#: Stores holding named fields per record, where an old renamed field can sit
-#: stale beside the new one.
-_FIELD_STORES = DOCUMENT_STORES | SEARCH_STORES | KEY_VALUE_STORES
-_SAMPLE_RECORDS = 200
 
 
 def redis_fields_present(cfg: Mapping[str, Any], prefix: str, names: Iterable[str]) -> set[str]:
@@ -430,10 +512,26 @@ def redis_fields_present(cfg: Mapping[str, Any], prefix: str, names: Iterable[st
 
     client = _redis_client(dict(cfg))
     wanted = set(names)
+    # A SCAN budget (re-review M1): scan_iter walked the whole keyspace when the
+    # prefix held fewer than the sample size.
+    raw: list[Any] = []
+    cursor, calls = 0, 0
+    deadline = time.monotonic() + _probe_seconds()
+    while True:
+        cursor, batch = client.scan(cursor=cursor, match=f"{prefix}:*", count=1000)
+        raw.extend(batch)
+        calls += 1
+        if not cursor or len(raw) >= _SAMPLE_RECORDS:
+            break
+        if calls >= _REDIS_SCAN_CALLS or time.monotonic() > deadline:
+            if not raw:
+                raise LegacyFieldsUnverified(
+                    f"Redis SCAN found no {prefix}:* key within its budget "
+                    f"({calls} calls, {_probe_seconds():g}s)"
+                )
+            break
     keys = keys_for_prefix(
-        [k.decode() if isinstance(k, bytes) else str(k)
-         for k in islice(client.scan_iter(match=f"{prefix}:*", count=_SAMPLE_RECORDS),
-                         _SAMPLE_RECORDS)],
+        [k.decode() if isinstance(k, bytes) else str(k) for k in islice(raw, _SAMPLE_RECORDS)],
         prefix,
     )
     found: set[str] = set()
@@ -488,7 +586,8 @@ def es_mapping_fields(cfg: Mapping[str, Any], index: str) -> set[str]:
 
 
 def existing_legacy_fields(
-    dest_type: str | None, cfg: Mapping[str, Any] | None, table: str, mappings: Iterable[Any] | None
+    dest_type: str | None, cfg: Mapping[str, Any] | None, table: str, mappings: Iterable[Any] | None,
+    run_scope: Any = None,
 ) -> list[tuple[str, str]]:
     """``(target, old field)`` pairs whose old field the destination already holds.
 
@@ -503,6 +602,10 @@ def existing_legacy_fields(
     if not pairs or not cfg or not table:
         return []
     olds = [old for _t, old in pairs]
+    key = _run_key(run_scope, kind, table, tuple(sorted(set(olds)))) if run_scope else None
+    hit = _PROBE_MEMO.get(key) if key else None
+    if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
+        return [p for p in hit[1] if p in pairs]
     if kind in DOCUMENT_STORES:
         present = mongo_fields_present(cfg, table, olds)
     elif kind == "redis":
@@ -511,7 +614,10 @@ def existing_legacy_fields(
         present = dynamodb_fields_present(cfg, table, olds)
     else:
         present = es_mapping_fields(cfg, table)
-    return [(t, old) for t, old in pairs if old in present]
+    found = [(t, old) for t, old in pairs if old in present]
+    if key:
+        _PROBE_MEMO[key] = (time.monotonic(), found)
+    return found
 
 
 def legacy_field_issues(
@@ -569,6 +675,7 @@ def legacy_field_verdict(
     *,
     sync_mode: str | None,
     policy: str = "",
+    run_scope: Any = None,
 ) -> tuple[list[dict[str, str]], bool]:
     """The one rule Validate and Execute share: ``(issues, blocking)``.
 
@@ -577,7 +684,7 @@ def legacy_field_verdict(
     """
     from services.sync_cursor import is_overwrite_sync
 
-    found = existing_legacy_fields(dest_type, cfg, table, mappings)
+    found = existing_legacy_fields(dest_type, cfg, table, mappings, run_scope)
     blocking = bool(found) and not is_overwrite_sync(str(sync_mode or "")) and policy != WRITE_NEW
     return legacy_field_issues(dest_type, found, blocking=blocking), blocking
 
@@ -599,18 +706,31 @@ def legacy_fields_refusal(request: Any) -> str:
         return ""
     extra = dict(getattr(dest, "extra", None) or {})
     policy = _policy_of(extra)
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(getattr(request, "sync_mode", "") or "")
+    if is_overwrite_sync(sync_mode):
+        return ""  # the collection / index is replaced: nothing can mix
     try:
         from src.transfer.adapters import resolve_connector_config
 
         cfg = resolve_connector_config(dest)
         table = str(getattr(dest, "table", "") or getattr(dest, "collection", "") or "")
         issues, blocking = legacy_field_verdict(
-            kind, mappings, cfg, table,
-            sync_mode=str(getattr(request, "sync_mode", "") or ""), policy=policy,
+            kind, mappings, cfg, table, sync_mode=sync_mode, policy=policy, run_scope=dest,
         )
-    except Exception as exc:  # noqa: BLE001 - the write's own connect reports an unreachable store
-        logger.warning("legacy field check skipped: %s", exc)
-        return ""
+    except Exception as exc:  # noqa: BLE001 - fail closed: an unchecked store is not "no old fields"
+        unchecked = (
+            f"Could not verify the destination's old field names ({exc}). Set "
+            f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the destination to write the new "
+            "names anyway (recorded on the run), or run an overwrite."
+        )
+        if policy == WRITE_NEW:
+            extra[LEGACY_FIELD_ACK] = [f"old field names not verified ({exc}); "
+                                       f"{LEGACY_FIELD_POLICY}={WRITE_NEW}"]
+            dest.extra = extra
+            return ""
+        return unchecked
     if blocking:
         return "Destination holds the old field names: " + " ".join(
             i["message"] for i in issues[:3]
@@ -689,9 +809,19 @@ def target_name_gates(
             dest_type, mappings, destination_config, destination_table,
             sync_mode=sync_mode, policy=legacy_field_policy,
         )
-    except Exception as exc:  # noqa: BLE001 - Execute re-checks before writing
-        logger.info("legacy field check skipped at Validate: %s", exc)
-        warnings, blocking = [], False
+    except Exception as exc:  # noqa: BLE001 - reported, never read as "no old fields"
+        from services.sync_cursor import is_overwrite_sync
+
+        blocking = not is_overwrite_sync(str(sync_mode or "")) and legacy_field_policy != WRITE_NEW
+        warnings = [{
+            "code": "target_path_legacy_fields_unchecked",
+            "target": "",
+            "message": (
+                f"Could not verify the destination's old field names ({exc}). Set "
+                f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} to write the new names anyway, or "
+                "run an overwrite."
+            ),
+        }]
     if warnings:
         gates.append({
             "id": "g23e_target_legacy_fields",
@@ -706,6 +836,7 @@ def target_name_gates(
 
 __all__ = [
     "MAP_TARGET",
+    "LegacyFieldsUnverified",
     "operator_rows",
     "prepare_stream_targets",
     "selected_streams",
