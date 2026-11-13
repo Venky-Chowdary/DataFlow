@@ -10,7 +10,10 @@ every resumed pass and in the proof. This module is that value.
   hash_pii key scope). It does nothing until a recipe asks for the clock.
 * The first ask reads the job record: a job that already has ``run_clock``
   (a resumed pass) replays it; otherwise the value is fixed now, in whole UTC
-  seconds, and stamped on the job record before any row uses it.
+  seconds, and stamped on the job record with a compare-and-swap before any
+  row uses it (two replicas racing both use the one that won).
+* It fails closed: a job record that cannot be read, or a stamp that cannot
+  be recorded, raises :class:`RunClockUnavailable` and the run refuses.
 * Outside a job (Transform preview, Validate) there is no run start yet:
   :func:`current_run_started_at` returns ``""`` and the engine uses a design
   clock it labels ``preview``.
@@ -18,17 +21,30 @@ every resumed pass and in the proof. This module is that value.
 
 from __future__ import annotations
 
-import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Iterator
 
-logger = logging.getLogger(__name__)
+from services.shape_models import ShapeError
+
 
 #: Job-record field holding ``{"started_at": iso, "source": "run"}``.
 JOB_FIELD = "run_clock"
+
+
+class RunClockUnavailable(ShapeError):
+    """The run's start could not be read or recorded: the run refuses.
+
+    Minting a value the job record does not hold would let a resumed pass
+    (or Gate-8) see a different time from the rows already written.
+    """
+
+
+def _recorded(job: Any) -> str:
+    clock = job.get(JOB_FIELD) if isinstance(job, dict) else None
+    return str(clock.get("started_at") or "") if isinstance(clock, dict) else ""
 
 
 class _Clock:
@@ -41,26 +57,45 @@ class _Clock:
     def resolve(self) -> str:
         with self.lock:
             if not self.value:
-                self.value = self._recorded() or self._fix()
+                self.value = self._settle()
             return self.value
 
-    def _recorded(self) -> str:
+    def _read(self, store: Any) -> dict[str, Any]:
         try:
-            job = self.store().get_job(self.job_id) or {}
-        except Exception:  # noqa: BLE001 - an unreadable record is "none recorded"
-            logger.warning("could not read run_clock for %s", self.job_id, exc_info=True)
-            return ""
-        return str((job.get(JOB_FIELD) or {}).get("started_at") or "")
+            job = store.get_job(self.job_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced as the run's refusal
+            raise RunClockUnavailable(
+                f"the run's start time could not be read from job {self.job_id} ({type(exc).__name__}); "
+                "the run stops rather than stamp a different time"
+            ) from exc
+        if not isinstance(job, dict):
+            raise RunClockUnavailable(
+                f"job {self.job_id} could not be read, so its run start time is unknown; "
+                "the run stops rather than stamp a different time"
+            )
+        return job
 
-    def _fix(self) -> str:
+    def _settle(self) -> str:
+        store = self.store()
+        recorded = _recorded(self._read(store))
+        if recorded:
+            return recorded  # a resumed pass replays the run's own value
         value = now_iso()
-        # Stamped before any row uses it: a resume must find the same value.
-        self.store().update_job_fields(
+        # Compare-and-swap: only the first replica to stamp the job wins.
+        if store.update_job_fields(
             self.job_id,
             {JOB_FIELD: {"started_at": value, "source": "run"}},
             touch_updated_at=False,
+            expected={JOB_FIELD: None},
+        ):
+            return value
+        recorded = _recorded(self._read(store))
+        if recorded:
+            return recorded  # another replica stamped it first: use that one
+        raise RunClockUnavailable(
+            f"the run's start time could not be recorded on job {self.job_id}; "
+            "the run stops rather than stamp rows with a time a resume could not repeat"
         )
-        return value
 
 
 _CLOCK: ContextVar[_Clock | None] = ContextVar("dataflow_run_clock", default=None)

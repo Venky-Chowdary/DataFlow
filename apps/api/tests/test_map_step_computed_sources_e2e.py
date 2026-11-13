@@ -175,6 +175,45 @@ def test_run_start_time_is_one_recorded_value_and_gate8_verifies_it():
         h.drop_table("postgresql", dst)
 
 
+def test_a_run_whose_start_time_cannot_be_recorded_refuses(monkeypatch):
+    """Fail closed: no row is stamped with a time the job record does not hold."""
+    h.dest_config("postgresql")  # skips when PostgreSQL is absent
+    from services import run_clock
+    from services.shape_models import ShapeRecipe
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+    from tests.typed_fidelity_helpers import pg_endpoint
+
+    def unavailable(self):
+        raise run_clock.RunClockUnavailable("job store unreachable (test)")
+
+    monkeypatch.setattr(run_clock._Clock, "_settle", unavailable)
+    recipe = {"steps": COMPUTED["steps"] + [{"op": "run_timestamp", "options": {"to": "stamped_at"}}]}
+    dst = f"mapc_dst_{uuid.uuid4().hex[:8]}"
+    src = _seed(dst)
+    h.execute("postgresql", f'ALTER TABLE public."{dst}" ADD COLUMN stamped_at timestamptz')  # nosec B608
+    try:
+        mappings = _mappings() + [{
+            "source": "stamped_at", "target": "stamped_at", "target_type": "TIMESTAMPTZ",
+            "approved": True, "confidence": 0.99, "user_override": True,
+        }]
+        request = TransferRequest(
+            source=pg_endpoint(src), destination=pg_endpoint(dst), mappings=mappings,
+            sync_mode="full_refresh_append", validation_mode="strict", shape_recipe=recipe,
+            approved_shape_recipe_hash=ShapeRecipe.parse(recipe).recipe_hash,
+            compliance_acknowledged=True, acknowledgment_actor="qa@example.com",
+            acknowledgment_reason="Customer names are in scope for this migration",
+        )
+        result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+        assert not result.success
+        assert "job store unreachable" in (result.error or ""), result.error
+        rows = h.query("postgresql", f'SELECT count(*) FROM public."{dst}"')  # nosec B608
+        assert rows[0][0] == 0, "no row was written"
+    finally:
+        h.drop_table("postgresql", src)
+        h.drop_table("postgresql", dst)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)

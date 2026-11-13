@@ -33,9 +33,15 @@ class _Store:
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         return self.jobs.get(job_id)
 
-    def update_job_fields(self, job_id: str, fields: dict[str, Any], **_: Any) -> None:
+    def update_job_fields(self, job_id: str, fields: dict[str, Any], *, expected=None, **_: Any) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        if expected and any(job.get(k) != v for k, v in expected.items()):
+            return False
         self.writes += 1
-        self.jobs.setdefault(job_id, {}).update(fields)
+        job.update(fields)
+        return True
 
 
 def test_the_step_parses_and_its_identity_carries_no_clock():
@@ -62,7 +68,7 @@ def test_every_row_and_every_batch_gets_the_one_run_value():
 
 
 def test_a_resumed_pass_replays_the_recorded_value_not_a_new_clock():
-    store = _Store()
+    store = _Store({"job-1": {}})
     with run_clock.run_clock_scope("job-1", store=lambda: store):
         first = run_clock.current_run_started_at()
     assert store.jobs["job-1"]["run_clock"]["started_at"] == first
@@ -76,14 +82,14 @@ def test_a_resumed_pass_replays_the_recorded_value_not_a_new_clock():
 
 
 def test_a_run_without_the_step_never_touches_the_job_record():
-    store = _Store()
+    store = _Store({"job-2": {}})
     with run_clock.run_clock_scope("job-2", store=lambda: store):
         ShapeEngine(ShapeRecipe.parse({"steps": [{"op": "drop_column", "column": "id"}]}, source_columns=["id"]))
-    assert store.writes == 0 and "job-2" not in store.jobs
+    assert store.writes == 0 and store.jobs["job-2"] == {}
 
 
 def test_the_clock_is_whole_seconds_utc():
-    store = _Store()
+    store = _Store({"job-3": {}})
     with run_clock.run_clock_scope("job-3", store=lambda: store):
         value = run_clock.current_run_started_at()
     moment = datetime.fromisoformat(value)
@@ -144,3 +150,102 @@ def test_the_transform_preview_says_a_run_fixes_its_own_start(client):
     stamps = {r["loaded_at"] for r in body["after"]}
     assert len(stamps) == 1, "one value for the whole preview"
     assert "a run fixes its own value once" in body["preview_note"]
+
+
+# --------------------------------------------------------------------------- fail closed
+
+
+class _FlakyRead(_Store):
+    def __init__(self, jobs):
+        super().__init__(jobs)
+        self.fail_reads = 1
+
+    def get_job(self, job_id):
+        if self.fail_reads:
+            self.fail_reads -= 1
+            raise ConnectionError("transient")
+        return super().get_job(job_id)
+
+
+class _Unreachable(_Store):
+    """What MongoDBService answers when the database is down: None and False."""
+
+    def get_job(self, job_id):
+        return None
+
+    def update_job_fields(self, job_id, fields, **kw):
+        return False
+
+
+def test_a_resume_that_cannot_read_the_record_refuses_and_keeps_the_recorded_value():
+    store = _FlakyRead({"j": {"run_clock": {"started_at": T0, "source": "run"}}})
+    with run_clock.run_clock_scope("j", store=lambda: store):
+        with pytest.raises(run_clock.RunClockUnavailable):
+            ShapeEngine(ShapeRecipe.parse(RECIPE, source_columns=["id"]))
+    assert store.jobs["j"]["run_clock"]["started_at"] == T0, "never overwritten"
+    assert store.writes == 0
+
+
+def test_an_unrecordable_clock_refuses_the_run():
+    store = _Unreachable()
+    with run_clock.run_clock_scope("j2", store=lambda: store):
+        with pytest.raises(run_clock.RunClockUnavailable):
+            ShapeEngine(ShapeRecipe.parse(RECIPE, source_columns=["id"]))
+
+
+def test_a_refused_stamp_with_nothing_recorded_refuses():
+    class NoWrite(_Store):
+        def update_job_fields(self, job_id, fields, **kw):
+            return False
+
+    store = NoWrite({"j3": {}})
+    with run_clock.run_clock_scope("j3", store=lambda: store):
+        with pytest.raises(run_clock.RunClockUnavailable):
+            run_clock.current_run_started_at()
+
+
+def test_two_replicas_stamping_at_once_agree_on_one_value():
+    import threading
+    import time as _time
+
+    gate = threading.Barrier(2)
+    lock = threading.Lock()
+
+    class Shared(_Store):
+        def get_job(self, job_id):
+            job = super().get_job(job_id)
+            snapshot = dict(job or {})
+            if "run_clock" not in snapshot:
+                gate.wait(timeout=5)  # both replicas read "nothing recorded"
+            return snapshot
+
+        def update_job_fields(self, job_id, fields, **kw):
+            with lock:  # the store's own atomic compare-and-swap
+                return super().update_job_fields(job_id, fields, **kw)
+
+    store = Shared({"j4": {}})
+    real_now = run_clock.now_iso
+    stamps = iter(["2026-11-13T10:00:00+00:00", "2026-11-13T10:00:01+00:00"])
+    stamp_lock = threading.Lock()
+
+    def now():
+        with stamp_lock:
+            return next(stamps)
+
+    seen: list[str] = []
+
+    def replica():
+        with run_clock.run_clock_scope("j4", store=lambda: store):
+            seen.append(run_clock.current_run_started_at())
+
+    run_clock.now_iso = now
+    try:
+        threads = [threading.Thread(target=replica) for _ in range(2)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+    finally:
+        run_clock.now_iso = real_now
+    _time.sleep(0)
+    assert len(seen) == 2 and seen[0] == seen[1], seen
+    assert store.jobs["j4"]["run_clock"]["started_at"] == seen[0]
+    assert store.writes == 1
