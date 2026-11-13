@@ -26,7 +26,7 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 from connectors.mongodb_common import (
     _mongo_client,
@@ -764,6 +764,15 @@ class QueryExportRequest(QueryExecuteRequest):
         description="append only when writing to a connector; overwrite/upsert must go through Transfer Studio",
     )
     conflict_columns: list[str] = Field(default_factory=list, description="Columns to use for upsert conflict resolution")
+    # G7 (CWE-1236): a console export is a file a person opens in a spreadsheet.
+    formula_protection: Literal["off", "prefix"] = Field(
+        "prefix",
+        description=(
+            "CSV/TSV file export: \"prefix\" (default) puts a leading ' on text cells that "
+            "start with = + - @ tab or CR so a spreadsheet never runs them as formulas "
+            "(numbers such as -5 are untouched); \"off\" writes exact values"
+        ),
+    )
 
 
 class QueryResult(BaseModel):
@@ -990,6 +999,8 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
     written = {"n": 0}
     handle = final_path.open("w", encoding="utf-8", newline="")
     writer_box: dict[str, Any] = {}
+    guard_formulas = body.formula_protection == "prefix" and fmt in {"csv", "tsv"}
+    from services.csv_safety import neutralize_export_cell
 
     def _on_row(columns: list[str], record: dict[str, Any]) -> None:
         if fmt == "jsonl":
@@ -1005,7 +1016,11 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
                 )
                 writer.writeheader()
                 writer_box["w"] = writer
-            writer.writerow({k: "" if record.get(k) is None else record.get(k) for k in columns})
+            row = {k: "" if record.get(k) is None else record.get(k) for k in columns}
+            if guard_formulas:
+                # G7: text that would open as a formula is quoted; numbers are not.
+                row = {k: neutralize_export_cell(v) for k, v in row.items()}
+            writer.writerow(row)
         written["n"] += 1
 
     try:
@@ -1136,7 +1151,12 @@ async def query_export(
         from src.transfer.adapters import write_destination_file
         from src.transfer.models import EndpointConfig
 
-        dest = EndpointConfig(kind="file_export", format=body.format, output_path=body.output_path)
+        dest = EndpointConfig(
+            kind="file_export",
+            format=body.format,
+            output_path=body.output_path,
+            extra={"formula_protection": body.formula_protection},
+        )
         export_bytes, export_name, dest_summary = write_destination_file(
             dest,
             records=rows,

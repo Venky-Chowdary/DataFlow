@@ -21,7 +21,13 @@ def write_destination_file(
     column_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format."""
+    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format.
+
+    ``endpoint.extra["formula_protection"]``: ``"off"`` (default — a transfer
+    job's file is data, byte-exact) or ``"prefix"`` (CSV/TSV text cells that
+    would open as a spreadsheet formula get a leading ``'``; see
+    ``services.csv_safety``). Human-download callers pass ``"prefix"``.
+    """
     import sys
     from pathlib import Path
 
@@ -32,12 +38,21 @@ def write_destination_file(
         resolve_target_columns,
         transform_error_policy_for_validation_mode,
     )
+    from services.csv_safety import formula_protection_mode, neutralize_export_cell
     from services.format_converter import can_convert, convert_rows
 
     fmt = (endpoint.format or "json").lower()
     # ndjson is a JSON Lines alias for the conversion engine
     if fmt == "ndjson":
         fmt = "jsonl"
+    # G7 (CWE-1236): opt-in OWASP guard for delimited text a person opens.
+    guard_formulas = (
+        formula_protection_mode(
+            (endpoint.extra if isinstance(endpoint.extra, dict) else {}).get("formula_protection")
+        )
+        == "prefix"
+        and fmt in {"csv", "tsv"}
+    )
     src_fmt = (source_format or fmt).lower()
     if src_fmt == "ndjson":
         src_fmt = "jsonl"
@@ -135,9 +150,8 @@ def write_destination_file(
         parsed = to_delimited_value(val, col, export_dest_types)
         if parsed is None:
             return ""
-        if isinstance(parsed, str):
-            return parsed
-        return cell_to_string(parsed)
+        text = parsed if isinstance(parsed, str) else cell_to_string(parsed)
+        return neutralize_export_cell(text) if guard_formulas else text
 
     def _export_summary(
         filename: str,
@@ -158,6 +172,9 @@ def write_destination_file(
             out["mime"] = mime
         if converted_from is not None:
             out["converted_from"] = converted_from
+        if guard_formulas:
+            # Gate-8 reads the guarded cells back to the exact values sent.
+            out["formula_protection"] = "prefix"
         return out
 
     grid = [
