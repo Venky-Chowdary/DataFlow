@@ -244,6 +244,11 @@ describe("readable fit and columns still on the row", () => {
     assert.equal(edgeRoute(28, 180), "smoothstep");
   });
 
+  it("a run start time step adds its column for the steps after it", () => {
+    const steps = [{ op: "run_timestamp", options: { to: "loaded_at" } }, { op: "trim", column: "loaded_at" }];
+    assert.deepEqual(columnsBeforeStep(steps, 1, ["id"]), ["id", "loaded_at"]);
+  });
+
   it("hides a column an earlier step dropped, and keeps one a later step still needs", () => {
     const steps = [
       { op: "trim", column: "customer_email" },

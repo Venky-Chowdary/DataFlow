@@ -107,39 +107,44 @@ export function applyImportedMappings(
 
 export type ComputedSource =
   | { kind: "expression"; target: string; expression: string }
-  | { kind: "constant"; target: string; value: string };
+  | { kind: "constant"; target: string; value: string }
+  | { kind: "run_time"; target: string };
 
 export function computedStep(c: ComputedSource): ShapeStepWire {
-  return c.kind === "expression"
-    ? { op: "derive_column", options: { to: c.target, expression: c.expression } }
-    : { op: "constant_column", options: { to: c.target, value: c.value } };
+  if (c.kind === "expression") return { op: "derive_column", options: { to: c.target, expression: c.expression } };
+  if (c.kind === "constant") return { op: "constant_column", options: { to: c.target, value: c.value } };
+  return { op: "run_timestamp", options: { to: c.target } };
 }
 
+const TIME_TYPE = /time|date/i;
+
 /**
- * CURRENT_TIMESTAMP is not a computed value here: the Transform engine is
- * deterministic so preview, Validate, Execute and a resume write the same
- * row. A load time comes from the destination's own clock default.
+ * "Run start time" is a ``run_timestamp`` Transform step, not a per-row clock:
+ * the run fixes one value when it starts and records it, a resume and Gate-8
+ * reuse it, and preview / Validate show a stand-in of the same type. A
+ * destination column with its own clock default can instead be left unmapped.
  */
-export function loadTimeAdvice(
-  column: { name: string; hasDefault: boolean; default: string | null } | undefined,
+export function runTimeAdvice(
+  column: { name: string; type?: string; hasDefault: boolean; default: string | null } | undefined,
 ): { ok: boolean; message: string } {
+  const type = String(column?.type ?? "");
+  if (column && type && !TIME_TYPE.test(type)) {
+    return { ok: false, message: `${column.name} is ${type}: a run start time needs a timestamp column.` };
+  }
+  const base = "Every row gets the run's start time (UTC), fixed once when the run starts and recorded with "
+    + "the run; a resume and Gate-8 reuse it. Preview and Validate show a stand-in time.";
   if (column?.hasDefault) {
     return {
       ok: true,
-      message: `Leave ${column.name} unmapped: the destination stamps ${column.default ?? "its default"} on insert.`,
+      message: `${base} Or leave ${column.name} unmapped: the destination stamps ${column.default ?? "its default"} on each insert.`,
     };
   }
-  return {
-    ok: false,
-    message:
-      "A clock is not a Transform value: preview, Validate, Execute and a resume would each see a different time. "
-      + "Give the destination column a DEFAULT CURRENT_TIMESTAMP and leave it unmapped.",
-  };
+  return { ok: true, message: base };
 }
 
 export function destColumnForAdvice(catalog: DestColumnCatalog | null, name: string) {
   const c = findDestColumn(catalog, name);
-  return c ? { name: c.name, hasDefault: c.hasDefault, default: c.default } : undefined;
+  return c ? { name: c.name, type: c.type, hasDefault: c.hasDefault, default: c.default } : undefined;
 }
 
 export interface TemplateUnbound {

@@ -75,7 +75,8 @@ _ROW_STEPS = frozenset({
 #: the column they write (``options.to`` / ``keys``) is new: written onto a column
 #: the row already holds, they overwrite it (``recipe_lossy``).
 _INVERTIBLE_STEPS = frozenset({
-    "rename_column", "sort_rows", "constant_column", "derive_column", "surrogate_key", "flatten_json",
+    "rename_column", "sort_rows", "constant_column", "run_timestamp", "derive_column", "surrogate_key",
+    "flatten_json",
 })
 #: Target logical type -> the engine cast that binds a text value into it.
 _CAST_FOR: dict[str, str] = {

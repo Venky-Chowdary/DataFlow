@@ -278,7 +278,7 @@ export function TransferMapStep({
   const [pendingComputed, setPendingComputed] = useState<ShapeStepWire[]>([]);
   const importId = useId();
   const computedSteps = useMemo(
-    () => transformSteps.filter((s) => ["derive_column", "constant_column", "concat_columns"].includes(s.op)),
+    () => transformSteps.filter((s) => ["derive_column", "constant_column", "concat_columns", "run_timestamp"].includes(s.op)),
     [transformSteps],
   );
   const documentBody = () => ({

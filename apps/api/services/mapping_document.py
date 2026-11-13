@@ -62,7 +62,7 @@ _FIELDS = (
     "assignment_strategy",
 )
 #: Transform ops that produce a column a mapping can read.
-_COMPUTED_OPS = frozenset({"derive_column", "constant_column", "concat_columns"})
+_COMPUTED_OPS = frozenset({"derive_column", "constant_column", "concat_columns", "run_timestamp"})
 
 
 class MappingDocumentError(ValueError):

@@ -5,12 +5,12 @@ import type { DestColumnCatalog } from "../../lib/destColumnCatalog";
 import {
   computedStep,
   destColumnForAdvice,
-  loadTimeAdvice,
+  runTimeAdvice,
   type ComputedSource,
 } from "../../lib/mappingCode";
 import type { ShapeStepWire } from "../../lib/shape";
 
-type Kind = "expression" | "constant" | "load_time";
+type Kind = "expression" | "constant" | "run_time";
 
 interface ComputedColumnDialogProps {
   open: boolean;
@@ -73,17 +73,20 @@ export function ComputedColumnDialog({ open, catalog, sourceColumns, onAdd, onCl
     };
   }, [open, kind, expression, sourceKey]);
 
-  const advice = kind === "load_time" ? loadTimeAdvice(destColumnForAdvice(catalog, target)) : null;
+  const advice = kind === "run_time" ? runTimeAdvice(destColumnForAdvice(catalog, target)) : null;
   const ready = Boolean(target.trim()) && (
-    kind === "expression" ? check.state === "ok" : kind === "constant" ? true : false
+    kind === "expression" ? check.state === "ok" : kind === "constant" ? true : Boolean(advice?.ok)
   );
 
   const add = () => {
-    if (!ready || kind === "load_time") return;
+    if (!ready) return;
+    const name = target.trim();
     const c: ComputedSource = kind === "expression"
-      ? { kind, target: target.trim(), expression: expression.trim() }
-      : { kind, target: target.trim(), value };
-    onAdd(computedStep(c), target.trim());
+      ? { kind, target: name, expression: expression.trim() }
+      : kind === "constant"
+        ? { kind, target: name, value }
+        : { kind, target: name };
+    onAdd(computedStep(c), name);
   };
 
   return (
@@ -92,7 +95,7 @@ export function ComputedColumnDialog({ open, catalog, sourceColumns, onAdd, onCl
       onClose={onClose}
       size="md"
       title="Computed destination column"
-      subtitle="Fill a destination column from an expression or a constant. It is added to Transform, where you preview it; Validate type-checks it against the destination."
+      subtitle="Fill a destination column from an expression, a constant or the run's start time. It is added to Transform, where you preview it; Validate type-checks it against the destination."
       className="df2-ms-computed"
       footer={
         <>
@@ -109,7 +112,7 @@ export function ComputedColumnDialog({ open, catalog, sourceColumns, onAdd, onCl
           {([
             ["expression", "Expression"],
             ["constant", "Constant"],
-            ["load_time", "Load time (CURRENT_TIMESTAMP)"],
+            ["run_time", "Run start time (fixed once per run)"],
           ] as const).map(([k, label]) => (
             <label key={k} className="df2-ms-radio">
               <input

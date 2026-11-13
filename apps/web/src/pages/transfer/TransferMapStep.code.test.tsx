@@ -275,16 +275,17 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
     ]);
   });
 
-  it("load time is the destination's default, refused where there is none", async () => {
+  it("run start time adds one run-scoped value to Transform", async () => {
     await render(ROWS());
     await act(async () => button("Computed column…").click());
-    await act(async () => document.querySelector<HTMLInputElement>('input[aria-label="Load time (CURRENT_TIMESTAMP)"]')!.click());
+    await act(async () => document.querySelector<HTMLInputElement>('input[aria-label="Run start time (fixed once per run)"]')!.click());
     const target = document.querySelector<HTMLInputElement>('.df2-ms-computed input[placeholder="full_name"]')!;
     await type(target, "loaded_at");
-    assert.match(document.querySelector(".df2-ms-computed")!.textContent ?? "", /Leave loaded_at unmapped: the destination stamps now\(\)/);
+    assert.match(document.querySelector(".df2-ms-computed")!.textContent ?? "", /or leave loaded_at unmapped: the destination stamps now\(\)/i);
     await type(target, "batch_ts");
-    assert.match(document.querySelector(".df2-ms-computed")!.textContent ?? "", /A clock is not a Transform value/);
-    assert.equal(button("Add to Transform").disabled, true);
+    assert.match(document.querySelector(".df2-ms-computed")!.textContent ?? "", /fixed once when the run starts/);
+    await act(async () => button("Add to Transform").click());
+    assert.deepEqual(addedSteps, [{ op: "run_timestamp", options: { to: "batch_ts" } }]);
   });
 
   it("templates: save the mapping, apply one with re-bound pairs through the preview", async () => {

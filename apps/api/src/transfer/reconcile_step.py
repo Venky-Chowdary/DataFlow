@@ -1596,7 +1596,13 @@ def _transform_applied_proof_impl(
         src_type = resolve_driver_type(source_endpoint.format or "")
         from services.shape_apply import is_typed_value_source as _itvs
 
-        runner = ShapeRunner(parsed, typed_values=_itvs(src_type))
+        from services.run_clock import recorded_run_started_at as _recorded_clock
+
+        runner = ShapeRunner(
+            parsed,
+            typed_values=_itvs(src_type),
+            run_started_at=_recorded_clock(dest_summary),
+        )
         src_cfg = resolve_connector_config(source_endpoint)
         read_cols = list(runner.recipe.input_columns or columns)
         expected_checksum = canonical_checksum_from_iter(

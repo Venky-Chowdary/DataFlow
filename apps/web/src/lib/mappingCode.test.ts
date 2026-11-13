@@ -6,8 +6,8 @@ import {
   applyImportedMappings,
   computedStep,
   documentRows,
-  loadTimeAdvice,
   mergeComputedSteps,
+  runTimeAdvice,
   templateUnboundNote,
 } from "./mappingCode";
 
@@ -97,13 +97,24 @@ describe("computed columns are Transform steps", () => {
     });
   });
 
-  it("load time is a destination default, never a computed value", () => {
-    const withDefault = loadTimeAdvice({ name: "loaded_at", hasDefault: true, default: "now()" });
+  it("run start time is a run_timestamp step: one value per run, not a per-row clock", () => {
+    assert.deepEqual(computedStep({ kind: "run_time", target: "loaded_at" }), {
+      op: "run_timestamp", options: { to: "loaded_at" },
+    });
+  });
+
+  it("run start time advice names the run's fixed value and the destination default", () => {
+    const plain = runTimeAdvice({ name: "batch_ts", type: "TIMESTAMPTZ", hasDefault: false, default: null });
+    assert.equal(plain.ok, true);
+    assert.match(plain.message, /fixed once when the run starts/);
+    assert.match(plain.message, /resume and Gate-8 reuse it/);
+    const withDefault = runTimeAdvice({ name: "loaded_at", type: "TIMESTAMP", hasDefault: true, default: "now()" });
     assert.equal(withDefault.ok, true);
-    assert.match(withDefault.message, /Leave loaded_at unmapped: the destination stamps now\(\)/);
-    const without = loadTimeAdvice({ name: "loaded_at", hasDefault: false, default: null });
-    assert.equal(without.ok, false);
-    assert.match(without.message, /preview, Validate, Execute and a resume/);
+    assert.match(withDefault.message, /or leave loaded_at unmapped: the destination stamps now\(\) on each insert/i);
+    assert.match(withDefault.message, /UTC/);
+    const notATime = runTimeAdvice({ name: "batch_no", type: "BIGINT", hasDefault: false, default: null });
+    assert.equal(notATime.ok, false);
+    assert.match(notATime.message, /batch_no is BIGINT/);
   });
 });
 
