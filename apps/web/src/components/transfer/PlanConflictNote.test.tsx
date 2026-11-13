@@ -11,6 +11,8 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   IS_REACT_ACT_ENVIRONMENT: true,
 });
+// Node 20 (CI) has no global navigator; react-dom reads it at import.
+Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
 
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
