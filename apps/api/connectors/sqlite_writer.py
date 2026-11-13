@@ -713,6 +713,15 @@ def _sqlite_upsert_batch(
         # never silently altered): UPDATE-then-INSERT below, never DELETE.
         logger.info("sqlite ON CONFLICT unavailable on %s: %s", table_name, exc)
 
+    if lsn_guarded:
+        # The prefilter matched stored LSNs by exact key; SQLite decides key
+        # equality (a NOCASE / RTRIM key matches another spelling).
+        rows, stale = _sqlite_drop_stale_by_db_key(
+            cur, table_quoted, target_cols, conflict_cols, rows, allow_equal_lsn
+        )
+        skipped += stale
+        if not rows:
+            return 0, empty_pk_skipped + skipped
     written = _sqlite_update_insert_upsert(
         cur,
         table_quoted,
@@ -736,6 +745,44 @@ def _project_row(row: Any, target_cols: list[str], cols: list[str]) -> tuple[Any
     if isinstance(row, dict):
         return tuple(row.get(c) for c in cols)
     return tuple(row[target_cols.index(c)] for c in cols)
+
+
+def _sqlite_drop_stale_by_db_key(
+    cur: Any,
+    table_quoted: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    rows: list[Any],
+    allow_equal_lsn: bool,
+) -> tuple[list[Any], int]:
+    """Drop rows whose ``_df_lsn`` is not newer than every LSN SQLite stores under
+    the same key, as SQLite itself matches keys. Same rule as
+    ``filter_stale_lsn_rows`` (``lsn_is_newer``; equal only when allowed)."""
+    from connectors.writer_common import DF_LSN_COL, lsn_is_newer
+
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+    lsn_q = quote_sql_identifier(DF_LSN_COL)
+    keep: list[Any] = []
+    for row in rows:
+        incoming = _project_row(row, target_cols, [DF_LSN_COL])[0]
+        cur.execute(
+            f"SELECT {lsn_q} FROM {table_quoted} WHERE {where_sql}",  # nosec B608
+            _project_row(row, target_cols, conflict_cols),
+        )
+
+        def _ok(prior: Any) -> bool:
+            if (
+                allow_equal_lsn
+                and incoming not in (None, "")
+                and prior not in (None, "")
+                and str(incoming).strip() == str(prior).strip()
+            ):
+                return True
+            return lsn_is_newer(incoming, prior)
+
+        if all(_ok(found[0]) for found in cur.fetchall()):
+            keep.append(row)
+    return keep, len(rows) - len(keep)
 
 
 def _sqlite_update_insert_upsert(

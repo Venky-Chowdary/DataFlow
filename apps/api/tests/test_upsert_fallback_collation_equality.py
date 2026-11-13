@@ -212,3 +212,66 @@ def test_mysql_identical_values_without_lsn_do_not_insert(mysql_engine):
     finally:
         with mysql_engine.begin() as c:
             c.execute(sa.text(f"drop table if exists {t}"))
+
+
+# ------------------------------------------- stale CDC images (re-review F1)
+def _lsn_sqlite(tmp_path, rows):
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "ws_lsn.db"
+    c = sqlite3.connect(db)
+    c.execute("create table t(k text collate nocase, name text, _df_lsn integer)")
+    c.execute("insert into t values ('ABC', 'newer', 10)")
+    c.commit()
+    c.close()
+    r = write_mapped_rows(
+        host="", port=0, database=str(db), username="", password="", schema="",
+        connection_string="", ssl=False, table_name="t", headers=["k", "name", "_df_lsn"],
+        data_rows=rows, mappings=[{"source": x, "target": x} for x in ("k", "name", "_df_lsn")],
+        column_types={"k": "VARCHAR", "name": "VARCHAR", "_df_lsn": "BIGINT"},
+        create_table=False, write_mode="upsert", conflict_columns=["k"],
+    )
+    c = sqlite3.connect(db)
+    try:
+        return r, list(c.execute("select k, name, _df_lsn from t order by rowid"))
+    finally:
+        c.close()
+
+
+def test_sqlite_fallback_refuses_a_stale_image_under_another_spelling(tmp_path):
+    r, rows = _lsn_sqlite(tmp_path, [["abc", "STALE", 5]])
+    assert r.ok, r.error
+    assert rows == [("ABC", "newer", 10)]
+    assert (r.rows_written, r.rows_skipped) == (0, 1)
+
+
+def test_sqlite_fallback_applies_a_newer_image_under_another_spelling(tmp_path):
+    r, rows = _lsn_sqlite(tmp_path, [["abc", "NEWEST", 11]])
+    assert r.ok, r.error
+    assert rows == [("ABC", "NEWEST", 11)]
+
+
+def test_generic_fallback_refuses_a_stale_image_under_another_spelling(tmp_path):
+    db = tmp_path / "ws_gen_lsn.db"
+    c = sqlite3.connect(db)
+    c.execute("create table t(k text collate nocase, name text, _df_lsn integer)")
+    c.execute("insert into t values ('ABC', 'newer', 10)")
+    c.commit()
+    c.close()
+    eng = sa.create_engine(f"sqlite:///{db}")
+    tbl = sa.Table(
+        "t", sa.MetaData(), sa.Column("k", sa.Text), sa.Column("name", sa.Text),
+        sa.Column("_df_lsn", sa.Integer),
+    )
+    try:
+        with eng.connect() as conn:
+            n = _upsert_batch(
+                conn, tbl, [{"k": "abc", "name": "STALE", "_df_lsn": 5}], ["k"],
+                ["k", "name", "_df_lsn"], "mssql",
+            )
+            conn.commit()
+    finally:
+        eng.dispose()
+    c = sqlite3.connect(db)
+    assert (n, list(c.execute("select * from t"))) == (0, [("ABC", "newer", 10)])
+    c.close()
