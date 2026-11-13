@@ -3191,8 +3191,9 @@ def resolve_target_columns(
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
-    ``identifier`` names each target (``destination_naming.writer_identifier``:
-    MongoDB keeps dotted field paths); by default SQL identifier sanitizing.
+    ``identifier`` names each target; by default the ``dest_db`` writer's own
+    rule (``destination_naming.writer_identifier``: Mongo keeps field paths,
+    SQL engines cut only at their real limit); no ``dest_db``: SQL sanitizing.
 
     Prefers live ``dest_types`` on existing tables (table_exists is not False),
     then explicit Map ``target_type``, then source logical type, then ``VARCHAR``.
@@ -3211,6 +3212,7 @@ def resolve_target_columns(
     target_types: list[str] = []
     samples = sample_values_by_source or {}
     live = dest_types or {}
+    name_of = identifier or writer_identifier(dest_db, preserve_case=preserve_case)
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit
@@ -3232,10 +3234,7 @@ def resolve_target_columns(
         except Exception:
             if not m.get("target"):
                 continue
-        tgt = (
-            identifier(m["target"]) if identifier
-            else sanitize_identifier(m["target"], preserve_case=preserve_case)
-        )
+        tgt = name_of(m["target"])
         if tgt not in target_cols:
             target_cols.append(tgt)
             explicit_target = bool(m.get("target_type"))

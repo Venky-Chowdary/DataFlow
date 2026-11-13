@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from services.value_serializer import json_dumps_exact_text
 
+from connectors.destination_naming import writer_identifier
 from connectors.elasticsearch_reader import _client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
@@ -416,7 +417,11 @@ def write_mapped_rows(
         "host": host, "port": port, "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # G11: a search store keeps the mapped name (``@timestamp``, ``host.name``).
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("elasticsearch"),
+    )
     source_carriers = _mapped_source_carriers(
         list(mappings or []), column_types, target_cols, logical_types
     )

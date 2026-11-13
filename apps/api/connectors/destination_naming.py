@@ -112,10 +112,31 @@ def target_identifier(
 ) -> Callable[[Any], str] | None:
     """``resolve_target_columns(identifier=)`` for code that names targets the
     way the destination's writer does (the stream's target columns, Gate-8's
-    source digest); ``None`` keeps the historical SQL sanitizing."""
-    if dest_kind(dest_type) in DOCUMENT_STORES:
+    source digest); ``None`` (no destination) keeps the historical SQL rule."""
+    if dest_kind(dest_type):
         return writer_identifier(dest_type, preserve_case=preserve_case)
     return None
+
+
+def name_cap(dest_type: str | None) -> int:
+    """How long a column name the destination's writer keeps (63 when unknown)."""
+    kind = dest_kind(dest_type)
+    if kind in SQL_NAME_LIMITS:
+        return SQL_NAME_LIMITS[kind]
+    if kind in SQL_UNLIMITED or kind in FILE_EXPORTS or keeps_exact_names(kind):
+        return _NO_CUT
+    return 63
+
+
+def capped(func: Callable[..., str], dest_type: str | None) -> Callable[..., str]:
+    """``func`` (an identifier helper taking ``max_len``) at the engine's own limit."""
+    cap = name_cap(dest_type)
+
+    def call(name: Any, *args: Any, **kwargs: Any) -> str:
+        kwargs.setdefault("max_len", cap)
+        return func(name, *args, **kwargs)
+
+    return call
 
 
 def _name_size(kind: str, name: str) -> int:

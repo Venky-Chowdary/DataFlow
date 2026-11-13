@@ -170,9 +170,11 @@ def _read_destination_sample(
         quote_column_list,
         quote_sql_identifier,
         quote_table_ref,
-        require_safe_identifier,
+        require_safe_identifier as _safe_ident,
     )
+    from connectors.destination_naming import capped
 
+    require_safe_identifier = capped(_safe_ident, db_type)  # G11: engine's own name limit
     cols = columns or ["*"]
     from services.value_serializer import SQL_NULL_SENTINEL
 
@@ -762,8 +764,6 @@ def _read_destination_sample(
                     warehouse=dest.get("warehouse", ""),
                     connection_string=dest.get("connection_string", ""),
                 )
-                from connectors.sql_identifiers import require_safe_identifier
-
                 with conn.cursor() as cur:
                     resolved = resolve_or_fold_snowflake_table(
                         cur, schema or "PUBLIC", table_name

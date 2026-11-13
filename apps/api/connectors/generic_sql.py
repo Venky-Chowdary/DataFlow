@@ -4991,7 +4991,7 @@ def write_mapped_rows(
     ledger_unavailable = False
 
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+        mappings, column_types, preserve_case=True, dest_db=type  # G11: engine's own limit
     )
     # Bind every downstream statement to the spelling the destination stores,
     # before mapped rows, types and the Table object are keyed by these names.

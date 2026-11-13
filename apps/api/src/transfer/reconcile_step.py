@@ -1880,7 +1880,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc0 = physical_select_list(sel_cols0, dq0)
+            qc0 = physical_select_list(sel_cols0, dq0, dest_db_type)
 
             def _scoped_gen(batches):
                 nonlocal actual_rows
@@ -2350,7 +2350,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc = physical_select_list(sel_cols, dq)
+            qc = physical_select_list(sel_cols, dq, dest_db_type)
             stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
             if scd2_opts:
                 from services.scd2_engine import scd2_is_current_predicate
