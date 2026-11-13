@@ -250,6 +250,9 @@ def check_guarded_dial(dialect: Any, cargs: Any, cparams: Any) -> None:
     """:func:`check_dial` for a connection of an engine :func:`guard_engine` marked."""
     if getattr(dialect, _GUARDED, False):
         check_dial(cparams, *cargs)
+        from connectors.host_config_selectors import check_guarded
+
+        check_guarded(dialect, cargs, cparams)  # no libpq service / ODBC DSN or driver library (review 4)
         if getattr(dialect, "name", "") == "oracle":
             from connectors.oracle_dsn_guard import check_dsn
 

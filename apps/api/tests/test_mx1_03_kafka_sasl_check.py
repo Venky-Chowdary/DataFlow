@@ -71,9 +71,20 @@ def test_no_credentials_means_no_check_and_no_socket():
         peer.close()
 
 
-def test_mechanisms_the_check_cannot_run_are_skipped():
+def test_mechanisms_the_check_cannot_run_are_skipped(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_ALLOW_PLATFORM_KERBEROS", "1")
     assert kc.kafka_sasl_check(_cfg(1, sasl_mechanism="GSSAPI")) is None
-    assert kc.kafka_sasl_check(_cfg(1, sasl_mechanism="OAUTHBEARER")) is None
+    token = {"extra": {"sasl_oauth_token": "tenant-token"}}
+    assert kc.kafka_sasl_check(_cfg(1, sasl_mechanism="OAUTHBEARER", **token)) is None
+
+
+def test_a_mechanism_the_policy_refuses_is_reported_not_raised(monkeypatch):
+    """Follow-up review 4: GSSAPI without the operator opt-in, OAUTHBEARER without a token."""
+    monkeypatch.delenv("DATAFLOW_ALLOW_PLATFORM_KERBEROS", raising=False)
+    for mechanism in ("GSSAPI", "OAUTHBEARER"):
+        check = kc.kafka_sasl_check(_cfg(1, sasl_mechanism=mechanism))
+        assert check is not None and check.outcome == "refused"
+        assert SENTINEL not in check.message
 
 
 def test_plaintext_sasl_against_tls_listener_names_security_protocol():

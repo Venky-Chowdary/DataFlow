@@ -14,6 +14,9 @@ warehouse is written as a ``file://`` URI (see ``iceberg_catalog``) and this IO
 drops the slash the URI grammar requires and the filesystem does not accept.
 POSIX locations are returned untouched.
 
+Every FileIO here dials an HDFS / viewfs namenode only when the connector
+named it and the egress policy allows it (``connectors.iceberg_hdfs_guard``).
+
 Every FileIO here also refuses to open Google Cloud or Azure storage without
 the table's own credential (follow-up review 1): pyarrow would use the API
 host's identity (``services.platform_gcp_azure_credentials``).
@@ -49,8 +52,12 @@ LOCAL_FILES = "dataflow.local-files"
 REFUSE = "refuse"
 
 
-def local_location_refusal(properties: Any, path: str) -> str:
-    """Why this FileIO may not touch the local ``path``, else ``""``."""
+def local_location_refusal(properties: Any, path: str, scope: Any = None) -> str:
+    """Why this FileIO may not touch the local ``path``, else ``""``.
+
+    ``scope`` is the caller the FileIO was built for (its workspace's part of
+    the Iceberg root, follow-up review 4), else the current one.
+    """
     if str((properties or {}).get(LOCAL_FILES) or "").strip().lower() == REFUSE:
         return (
             "This Iceberg catalog named a local file on the Datawrap server (a metadata, "
@@ -60,17 +67,29 @@ def local_location_refusal(properties: Any, path: str) -> str:
     from connectors.iceberg_catalog import _jail_local_path
 
     try:
-        _jail_local_path(path, "data or metadata file")
-    except ValueError:
+        _jail_local_path(path, "data or metadata file", scope=scope)
+    except ValueError as exc:
         return (
             "This Iceberg table named a local file outside the Iceberg warehouse folder "
-            "(DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area); Datawrap does not open it."
+            "(DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area) or outside this "
+            f"workspace's part of it; Datawrap does not open it. {exc}"
         )
     return ""
 
 
 class LocalUriPyArrowFileIO(PyArrowFileIO):
     """``PyArrowFileIO`` that hands the local filesystem a path it accepts."""
+
+    def __init__(self, properties: Any = EMPTY_DICT) -> None:
+        super().__init__(properties)
+        from services.iceberg_workspace_root import current_scope
+
+        # pyiceberg reads and writes files in executor threads, where the job's or
+        # connector's workspace binding is not set: keep the builder's (review 4).
+        self._df_scope = current_scope()
+        from services.egress_guard import current_egress_workspace
+
+        self._df_egress_workspace = current_egress_workspace()
 
     def _check_local(self, location: Any) -> None:
         raw = getattr(location, "location", location)  # delete() takes a file object too
@@ -81,7 +100,7 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
             # instead (follow-up review 3, M1): judge exactly what pyarrow opens.
             if netloc or not os.path.isabs(path):
                 _refuse(_NOT_ABSOLUTE)
-            _refuse(local_location_refusal(self.properties, path))
+            _refuse(local_location_refusal(self.properties, path, getattr(self, "_df_scope", None)))
 
     def new_input(self, location: str) -> Any:
         self._check_local(location)
@@ -101,6 +120,13 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
         if scheme == "file":
             return scheme, netloc, strip_uri_drive_slash(path)
         return scheme, netloc, path
+
+    def _initialize_hdfs_fs(self, scheme: str, netloc: str | None) -> Any:
+        from connectors.iceberg_hdfs_guard import hdfs_refusal
+
+        # Only the namenode the connector named, through the egress check (follow-up review 4).
+        _refuse(hdfs_refusal(self.properties, netloc, getattr(self, "_df_egress_workspace", ""), scheme))
+        return super()._initialize_hdfs_fs(scheme, netloc)
 
     def _initialize_gcs_fs(self) -> Any:
         from services.platform_gcp_azure_credentials import gcs_fileio_refusal

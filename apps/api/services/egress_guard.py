@@ -782,9 +782,13 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     """
     from connectors.aws_common import default_credentials_refusal
     from services.iceberg_class_properties import iceberg_connector_class_refusal
+    from services.iceberg_workspace_root import connector_refusal as iceberg_area_refusal
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
+    from connectors.host_config_selectors import driver_availability_refusal as host_config_availability
+    from connectors.host_config_selectors import settings_refusal as host_config_refusal
+    from connectors.kafka_sasl_policy import settings_refusal as kafka_settings_refusal
     from connectors.mysql_options import connector_option_refusal
     from connectors.mongodb_auth_mechanism import settings_refusal as mongo_auth_refusal
     from connectors.oracle_dsn_guard import settings_refusal as oracle_dsn_refusal
@@ -796,18 +800,24 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         or iceberg_connector_class_refusal(data)
         or iceberg_connector_refusal(data)
         or iceberg_gcp_azure_connector_refusal(data)
+        # A local Iceberg path only in the saving workspace's area of the root (follow-up review 4).
+        or iceberg_area_refusal(data)
         # No PyMySQL option that reads a host file or socket (follow-up review 2, H3 + H4).
         or connector_option_refusal(
             data, mysql_family=_dials_mysql_sockets(str(data.get("type") or data.get("format") or ""))
         )
         # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
         or google_connector_refusal(data)
+        # No libpq service, ODBC DSN / DSN file or driver library of this host (review 4).
+        or host_config_refusal(data, availability=False)
         # No TLS certificate / key / wallet file on this host (follow-up review 2, TLS files).
         or tls_files_refusal(data)
         # No Oracle config provider / LDAP DSN or pyo. wallet (follow-up review 3, M3 + M4).
         or oracle_dsn_refusal(data)
         # No MongoDB auth mechanism that uses this host's identity (follow-up review 3).
         or mongo_auth_refusal(data)
+        # No Kafka login with this host's identity, no Kafka option naming a host file (review 4).
+        or kafka_settings_refusal(data)
     )
     if platform_credentials:
         return platform_credentials
@@ -827,7 +837,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         ):
             if is_always_blocked_target(host):
                 return _refusal_text(host, phrase)
-        return ""
+        return host_config_availability(data)
     return new_point_refusal(
         "connector_save",
         *values,
@@ -835,7 +845,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         db_type=db_type,
         connector=str(data.get("name") or ""),
         aws_endpoint=aws_endpoint,
-    )
+    ) or host_config_availability(data)  # an uninstalled ODBC driver, after every security check
 
 
 def egress_url_allowed(
