@@ -113,6 +113,9 @@ os.environ["DATAFLOW_ENV"] = "test"
 
 
 def pytest_configure(config):
+    # No CDC slot outlives this session (an inactive slot pins WAL forever).
+    if not config.pluginmanager.has_plugin("tests.pg_slot_guard"):
+        config.pluginmanager.import_plugin("tests.pg_slot_guard")
     config.addinivalue_line(
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
@@ -944,4 +947,3 @@ def _isolated_console_outbox():
     if sender is not None:
         sender.ConsoleEmailSender.OUTBOX.clear()
     yield
-
