@@ -36,7 +36,7 @@
     "pypi:pymssql": {
       "licence": "LGPL",
       "why": "SQL Server fallback driver. LGPL-2.1. Used unmodified as a separate library. The wheel bundles FreeTDS (LGPL).",
-      "notice": "LGPL-2.1, used unmodified as a separately replaceable library (you may replace it with a modified version); the wheel links FreeTDS (LGPL-2.0) statically. Licence text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (also in the package's dist-info). Corresponding source shipped in image at /usr/share/doc/datawrap/third-party-source/ (pymssql-<installed version>.tar.gz and freetds-<linked version>.tar.gz, SHA256SUMS). Upstream: https://github.com/pymssql/pymssql and https://www.freetds.org",
+      "notice": "LGPL-2.1, used unmodified as a separately replaceable library (you may replace it with a modified version); the wheel links FreeTDS (LGPL-2.0) statically. Licence text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (also in the package's dist-info). Corresponding source shipped in image at /usr/share/doc/datawrap/third-party-source/ (pymssql-<installed version>.tar.gz and freetds-<linked version>.tar.bz2, SHA256SUMS). Upstream: https://github.com/pymssql/pymssql and https://www.freetds.org",
       "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "accepted with attribution; used unmodified"}
     },
     "pypi:pypdfium2": {

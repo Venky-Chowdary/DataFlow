@@ -70,7 +70,6 @@ __all__ = [
 ]
 
 PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
-FREETDS_URL = "https://www.freetds.org/files/stable/freetds-{version}.tar.gz"
 KNOWN_EXTRAS = ("freetds",)
 _FREETDS_RE = re.compile(rb"freetds v(\d+\.\d+(?:\.\d+)?)")
 
@@ -118,11 +117,29 @@ def dockerfile_specs(dockerfile: str) -> list[Spec]:
     raise SourceError("Dockerfile has no `RUN ... fetch_lgpl_sources.py --dest ...` step")
 
 
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another HTTPS URL (a mirror may redirect)."""
+
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        if not str(newurl).startswith("https://"):
+            raise SourceError(f"refusing a redirect from {req.full_url} to non-HTTPS {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_HttpsOnlyRedirects())
+
+
 def _http_get(url: str) -> bytes:
     if not url.startswith("https://"):
         raise SourceError(f"refusing non-HTTPS source URL {url}")
-    # HTTPS only (checked above), so bandit's file:/ scheme concern does not apply.
-    with urllib.request.urlopen(url, timeout=120) as resp:  # nosec B310
+    # HTTPS only (checked above and on every redirect), so bandit's file:/
+    # scheme concern does not apply.
+    with _OPENER.open(url, timeout=120) as resp:  # nosec B310
+        final = resp.geturl()
+        if not final.startswith("https://"):
+            raise SourceError(f"refusing {url}: it ended at non-HTTPS {final}")
         return resp.read()
 
 
@@ -159,24 +176,20 @@ def _sdist(spec: Spec, version: str, get: Callable[[str], bytes]) -> tuple[str, 
 
 
 def _freetds(version: str, get: Callable[[str], bytes]) -> tuple[str, bytes, str]:
-    url = FREETDS_URL.format(version=version)
-    payload = get(url)
-    try:
-        published = get(url + ".sha256").decode().split()[0].strip().lower()
-    except (SourceError, OSError):  # urllib's HTTPError / URLError are OSErrors
-        published = ""
-    if published:
-        if _sha256(payload) != published:
-            raise SourceError(f"freetds-{version}.tar.gz: SHA-256 does not match freetds.org's")
-        return f"freetds-{version}.tar.gz", payload, "freetds.org published SHA-256"
-    return (
-        f"freetds-{version}.tar.gz",
-        payload,
-        "recorded at download over HTTPS (freetds.org publishes no checksum for this release)",
-    )
+    up = UPSTREAM.get(("freetds", version))
+    if up is None:
+        raise SourceError(
+            f"no pinned checksum for FreeTDS {version} (the version pymssql's wheel links): add "
+            f"('freetds', '{version}') to UPSTREAM in scripts/bundled_libraries.py with a SHA-256 "
+            "from a source independent of freetds.org (e.g. a distribution's package recipe)"
+        )
+    payload, how = _upstream(up, get)
+    return up.filename, payload, how
 
 
 def _upstream(up: Upstream, get: Callable[[str], bytes]) -> tuple[bytes, str]:
+    if not (up.sha512 or up.sha256 or up.md5):
+        raise SourceError(f"{up.filename}: no pinned checksum; refusing to ship an unverified download")
     errors = []
     for url in up.urls:
         try:
@@ -192,7 +205,11 @@ def _upstream(up: Upstream, get: Callable[[str], bytes]) -> tuple[bytes, str]:
             if _sha256(payload) != up.sha256:
                 raise SourceError(f"{up.filename}: SHA-256 does not match the pinned value ({url})")
             return payload, "pinned SHA-256"
-        return payload, f"recorded at download over HTTPS ({up.note})"
+        # MD5 only where it is the sole checksum ever published (a 2013
+        # release); a second preimage of a published MD5 is not practical.
+        if hashlib.md5(payload).hexdigest() != up.md5:  # nosec B324
+            raise SourceError(f"{up.filename}: MD5 does not match the pinned value ({url})")
+        return payload, "pinned MD5 (the only checksum published for this release)"
     raise SourceError(f"{up.filename}: no mirror answered ({'; '.join(errors)})")
 
 

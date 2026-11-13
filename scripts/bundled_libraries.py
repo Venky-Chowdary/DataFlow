@@ -126,6 +126,7 @@ class Upstream:
     urls: tuple[str, ...]
     sha256: str = ""
     sha512: str = ""
+    md5: str = ""  # only where no SHA-2 checksum was ever published (keyutils 1.5.8)
     note: str = ""
 
 
@@ -139,14 +140,20 @@ _GCC_85_EL8 = (
     "b4bd1bc530bb99f6209ffeca67581a198de82f7253530de8c24a2a81770eb4ea"
 )
 
-#: (family, version) -> where its source comes from. Checksums: CentOS Stream
-#: dist-git ``sources`` files (keyutils c8s, gcc c8s) and the manylinux
-#: libxcrypt pin, all read on 2026-11-13.
+#: (family, version) -> where its source comes from, with a pinned checksum
+#: from a source independent of the download host. A family / version without
+#: a pin fails the build (fetch_lgpl_sources.py). Checksums: CentOS Stream
+#: dist-git ``sources`` files (keyutils c8s, gcc c8s), the manylinux libxcrypt
+#: pin, Homebrew's FreeTDS formula and Arch Linux's keyutils 1.5.8 PKGBUILD,
+#: all read on 2026-11-13.
 UPSTREAM: dict[tuple[str, str], Upstream] = {
     ("keyutils", "1.5.8"): Upstream(
         "keyutils-1.5.8.tar.bz2",
         ("https://people.redhat.com/~dhowells/keyutils/keyutils-1.5.8.tar.bz2",),
-        note="no published checksum found for 1.5.8 (CentOS 7 era); recorded at download",
+        md5="3c7f463039b83833c12a9414c2fcb389",
+        note="MD5 published in Arch Linux's keyutils 1.5.8-1 PKGBUILD (archlinux/svntogit-packages "
+        "a6cd0f050a660763a49e670a0886371bbd1178d3, 2013-10-28). No SHA-2 checksum was published for "
+        "1.5.8: Fedora / CentOS 7 dist-git recorded MD5 / SHA-1, and Debian never packaged 1.5.8",
     ),
     ("keyutils", "1.5.10"): Upstream(
         "keyutils-1.5.10.tar.bz2",
@@ -155,6 +162,16 @@ UPSTREAM: dict[tuple[str, str], Upstream] = {
             "https://people.redhat.com/~dhowells/keyutils/keyutils-1.5.10.tar.bz2",
         ),
         sha512=_KEYUTILS_1510,
+    ),
+    # FreeTDS, linked statically into pymssql's wheel (fetch_lgpl_sources.py
+    # spec pymssql+freetds). The pin comes from Homebrew's formula at that
+    # version, not from freetds.org, so the download host cannot vouch for itself.
+    ("freetds", "1.5.19"): Upstream(
+        "freetds-1.5.19.tar.bz2",
+        ("https://www.freetds.org/files/stable/freetds-1.5.19.tar.bz2",),
+        sha256="0dc2df2fea9934e3a99e00d417f3d192e9897572f6aff3905bd48f2507d16dff",
+        note="SHA-256 from Homebrew's freetds formula at 1.5.19 (Homebrew/homebrew-core "
+        "7cac0676d2fea7d4b783ce8b65e283b05cf37e58, 2026-08-16)",
     ),
     ("libxcrypt", "4.5.2"): Upstream(
         "libxcrypt-4.5.2.tar.xz",

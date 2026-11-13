@@ -167,37 +167,104 @@ def test_no_sdist_for_the_installed_version_fails_the_build(tmp_path: Path) -> N
         fetch.ship([fetch.parse_spec("paramiko")], tmp_path, get=net, version_of=lambda d: "5.1.0")
 
 
+FREETDS_1519 = "https://www.freetds.org/files/stable/freetds-1.5.19.tar.bz2"
+
+
 def test_freetds_source_follows_the_linked_version(tmp_path: Path, monkeypatch) -> None:
     payload = b"pymssql source"
     tds = b"freetds tarball"
-    tds_sum = hashlib.sha256(tds).hexdigest()
+    monkeypatch.setitem(fetch.UPSTREAM, ("freetds", "1.5.19"), fetch.Upstream(
+        "freetds-1.5.19.tar.bz2", (FREETDS_1519,), sha256=hashlib.sha256(tds).hexdigest()))
     net = FakeNet({
         "https://pypi.org/pypi/pymssql/2.4.6/json": json.dumps(_index("pymssql", "2.4.6", payload)).encode(),
         "https://files.example/pymssql-2.4.6.tar.gz": payload,
-        "https://www.freetds.org/files/stable/freetds-1.5.19.tar.gz": tds,
-        "https://www.freetds.org/files/stable/freetds-1.5.19.tar.gz.sha256": f"{tds_sum}  freetds-1.5.19.tar.gz\n".encode(),
+        FREETDS_1519: tds,
     })
     monkeypatch.setattr(fetch, "linked_binaries", lambda dist: [])
     monkeypatch.setattr(fetch, "freetds_version", lambda binaries: "1.5.19")
     rows = fetch.ship([fetch.parse_spec("pymssql+freetds")], tmp_path, get=net, version_of=lambda d: "2.4.6")
-    assert (tmp_path / "freetds-1.5.19.tar.gz").read_bytes() == tds
-    assert {r["file"] for r in rows} == {"pymssql-2.4.6.tar.gz", "freetds-1.5.19.tar.gz"}
+    assert (tmp_path / "freetds-1.5.19.tar.bz2").read_bytes() == tds
+    assert {r["file"] for r in rows} == {"pymssql-2.4.6.tar.gz", "freetds-1.5.19.tar.bz2"}
     freetds_row = next(r for r in rows if r["file"].startswith("freetds"))
     assert freetds_row["for"] == "FreeTDS 1.5.19 (statically linked into pymssql 2.4.6)"
-    assert freetds_row["verified_against"] == "freetds.org published SHA-256"
+    assert freetds_row["verified_against"] == "pinned SHA-256"
 
 
-def test_freetds_without_a_published_checksum_is_labelled_not_claimed(tmp_path: Path, monkeypatch) -> None:
+# ── review 8: every fetched source is verified against a pin ───────────────
+
+
+def test_freetds_is_pinned_per_version_from_an_independent_source() -> None:
+    up = fetch.UPSTREAM[("freetds", "1.5.19")]
+    assert up.urls == (FREETDS_1519,)
+    # Homebrew/homebrew-core 7cac0676 ("freetds 1.5.19", 2026-08-16).
+    assert up.sha256 == "0dc2df2fea9934e3a99e00d417f3d192e9897572f6aff3905bd48f2507d16dff"
+    assert "Homebrew" in up.note
+
+
+def test_a_freetds_version_without_a_pin_fails_the_build(tmp_path: Path, monkeypatch) -> None:
     net = FakeNet({
         "https://pypi.org/pypi/pymssql/2.4.6/json": json.dumps(_index("pymssql", "2.4.6", b"p")).encode(),
         "https://files.example/pymssql-2.4.6.tar.gz": b"p",
-        "https://www.freetds.org/files/stable/freetds-1.5.19.tar.gz": b"t",
+        "https://www.freetds.org/files/stable/freetds-1.5.99.tar.bz2": b"t",
+    })
+    monkeypatch.setattr(fetch, "linked_binaries", lambda dist: [])
+    monkeypatch.setattr(fetch, "freetds_version", lambda binaries: "1.5.99")
+    with pytest.raises(fetch.SourceError, match=r"no pinned checksum for FreeTDS 1\.5\.99"):
+        fetch.ship([fetch.parse_spec("pymssql+freetds")], tmp_path, get=net, version_of=lambda d: "2.4.6")
+    assert "https://www.freetds.org/files/stable/freetds-1.5.99.tar.bz2" not in net.seen
+
+
+def test_a_freetds_tarball_that_does_not_match_its_pin_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setitem(fetch.UPSTREAM, ("freetds", "1.5.19"), fetch.Upstream(
+        "freetds-1.5.19.tar.bz2", (FREETDS_1519,), sha256="0" * 64))
+    net = FakeNet({
+        "https://pypi.org/pypi/pymssql/2.4.6/json": json.dumps(_index("pymssql", "2.4.6", b"p")).encode(),
+        "https://files.example/pymssql-2.4.6.tar.gz": b"p",
+        FREETDS_1519: b"tampered",
     })
     monkeypatch.setattr(fetch, "linked_binaries", lambda dist: [])
     monkeypatch.setattr(fetch, "freetds_version", lambda binaries: "1.5.19")
-    rows = fetch.ship([fetch.parse_spec("pymssql+freetds")], tmp_path, get=net, version_of=lambda d: "2.4.6")
-    label = next(r for r in rows if r["file"].startswith("freetds"))["verified_against"]
-    assert "publishes no checksum" in label
+    with pytest.raises(fetch.SourceError, match="SHA-256"):
+        fetch.ship([fetch.parse_spec("pymssql+freetds")], tmp_path, get=net, version_of=lambda d: "2.4.6")
+
+
+def test_keyutils_158_is_pinned_from_a_published_checksum(tmp_path: Path) -> None:
+    up = fetch.UPSTREAM[("keyutils", "1.5.8")]
+    # Arch Linux keyutils 1.5.8-1 PKGBUILD (archlinux/svntogit-packages a6cd0f05).
+    assert up.md5 == "3c7f463039b83833c12a9414c2fcb389"
+    assert "Arch Linux" in up.note
+    payload, how = fetch._upstream(
+        fetch.Upstream("k.tar.bz2", ("https://mirror.example/k",), md5=hashlib.md5(b"k").hexdigest()),
+        FakeNet({"https://mirror.example/k": b"k"}),
+    )
+    assert how == "pinned MD5 (the only checksum published for this release)"
+    with pytest.raises(fetch.SourceError, match="MD5"):
+        fetch._upstream(
+            fetch.Upstream("k.tar.bz2", ("https://mirror.example/k",), md5="0" * 32),
+            FakeNet({"https://mirror.example/k": b"k"}),
+        )
+
+
+def test_a_source_without_any_pin_is_refused(tmp_path: Path) -> None:
+    net = FakeNet({"https://mirror.example/x": b"x"})
+    with pytest.raises(fetch.SourceError, match="no pinned checksum"):
+        fetch._upstream(fetch.Upstream("x.tar", ("https://mirror.example/x",), note="whatever"), net)
+    assert net.seen == []
+    for key, up in fetch.UPSTREAM.items():
+        assert up.sha512 or up.sha256 or up.md5, key
+
+
+def test_http_get_refuses_a_redirect_to_plain_http() -> None:
+    import urllib.request
+
+    handler = fetch._HttpsOnlyRedirects()
+    req = urllib.request.Request("https://www.freetds.org/files/stable/x.tar.bz2")
+    with pytest.raises(fetch.SourceError, match="non-HTTPS"):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://mirror.example/x.tar.bz2")
+    ok = handler.redirect_request(req, None, 302, "Found", {}, "https://mirror.example/x.tar.bz2")
+    assert ok is not None and ok.full_url == "https://mirror.example/x.tar.bz2"
+    with pytest.raises(fetch.SourceError, match="non-HTTPS"):
+        fetch._http_get("http://www.freetds.org/x")
 
 
 # ── libraries bundled inside the wheels (auditwheel ``<pkg>.libs/``) ────────

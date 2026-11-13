@@ -76,13 +76,17 @@ allows bundling as long as the copyright and licence travel with the fonts;
      - `paramiko-<version>.tar.gz`;
      - `psycopg2-<version>.tar.gz` (the source of `psycopg2-binary`);
      - `pymssql-<version>.tar.gz`;
-     - `freetds-<version>.tar.gz`. pymssql's wheel links FreeTDS (LGPL)
-       statically; the version is read from the linked binary.
+     - `freetds-<version>.tar.bz2`. pymssql's wheel links FreeTDS (LGPL)
+       statically; the version is read from the linked binary (1.5.19 in
+       pymssql 2.4.6).
 
      The PyPI sources are verified against PyPI's SHA-256 digests. FreeTDS
-     is verified against freetds.org's published SHA-256 when there is one,
-     and is otherwise labelled in `MANIFEST.json` as recorded at download.
-     Any failure fails the image build.
+     is verified against a SHA-256 pinned per version in `UPSTREAM`
+     (`scripts/bundled_libraries.py`), taken from a source independent of
+     freetds.org, so the download host cannot also vouch for itself: for
+     1.5.19, Homebrew's formula at commit 7cac0676. A linked version without a pin fails the
+     build. Downloads are HTTPS only, and a redirect to a non-HTTPS URL is
+     refused. Any failure fails the image build.
    - `NOTICE` carries, for each, the LGPL licence-text URL, where in the image
      the source is, and that the library is separately replaceable. The gate
      refuses an approved GPL-family exception whose notice lacks the
@@ -135,7 +139,7 @@ listing every bundled library:
 | Source | Covers | Verified against |
 |---|---|---|
 | keyutils 1.5.10 | the pymssql copy | CentOS Stream dist-git SHA-512 (lookaside cache), pinned |
-| keyutils 1.5.8 | the psycopg2-binary copy | no published checksum found for 1.5.8, so the SHA-256 is recorded at download and labelled as such |
+| keyutils 1.5.8 | the psycopg2-binary copy | pinned MD5 published in Arch Linux's 1.5.8-1 PKGBUILD (2013), the only checksum ever published for 1.5.8 (Fedora / CentOS 7 recorded MD5 / SHA-1; Debian never packaged it) |
 | libxcrypt 4.5.2 | psycopg2-binary's libcrypt | pinned SHA-256, the same value manylinux pins |
 | GCC 8.5.0 (el8 tarball, about 65 MB) | numpy's libquadmath and libgfortran | pinned SHA-512 from CentOS Stream c8s |
 
