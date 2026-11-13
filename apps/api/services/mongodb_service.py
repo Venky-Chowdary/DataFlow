@@ -1311,7 +1311,6 @@ class MongoDBService:
         """
         db = self.get_database()
         jobs = db["transfer_jobs"]
-        self._ensure_naming_history_indexes(jobs)
         obj = str(destination_object)
         query = {"$and": [
             # A missing / null / blank workspace_id is "no workspace" here too
@@ -1331,16 +1330,17 @@ class MongoDBService:
                   .limit(max(1, int(limit))).max_time_ms(int(max_time_ms)))
         return [dict(doc, _id=str(doc["_id"])) for doc in cursor]
 
-    def _ensure_naming_history_indexes(self, jobs: Any) -> None:
-        """(workspace_id, destination_collection) and (workspace_id, naming.object), once."""
-        if getattr(self, "_naming_history_indexes_ready", False):
-            return
-        try:
-            jobs.create_index([("workspace_id", 1), ("destination_collection", 1)])
-            jobs.create_index([("workspace_id", 1), ("naming.object", 1)])
-        except Exception as exc:  # noqa: BLE001 - an index is an optimisation
-            logger.debug("transfer_jobs naming-history indexes skipped: %s", exc)
-        self._naming_history_indexes_ready = True
+    def ensure_naming_history_indexes(self, *, max_time_ms: int = 30000) -> bool:
+        """The naming-history indexes, newest-first, so the sort is not in memory.
+
+        Built at API startup in the background (``services.naming_history``),
+        never on a request; each build is bounded by ``max_time_ms``.
+        """
+        jobs = self.get_database()["transfer_jobs"]
+        for field in ("naming.object", "destination_collection"):
+            jobs.create_index([("workspace_id", 1), (field, 1), ("created_at", -1)],
+                              maxTimeMS=int(max_time_ms))
+        return True
 
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace — the legacy rows the D154 backfill assigns.
@@ -2170,6 +2170,9 @@ class MemoryMongoDBService:
             if touch_updated_at:
                 rec["updated_at"] = datetime.now(timezone.utc)
         return True
+
+    def ensure_naming_history_indexes(self, *, max_time_ms: int = 30000) -> bool:
+        return True  # the memory store has no indexes to build
 
     def naming_history_jobs(
         self, destination_object: str, *, workspace_id: str, limit: int = 50,

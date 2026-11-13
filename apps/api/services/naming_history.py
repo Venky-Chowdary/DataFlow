@@ -151,6 +151,20 @@ def object_history(
     return LEGACY if legacy else NONE
 
 
+def ensure_naming_history_indexes(svc: Any = None, *, max_time_ms: int = 30000) -> bool:
+    """Build the job store's naming-history indexes (API startup, in the background)."""
+    try:
+        if svc is None:
+            from services.mongodb_service import get_mongodb_service
+
+            svc = get_mongodb_service()
+        build = getattr(svc, "ensure_naming_history_indexes", None)
+        return bool(build(max_time_ms=max_time_ms)) if callable(build) else False
+    except Exception as exc:  # noqa: BLE001 - an index is an optimisation; the query is bounded
+        logger.warning("G11: naming-history indexes not built: %s", exc)
+        return False
+
+
 def record_naming(obj: str, mode: str) -> None:
     """Stamp this run's naming decision for ``obj`` on its job (no-op outside a run)."""
     bound = _RUN.get()
@@ -203,6 +217,7 @@ __all__ = [
     "NONE",
     "SCHEME_VERSION",
     "cluster_of",
+    "ensure_naming_history_indexes",
     "naming_job_scope",
     "note_checked",
     "object_history",
