@@ -202,6 +202,67 @@ written offer.
 owner decision 3 it is operator-installed, so it is excluded from this scan
 and from NOTICE (`OPERATOR_INSTALLED` in `scripts/bundled_libraries.py`).
 
+## Debian packages in the API image
+
+The API image is Debian bookworm (`python:3.12-slim-bookworm`). It ships
+the base image's packages plus the final stage's `unixodbc`, `libodbc2`
+(LGPL-2.1, for pyodbc) and `curl` (health check), with their dependencies.
+
+**Multi-stage build.** `Dockerfile.api` builds the Python environment
+(`/opt/venv`) in a `build` stage that has `build-essential` and `libpq-dev`.
+The final stage copies `/opt/venv` and installs only the runtime packages
+above, so no compiler or header package ships. The runtime requirements
+need no compiler (four sdists are pure Python: clickhouse-sqlalchemy,
+pure-sasl, pydruid, pyhive), but they are built in the build stage all the
+same. The final stage's pip installs are wheels only:
+- the vendor drivers, with `--only-binary :all:`;
+- preflight, which is pure Python.
+
+**Source shipping.** The final stage runs `scripts/fetch_debian_sources.py`
+after its last `apt-get install`, in five steps:
+1. List every installed package with `dpkg-query`, with its exact source
+   version.
+2. Read each package's licence from `/usr/share/doc/<pkg>/copyright`. A
+   package whose copyright file is missing, or names no licence the script
+   recognises, fails the build.
+3. For every package whose copyright file names a copyleft licence (GPL,
+   LGPL, MPL, ...), ship the `.dsc`, orig and debian tarballs of the exact
+   source version into `/usr/share/doc/datawrap/third-party-source/`, next to
+   the PyPI sources. The files come from deb.debian.org and are checked
+   against apt's signed Sources index: the step adds `deb-src` and runs
+   `apt-get update`, which verifies the archive signature. When a version
+   has left the archive, they come from snapshot.debian.org, checked against
+   its content address. Every file is also checked against the `.dsc`
+   checksums.
+4. Merge the files' sums into `SHA256SUMS`.
+5. List package, source, files and how each was verified in
+   `DEBIAN_SOURCES.json`.
+
+Any failure fails the build. The `deb-src` entries and the index are removed
+in the same layer.
+
+On the 2026-11-13 base image, 96 of its 105 packages (67 source packages)
+have a copyleft copyright file. The 9 permissive ones are debconf, libmd0,
+the ncurses packages, libpcre2-8-0, tzdata and zlib1g. Shipping their
+sources (glibc, GCC 12's runtime libraries, perl, systemd, util-linux, ...)
+adds a few hundred MB to the image. The CI `api-image` job prints the
+directory's size.
+
+**Drift check.** `licence-policy.json` `apt_packages` reviews the final
+stage's own apt packages. `fetch_debian_sources.py --verify-dockerfile` (CI
+security job) fails in three cases:
+- the Dockerfile installs a package the policy has not reviewed;
+- it no longer installs a listed one;
+- it installs a compiler or a `-dev` package in the final stage.
+
+The CI `api-image` job builds the image without a cache and checks the
+result:
+- no `build-essential` or `gcc`;
+- all four manifests are present;
+- `sha256sum --check SHA256SUMS` passes;
+- `pip check` passes;
+- the core imports work.
+
 ## Operator-installed vendor drivers (SAP HANA, Teradata, IBM Db2)
 
 The SAP HANA, Teradata and IBM Db2 connectors need proprietary vendor drivers, plus

@@ -1041,6 +1041,14 @@ jobs:
         # source it cannot name.
         run: python scripts/fetch_lgpl_sources.py --verify-dockerfile Dockerfile.api
 
+      - name: Debian package drift check (Dockerfile.api final stage)
+        # Fails when the final stage installs an apt package that
+        # licence-policy.json apt_packages has not reviewed (or no longer
+        # installs a listed one), or a compiler / -dev package. The image
+        # build itself ships the source of every copyleft package; the
+        # api-image job proves it.
+        run: python scripts/fetch_debian_sources.py --verify-dockerfile Dockerfile.api
+
       - name: Upload licence report
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -1066,6 +1074,52 @@ jobs:
   # production build. Job ids stay studio-ui and studio-ui-next so the
   # required check name does not change. Shared setup lives in
   # .github/actions/studio-surface. studio-ui-next is not a required check.
+  api-image:
+    # Builds Dockerfile.api from scratch (no layer cache, so the source steps
+    # really run) and checks the result: no compiler or build-essential in the
+    # final stage, the shipped sources present and matching SHA256SUMS
+    # (PyPI sdists, FreeTDS, wheel-bundled libraries, Debian packages), and a
+    # consistent, importable Python environment.
+    name: API image (multi-stage build, shipped sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Dockerfile.api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          load: true
+          push: false
+          tags: datawrap-api:ci
+
+      - name: Check the image
+        run: |
+          docker image ls datawrap-api:ci --format 'image size: {{.Size}}'
+          cat > "$RUNNER_TEMP/check-image.sh" <<'CHECK'
+          set -e
+          if dpkg -s build-essential >/dev/null 2>&1; then echo "build-essential is in the image"; exit 1; fi
+          if command -v gcc >/dev/null 2>&1; then echo "gcc is in the image"; exit 1; fi
+          src=/usr/share/doc/datawrap/third-party-source
+          for f in SHA256SUMS MANIFEST.json BUNDLED_LIBRARIES.json DEBIAN_SOURCES.json; do
+            test -s "$src/$f" || { echo "missing $src/$f"; exit 1; }
+          done
+          cd "$src"
+          sha256sum --check --quiet SHA256SUMS
+          ls unixodbc_*.dsc freetds-*.tar.bz2 paramiko-*.tar.gz
+          python -c 'import json; d = json.load(open("DEBIAN_SOURCES.json")); print(len(d["sources"]), "Debian source packages shipped")'
+          du -sh "$src"
+          pip check
+          python -c 'import fastapi, psycopg2, pymssql, pyodbc, snowflake.connector, preflight'
+          CHECK
+          docker run --rm -v "$RUNNER_TEMP/check-image.sh:/check-image.sh:ro" datawrap-api:ci sh /check-image.sh
+
   studio-ui:
     runs-on: ubuntu-latest
     steps:
@@ -1106,6 +1160,7 @@ jobs:
       - cdc-sqlserver
       - cdc-oracle
       - security
+      - api-image
       - studio-ui
     runs-on: ubuntu-latest
     steps:
@@ -1121,6 +1176,7 @@ jobs:
           CDC_SQLSERVER: ${{ needs.cdc-sqlserver.result }}
           CDC_ORACLE: ${{ needs.cdc-oracle.result }}
           SECURITY: ${{ needs.security.result }}
+          API_IMAGE: ${{ needs.api-image.result }}
           STUDIO_UI: ${{ needs.studio-ui.result }}
         run: |
           failed=0
@@ -1135,6 +1191,7 @@ jobs:
             "cdc-sqlserver:$CDC_SQLSERVER" \
             "cdc-oracle:$CDC_ORACLE" \
             "security:$SECURITY" \
+            "api-image:$API_IMAGE" \
             "studio-ui:$STUDIO_UI"; do
             name="${check%%:*}"
             result="${check##*:}"

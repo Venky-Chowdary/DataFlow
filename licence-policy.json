@@ -10,6 +10,12 @@
     "PSF-2.0", "Python-2.0", "CNRI-Python", "Unlicense", "Zlib", "HPND", "CC0-1.0", "BlueOak-1.0.0",
     "CC-BY-4.0", "OFL-1.1", "Public-Domain", "UPL-1.0"
   ],
+  "apt_packages_about": "Debian packages Dockerfile.api's final stage installs on top of the base image (scripts/fetch_debian_sources.py --verify-dockerfile checks the list; a change fails CI until it is reviewed here). Whatever the list, the image build ships the Debian source of EVERY installed package whose /usr/share/doc/<pkg>/copyright names a copyleft licence (base image packages and dependencies included) into /usr/share/doc/datawrap/third-party-source, listed in DEBIAN_SOURCES.json, and fails on a package whose licence it cannot tell.",
+  "apt_packages": {
+    "unixodbc": {"licence": "LGPL-2.1", "why": "unixODBC driver manager (odbcinst / isql and the driver registry) for pyodbc, used unmodified.", "source": "shipped"},
+    "libodbc2": {"licence": "LGPL-2.1", "why": "unixODBC's libodbc.so.2, which pyodbc's wheel links; used unmodified as a shared library.", "source": "shipped"},
+    "curl": {"licence": "curl (MIT-style); its libraries' licences are read from their copyright files at build time", "why": "HEALTHCHECK probe.", "source": "shipped when its copyright file names a copyleft licence (build-time scan)"}
+  },
   "exceptions": {
     "pypi:certifi": {
       "licence": "MPL-2.0",
