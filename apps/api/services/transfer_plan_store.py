@@ -346,16 +346,16 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
     always a new file from the atomic replace, so it never shares an inode
     with its backup.
     """
+    backup = _backup_path(STORE_PATH)
     staging: Path | None = None
-    if STORE_PATH.exists():
-        backup = _backup_path(STORE_PATH)
-        staging = backup.with_name(f".{backup.name}.{os.getpid()}.staging")
-        staging.unlink(missing_ok=True)
-        try:
-            os.link(STORE_PATH, staging)
-        except OSError:
-            shutil.copy2(STORE_PATH, staging)
     try:
+        if STORE_PATH.exists():
+            staging = backup.with_name(f".{backup.name}.{os.getpid()}.staging")
+            staging.unlink(missing_ok=True)
+            try:
+                os.link(STORE_PATH, staging)
+            except OSError:
+                shutil.copy2(STORE_PATH, staging)
         write_json_atomic(
             STORE_PATH,
             {"plans": [p.to_dict() for p in plans]},
@@ -366,8 +366,20 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
         if staging is not None:
             staging.unlink(missing_ok=True)
         raise
-    if staging is not None:
-        os.replace(staging, _backup_path(STORE_PATH))
+    if staging is None:
+        return
+    # The new store has landed: the write is committed. A backup that cannot
+    # be rotated is logged, never reported as a failed write (a retry would
+    # append the same change twice).
+    try:
+        os.replace(staging, backup)
+    except OSError as exc:
+        staging.unlink(missing_ok=True)
+        logger.warning(
+            "Transfer plan store saved, but its backup %s was not updated (%s)",
+            backup.name,
+            type(exc).__name__,
+        )
 
 
 @contextlib.contextmanager

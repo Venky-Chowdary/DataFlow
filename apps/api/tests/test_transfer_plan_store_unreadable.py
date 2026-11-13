@@ -317,12 +317,48 @@ def test_a_failed_write_leaves_the_backup_alone_and_unlinked(isolated_plan_store
     assert not [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
 
 
-def test_backup_and_store_never_share_an_inode_after_a_write(isolated_plan_store):
-    import os
+def test_a_partial_backup_copy_leaves_no_staging_file(isolated_plan_store, monkeypatch):
+    """Hard link refused (other device) and the copy fails half-way: nothing is left behind."""
+    import errno
 
-    _two_plans()
+    a, _b = _two_plans()
     bak = isolated_plan_store.with_name("transfer_plans.json.bak")
-    assert os.stat(bak).st_ino != os.stat(isolated_plan_store).st_ino
+    backup_before, store_before = bak.read_bytes(), isolated_plan_store.read_bytes()
+
+    def no_link(*_args):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    def partial_copy(_src, dst, *_args, **_kwargs):
+        Path(dst).write_text("partial")
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "link", no_link)
+        patched.setattr(store.shutil, "copy2", partial_copy)
+        with pytest.raises(OSError):
+            attach_job(a, "job-1")
+    assert not [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
+    assert isolated_plan_store.read_bytes() == store_before
+    assert bak.read_bytes() == backup_before
+
+
+def test_a_write_that_landed_is_not_reported_failed_when_the_backup_rename_fails(
+    isolated_plan_store, caplog
+):
+    """The new store is committed; a failing .bak rename must not make the caller retry it."""
+    a, _b = _two_plans()
+    bak = isolated_plan_store.with_name("transfer_plans.json.bak")
+    bak.unlink()
+    bak.mkdir()  # os.replace(staging, .bak) now fails
+    caplog.set_level(logging.WARNING, logger=store.logger.name)
+    try:
+        updated = attach_job(a, "job-2")
+    finally:
+        bak.rmdir()
+    assert updated is not None and updated.job_ids == ["job-2"]
+    assert get_plan(a).job_ids == ["job-2"]
+    assert not [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
+    assert any("transfer_plans.json.bak" in r.getMessage() for r in caplog.records)
 
 
 def test_a_store_saved_with_a_utf8_bom_is_readable(isolated_plan_store):
