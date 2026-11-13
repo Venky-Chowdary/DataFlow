@@ -83,7 +83,8 @@ def pointer(companion: Path, ref: str) -> str:
         "",
         f"   `{ref}`",
         "",
-        "   It holds the Debian source of every copyleft system package in this image",
+        "   (also in this image's label `io.datawrap.sources`). It holds the Debian",
+        "   source of every copyleft system package in this image",
         "   and the GCC source for numpy's libquadmath / libgfortran. To copy it:",
         "",
         "   ```",
@@ -214,10 +215,15 @@ def verify_dockerfile(dockerfile: Path) -> list[str]:
         )
         return problems
     final = release.body
-    if "ARG SOURCES_REF" not in final or not re.search(
-        r'LABEL [a-z.]+="\$\{SOURCES_REF\}"', final
-    ):
-        problems.append('the release stage must take ARG SOURCES_REF and label the image with it')
+    if "ARG SOURCES_REF" not in final or 'LABEL io.datawrap.sources="${SOURCES_REF}"' not in final:
+        problems.append(
+            'the release stage must take ARG SOURCES_REF and set LABEL io.datawrap.sources="${SOURCES_REF}"'
+        )
+    if re.search(r"org\.opencontainers\.image\.source\s*=\s*\"?\$\{?SOURCES_REF", "\n".join(s.body for s in stages)):
+        problems.append(
+            "org.opencontainers.image.source must stay the repository URL (GHCR linking, Renovate, "
+            "scanners); the companion reference belongs in io.datawrap.sources"
+        )
     copies = list(re.finditer(r"COPY --from=sources-collect (.+)", final))
     if not copies:
         problems.append("the release stage copies no companion manifests")

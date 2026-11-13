@@ -243,7 +243,7 @@ name the companion too.
   this tag and how to copy it (`docker create` + `docker export`,
   `sha256sum -c SHA256SUMS`). It lists every Debian source package, with
   the binary packages it covers, and every file, with its SHA-256;
-- the OCI label `org.opencontainers.image.source` holds the companion
+- the label `io.datawrap.sources` holds the companion
   reference;
 - `/usr/share/doc/datawrap/companion/` holds a copy of the companion's
   `SHA256SUMS` and manifests.

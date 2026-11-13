@@ -162,7 +162,9 @@ FROM app AS release
 # Where the companion bundle of this image is published. release.yml passes
 # <registry>/<image>:<tag>-sources; other builds keep this default.
 ARG SOURCES_REF="unpublished build: release images point at <image>:<tag>-sources"
-LABEL org.opencontainers.image.source="${SOURCES_REF}"
+# Its own label: org.opencontainers.image.source stays the repository (GHCR
+# package linking, Renovate, scanners); release.yml sets that one.
+LABEL io.datawrap.sources="${SOURCES_REF}"
 COPY --from=sources-collect /sources/SHA256SUMS /sources/MANIFEST.json /sources/DEBIAN_SOURCES.json \
      /usr/share/doc/datawrap/companion/
 COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py scripts/fetch_debian_sources.py \

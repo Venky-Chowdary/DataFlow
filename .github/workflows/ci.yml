@@ -1162,7 +1162,7 @@ jobs:
       - name: Check the release image (pointer to the companion)
         run: |
           docker image ls datawrap-api:ci-release --format 'release image size: {{.Size}}'
-          label=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.source" }}' datawrap-api:ci-release)
+          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' datawrap-api:ci-release)
           [ "$label" = "datawrap-api:ci-sources" ] || { echo "the source label is '$label'"; exit 1; }
           docker run --rm datawrap-api:ci-release sh -ec '
             grep -q "datawrap-api:ci-sources" /usr/share/doc/datawrap/SOURCES.md

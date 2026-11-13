@@ -9,7 +9,7 @@ The Debian system-package sources and the GCC 8.5 source (for numpy's
 libquadmath / libgfortran) go into a companion OCI image,
 ``<image>:<tag>-sources``. release.yml publishes it with the runtime image,
 in the same registry. The runtime image carries a pointer:
-``/usr/share/doc/datawrap/SOURCES.md``, the ``org.opencontainers.image.source``
+``/usr/share/doc/datawrap/SOURCES.md``, the ``io.datawrap.sources``
 label, and the companion's SHA256SUMS. These tests run offline.
 """
 
@@ -156,6 +156,7 @@ def test_sources_md_says_where_the_companion_is_and_what_it_holds(tmp_path) -> N
     assert "| unixodbc | 2.3.11-2+deb12u1 | libodbc2, unixodbc |" in text
     assert "gcc-8.5.0-20210514.tar.xz" in text and "numpy 2.5.4" in text
     assert SOURCE_DIR in text, "it also says what stays in the image"
+    assert "io.datawrap.sources" in text
 
 
 def test_the_companion_must_hold_exactly_the_runtimes_copyleft_packages(tmp_path) -> None:
@@ -306,7 +307,7 @@ def test_ci_builds_both_images_and_checks_them() -> None:
     assert "--target" not in default["run"] and "sources-collect" in default["run"]
     assert steps.index(default) < steps.index(builds[0])
     text = json.dumps(steps)
-    for probe in ("*.dsc", "gcc-*", "SOURCES.md", "org.opencontainers.image.source",
+    for probe in ("*.dsc", "gcc-*", "SOURCES.md", "io.datawrap.sources",
                   "sha256sum --check", "docker export", "pip check", "build-essential"):
         assert probe in text, probe
     assert "api-image" in jobs["required-checks"]["needs"]
@@ -340,6 +341,32 @@ def test_release_publishes_the_companion_with_the_runtime_image() -> None:
     run = steps[runtime]["with"]
     assert "release" in run["target"], "the api release image is the release target (pointer)"
     assert "SOURCES_REF=" in run["build-args"] and "-sources" in run["build-args"]
-    assert "org.opencontainers.image.source=" in run["labels"] and "-sources" in run["labels"]
+    # M1: the OCI source label stays the repository (GHCR linking, Renovate,
+    # scanners); the companion has its own label, set by the release stage.
+    assert "org.opencontainers.image.source=https://github.com/${{ github.repository }}" in run["labels"]
+    assert "-sources" not in run["labels"]
     verify = next(s for s in steps if "imagetools inspect" in str(s.get("run", "")))
     assert verify["if"] == "${{ matrix.companion }}" and "-sources" in verify["run"]
+
+
+def test_the_oci_source_label_stays_the_repository() -> None:
+    """Final review M1: org.opencontainers.image.source is the GitHub repository
+    (GHCR links the package to it; Renovate and scanners read it). The companion
+    reference has its own label, io.datawrap.sources."""
+    text = _dockerfile()
+    assert 'LABEL io.datawrap.sources="${SOURCES_REF}"' in text
+    assert not [ln for ln in text.splitlines()
+                if ln.startswith("LABEL") and "org.opencontainers.image.source" in ln]
+    bad = text.replace(
+        'LABEL io.datawrap.sources="${SOURCES_REF}"',
+        'LABEL io.datawrap.sources="${SOURCES_REF}" org.opencontainers.image.source="${SOURCES_REF}"',
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "Dockerfile"
+        path.write_text(bad, encoding="utf-8")
+        assert any("org.opencontainers.image.source" in p for p in bundle.verify_dockerfile(path))
+    steps = _workflow("release.yml")["jobs"]["publish-images"]["steps"]
+    verify = next(s for s in steps if "imagetools inspect" in str(s.get("run", "")))
+    assert "io.datawrap.sources" in verify["run"]

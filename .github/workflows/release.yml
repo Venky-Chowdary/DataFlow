@@ -128,7 +128,7 @@ jobs:
           target: ${{ matrix.companion && 'release' || '' }}
           build-args: ${{ matrix.companion && format('SOURCES_REF={0}:{1}-sources', steps.image.outputs.name, github.ref_name) || '' }}
           labels: |
-            org.opencontainers.image.source=${{ matrix.companion && format('{0}:{1}-sources', steps.image.outputs.name, github.ref_name) || format('https://github.com/{0}', github.repository) }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=release-${{ matrix.image }}
@@ -144,7 +144,7 @@ jobs:
           ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
           docker buildx imagetools inspect "$ref" >/dev/null || { echo "::error::$ref is not published"; exit 1; }
           docker pull -q "${IMAGE_NAME}:${GITHUB_REF_NAME}" >/dev/null
-          label=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.source" }}' "${IMAGE_NAME}:${GITHUB_REF_NAME}")
+          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' "${IMAGE_NAME}:${GITHUB_REF_NAME}")
           [ "$label" = "$ref" ] || { echo "::error::the runtime image points at '$label', not $ref"; exit 1; }
           docker run --rm "${IMAGE_NAME}:${GITHUB_REF_NAME}" grep -q "$ref" /usr/share/doc/datawrap/SOURCES.md
 
