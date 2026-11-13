@@ -1082,16 +1082,18 @@ jobs:
   # required check name does not change. Shared setup lives in
   # .github/actions/studio-surface. studio-ui-next is not a required check.
   api-image:
-    # Builds both images from Dockerfile.api, without a layer cache (so the
+    # Builds Dockerfile.api's three targets without a layer cache (so the
     # source steps really run):
+    # - the deployable default target (what Railway builds), first and on its
+    #   own: it must not run any companion stage;
     # - the companion source bundle (--target sources, what release.yml
     #   publishes as <image>:<tag>-sources);
-    # - the runtime image, pointed at it.
+    # - the release image (--target release): the runtime plus the pointer.
     # Runtime checks: no compiler or build-essential; the small wheel sources
-    # and inventory present; no Debian or GCC source; the SOURCES.md pointer,
-    # the label and the companion's SHA256SUMS present; pip check; imports.
-    # Companion checks: every file matches its SHA256SUMS, which equals the
-    # runtime's copy. keyutils 1.5.8 has only a published MD5: this job
+    # and inventory present; no Debian or GCC source and no pointer; pip check;
+    # imports. Release checks: the SOURCES.md pointer, the label and the
+    # companion's SHA256SUMS. Companion checks: every file matches its
+    # SHA256SUMS, which equals the release image's copy. keyutils 1.5.8 has only a published MD5: this job
     # records its SHA-256 once (after the MD5 check) and fails if it changes.
     name: API image (runtime + companion source bundle)
     runs-on: ubuntu-latest
@@ -1103,6 +1105,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build the deployable default target (no companion stages)
+        # What Railway builds for api, worker and scheduler. It must not run
+        # sources-collect: a deploy never downloads the Debian / GCC sources.
+        shell: bash
+        run: |
+          docker buildx build --load --progress=plain -f Dockerfile.api -t datawrap-api:ci . 2>&1 \
+            | tee "$RUNNER_TEMP/runtime-build.log"
+          if grep -qE "\[sources-collect|fetch_debian_sources\.py --dest|fetch_lgpl_sources\.py --companion" \
+              "$RUNNER_TEMP/runtime-build.log"; then
+            echo "the default target ran a companion stage (sources-collect)"; exit 1
+          fi
+
       - name: Build the companion source bundle (target sources)
         uses: docker/build-push-action@v6
         with:
@@ -1113,21 +1127,20 @@ jobs:
           push: false
           tags: datawrap-api:ci-sources
 
-      - name: Build the runtime image
+      - name: Build the release image (target release, with the pointer)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.api
+          target: release
           load: true
           push: false
-          tags: datawrap-api:ci
+          tags: datawrap-api:ci-release
           build-args: SOURCES_REF=datawrap-api:ci-sources
 
       - name: Check the runtime image
         run: |
           docker image ls datawrap-api:ci --format 'runtime image size: {{.Size}}'
-          label=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.source" }}' datawrap-api:ci)
-          [ "$label" = "datawrap-api:ci-sources" ] || { echo "org.opencontainers.image.source is '$label'"; exit 1; }
           cat > "$RUNNER_TEMP/check-runtime.sh" <<'CHECK'
           set -e
           if dpkg -s build-essential >/dev/null 2>&1; then echo "build-essential is in the image"; exit 1; fi
@@ -1139,14 +1152,25 @@ jobs:
           ls freetds-*.tar.bz2 paramiko-*.tar.gz psycopg2-*.tar.gz pymssql-*.tar.gz keyutils-*.tar.bz2 libxcrypt-*.tar.xz
           if ls *.dsc gcc-* 2>/dev/null | grep -q .; then echo "Debian or GCC source is in the runtime image"; exit 1; fi
           test ! -e DEBIAN_SOURCES.json || { echo "DEBIAN_SOURCES.json is in the runtime image"; exit 1; }
-          grep -q "datawrap-api:ci-sources" /usr/share/doc/datawrap/SOURCES.md
-          grep -q "Debian source packages" /usr/share/doc/datawrap/SOURCES.md
-          test -s /usr/share/doc/datawrap/companion/SHA256SUMS
+          test ! -e /tmp/lgpl || { echo "the source-step scripts are in the runtime image"; exit 1; }
           du -sh "$src"
           pip check
           python -c 'import fastapi, psycopg2, pymssql, pyodbc, snowflake.connector, preflight'
           CHECK
           docker run --rm -v "$RUNNER_TEMP/check-runtime.sh:/check-runtime.sh:ro" datawrap-api:ci sh /check-runtime.sh
+
+      - name: Check the release image (pointer to the companion)
+        run: |
+          docker image ls datawrap-api:ci-release --format 'release image size: {{.Size}}'
+          label=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.source" }}' datawrap-api:ci-release)
+          [ "$label" = "datawrap-api:ci-sources" ] || { echo "the source label is '$label'"; exit 1; }
+          docker run --rm datawrap-api:ci-release sh -ec '
+            grep -q "datawrap-api:ci-sources" /usr/share/doc/datawrap/SOURCES.md
+            grep -q "Debian source packages" /usr/share/doc/datawrap/SOURCES.md
+            test -s /usr/share/doc/datawrap/companion/SHA256SUMS'
+          if docker run --rm datawrap-api:ci test -e /usr/share/doc/datawrap/SOURCES.md; then
+            echo "the deployable runtime carries the release pointer"; exit 1
+          fi
 
       - name: Check the companion source bundle
         run: |
@@ -1158,7 +1182,7 @@ jobs:
           cd "$RUNNER_TEMP/companion"
           sha256sum --check --quiet SHA256SUMS
           ls *.dsc gcc-*.tar.xz DEBIAN_SOURCES.json MANIFEST.json
-          docker run --rm datawrap-api:ci cat /usr/share/doc/datawrap/companion/SHA256SUMS | diff - SHA256SUMS
+          docker run --rm datawrap-api:ci-release cat /usr/share/doc/datawrap/companion/SHA256SUMS | diff - SHA256SUMS
           python3 -c 'import json; d = json.load(open("DEBIAN_SOURCES.json")); print(len(d["sources"]), "Debian source packages in the companion")'
           du -sh .
 

@@ -273,7 +273,7 @@ def test_the_image_is_multi_stage_with_compilers_only_in_the_build_stage() -> No
     build = stages["build"]
     assert "build-essential" in deb.apt_installs(build.body)
     chain = deb.runtime_chain(_stages())
-    assert [s.name for s in chain] == ["runtime-base", "runtime"], "the last stage is the runtime image"
+    assert [s.name for s in chain] == ["runtime-base", "app", "runtime"], "the last stage is the runtime image"
     runtime_pkgs = set().union(*(deb.apt_installs(s.body) for s in chain))
     assert not {p for p in runtime_pkgs if p == "build-essential" or p.endswith("-dev") or p in {"gcc", "g++", "make"}}
     runtime = _runtime_text()

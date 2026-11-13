@@ -170,7 +170,9 @@ def verify_dockerfile(dockerfile: Path) -> list[str]:
     stages = dockerfile_stages(dockerfile.read_text(encoding="utf-8"))
     by_name = {s.name: s for s in stages if s.name}
     chain = runtime_chain(stages)
-    runtime_text = "\n".join(s.body for s in chain)
+    runtime_text = "\n".join(
+        line for s in chain for line in s.body.splitlines() if not line.lstrip().startswith("#")
+    )
     collect = by_name.get("sources-collect")
     if collect is None:
         return ["no `sources-collect` stage builds the companion bundle"]
@@ -193,21 +195,40 @@ def verify_dockerfile(dockerfile: Path) -> list[str]:
         "COPY --from=sources-collect /sources /"
     ]:
         problems.append("the `sources` stage must hold only `COPY --from=sources-collect /sources /`")
-    if "fetch_debian_sources.py --dest" in runtime_text or "--companion" in runtime_text:
-        problems.append("the runtime stages run the Debian / companion source step; it belongs in sources-collect")
-    final = chain[-1].body
-    if "ARG SOURCES_REF" not in final or not re.search(
-        r'LABEL org\.opencontainers\.image\.source="\$\{SOURCES_REF\}"', final
+    for forbidden, what in (
+        ("--from=sources-collect", "copies from the companion stage"),
+        ("fetch_debian_sources.py --dest", "runs the Debian source step"),
+        ("--companion", "runs the companion source step"),
+        ("source_bundle.py", "writes the companion pointer"),
     ):
-        problems.append('the runtime stage must take ARG SOURCES_REF and set LABEL org.opencontainers.image.source="${SOURCES_REF}"')
-    for copy in re.finditer(r"COPY --from=sources-collect (.+)", final):
+        if forbidden in runtime_text:
+            problems.append(
+                f"the default target ({' -> '.join(s.name or s.base for s in chain)}) {what}; "
+                "only the release stage may depend on sources-collect, so a deploy build "
+                "never downloads the Debian / GCC sources"
+            )
+    release = by_name.get("release")
+    if release is None or release.base not in {s.name for s in chain}:
+        problems.append(
+            "no release stage (FROM a default-target stage) carries the companion pointer"
+        )
+        return problems
+    final = release.body
+    if "ARG SOURCES_REF" not in final or not re.search(
+        r'LABEL [a-z.]+="\$\{SOURCES_REF\}"', final
+    ):
+        problems.append('the release stage must take ARG SOURCES_REF and label the image with it')
+    copies = list(re.finditer(r"COPY --from=sources-collect (.+)", final))
+    if not copies:
+        problems.append("the release stage copies no companion manifests")
+    for copy in copies:
         srcs = copy.group(1).split()[:-1]
         if not srcs or any(not s.endswith((".json", "/SHA256SUMS")) for s in srcs):
-            problems.append(f"the runtime stage may copy only the manifests from the companion, not {srcs}")
+            problems.append(f"the release stage may copy only the manifests from the companion, not {srcs}")
     if f"source_bundle.py --check {COMPANION_COPY}" not in final:
-        problems.append("the runtime stage does not run `source_bundle.py --check` against the companion")
+        problems.append("the release stage does not run `source_bundle.py --check` against the companion")
     if f"--out {POINTER}" not in final or "source_bundle.py --pointer" not in final:
-        problems.append(f"the runtime stage does not write the pointer {POINTER}")
+        problems.append(f"the release stage does not write the pointer {POINTER}")
     return problems
 
 

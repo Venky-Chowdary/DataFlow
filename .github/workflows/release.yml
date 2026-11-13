@@ -122,7 +122,10 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
-          # The API image's pointer (SOURCES.md) and source label name its companion.
+          # The API release image is the `release` target: the deployable
+          # runtime plus the pointer (SOURCES.md, companion SHA256SUMS) naming
+          # its companion. Deploys keep building the default target.
+          target: ${{ matrix.companion && 'release' || '' }}
           build-args: ${{ matrix.companion && format('SOURCES_REF={0}:{1}-sources', steps.image.outputs.name, github.ref_name) || '' }}
           labels: |
             org.opencontainers.image.source=${{ matrix.companion && format('{0}:{1}-sources', steps.image.outputs.name, github.ref_name) || format('https://github.com/{0}', github.repository) }}

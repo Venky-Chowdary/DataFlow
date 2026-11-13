@@ -201,8 +201,28 @@ def test_the_dockerfile_builds_the_companion_and_the_pointer() -> None:
     text = _dockerfile()
     assert "FROM scratch AS sources" in text
     assert "fetch_lgpl_sources.py --companion gcc --dest /sources" in text
-    assert 'LABEL org.opencontainers.image.source="${SOURCES_REF}"' in text
     assert "--out /usr/share/doc/datawrap/SOURCES.md" in text
+
+
+def test_the_default_target_never_depends_on_the_companion() -> None:
+    """Final review M2: Railway builds the default target for api, worker and
+    scheduler. It must not download the Debian / GCC sources (a download
+    failure would block a deploy); only the release target carries the pointer."""
+    stages = deb.dockerfile_stages(_dockerfile())
+    by_name = {s.name: s for s in stages}
+    assert stages[-1].name == "runtime", "the default target is the deployable runtime"
+    chain = deb.runtime_chain(stages)
+    assert [s.name for s in chain] == ["runtime-base", "app", "runtime"]
+    runtime_text = "\n".join(
+        line for s in chain for line in s.body.splitlines() if not line.lstrip().startswith("#")
+    )
+    for forbidden in ("--from=sources-collect", "source_bundle.py", "fetch_debian_sources.py --dest",
+                      "--companion", "SOURCES_REF"):
+        assert forbidden not in runtime_text, forbidden
+    release = by_name["release"]
+    assert release.base == "app"
+    assert "COPY --from=sources-collect /sources/SHA256SUMS" in release.body
+    assert "source_bundle.py --check" in release.body and "source_bundle.py --pointer" in release.body
 
 
 @pytest.mark.parametrize(
@@ -211,8 +231,10 @@ def test_the_dockerfile_builds_the_companion_and_the_pointer() -> None:
         ("--companion gcc --dest", "--companion gcc keyutils --dest", "companion families"),
         ("--companion gcc --dest", "--companion --dest", "companion families"),
         ("FROM scratch AS sources", "FROM runtime-base AS sources", "FROM scratch"),
-        ('LABEL org.opencontainers.image.source="${SOURCES_REF}"', "", "org.opencontainers.image.source"),
+        ("FROM app AS release", "FROM app AS releasing", "release stage"),
         ("/sources/SHA256SUMS /sources/MANIFEST.json", "/sources/ /sources/MANIFEST.json", "only the manifests"),
+        ("# The source-step scripts are not part of the running image.",
+         "COPY --from=sources-collect /sources/SHA256SUMS /x/", "default target"),
     ],
 )
 def test_the_drift_check_catches_a_broken_companion_layout(tmp_path, old, new, complaint) -> None:
@@ -227,10 +249,10 @@ def test_the_drift_check_catches_a_broken_companion_layout(tmp_path, old, new, c
 def test_the_drift_check_catches_debian_sources_in_the_runtime(tmp_path) -> None:
     text = _dockerfile()
     bad = tmp_path / "Dockerfile"
-    marker = "COPY --from=sources-collect /sources/SHA256SUMS"
+    marker = "# The source-step scripts are not part of the running image."
     bad.write_text(text.replace(marker, "RUN python /tmp/lgpl/fetch_debian_sources.py --dest /x\n" + marker, 1),
                    encoding="utf-8")
-    assert any("runtime" in p and "Debian" in p for p in bundle.verify_dockerfile(bad))
+    assert any("default target" in p and "Debian" in p for p in bundle.verify_dockerfile(bad))
 
 
 # ── policy, NOTICE ─────────────────────────────────────────────────────────
@@ -275,9 +297,14 @@ def test_ci_builds_both_images_and_checks_them() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     steps = jobs["api-image"]["steps"]
     builds = [s for s in steps if str(s.get("uses", "")).startswith("docker/build-push-action")]
-    assert {b["with"].get("target") for b in builds} == {"sources", None}
-    runtime = next(b for b in builds if not b["with"].get("target"))
-    assert "SOURCES_REF=datawrap-api:ci-sources" in runtime["with"]["build-args"]
+    assert {b["with"].get("target") for b in builds} == {"sources", "release"}
+    release = next(b for b in builds if b["with"].get("target") == "release")
+    assert "SOURCES_REF=datawrap-api:ci-sources" in release["with"]["build-args"]
+    # The deployable default target is built on its own, first, and must not
+    # run any companion stage.
+    default = next(s for s in steps if "docker buildx build" in str(s.get("run", "")))
+    assert "--target" not in default["run"] and "sources-collect" in default["run"]
+    assert steps.index(default) < steps.index(builds[0])
     text = json.dumps(steps)
     for probe in ("*.dsc", "gcc-*", "SOURCES.md", "org.opencontainers.image.source",
                   "sha256sum --check", "docker export", "pip check", "build-essential"):
@@ -311,6 +338,7 @@ def test_release_publishes_the_companion_with_the_runtime_image() -> None:
     assert "-sources" in comp["with"]["tags"] and "steps.image.outputs.name" in comp["with"]["tags"]
     assert comp["if"] == "${{ matrix.companion }}"
     run = steps[runtime]["with"]
+    assert "release" in run["target"], "the api release image is the release target (pointer)"
     assert "SOURCES_REF=" in run["build-args"] and "-sources" in run["build-args"]
     assert "org.opencontainers.image.source=" in run["labels"] and "-sources" in run["labels"]
     verify = next(s for s in steps if "imagetools inspect" in str(s.get("run", "")))

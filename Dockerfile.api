@@ -10,9 +10,11 @@
 #   bundle. It holds the Debian source of every copyleft system package
 #   and the GCC source, published by release.yml as <image>:<tag>-sources
 #   (docker build --target sources).
-# - runtime (the default target): runtime-base plus the pointer to the
-#   companion, /usr/share/doc/datawrap/SOURCES.md, and the
-#   org.opencontainers.image.source label.
+# - app: runtime-base plus the vendor-driver option, preflight and the API.
+# - release (release builds only): app plus the pointer to the companion,
+#   /usr/share/doc/datawrap/SOURCES.md, its SHA256SUMS copy and the label.
+# - runtime (the default target, what deploys build): app, unchanged; it
+#   never depends on the companion stages.
 # Checked by the CI api-image job, tests/test_debian_source_shipping.py and
 # tests/test_source_bundle.py.
 
@@ -76,8 +78,7 @@ COPY apps/api/constraints-image.txt /app/constraints-image.txt
 # Sources UPSTREAM marks bundle="companion" (the 65 MB GCC source for numpy's
 # libquadmath / libgfortran) are not shipped here; the inventory names the
 # companion bundle as their location.
-COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py scripts/fetch_debian_sources.py \
-     scripts/source_bundle.py /tmp/lgpl/
+COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py /tmp/lgpl/
 RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source --bundled \
       paramiko psycopg2-binary=psycopg2 pymssql+freetds
 
@@ -91,6 +92,7 @@ RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-
 #   index or snapshot.debian.org, and against the .dsc checksums. A package
 #   whose licence cannot be told fails the build.
 FROM runtime-base AS sources-collect
+COPY scripts/fetch_debian_sources.py /tmp/lgpl/
 RUN python /tmp/lgpl/fetch_lgpl_sources.py --companion gcc --dest /sources
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::GzipIndexes=false update \
@@ -102,23 +104,7 @@ FROM scratch AS sources
 COPY --from=sources-collect /sources /
 
 
-FROM runtime-base AS runtime
-
-# Where the companion bundle of this image is published. release.yml passes
-# <registry>/<image>:<tag>-sources; other builds keep this default.
-ARG SOURCES_REF="unpublished build: release images point at <image>:<tag>-sources"
-LABEL org.opencontainers.image.source="${SOURCES_REF}"
-
-# The pointer: SOURCES.md says where the companion is and lists every file in
-# it with its SHA-256. The build fails unless the companion holds exactly this
-# image's copyleft Debian source packages and companion-located sources.
-COPY --from=sources-collect /sources/SHA256SUMS /sources/MANIFEST.json /sources/DEBIAN_SOURCES.json \
-     /usr/share/doc/datawrap/companion/
-RUN python /tmp/lgpl/source_bundle.py --check /usr/share/doc/datawrap/companion \
-      --runtime-sources /usr/share/doc/datawrap/third-party-source \
-    && python /tmp/lgpl/source_bundle.py --pointer /usr/share/doc/datawrap/companion --ref "$SOURCES_REF" \
-      --out /usr/share/doc/datawrap/SOURCES.md \
-    && rm -rf /tmp/lgpl
+FROM runtime-base AS app
 
 # Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql, IBM Db2
 # ibm-db with its clidriver, and their SQLAlchemy dialects) are NOT shipped by
@@ -133,6 +119,9 @@ RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
     else \
       echo "Vendor drivers not installed (INSTALL_VENDOR_DRIVERS=0)"; \
     fi
+
+# The source-step scripts are not part of the running image.
+RUN rm -rf /tmp/lgpl
 
 COPY packages/preflight /app/packages/preflight
 # Runtime only: preflight's dev extra is pytest, which the image must not ship
@@ -161,3 +150,30 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
   CMD curl -f "http://127.0.0.1:${PORT:-8000}/health" || exit 1
 
 CMD ["/app/scripts/start-api.sh"]
+
+
+# Release builds only (release.yml, the CI api-image job): the pointer to the
+# companion bundle. SOURCES.md says where the companion is and lists every
+# file in it with its SHA-256; the build fails unless the companion holds
+# exactly this image's copyleft Debian source packages and companion-located
+# sources. Only this stage depends on sources-collect, so a deploy build of
+# the default target never downloads the Debian / GCC sources.
+FROM app AS release
+# Where the companion bundle of this image is published. release.yml passes
+# <registry>/<image>:<tag>-sources; other builds keep this default.
+ARG SOURCES_REF="unpublished build: release images point at <image>:<tag>-sources"
+LABEL org.opencontainers.image.source="${SOURCES_REF}"
+COPY --from=sources-collect /sources/SHA256SUMS /sources/MANIFEST.json /sources/DEBIAN_SOURCES.json \
+     /usr/share/doc/datawrap/companion/
+COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py scripts/fetch_debian_sources.py \
+     scripts/source_bundle.py /tmp/lgpl/
+RUN python /tmp/lgpl/source_bundle.py --check /usr/share/doc/datawrap/companion \
+      --runtime-sources /usr/share/doc/datawrap/third-party-source \
+    && python /tmp/lgpl/source_bundle.py --pointer /usr/share/doc/datawrap/companion --ref "$SOURCES_REF" \
+      --out /usr/share/doc/datawrap/SOURCES.md \
+    && rm -rf /tmp/lgpl
+
+
+# The default target: what Railway (api, worker, scheduler) and every deploy
+# build. It is `app`, with no dependency on the companion bundle.
+FROM app AS runtime
