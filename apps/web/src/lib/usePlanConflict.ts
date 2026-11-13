@@ -54,6 +54,9 @@ const message = (err: unknown) => (err instanceof Error ? err.message : "The req
 export function usePlanConflict({ api, headRef, onUseLatest, notify }: PlanConflictOptions) {
   const [conflict, setConflict] = useState<PlanConflictState | null>(null);
   const current = useRef<PlanConflictState | null>(null);
+  // Bumped by every open/close: an async step only applies its result while
+  // its generation is still current (Cancel during loading stays cancelled).
+  const generation = useRef(0);
   const update = useCallback((next: PlanConflictState | null) => {
     current.current = next;
     setConflict(next);
@@ -63,14 +66,17 @@ export function usePlanConflict({ api, headRef, onUseLatest, notify }: PlanConfl
   const open = useCallback(
     async (planId: string, mine: PlanMappingRow[], origin: PlanConflictOrigin): Promise<"shown" | "resolved"> => {
       const pending: PlanConflictState = { planId, origin, mine, latest: null, status: "loading", error: "" };
+      const gen = ++generation.current;
       update(pending);
       let plan: PlanView;
       try {
         ({ plan } = await api.getPlan(planId));
       } catch (err) {
+        if (gen !== generation.current) return "shown";
         update({ ...pending, status: "ready", error: `The latest version of the plan could not be loaded: ${message(err)}` });
         return "shown";
       }
+      if (gen !== generation.current) return "shown";  // cancelled or re-opened meanwhile
       const latest = activeRevision(plan);
       const head = headVersion(plan);
       const latestMappings = latest?.mappings ?? [];
@@ -129,6 +135,7 @@ export function usePlanConflict({ api, headRef, onUseLatest, notify }: PlanConfl
   const cancel = useCallback(() => {
     const state = current.current;
     if (state?.status === "saving") return;
+    generation.current += 1;
     update(null);
   }, [update]);
 

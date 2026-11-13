@@ -225,3 +225,22 @@ describe("plan conflict dialog — duplicates", () => {
     assert.equal(h.head.current, 2);
   });
 });
+
+describe("plan conflict dialog — cancelled while loading", () => {
+  it("stays closed when the latest revision arrives after Cancel", { timeout: 10_000 }, async () => {
+    let release!: (v: ReturnType<typeof plan>) => void;
+    const pending = new Promise<ReturnType<typeof plan>>((resolve) => { release = resolve; });
+    const h = await mount(api({ getPlan: () => pending }));
+    let opened!: Promise<"shown" | "resolved">;
+    await act(async () => { opened = h.open(MINE); });
+    assert.ok(dialog(), "the dialog shows while loading");
+    await escape();
+    assert.equal(dialog(), null);
+    await act(async () => {
+      release(plan(3, LATEST));
+      await opened;
+    });
+    assert.equal(dialog(), null, "a stale answer must not re-open it");
+    assert.equal(h.head.current, 2);
+  });
+});
