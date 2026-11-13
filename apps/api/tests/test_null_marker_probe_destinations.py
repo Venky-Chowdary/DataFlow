@@ -312,3 +312,36 @@ def test_engine_run_into_generic_sql_over_a_sqlite_url_is_probed(tmp_path, _isol
         or (getattr(result, "reconciliation", None) or {}).get("null_marker_check")
     assert result.success is True, result.error
     assert check and check["status"] == "passed", check
+
+
+def test_an_in_engine_duckdb_copy_is_judged_against_its_source_table(tmp_path, _isolated):  # noqa: F811
+    """No row passes through Datawrap on an in-engine copy: the source is counted on its engine.
+
+    The source really holds the marker spelling; the in-engine copy lands it as
+    is, and the probe must find the same count on both sides, not a leak.
+    """
+    import duckdb
+
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    src_path, dst_path = str(tmp_path / "s.duckdb"), str(tmp_path / "d.duckdb")
+    conn = duckdb.connect(src_path)
+    conn.execute("CREATE TABLE src (id INTEGER PRIMARY KEY, note VARCHAR)")
+    conn.executemany("INSERT INTO src VALUES (?, ?)", [(1, SQL_NULL_SENTINEL), (2, "fine"), (3, None)])
+    conn.close()
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="duckdb", database=src_path, table="src"),
+        destination=EndpointConfig(kind="database", format="duckdb", database=dst_path, table="dst"),
+        sync_mode="full_refresh_overwrite", validation_mode="strict", skip_preflight=True,
+        stream_contracts=[{"name": "src", "sync_mode": "full_refresh_overwrite", "primary_key": "id",
+                           "selected": True}],
+    )
+    result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+    summary = result.destination_summary or {}
+    check = (summary.get("reconciliation") or {}).get("null_marker_check") \
+        or (getattr(result, "reconciliation", None) or {}).get("null_marker_check")
+    assert result.success is True, result.error
+    assert summary.get("copy_fast_path") == "used", summary.get("copy_fast_path")
+    assert check and check["status"] == "passed", check
+    assert (check["destination_raw_rows"], check["source_raw_rows"]) == (1, 1), check
