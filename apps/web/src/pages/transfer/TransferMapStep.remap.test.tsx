@@ -455,6 +455,41 @@ describe("Map step: remap onto existing destination columns", () => {
     assert.match(dialog.textContent ?? "", /unsupported domain jump/);
   });
 
+  it("touch: a finger drags a source onto a destination column; lifting off a column cancels", async () => {
+    await render([m("first_name", "", "VARCHAR(40)"), m("last_name", "", "VARCHAR(60)")]);
+    const fire = (el: Element, type: string, pointerType: string, x = 10, y = 10) => {
+      const Ctor = (dom.window as unknown as { PointerEvent?: typeof MouseEvent }).PointerEvent ?? dom.window.MouseEvent;
+      const ev = new Ctor(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
+      Object.defineProperty(ev, "pointerType", { value: pointerType });
+      Object.defineProperty(ev, "pointerId", { value: 7 });
+      el.dispatchEvent(ev);
+    };
+    let under: Element | null = null;
+    document.elementFromPoint = () => under;
+    const grip = q<HTMLButtonElement>('button[aria-label="Move first_name to a destination column"]');
+    await act(async () => fire(grip, "pointerdown", "touch"));
+    under = q('[data-dest-column="given_name"]').querySelector(".df2-ms-dest-name");
+    await act(async () => fire(grip, "pointermove", "touch", 20, 20));
+    assert.ok(document.querySelector('[data-dest-column="given_name"].is-drop-over'));
+    assert.match(host!.textContent ?? "", /Lift your finger on a destination column/);
+    await act(async () => fire(grip, "pointerup", "touch", 20, 20));
+    await settle(50);
+    assert.equal(latest.find((r) => r.source === "first_name")!.target, "given_name");
+
+    const grip2 = q<HTMLButtonElement>('button[aria-label="Move last_name to a destination column"]');
+    await act(async () => fire(grip2, "pointerdown", "pen"));
+    under = null;
+    await act(async () => fire(grip2, "pointermove", "pen", 900, 900));
+    await act(async () => fire(grip2, "pointerup", "pen", 900, 900));
+    await settle(50);
+    assert.equal(latest.find((r) => r.source === "last_name")!.target, "");
+    assert.match(q('[data-testid="map-live-region"]').textContent ?? "", /Cancelled\. last_name is unchanged/);
+
+    // A mouse keeps native drag and drop: pointer events from it start nothing.
+    await act(async () => fire(grip2, "pointerdown", "mouse"));
+    assert.equal(grip2.getAttribute("aria-pressed"), "false");
+  });
+
   it("a 1,500-column destination renders a window of options, not all of them", async () => {
     catalogColumns = Array.from({ length: 1500 }, (_, i) => col(`col_${i}`, "INT"));
     await render([m("first_name", "col_3", "INT")]);

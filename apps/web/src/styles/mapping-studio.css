@@ -118,6 +118,8 @@ html[data-theme="dark"] .df2-ms-automap {
   background: transparent;
   color: var(--df-text-tertiary);
   cursor: grab;
+  /* A finger on the grip drags; it does not scroll the page. */
+  touch-action: none;
 }
 
 .df2-ms-grip:hover {

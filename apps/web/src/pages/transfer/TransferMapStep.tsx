@@ -3,6 +3,7 @@ import { ColumnReviewPanel, type ColumnRemapControls } from "../../components/Co
 import { AutoMapDialog } from "../../components/mapping/AutoMapDialog";
 import { DestinationColumnsPanel, DND_MIME } from "../../components/mapping/DestinationColumnsPanel";
 import { MappingToolbar } from "../../components/mapping/MappingToolbar";
+import { useTouchDrag } from "../../components/mapping/useTouchDrag";
 import {
   useDestinationCatalog,
   useMappingStudio,
@@ -292,6 +293,8 @@ export function TransferMapStep({
     setFocusSource(source);
   };
 
+  const touch = useTouchDrag(studio, () => setPanelOpen(true));
+
   const renderGrip = (m: MapRow) => {
     const active = studio.dnd.mode === "dragging" && studio.dnd.source === m.source;
     return (
@@ -299,6 +302,7 @@ export function TransferMapStep({
         type="button"
         className={`df2-ms-grip${active ? " is-grabbed" : ""}`}
         draggable
+        {...touch.handlers(m.source)}
         aria-roledescription="draggable source column"
         aria-label={`Move ${m.source} to a destination column`}
         aria-describedby={gripHelpId}
@@ -731,10 +735,10 @@ export function TransferMapStep({
             onTogglePanel={() => setPanelOpen((v) => !v)}
           />
         )}
-        {studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard" && (
+        {studio.dnd.mode === "dragging" && (studio.dnd.via === "keyboard" || touch.touching) && (
           <p className="df2-ms-drag-status" aria-hidden="true">
             Moving <strong>{studio.dnd.source}</strong> → <strong>{studio.dragOver ?? "…"}</strong>.
-            Arrow keys choose, Enter drops, Escape cancels.
+            {touch.touching ? "Lift your finger on a destination column to drop it there." : "Arrow keys choose, Enter drops, Escape cancels."}
           </p>
         )}
         <div className={`df2-ms-split${remapControls && panelOpen ? " has-panel" : ""}`}>
