@@ -158,6 +158,14 @@ def is_precision_collapse_coercion(
     ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+
+    # C3: what the token means on the engine that declared it (unsigned
+    # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
+    # numeric) — the bare token alone graded these pairs lossless.
+    if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
+        return True
+    source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display
@@ -838,6 +846,14 @@ def is_lossy_coercion(
                 proven=proven,
             )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+
+    # C3: what the token means on the engine that declared it (unsigned
+    # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
+    # numeric) — the bare token alone graded these pairs lossless.
+    if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
+        return True
+    source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display

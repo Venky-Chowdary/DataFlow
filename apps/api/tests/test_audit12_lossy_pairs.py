@@ -15,10 +15,11 @@ pairs that do lose values on an existing destination column:
 The other five pairs the audit listed (unconstrained ``numeric`` into MySQL
 ``DECIMAL(38,15)``, SQL Server ``tinyint`` into MySQL ``TINYINT``,
 ``datetime2(7)`` into ``TIMESTAMP(6)``, Oracle ``DATE`` into PostgreSQL
-``DATE``, MySQL ``timestamp`` into PostgreSQL ``TIMESTAMP``) are the product's
-own create-new mapping today, so grading them lossy would refuse the second
-run of every table Datawrap creates; they need the create-new mapper changed
-first and are pinned below as the known, deferred remainder.
+``DATE``, MySQL ``timestamp`` into PostgreSQL ``TIMESTAMP``) were the product's
+own create-new mapping, so grading them lossy would have refused the second
+run of every table Datawrap created. C3 changed the create-new mapper where a
+value-keeping carrier exists and flags all five (pinned below; the full proof
+is ``test_c3_engine_lossy_pairs.py``).
 """
 
 from __future__ import annotations
@@ -33,19 +34,23 @@ from services.type_system import create_new_mapping_target_type
 
 
 def _lossy(source_db: str, source_type: str, dest_db: str, target_type: str) -> bool:
-    return bool(
-        is_lossy_coercion(
-            source_type,
-            target_type,
-            dest_db=dest_db,
-            source_db=source_db,
-            dest_table_exists=True,
+    from services.source_engine_scope import bind_source_engine
+
+    # Validate binds the source engine for the whole check, as here.
+    with bind_source_engine(source_db):
+        return bool(
+            is_lossy_coercion(
+                source_type,
+                target_type,
+                dest_db=dest_db,
+                source_db=source_db,
+                dest_table_exists=True,
+            )
+        ) or bool(
+            is_precision_collapse_coercion(
+                source_type, target_type, dest_db=dest_db, dest_table_exists=True
+            )
         )
-    ) or bool(
-        is_precision_collapse_coercion(
-            source_type, target_type, dest_db=dest_db, dest_table_exists=True
-        )
-    )
 
 
 @pytest.mark.parametrize(
@@ -110,13 +115,13 @@ _SOURCES = {
     ],
     "mysql": [
         "varchar(10)", "tinyint", "smallint", "mediumint", "int", "bigint",
-        "int unsigned", "float", "double", "decimal(12,2)",
+        "int unsigned", "float", "double", "decimal(12,2)", "timestamp", "timestamp(3)",
     ],
     "sqlserver": [
         "varchar(10)", "nvarchar(10)", "tinyint", "smallint", "int", "bigint",
-        "real", "float", "decimal(12,2)",
+        "real", "float", "decimal(12,2)", "datetime2(7)",
     ],
-    "oracle": ["VARCHAR2(10)", "VARCHAR2(10 CHAR)", "NUMBER(10)", "BINARY_DOUBLE", "FLOAT"],
+    "oracle": ["VARCHAR2(10)", "VARCHAR2(10 CHAR)", "NUMBER(10)", "BINARY_DOUBLE", "FLOAT", "DATE"],
 }
 _DESTS = ["postgresql", "mysql", "sqlserver", "oracle", "sqlite", "snowflake"]
 
@@ -130,6 +135,10 @@ _KNOWN_LOSSY_CREATE_NEW: set[tuple[str, str, str]] = {
     ("oracle", "NUMBER(10)", "sqlserver"),
     ("oracle", "NUMBER(10)", "oracle"),
     ("oracle", "NUMBER(10)", "snowflake"),
+    # Graded lossy before C3 too: create-new stamps FSP 6 on a bare MySQL
+    # TIMESTAMP (an invented fractional precision), unrelated to the C3 pairs.
+    ("mysql", "timestamp", "mysql"),
+    ("mysql", "timestamp(3)", "mysql"),
 }
 
 
@@ -146,16 +155,21 @@ def test_the_products_own_create_new_target_is_never_graded_lossy(source_db, des
 
 
 @pytest.mark.parametrize(
-    "source_db,source_type,dest_db,target_type",
+    "source_db,source_type,dest_db,target_type,population",
     [
-        ("postgresql", "numeric", "mysql", "DECIMAL(38,15)"),
-        ("sqlserver", "tinyint", "mysql", "TINYINT"),
-        ("sqlserver", "datetime2(7)", "postgresql", "TIMESTAMP(6)"),
-        ("oracle", "DATE", "postgresql", "DATE"),
-        ("mysql", "timestamp", "postgresql", "TIMESTAMP"),
+        ("postgresql", "numeric", "mysql", "DECIMAL(38,15)", None),
+        ("sqlserver", "tinyint", "mysql", "TINYINT", None),
+        ("sqlserver", "datetime2(7)", "postgresql", "TIMESTAMP(6)", ["2024-01-01 00:00:00.1234567"]),
+        ("oracle", "DATE", "postgresql", "DATE", None),
+        ("mysql", "timestamp", "postgresql", "TIMESTAMP", None),
     ],
 )
-def test_deferred_pairs_are_the_create_new_mapping(source_db, source_type, dest_db, target_type):
-    """The remaining audit pairs are what create-new emits; fixing them is a mapper change."""
-    assert create_new_mapping_target_type(source_type, dest_db, source_db=source_db) == target_type
-    assert _lossy(source_db, source_type, dest_db, target_type) is False
+def test_formerly_deferred_pairs_are_flagged(source_db, source_type, dest_db, target_type, population):
+    """C3: all five are lossy for their source engine (datetime2 on measured values)."""
+    from services.source_engine_scope import bind_source_engine
+
+    with bind_source_engine(source_db):
+        assert is_lossy_coercion(
+            source_type, target_type, dest_db=dest_db, source_db=source_db,
+            dest_table_exists=True, population=population,
+        ) is True

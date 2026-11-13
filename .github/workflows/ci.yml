@@ -662,6 +662,7 @@ jobs:
             tests/test_cdc_sqlserver_native_integration.py \
             tests/test_sqlserver_native_cdc.py \
             tests/test_sqlserver_oracle_cdc.py \
+            tests/test_c3_lossy_pairs_sqlserver_live.py \
             -v --tb=short
         env:
           DATAFLOW_JOB_STORE: memory
@@ -756,6 +757,7 @@ jobs:
           python -m pytest \
             tests/test_cdc_oracle_integration.py \
             tests/test_sqlserver_oracle_cdc.py \
+            tests/test_c3_lossy_pairs_oracle_live.py \
             -v --tb=short
         env:
           DATAFLOW_JOB_STORE: memory
