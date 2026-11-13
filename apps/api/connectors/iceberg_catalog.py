@@ -116,11 +116,15 @@ def iceberg_local_root() -> Path | None:
     return root.resolve() if root else None
 
 
-def _jail_local_path(path_str: str, label: str) -> Path:
-    """Resolve a local path (symlinks followed) and keep it under the Iceberg root.
+def _jail_local_path(path_str: str, label: str, *, scope: Any = None) -> Path:
+    """Resolve a local path (symlinks followed) and keep it in the caller's part of the Iceberg root.
 
-    A relative path is anchored at the root. Without a root the path is only
-    resolved. Refused before anything is created.
+    The root is divided per workspace (``services.iceberg_workspace_root``,
+    follow-up review 4): a workspace-bound caller opens only its own area, and
+    a relative path is anchored there; an unbound caller keeps the whole root.
+    ``scope`` is a captured caller (a FileIO used in a pool thread), else the
+    current one. Without a root the path is only resolved. Refused before
+    anything is created.
     """
     raw = (path_str or ".").strip()
     if "\x00" in raw:
@@ -134,15 +138,9 @@ def _jail_local_path(path_str: str, label: str) -> Path:
         resolved = candidate.resolve()
         audit_would_confine("iceberg", resolved)
         return resolved
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
-    if not is_within(resolved, root):
-        raise ValueError(  # no host path in the message (security follow-up 1)
-            f"Iceberg {label} must be under the Iceberg warehouse folder (DATAFLOW_ICEBERG_ROOT, "
-            "else the data folder's iceberg area)"
-        )
-    return resolved
+    from services.iceberg_workspace_root import current_scope, place
+
+    return place(candidate, root, scope if scope is not None else current_scope(), label)
 
 
 def resolve_local_warehouse(path_str: str, *, create: bool = True) -> Path:
@@ -195,7 +193,11 @@ def _jail_sqlite_uri(uri: str) -> str:
     if iceberg_local_root() is None:
         audit_would_confine("iceberg", Path(rest).expanduser().resolve())
         return uri
-    resolved = _jail_local_path(rest, "catalog_path")
+    from services.iceberg_workspace_root import current_scope, ensure_area
+
+    scope = current_scope()
+    resolved = _jail_local_path(rest, "catalog_path", scope=scope)
+    ensure_area(iceberg_local_root(), scope)  # the own area holds the catalog file
     return f"sqlite:///{resolved}{sep}{query}"
 
 

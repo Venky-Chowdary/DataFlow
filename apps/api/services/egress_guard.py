@@ -782,6 +782,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     """
     from connectors.aws_common import default_credentials_refusal
     from services.iceberg_class_properties import iceberg_connector_class_refusal
+    from services.iceberg_workspace_root import connector_refusal as iceberg_area_refusal
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
@@ -796,6 +797,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         or iceberg_connector_class_refusal(data)
         or iceberg_connector_refusal(data)
         or iceberg_gcp_azure_connector_refusal(data)
+        # A local Iceberg path only in the saving workspace's area of the root (follow-up review 4).
+        or iceberg_area_refusal(data)
         # No PyMySQL option that reads a host file or socket (follow-up review 2, H3 + H4).
         or connector_option_refusal(
             data, mysql_family=_dials_mysql_sockets(str(data.get("type") or data.get("format") or ""))

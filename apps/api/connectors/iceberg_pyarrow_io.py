@@ -49,8 +49,12 @@ LOCAL_FILES = "dataflow.local-files"
 REFUSE = "refuse"
 
 
-def local_location_refusal(properties: Any, path: str) -> str:
-    """Why this FileIO may not touch the local ``path``, else ``""``."""
+def local_location_refusal(properties: Any, path: str, scope: Any = None) -> str:
+    """Why this FileIO may not touch the local ``path``, else ``""``.
+
+    ``scope`` is the caller the FileIO was built for (its workspace's part of
+    the Iceberg root, follow-up review 4), else the current one.
+    """
     if str((properties or {}).get(LOCAL_FILES) or "").strip().lower() == REFUSE:
         return (
             "This Iceberg catalog named a local file on the Datawrap server (a metadata, "
@@ -60,17 +64,26 @@ def local_location_refusal(properties: Any, path: str) -> str:
     from connectors.iceberg_catalog import _jail_local_path
 
     try:
-        _jail_local_path(path, "data or metadata file")
-    except ValueError:
+        _jail_local_path(path, "data or metadata file", scope=scope)
+    except ValueError as exc:
         return (
             "This Iceberg table named a local file outside the Iceberg warehouse folder "
-            "(DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area); Datawrap does not open it."
+            "(DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area) or outside this "
+            f"workspace's part of it; Datawrap does not open it. {exc}"
         )
     return ""
 
 
 class LocalUriPyArrowFileIO(PyArrowFileIO):
     """``PyArrowFileIO`` that hands the local filesystem a path it accepts."""
+
+    def __init__(self, properties: Any = EMPTY_DICT) -> None:
+        super().__init__(properties)
+        from services.iceberg_workspace_root import current_scope
+
+        # pyiceberg reads and writes files in executor threads, where the job's or
+        # connector's workspace binding is not set: keep the builder's (review 4).
+        self._df_scope = current_scope()
 
     def _check_local(self, location: Any) -> None:
         raw = getattr(location, "location", location)  # delete() takes a file object too
@@ -81,7 +94,7 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
             # instead (follow-up review 3, M1): judge exactly what pyarrow opens.
             if netloc or not os.path.isabs(path):
                 _refuse(_NOT_ABSOLUTE)
-            _refuse(local_location_refusal(self.properties, path))
+            _refuse(local_location_refusal(self.properties, path, getattr(self, "_df_scope", None)))
 
     def new_input(self, location: str) -> Any:
         self._check_local(location)
