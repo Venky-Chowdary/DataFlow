@@ -42,9 +42,9 @@ Scan of 2026-11-13: 493 packages.
 
 | Package | Shipped | Licence | Assessment |
 |---|---|---|---|
-| `paramiko` | yes | LGPL-2.1 | SFTP connector. Used unmodified, as a separately replaceable library. **Owner decision.** |
-| `psycopg2-binary` | yes | LGPL-3.0 with exceptions | PostgreSQL driver. The wheel bundles libpq and OpenSSL. Used unmodified. **Owner decision.** |
-| `pymssql` | yes | LGPL-2.1 | SQL Server fallback driver. The wheel bundles FreeTDS (LGPL). Used unmodified. **Owner decision.** |
+| `paramiko` | yes | LGPL-2.1 | SFTP connector. Used unmodified, as a separately replaceable library. **Approved by the owner, 2026-11-13.** |
+| `psycopg2-binary` | yes | LGPL-3.0 with exceptions | PostgreSQL driver. The wheel bundles libpq and OpenSSL. Used unmodified. **Approved by the owner, 2026-11-13.** |
+| `pymssql` | yes | LGPL-2.1 | SQL Server fallback driver. The wheel bundles FreeTDS (LGPL). Used unmodified. **Approved by the owner, 2026-11-13.** |
 | `certifi` | yes | MPL-2.0 | CA bundle. File-level copyleft, used unmodified. |
 | `orjson` | yes | MPL-2.0 AND (Apache-2.0 OR MIT) | Pulled in by `trino`. Used unmodified. |
 | `hdbcli` | yes | Proprietary (SAP) | SAP HANA client. Redistribution in the image is **not cleared**. **Owner decision.** |
@@ -62,10 +62,14 @@ allows bundling as long as the copyright and licence travel with the fonts;
 1. **The project's own licence.** Decided 2026-11-13: proprietary, all
    rights reserved (see above).
 2. **LGPL drivers in the image** (`paramiko`, `psycopg2-binary`, `pymssql`).
-   Using an unmodified LGPL library is normally compatible with proprietary
-   distribution, as long as the licence text, a source pointer, and the
-   user's ability to replace the library are preserved. Python packages in a
-   container meet the last condition. Legal sign-off is still needed.
+   Decided 2026-11-13: accepted with attribution. Conditions, which the
+   licence gate enforces through `licence-policy.json` (`decision`):
+   - they stay unmodified and are loaded as separate, user-replaceable
+     Python packages;
+   - `NOTICE` carries, for each, the LGPL licence-text URL, the source
+     location and a written offer of the corresponding source for the
+     shipped version (binary distribution in the image). The gate refuses an
+     approved GPL-family exception without those three.
 3. **Proprietary drivers in the image** (`hdbcli`, `teradatasql`). Shipping
    them inside a container may not be allowed by their vendor terms. The
    options are to keep them with a confirmed right to redistribute, to make

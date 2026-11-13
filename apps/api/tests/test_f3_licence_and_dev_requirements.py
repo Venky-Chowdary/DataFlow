@@ -247,3 +247,48 @@ def test_notice_and_docs_point_at_the_licence() -> None:
     assert "not stated in this repository" not in notice_text
     docs = (REPO / "docs" / "legal" / "third-party-licences.md").read_text(encoding="utf-8")
     assert "LICENSE" in docs and "proprietary" in docs.lower()
+
+
+# ── owner decision 2: the LGPL drivers are accepted with attribution ───────
+
+_LGPL = ("pypi:paramiko", "pypi:psycopg2-binary", "pypi:pymssql")
+
+
+def test_lgpl_drivers_are_approved_with_the_decision_recorded() -> None:
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    for key in _LGPL:
+        entry = policy["exceptions"][key]
+        assert not entry.get("owner_decision"), key
+        assert entry["decision"] == {
+            "status": "approved",
+            "by": "owner",
+            "date": "2026-11-13",
+            "terms": "accepted with attribution; used unmodified",
+        }, key
+
+
+def test_an_approved_lgpl_exception_must_carry_licence_text_and_source_offer(tmp_path: Path) -> None:
+    bad = {
+        "allowed": [],
+        "exceptions": {
+            "pypi:x": {
+                "licence": "LGPL-2.1",
+                "why": "w",
+                "notice": "LGPL-2.1, used unmodified.",
+                "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "t"},
+            }
+        },
+    }
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(ValueError, match="licence text"):
+        scan.load_policy(path)
+
+
+def test_notice_carries_lgpl_text_and_source_offer_for_each_driver() -> None:
+    text = (REPO / "NOTICE").read_text(encoding="utf-8")
+    for name in ("paramiko", "psycopg2-binary", "pymssql"):
+        block = text.split(f"{name} (pypi) - ", 1)[1].split("\n\n", 1)[0]
+        assert "gnu.org/licenses" in block, name
+        assert "Source:" in block and "written offer" in block, name
+        assert "unmodified" in block, name

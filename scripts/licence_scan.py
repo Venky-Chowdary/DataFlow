@@ -381,6 +381,18 @@ def load_policy(path: Path = POLICY) -> dict[str, Any]:
         missing = [f for f in ("licence", "why") if not str(entry.get(f) or "").strip()]
         if missing:
             raise ValueError(f"{path}: exception {key!r} lacks {missing}")
+        decision = entry.get("decision") or {}
+        if decision and entry.get("owner_decision"):
+            raise ValueError(f"{path}: exception {key!r} is both pending (owner_decision) and decided")
+        if decision.get("status") == "approved" and re.search(r"GPL", str(entry["licence"])):
+            # Shipping an (L)GPL library in the image is binary distribution:
+            # the licence text and the source (with a written offer) must travel.
+            text = str(entry.get("notice") or "")
+            if "gnu.org/licenses" not in text or "Source:" not in text or "written offer" not in text:
+                raise ValueError(
+                    f"{path}: approved exception {key!r} must name the licence text "
+                    "(gnu.org/licenses URL), a 'Source:' pointer and a written offer in its notice"
+                )
     return policy
 
 
