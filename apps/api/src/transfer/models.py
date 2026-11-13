@@ -169,6 +169,11 @@ class TransferRequest:
     enforce_contract: bool = True
     # When True with contract_id, transfer fails unless the contract is SIGNED.
     require_signed_contract: bool = False
+    # Reversibility gate (g24): when True, preflight blocks unless every table is reversible.
+    require_reversibility: bool = False
+    # Set only by Parity Studio on a key re-sync child ("parity_key_resync"): the g24 row-change rule
+    # does not apply to a repair that restores named keys of its parent job (never a client field).
+    reversibility_row_rule_exemption: str = ""
     # Operator identity for Jobs audit (email / subject).
     triggered_by: str = ""
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
@@ -381,6 +386,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
         "require_signed_contract": request.require_signed_contract,
+        "require_reversibility": bool(getattr(request, "require_reversibility", False)),
+        "reversibility_row_rule_exemption": str(getattr(request, "reversibility_row_rule_exemption", "") or ""),
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
         "number_locale": request.number_locale,
@@ -628,6 +635,8 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),
         require_signed_contract=bool(data.get("require_signed_contract", False)),
+        require_reversibility=bool(data.get("require_reversibility", False)),
+        reversibility_row_rule_exemption=str(data.get("reversibility_row_rule_exemption") or "").strip(),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
         number_locale=(

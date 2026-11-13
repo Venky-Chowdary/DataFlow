@@ -373,6 +373,10 @@ def _is_fidelity_signal(
     kind = str(details.get("kind") or "").lower()
     framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}
     framing_kind = str(framing.get("kind") or "").lower()
+    if gid == "g24_reversibility":
+        # An opted-in reversibility requirement, not a type path that loses data on
+        # write: it keeps its own headline (which names every lossy column) and fix.
+        return False
     if gid in {"g5_dry_run", "g5_sample", "g5_sample_validation", "g8_reconciliation"}:
         if kind in {"transform_errors", "duplicate_keys", "identity_transform"}:
             return False

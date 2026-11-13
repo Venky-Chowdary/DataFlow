@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from services.decision_kernel import materialize_dest_ddl
+from services.reversibility_enforce import scan_pass
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -790,6 +791,7 @@ def iter_bq_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _bq_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 

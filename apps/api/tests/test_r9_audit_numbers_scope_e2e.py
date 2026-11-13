@@ -25,6 +25,49 @@ if str(_TESTS) not in sys.path:
 
 from r9_workspace_world import r9  # noqa: E402,F401
 
+_SEEDED_REMOVED_COUNT = 4321
+
+
+def _leaks_platform_retention(body: object) -> bool:
+    """True when a JSON body carries the platform's retention figures.
+
+    Reads the parsed body: a ``removed_count`` key anywhere, or the seeded
+    count as a value. A raw ``"4321" not in text`` check also matched the
+    digits inside the keyring's random key ids, the chain head hash or a
+    microsecond timestamp, which a workspace's own verify body carries, and
+    failed about one run in fifty.
+    """
+    found = False
+
+    def walk(node: object) -> None:
+        nonlocal found
+        if isinstance(node, dict):
+            if "removed_count" in node:
+                found = True
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif not isinstance(node, bool) and node in (_SEEDED_REMOVED_COUNT, str(_SEEDED_REMOVED_COUNT)):
+            found = True
+
+    walk(body)
+    return found
+
+
+def test_the_leak_check_reads_figures_not_digits_inside_hashes():
+    own = {
+        "signing": {"known_key_ids": ["ak_08d04321088c6276"]},
+        "chain_head": "ab4321cd" * 8,
+        "retention_checkpoints": [{"kind": "chain_truncation", "at": "2026-11-13T00:43:21.432100+00:00"}],
+    }
+    assert "4321" in str(own)  # the old substring check failed this body
+    assert not _leaks_platform_retention(own)
+    assert _leaks_platform_retention({"retention_checkpoints": [{"removed_count": 1}]})
+    assert _leaks_platform_retention({"retention_checkpoints": [{"kind": "x", "removed": 4321}]})
+    assert _leaks_platform_retention({"detail": "4321"})
+
 
 def _seed_platform_audit(r9) -> dict[str, str]:
     from services import audit_anchor, audit_log, evidence_chain
@@ -43,7 +86,7 @@ def _seed_platform_audit(r9) -> dict[str, str]:
     )
     audit_anchor.anchor_tip(platform["event_hash"])
     evidence_chain.record_truncation(
-        removed_count=4321, last_removed_event_hash="feed" * 16, first_kept_event_hash=None
+        removed_count=_SEEDED_REMOVED_COUNT, last_removed_event_hash="feed" * 16, first_kept_event_hash=None
     )
     return {"acme": acme["event_hash"], "bravo": bravo["event_hash"], "platform": platform["event_hash"]}
 
@@ -75,7 +118,7 @@ def test_signup_sees_its_own_audit_head_not_platform_numbers(r9, tmp_path, monke
 
     verify = bravo.get("/api/v1/audit/verify")
     assert verify.status_code == 200, verify.text
-    assert "4321" not in verify.text and "removed_count" not in verify.text
+    assert not _leaks_platform_retention(verify.json()), verify.text
 
     # Platform-wide actions are the platform admin's, and refusing them must
     # not leak the figures either.
@@ -95,4 +138,4 @@ def test_signup_sees_its_own_audit_head_not_platform_numbers(r9, tmp_path, monke
     purge = root.post("/api/v1/audit/retention/purge?dry_run=true")
     assert purge.status_code == 200, purge.text
     assert purge.json()["dry_run"] is True
-    assert "4321" in root.get("/api/v1/audit/verify").text
+    assert _leaks_platform_retention(root.get("/api/v1/audit/verify").json())

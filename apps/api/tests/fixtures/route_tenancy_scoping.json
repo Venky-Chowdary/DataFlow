@@ -160,6 +160,46 @@
       "scope": "workspace",
       "resource": "contract"
     },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}/evidence": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "POST /api/v1/exit/rehearsals/{rehearsal_id}/signoff": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "PATCH /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
     "POST /api/v1/iam/api-keys/{key_id}/rotate": {
       "scope": "workspace",
       "resource": "api_key"
@@ -197,6 +237,10 @@
       "resource": "job"
     },
     "POST /api/v1/jobs/{job_id}/parity-report/signoff": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/reversibility": {
       "scope": "workspace",
       "resource": "job"
     },
@@ -438,6 +482,10 @@
       "resource": "plan"
     },
     "POST /api/v1/transfer/plans/{plan_id}/preflight": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "GET /api/v1/transfer/plans/{plan_id}/reversibility": {
       "scope": "workspace",
       "resource": "plan"
     },

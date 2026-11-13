@@ -34,19 +34,23 @@ def shutdown_budget_seconds() -> float:
 
 def _stoppers() -> list[tuple[str, Callable[[float], object], float]]:
     """(name, stop(timeout), the stop's own longest wait), in the order they run."""
+    from services.exit_rehearsal import stop_background as stop_exit_verifications
     from services.job_watchdog import stop_stall_watchdog
     from services.orphan_jobs import stop_orphan_sweeper
     from services.signup_service import stop_mail_outbox_sweeper
     from services.transfer_scheduler import drain as drain_transfer_pool
     from services.worker_fleet import stop_api_claim_loop, worker_drain_seconds
 
-    # Sweepers first: they must not judge a job the claim loop is handing back.
+    # Exit-rehearsal verifications first: they are cancelled (claims released,
+    # nothing closed) and joined; the next start's scheduler beat verifies them.
+    # Sweepers next: they must not judge a job the claim loop is handing back.
     # The claim loop then stops claiming and drains (bounded by
     # WORKER_DRAIN_SECONDS); the API's own transfer pool (single node without
     # a worker fleet) drains the same way (ops review M12); the mail sweeper
     # goes last.
     drain = worker_drain_seconds()
     return [
+        ("exit verifications", stop_exit_verifications, 10.0),
         ("orphan sweeper", stop_orphan_sweeper, 5.0),
         ("stall watchdog", stop_stall_watchdog, 5.0),
         ("API claim loop", stop_api_claim_loop, drain + 5.0),

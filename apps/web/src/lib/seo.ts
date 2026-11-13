@@ -125,6 +125,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
       "Datawrap benchmark, ETL throughput, data transfer performance, rows per second",
     robots: "noindex",
   },
+  exit: {
+    title: "Exit readiness",
+    description:
+      "Declared systems, rehearsed exits measured against their windows, completeness evidence per table, and signed Exit Evidence Packs.",
+    keywords: "exit plan, exit rehearsal, data portability, EU Data Act switching, DORA exit strategy, evidence pack",
+    robots: "noindex",
+  },
   contracts: {
     title: "Data contracts",
     description:
