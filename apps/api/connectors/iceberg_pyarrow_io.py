@@ -14,6 +14,9 @@ warehouse is written as a ``file://`` URI (see ``iceberg_catalog``) and this IO
 drops the slash the URI grammar requires and the filesystem does not accept.
 POSIX locations are returned untouched.
 
+Every FileIO here dials an HDFS / viewfs namenode only when the connector
+named it and the egress policy allows it (``connectors.iceberg_hdfs_guard``).
+
 Every FileIO here also refuses to open Google Cloud or Azure storage without
 the table's own credential (follow-up review 1): pyarrow would use the API
 host's identity (``services.platform_gcp_azure_credentials``).
@@ -84,6 +87,9 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
         # pyiceberg reads and writes files in executor threads, where the job's or
         # connector's workspace binding is not set: keep the builder's (review 4).
         self._df_scope = current_scope()
+        from services.egress_guard import current_egress_workspace
+
+        self._df_egress_workspace = current_egress_workspace()
 
     def _check_local(self, location: Any) -> None:
         raw = getattr(location, "location", location)  # delete() takes a file object too
@@ -114,6 +120,13 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
         if scheme == "file":
             return scheme, netloc, strip_uri_drive_slash(path)
         return scheme, netloc, path
+
+    def _initialize_hdfs_fs(self, scheme: str, netloc: str | None) -> Any:
+        from connectors.iceberg_hdfs_guard import hdfs_refusal
+
+        # Only the namenode the connector named, through the egress check (follow-up review 4).
+        _refuse(hdfs_refusal(self.properties, netloc, getattr(self, "_df_egress_workspace", "")))
+        return super()._initialize_hdfs_fs(scheme, netloc)
 
     def _initialize_gcs_fs(self) -> Any:
         from services.platform_gcp_azure_credentials import gcs_fileio_refusal
