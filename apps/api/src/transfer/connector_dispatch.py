@@ -76,6 +76,26 @@ def writer_extra_kwargs(
     }
 
 
+def file_writer_dest_extra(cfg: dict[str, Any], dest: Any = None) -> dict[str, Any]:
+    """The ``dest_extra`` a file-like writer (S3/GCS/ADLS/SFTP/email) receives.
+
+    The saved connector's nested ``extra`` overlaid with the run's inline
+    ``dest.extra``, plus the writer options :func:`resolve_connector_config`
+    flattened onto ``cfg`` (``tsv_null``, ``formula_protection``,
+    ``file_format``). Gate-8 reads ``tsv_null`` from that same ``cfg``, so the
+    writer and the read-back can never disagree on the TSV NULL convention
+    (review H2: the S3/GCS/ADLS stream writers got no ``dest_extra`` at all).
+    """
+    saved = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    raw = getattr(dest, "extra", None)
+    inline = dict(raw) if isinstance(raw, dict) else {}
+    merged = {**saved, **inline}
+    for key in ("tsv_null", "formula_protection", "file_format"):
+        if not merged.get(key) and cfg.get(key):
+            merged[key] = cfg[key]
+    return merged
+
+
 def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     """Writer kwargs every driver needs, on every path.
 
