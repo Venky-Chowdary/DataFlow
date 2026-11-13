@@ -60,20 +60,19 @@ def _row_get(row: dict[str, Any], col: str) -> Any:
 def _pk_value(row: dict[str, Any], primary_key: str | Sequence[str]) -> str | None:
     """The row's key, or ``None`` when any key column is NULL.
 
-    A wire NULL (the ``__DF_SQL_NULL__`` sentinel, or an absent field) is no key,
-    exactly like a Python ``None``. Taking the sentinel for a value made a
-    NULL-key delete ``DELETE ... WHERE sku = '__DF_SQL_NULL__'`` (SQL Server
-    native, PostgreSQL REPLICA IDENTITY FULL) instead of an unkeyed delete. The
-    user's own text spelling the sentinel arrives escaped or as a
-    ``WireLiteral`` and stays a key.
+    NULL is what the reader encoded as NULL (``None``, ``Missing``, a marked wire
+    cell holding the marker), never a string's spelling: a plain ``str`` key
+    that reads ``__DF_SQL_NULL__`` is that key and its delete is applied
+    (review F1). A wire NULL from a reader is marked, so a NULL-key delete is
+    still unkeyed (parked, C2) rather than ``DELETE ... WHERE sku = marker``.
     """
-    from services.value_serializer import is_reader_null_cell
+    from services.value_serializer import is_encoded_null
 
     cols = _pk_columns(primary_key)
     parts: list[str] = []
     for col in cols:
         val = _row_get(row, col)
-        if val is None or is_reader_null_cell(val):
+        if is_encoded_null(val):
             return None
         parts.append(str(val))
     return _PK_SEP.join(parts) if len(parts) > 1 else parts[0]

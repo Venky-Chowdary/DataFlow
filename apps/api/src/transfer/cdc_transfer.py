@@ -1657,10 +1657,13 @@ def _repairable_image(
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        if key_cols and _pk_value(row, key_cols) is None:
+        # Reader rows by contract: mark first, so a NULL is the reader's NULL
+        # and a literal key (escaped on the wire) stays a key (review F1).
+        marked = {k: _reader_wire_cell(v) for k, v in row.items()}
+        if key_cols and _pk_value(marked, key_cols) is None:
             held += 1
             continue
-        kept.append({k: _reader_wire_cell(v) for k, v in row.items()})
+        kept.append(marked)
     return kept, held
 
 

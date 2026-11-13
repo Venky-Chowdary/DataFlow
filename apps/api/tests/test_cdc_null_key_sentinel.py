@@ -56,7 +56,9 @@ def test_a_wire_null_is_no_key():
     from services.cdc_snapshot_window import _pk_value
 
     assert _pk_value({"sku": WireCell(SQL_NULL_SENTINEL)}, "sku") is None
-    assert _pk_value({"sku": SQL_NULL_SENTINEL}, "sku") is None
+    # A plain string is a value whatever it spells (review F1): only the
+    # reader's own NULL encoding is no key.
+    assert _pk_value({"sku": SQL_NULL_SENTINEL}, "sku") == SQL_NULL_SENTINEL
     assert _pk_value({"a": "1", "b": WireCell(SQL_NULL_SENTINEL)}, ["a", "b"]) is None
     # The user's own text that spells the sentinel is a value, not NULL.
     assert _pk_value({"sku": WireLiteral(SQL_NULL_SENTINEL)}, "sku") == SQL_NULL_SENTINEL
@@ -93,22 +95,22 @@ def test_sqlserver_null_key_delete_without_a_park_sink_still_refuses():
 
 
 def test_apply_backstop_parks_a_delete_whose_key_is_the_sentinel():
+    """Parks a key the reader encoded as NULL; a plain string that spells it is a key (F1)."""
     from services.cdc_engine import ChangeBatch
     from services.cdc_unkeyed_delete import park_null_key_deletes
-    from services.keyset_pagination import KEYSET_SEP
 
     change = ChangeBatch(
-        deletes=["b", SQL_NULL_SENTINEL, f"x{KEYSET_SEP}{SQL_NULL_SENTINEL}", ""],
+        deletes=["b", WireCell(SQL_NULL_SENTINEL), SQL_NULL_SENTINEL, ""],
         resume_token="0/10",
     )
     moved = park_null_key_deletes(change, ["sku"], table="orders")
-    assert moved == 1 and change.deletes == ["b", f"x{KEYSET_SEP}{SQL_NULL_SENTINEL}", ""]
+    assert moved == 1 and change.deletes == ["b", SQL_NULL_SENTINEL, ""]
     assert change.unkeyed_deletes[0]["table"] == "orders"
     assert change.unkeyed_deletes[0]["row"] == {"sku": SQL_NULL_SENTINEL}
 
-    composite = ChangeBatch(deletes=[f"x{KEYSET_SEP}{SQL_NULL_SENTINEL}", f"x{KEYSET_SEP}y"])
+    composite = ChangeBatch(deletes=[("x", WireCell(SQL_NULL_SENTINEL)), ("x", "y")])
     assert park_null_key_deletes(composite, ["a", "b"], table="t") == 1
-    assert composite.deletes == [f"x{KEYSET_SEP}y"]
+    assert composite.deletes == [("x", "y")]
     assert composite.unkeyed_deletes[0]["row"] == {"a": "x", "b": SQL_NULL_SENTINEL}
     # Idempotent: a second pass finds nothing more.
     assert park_null_key_deletes(composite, ["a", "b"], table="t") == 0

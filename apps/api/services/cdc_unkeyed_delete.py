@@ -64,24 +64,21 @@ def unkeyed_delete_record(table: str, row: Any, lsn: Any = None) -> dict[str, An
 
 
 def null_key_part(key: Any, n_columns: int = 1) -> bool:
-    """True when a delete key, or any column of a composite key, is SQL NULL.
+    """True when a delete key, or any column of a composite key, is NULL as the reader encoded it.
 
-    A delete key is wire text: a NULL column is the ``__DF_SQL_NULL__`` sentinel
-    (or an absent-field spelling), and the user's own text that spells it
-    arrives escaped. ``''`` is a value (D53), not NULL. A composite key
-    (``n_columns > 1``) is joined with the keyset separator; a single-column key
-    is one value even if it contains that character.
+    ``None``, ``Missing`` or a marked wire cell holding the marker. A plain
+    string is a value whatever it spells (review F1): a joined composite key is
+    text, so only list/tuple keys can carry a per-column NULL. ``''`` is a
+    value (D53), not NULL.
     """
-    from services.keyset_pagination import KEYSET_SEP
-    from services.value_serializer import is_reader_null_cell
+    from services.value_serializer import is_encoded_null
 
-    if key is None:
+    del n_columns  # a joined key is plain text: its parts are values
+    if is_encoded_null(key):
         return True
     if isinstance(key, (list, tuple)):
-        return any(p is None or is_reader_null_cell(p) for p in key)
-    text = str(key)
-    parts = text.split(KEYSET_SEP) if n_columns > 1 else [text]
-    return any(is_reader_null_cell(part) for part in parts)
+        return any(is_encoded_null(p) for p in key)
+    return False
 
 
 def park_null_key_deletes(change: Any, key_columns: list[str] | None, *, table: str = "") -> int:
@@ -103,7 +100,6 @@ def park_null_key_deletes(change: Any, key_columns: list[str] | None, *, table: 
     if len(keep) == len(deletes):
         return 0
     from connectors.writer_common import extract_cdc_lsn
-    from services.cdc_snapshot_window import _pk_row_dict
 
     lsn = extract_cdc_lsn(getattr(change, "resume_token", None))
     moved: list[dict[str, Any]] = []
@@ -113,7 +109,8 @@ def park_null_key_deletes(change: Any, key_columns: list[str] | None, *, table: 
         if isinstance(key, (list, tuple)):
             image = {cols[i]: key[i] for i in range(min(len(cols), len(key)))} if cols else {}
         else:
-            image = _pk_row_dict(cols, str(key)) if cols else {}
+            # The whole key is the reader's NULL: each key column is NULL.
+            image = {c: None for c in cols}
         # The image names NULL as NULL — never the sentinel text re-encoded.
         image = {k: (None if null_key_part(v) else v) for k, v in image.items()}
         moved.append(unkeyed_delete_record(table or str(getattr(change, "table", "") or ""), image, lsn))
