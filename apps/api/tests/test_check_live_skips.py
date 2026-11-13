@@ -402,3 +402,45 @@ def test_the_mariadb_3307_emulator_cell_is_scoped_out_of_api_tests_explicitly() 
         "skipped", "mysql emulator not reachable on localhost:3306",
     )
     assert check("api-tests", [mysql], manifest).unexpected
+
+
+CI_9BE = Path(__file__).parent / "fixtures" / "live_skips" / "ci_9be296013_api_tests_unexpected.json"
+
+# Fixed by making the test run (env wiring), never by an allowlist entry: in a
+# replay they must still be unexpected.
+_WIRED_NOT_ALLOWLISTED = (
+    "tests/test_privilege_probe_grant_signals.py::",
+    "tests/test_widen_respects_existing_carrier.py::",
+    "tests/test_rule_compiler_postgres_catalog.py::",
+    "tests/test_auto_create_rollback_never_drops_existing.py::",
+    "tests/test_keyed_readback_scope.py::",
+    "tests/test_row_contract_quarantine_accounting.py::",
+    "tests/test_r14_mysql_ssl_mode_form_options_e2e.py::",
+    "tests/test_streaming_readback.py::",
+)
+
+
+def test_every_api_tests_skip_ci_flagged_at_9be296013_is_resolved() -> None:
+    """All 36 unexpected skips of the six api-tests shards at 9be296013.
+
+    - Genuine environment skips (no MariaDB on 3307; SQL Server, which
+      api-tests does not start) are expected by exact entries.
+    - Env-wiring gaps stay unexpected in this replay: the tests were fixed to
+      reach CI's engines (tests/test_ci_live_env_wiring.py), so they run.
+    """
+    from scripts.check_live_skips import Case
+
+    data = json.loads(CI_9BE.read_text(encoding="utf-8"))
+    assert len(data["skips"]) == 36
+    assert {s["shard"] for s in data["skips"]} == {1, 2, 3, 4, 5, 6}
+    manifest = load_manifest()
+    wired, allowed = [], []
+    for s in data["skips"]:
+        (wired if s["test"].startswith(_WIRED_NOT_ALLOWLISTED) else allowed).append(s)
+    assert len(wired) == 20 and len(allowed) == 16
+    for s in allowed:
+        result = check("api-tests", [Case(s["test"], "skipped", s["reason"])], manifest)
+        assert not result.unexpected, (s["test"], s["reason"])
+    for s in wired:
+        result = check("api-tests", [Case(s["test"], "skipped", s["reason"])], manifest)
+        assert result.unexpected, f"{s['test']} must be fixed by wiring, not allowlisted"
