@@ -359,18 +359,23 @@ def test_a_partial_backup_copy_leaves_no_staging_file(isolated_plan_store, monke
 
 
 def test_a_write_that_landed_is_not_reported_failed_when_the_backup_rename_fails(
-    isolated_plan_store, caplog
+    isolated_plan_store, caplog, monkeypatch
 ):
     """The new store is committed; a failing .bak rename must not make the caller retry it."""
+    import os
+
     a, _b = _two_plans()
-    bak = isolated_plan_store.with_name("transfer_plans.json.bak")
-    bak.unlink()
-    bak.mkdir()  # os.replace(staging, .bak) now fails
+    real_replace = os.replace
+
+    def failing_backup_rename(src, dst):
+        if str(src).endswith(".staging"):
+            raise OSError(30, "Read-only file system")
+        return real_replace(src, dst)
+
     caplog.set_level(logging.WARNING, logger=store.logger.name)
-    try:
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "replace", failing_backup_rename)
         updated = attach_job(a, "job-2")
-    finally:
-        bak.rmdir()
     assert updated is not None and updated.job_ids == ["job-2"]
     assert get_plan(a).job_ids == ["job-2"]
     assert not [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
@@ -383,3 +388,40 @@ def test_a_store_saved_with_a_utf8_bom_is_readable(isolated_plan_store):
     assert {p.id for p in list_plans()} == {a, b}
     sync_ui_mappings(a, MAPPING)
     assert len(get_plan(a).revisions) == 2
+
+
+def test_three_backup_generations_are_kept(isolated_plan_store):
+    a = create_plan({"name": "A"}).id
+    snapshots = []
+    for i in range(4):
+        snapshots.append(isolated_plan_store.read_bytes())
+        update_plan(a, {"name": f"A{i}"})
+    gen = [isolated_plan_store.with_name(n) for n in ("transfer_plans.json.bak", "transfer_plans.json.bak.1", "transfer_plans.json.bak.2")]
+    assert [g.read_bytes() for g in gen] == [snapshots[3], snapshots[2], snapshots[1]]
+    assert not isolated_plan_store.with_name("transfer_plans.json.bak.3").exists()
+
+
+def test_the_refusal_names_the_newest_readable_backup(isolated_plan_store):
+    a = create_plan({"name": "A"}).id
+    for i in range(3):
+        update_plan(a, {"name": f"A{i}"})
+    _truncated(isolated_plan_store)
+    _garbage(isolated_plan_store.with_name("transfer_plans.json.bak"))
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup == "transfer_plans.json.bak.1"
+    assert "transfer_plans.json.bak.1" in str(caught.value)
+    assert caught.value.backup_path == str(isolated_plan_store) + ".bak.1"
+
+    client = _client()
+    res = client.get(f"/api/v1/transfer/plans/{a}")
+    assert res.status_code == 503
+    assert "transfer_plans.json.bak.1" in res.json()["detail"]
+
+    for name in ("transfer_plans.json.bak.1", "transfer_plans.json.bak.2"):
+        _garbage(isolated_plan_store.with_name(name))
+    with pytest.raises(PlanStoreUnreadable) as none_left:
+        get_plan(a)
+    assert none_left.value.readable_backup == ""
+    assert "no readable backup" in str(none_left.value)
+    assert "no readable backup" in client.get(f"/api/v1/transfer/plans/{a}").json()["detail"]

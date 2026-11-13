@@ -15,9 +15,11 @@ raises :class:`PlanVersionConflict` instead of replacing that revision.
 Fail closed (PS-2): an absent store file is an empty store, but a present one
 that cannot be read or parsed raises :class:`PlanStoreUnreadable` for every
 read and write — answering "no plans" would let the next write replace the
-file with only the plan in hand. Each write first keeps the file it replaces
-as ``<store>.bak`` (one generation) for an operator to restore; reads never
-fall back to it, since it may hold plans deleted since.
+file with only the plan in hand. Each write keeps the file it replaces as
+``<store>.bak`` and rotates the older ones to ``.bak.1`` and ``.bak.2`` for an
+operator to restore; reads never fall back to them, since they may hold plans
+deleted since. Writes are durable (``write_json_atomic`` fsyncs the data and
+the directory).
 """
 
 from __future__ import annotations
@@ -76,13 +78,22 @@ class PlanStoreUnreadable(RuntimeError):
     """
 
     def __init__(self, path: Path, error: BaseException) -> None:
+        backup = _newest_readable_backup(Path(path))
         self.path = str(path)
-        self.backup_path = str(_backup_path(path))
+        self.backup_path = str(backup or _backup_path(Path(path)))
+        #: File name of the newest backup generation that parses; "" when none does.
+        self.readable_backup = backup.name if backup else ""
         self.error_class = type(error).__name__
+        if backup:
+            remedy = f"restore the newest readable backup {backup.name} in the data directory"
+        else:
+            remedy = (
+                f"no readable backup was found ({', '.join(p.name for p in _backup_paths(Path(path)))}); "
+                "restore it from your own backups"
+            )
         super().__init__(
             f"Transfer plan store {Path(path).name} cannot be read ({self.error_class}); nothing "
-            f"was read or written. Repair it, or restore the previous good copy "
-            f"{_backup_path(Path(path)).name} in the data directory, then retry."
+            f"was read or written. Repair it, or {remedy}, then retry."
         )
 
 
@@ -90,8 +101,30 @@ class PlanStoreUnreadable(RuntimeError):
 _REPORTED: dict[str, str] = {}
 
 
+#: Backup generations kept: ``.bak`` (newest), ``.bak.1``, ``.bak.2``.
+BACKUP_GENERATIONS = 3
+
+
 def _backup_path(path: Path) -> Path:
     return path.with_name(path.name + ".bak")
+
+
+def _backup_paths(path: Path) -> list[Path]:
+    """Every backup generation, newest first."""
+    newest = _backup_path(path)
+    return [newest] + [newest.with_name(f"{newest.name}.{i}") for i in range(1, BACKUP_GENERATIONS)]
+
+
+def _newest_readable_backup(path: Path) -> Path | None:
+    """The newest backup generation that parses as a plan store, if any."""
+    for candidate in _backup_paths(path):
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, dict) and isinstance(raw.get("plans", []), list):
+            return candidate
+    return None
 
 
 class UnknownPlanVersion(LookupError):
@@ -390,10 +423,15 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
         raise
     if staging is None:
         return
-    # The new store has landed: the write is committed. A backup that cannot
-    # be rotated is logged, never reported as a failed write (a retry would
+    # The new store has landed: the write is committed. Rotate the backups
+    # (.bak.1 -> .bak.2, .bak -> .bak.1, staging -> .bak). One that cannot be
+    # rotated is logged, never reported as a failed write (a retry would
     # append the same change twice).
+    generations = _backup_paths(STORE_PATH)
     try:
+        for older, newer in zip(reversed(generations[1:]), reversed(generations[:-1])):
+            if newer.exists():
+                os.replace(newer, older)
         os.replace(staging, backup)
     except OSError as exc:
         staging.unlink(missing_ok=True)

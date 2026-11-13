@@ -1051,8 +1051,16 @@ async def plan_store_unreadable_handler(request: Request, exc: PlanStoreUnreadab
     """The transfer-plan store file is damaged: refuse, never answer "no plans".
 
     The store logged the path and error class once at ERROR; the response
-    names the files an operator repairs or restores, not their location.
+    names the files an operator repairs or restores (the newest backup
+    generation that still parses), not their location.
     """
+    if exc.readable_backup:
+        remedy = f"restore the newest readable backup, {exc.readable_backup}"
+    else:
+        remedy = (
+            "restore it from your own backups (no readable backup was found in "
+            "transfer_plans.json.bak, .bak.1 or .bak.2)"
+        )
     return JSONResponse(
         status_code=503,
         content={
@@ -1060,8 +1068,7 @@ async def plan_store_unreadable_handler(request: Request, exc: PlanStoreUnreadab
             "detail": (
                 "Transfer plans cannot be loaded: the plan store file (transfer_plans.json in "
                 "the data directory) is unreadable or damaged, so nothing was read or changed. "
-                "An operator must repair it or restore the previous good copy, "
-                "transfer_plans.json.bak, then retry."
+                f"An operator must repair it or {remedy}, then retry."
             ),
         },
     )

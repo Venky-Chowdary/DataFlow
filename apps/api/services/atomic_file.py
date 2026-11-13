@@ -26,6 +26,28 @@ TEMP_SUFFIX = ".tmp"
 STALE_TEMP_SECONDS = 60.0
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable (POSIX); a no-op where unsupported.
+
+    Without it a power loss can lose the rename itself, or keep it and lose
+    the data it pointed at. Platforms without ``O_DIRECTORY`` (Windows) and
+    filesystems that refuse a directory fsync (EINVAL) are skipped.
+    """
+    flag = getattr(os, "O_DIRECTORY", None)
+    if flag is None:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY | flag)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        logger.debug("Directory fsync not supported for %s: %s", directory, exc)
+    finally:
+        os.close(fd)
+
+
 def write_json_atomic(
     path: Path,
     data: dict[str, Any],
@@ -33,7 +55,12 @@ def write_json_atomic(
     indent: int = 2,
     default: Any | None = json_default,
 ) -> None:
-    """Write ``data`` to ``path`` atomically using a temp file and ``os.replace``."""
+    """Write ``data`` to ``path`` atomically and durably.
+
+    A sibling temp file is written and fsynced, then ``os.replace``d over
+    ``path``, then the directory is fsynced: after a crash or power loss the
+    file is the old complete one or the new complete one, never empty or half.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with _WRITE_LOCK:
         tmp_path: Path | None = None
@@ -43,11 +70,14 @@ def write_json_atomic(
             ) as tmp:
                 tmp_path = Path(tmp.name)
                 json.dump(data, tmp, indent=indent, default=default)
+                tmp.flush()
+                os.fsync(tmp.fileno())
             os.replace(tmp_path, path)
         except Exception:
             if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
             raise
+        _fsync_directory(path.parent)
 
 
 def _open_sibling_temp(path: str) -> tuple[int, str]:
