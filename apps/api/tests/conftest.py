@@ -101,6 +101,15 @@ if not os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY"):
     else:
         set_hypothesis_home_dir(_suite_hypothesis_dir)
 
+# CALL/SELECT source spools (services.procedure_source) go to a suite temp
+# folder, never the shared {tmp}/dataflow-callable (~1,000 leaked df-proc-*.jsonl
+# files, 325 MB, filled a shared disk). The session guard below fails the run
+# on a spool file nothing owns any more.
+if not os.environ.get("DATAFLOW_CALLABLE_SPOOL_DIR") and not os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR"):
+    _suite_spool_dir = tempfile.mkdtemp(prefix="df-suite-callable-")
+    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _suite_spool_dir
+    atexit.register(shutil.rmtree, _suite_spool_dir, ignore_errors=True)
+
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 # Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
 # the shared database whenever one is connected (audit H-5). Tests isolate
@@ -956,12 +965,28 @@ def _source_dir_writes(before: dict[str, dict], after: dict[str, dict]) -> list[
     return problems
 
 
+def _orphan_callable_spools() -> list[str]:
+    """Spool files (``df-proc-*.jsonl``) no live spool owns: a leak that outlives the run."""
+    procedure_source = sys.modules.get("services.procedure_source")
+    if procedure_source is None:
+        return []
+    import gc
+
+    gc.collect()  # an unreferenced spool's finalizer removes its file
+    root = procedure_source.callable_spool_root()
+    if not root.is_dir():
+        return []
+    owned = {str(spool.path) for spool in list(procedure_source._SPOOLS.values())}
+    return sorted(str(p.relative_to(root)) for p in root.rglob("df-proc-*.jsonl") if str(p) not in owned)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_no_test_writes_dev_data_dir():
     """The suite must never write into apps/api/data — per-test stores live
     under tmp_path via DATAWRAP_DATA_DIR — nor into apps/api/exports or
-    apps/api/.hypothesis (T-F1). Fails the run listing every file a test
-    created or modified in those shared source-tree directories."""
+    apps/api/.hypothesis (T-F1), and must not leak CALL/SELECT spool files.
+    Fails the run listing every file a test created or modified in those
+    shared source-tree directories, and every orphaned spool file."""
     before = _data_dir_fingerprint()
     before_src = {name: _tree_fingerprint(_api_root / name) for name in _GUARDED_SOURCE_DIRS}
     yield
@@ -978,6 +1003,12 @@ def _guard_no_test_writes_dev_data_dir():
     problems += _source_dir_writes(
         before_src, {name: _tree_fingerprint(_api_root / name) for name in _GUARDED_SOURCE_DIRS}
     )
+    orphans = _orphan_callable_spools()
+    if orphans:
+        problems.append(
+            "tests left CALL/SELECT spool files nothing owns (close_callable_spool / the job "
+            f"scope must remove them): {orphans[:20]}"
+        )
     if problems:
         pytest.fail("; ".join(problems))
 
