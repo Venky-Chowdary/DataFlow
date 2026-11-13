@@ -152,16 +152,20 @@ def csv_quote_cell(cell: str) -> str:
 
 
 def _tsv_quote_cell(cell: str) -> str:
-    """A TSV cell: quoted like ``csv`` with ``delimiter='\\t'`` when it must be.
+    """A TSV cell, quoted only when an unquoted cell would split or misparse.
 
-    A tab, ``"``, CR or LF inside an unquoted TSV cell splits the cell or the
-    row (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula
-    cell). Cells without those characters stay byte-identical — NULL and
-    ``''`` remain an empty cell, as TSV always wrote them.
+    A tab, CR or LF inside an unquoted TSV cell splits the cell or the row
+    (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula cell),
+    and a leading ``"`` opens a quoted field in every RFC-4180 reader. Those
+    cells are quoted (``"`` doubled). A mid-field ``"`` stays raw: the
+    product's TSV readers take it literally, and loaders that read TSV
+    without quote handling must keep receiving the same bytes (G7 re-review
+    B1). Every other cell — NULL and ``''`` included, both empty — is
+    byte-identical to the writer before H1.
     """
     if cell == _CSV_NULL:
         return ""
-    if any(c in cell for c in '\t"\n\r'):
+    if cell.startswith('"') or any(c in cell for c in "\t\n\r"):
         return '"' + cell.replace('"', '""') + '"'
     return cell
 

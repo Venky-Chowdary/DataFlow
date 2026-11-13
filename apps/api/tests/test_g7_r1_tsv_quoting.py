@@ -6,10 +6,10 @@ formula that bypassed the ``formula_protection`` guard; ``y<LF>=1+1`` split
 into a new row starting with a formula. The same bug silently corrupted any
 TSV row with an embedded tab or newline.
 
-Rule (every TSV writer, regardless of the formula setting): RFC-4180-style
-quoting as Python's ``csv`` module does with ``delimiter='\\t'`` — a cell that
-contains the delimiter, ``"``, CR or LF is wrapped in quotes with ``"``
-doubled. Rows that need no quoting stay byte-identical.
+Rule (every TSV writer, regardless of the formula setting): a cell that
+contains a tab, CR or LF, or starts with ``"``, is wrapped in quotes with
+``"`` doubled (RFC-4180, as Python's ``csv`` reads it). A mid-field ``"``
+stays raw (re-review B1). Rows that need no quoting stay byte-identical.
 """
 
 from __future__ import annotations
@@ -47,16 +47,15 @@ def _no_cell_starts_with_a_formula(rows: list[list[str]]) -> None:
             assert cell[:1] not in {"=", "+", "@"}, row
 
 
-def test_format_csv_row_quotes_tsv_cells_like_python_csv():
+def test_format_csv_row_quotes_tsv_cells_that_would_split():
     from services.csv_codec import csv_cell_encode, format_csv_row
 
-    cells = ["a\tb", "c\nd", "e\rf", 'g"h', "plain", "", None]
+    cells = ["a\tb", "c\nd", "e\rf", 'g"h', '"lead', "plain", "", None]
     line = format_csv_row([csv_cell_encode(c) for c in cells], "\t")
-    buf = io.StringIO()
-    csv.writer(buf, delimiter="\t", lineterminator="").writerow(cells[:5])
-    # '' and NULL stay empty unquoted TSV cells, as before.
-    assert line == buf.getvalue() + "\t\t"
-    assert next(csv.reader(io.StringIO(line, newline=""), delimiter="\t"))[:5] == cells[:5]
+    # Tab/CR/LF/leading-quote cells are quoted like Python csv does; a
+    # mid-field quote stays raw (B1); '' and NULL stay empty cells.
+    assert line == '"a\tb"\t"c\nd"\t"e\rf"\tg"h\t"""lead"\tplain\t\t'
+    assert next(csv.reader(io.StringIO(line, newline=""), delimiter="\t"))[:6] == cells[:6]
 
 
 def test_format_csv_row_plain_tsv_rows_stay_byte_identical():
