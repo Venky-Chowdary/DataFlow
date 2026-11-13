@@ -86,7 +86,7 @@ def execute(
     stream_contracts: list[dict[str, Any]] | None = None,
     extra_form: dict[str, str] | None = None,
     schema_policy: str = "manual_review",
-    expect_status: int = 200,
+    expect_status: int | None = 200,
 ) -> dict[str, Any]:
     """``/api/v1/transfer/run`` under the hashes Validate approved."""
     proof = pf.get("proof_bundle") or {}
@@ -115,7 +115,8 @@ def execute(
         **(extra_form or {}),
     }
     resp = client.post("/api/v1/transfer/run", data=form)
-    assert resp.status_code == expect_status, resp.text
+    if expect_status is not None:
+        assert resp.status_code == expect_status, resp.text
     body = resp.json()
     return body.get("detail") if isinstance(body.get("detail"), dict) else body
 

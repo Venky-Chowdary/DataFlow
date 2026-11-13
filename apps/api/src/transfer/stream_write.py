@@ -365,6 +365,8 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            # G11: an acknowledged legacy_field_policy=write_new, on the run.
+            legacy_field_ack=list((getattr(dest, "extra", None) or {}).get("legacy_field_ack") or []),
         )
         if not result.ok:
             _raise_write_failure(result, "MongoDB batch write failed")
@@ -578,6 +580,7 @@ def _write_batch(
             extra = getattr(dest, "extra", None) or {}
             if isinstance(extra, dict):
                 kwargs["destination_extra"] = dict(extra)
+                kwargs["legacy_field_ack"] = list(extra.get("legacy_field_ack") or [])
         if dest_type == "redis":
             from connectors.redis_reader import redis_key_format
 

@@ -103,6 +103,10 @@ def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     )
     if prior:
         out["dest_table_prior_spelling"] = prior
+    # G11: an acknowledged legacy_field_policy=write_new, recorded by the writer.
+    ack = dest_extra.get("legacy_field_ack") or nested.get("legacy_field_ack")
+    if ack:
+        out["legacy_field_ack"] = list(ack)
     return out
 
 

@@ -4,10 +4,13 @@ Before G11 a MongoDB target ``address.city`` was written as the top-level
 field ``address_city`` and an Elasticsearch ``@timestamp`` as ``_timestamp``
 (``host.name`` as ``host_name``). Those targets now keep their names, so a run
 into a collection or index an earlier run filled would silently mix both
-shapes. Validate warns (``g23e_target_legacy_fields``, code
-``target_path_legacy_flat_field``) naming both spellings and the remedies
-(rename the target, one overwrite run, or ``$rename``); no warning for a new or
-empty collection or one already holding the nested shape.
+shapes and leave the old field stale. Validate (``g23e_target_legacy_fields``,
+code ``target_path_legacy_flat_field``) names both spellings and the remedies
+(rename the target, one overwrite run, or ``$rename``). It blocks a run that
+would mix shapes (append / upsert) unless the operator set
+``legacy_field_policy=write_new``; an overwrite only warns. Nothing is reported
+for a new or empty collection or one already holding the nested shape.
+(Review #3 turned the Validate warning into the same block Execute applies.)
 """
 
 from __future__ import annotations
@@ -30,11 +33,11 @@ def _maps(*targets: str) -> list[dict]:
     return [{"source": f"c{i}", "target": t, "confidence": 1.0} for i, t in enumerate(targets)]
 
 
-def _gates(dest_type: str, targets, **kw) -> dict[str, dict]:
+def _gates(dest_type: str, targets, sync_mode: str = "full_refresh_append", **kw) -> dict[str, dict]:
     from services.preflight_transfer_policy import run_transfer_policy_gates
 
     gates = run_transfer_policy_gates(
-        sync_mode="full_refresh_append", dest_type=dest_type, source_type="postgresql",
+        sync_mode=sync_mode, dest_type=dest_type, source_type="postgresql",
         source_kind="database", mappings=_maps(*targets),
         destination_table=kw.pop("destination_table", "t"), **kw,
     )
@@ -79,12 +82,20 @@ def test_mongo_existing_flat_field_warns_with_remedies(mongo_db):
     gates = _gates("mongodb", ["id", "address.city"], destination_config=cfg,
                    destination_table="legacy")
     warn = gates["g23e_target_legacy_fields"]
-    assert warn["status"] == "warn"
+    assert warn["status"] == "block"
+    assert "legacy_field_policy='write_new'" in warn["message"]
     issue = warn["details"]["issues"][0]
     assert issue["code"] == "target_path_legacy_flat_field"
     assert (issue["target"], issue["other"]) == ("address.city", "address_city")
     for needle in ("'address_city'", "'address.city'", "overwrite", "$rename"):
         assert needle in warn["message"], warn["message"]
+    acked = _gates("mongodb", ["id", "address.city"], destination_config=cfg,
+                   destination_table="legacy",
+                   destination_endpoint={"format": "mongodb", "legacy_field_policy": "write_new"})
+    assert acked["g23e_target_legacy_fields"]["status"] == "warn"
+    replaced = _gates("mongodb", ["id", "address.city"], "full_refresh_overwrite",
+                      destination_config=cfg, destination_table="legacy")
+    assert replaced["g23e_target_legacy_fields"]["status"] == "warn"
     for table in ("nested", "empty", "missing"):
         assert _gates("mongodb", ["id", "address.city"], destination_config=cfg,
                       destination_table=table) == {}, table

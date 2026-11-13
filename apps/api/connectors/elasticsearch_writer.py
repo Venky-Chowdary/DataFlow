@@ -1040,7 +1040,9 @@ def write_mapped_rows(
             chunks_completed=1,
             error=err_msg,
             warnings=(
-                errors
+                # G11: the operator's legacy_field_policy=write_new, on the run.
+                [str(a) for a in (_kwargs.get("legacy_field_ack") or [])]
+                + errors
                 + truncation_warnings(ms_guard.truncated, "Elasticsearch date")
                 + [str(e) for e in (bulk_errors or [])[:5]]
             )[:10],

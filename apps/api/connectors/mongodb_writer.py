@@ -1620,6 +1620,8 @@ def write_mapped_rows(
                     for col in sorted(utc_normalized_cols)
                 ),
                 *truncation_warnings(ms_guard.truncated, "BSON"),
+                # G11: the operator's legacy_field_policy=write_new, on the run.
+                *(str(a) for a in (_kwargs.get("legacy_field_ack") or [])),
             ],
             meta={
                 **gate8_writer_meta(mapped_rows, target_cols),
