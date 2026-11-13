@@ -827,6 +827,11 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
         # SQLAlchemy itself is installed (concrete engines use connection URLs).
         if not catalog_id or catalog_id == "generic_sql":
             return True
+        from connectors.vendor_drivers import missing_packages, vendor_driver
+
+        # SAP HANA / Teradata: operator-installed DBAPI *and* dialect (owner decision).
+        if (vendor := vendor_driver(catalog_id)) and missing_packages(vendor):
+            return False
         drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
         module = _generic_sql_dbapi_module(drivername)
         if module is None or not _module_is_installed(module):
@@ -1135,6 +1140,12 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["capability_label"] = label
     out["certification_tier"] = tier
     out["driver_available"] = package_ok
+    from connectors.vendor_drivers import REQUIRES_OPERATOR_DRIVER, operator_driver_info
+
+    # SAP HANA / Teradata drivers are installed by the operator, never shipped.
+    out["operator_installed_driver"] = operator_driver_info(catalog_id)
+    if out["operator_installed_driver"] and not out["operator_installed_driver"]["installed"]:
+        out["capability_label"] = REQUIRES_OPERATOR_DRIVER
     out["environment_gap"] = env_gap
     if env_gap:
         out["environment_gap_reason"] = (
@@ -1269,6 +1280,11 @@ def planned_driver_message(connector_type: str) -> str:
     kind = str(connector_type or "").strip().lower()
     if not kind:
         return ""
+    from connectors.vendor_drivers import operator_driver_message
+
+    # SAP HANA / Teradata: say what the operator installs and under whose licence.
+    if vendor_message := operator_driver_message(kind):
+        return vendor_message
     driver = resolve_driver_type(kind)
     if driver_available(driver, kind):
         return ""
@@ -1364,6 +1380,10 @@ def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
                 "This is an environment gap, not a Planned connector."
             )
 
+    from connectors.vendor_drivers import operator_driver_message
+
+    if vendor_message := operator_driver_message(cid):
+        return False, vendor_message
     row = enrich_catalog_entry(
         {
             "id": cid,

@@ -96,6 +96,11 @@ def main() -> int:
         "--tb=short",
         "--durations=0",
     ]
+    # CI's live-engine skip checker (scripts/check_live_skips.py) reads the
+    # per-test outcomes and skip messages from this junit file.
+    junit = os.environ.get("WAREHOUSE_SKU_JUNIT", "").strip()
+    if junit:
+        cmd.append(f"--junitxml={junit}")
     env = os.environ.copy()
     env.setdefault("DATAFLOW_JOB_STORE", "memory")
     env.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")

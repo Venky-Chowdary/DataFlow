@@ -1,9 +1,49 @@
 # DataFlow API — production image (Railway / Docker)
-FROM python:3.12-slim-bookworm
+#
+# Stages:
+# - build: has the compilers and the -dev headers. It builds the Python
+#   environment in /opt/venv (the runtime requirements include sdists).
+# - runtime-base: copies /opt/venv and installs runtime packages only, so
+#   build-essential and the headers never ship. It also ships the small
+#   Python-wheel LGPL sources and the bundled-library inventory.
+# - sources-collect, then sources (FROM scratch): the companion source
+#   bundle. It holds the Debian source of every copyleft system package
+#   and the GCC source, published by release.yml as <image>:<tag>-sources
+#   (docker build --target sources).
+# - runtime (the default target): runtime-base plus the pointer to the
+#   companion, /usr/share/doc/datawrap/SOURCES.md, and the
+#   org.opencontainers.image.source label.
+# Checked by the CI api-image job, tests/test_debian_source_shipping.py and
+# tests/test_source_bundle.py.
+
+FROM python:3.12-slim-bookworm AS build
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# The runtime install is locked: constraints-image.txt pins every package (and
+# so every wheel whose bundled libraries were reviewed; see
+# scripts/bundled_libraries.py REVIEWED_WHEELS). Regenerate it with the command
+# in its header when requirements.txt changes. Every pip install uses it.
+COPY apps/api/requirements.txt /app/requirements.txt
+COPY apps/api/constraints-image.txt /app/constraints-image.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt -c /app/constraints-image.txt
+
+
+FROM python:3.12-slim-bookworm AS runtime-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/venv/bin:$PATH \
     DATAFLOW_ENV=production \
     DATAFLOW_AUTO_INSTALL_DRIVERS=0 \
     DATAFLOW_TRAINING=off \
@@ -12,19 +52,93 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Runtime packages only: unixODBC for pyodbc, curl for the health check. The
+# list must equal licence-policy.json apt_packages (CI:
+# fetch_debian_sources.py --verify-dockerfile); no compiler, no -dev package.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
     unixodbc \
     libodbc2 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY apps/api/requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+COPY --from=build /opt/venv /opt/venv
+COPY apps/api/constraints-image.txt /app/constraints-image.txt
+
+# LGPL corresponding source (owner decision, 2026-11-13: accepted with
+# attribution). The source of exactly the installed versions ships in the
+# image, with SHA-256 sums: paramiko, psycopg2 (source of psycopg2-binary) and
+# pymssql from PyPI, plus FreeTDS, which pymssql's wheel links statically.
+# The package list must equal the approved LGPL entries in licence-policy.json
+# (CI: fetch_lgpl_sources.py --verify-dockerfile; tests/test_lgpl_source_shipping.py).
+# --bundled adds the source of the LGPL/GPL libraries the wheels bundle in
+# their <pkg>.libs/ (keyutils, libxcrypt, GCC libquadmath/libgfortran); an
+# unreviewed bundled library fails the build (scripts/bundled_libraries.py).
+# Sources UPSTREAM marks bundle="companion" (the 65 MB GCC source for numpy's
+# libquadmath / libgfortran) are not shipped here; the inventory names the
+# companion bundle as their location.
+COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py scripts/fetch_debian_sources.py \
+     scripts/source_bundle.py /tmp/lgpl/
+RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source --bundled \
+      paramiko psycopg2-binary=psycopg2 pymssql+freetds
+
+
+# Companion source bundle, collected FROM the runtime packages.
+# - The GCC source (the companion-located families in UPSTREAM; the drift
+#   check holds the list to them).
+# - The Debian source (.dsc, orig and debian tarballs of the exact installed
+#   source version) of every package whose /usr/share/doc/<pkg>/copyright
+#   names a copyleft licence. Each is verified against apt's signed Sources
+#   index or snapshot.debian.org, and against the .dsc checksums. A package
+#   whose licence cannot be told fails the build.
+FROM runtime-base AS sources-collect
+RUN python /tmp/lgpl/fetch_lgpl_sources.py --companion gcc --dest /sources
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::GzipIndexes=false update \
+    && python /tmp/lgpl/fetch_debian_sources.py --dest /sources \
+    && rm -rf /var/lib/apt/lists/*
+
+# The companion image itself: only the source tree, SHA256SUMS and manifests.
+FROM scratch AS sources
+COPY --from=sources-collect /sources /
+
+
+FROM runtime-base AS runtime
+
+# Where the companion bundle of this image is published. release.yml passes
+# <registry>/<image>:<tag>-sources; other builds keep this default.
+ARG SOURCES_REF="unpublished build: release images point at <image>:<tag>-sources"
+LABEL org.opencontainers.image.source="${SOURCES_REF}"
+
+# The pointer: SOURCES.md says where the companion is and lists every file in
+# it with its SHA-256. The build fails unless the companion holds exactly this
+# image's copyleft Debian source packages and companion-located sources.
+COPY --from=sources-collect /sources/SHA256SUMS /sources/MANIFEST.json /sources/DEBIAN_SOURCES.json \
+     /usr/share/doc/datawrap/companion/
+RUN python /tmp/lgpl/source_bundle.py --check /usr/share/doc/datawrap/companion \
+      --runtime-sources /usr/share/doc/datawrap/third-party-source \
+    && python /tmp/lgpl/source_bundle.py --pointer /usr/share/doc/datawrap/companion --ref "$SOURCES_REF" \
+      --out /usr/share/doc/datawrap/SOURCES.md \
+    && rm -rf /tmp/lgpl
+
+# Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql, IBM Db2
+# ibm-db with its clidriver, and their SQLAlchemy dialects) are NOT shipped by
+# default. They are installed after the source steps, so their bundled
+# libraries are the operator's to account for. They are wheels (this stage
+# has no compiler). An operator who has accepted the vendors' licences builds
+# with:  --build-arg INSTALL_VENDOR_DRIVERS=1
+ARG INSTALL_VENDOR_DRIVERS=0
+COPY apps/api/requirements-vendor-drivers.txt /app/requirements-vendor-drivers.txt
+RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
+      pip install --only-binary :all: -r /app/requirements-vendor-drivers.txt -c /app/constraints-image.txt; \
+    else \
+      echo "Vendor drivers not installed (INSTALL_VENDOR_DRIVERS=0)"; \
+    fi
 
 COPY packages/preflight /app/packages/preflight
-RUN pip install -e "/app/packages/preflight[dev]" || pip install -e /app/packages/preflight
+# Runtime only: preflight's dev extra is pytest, which the image must not ship
+# (test tools live in the API dev requirements file, which CI installs).
+# Pure Python: no compiler needed.
+RUN pip install -e /app/packages/preflight -c /app/constraints-image.txt
 
 COPY apps/api /app/apps/api
 COPY scripts/start-api.sh /app/scripts/start-api.sh

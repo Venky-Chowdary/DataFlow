@@ -515,6 +515,25 @@ def _is_local_account(account: str) -> bool:
     return account.lower() in ("local", "localhost", "fakesnow")
 
 
+def _import_fakesnow(account: str) -> Any:
+    """fakesnow for a local account, or a clean refusal where it is not installed.
+
+    fakesnow is a test tool (requirements-dev.txt); the production image does not
+    ship it, so a "local" account there must not surface a raw ImportError.
+    """
+    try:
+        import fakesnow
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or "fakesnow"
+        raise RuntimeError(
+            f"Snowflake account '{account}' is the local Snowflake emulator (fakesnow), which is "
+            "not installed on this server: it is a test tool that production images do not ship "
+            f"(missing module: {missing}). Use your Snowflake account identifier (for example "
+            "xy12345.us-east-1) instead. No connection was attempted."
+        ) from exc
+    return fakesnow
+
+
 def snowflake_schema_and_table(schema: str, table: str) -> tuple[str, str]:
     """``(schema, bare table)`` for a possibly schema-qualified Snowflake name.
 
@@ -1142,7 +1161,7 @@ def _login(
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
     if _is_local_account(kwargs["account"]):
-        import fakesnow
+        fakesnow = _import_fakesnow(kwargs["account"])
 
         global _fakesnow_refcount, _fakesnow_patch_cm, _fakesnow_installed_db_path
 

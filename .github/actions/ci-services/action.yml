@@ -22,6 +22,13 @@ runs:
       shell: bash
       run: bash .github/scripts/start_ci_databases.sh bigquery
 
+    - name: Export live-engine connection settings (every name the suite reads)
+      # The suite reads a dozen spellings per engine (PGHOST, PG_HOST, P2_PG_*,
+      # DATAFLOW_PG_TEST_DSN, DATAFLOW_TEST_MYSQL_*, ...). Setting only PG*
+      # left ~200 live PG/MySQL/Mongo tests skipping beside running engines.
+      shell: bash
+      run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -32,7 +39,7 @@ runs:
       run: |
         cd apps/api
         python -m pip install --upgrade pip
-        python -m pip install -r requirements.txt
+        python -m pip install -r requirements-dev.txt
         cd ../../packages/preflight
         python -m pip install -e .
 
