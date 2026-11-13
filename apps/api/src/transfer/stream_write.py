@@ -571,10 +571,13 @@ def _write_batch(
             if isinstance(extra, dict):
                 kwargs["destination_extra"] = dict(extra)
         if dest_type == "redis":
+            from connectors.redis_reader import redis_key_format
+
             kwargs["write_mode"] = write_mode
             kwargs["conflict_columns"] = conflict_columns
             kwargs["sync_mode"] = sync_mode
             kwargs["file_batch_idx"] = chunk_idx
+            kwargs["key_format"] = redis_key_format(cfg, getattr(dest, "extra", None))
         if dest_type == "dynamodb":
             # Create-table needs HASH[/RANGE] from conflict_columns; without
             # them Dynamo invents nothing and refuses, or (worse) operators

@@ -225,19 +225,40 @@ _REDIS_COLLECTION_CAP = 10_000
 REDIS_ENVELOPE_COLUMNS: tuple[str, ...] = ("redis_key", "redis_value", "redis_type")
 
 
-def redis_key_for(prefix: str, identity: Any) -> str:
+#: Connector option ``key_format``. ``raw``: the key is ``prefix:<id text>``
+#: (Redis keys are binary safe, nothing is escaped). ``legacy``: the id is
+#: sanitized like a SQL identifier (``1`` -> ``col_1``, ``ann@acme.com`` and
+#: ``ann.acme@com`` -> ``ann_acme_com``, cut at 63 characters) — kept for
+#: connectors saved before the option existed so their keys do not move; the
+#: writer refuses the collisions it causes. New Redis connectors save ``raw``.
+REDIS_KEY_FORMATS = ("raw", "legacy")
+
+
+def redis_key_format(cfg: Any, dest_extra: Any = None) -> str:
+    """The connector's key layout; anything but ``raw`` is ``legacy``."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    dest = dest_extra if isinstance(dest_extra, dict) else {}
+    raw = cfg.get("key_format") or nested.get("key_format") or dest.get("key_format") or ""
+    return "raw" if str(raw).strip().lower() == "raw" else "legacy"
+
+
+def redis_key_for(prefix: str, identity: Any, key_format: str = "legacy") -> str:
     """Canonical ``prefix:identity`` key layout shared by write and read-back.
 
-    The identity is sanitized, so a row keyed ``1`` is stored at ``prefix:col_1``
-    rather than ``prefix:1``. Gate-8 has to rebuild the exact same key to
-    re-read a batch, and a second copy of this rule would silently stop matching
-    the moment either side changed.
+    Under ``legacy`` the identity is sanitized, so a row keyed ``1`` is stored at
+    ``prefix:col_1`` rather than ``prefix:1``; under ``raw`` it is the id text.
+    Gate-8 has to rebuild the exact same key to re-read a batch, and a second
+    copy of this rule would silently stop matching the moment either side
+    changed.
     """
     from connectors.sql_identifiers import sanitize_identifier
     from services.value_serializer import present_cell_text
 
-    text = present_cell_text(identity)
-    return f"{prefix}:{sanitize_identifier(text or '', preserve_case=True)}"
+    text = present_cell_text(identity) or ""
+    if key_format == "raw":
+        return f"{prefix}:{text}"
+    return f"{prefix}:{sanitize_identifier(text, preserve_case=True)}"
 
 
 _DB_INDEX_RE = re.compile(r"^db\d+$", re.I)

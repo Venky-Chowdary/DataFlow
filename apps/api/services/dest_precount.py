@@ -3889,17 +3889,18 @@ def _redis_key_hits(
     ``|``-joined identity, which is the same rule
     ``redis_writer._resolve_redis_key_id`` writes with.
     """
-    from connectors.redis_reader import _redis_client, redis_key_for
+    from connectors.redis_reader import _redis_client, redis_key_for, redis_key_format
     from services.value_serializer import present_cell_text
 
     if not prefix:
         return None
+    key_format = redis_key_format(dict(cfg))
     client = _redis_client(cfg)
     hits = 0
     chunk: list[str] = []
     for tup in keys:
         identity = "|".join(present_cell_text(part) or "" for part in tup)
-        chunk.append(redis_key_for(prefix, identity))
+        chunk.append(redis_key_for(prefix, identity, key_format=key_format))
         if len(chunk) >= 500:
             hits += _redis_exists_count(client, chunk)
             chunk = []
@@ -4219,7 +4220,7 @@ def _redis_delete_keys(
     keys: Sequence[str],
 ) -> int:
     """DEL leftover identities at the same ``prefix:identity`` the writer uses."""
-    from connectors.redis_reader import _redis_client, redis_key_for
+    from connectors.redis_reader import _redis_client, redis_key_for, redis_key_format
     from services.row_conservation import parse_delete_keys
     from services.value_serializer import present_cell_text
 
@@ -4230,7 +4231,7 @@ def _redis_delete_keys(
     to_del: list[str] = []
     for tup in leftover:
         identity = "|".join(present_cell_text(part) or "" for part in tup)
-        to_del.append(redis_key_for(prefix, identity))
+        to_del.append(redis_key_for(prefix, identity, key_format=redis_key_format(dict(cfg))))
     if not to_del:
         return 0
     return int(client.delete(*to_del) or 0)

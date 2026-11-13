@@ -2865,6 +2865,8 @@ def verify_target(
             pk_column=pk,
         )
     elif db_type == "redis":
+        from connectors.redis_reader import redis_key_format
+
         count, chk = verify_redis_prefix(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 6379),
@@ -2880,6 +2882,7 @@ def verify_target(
             pk_column=pk,
             dest_db_type=db_type,
             dest_types=dest_types,
+            key_format=redis_key_format(dest),
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = _reconciliation.verify_elasticsearch_index(
