@@ -50,6 +50,88 @@ def export_append_refusal(fmt: str, path: str) -> str:
     )
 
 
+def _is_key_merge(sync_mode: str) -> bool:
+    from services.sync_cursor import normalize_sync_mode, resolve_effective_sync_mode
+
+    mode = normalize_sync_mode(resolve_effective_sync_mode(sync_mode), default="")
+    return mode in {"incremental_deduped", "upsert"}
+
+
+def export_key_columns(stream_contracts: Any, mappings: Any) -> list[str]:
+    """The export's key, in the column names the export file carries."""
+    from services.sync_cursor import map_source_to_target, resolve_sync_contract
+
+    contract = resolve_sync_contract(list(stream_contracts or []))
+    if contract is None or not getattr(contract, "primary_key", None):
+        return []
+    return [
+        map_source_to_target(col, list(mappings or [])) or col
+        for col in contract.primary_key_columns()
+    ]
+
+
+def merge_export_by_key(path: str, export_bytes: bytes, key_cols: list[str]) -> tuple[bytes, dict[str, int]]:
+    """The existing export with this run's rows merged in by key (CLM-1).
+
+    The same parse → last-wins merge → encode the object-store destinations
+    use (``connectors.object_store_incremental``). A file it can't parse is
+    refused before anything is written, so the operator's file stays as is.
+    """
+    from connectors.object_store_incremental import (
+        ObjectMergeRefused,
+        _export_from_bytes,
+        _parse_records,
+        _row_identity,
+        merge_object_bytes,
+    )
+
+    name = os.path.basename(path)
+    if not key_cols:
+        raise ValueError(
+            f"Incremental deduped into the existing export {name} needs a primary key to "
+            "merge by; the file was not changed. Set the stream's primary key, or choose append."
+        )
+    with open(path, "rb") as fh:
+        existing = fh.read()
+    spill = 64 * 1024 * 1024
+    try:
+        merged = merge_object_bytes(
+            key=name, existing=existing,
+            new_export=_export_from_bytes(export_bytes, "application/octet-stream", spill),
+            target_cols=[], dest_types=None, conflict_columns=key_cols,
+            strategy="key", spill_max_size=spill,
+        )
+    except ObjectMergeRefused as exc:
+        raise ValueError(
+            f"The export {name} couldn't be merged by key ({exc}); the file was not changed. "
+            "Export to a new file, or choose overwrite."
+        ) from exc
+    prior = {_row_identity(r, key_cols) for r in _parse_records(name, existing)}
+    incoming = {_row_identity(r, key_cols) for r in _parse_records(name, export_bytes)}
+    prior.discard(None)
+    incoming.discard(None)
+    # The Gate-8 key census: new keys grow the file, stored keys are replaced.
+    census = {"unique_batch_keys": len(incoming), "dest_preexisting": len(prior & incoming)}
+    try:
+        return merged.read_all(), census
+    finally:
+        merged.close()
+
+
+def _replace_file(path: str, data: bytes) -> None:
+    """Write ``data`` beside ``path`` and swap it in: a failed write leaves the old file."""
+    tmp = f"{path}.w2tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def land_export_bytes(
     destination: Any,
     export_bytes: bytes,
@@ -57,6 +139,8 @@ def land_export_bytes(
     job_id: str,
     sync_mode: str,
     export_name: str,
+    stream_contracts: Any = None,
+    mappings: Any = None,
 ) -> dict[str, Any]:
     """Write an export to disk and describe where it landed.
 
@@ -89,6 +173,7 @@ def land_export_bytes(
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
     appending, rows_before = False, None
+    key_census: dict[str, int] = {}
     legacy_note = ""
     # The export lands in the folder of the job's workspace (audit H-2): two
     # workspaces naming the same ``output_path`` never share a file.
@@ -124,6 +209,14 @@ def land_export_bytes(
             rows_before = existing_record_count(fmt or "csv", export_path)
             with open(export_path, "ab") as fh:
                 fh.write(payload)
+        elif _is_key_merge(sync_mode) and os.path.exists(export_path):
+            # CLM-1: "wb" here dropped every earlier row the source no longer sent.
+            merged, key_census = merge_export_by_key(
+                export_path, export_bytes, export_key_columns(stream_contracts, mappings)
+            )
+            rows_before = existing_record_count(fmt or "csv", export_path)
+            _replace_file(export_path, merged)
+            appending = True
         else:
             with open(export_path, "wb") as fh:
                 fh.write(export_bytes)
@@ -151,6 +244,10 @@ def land_export_bytes(
 
         # The file's records before this run appended: the run's own rows are the delta (review 4, H-3).
         landed[PRECOUNT_KEY] = rows_before
+        if key_census:
+            from services.row_conservation import CENSUS_KEY
+
+            landed[CENSUS_KEY] = key_census
     if legacy_note:
         logging.getLogger(__name__).warning("Export %s for job %s: %s", name, job_id, legacy_note)
         landed["legacy_flat_export"] = legacy_note

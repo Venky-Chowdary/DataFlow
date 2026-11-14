@@ -241,12 +241,23 @@ export function syncModeHonestyLine(
   destDbType?: string | null,
   destKind?: string | null,
 ): string {
-  // A file export writes a new artifact per run; table prose does not apply.
+  // A file export: what the run does to a named export file depends on the mode.
   if (destKind === "file_export") {
-    return (
-      "Writes a new export file for this run. No table is created, appended to "
-      + "or altered, and earlier export files are left unchanged."
-    );
+    const unnamed = " Without a file name, each run writes a new export file.";
+    if (mode === "full_refresh_append" || mode === "incremental_append") {
+      return (
+        "Adds this run's rows to the end of the named export file (CSV, TSV, JSON Lines "
+        + "or fixed-width; other formats are refused rather than replaced)." + unnamed
+      );
+    }
+    if (mode === "incremental_deduped" || mode === "upsert") {
+      return (
+        "Merges this run's rows into the named export file by primary key: a key already "
+        + "in the file is replaced, new keys are added, and rows the source no longer has "
+        + "stay in the file." + unnamed
+      );
+    }
+    return "Replaces the contents of the named export file with this run's rows." + unnamed;
   }
   if (mode === "full_refresh_append") {
     if (destTableExists === true) {

@@ -2096,7 +2096,12 @@ def _close_population(
     # identities do not apply to a replaced file. An append onto an existing
     # line-delimited export (``services.file_export_append``) records the
     # file's record count before it wrote: only the delta proves that run.
-    if dest_count_source == DEST_ARTIFACT_READBACK and not (kind == KIND_APPEND_DELTA and dest_count_before):
+    # A key-merged export (CLM-1) records the file's count before and its key
+    # census: new keys grow the file, stored keys are replaced in it.
+    keyed_export = kind == KIND_KEYED and census is not None and dest_count_before is not None
+    if dest_count_source == DEST_ARTIFACT_READBACK and not (
+        (kind == KIND_APPEND_DELTA and dest_count_before) or keyed_export
+    ):
         kind = KIND_OVERWRITE
     # Chunked vector loads are identity conservation regardless of the
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.

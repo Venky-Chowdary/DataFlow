@@ -158,6 +158,17 @@ describe("syncModeHonestyLine", () => {
       assert.doesNotMatch(line, /Inserts into the existing table|Replaces rows/);
     }
   });
+  it("file export captions say what each mode does to a named file (CLM-1)", () => {
+    const caption = (mode: string) => syncModeHonestyLine(mode, true, "postgresql", "file_export");
+    assert.match(caption("full_refresh_overwrite"), /Replaces the contents of the named export file/);
+    assert.match(caption("full_refresh_append"), /Adds this run's rows to the end/);
+    assert.match(caption("incremental_append"), /Adds this run's rows to the end/);
+    assert.match(caption("incremental_deduped"), /Merges this run's rows .* by primary key/);
+    assert.match(caption("upsert"), /stay in the file/);
+    for (const mode of ["full_refresh_overwrite", "full_refresh_append", "incremental_deduped"]) {
+      assert.doesNotMatch(caption(mode), /earlier export files are left unchanged/);
+    }
+  });
   it("names leftover empty tables as dest-exists on Full append — no CREATE, no ALTER", () => {
     const line = syncModeHonestyLine("full_refresh_append", true);
     assert.match(line, /existing table/i);

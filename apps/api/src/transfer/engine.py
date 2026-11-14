@@ -2768,7 +2768,7 @@ class UniversalTransferEngine:
                             export_bytes,
                             job_id=job_id,
                             sync_mode=request.sync_mode,
-                            export_name=export_name,
+                            export_name=export_name, stream_contracts=request.stream_contracts, mappings=mappings,
                         )
                     )
                 except ValueError as refusal:
