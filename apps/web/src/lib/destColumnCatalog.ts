@@ -280,6 +280,18 @@ export function remapToDestination(
   target: string,
   catalog: DestColumnCatalog | null | undefined,
 ): EditableMapping {
+  // Pointing a row at the column it already writes is not an edit: Auto-map's
+  // "id → id" must not drop the row's approval or re-grade it (UX-26).
+  const same = String(target || "").trim();
+  if (
+    same
+    && same.toLowerCase() === String(m.target || "").trim().toLowerCase()
+    && m.existsInDestination === true
+    && m.assignmentStrategy !== "pending_dest_schema"
+    && Boolean(m.destType)
+  ) {
+    return m;
+  }
   const base = applyOperatorRemapDest(m, target);
   if (!base.target) return base;
   const col = findDestColumn(catalog, base.target);

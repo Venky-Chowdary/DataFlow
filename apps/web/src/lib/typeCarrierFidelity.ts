@@ -270,8 +270,17 @@ function isNationalCharsetCarrier(inferred: string | null | undefined): boolean 
 }
 
 /** Fixed-width CHAR(n)/NCHAR(n) — blank-padded storage, not an open string. */
+/**
+ * The type with MySQL's column-attribute tails removed: `CHARACTER SET x`,
+ * `CHARSET x` and `COLLATE x` say how text compares, not how it is padded, so
+ * `CHAR(2) COLLATE utf8mb4_bin` is still a blank-padded CHAR(2) (UX-4).
+ */
+function withoutCharsetTails(inferred: string | null | undefined): string {
+  return (inferred || "").replace(/\s+(?:character\s+set|charset|collate)\s+\S+/gi, "").trim();
+}
+
 function isBlankPaddedCharCarrier(inferred: string | null | undefined): boolean {
-  const t = (inferred || "").trim().toLowerCase();
+  const t = withoutCharsetTails(inferred).toLowerCase();
   if (!t) return false;
   return /^(?:n?char|character|nchar\s+varying|bpchar)\s*\(\s*\d+\s*\)$/.test(t)
     || /^(?:n?char|character|bpchar)$/.test(t);
