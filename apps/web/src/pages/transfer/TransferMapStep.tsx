@@ -799,28 +799,6 @@ export function TransferMapStep({
             </div>
           </details>
         )}
-        {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema ? (
-          <div className="df2-map-blocker-bar" role="status">
-            <div className="df2-map-blocker-bar-head">
-              <DtIcon name="alert" size={16} />
-              <strong>{blockerSummary.headline}</strong>
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={destSchemaLoading}
-                onClick={() => void onReloadDestSchema()}
-              >
-                {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <MapIssueList
-            issues={mapIssues}
-            summary={issueSummary}
-            testId={targetIssues.length > 0 ? "map-target-issues" : "map-issues"}
-          />
-        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
@@ -847,6 +825,29 @@ export function TransferMapStep({
         )}
         {/* Toolbar and split scroll inside the Map body: the classic view is a fixed-height card. */}
         <div className="df2-ms-scroll">
+        {/* The issue list scrolls with the grid, so a phone keeps rows in view. */}
+        {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema ? (
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={destSchemaLoading}
+                onClick={() => void onReloadDestSchema()}
+              >
+                {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <MapIssueList
+            issues={mapIssues}
+            summary={issueSummary}
+            testId={targetIssues.length > 0 ? "map-target-issues" : "map-issues"}
+          />
+        )}
         {(codeStatus || (pendingComputed.length > 0 && onAddComputedSteps)) && (
           <p className="df2-ms-code-status" role="status" data-testid="map-code-status">
             {codeStatus}
