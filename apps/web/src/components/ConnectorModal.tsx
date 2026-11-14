@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorCatalogPanel } from "./ConnectorCatalogPanel";
 import { ButtonLoader } from "./LoadingState";
 import { DtIcon } from "./DtIcon";
@@ -41,6 +41,7 @@ import {
 import { getConnectorSetupGuide } from "../lib/connectorSetupGuide";
 import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { looksLikeUserinfoHost, parseUrlAuthority } from "../lib/urlAuthority";
+import { useOverlayFocus } from "../lib/restoreFocus";
 
 interface ConnectorModalProps {
   initialType?: string;
@@ -331,6 +332,10 @@ export function ConnectorModal({
     setFieldError(null);
     return true;
   };
+
+  // UX-15: take focus on open and hand it back to the trigger on close.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useOverlayFocus(true, panelRef);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -720,6 +725,8 @@ export function ConnectorModal({
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
         className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-conn-setup"}${helpOpen ? " is-help-open" : ""}`}
+        ref={panelRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

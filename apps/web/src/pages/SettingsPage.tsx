@@ -36,6 +36,7 @@ import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/ai
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
 import { purgeConfirmCopy, retentionHint } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
+import { useOverlayFocus } from "../lib/restoreFocus";
 import { TENANT_SAVED_EVENT, concreteWorkspaceId, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
@@ -110,6 +111,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [ssoDomainsText, setSsoDomainsText] = useState("");
   const [ssoClearSecret, setSsoClearSecret] = useState(false);
   const [aiEditor, setAiEditor] = useState<string | null>(null);
+  // UX-15: the SSO and AI provider editors take focus and hand it back on close.
+  const ssoPanelRef = useRef<HTMLDivElement>(null);
+  const aiPanelRef = useRef<HTMLDivElement>(null);
+  useOverlayFocus(Boolean(ssoEditor && ssoDraft), ssoPanelRef, () => setSsoEditor(null));
+  useOverlayFocus(Boolean(aiEditor), aiPanelRef, () => setAiEditor(null));
   const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
   const [aiSaving, setAiSaving] = useState(false);
   const [aiTesting, setAiTesting] = useState<string | null>(null);
@@ -1722,10 +1728,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
         {ssoEditor && ssoDraft && (
           <div className="dt-modal-overlay" onClick={() => setSsoEditor(null)} role="presentation">
-            <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div ref={ssoPanelRef} tabIndex={-1} className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="df2-sso-editor-title">
               <div className="dt-modal-header">
                 <div>
-                  <h2 className="dt-modal-title">{ssoLock.locked ? "View" : "Configure"} {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
+                  <h2 id="df2-sso-editor-title" className="dt-modal-title">{ssoLock.locked ? "View" : "Configure"} {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
                   <p className="dt-modal-subtitle" data-testid={ssoLock.locked ? "sso-read-only-reason" : undefined}>
                     {ssoLock.locked ? `Read-only. ${ssoLock.reason}.` : "Settings are persisted and used for workspace sign-in."}
                   </p>
@@ -1794,10 +1800,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
         {aiEditor && (
           <div className="dt-modal-overlay" onClick={() => setAiEditor(null)} role="presentation">
-            <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div ref={aiPanelRef} tabIndex={-1} className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="df2-ai-editor-title">
               <div className="dt-modal-header">
                 <div>
-                  <h2 className="dt-modal-title">{aiLock.locked ? "View" : "Configure"} {aiEditor}</h2>
+                  <h2 id="df2-ai-editor-title" className="dt-modal-title">{aiLock.locked ? "View" : "Configure"} {aiEditor}</h2>
                   <p className="dt-modal-subtitle" data-testid={aiLock.locked ? "ai-read-only-reason" : undefined}>
                     {aiLock.locked
                       ? `Read-only. ${aiLock.reason}.`

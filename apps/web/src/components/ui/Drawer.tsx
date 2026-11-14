@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
+import { captureFocusForRestore } from "../../lib/restoreFocus";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
 import { isTopOverlay, pushOverlay } from "../../lib/overlayStack";
 
@@ -92,6 +93,7 @@ export function Drawer({
       if (!isTopOverlay(panelRef.current)) return;
       closeRef.current();
     };
+    const restoreFocus = captureFocusForRestore(null, () => panelRef.current);
     const popOverlay = panelRef.current ? pushOverlay(panelRef.current) : () => {};
     document.addEventListener("keydown", onKey);
     const unlock = lockBodyScroll();
@@ -101,6 +103,7 @@ export function Drawer({
       document.removeEventListener("keydown", onKey);
       unlock();
       window.cancelAnimationFrame(t);
+      restoreFocus();
     };
   }, [open]);
 
