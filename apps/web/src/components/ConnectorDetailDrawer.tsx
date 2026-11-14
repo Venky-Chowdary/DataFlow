@@ -1,7 +1,7 @@
 import { ConnectorIcon } from "../app/brand-icons";
 import {
   connectorHealthBadgeLabel,
-  connectorLooksHealthy,
+  connectorPassedProbe,
   connectorTestHealth,
 } from "../lib/connectorHealth";
 import { DtIcon } from "./DtIcon";
@@ -55,7 +55,8 @@ export function ConnectorDetailDrawer({
 }: ConnectorDetailDrawerProps) {
   if (!c) return null;
 
-  const healthy = connectorLooksHealthy(c);
+  // A green signal means a probe passed; never tested is neutral grey.
+  const healthy = connectorPassedProbe(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
   const healthBadge = connectorHealthBadgeLabel(c);
   const endpoint = connectorEndpointLabel(c) || "Managed endpoint";

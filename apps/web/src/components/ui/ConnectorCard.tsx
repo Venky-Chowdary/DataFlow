@@ -90,9 +90,9 @@ export function ConnectorCard({
         aria-current={selected || undefined}
       >
         <span
-          className={`df2-health-dot ${!online ? "" : healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online || neverTested ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={!online ? "Health unknown while offline" : healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : neverTested ? "Never tested" : healthy ? "Healthy" : "Connection error"}
         />
         <span className="df2-connector-row-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={16} />
@@ -167,9 +167,9 @@ export function ConnectorCard({
     >
       <div className="df2-connector-row-top">
         <span
-          className={`df2-health-dot ${!online ? "" : healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online || neverTested ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={!online ? "Health unknown while offline" : healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : neverTested ? "Never tested" : healthy ? "Healthy" : "Connection error"}
         />
         <div className="df2-connector-card-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={20} />
