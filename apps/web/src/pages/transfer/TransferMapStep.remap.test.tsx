@@ -666,5 +666,9 @@ describe("Map step counts on screen come from one selector (W6 round 2)", () => 
     assert.match(status, /^4 of 4 mapped/);
     assert.match(status, /4 ready to approve$/);
     assert.doesNotMatch(status, /need your review|needs your review/);
+    // The destination panel counts the new columns too, in words the header agrees with.
+    const panelLine = q('[data-testid="dest-panel-summary"]').textContent ?? "";
+    assert.match(panelLine, /existing columns · 0 receive a source · 4 new columns will be added/);
+    assert.doesNotMatch(panelLine, /unmapped/);
   });
 });
