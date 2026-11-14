@@ -364,6 +364,21 @@ def run_transfer_policy_gates(
     )
     if eos_gate:
         gates.append(eos_gate)
+    if sync == "cdc" and dest and not allow_append_only:
+        from services.cdc_destination_support import (
+            CDC_DELETES_UNSUPPORTED_CODE,
+            cdc_deletes_supported,
+            unsupported_cdc_deletes_message,
+        )
+
+        if not cdc_deletes_supported(str(dest)):
+            gates.append({
+                "id": "g9d_cdc_dest_deletes",
+                "status": GateStatus.BLOCK.value,
+                "message": unsupported_cdc_deletes_message(str(dest)),
+                "duration_ms": 0,
+                "details": {"dest_type": dest, "error_code": CDC_DELETES_UNSUPPORTED_CODE},
+            })
 
     from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
 

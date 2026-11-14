@@ -90,10 +90,12 @@ def test_self_describing_source_still_types_real_numbers():
 
 
 def test_schemaless_json_file_source_still_infers_from_samples():
-    # A JSON / JSONL file declares no types (its reader reports TEXT), so the
-    # samples are the only evidence and digit-only text still promotes.
-    assert _stamped_types("file", "json") == {"id": "INTEGER", "name": "TEXT"}
-    assert _stamped_types("file", "jsonl") == {"id": "INTEGER", "name": "TEXT"}
+    # DATA-20: a JSON / JSONL reader types each column from the JSON values
+    # (a number column is INTEGER/DOUBLE), so a TEXT it reports is the file's
+    # own string declaration, like a Kafka JSON message's: digit-only text
+    # samples no longer promote it. A CSV header (below) still does.
+    assert _stamped_types("file", "json") == {"id": "TEXT", "name": "TEXT"}
+    assert _stamped_types("file", "jsonl") == {"id": "TEXT", "name": "TEXT"}
 
 
 def test_file_source_still_infers_from_samples():

@@ -28,8 +28,11 @@ def test_codec_quoted_empty_is_empty_string() -> None:
 def test_codec_legacy_null_spelling_reads_as_null() -> None:
     from services.csv_codec import iter_csv_records
 
-    rows = list(iter_csv_records(io.StringIO("a,b\n\\N,x\n")))
+    # DATA-21: only when the source declares \N its NULL spelling.
+    rows = list(iter_csv_records(io.StringIO("a,b\n\\N,x\n"), null_marker="\\N"))
     assert rows[1][0] is None
+    rows = list(iter_csv_records(io.StringIO("a,b\n\\N,x\n")))
+    assert rows[1][0] == "\\N"
 
 
 def test_codec_keep_option_holds_unquoted_empty() -> None:

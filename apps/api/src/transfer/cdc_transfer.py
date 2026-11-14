@@ -1379,6 +1379,7 @@ def _gate_cdc_sink(
 def _refuse_cdc_advance_on_abort(
     dest_summary: dict[str, Any] | None,
     validation_mode: str,
+    rows_committed: int = 0,
 ) -> None:
     """Raise when CDC must not advance watermark/ack after abort-class rejects.
 
@@ -1393,17 +1394,30 @@ def _refuse_cdc_advance_on_abort(
     if not isinstance(dest_summary, dict):
         return
     if dest_summary.get("ok") is False:
-        raise ValueError(
-            str(
-                dest_summary.get("error")
-                or "CDC destination write blocked — refuse watermark advance"
-            )
+        abort = str(
+            dest_summary.get("error")
+            or "CDC destination write blocked — refuse watermark advance"
         )
-    abort = reject_on_strict_policy(
-        transform_error_policy_for_validation_mode(validation_mode),
-        dest_summary.get("rejected_details") or [],
-        "CDC",
-    )
+    else:
+        abort = reject_on_strict_policy(
+            transform_error_policy_for_validation_mode(validation_mode),
+            dest_summary.get("rejected_details") or [],
+            "CDC",
+        )
+    if abort and rows_committed > 0:
+        # DATA-4: the batch was applied before this verdict, so "blocks partial
+        # write" with records=0 hid the rows the destination now holds.
+        from .adapters import WriteBatchBlocked
+
+        raise WriteBatchBlocked(
+            abort.replace("strict error policy blocks partial write", "strict error policy stopped the run")
+            + f" This CDC run had already written {int(rows_committed):,} row(s); they stay on "
+            "the destination. The CDC position did not move, so the next run applies these "
+            "changes again once the refused value is fixed.",
+            rejected_details=list(dest_summary.get("rejected_details") or []),
+            rows_written=int(rows_committed),
+            dest_summary=dest_summary,
+        )
     if abort:
         raise ValueError(abort)
 
@@ -1667,6 +1681,107 @@ def _repairable_image(
     return kept, held
 
 
+def _apply_source_truncate(
+    dest_type: str, dest_cfg: dict[str, Any], dest_table: str, change: ChangeBatch
+) -> int:
+    """Empty the destination for a source TRUNCATE before the batch's changes (DATA-1)."""
+    if not getattr(change, "truncated", False):
+        return 0
+    from connectors.table_manager import _missing_table_error
+    from services.cdc_truncate_apply import empty_destination_for_source_truncate
+
+    try:
+        return empty_destination_for_source_truncate(
+            dest_type, dest_cfg, dest_table, dest_cfg.get("schema")
+        )
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return 0
+        raise
+
+
+def _stamp_truncate(summary: Any, change: ChangeBatch, rows: int) -> None:
+    if isinstance(summary, dict) and getattr(change, "truncated", False):
+        summary["source_truncated"] = True
+        summary["source_truncate_deleted_rows"] = int(rows)
+
+
+def _refuse_cdc_without_deletes(dest_type: str, destination: Any, dest_cfg: dict[str, Any], table: str) -> None:
+    """Refuse CDC before the snapshot when the destination can't apply deletes (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.cdc_exactly_once import dest_allow_append_only
+
+    if cdc_deletes_supported(dest_type):
+        return
+    if dest_allow_append_only(destination) or _truthy_cfg(
+        dest_cfg, "allow_append_only", "cdc_allow_append_only"
+    ):
+        return
+    from services.data_errors import CdcDeletesUnsupported
+
+    raise CdcDeletesUnsupported(unsupported_cdc_deletes_message(dest_type, table))
+
+
+def _apply_cdc_deletes(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    change: ChangeBatch,
+    pk_target_cols: list[str],
+) -> int:
+    """LSN-guarded deletes; a failure names the keys this batch already applied (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.data_errors import (
+        CdcBatchPartiallyApplied,
+        CdcDeletesUnsupported,
+        key_list_text,
+    )
+
+    applied = sorted(
+        "|".join(k) for k in _applied_change_keys(
+            ChangeBatch(inserts=change.inserts, updates=change.updates), pk_target_cols
+        )
+    )
+    if not cdc_deletes_supported(dest_type):
+        raise CdcDeletesUnsupported(
+            unsupported_cdc_deletes_message(dest_type, dest_table),
+            details={"applied_keys": applied[:50], "applied_key_count": len(applied)},
+        )
+    try:
+        return delete_by_primary_keys(
+            db_type=dest_type,
+            cfg=dest_cfg,
+            table_name=dest_table,
+            primary_key_column=pk_target_cols,
+            keys=change.deletes,
+            schema=dest_cfg.get("schema"),
+            incoming_lsn=extract_cdc_lsn(change.resume_token),
+            lsn_column=DF_LSN_COL,
+        )
+    except Exception as exc:
+        if not applied:
+            raise
+        raise CdcBatchPartiallyApplied(
+            f"CDC couldn't apply {len(change.deletes)} source delete(s) to {dest_table}: "
+            f"{exc}. This change batch had already written key(s) {key_list_text(applied)}; "
+            "those rows are on the destination at their new values, and the deleted "
+            "rows are still there. The stream position did not move, so the next run "
+            "replays this batch. Fix the cause, then run again.",
+            details={
+                "applied_keys": applied[:50],
+                "applied_key_count": len(applied),
+                "pending_delete_keys": [str(k) for k in change.deletes[:50]],
+                "pending_delete_count": len(change.deletes),
+            },
+        ) from exc
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1722,6 +1837,7 @@ def _apply_change_batch(
             rejected=rejected_details,
             lookup_columns=change.lookup_columns,
             unkeyed_deletes=list(change.unkeyed_deletes or []),
+            truncated=bool(getattr(change, "truncated", False)),
         )
     # C2: deletes with no key are recorded (DLQ + audit) before anything moves;
     # a failed record raises, so the position never passes them. A delete whose
@@ -1747,6 +1863,7 @@ def _apply_change_batch(
         connector=str(dest_type or ""),
     )
 
+    truncated_rows = _apply_source_truncate(dest_type, dest_cfg, dest_table, change)
     inherit_note = ""
     if mappings_inherited:
         mappings, headers, pk_target_col, inherit_note = _align_inherited_batch(
@@ -1793,10 +1910,11 @@ def _apply_change_batch(
         # Gate-8 refused every SQL Server change-tracking run as "no
         # reconcile_sample" although the destination equalled the source (D173).
         _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
+        _stamp_truncate(dest_summary, change, truncated_rows)
         return rows, checksum, stamp_parked(_note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
-        ), parked_evidence), deleted
+        ), parked_evidence), deleted + truncated_rows
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -1816,6 +1934,8 @@ def _apply_change_batch(
         from services.row_conservation import census_change_batch, observe_change_batch
 
         if census_acc is not None:
+            if truncated_rows:
+                census_acc.add_source_truncate(truncated_rows)
             observe_change_batch(
                 census_acc,
                 inserts=change.inserts,
@@ -1841,6 +1961,10 @@ def _apply_change_batch(
                 table_name=dest_table,
                 mappings=mappings,
             )
+        if census is not None and truncated_rows and census_acc is None:
+            import dataclasses
+
+            census = dataclasses.replace(census, tombstones=census.tombstones + truncated_rows)
         if census is not None:
             census_payload = census.to_dict()
 
@@ -1922,56 +2046,7 @@ def _apply_change_batch(
     if change.deletes:
         if not pk_target_cols:
             raise ValueError("CDC deletes require a primary key on the destination")
-        deleted = delete_by_primary_keys(
-            db_type=dest_type,
-            cfg=dest_cfg,
-            table_name=dest_table,
-            primary_key_column=pk_target_cols,
-            keys=change.deletes,
-            schema=dest_cfg.get("schema"),
-            incoming_lsn=extract_cdc_lsn(change.resume_token),
-            lsn_column=DF_LSN_COL,
-        )
-        # Fail closed: unsupported destinations used to silently no-op deletes.
-        if deleted == 0 and change.deletes:
-            from connectors.table_manager import UnsupportedCdcDeleteError
-
-            # Re-check: 0 can mean keys already absent (idempotent). Probe support.
-            # Keep in sync with connectors.table_manager.delete_by_primary_keys.
-            supported = (dest_type or "").lower() in {
-                "postgresql",
-                "redshift",
-                "mysql",
-                "sqlite",
-                "generic_sql",
-                "mongodb",
-                "mongo",
-                "sqlserver",
-                "mssql",
-                "oracle",
-                "oracle_db",
-                "oracle_autonomous_warehouse",
-                "snowflake",
-                "bigquery",
-                "duckdb",
-                "databricks",
-                "synapse_analytics",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-                "iceberg",
-                "apache_iceberg",
-                "pgvector",
-                "qdrant",
-                "weaviate",
-                "pinecone",
-            }
-            if not supported:
-                raise UnsupportedCdcDeleteError(
-                    f"CDC deletes are not supported for destination type '{dest_type}'"
-                )
+        deleted = _apply_cdc_deletes(dest_type, dest_cfg, dest_table, change, pk_target_cols)
 
     # Stash a bounded source sample so Gate-8 reconciliation can compare the
     # rows we just wrote against a read-back of the destination.
@@ -2011,7 +2086,8 @@ def _apply_change_batch(
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
     dest_summary["rows_skipped"] = rows_skipped
-    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted
+    _stamp_truncate(dest_summary, change, truncated_rows)
+    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted + truncated_rows
 
 
 def _stamp_cdc_poll(
@@ -2404,6 +2480,7 @@ def _run_cdc_shared_multi_table(
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, "")
     delivery_guarantee = apply_require_exactly_once(
         delivery_guarantee,
         required=dest_require_exactly_once(destination, dest_cfg),
@@ -2958,7 +3035,7 @@ def _run_cdc_shared_multi_table(
                 change=change,
                 key_cols=list(pk_source or []),
             )
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(total_rows or 0))
 
         skip_ack = False
         if change.resume_token is not None:
@@ -3494,6 +3571,7 @@ def _run_cdc_single_stream(
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
     dest_table = resolve_dest_table(dest_type, destination, table_name)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, dest_table)
 
     contract = resolve_sync_contract(stream_contracts)
     primary_key = contract.primary_key if contract else ""
@@ -4231,7 +4309,7 @@ def _run_cdc_single_stream(
         if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
             eos_active = False
 
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(state.rows_written or 0))
 
         # Never overwrite a durable log resume with incremental/side-channel tokens
         # (binlog gaps / wrong PG slots under load). Never ack those tokens either.

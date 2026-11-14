@@ -1734,7 +1734,7 @@ def write_mapped_rows(
                         rows_skipped += len(kept_keys)
                         skipped_identity_keys.extend(kept_keys)
                     for offset in range(0, len(dense), CHUNK_SIZE) if dense else []:
-                        batch = dense[offset : offset + CHUNK_SIZE]
+                        batch = _wide_ints_as_text(dense[offset : offset + CHUNK_SIZE])
                         start = row_offset + offset
                         with conn:
                             # D102: stop the NEXT chunk when the job was
@@ -1924,3 +1924,29 @@ def write_mapped_rows(
             rejected_details=rejected_details if "rejected_details" in locals() else [],
             rows_skipped=rows_skipped if "rows_skipped" in locals() else 0,
         )
+
+
+_SQLITE_INT_MIN, _SQLITE_INT_MAX = -(2**63), 2**63 - 1
+
+
+def _wide_ints_as_text(rows: list[Any]) -> list[Any]:
+    """Bind an integer outside SQLite's signed 64-bit range as its exact text.
+
+    DATA-17: Validate passed BIGINT UNSIGNED -> SQLite, then the run died with
+    the driver's "Python int too large to convert to SQLite INTEGER". Its
+    create-new carrier is TEXT, which keeps the digits exactly.
+    """
+    def _cell(value: Any) -> Any:
+        if type(value) is int and not _SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX:
+            return str(value)
+        return value
+
+    out: list[Any] = []
+    for row in rows:
+        if isinstance(row, tuple) and any(type(v) is int for v in row):
+            out.append(tuple(_cell(v) for v in row))
+        elif isinstance(row, list) and any(type(v) is int for v in row):
+            out.append([_cell(v) for v in row])
+        else:
+            out.append(row)
+    return out

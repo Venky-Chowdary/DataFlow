@@ -89,7 +89,7 @@ from services.engine_pool import release_engine
 from services.reversibility_enforce import scan_pass
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, driver_cell_to_string
 from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
@@ -3293,7 +3293,7 @@ def fetch_pk_lsn_map(
         release_engine(engine)
 
 
-def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
+def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any], engine: Any = None) -> list[Any]:
     """Select list that keeps an Oracle TIMESTAMP WITH TIME ZONE offset.
 
     python-oracledb hands back a *naive* ``datetime`` for TIMESTAMP WITH
@@ -3303,7 +3303,8 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
     every other dialect and column is projected unchanged.
     """
     if not _is_oracle_wire(_dialect_key(cfg), str(cfg.get("type") or "")):
-        return list(cols)
+        from connectors.sqlserver_tick import seven_digit_projection  # pymssql DATETIME2(7)
+        return seven_digit_projection(cols, engine)
     out: list[Any] = []
     for col in cols:
         kind = _oracle_tz_kind_sa(getattr(col, "type", None))
@@ -3386,7 +3387,7 @@ def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
         from services.json_polarity import json_document_wire
 
         return json_document_wire(value)
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)
 
 
 def _is_json_sa(col: Any) -> bool:
@@ -3451,7 +3452,7 @@ def _read_table_raw(
     result = conn.execute(sa.text(sql))
     headers = _result_headers(dialect, result)
     rows = [
-        [cell_to_string(value, preserve_sql_null=True) for value in row]
+        [driver_cell_to_string(value) for value in row]
         for row in result.fetchall()
     ]
     return headers, rows
@@ -3642,7 +3643,7 @@ def read_table_batch(
                 else:
                     columns = selected_cols = list(table_obj.c)
 
-                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
                 # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
                 pk_cols = (
                     [c for c in table_obj.primary_key.columns]
@@ -3779,7 +3780,7 @@ def read_table_scan_batch(
                     if selected_cols
                     else []
                 )
-                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
                 if filter_value is not None:
                     _fname = reflected_column_name(table_obj, str(filter_column))
                     if _fname is None:
@@ -3843,7 +3844,7 @@ def read_table_scan_batch(
         rows = [_serialize_source_row(row, selected_cols, dialect) for row in raw]
     else:
         rows = [
-            [cell_to_string(value, preserve_sql_null=True) for value in row]
+            [driver_cell_to_string(value) for value in row]
             for row in raw
         ]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
@@ -3998,7 +3999,7 @@ def read_table_cursor_batch(
                 )
 
             key_cols = [table_obj.c[n] for n in key_names]
-            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
             bookmark = present_cursor_bookmark(cursor_after)
             if bookmark is not None and cursor_inclusive:
                 # D60/D98 — run-seed watermark: re-read the whole tie group

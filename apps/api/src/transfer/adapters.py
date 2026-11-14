@@ -231,7 +231,7 @@ def parse_file_content(
     schema = (
         dict(writer_schema)
         if writer_schema
-        else FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+        else FileParser.infer_schema(result.data, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
     )
     from services.value_serializer import payload_record_wire
 
@@ -284,7 +284,7 @@ def parse_file_route_sample(
         dict(writer_schema)
         if writer_schema
         else (
-            FileParser.infer_schema(sample, invalid_calendar_votes=True)
+            FileParser.infer_schema(sample, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
             if sample
             else {c: "string" for c in result.columns}
         )

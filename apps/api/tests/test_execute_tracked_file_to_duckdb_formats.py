@@ -132,6 +132,16 @@ def test_file_to_duckdb_preserves_types(fmt: str):
         # offset, so the destination keeps them naive — stamping UTC would invent a
         # zone the file never declared.
         assert len(rows) == 3
+        if fmt in {"json", "jsonl"}:
+            # DATA-20: this fixture's amount and active are JSON *strings*
+            # ("1000.00", "true"); a JSON string stays text, while an ISO
+            # date string still lands as a timestamp.
+            assert rows == [
+                (1, "1000.00", "hello", datetime(2024, 1, 15, 0, 0, 0), "true", '{"k":"v"}', '["a","b"]'),
+                (2, "2000.50", None, datetime(2024, 2, 28, 14, 30, 0), "false", None, None),
+                (3, "3.14", "null", datetime(2024, 3, 1, 0, 0, 0), "1", "{}", "[]"),
+            ]
+            return
         assert rows[0] == (
             1,
             Decimal("1000.0000"),

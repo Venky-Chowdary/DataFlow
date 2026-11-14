@@ -75,6 +75,11 @@ def mysql_value_to_sqlite(value: Any, *, time_fsp: int | None = None) -> Any:
         return None
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, int) and not -(2**63) <= value <= 2**63 - 1:
+        # DATA-17: a BIGINT UNSIGNED past 2^63-1 can't bind to SQLite INTEGER
+        # (the driver raised "Python int too large"); the row path keeps it as
+        # exact TEXT.
+        raise FastPathUnavailable("an unsigned 64-bit integer exceeds SQLite INTEGER")
     if isinstance(value, timedelta):
         # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38).
         # MySQL TIME is a signed interval (-838:59:59 .. 838:59:59); the TEXT

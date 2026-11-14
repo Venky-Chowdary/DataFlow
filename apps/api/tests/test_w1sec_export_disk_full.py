@@ -61,9 +61,13 @@ def test_a_failed_export_write_keeps_no_partial_file(exports, monkeypatch):
     data = b"id,v\n" + b"".join(f"{i},{'x' * 40}\n".encode() for i in range(5000))
     _full_disk_after(monkeypatch, 4096)
     dest = SimpleNamespace(format="csv", output_path="")
-    with pytest.raises(ValueError) as caught:
+    from services.data_errors import DataPathError
+
+    # W1 and W2 both fixed REL-3; the merged module raises W2's coded DataPathError.
+    with pytest.raises(DataPathError) as caught:
         land_export_bytes(dest, data, job_id="w1secjob", sync_mode="full_refresh_overwrite",
                           export_name="export_w1secjob.csv")
+    assert caught.value.code == "EXPORT_WRITE_FAILED"
     message = str(caught.value)
     assert "Errno" not in message and "disk is full" in message and "No partial file" in message
     left = [p for p in exports.rglob("*") if p.is_file()]
@@ -78,7 +82,9 @@ def test_an_append_that_fails_restores_the_file(exports, monkeypatch):
     target = next(p for p in exports.rglob("w1sec_append.csv"))
     before = target.read_bytes()
     _full_disk_after(monkeypatch, 2)
-    with pytest.raises(ValueError):
+    from services.data_errors import DataPathError
+
+    with pytest.raises(DataPathError):
         land_export_bytes(dest, b"id\n" + b"2\n" * 5000, job_id="j2", sync_mode="full_refresh_append",
                           export_name="x.csv")
     assert target.read_bytes() == before

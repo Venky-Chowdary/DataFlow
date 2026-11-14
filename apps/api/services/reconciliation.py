@@ -8,6 +8,7 @@ import json
 import logging
 from services.brand_env import getenv_brand
 from services.connector_auth import resolve_api_key
+import math
 import re
 import uuid
 import sys
@@ -1267,24 +1268,31 @@ def reconcile(
             if checksum_match
             else " One or more source-row fingerprints are missing on the destination."
         )
+        # DATA-1: rows the source no longer has (a missed TRUNCATE or delete)
+        # are a divergence, not a pass; the image is not proven.
+        dest_extra = target_rows > expected_rows
+        extra_note = (
+            f" The destination holds {target_rows - expected_rows:,} row(s) the source "
+            "no longer has, so it is not proven to match."
+            if dest_extra else ""
+        )
         return ReconciliationReport(
-            passed=(not dest_short) and checksum_match,
+            passed=(not dest_short) and checksum_match and not dest_extra,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
                 f"CDC catch-up dest COUNT={target_rows:,} vs source image "
-                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
-                "Dest extras are not a failure. At-least-once upsert. "
-                "Not platform exactly-once."
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note}{extra_note} "
+                "At-least-once upsert. Not platform exactly-once."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
             checksum_match=checksum_match and not dest_short,
-            population_proof=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short and not dest_extra,
             assurance_level=CDC_SOURCE_IMAGE_VALUES,
             checksum_scope=CDC_SOURCE_IMAGE_VALUES,
             target_rows_before=target_rows_before,
@@ -3353,6 +3361,15 @@ def fingerprint_for_reconcile(
         # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
         wire = None
         value = None
+    _doc_col = str(ddl_type or "").strip().lower()
+    _doc_col = "json" in _doc_col or _doc_col in {"object", "document", "array", "struct", "map"}
+    if str(engine or "").lower() in _DOCUMENT_ENGINES and (
+        type(value).__name__ == "JsonNullToken"
+        or _document_json_null(str(engine or "").lower(), value, None, "json" if _doc_col else transform)
+    ):
+        # DATA-11: a document stores JSON null as its null; the read-back is None.
+        wire = None
+        value = None
     if isinstance(wire, str):
         # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
         # literal ``x`` (one layer — the recursive escape stays provable), so
@@ -3497,6 +3514,27 @@ def _reject_json_constant(token: str) -> Any:
     raise ValueError(token)
 
 
+_NEG_ZERO_RE = re.compile(r"^-0*\.?0*(?:e[+-]?\d+)?$", re.IGNORECASE)
+
+
+def _negative_zero(value: Any) -> bool:
+    if isinstance(value, float):
+        return value == 0.0 and math.copysign(1.0, value) < 0
+    return isinstance(value, str) and bool(_NEG_ZERO_RE.match(value.strip())) and "0" in value
+
+
+def _float_ddl(ddl_type: str, engine: str = "") -> bool:
+    """A PostgreSQL double column, which stores IEEE -0 (DATA-19).
+
+    SQL Server FLOAT normalizes -0 to 0, and the float4 fold is pinned
+    (x134), so only the double carrier PostgreSQL keeps -0 in is sign-aware.
+    """
+    text = str(ddl_type or "").upper()
+    if str(engine or "").lower() not in {"postgresql", "postgres", ""}:
+        return False
+    return "DOUBLE" in text or text.strip() in {"FLOAT8", "FLOAT"}
+
+
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     """Canonical cell text for Gate-8 checksums.
 
@@ -3516,6 +3554,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
+    if _negative_zero(value) and _float_ddl(ddl_type, engine):
+        # DATA-19: IEEE -0.0 is a distinct value a float column keeps; folding
+        # it into 0 let a write that dropped the sign verify (full_checksum).
+        return "-0"
     if (
         isinstance(value, str)
         and not isinstance(value, WireLiteral)
@@ -4344,6 +4386,23 @@ def _align_history_versions(
     return aligned
 
 
+_DOCUMENT_ENGINES = frozenset({"mongodb", "mongo", "documentdb", "cosmosdb"})
+
+
+def _document_json_null(engine: str, raw_src: Any, raw_tgt: Any, transform: Any) -> bool:
+    """DATA-11: a JSON ``null`` lands in a document store as BSON null.
+
+    The document carries the JSON value itself, and JSON ``null`` *is* null
+    there, so the read-back ``None`` is the same value (the false red was
+    source='null' dest='null').
+    """
+    if engine not in _DOCUMENT_ENGINES or raw_tgt is not None:
+        return False
+    if str(transform or "").strip().lower() != "json":
+        return False
+    return isinstance(raw_src, str) and raw_src.strip() == "null"
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -4920,6 +4979,7 @@ def sample_compare_rows(
                     key=key if keyed else "",
                     inserted_keys=inserted_keys,
                 )
+                and not _document_json_null(eng, raw_src, raw_tgt, transform)
             ):
                 mismatches.append(
                     {

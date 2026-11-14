@@ -13,7 +13,7 @@ from connectors.sql_snapshot_scan import (
 )
 from connectors.sqlite_common import require_sqlite_source_file, sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
-from services.value_serializer import cell_to_string
+from services.value_serializer import driver_cell_to_string
 
 
 def _cell(value: Any) -> str:
@@ -24,7 +24,7 @@ def _cell(value: Any) -> str:
     BLOB stayed raw bytes, and NULL stayed ``None`` instead of the SQL NULL
     sentinel.
     """
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)
 
 
 def _row(row: Any) -> tuple[str, ...]:

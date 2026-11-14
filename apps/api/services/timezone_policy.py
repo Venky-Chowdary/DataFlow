@@ -45,7 +45,9 @@ INSTANT_TIMESTAMP_DIALECTS: Final[frozenset[str]] = frozenset(
 # MySQL ``TIMESTAMP`` epoch bounds (inclusive), per the MySQL 8 reference.
 MYSQL_TIMESTAMP_MIN: Final[datetime] = datetime(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
 MYSQL_TIMESTAMP_MAX: Final[datetime] = datetime(
-    2038, 1, 19, 3, 14, 7, tzinfo=timezone.utc
+    # DATA-15: the upper bound carries the fraction (.999999), so a TIMESTAMP(3)
+    # holding '2038-01-19 03:14:07.999' is in range.
+    2038, 1, 19, 3, 14, 7, 999999, tzinfo=timezone.utc
 )
 
 POLICY_NATIVE_INSTANT: Final[str] = "native_instant_carrier"

@@ -2096,7 +2096,12 @@ def _close_population(
     # identities do not apply to a replaced file. An append onto an existing
     # line-delimited export (``services.file_export_append``) records the
     # file's record count before it wrote: only the delta proves that run.
-    if dest_count_source == DEST_ARTIFACT_READBACK and not (kind == KIND_APPEND_DELTA and dest_count_before):
+    # A key-merged export (CLM-1) records the file's count before and its key
+    # census: new keys grow the file, stored keys are replaced in it.
+    keyed_export = kind == KIND_KEYED and census is not None and dest_count_before is not None
+    if dest_count_source == DEST_ARTIFACT_READBACK and not (
+        (kind == KIND_APPEND_DELTA and dest_count_before) or keyed_export
+    ):
         kind = KIND_OVERWRITE
     # Chunked vector loads are identity conservation regardless of the
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
@@ -3338,6 +3343,18 @@ class KeyCensusAccumulator:
         self._pending_new = list(unseen)
         self._pending_added = added
         self._pending_open = True
+
+    def add_source_truncate(self, rows_removed: int) -> None:
+        """A source TRUNCATE emptied the destination: each row it held is a delete.
+
+        Keys this run already wrote are gone too, so a later re-insert counts as
+        an insert again (data audit DATA-1).
+        """
+        removed = max(int(rows_removed or 0), 0)
+        self._tombstones += removed
+        self._unique_tombstone_fallback += removed
+        self._absent.update(self._seen)
+        self._tomb_seen.clear()
 
     def add_tombstones(
         self,

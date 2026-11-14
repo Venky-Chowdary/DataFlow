@@ -552,6 +552,34 @@ def _records_after_failure(prior: Any, incoming: Any) -> int:
     return max(_n(prior), _n(incoming))
 
 
+def _verification_interrupted(display: str, exc: BaseException, prev: dict[str, Any]) -> str:
+    """REL-4: a run that failed while verifying keeps the rows it wrote; say so.
+
+    A connection dropped during Gate-8 failed the job with raw driver text and
+    never said the committed rows were still in the destination.
+    """
+    from connectors.write_resilience import is_connection_lost
+
+    if not is_connection_lost(exc):
+        return display
+    rows = prev.get("records_processed")
+    held = f"The {int(rows):,} row(s) it wrote" if isinstance(rows, int) and rows > 0 else "The rows it wrote"
+    note = (
+        "The connection dropped while the run was verifying the destination, so the "
+        f"check did not finish. {held} are still in the destination and are not "
+        "verified. Re-run the job once the connection is back; it re-verifies."
+    )
+    # The driver's own text stays in error_details["raw"]; the job message is plain.
+    return note
+
+
+#: A failed write whose pre-run backup was restored (DATA-5).
+DESTINATION_RESTORED_NOTE = (
+    "The destination was restored to its pre-run content from the backup taken before "
+    "this run, so no row this run wrote remains."
+)
+
+
 def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, str]:
     """Row count and message for a write that stopped after a committed prefix.
 
@@ -569,8 +597,14 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
             "Blocked-write row count could not read job %s: %s", job_id, exc
         )
         prior = None
-    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    if getattr(blocked, "destination_restored", False):
+        # DATA-5: the pre-run backup was put back, so nothing this run wrote
+        # remains. "N rows committed" / "N rows were already written" next to
+        # a restored table contradicted itself.
+        message = re.sub(r"^partial write \(the failing batch reported [\d,]+ row\(s\) committed\): ", "", message)
+        return 0, f"{message.rstrip()} {DESTINATION_RESTORED_NOTE}"
+    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     if getattr(blocked, "multi_stream_undo", None):
         # C4: the other tables of a failed multi-table run were undone too.
         note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
@@ -672,6 +706,8 @@ def _fail_runtime_job(
         lease_extras.pop("operator_error", None) or error_details.get("message") or exc
     )
     display = str(exc) if cancelled else operator_msg
+    if not cancelled and failed_at_phase in {"reconcile", "verify", "verifying", "validate_post_write"}:
+        display = _verification_interrupted(display, exc, prev)
     multi_undo = getattr(exc, "multi_stream_undo", None)
     if isinstance(multi_undo, list) and multi_undo:
         # C4: what the undo did to each table of a failed multi-table run is

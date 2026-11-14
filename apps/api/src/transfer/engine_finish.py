@@ -325,16 +325,16 @@ def _settle_route_backups(destination: EndpointConfig, *, restore: bool) -> bool
         try:
             from .adapters import resolve_connector_config
             from connectors.table_manager import (
-                discard_pg_route_backups,
-                restore_pg_route_backups,
+                discard_route_backups,
+                restore_route_backups,
             )
 
             cfg = resolve_connector_config(destination)
             if restore:
-                restored = restore_pg_route_backups(cfg, route_backups)
+                restored = restore_route_backups(cfg, route_backups)
                 ok = len(restored) == len(route_backups)
             else:
-                discard_pg_route_backups(cfg, route_backups)
+                discard_route_backups(cfg, route_backups)
                 ok = True
         except Exception as exc:  # noqa: BLE001 - backup settle must not hide the transfer result
             logger.error(

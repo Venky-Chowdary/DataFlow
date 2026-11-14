@@ -7626,6 +7626,22 @@ def _run_reconciliation_impl(
                 active_rows = sub_summary.get("active_rows")
                 active_checksum = sub_summary["active_checksum"]
                 break
+    if (
+        not active_checksum
+        and not source_rows
+        and isinstance(dest_summary, dict)
+        and "active_checksum" in dest_summary
+        and dest_summary.get("active_rows") == 0
+        and (dest_summary.get("scd2_opts") or dest_summary.get("mirror_delete_mode"))
+    ):
+        # DATA-3 / DATA-6: an acknowledged empty source closed (SCD2) or
+        # deleted (mirror) every row. The measured current population is
+        # empty, as the source is; "" is the writer's empty-population digest,
+        # and falling through counted closed history as live rows.
+        from services.fingerprint_accumulator import FingerprintAccumulator
+
+        active_rows = 0
+        active_checksum = source_checksum = FingerprintAccumulator().digest()
     if active_checksum and source_checksum_scope_note:
         return _finalize(
             _merge_cardinality_only_report(
@@ -9087,6 +9103,7 @@ def _run_reconciliation_impl(
         keyed_expected_delta=keyed_delta,
         route_digest_match=dest_summary.get("route_digest_match"),
         rows_written=int(rows_written) if rows_written is not None else None,
+        retained_rows=_declared_off_leftover(dest_summary, table_name) if keyed_scope else 0,
     )
     if cdc_poll_drift:
         from services.incremental_drift import attach_drift
@@ -9095,6 +9112,24 @@ def _run_reconciliation_impl(
             attach_drift(report.to_dict(), cdc_poll_drift, resource=str(table_name or ""))
         )
     return _finalize(report.to_dict())
+
+
+def _declared_off_leftover(dest_summary: dict[str, Any] | None, table_name: Any) -> int:
+    """Destination keys a declared ``delete_mode=off`` kept on purpose, disclosed.
+
+    DATA-1 fails CDC reconcile on rows the source no longer has; the operator's
+    own ``delete_mode=off`` keeps them and the snapshot sweep counts them, so
+    they are retained rows, not an unexplained divergence. Any other reason a
+    key was kept (no primary key, a rewritten key) stays a failure.
+    """
+    found = (dest_summary or {}).get("snapshot_leftover")
+    if isinstance(found, dict) and "status" not in found:
+        found = found.get(str(table_name or ""))
+    if not isinstance(found, dict):
+        return 0
+    if found.get("status") != "kept" or found.get("delete_mode") != "off" or not found.get("declared"):
+        return 0
+    return max(int(found.get("leftover") or 0), 0)
 
 
 def _cdc_poll_window(dest_summary: dict[str, Any] | None) -> dict[str, Any]:

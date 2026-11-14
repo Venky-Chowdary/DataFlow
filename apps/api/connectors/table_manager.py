@@ -501,13 +501,14 @@ def retire_generic_sql_overwrite(
                 _rollback_quietly(conn)
                 if _missing_table_error(exc):
                     return "absent", None
-                logger.warning(
-                    "Overwrite of %s cannot keep a recoverable copy (%s); "
-                    "emptying without one",
-                    live_ref,
-                    exc,
-                )
-                return _empty_generic_sql(gcfg, table_name, schema), None
+                # Review of the overwrite set-aside (53351cf30): emptying with no
+                # copy broke its own rule — a load that then failed left the
+                # destination empty or partial with nothing to restore. Refuse,
+                # as ClickHouse and the set-aside engines do; the rows stay.
+                raise TableDropError(
+                    table_name,
+                    f"could not keep a copy of the live rows before replacing them: {exc}",
+                ) from exc
             try:
                 # DELETE, not TRUNCATE: it is transactional everywhere and a
                 # referencing foreign key does not refuse it.
@@ -1595,9 +1596,23 @@ def _fetch_pk_lsn_map(
     """
     from services.cdc_snapshot_window import _pk_columns
 
+    from services.cdc_destination_support import lsn_fetch_route
+
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}
     dt = (db_type or "").lower().strip()
+    route = lsn_fetch_route(dt)
+    if route is None:
+        raise RuntimeError(
+            f"LSN delete fetch is not wired for destination type {dt!r}; "
+            "refusing to invent existing_lsn=None (would always apply deletes)"
+        )
+    if route in {"redis", "elasticsearch", "dynamodb"}:
+        from services import cdc_kv_lsn
+
+        fetch = getattr(cdc_kv_lsn, f"{route}_lsn_map")
+        target = {"redis": "prefix", "elasticsearch": "index"}.get(route, "table_name")
+        return fetch(cfg, cols=pk_cols, keys=list(keys), lsn_column=lsn_column, **{target: table_name})
     if dt == "oracle":
         *pk_cols, lsn_column = _oracle_stored_names(cfg, schema, table_name, [*pk_cols, lsn_column])
     if len(pk_cols) > 1:
@@ -2563,9 +2578,25 @@ def create_pg_table_backup(
             if not cur.fetchone():
                 return None
             _pg_refuse_unrestorable_triggers(cur, schema, table)
+            from services.dfbak_sweeper import (
+                backup_comment,
+                parse_backup_comment,
+                sweep_pg_backups,
+            )
+
+            # DATA-13: obsolete backups killed runs left in this schema.
+            sweep_pg_backups(cur, schema, keep_job=str(job_id or ""))
+            cur.execute("SELECT obj_description(to_regclass(%s), 'pg_class')", (bak_ref,))
+            prior = parse_backup_comment((cur.fetchone() or [None])[0])
+            if prior is not None and prior[0] == str(job_id or ""):
+                # An earlier attempt of this job was killed before it settled:
+                # its backup is the true pre-run image, and the live table may
+                # be half-written. Keep it; never recopy over it.
+                return {"table": table, "backup": backup, "schema": schema}
             cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
             cur.execute(f"CREATE TABLE {bak_ref} (LIKE {live_ref} INCLUDING ALL)")
             cur.execute(f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")
+            cur.execute("COMMENT ON TABLE " + bak_ref + " IS %s", (backup_comment(str(job_id or "")),))
     except PgBackupRestoreRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - a missing backup must not abort the write
@@ -2769,6 +2800,31 @@ def undo_pg_route_run(
             except Exception as exc:  # noqa: BLE001 - close is best-effort
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return restored
+
+
+def _split_backups(backups: dict[str, dict[str, str]]) -> tuple[dict, dict]:
+    mysql = {k: v for k, v in (backups or {}).items() if (v or {}).get("engine") == "mysql"}
+    return mysql, {k: v for k, v in (backups or {}).items() if k not in mysql}
+
+
+def restore_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str, str]]) -> list[str]:
+    """Restore PostgreSQL and MySQL (DATA-5) strict-run backups alike."""
+    from connectors.mysql_route_backup import restore_mysql_route_backups
+
+    mysql, pg = _split_backups(backups)
+    return (restore_pg_route_backups(cfg, pg) if pg else []) + (
+        restore_mysql_route_backups(cfg, mysql) if mysql else []
+    )
+
+
+def discard_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str, str]]) -> None:
+    from connectors.mysql_route_backup import discard_mysql_route_backups
+
+    mysql, pg = _split_backups(backups)
+    if pg:
+        discard_pg_route_backups(cfg, pg)
+    if mysql:
+        discard_mysql_route_backups(cfg, mysql)
 
 
 def discard_pg_route_backups(

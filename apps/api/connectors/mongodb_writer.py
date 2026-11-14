@@ -998,7 +998,7 @@ def write_mapped_rows(
                 from connectors.sql_bind import coerce_decimal_wire
 
                 coerced = coerce_decimal_wire(value, ddl_type=upper or "DECIMAL")
-                return Decimal128(str(coerced))
+                return _exact_decimal128(coerced)
             if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 from decimal import Decimal
 
@@ -1620,6 +1620,8 @@ def write_mapped_rows(
                 mapped_rows,
                 target_cols,
                 dest_db_type="mongodb",
+                # DATA-11: a document column's JSON null is stored as null.
+                dest_types={c: t for c, t in (dest_types or {}).items() if _is_document_type(t)},
             ),
             chunks_completed=chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
@@ -1662,3 +1664,29 @@ def write_mapped_rows(
             rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
             warnings=transform_errors if "transform_errors" in locals() else [],
         )
+
+
+def _is_document_type(type_text: Any) -> bool:
+    """A column the writer stores as a document value (JSON / object / array)."""
+    text = str(type_text or "").strip().lower()
+    return "json" in text or text in {"object", "document", "array", "struct", "map"}
+
+
+def _exact_decimal128(value: Any) -> Any:
+    """Decimal128 that holds ``value`` exactly, or a ValueError the policy holds out.
+
+    DATA-17: Decimal128 keeps 34 significant digits. A 38-digit decimal raised
+    the driver's bare ``decimal.Inexact`` after Validate had passed.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from bson.decimal128 import Decimal128
+
+    try:
+        return Decimal128(str(value))
+    except (InvalidOperation, ArithmeticError) as exc:
+        digits = len(Decimal(str(value)).as_tuple().digits)
+        raise ValueError(
+            f"MongoDB Decimal128 holds 34 significant digits; {value} has {digits}, so it "
+            "can't be stored exactly — map the field as text, or quarantine these rows"
+        ) from exc
