@@ -45,7 +45,7 @@ from ..transfer.connector_registry import run_probe
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 from services.ops_events import emit_event
 from services.execution_engine_contract import job_contract_flags
-from services.safe_errors import coded_http_exception, safe_http_exception
+from services.safe_errors import coded_http_exception, run_failure_http_exception, safe_http_exception
 
 logger = logging.getLogger(__name__)
 
@@ -3035,7 +3035,10 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if typed_refusal:
             raise HTTPException(status_code=409, detail=typed_refusal) from e
-        raise safe_http_exception(e, event="connectors.replay_job_quarantine.failed", public_message="Couldn't replay the quarantined rows.", status_code=500) from e
+        # A refused replay is a failed run: the job record's words, with a reference.
+        raise run_failure_http_exception(
+            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write"
+        ) from e
 
 
 @router.get("/{connector_id}")

@@ -134,7 +134,7 @@ TEMPLATES: dict[str, Template] = {
     ),
     "access.database_not_granted": Template(
         "Database not available to this user",
-        "{engine} denied this user access to database{db}: it doesn't exist or the user has no grant on it.",
+        "{engine} denied this user access to database{db}: it does not exist or the user has no grant on it.",
         "Check the database name on the connection, or grant the user access to it.",
         "open_connection", _EDIT_API,
     ),
@@ -196,19 +196,19 @@ TEMPLATES: dict[str, Template] = {
     # -- object -------------------------------------------------------------
     "object.database_not_found": Template(
         "Database not found",
-        "Database{db} doesn't exist on this {engine} server.",
+        "Database{db} does not exist on this {engine} server.",
         "Check the database name on the connection.",
         "open_connection", _EDIT_API,
     ),
     "object.schema_not_found": Template(
         "Schema not found",
-        "Schema{s} doesn't exist{side_on}.",
+        "Schema{s} does not exist{side_on}.",
         "Check the schema name on the connection (names can be case-sensitive), or create the schema.",
         "open_connection", _EDIT_API,
     ),
     "object.table_not_found": Template(
         "Table not found",
-        "Table{t} doesn't exist{side_on}.",
+        "Table{t} does not exist{side_on}.",
         "Check the table name.",
         "open_connection",
         side_actions={
@@ -219,13 +219,13 @@ TEMPLATES: dict[str, Template] = {
     ),
     "object.table_not_visible": Template(
         "Table not visible",
-        "Table{t} isn't visible to this connection: it doesn't exist, or the connection's role has no privilege on it.",
+        "Table{t} isn't visible to this connection: it does not exist, or the connection's role has no privilege on it.",
         "Check the table name, or grant the connection's role SELECT on it.",
         "open_connection",
     ),
     "object.column_not_found": Template(
         "Column not found",
-        "Column{c} doesn't exist{in_t}{side_on}.",
+        "Column{c} does not exist{in_t}{side_on}.",
         "Check the column name.",
         "open_map",
         side_actions={
@@ -236,7 +236,7 @@ TEMPLATES: dict[str, Template] = {
     ),
     "object.collection_not_found": Template(
         "Collection not found",
-        "Collection{t} doesn't exist in this MongoDB database.",
+        "Collection{t} does not exist in this MongoDB database.",
         "Check the collection name.",
         "open_connection",
     ),
@@ -316,7 +316,7 @@ TEMPLATES: dict[str, Template] = {
     ),
     "value.fk_violation": Template(
         "Missing referenced row",
-        "A row refers to a key that doesn't exist{in_k}{in_t}.",
+        "A row refers to a key that does not exist{in_k}{in_t}.",
         "Load the referenced table first, or remove the foreign key, then run again.",
         "open_map",
     ),

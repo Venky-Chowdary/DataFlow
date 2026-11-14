@@ -238,7 +238,7 @@ def test_err14_a_database_named_auth_is_not_an_authentication_failure(client):
                                                      "database": "auth"})
     message = r.json()["message"]
     assert "Authentication failed" not in message and "password is wrong" not in message, message
-    assert 'Database "auth" doesn\'t exist' in message, message
+    assert 'Database "auth" does not exist' in message, message
 
 
 def test_err15_mysql_unknown_database_does_not_blame_the_password(client):
@@ -342,7 +342,7 @@ def test_err25_err26_schemas_route_says_when_the_connection_failed(pg_objects, c
     body = client.post("/api/v1/query/schema", json={"connector_id": good.id,
                                                      "schema_name": f"w3err_rt_noschema_{TOK}"}).json()
     assert "0 tables" not in body.get("message", ""), body
-    assert "doesn't exist" in body.get("message", ""), body
+    assert "does not exist" in body.get("message", ""), body
 
 
 def test_err27_full_disk_export_says_so_and_leaves_no_file(pg_objects, client, monkeypatch):

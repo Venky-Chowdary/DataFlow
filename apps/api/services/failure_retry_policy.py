@@ -159,8 +159,8 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
 # classified with the credential refusals above.
 _MISSING_RELATION_RES: tuple[re.Pattern[str], ...] = (
     # services.error_taxonomy copy for object.table_not_found / table_not_visible.
-    re.compile(r'\btable "([^"]+)" (?:doesn\'t exist|isn\'t visible)', re.I),
-    re.compile(r'\bcollection "([^"]+)" doesn\'t exist', re.I),
+    re.compile(r'\btable "([^"]+)" (?:does not exist|doesn\'t exist|isn\'t visible)', re.I),
+    re.compile(r'\bcollection "([^"]+)" (?:does not exist|doesn\'t exist)', re.I),
     re.compile(r'relation "([^"]+)" does not exist', re.I),
     re.compile(r"table '([^']+)' doesn't exist", re.I),
     re.compile(r"no such table: ([^\s,;]+)", re.I),

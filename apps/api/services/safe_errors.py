@@ -239,3 +239,31 @@ def failure_fields(message: Any, *, engine: str = "", side: str = "connection", 
     }
     envelope["message"] = str(message or envelope.get("message") or "")
     return {"error": envelope, "reference": cid}
+
+
+def run_failure_http_exception(
+    exc: BaseException,
+    *,
+    status_code: int = 422,
+    event: str,
+    side: str = "",
+    phase: str = "",
+) -> HTTPException:
+    """A failed run answered over HTTP in the job record's words (``humanize_transfer_failure``)."""
+    from services.error_handling import humanize_transfer_failure
+
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    emit_event(_LOG, event, outcome="failed", level=logging.WARNING, error=exc,
+               correlation_id=cid, http_status=status_code)
+    human = humanize_transfer_failure(exc, side=side, phase=phase)
+    text = " ".join(p for p in (str(human.get("message") or ""), str(human.get("fix") or "")) if p)
+    envelope = {
+        "error": {
+            "code": human.get("code"), "title": human.get("title"), "message": human.get("message"),
+            "action": human.get("action") or {"label": human.get("fix") or "", "ui": "", "api": ""},
+            "object": human.get("object") or {}, "retriable": bool(human.get("retriable")),
+            "reference": cid,
+        },
+        "detail": f"{text} Reference: {cid}",
+    }
+    return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})
