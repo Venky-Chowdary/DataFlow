@@ -30,6 +30,7 @@ import {
   getActiveWorkspaceId,
   isKnownWorkspaceChoice,
   landingWorkspaceId,
+  memberCountLabel,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
@@ -483,7 +484,7 @@ export function TeamSettings() {
                 {workspaces.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
-                    {typeof w.member_count === "number" ? ` — ${w.member_count} member(s)` : ""}
+                    {typeof w.member_count === "number" ? ` · ${memberCountLabel(w.member_count)}` : ""}
                   </option>
                 ))}
               </select>
