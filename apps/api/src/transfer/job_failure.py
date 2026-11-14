@@ -122,12 +122,32 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
         update["streams"] = streams
 
 
-def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
+def _failure_side(exc: Exception, request: Any) -> str:
+    """Which end raised ``exc``: the reader/writer tag, else the table it names.
+
+    Readers and writers tag what they raise (``error_taxonomy.failure_side``).
+    An untagged driver error that names exactly one of the run's tables is
+    attributed to that end; anything else stays unattributed rather than
+    guessed (ERR-1: a source SELECT denial was reported as a destination write).
+    """
+    tagged = str(getattr(exc, "datawrap_side", "") or "")
+    if tagged or request is None:
+        return tagged
+    text = str(exc)
+    ends = []
+    for side, endpoint in (("source", getattr(request, "source", None)), ("destination", getattr(request, "destination", None))):
+        table = str(getattr(endpoint, "table", "") or "").split(".")[-1].strip('"`[]')
+        if table and re.search(rf"(?<![\w]){re.escape(table)}(?![\w])", text):
+            ends.append(side)
+    return ends[0] if len(ends) == 1 else ""
+
+
+def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build error_details + top-level job fields for a failed transfer."""
     from services.error_handling import humanize_transfer_failure
 
     classification = classify_error(exc)
-    human = humanize_transfer_failure(exc)
+    human = humanize_transfer_failure(exc, side=_failure_side(exc, request))
     details: dict[str, Any] = {
         "retriable": classification.get("retriable"),
         "evidence": classification.get("evidence"),
@@ -139,6 +159,9 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "message": human.get("message"),
         "confidence": human.get("confidence"),
     }
+    for key in ("action", "object", "driver", "side"):
+        if human.get(key):
+            details[key] = human[key]
     stamped = getattr(exc, "failure_details", None)
     if isinstance(stamped, dict):
         details.update(stamped)
@@ -622,7 +645,7 @@ def _fail_runtime_job(
     status = "cancelled" if cancelled else "failed"
     if cancelled:
         _release_cancelled_cdc_slot(mongo, job_id, request, identity=capture)
-    error_details, lease_extras = _job_failure_fields(exc)
+    error_details, lease_extras = _job_failure_fields(exc, request)
     prev = {}
     try:
         prev = mongo.get_job(job_id) or {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.error_taxonomy import failure_side
 import logging
 import re
 import sys
@@ -18,16 +19,12 @@ if str(_API_ROOT) not in sys.path:
 
 try:
     from services.file_parser import FileParser
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.file_parser import FileParser
 
 try:
     from services.mongodb_service import get_mongodb_service
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
@@ -874,6 +871,7 @@ def _pack_source_read(
     return records, headers, schema
 
 
+@failure_side("source", "read")
 def read_source_database(
     endpoint: EndpointConfig,
     *,
@@ -1451,6 +1449,7 @@ def read_source_database(
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
+@failure_side("destination", "write")
 def write_destination_database(
     endpoint: EndpointConfig,
     records: list[dict],

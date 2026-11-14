@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.error_taxonomy import failure_side
 import sys
 import threading
 import time
@@ -201,6 +202,7 @@ def _first_page_message(run: Any) -> str:
     )
 
 
+@failure_side("source", "read")
 def _read_batch(*args, **kwargs):
     """Retry transient source-read errors without leaking partial state."""
     budget = RetryBudget(

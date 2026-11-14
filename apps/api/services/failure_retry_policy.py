@@ -283,6 +283,44 @@ def classify_failure(
     )
 
 
+_TRANSIENT_CODES = frozenset({
+    "network.refused", "network.unreachable", "network.connect_timeout", "network.connection_lost",
+    "timeout.lock", "timeout.deadlock", "capacity.connection_limit", "capacity.quota",
+    "platform.job_store_unavailable", "platform.gateway_timeout", "platform.internal",
+})
+#: Families a later attempt cannot repair: the configuration or the data must change.
+_DETERMINISTIC_FAMILIES = ("auth.", "access.", "config.", "query.", "value.")
+_DETERMINISTIC_CODES = frozenset({
+    "object.database_not_found", "object.schema_not_found", "object.column_not_found",
+    "object.file_not_found", "network.dns_not_found", "network.tls_required",
+    "network.tls_untrusted", "network.egress_blocked", "capacity.disk_full", "capacity.table_full",
+})
+
+
+def classify_error_code(code: Any) -> RetryClassification | None:
+    """Decide on the job's taxonomy code (``services.error_taxonomy``), or ``None``.
+
+    The job's ``error`` is user copy from the taxonomy's template table; the
+    code is the stable fact. A missing table is left to the scheduler, which
+    holds the source table name (a table can be mid-swap).
+    """
+    key = str(code or "")
+    if key in _TRANSIENT_CODES:
+        return RetryClassification(kind=TRANSIENT, reason="Operational fault — a later attempt may succeed.")
+    if key in _DETERMINISTIC_CODES or key.startswith(_DETERMINISTIC_FAMILIES):
+        from services.error_taxonomy import TEMPLATES
+
+        action = TEMPLATES[key].action if key in TEMPLATES else ""
+        if key.startswith(("auth.", "access.")):
+            action = f"Credentials or grants are rejected — fix them on the connector. {action}".strip()
+        return RetryClassification(
+            kind=DETERMINISTIC,
+            reason="This failure repeats until the configuration or data changes — retrying replays it.",
+            corrective_action=action,
+        )
+    return None
+
+
 #: What a continuity refusal (code DESTINATION_CONTINUITY) tells the operator.
 CONTINUITY_CORRECTIVE = (
     "Recover the destination: rebaseline it (accept it as it is now, or accept "
@@ -321,6 +359,10 @@ def classify_job_failure(job: Mapping[str, Any] | None) -> RetryClassification:
             ),
             corrective_action=CONTINUITY_CORRECTIVE,
         )
+    details = doc.get("error_details") if isinstance(doc.get("error_details"), Mapping) else {}
+    by_code = classify_error_code(doc.get("error_code") or details.get("code"))
+    if by_code is not None:
+        return by_code
     preflight = doc.get("preflight") if isinstance(doc.get("preflight"), Mapping) else {}
     blockers = preflight.get("blockers") if isinstance(preflight, Mapping) else None
     return classify_failure(
