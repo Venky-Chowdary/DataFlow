@@ -110,3 +110,16 @@ def test_source_truncate_empties_the_destination(dest_kind, tmp_path):
         if dest_kind == "mysql":
             live.drop_my(dst)
         live.drop_cdc_artifacts(src)
+
+
+def test_only_a_declared_delete_mode_off_explains_destination_extras():
+    """The r13 contract: delete_mode=off keeps leftovers on purpose and says so."""
+    from src.transfer.reconcile_step import _declared_off_leftover
+
+    kept = {"status": "kept", "delete_mode": "off", "declared": True, "leftover": 1}
+    assert _declared_off_leftover({"snapshot_leftover": kept}, "t") == 1
+    assert _declared_off_leftover({"snapshot_leftover": {"t": kept}}, "t") == 1
+    assert _declared_off_leftover({"snapshot_leftover": {**kept, "declared": False}}, "t") == 0
+    assert _declared_off_leftover({"snapshot_leftover": {**kept, "delete_mode": "hard"}}, "t") == 0
+    assert _declared_off_leftover({"snapshot_leftover": {**kept, "status": "unmeasured"}}, "t") == 0
+    assert _declared_off_leftover({}, "t") == 0
