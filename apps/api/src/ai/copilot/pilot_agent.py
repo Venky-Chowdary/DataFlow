@@ -19,7 +19,7 @@ from typing import Any
 from services.tracing import submit_in_context
 from services.value_serializer import json_default
 from services.workspace_filter import current_actor
-from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
+from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .answer_contract import RenderTracker, result_used
 from .pilot_egress import history_for_model, model_payload, narration_allowed
@@ -4364,10 +4364,10 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             "Show my recent jobs",
             "What can you do?",
         ])
-        # Keep a couple of curated domain prompts after the proven ones.
-        for extra in (SUGGESTED_PROMPTS or [])[:2]:
-            if extra not in prompts and "logistics" not in extra.lower():
-                prompts.append(extra)
+        # UX-18: the curated domain prompts name demo connections ("Local
+        # Postgres", "Warehouse") this workspace may not have; offered as a
+        # starter they dead-ended. Only prompts grounded in this workspace's
+        # own datasets and connectors are suggested.
         return prompts
 
 

@@ -13,7 +13,7 @@ import {
   formatPilotReachError,
   ModelCapabilities,
 } from "../lib/api";
-import { AUTOMATION_IDEAS } from "../lib/automationIdeas";
+import { WORKSPACE_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import {
   applyPilotSafeActions,
@@ -128,7 +128,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     }
   }, [session.messages.length, loading]);
 
-  const ideas = AUTOMATION_IDEAS;
+  const ideas = WORKSPACE_IDEAS;
 
   const applySafeActions = (
     actions?: CopilotAction[],
@@ -467,7 +467,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <>
                   <p className="df2-section-label">Suggested prompts</p>
                   <div className="df2-pilot-quick">
-                    {uniquePilotPrompts(prompts).slice(0, 4).map((p) => (
+                    {uniquePilotPrompts(prompts).filter((p) => !ideas.some((idea) => idea.prompt === p)).slice(0, 4).map((p) => (
                       <button key={p} type="button" onClick={() => send(p)}>{p}</button>
                     ))}
                   </div>
@@ -537,7 +537,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           <div className="df2-pilot-composer-bar">
             <textarea
               rows={started ? 2 : 3}
-              placeholder={started ? "Follow up — summarize that, or ask what to do next…" : "Give me a workspace briefing, count airports, plan a transfer…"}
+              placeholder={started ? "Follow up — summarize that, or ask what to do next…" : "Give me a workspace briefing, list tables on a connection, plan a transfer…"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
