@@ -1618,6 +1618,10 @@ def _read_destination_sample(
                     except Exception:
                         pass
 
+        if db_type == "generic_sql":  # GSQL-G8-1: any other SQLAlchemy engine
+            from services.target_sample_generic import read_generic_sql_sample
+            return read_generic_sql_sample(dest, schema=schema, table_name=table_name, cols=list(cols), keys=list(keys),
+                                           keys_has_null=_keys_has_null, sort_key=sort_key, limit=limit)
     except TargetSampleUnavailable:
         raise
     except Exception as exc:
