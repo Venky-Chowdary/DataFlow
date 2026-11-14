@@ -498,21 +498,17 @@ def run_file_preflight(
             # contract the remediation for a grant the role does not have.
             from services.preflight_sample import source_read_is_privilege_denial
 
-            if source_read_is_privilege_denial(sample_unavailable_reason):
-                source_error = (
-                    "SELECT was denied on this table. Columns visible in the catalog "
-                    "are not a readable source. Grant SELECT to the connector role, "
-                    f"then re-validate. ({sample_unavailable_reason})"
-                )
-            elif engine_sample.read_failed:
+            if engine_sample.read_failed or source_read_is_privilege_denial(sample_unavailable_reason):
                 # QA MX3-22: G1 said "Source readable — N columns" beside a
-                # reader that had just raised. Catalog metadata is not a
-                # readable source; the probe failure is the G1 finding.
-                source_error = (
-                    "The source catalog lists this table but Execute's reader "
-                    "could not read rows from it. Fix the source read (connection, "
-                    f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
-                )
+                # reader that had just raised. The classified read failure is
+                # the G1 finding (ERR-32: it no longer claims the catalog lists
+                # the table); dependent gates wait on it instead of repeating
+                # it (ERR-31).
+                from services.error_taxonomy import classify as _classify
+
+                _named = _classify(sample_unavailable_reason, side="source", phase="read", fallback=False)
+                source_error = _named.text if _named is not None else sample_unavailable_reason
+                sample_unavailable_reason = "not run: waiting on Source (G1)"
     # A measured COUNT(*) of 0 is the population. Requiring a sample row
     # blocked an empty table whose catalog count was already 0 (R8-005).
     # A failed read still blocks — a count of 0 does not excuse a grant error.
@@ -1098,6 +1094,11 @@ def run_file_preflight(
         except Exception as fit_exc:
             pre_gate_fit_error = str(fit_exc)[:400]
             logger.warning("pre-gate population fit scan failed: %s", fit_exc, exc_info=fit_exc)
+        if source_error and pre_gate_fit_error and getattr(pre_gate_fit_report, "probe_error", ""):
+            # ERR-31: G1 already names this read failure; the fit gate waits on it.
+            from dataclasses import replace as _dc_replace
+
+            pre_gate_fit_report = _dc_replace(pre_gate_fit_report, probe_error="not run: waiting on Source (G1)")
     from services.population_fit_narrowing import proven_width_narrowings
 
     proven_string_narrowings = proven_width_narrowings(

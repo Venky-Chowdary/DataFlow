@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from services import mfa
 from services.admin_audit import record_admin_change
 from services.audit_coverage import record_security_event, session_label
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 admin_router = APIRouter(prefix="/iam", tags=["IAM"])
@@ -387,7 +388,7 @@ def login_mfa(body: ChallengeBody, request: Request):
 
         token, expires_at = create_token(email, amr=["pwd", method], **session_client(request))
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="mfa.login_mfa.failed", public_message="Sign-in is temporarily unavailable.", status_code=503) from exc
     jti = token_jti(token)
     record_security_event(
         "auth.mfa.challenge.passed",

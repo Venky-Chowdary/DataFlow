@@ -122,12 +122,32 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
         update["streams"] = streams
 
 
-def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
+def _failure_side(exc: Exception, request: Any) -> str:
+    """Which end raised ``exc``: the reader/writer tag, else the table it names.
+
+    Readers and writers tag what they raise (``error_taxonomy.failure_side``).
+    An untagged driver error that names exactly one of the run's tables is
+    attributed to that end; anything else stays unattributed rather than
+    guessed (ERR-1: a source SELECT denial was reported as a destination write).
+    """
+    tagged = str(getattr(exc, "datawrap_side", "") or "")
+    if tagged or request is None:
+        return tagged
+    text = str(exc)
+    ends = []
+    for side, endpoint in (("source", getattr(request, "source", None)), ("destination", getattr(request, "destination", None))):
+        table = str(getattr(endpoint, "table", "") or "").split(".")[-1].strip('"`[]')
+        if table and re.search(rf"(?<![\w]){re.escape(table)}(?![\w])", text):
+            ends.append(side)
+    return ends[0] if len(ends) == 1 else ""
+
+
+def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build error_details + top-level job fields for a failed transfer."""
     from services.error_handling import humanize_transfer_failure
 
     classification = classify_error(exc)
-    human = humanize_transfer_failure(exc)
+    human = humanize_transfer_failure(exc, side=_failure_side(exc, request))
     details: dict[str, Any] = {
         "retriable": classification.get("retriable"),
         "evidence": classification.get("evidence"),
@@ -139,17 +159,28 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "message": human.get("message"),
         "confidence": human.get("confidence"),
     }
+    for key in ("action", "object", "driver", "side", "legacy_code"):
+        if human.get(key):
+            details[key] = human[key]
     stamped = getattr(exc, "failure_details", None)
     if isinstance(stamped, dict):
         details.update(stamped)
     # Prefer operator-facing message for job.error / SSE while keeping raw in details.
+    operator_error = human.get("message")
+    if human.get("action"):
+        # A taxonomy failure reads the same on the job, in the schedule
+        # notification, the email and Pilot: its message and its one action.
+        operator_error = f"{human.get('message')} {human.get('fix')}".strip()
     extras: dict[str, Any] = {
         "error_code": human.get("code"),
         "error_title": human.get("title"),
         "error_fix": human.get("fix"),
         "error_confidence": human.get("confidence"),
-        "operator_error": human.get("message"),
+        "operator_error": operator_error,
     }
+    if human.get("legacy_code"):
+        # Deprecated, one release: the pre-taxonomy code (error_details.legacy_code too).
+        extras["error_legacy_code"] = human["legacy_code"]
     dropped = str(getattr(exc, "destination_table_dropped", "") or "")
     if dropped:
         from services.error_handling import ROWS_STAY_NOTE
@@ -622,7 +653,7 @@ def _fail_runtime_job(
     status = "cancelled" if cancelled else "failed"
     if cancelled:
         _release_cancelled_cdc_slot(mongo, job_id, request, identity=capture)
-    error_details, lease_extras = _job_failure_fields(exc)
+    error_details, lease_extras = _job_failure_fields(exc, request)
     prev = {}
     try:
         prev = mongo.get_job(job_id) or {}
@@ -970,7 +1001,7 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
-    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_fix
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_action
 
     if any(
         isinstance(b, dict)
@@ -981,9 +1012,14 @@ def _fail_job_preflight(
         # D170: the run was refused whole; say how to load the valid rows.
         # QA r12 D2: the job is failing, so the way out is a retry — name the
         # tool and REST field that accept the acceptance for a failed job.
-        fix = quarantine_retry_fix(job_id)
+        # ERR-33: the job's words are the UI action; the MCP / REST form is
+        # the action's ``api`` and ``remediation_api``.
+        action = quarantine_retry_action(job_id)
+        fix = action["label"]
         error_message = f"{error_message.rstrip('. ')}. {fix}."
         error_details["remediation"] = fix
+        error_details["remediation_api"] = action["api"]
+        error_details["action"] = action
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from services.api_errors import ApiError
 from services.rbac import require_admin_connector_access, require_admin_for_endpoints
 from src.services import auth_service
+from services.safe_errors import safe_http_exception
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
@@ -460,7 +461,10 @@ async def _run_lifecycle_confirm(
         try:
             closing = workspace_closing(repair_workspace_id, fail_closed=True)
         except WorkspaceStateUnavailable as exc:
-            raise HTTPException(status_code=503, detail={"kind": "store_unavailable", "message": str(exc)}) from exc
+            raise safe_http_exception(
+                exc, event="copilot.workspace_state.unavailable",
+                public_message="Workspace state is unavailable right now.", status_code=503,
+            ) from exc
         if closing:
             # A repair writes to the workspace's destination (review 6).
             raise HTTPException(status_code=409, detail="This workspace is being deleted")

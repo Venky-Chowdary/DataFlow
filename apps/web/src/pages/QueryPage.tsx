@@ -297,7 +297,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       const seq = ++runSeq.current;
       const isCurrent = () => seq === runSeq.current;
       setQueryLoading(true);
-      setResult(null);
+      // UX-37: a failed run keeps the previous result on screen; a success replaces it.
       setExportResult(null);
       const startedAt = Date.now();
       try {
@@ -346,19 +346,14 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           saveHistory(next, workspaceId);
           return next;
         });
-        const dialectHint = /dialect|pymysql|psycopg|driver/i.test(message);
-        toast({
-          title: "Query failed",
-          message: dialectHint
-            ? `${message} Check that the ${selected?.type || "SQL"} connector driver is installed in the API environment.`
-            : message,
-          tone: "error",
-        });
+        // The API names the cause and the one next action (error.code); the
+        // page adds nothing guessed from the text. The reference renders as a chip.
+        toast({ title: "Query failed", message, tone: "error" });
       } finally {
         if (isCurrent()) setQueryLoading(false);
       }
     },
-    [active, paramsForRequest, selected?.name, selected?.type, toast, workspaceId],
+    [active, paramsForRequest, selected?.name, toast, workspaceId],
   );
 
   const runAll = useCallback(() => {

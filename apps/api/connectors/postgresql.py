@@ -69,8 +69,24 @@ def test_postgresql(
                     (schema_name,),
                 )
                 total = int((cur.fetchone() or [len(tables)])[0])
+            schema_missing = False
+            if not tables:
+                # ERR-26: "0 tables" for a schema that does not exist hid the cause.
+                cur.execute("SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema_name,))
+                schema_missing = cur.fetchone() is None
 
         conn.close()
+        if schema_missing:
+            from services.error_taxonomy import DatawrapError, classify
+
+            named = classify(
+                DatawrapError("object.schema_not_found", object={"schema": schema_name}),
+                side="connection", engine="postgresql",
+            )
+            return ConnectResult(
+                ok=True, tables=[], message=named.text if named else "", driver="psycopg2",
+                tables_truncated=False, table_types={},
+            )
         if truncated:
             message = (
                 f"PostgreSQL connected — {total} tables in schema '{schema_name}' "

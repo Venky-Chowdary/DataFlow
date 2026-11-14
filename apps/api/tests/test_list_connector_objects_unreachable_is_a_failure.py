@@ -47,7 +47,10 @@ def test_a_driver_timeout_is_reported_as_a_failure(monkeypatch, connector):
     })
     assert not result.success, result
     assert "unreachable-pg-lco" in result.error and "Timeout of 2.0s exceeded" in result.error
-    assert result.output == {"connector_name": "unreachable-pg-lco", "connected": False}
+    # ERR-22: the output also carries the reason, so Pilot's run_query can report it.
+    assert {k: v for k, v in result.output.items() if k != "message"} == {
+        "connector_name": "unreachable-pg-lco", "connected": False}
+    assert "Timeout of 2.0s exceeded" in result.output["message"]
 
 
 def test_an_empty_reachable_connector_still_lists_nothing_successfully(monkeypatch, connector):

@@ -73,9 +73,11 @@ def test_oracle_connection_test_gives_up_at_the_connect_timeout(black_hole):
     took = time.monotonic() - started
     assert not ok
     assert took < 2 + _SLACK, (took, msg)
-    assert msg.startswith(f"Handshake timed out (127.0.0.1:{black_hole}): the server accepted "
+    # W3 error taxonomy: the copy names the connection, never its host:port.
+    assert msg.startswith("Handshake timed out: the server accepted "
                           "the TCP connection but did not answer the database handshake "
                           "within 2 seconds"), msg
+    assert str(black_hole) not in msg.split(" Driver: ")[0], msg
 
 
 def test_oracle_engine_connect_outside_a_tool_call_is_bounded_too(black_hole):

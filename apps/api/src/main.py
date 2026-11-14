@@ -24,7 +24,7 @@ from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable
 from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
-from services.safe_errors import public_error
+from services.safe_errors import EnvelopeHTTPException, public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
 from services.data_residency import ResidencyRefused
@@ -476,7 +476,19 @@ _redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
     title="Datawrap API",
-    description="Universal Data Transfer Platform API",
+    description=(
+        "Universal Data Transfer Platform API\n\n"
+        "**Errors.** A failure carries `{error: {code, message, action: {label, ui, api}, "
+        "object, retriable, reference}, detail}`; `detail` stays a string. Failed jobs "
+        "carry the same `code` as `error_code` and `error_details.code`.\n\n"
+        "**Deprecated: `legacy_code`.** For one release, `error.legacy_code`, "
+        "`error_details.legacy_code` and the job's `error_legacy_code` repeat the "
+        "pre-taxonomy code a taxonomy code replaced: `destination_permission_denied` "
+        "(now `access.*`), `destination_column_missing` (`object.column_not_found`), "
+        "`table_not_found` (`object.table_not_found`), `destination_lock_timeout` "
+        "(`timeout.lock`), `transfer_failed` (`unclassified`), and the "
+        "`destination_*` capacity / CHECK codes. Key on `code`; `legacy_code` will be removed."
+    ),
     version="1.0.0",
     docs_url=_docs,
     redoc_url=_redoc,
@@ -993,6 +1005,16 @@ async def api_info():
 @app.exception_handler(ApiError)
 async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
+
+
+@app.exception_handler(EnvelopeHTTPException)
+async def error_envelope_handler(request: Request, exc: EnvelopeHTTPException):
+    """``{error: {code, message, action, object, retriable, reference}, detail}``."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.envelope,
+        headers=dict(exc.headers or {}),
+    )
 
 
 @app.exception_handler(DuplicateTransferSubmission)

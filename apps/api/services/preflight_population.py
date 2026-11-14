@@ -497,7 +497,7 @@ def scan_existing_table_population_fit(
                 source_table,
                 walk_exc,
             )
-            population_walk_error = str(walk_exc)[:400]
+            population_walk_error = _walk_error_copy(walk_exc, source_table)
             table_rows = None
         if table_rows is not None:
             table_rows = iter(table_rows)
@@ -512,7 +512,7 @@ def scan_existing_table_population_fit(
                     source_table,
                     walk_exc,
                 )
-                population_walk_error = str(walk_exc)[:400]
+                population_walk_error = _walk_error_copy(walk_exc, source_table)
             else:
                 def chained():
                     yield first
@@ -651,3 +651,11 @@ def scan_existing_table_population_fit(
         if widen is not None:
             fit_report = widen.report
     return fit_report, population_walk_error, population_rows, rows_are_population, resolved_filter
+
+
+def _walk_error_copy(exc: BaseException, table: Any) -> str:
+    """ERR-9: a failed population walk is named by the taxonomy, never by its SQL."""
+    from services.error_taxonomy import classify
+
+    named = classify(exc, side="source", phase="read", object={"table": str(table or "")})
+    return named.text if named is not None else "the source read failed"

@@ -42,6 +42,7 @@ from services.workspace_access import (
     resolve_write_workspace,
     tenant_scope,
 )
+from services.safe_errors import classified_http_exception
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
 
@@ -1175,10 +1176,12 @@ async def accept_source_schema(
             _apply_callable_schedule_source(endpoint, sched)
             info = _probe_source_schema_timed(endpoint)
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
+            raise classified_http_exception(
+                exc, side="source", phase="introspect", status_code=504, event="schedules.accept_source_schema.timeout"
+            ) from exc
         except Exception as exc:
-            raise HTTPException(
-                status_code=502, detail=f"Could not read the source schema: {exc}"
+            raise classified_http_exception(
+                exc, side="source", phase="introspect", status_code=502, event="schedules.accept_source_schema.failed"
             ) from exc
         schema = _flat_schema_map(info.get("schema"))
         columns = [str(c) for c in (info.get("columns") or schema.keys())]

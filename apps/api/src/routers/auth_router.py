@@ -31,6 +31,7 @@ from ..services.auth_service import (
     public_user,
     revoke_token,
 )
+from services.safe_errors import safe_http_exception
 
 try:
     from services import oidc_client
@@ -1019,7 +1020,7 @@ def login(body: LoginRequest, request: Request):
     try:
         user = pre_authenticated or authenticate(body.email, body.password)
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="auth.login.failed", public_message="Sign-in is temporarily unavailable.", status_code=503) from exc
     if not user:
         # Flag-on: a pending (unverified) signup gets a fresh code and a 403 —
         # never a session. Banned/disabled/unknown all keep the neutral 401.
@@ -1084,7 +1085,7 @@ def login(body: LoginRequest, request: Request):
     try:
         token, expires_at = create_token(user["email"], amr=["pwd"], **session_client(request))
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="auth.login.failed", public_message="Sign-in is temporarily unavailable.", status_code=503) from exc
     try:
         from services.audit_coverage import record_security_event, session_label
         from src.services.auth_service import token_jti

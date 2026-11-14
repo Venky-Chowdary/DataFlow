@@ -15,6 +15,7 @@ from ..ai import (
     analyze_schema,
     generate_mappings,
 )
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/ai", tags=["AI Semantic Engine"])
 
@@ -186,7 +187,7 @@ async def api_analyze_column(request: ColumnAnalysisRequest):
             warnings=result.warnings,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_column.failed", public_message="Column analysis failed.", status_code=500)
 
 
 @router.post("/analyze/schema", response_model=SchemaAnalysisResponse)
@@ -235,7 +236,7 @@ async def api_analyze_schema(request: SchemaAnalysisRequest):
             recommendations=result.recommendations,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_schema.failed", public_message="Schema analysis failed.", status_code=500)
 
 
 @router.post("/map", response_model=MappingResponse)
@@ -293,7 +294,7 @@ async def api_generate_mappings(request: MappingRequest):
             overall_confidence=round(overall_confidence, 3),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_generate_mappings.failed", public_message="Mapping suggestions failed.", status_code=500)
 
 
 @router.post("/detect-pii", response_model=PIIDetectionResponse)
@@ -336,7 +337,7 @@ async def api_detect_pii(request: PIIDetectionRequest):
             compliance_summary=compliance_summary,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_detect_pii.failed", public_message="PII detection failed.", status_code=500)
 
 
 class VectorRoutingRequest(BaseModel):
@@ -377,7 +378,7 @@ async def api_vector_routing(request: VectorRoutingRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_vector_routing.failed", public_message="Vector routing recommendation failed.", status_code=500)
 
 
 def _platform_admin_only(request: Request, permission: str, what: str) -> None:
@@ -403,7 +404,7 @@ async def api_embedding_cache_stats():
         stats.pop("path", None)
         return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_embedding_cache_stats.failed", public_message="Couldn't read the embedding cache status.", status_code=500)
 
 
 @router.delete("/embedding-cache")
@@ -427,7 +428,7 @@ async def api_embedding_cache_clear(
             memory_cleared = clear_memory_cache()
         return {**result, "memory_cleared": memory_cleared}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_embedding_cache_clear.failed", public_message="Couldn't clear the embedding cache.", status_code=500)
 
 
 @router.get("/semantic-types")
@@ -566,9 +567,7 @@ async def api_rag_query(request: RAGQueryRequest):
             grounded=bool(result.get("grounded")),
         )
     except Exception as e:
-        from services.safe_errors import safe_http_exception
-
-        raise safe_http_exception(e, event="ai.rag.query.errored", public_message="Could not answer the query.") from e
+        raise safe_http_exception(e, event="ai.api_rag_query.failed", public_message="The data question couldn't be answered.", status_code=500)
 
 
 @router.post("/rag/ingest", response_model=RAGIngestResponse)
@@ -591,9 +590,7 @@ async def api_rag_ingest(request: RAGIngestRequest, http_request: Request):
             total_documents=status["document_count"],
         )
     except Exception as e:
-        from services.safe_errors import safe_http_exception
-
-        raise safe_http_exception(e, event="ai.rag.ingest.errored", public_message="Could not ingest the schema.") from e
+        raise safe_http_exception(e, event="ai.api_rag_ingest.failed", public_message="Knowledge base ingest failed.", status_code=500)
 
 
 @router.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
@@ -630,7 +627,7 @@ def api_analyze_enhanced(request: EnhancedAnalysisRequest):
             method="chain_of_thought",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_enhanced.failed", public_message="Schema analysis failed.", status_code=500)
 
 
 @router.post("/map/enhanced", response_model=EnhancedMappingResponse)
@@ -665,7 +662,7 @@ def api_map_enhanced(request: EnhancedMappingRequest):
             reasoning=reasoning,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_map_enhanced.failed", public_message="Mapping suggestions failed.", status_code=500)
 
 
 @router.post("/suggest/transforms", response_model=TransformSuggestionResponse)
@@ -690,7 +687,7 @@ async def api_suggest_transforms(request: TransformSuggestionRequest):
             requires_human_accept=True,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_suggest_transforms.failed", public_message="Transform suggestions failed.", status_code=500)
 
 
 @router.get("/models/status", response_model=ModelsStatusResponse)
@@ -711,4 +708,4 @@ async def api_models_status(run_evaluation: bool = False):
             evaluation=evaluation,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_models_status.failed", public_message="Couldn't read the model status.", status_code=500)

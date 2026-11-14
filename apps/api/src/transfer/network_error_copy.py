@@ -65,17 +65,11 @@ _LOGIN_TIMEOUT = re.compile(r"\bhyt00\b|login timeout expired")
 #: Copy whose cause a TCP check of the endpoint can settle (:func:`observed_endpoint_copy`).
 _RECHECKABLE = ("Connection timed out", "Network unreachable", "Handshake timed out")
 
-_PG_ENDPOINT = re.compile(r'connection to server at "([^"]+)"(?:\s*\([^)]*\))?,\s*port (\d+)')
-_MYSQL_HOST = re.compile(r"server on '([^']+)'")
 
 
 def _where(raw: str) -> str:
-    m = _PG_ENDPOINT.search(raw)
-    if m:
-        return f" ({m.group(1)}:{m.group(2)})"
-    m = _MYSQL_HOST.search(raw)
-    if m:
-        return f" ({m.group(1)})"
+    """Never the host or port: a message names the connection, not its address."""
+    del raw
     return ""
 
 
@@ -164,7 +158,8 @@ def observed_endpoint_copy(outcome: str, host: str, port: int, seconds: float) -
     :func:`services.wire_protocol_sniff.tcp_answer`'s verdict; ``""`` when it
     settles nothing.
     """
-    where = f" ({host}:{port})"
+    del host, port
+    where = ""
     if outcome == "silent":
         return (
             f"Handshake timed out{where}: the server accepted the TCP connection but "
