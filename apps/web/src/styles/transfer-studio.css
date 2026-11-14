@@ -12544,7 +12544,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
      is the one scroll container. */
   .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-step-layout {
     grid-template-rows: none;
-    grid-auto-rows: max-content !important;
+    grid-auto-rows: max-content;
     overflow-y: auto !important;
   }
 }

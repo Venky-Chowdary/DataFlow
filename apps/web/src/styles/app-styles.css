@@ -395,7 +395,6 @@ html:has(.df2-app) #root {
   gap: 12px;
   padding: 10px 16px;
   margin: 0;
-  border-radius: 0;
   border-left: 0;
   border-right: 0;
 }

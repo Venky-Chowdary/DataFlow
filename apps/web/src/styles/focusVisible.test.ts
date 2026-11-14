@@ -94,7 +94,7 @@ describe("skip link and main landmark", () => {
   });
 
   it("the content area is the one <main> landmark and can take focus", () => {
-    assert.match(app, /<main id="datawrap-main-content" className={`df2-content \$\{contentModeClass\}`} tabIndex=\{-1\}/);
+    assert.match(app, /<main\s+id="datawrap-main-content"\s+className=\{`df2-content \$\{contentModeClass\}`\}\s+tabIndex=\{-1\}/);
     assert.equal((app.match(/<main\b/g) ?? []).length, 1);
     const transfer = readFileSync(join(srcDir, "pages", "TransferPage.tsx"), "utf8");
     assert.equal((transfer.match(/<main\b/g) ?? []).length, 0, "Transfer Studio must not nest a second <main>");
