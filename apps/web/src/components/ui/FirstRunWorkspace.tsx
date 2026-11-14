@@ -8,6 +8,7 @@ import {
   workspaceNameProblem,
   type FirstRunState,
 } from "../../lib/firstRunWorkspace";
+import { isUiPreviewSession } from "../../lib/session";
 import { WORKSPACE_DIRECTORY_EVENT, notifyWorkspaceDirectory, setActiveWorkspaceId } from "../../lib/workspace";
 import { DtIcon } from "../DtIcon";
 import { Button } from "./Button";
@@ -31,6 +32,8 @@ export function FirstRunWorkspace({ onCreated }: { onCreated?: (workspaceId: str
   const errorId = useId();
 
   const reload = useCallback(() => {
+    // The dev UI preview is not an account: it has nothing to set up.
+    if (isUiPreviewSession()) return;
     fetchWorkspaces()
       .then((dir) => {
         const next = firstRunState(dir);

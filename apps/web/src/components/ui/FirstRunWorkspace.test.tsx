@@ -153,6 +153,13 @@ describe("first sign-in with no workspace", () => {
     assert.match(banner!.textContent ?? "", /No workspace yet/);
   });
 
+  it("stays out of the dev UI preview, which is not an account", async () => {
+    localStorage.setItem("df2.session", JSON.stringify({ email: "preview@local", name: "", role: "admin", token: "dev-ui-preview", expires_at: 0, signed_in_at: 0 }));
+    await render(createElement(FirstRunWorkspace));
+    assert.equal(document.querySelector('[role="dialog"]'), null);
+    assert.equal(document.querySelector('[data-testid="first-run-banner"]'), null);
+  });
+
   it("tells a non-admin member who can help instead of offering a create they cannot do", async () => {
     directory = { workspaces: [], platform_admin: false, views: [] };
     await render(createElement(FirstRunWorkspace));
