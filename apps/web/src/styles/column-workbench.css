@@ -651,7 +651,8 @@
 .df2-column-review-chrome {
   flex-shrink: 0;
   padding: 8px 12px;
-  border-bottom: 1px solid #f1f5f9;
+  /* Token: #f1f5f9 was a white rule under the Map grid's toolbar in dark mode. */
+  border-bottom: 1px solid var(--df-border);
 }
 
 /* Status strip shares the mapping card's width. Chrome padding must not inset it. */

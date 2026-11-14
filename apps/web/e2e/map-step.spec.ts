@@ -680,8 +680,9 @@ test.describe("Map step layout at every supported size (W7)", () => {
 });
 
 test.describe("Map step chrome in both themes (W7 round 2)", () => {
-  test("dark: the grid card and the footer's secondary buttons use the toolbar buttons' border", async ({ browser }) => {
-    for (const view of [W7_VIEWS[1], W7_VIEWS[2]]) {
+  test("dark: the grid card, its toolbar rule and the footer's secondary buttons use the toolbar buttons' border", async ({ browser }) => {
+    test.setTimeout(180_000);
+    for (const view of [W7_VIEWS[1], W7_VIEWS[2], W7_VIEWS[5]]) {
       const { context, page } = await openMap(browser, view, "dark");
       // Nothing keeps focus from the walk: these are resting borders, not a focus ring.
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -692,11 +693,16 @@ test.describe("Map step chrome in both themes (W7 round 2)", () => {
           toolbar: color([...document.querySelectorAll(".df2-ms-toolbar .df2-btn")].find((b) => /Auto-map/.test((b as HTMLElement).innerText))),
           more: color(document.querySelector(".df2-ms-more")),
           grid: color(document.querySelector(".df2-map-step-panel .df2-column-review-editor")),
+          gridToolbarRule: (() => {
+            const chrome = document.querySelector(".df2-map-step-panel .df2-column-review-chrome");
+            return chrome ? getComputedStyle(chrome).borderBottomColor : "missing";
+          })(),
           footer: footer.map((b) => `${(b as HTMLElement).innerText.trim()}=${color(b)}`),
         };
       });
       expect(borders.more, `${view.width}: Auto-map and More share one border`).toBe(borders.toolbar);
       expect(borders.grid, `${view.width}: the grid card's border`).toBe(borders.toolbar);
+      expect(borders.gridToolbarRule, `${view.width}: the rule under the grid's toolbar`).toBe(borders.toolbar);
       expect(borders.footer.length, `${view.width}: Back, Clear key and Advanced`).toBeGreaterThanOrEqual(3);
       for (const entry of borders.footer) {
         expect(entry.split("=")[1], `${view.width}: footer ${entry.split("=")[0]} border`).toBe(borders.toolbar);
