@@ -2209,14 +2209,21 @@ def mysql_latin1_exempt_controls(
     return out
 
 
+_NUL_KEEPING_DESTS = frozenset({"sqlite", "mongodb", "mongo"})
+
+
 def _check_encoding_anomalies(
     rows: list[dict[str, Any]],
     *,
     validation_mode: str = "strict",
     mappings: list[dict] | None = None,
     exempt_controls: dict[str, frozenset[str]] | None = None,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
+
+    DATA-24: SQLite and MongoDB store U+0000 inside text exactly, so a NUL
+    there is data, not a load-breaking control.
 
     Strict/maximum: U+FFFD and control characters block at Validate; format
     characters alone (U+200B …) warn, because they are valid text the
@@ -2260,6 +2267,8 @@ def _check_encoding_anomalies(
             controls, formats = _format_control_chars(
                 text, (exempt_controls or {}).get(str(col).lower(), frozenset())
             )
+            if str(dest_kind or "").strip().lower() in _NUL_KEEPING_DESTS:
+                controls = [c for c in controls if c != "U+0000"]
             bad = controls + formats
             if bad:
                 findings.append({
@@ -2723,6 +2732,7 @@ def run_integrity_audit(
             _check_encoding_anomalies(
                 rows, validation_mode=validation_mode, mappings=mappings,
                 exempt_controls=mysql_latin1_exempt_controls(source_db_type, source_types),
+                dest_kind=dest_kind,
             )
         )
 
