@@ -720,7 +720,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             if isinstance(c, dict)
         }
         with open(path, "r", encoding=encoding) as f:
-            reader = iter_csv_records(f, delimiter)
+            reader = iter_csv_records(f, delimiter, null_marker=str(record.get("null_marker") or ""))
             headers = next(reader, [])
             chunk = []
             for row in reader:
@@ -1187,6 +1187,7 @@ class FileParser:
                     io.StringIO(text),
                     delim,
                     empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                    null_marker=str(getattr(opts, "null_marker", "") or ""),
                 ),
                 opts,
                 header_names=csv_header_names,
