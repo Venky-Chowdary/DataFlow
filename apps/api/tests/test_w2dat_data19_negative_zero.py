@@ -19,7 +19,7 @@ def test_fingerprint_keeps_the_sign_of_zero_on_float_columns():
     from services.reconciliation import normalize_cell
 
     assert normalize_cell(-0.0, ddl_type="DOUBLE PRECISION") != normalize_cell(0.0, ddl_type="DOUBLE PRECISION")
-    assert normalize_cell("-0.0", ddl_type="REAL") == normalize_cell(-0.0, ddl_type="REAL")
+    assert normalize_cell("-0.0", ddl_type="FLOAT8", engine="postgresql") == normalize_cell(-0.0, ddl_type="FLOAT8")
     # A decimal carrier has no negative zero: it still folds.
     assert normalize_cell("-0.0", ddl_type="NUMERIC(5,1)") == normalize_cell("0.0", ddl_type="NUMERIC(5,1)")
 

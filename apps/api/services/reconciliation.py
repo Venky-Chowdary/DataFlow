@@ -3523,9 +3523,16 @@ def _negative_zero(value: Any) -> bool:
     return isinstance(value, str) and bool(_NEG_ZERO_RE.match(value.strip())) and "0" in value
 
 
-def _float_ddl(ddl_type: str) -> bool:
+def _float_ddl(ddl_type: str, engine: str = "") -> bool:
+    """A PostgreSQL double column, which stores IEEE -0 (DATA-19).
+
+    SQL Server FLOAT normalizes -0 to 0, and the float4 fold is pinned
+    (x134), so only the double carrier PostgreSQL keeps -0 in is sign-aware.
+    """
     text = str(ddl_type or "").upper()
-    return any(tok in text for tok in ("DOUBLE", "FLOAT", "REAL"))
+    if str(engine or "").lower() not in {"postgresql", "postgres", ""}:
+        return False
+    return "DOUBLE" in text or text.strip() in {"FLOAT8", "FLOAT"}
 
 
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
@@ -3547,7 +3554,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
-    if _negative_zero(value) and _float_ddl(ddl_type):
+    if _negative_zero(value) and _float_ddl(ddl_type, engine):
         # DATA-19: IEEE -0.0 is a distinct value a float column keeps; folding
         # it into 0 let a write that dropped the sign verify (full_checksum).
         return "-0"
