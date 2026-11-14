@@ -118,8 +118,24 @@ def merge_export_by_key(path: str, export_bytes: bytes, key_cols: list[str]) -> 
         merged.close()
 
 
+def _write_failed(path: str, exc: OSError) -> Exception:
+    from services.data_errors import DataPathError
+
+    return DataPathError(
+        f"The export file {os.path.basename(path)} couldn't be written: the disk or the "
+        "file-size limit ran out before the last row. No partial file was left: the "
+        "file is as it was before this run. Free space (or raise the limit), then run again.",
+        code="EXPORT_WRITE_FAILED",
+        details={"rows_committed": 0, "errno": getattr(exc, "errno", None)},
+    )
+
+
 def _replace_file(path: str, data: bytes) -> None:
-    """Write ``data`` beside ``path`` and swap it in: a failed write leaves the old file."""
+    """Write ``data`` beside ``path`` and swap it in: a failed write leaves the old file.
+
+    REL-3: a direct ``wb`` write that hit a full disk left a truncated export
+    (cut mid-row) at the download name.
+    """
     tmp = f"{path}.w2tmp"
     try:
         with open(tmp, "wb") as fh:
@@ -127,9 +143,27 @@ def _replace_file(path: str, data: bytes) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+    except OSError as exc:
+        raise _write_failed(path, exc) from exc
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+def _append_file(path: str, payload: bytes) -> None:
+    """Append ``payload``; a failed append is cut back to the file's prior size (REL-3)."""
+    size = os.path.getsize(path)
+    try:
+        with open(path, "ab") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        try:
+            os.truncate(path, size)
+        except OSError:
+            logging.getLogger(__name__).error("export %s could not be cut back after a failed append", path)
+        raise _write_failed(path, exc) from exc
 
 
 def land_export_bytes(
@@ -207,8 +241,7 @@ def land_export_bytes(
         elif appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
             rows_before = existing_record_count(fmt or "csv", export_path)
-            with open(export_path, "ab") as fh:
-                fh.write(payload)
+            _append_file(export_path, payload)
         elif _is_key_merge(sync_mode) and os.path.exists(export_path):
             # CLM-1: "wb" here dropped every earlier row the source no longer sent.
             merged, key_census = merge_export_by_key(
@@ -218,14 +251,12 @@ def land_export_bytes(
             _replace_file(export_path, merged)
             appending = True
         else:
-            with open(export_path, "wb") as fh:
-                fh.write(export_bytes)
+            _replace_file(export_path, export_bytes)
         name = target.name
     else:
         name = f"export_{job_id}.{ext}"
         export_path = str(generated_export_path(name, workspace_id=workspace_id))
-        with open(export_path, "wb") as fh:
-            fh.write(export_bytes)
+        _replace_file(export_path, export_bytes)
     from pathlib import Path
 
     from services.transfer_journal import _sha256_file
