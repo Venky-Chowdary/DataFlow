@@ -11325,7 +11325,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 /* The current step's name in the compact (phone) stepper. The step button is
    disabled, and a disabled button paints its text GrayText at 30 %, so "Map"
    read like the upcoming Gate and Run. Full brand ink, as the desktop label
-   (>= 768 px sets the same token with !important and hides this label). */
+   (>= 768 px sets the same token as a forced override and hides this label). */
 .df2-transfer-studio-chrome .df2-wizard-step.active .df2-wizard-label-short {
   color: var(--df-brand-strong);
   font-weight: var(--df-fw-bold);
