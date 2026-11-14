@@ -678,3 +678,90 @@ test.describe("Map step layout at every supported size (W7)", () => {
     await context.close();
   });
 });
+
+test.describe("Map step chrome in both themes (W7 round 2)", () => {
+  test("dark: the grid card and the footer's secondary buttons use the toolbar buttons' border", async ({ browser }) => {
+    for (const view of [W7_VIEWS[1], W7_VIEWS[2]]) {
+      const { context, page } = await openMap(browser, view, "dark");
+      // Nothing keeps focus from the walk: these are resting borders, not a focus ring.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const borders = await page.evaluate(() => {
+        const color = (el: Element | null | undefined) => (el ? getComputedStyle(el).borderTopColor : "missing");
+        const footer = [...document.querySelectorAll(".df2-map-footer .df2-btn:not(.df2-btn-primary)")];
+        return {
+          toolbar: color([...document.querySelectorAll(".df2-ms-toolbar .df2-btn")].find((b) => /Auto-map/.test((b as HTMLElement).innerText))),
+          more: color(document.querySelector(".df2-ms-more")),
+          grid: color(document.querySelector(".df2-map-step-panel .df2-column-review-editor")),
+          footer: footer.map((b) => `${(b as HTMLElement).innerText.trim()}=${color(b)}`),
+        };
+      });
+      expect(borders.more, `${view.width}: Auto-map and More share one border`).toBe(borders.toolbar);
+      expect(borders.grid, `${view.width}: the grid card's border`).toBe(borders.toolbar);
+      expect(borders.footer.length, `${view.width}: Back, Clear key and Advanced`).toBeGreaterThanOrEqual(3);
+      for (const entry of borders.footer) {
+        expect(entry.split("=")[1], `${view.width}: footer ${entry.split("=")[0]} border`).toBe(borders.toolbar);
+      }
+      await context.close();
+    }
+  });
+
+  for (const theme of ["light", "dark"] as const) {
+    test(`390 ${theme}: the current step's name reads as current, not as an upcoming step`, async ({ browser }) => {
+      const { context, page } = await openMap(browser, W7_VIEWS[5], theme);
+      const steps = await page.evaluate(() => {
+        type Rgba = [number, number, number, number];
+        const parse = (c: string): Rgba => {
+          const n = (c.match(/[\d.]+/g) ?? ["0", "0", "0", "0"]).map(Number);
+          return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1];
+        };
+        const over = (top: Rgba, under: Rgba): Rgba => {
+          const a = top[3];
+          return [top[0] * a + under[0] * (1 - a), top[1] * a + under[1] * (1 - a), top[2] * a + under[2] * (1 - a), 1];
+        };
+        const background = (el: Element): Rgba => {
+          const layers: Rgba[] = [];
+          for (let n: Element | null = el; n; n = n.parentElement) {
+            const c = parse(getComputedStyle(n).backgroundColor);
+            if (c[3] > 0) layers.push(c);
+            if (c[3] === 1) break;
+          }
+          let out: Rgba = [255, 255, 255, 1];
+          for (const layer of layers.reverse()) out = over(layer, out);
+          return out;
+        };
+        const lum = (c: Rgba) => {
+          const ch = c.slice(0, 3).map((v) => {
+            const s = v / 255;
+            return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+        };
+        const ratio = (a: Rgba, b: Rgba) => {
+          const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+          return (x + 0.05) / (y + 0.05);
+        };
+        const nav = document.querySelector('nav[aria-label="Transfer steps"]')!;
+        return [...nav.querySelectorAll(".df2-wizard-step")].map((step) => {
+          const label = [...step.querySelectorAll(".df2-wizard-label, .df2-wizard-label-short")]
+            .find((l) => getComputedStyle(l).display !== "none" && (l as HTMLElement).innerText.trim())!;
+          const bg = background(label);
+          const fg = over(parse(getComputedStyle(label).color), bg);
+          return {
+            name: (label as HTMLElement).innerText.trim(),
+            current: step.getAttribute("aria-current") === "step",
+            done: step.classList.contains("done"),
+            color: getComputedStyle(label).color,
+            contrast: Math.round(ratio(fg, bg) * 100) / 100,
+          };
+        });
+      });
+      const current = steps.find((s) => s.current);
+      expect(current, JSON.stringify(steps)).toBeTruthy();
+      expect(current!.contrast, `390 ${theme}: current step "${current!.name}" contrast`).toBeGreaterThanOrEqual(4.5);
+      for (const upcoming of steps.filter((s) => !s.current && !s.done)) {
+        expect(upcoming.color, `390 ${theme}: "${current!.name}" is drawn like upcoming "${upcoming.name}"`).not.toBe(current!.color);
+      }
+      await context.close();
+    });
+  }
+});
