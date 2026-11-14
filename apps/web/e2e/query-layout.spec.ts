@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 import { installHermeticStubs } from "./hermetic";
-import { overlapArea, type Box } from "./layout";
+import { clippedBox, overlapArea, type Box } from "./layout";
 
 /**
  * Query workspace layout and states, at 1440 / 1366 / 1024 / 390 in both
@@ -186,13 +186,51 @@ for (const view of VIEWS) {
       await openQuery(page, theme);
       await expect(page.locator(".df2-qw-node").first()).toBeVisible({ timeout: desktop ? 20_000 : 1 }).catch(() => {});
 
+      // --- Connector picker: the engine is named once, and a long label ends in "…".
+      const repeats = await page.locator("#query-connector option").evaluateAll((options) =>
+        options
+          .map((o) => o.textContent ?? "")
+          .filter((text) => ["PostgreSQL", "Snowflake"].some((engine) => (text.toLowerCase().match(new RegExp(engine.toLowerCase(), "g")) ?? []).length > 1)),
+      );
+      expect.soft(repeats, "no option repeats the engine its name already says").toEqual([]);
+      if (desktop) {
+        const picker = await page.locator("#query-connector").evaluate((el) => {
+          const style = getComputedStyle(el);
+          return { overflow: style.textOverflow, clip: style.overflowX, nowrap: style.whiteSpace, title: el.getAttribute("title") ?? "" };
+        });
+        expect.soft(picker.overflow, "a long connector label ends in an ellipsis").toBe("ellipsis");
+        expect.soft(picker.nowrap, "the connector label stays on one line").toBe("nowrap");
+        expect.soft(picker.title, "the full label is the picker's title").toMatch(/\S/);
+      } else {
+        // Phones: every connection field visible inside the card; nothing scrolls sideways.
+        const bar = page.getByTestId("query-action-bar");
+        const barBox = await bar.boundingBox({ timeout: 2_000 }).catch(() => null);
+        const sideways = await bar.evaluate((el) => {
+          const scrolls = [el, ...el.querySelectorAll("*")].filter((n) => n.scrollWidth > n.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(n).overflowX));
+          return scrolls.length;
+        }, undefined, { timeout: 2_000 }).catch(() => -1);
+        expect.soft(sideways, "phone: no sideways scroll in the connection area").toBe(0);
+        for (const id of ["#query-connector", "#query-database", "#query-collection", "#query-row-limit"]) {
+          const box = await page.locator(id).boundingBox({ timeout: 2_000 }).catch(() => null);
+          const visible = box ? await clippedBox(page, id).catch(() => null) : null;
+          const inside = Boolean(box && barBox && box.x >= barBox.x - 1 && box.x + box.width <= barBox.x + barBox.width + 1 && box.x + box.width <= view.width);
+          expect.soft(inside, `phone: ${id} sits fully inside the card`).toBe(true);
+          expect.soft(Boolean(box && visible && Math.abs(visible.width - box.width) <= 1), `phone: ${id} is not clipped`).toBe(true);
+        }
+      }
+
       // --- Run: one primary button, reachable, with the shortcut it honours.
       const run = page.getByTestId("query-run");
       await expect.soft(run, "Run button present and on screen").toBeInViewport({ timeout: 2_000 });
       await expect.soft(run, "Run names its shortcut").toHaveAttribute("aria-keyshortcuts", /Control\+Enter/, { timeout: 1_000 });
 
       // A 500-row limit, so the 500-row answer is cut short and must say so.
-      await page.locator("#query-row-limit").selectOption("500");
+      const limitSet = await page.locator("#query-row-limit").selectOption("500", { timeout: 5_000 }).then(() => true, () => false);
+      expect.soft(limitSet, "Row limit can be operated").toBe(true);
+      if (!limitSet) await page.locator("#query-row-limit").evaluate((el: HTMLSelectElement) => {
+        el.value = "500";
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
 
       // --- Keyboard: type with the completion popup open, then Ctrl+Enter runs.
       const editor = page.getByLabel("Query editor");
@@ -206,6 +244,12 @@ for (const view of VIEWS) {
         await page.keyboard.press("Escape");
         await page.getByRole("button", { name: "Run all" }).click();
         await expect(page.locator(".df2-qw-grid-count")).toContainText("500 rows");
+      }
+      if (!desktop) {
+        // Phones: the first result rows are on screen after a run, without scrolling.
+        await page.evaluate(() => document.querySelector(".df2-content")?.scrollTo(0, 0));
+        const firstRow = await page.locator(".df2-qw-grid-scroll tbody tr").first().boundingBox({ timeout: 5_000 }).catch(() => null);
+        expect.soft(Boolean(firstRow && firstRow.y + firstRow.height <= view.height), "phone: the first result row is visible after a run").toBe(true);
       }
       await expect.soft(status, "status says the row limit cut the result").toContainText(/limited to 500 rows/i, { timeout: 1_000 });
       await expect.soft(status, "status shows elapsed time").toContainText(/\d+ ms/, { timeout: 1_000 });

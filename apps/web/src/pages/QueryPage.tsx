@@ -743,6 +743,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       ? "Write a query first"
       : "";
   const explainable = Boolean(active?.connectorId) && hasQuery && !isMongo;
+  // Phones: a short editor that grows with the text, so the first result rows
+  // stay on screen after a run (22 px a line, 120–300 px of code area).
+  const phoneCodeHeight = Math.min(300, Math.max(120, 32 + 22 * ((queryText.match(/\n/g)?.length ?? 0) + 1)));
   const schemaShown = wide ? layout.schemaOpen : schemaDrawerOpen;
 
   return (
@@ -895,6 +898,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                   placeholder={isMongo ? "users" : "Any"}
                 />
               </div>
+            </div>
+            {/* Row limit and the actions share a row on phones; on desktop this wrapper is transparent. */}
+            <div className="df2-qw-runrow">
               <div className="df2-field df2-qw-field df2-qw-field--limit">
                 <label className="df2-label" htmlFor="query-row-limit">Row limit</label>
                 <select
@@ -910,78 +916,78 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                   ))}
                 </select>
               </div>
-            </div>
-            <div className="df2-qw-actions">
-              <button
-                type="button"
-                className="df2-qw-tool"
-                onClick={() => editorRef.current?.format()}
-                disabled={!hasQuery || queryLoading}
-                title={`Format (${MOD_KEY}+Shift+F)`}
-                aria-keyshortcuts="Control+Shift+F Meta+Shift+F"
-              >
-                <DtIcon name="code" size={14} /> <span className="df2-qw-tool-label">Format</span>
-              </button>
-              {!isMongo && (
+              <div className="df2-qw-actions">
                 <button
                   type="button"
                   className="df2-qw-tool"
-                  onClick={runExplain}
-                  disabled={!explainable || queryLoading || exportLoading}
-                  title={`Explain plan (${MOD_KEY}+E)`}
-                  aria-keyshortcuts="Control+E Meta+E"
+                  onClick={() => editorRef.current?.format()}
+                  disabled={!hasQuery || queryLoading}
+                  title={`Format (${MOD_KEY}+Shift+F)`}
+                  aria-keyshortcuts="Control+Shift+F Meta+Shift+F"
                 >
-                  <DtIcon name="scan" size={14} /> <span className="df2-qw-tool-label">Explain</span>
+                  <DtIcon name="code" size={14} /> <span className="df2-qw-tool-label">Format</span>
                 </button>
-              )}
-              <button
-                ref={exportButtonRef}
-                type="button"
-                className="df2-qw-tool"
-                data-active={exportOpen}
-                aria-expanded={exportOpen}
-                aria-controls="query-export-panel"
-                onClick={() => setExportOpen((v) => !v)}
-                disabled={!result}
-                title={result ? "Export these results" : "Run a query first"}
-              >
-                <DtIcon name="download" size={14} /> <span className="df2-qw-tool-label">Export</span>
-              </button>
-              <span className="df2-qw-actions-sep" aria-hidden />
-              <Button
-                variant="secondary"
-                disabled={exportLoading || queryLoading || Boolean(runBlocked)}
-                onClick={runAll}
-                title={runBlocked || `Run everything in the editor (${MOD_KEY}+Shift+Enter)`}
-                aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter"
-                data-testid="query-run-all"
-              >
-                Run all
-              </Button>
-              {queryLoading ? (
-                <Button
-                  variant="danger"
-                  onClick={stopRun}
-                  leadingIcon={<DtIcon name="x" size={14} />}
-                  data-testid="query-stop"
-                  title="Stop waiting for this run"
+                {!isMongo && (
+                  <button
+                    type="button"
+                    className="df2-qw-tool"
+                    onClick={runExplain}
+                    disabled={!explainable || queryLoading || exportLoading}
+                    title={`Explain plan (${MOD_KEY}+E)`}
+                    aria-keyshortcuts="Control+E Meta+E"
+                  >
+                    <DtIcon name="scan" size={14} /> <span className="df2-qw-tool-label">Explain</span>
+                  </button>
+                )}
+                <button
+                  ref={exportButtonRef}
+                  type="button"
+                  className="df2-qw-tool"
+                  data-active={exportOpen}
+                  aria-expanded={exportOpen}
+                  aria-controls="query-export-panel"
+                  onClick={() => setExportOpen((v) => !v)}
+                  disabled={!result}
+                  title={result ? "Export these results" : "Run a query first"}
                 >
-                  Stop
-                </Button>
-              ) : (
+                  <DtIcon name="download" size={14} /> <span className="df2-qw-tool-label">Export</span>
+                </button>
+                <span className="df2-qw-actions-sep" aria-hidden />
                 <Button
-                  variant="primary"
-                  className="df2-qw-run"
-                  disabled={exportLoading || Boolean(runBlocked)}
-                  onClick={() => editorRef.current?.run()}
-                  leadingIcon={<DtIcon name="play" size={14} />}
-                  title={runBlocked || `Run the selection, or the statement under the caret (${MOD_KEY}+Enter)`}
-                  aria-keyshortcuts="Control+Enter Meta+Enter"
-                  data-testid="query-run"
+                  variant="secondary"
+                  disabled={exportLoading || queryLoading || Boolean(runBlocked)}
+                  onClick={runAll}
+                  title={runBlocked || `Run everything in the editor (${MOD_KEY}+Shift+Enter)`}
+                  aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter"
+                  data-testid="query-run-all"
                 >
-                  Run <kbd className="df2-qw-kbd" aria-hidden>{MOD_KEY}+↵</kbd>
+                  Run all
                 </Button>
-              )}
+                {queryLoading ? (
+                  <Button
+                    variant="danger"
+                    onClick={stopRun}
+                    leadingIcon={<DtIcon name="x" size={14} />}
+                    data-testid="query-stop"
+                    title="Stop waiting for this run"
+                  >
+                    Stop
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    className="df2-qw-run"
+                    disabled={exportLoading || Boolean(runBlocked)}
+                    onClick={() => editorRef.current?.run()}
+                    leadingIcon={<DtIcon name="play" size={14} />}
+                    title={runBlocked || `Run the selection, or the statement under the caret (${MOD_KEY}+Enter)`}
+                    aria-keyshortcuts="Control+Enter Meta+Enter"
+                    data-testid="query-run"
+                  >
+                    Run <kbd className="df2-qw-kbd" aria-hidden>{MOD_KEY}+↵</kbd>
+                  </Button>
+                )}
+              </div>
             </div>
 
             {/* ------------------------------------------------- export --- */}
@@ -1146,7 +1152,12 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
             style={wide ? ({ "--df2-qw-editor-h": `${editorPaneHeight}px` } as React.CSSProperties) : undefined}
           >
             {/* --------------------------------------------------- editor --- */}
-            <div className="df2-qw-pane df2-qw-pane--editor" id="query-editor-pane" data-testid="query-pane-editor">
+            <div
+              className="df2-qw-pane df2-qw-pane--editor"
+              id="query-editor-pane"
+              data-testid="query-pane-editor"
+              style={wide ? undefined : ({ "--df2-qw-phone-code-h": `${phoneCodeHeight}px` } as React.CSSProperties)}
+            >
               <QueryEditor
                 ref={editorRef}
                 value={queryText}

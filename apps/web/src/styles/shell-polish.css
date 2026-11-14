@@ -1037,6 +1037,10 @@ select.df2-select {
 .df2-connector-select {
   flex: 1;
   min-width: 0;
+  /* A long name ends in "…", never cut mid-glyph; the full label is the title. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .df2-transfer-panel {

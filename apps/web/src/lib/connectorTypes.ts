@@ -349,6 +349,22 @@ export function connectorDisplayName(id: string): string {
   return getConnectorLabel(id, CONNECTOR_CATALOG.find((c) => c.id === id));
 }
 
+/**
+ * A saved connection's name with its engine, for pickers: "Orders (PostgreSQL)".
+ * When the name already says the engine ("Warehouse (SQLite)", "sqlite cache"),
+ * the engine is not appended again — "Warehouse (SQLite) (SQLite)" read as a bug.
+ * `style` picks the separator the picker already uses: "(Engine)" or "· Engine".
+ */
+export function connectorNameWithEngine(name: string, type: string, style: "paren" | "dot" = "paren"): string {
+  const label = (name || "").trim();
+  const engine = connectorDisplayName(type);
+  if (!engine) return label;
+  if (!label) return engine;
+  const lower = label.toLowerCase();
+  if (lower.includes(engine.toLowerCase()) || (type && lower.includes(type.toLowerCase()))) return label;
+  return style === "dot" ? `${label} · ${engine}` : `${label} (${engine})`;
+}
+
 export function getConnectorDefaults(type: string): { host: string; port: number; label: string } {
   const item = CONNECTOR_CATALOG.find((c) => c.id === type);
   const driver = resolveDriverType(type);

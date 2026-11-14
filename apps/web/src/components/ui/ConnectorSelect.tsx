@@ -1,6 +1,6 @@
 import { ConnectorIcon } from "../../app/brand-icons";
 import { Connector } from "../../lib/types";
-import { connectorDisplayName } from "../../lib/connectorTypes";
+import { connectorNameWithEngine } from "../../lib/connectorTypes";
 
 interface ConnectorSelectProps {
   id?: string;
@@ -61,11 +61,11 @@ export function ConnectorSelect({
 }
 
 /**
- * UX-40: the connection's name first, then its engine's own name, then a test
- * warning only when there is one, so a narrow picker keeps what tells
+ * UX-40: the connection's name first, then its engine's own name (unless the
+ * name already says it), then a test warning only when there is one, so a narrow picker keeps what tells
  * connections apart. The full text is the option's and the select's title.
  */
 export function connectorOptionLabel(c: Pick<Connector, "name" | "type" | "last_test_ok">): string {
   const status = c.last_test_ok === false ? " · test failed" : c.last_test_ok == null ? " · not tested" : "";
-  return `${c.name} (${connectorDisplayName(c.type)})${status}`;
+  return `${connectorNameWithEngine(c.name, c.type)}${status}`;
 }
