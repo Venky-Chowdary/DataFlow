@@ -61,7 +61,6 @@ interface PipelineDetailDrawerProps {
   onClose: () => void;
   onRun: () => void;
   /** Delta sync on the signed contract. One confirm. */
-  onSync?: () => void;
   /** Re-read from the start on the signed contract. One confirm. */
   onFullResync?: () => void;
   onEdit: () => void;
@@ -109,7 +108,6 @@ export function PipelineDetailDrawer({
   breakerHint,
   onClose,
   onRun,
-  onSync,
   onFullResync,
   onEdit,
   onDelete,
@@ -439,17 +437,6 @@ export function PipelineDetailDrawer({
             >
               {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
             </Button>}
-            {!decisionPending && onSync && (
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-                title={runRefusal || "Sync the signed contract. One confirm."}
-                onClick={onSync}
-              >
-                Sync now
-              </Button>
-            )}
             {runRefusal ? (
               // UX-22: the reason is on the page, not only in a tooltip.
               <p className="df2-permission-inline" data-testid="pipeline-run-refusal">{runRefusal}</p>

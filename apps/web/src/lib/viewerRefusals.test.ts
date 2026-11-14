@@ -13,8 +13,8 @@ const src = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(src, rel), "utf8");
 
 describe("viewer refusals", () => {
-  it("Schedules offers Sync now only to someone who may run it", () => {
-    assert.match(read("pages/SchedulesPage.tsx"), /onSync=\{jobRun\.allowed \? \(\) => void handleScheduleSync\(sched\.id, "sync"\) : undefined\}/);
+  it("Schedules offers Run now only to someone who may run it", () => {
+    assert.match(read("pages/SchedulesPage.tsx"), /onSync=\{jobRun\.allowed \? \(\) => void runSchedule\(sched\.id\) : undefined\}/);
   });
 
   it("the pipeline drawer states the refusal on the page", () => {
