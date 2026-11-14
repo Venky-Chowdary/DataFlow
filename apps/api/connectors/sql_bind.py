@@ -1687,6 +1687,9 @@ def coerce_float_wire(
             ) from exc
         return _within_carrier(num)
     if isinstance(value, Decimal):
+        if not value.is_finite() and str(engine or "").lower() in _NONFINITE_FLOAT_ENGINES:
+            # DATA-8: NaN / ±Infinity are values these engines' floats hold.
+            return float(value)
         try:
             num = float_carrier_or_refuse(value)
         except ValueError as exc:
@@ -2451,3 +2454,8 @@ def normalize_sql_bind_value(
 
 
 _JSON_DOCUMENT_KINDS = frozenset({"json", "array", "struct", "map"})
+
+
+#: Engines whose binary floats store IEEE NaN and ±Infinity (DATA-8). MySQL,
+#: SQL Server and SQLite (NaN becomes NULL) do not: there the bind refuses.
+_NONFINITE_FLOAT_ENGINES = frozenset({"postgresql", "postgres", "oracle"})
