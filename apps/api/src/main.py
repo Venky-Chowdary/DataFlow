@@ -474,7 +474,19 @@ _redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
     title="Datawrap API",
-    description="Universal Data Transfer Platform API",
+    description=(
+        "Universal Data Transfer Platform API\n\n"
+        "**Errors.** A failure carries `{error: {code, message, action: {label, ui, api}, "
+        "object, retriable, reference}, detail}`; `detail` stays a string. Failed jobs "
+        "carry the same `code` as `error_code` and `error_details.code`.\n\n"
+        "**Deprecated: `legacy_code`.** For one release, `error.legacy_code`, "
+        "`error_details.legacy_code` and the job's `error_legacy_code` repeat the "
+        "pre-taxonomy code a taxonomy code replaced: `destination_permission_denied` "
+        "(now `access.*`), `destination_column_missing` (`object.column_not_found`), "
+        "`table_not_found` (`object.table_not_found`), `destination_lock_timeout` "
+        "(`timeout.lock`), `transfer_failed` (`unclassified`), and the "
+        "`destination_*` capacity / CHECK codes. Key on `code`; `legacy_code` will be removed."
+    ),
     version="1.0.0",
     docs_url=_docs,
     redoc_url=_redoc,

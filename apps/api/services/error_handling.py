@@ -1031,7 +1031,11 @@ def _driver_sentence(error: Any) -> str:
 
 def _taxonomy_failure(classified: Any, raw: str) -> dict[str, Any]:
     """Job-failure fields from one :class:`services.error_taxonomy.ClassifiedError`."""
+    from services.error_taxonomy import legacy_code
+
     return {
+        # Deprecated, one release: the pre-taxonomy code API / MCP clients key on.
+        "legacy_code": legacy_code(classified.code),
         "code": classified.code,
         "category": classified.code.split(".", 1)[0],
         "title": classified.title,

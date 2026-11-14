@@ -404,6 +404,30 @@ TEMPLATES: dict[str, Template] = {
     ),
 }
 
+#: DEPRECATED, one release only: the job-failure code each taxonomy code
+#: replaced, for API and MCP clients still keyed on the old codes. Carried as
+#: ``legacy_code`` on the envelope and the job record; removed next release.
+LEGACY_CODES: dict[str, str] = {
+    "access.source_read_denied": "destination_permission_denied",
+    "access.dest_write_denied": "destination_permission_denied",
+    "access.dest_ddl_denied": "destination_permission_denied",
+    "access.denied": "destination_permission_denied",
+    "object.column_not_found": "destination_column_missing",
+    "object.table_not_found": "table_not_found",
+    "timeout.lock": "destination_lock_timeout",
+    "unclassified": "transfer_failed",
+    "capacity.table_full": "destination_table_full",
+    "capacity.disk_full": "destination_disk_full",
+    "capacity.connection_limit": "destination_connection_limit",
+    "value.check_violation": "destination_check_violation",
+}
+
+
+def legacy_code(code: str) -> str:
+    """The deprecated pre-taxonomy code for ``code``, or ``""``."""
+    return LEGACY_CODES.get(str(code or ""), "")
+
+
 _ENGINE_NAMES = {
     "postgresql": "PostgreSQL", "postgres": "PostgreSQL", "redshift": "Amazon Redshift",
     "mysql": "MySQL", "mariadb": "MariaDB", "mongodb": "MongoDB", "sqlite": "SQLite",
@@ -703,19 +727,19 @@ class ClassifiedError:
         return f"{self.text} Reference: {reference}" if reference else self.text
 
     def envelope(self, reference: str) -> dict[str, Any]:
-        return {
-            "error": {
-                "code": self.code,
-                "title": self.title,
-                "message": self.message,
-                "action": dict(self.action),
-                "object": dict(self.object),
-                "retriable": self.retriable,
-                "reference": reference,
-                "driver": dict(self.driver),
-            },
-            "detail": self.user_text(reference),
+        error: dict[str, Any] = {
+            "code": self.code,
+            "title": self.title,
+            "message": self.message,
+            "action": dict(self.action),
+            "object": dict(self.object),
+            "retriable": self.retriable,
+            "reference": reference,
+            "driver": dict(self.driver),
         }
+        if legacy_code(self.code):
+            error["legacy_code"] = legacy_code(self.code)  # deprecated, one release
+        return {"error": error, "detail": self.user_text(reference)}
 
     def as_dict(self) -> dict[str, Any]:
         return {

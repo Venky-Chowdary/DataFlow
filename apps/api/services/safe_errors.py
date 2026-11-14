@@ -266,4 +266,6 @@ def run_failure_http_exception(
         },
         "detail": f"{text} Reference: {cid}",
     }
+    if human.get("legacy_code"):
+        envelope["error"]["legacy_code"] = human["legacy_code"]  # deprecated, one release
     return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})

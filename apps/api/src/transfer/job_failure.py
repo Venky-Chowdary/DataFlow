@@ -159,7 +159,7 @@ def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, 
         "message": human.get("message"),
         "confidence": human.get("confidence"),
     }
-    for key in ("action", "object", "driver", "side"):
+    for key in ("action", "object", "driver", "side", "legacy_code"):
         if human.get(key):
             details[key] = human[key]
     stamped = getattr(exc, "failure_details", None)
@@ -178,6 +178,9 @@ def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, 
         "error_confidence": human.get("confidence"),
         "operator_error": operator_error,
     }
+    if human.get("legacy_code"):
+        # Deprecated, one release: the pre-taxonomy code (error_details.legacy_code too).
+        extras["error_legacy_code"] = human["legacy_code"]
     dropped = str(getattr(exc, "destination_table_dropped", "") or "")
     if dropped:
         from services.error_handling import ROWS_STAY_NOTE
