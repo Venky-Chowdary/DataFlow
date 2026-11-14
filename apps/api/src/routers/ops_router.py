@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from services.safe_errors import classified_http_exception
 
 router = APIRouter(prefix="/ops", tags=["Ops"])
 
@@ -273,9 +274,7 @@ async def get_cdc_captures(
             workspace_id=ws, unrestricted=unrestricted,
         )
     except Exception as exc:  # noqa: BLE001 - name the source failure, never a 500
-        raise HTTPException(
-            status_code=502, detail=f"Could not read the source's replication slots: {exc}"
-        ) from exc
+        raise classified_http_exception(exc, side="source", phase="read", status_code=502, event="ops.get_cdc_captures.failed") from exc
 
 
 class CdcCaptureCleanupBody(BaseModel):
@@ -320,9 +319,7 @@ async def post_cdc_captures_cleanup(
             dry_run=body.dry_run,
         )
     except Exception as exc:  # noqa: BLE001 - name the source failure, never a 500
-        raise HTTPException(
-            status_code=502, detail=f"Could not clean up the source's replication slots: {exc}"
-        ) from exc
+        raise classified_http_exception(exc, side="source", phase="ddl", status_code=502, event="ops.post_cdc_captures_cleanup.failed") from exc
     if not body.dry_run:
         record_security_event(
             "cdc.capture.cleanup",

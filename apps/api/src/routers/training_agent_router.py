@@ -4,8 +4,9 @@ Datawrap — Dedicated Training Agent API
 Separate from Copilot chat — manages continuous model training on universal data.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/training-agent", tags=["Training Agent"])
 
@@ -68,7 +69,9 @@ async def run_training_sync(request: TrainRequest, http_request: Request):
         )
         return TrainResponse(run_id=run.id, status=run.status, metrics=run.metrics, errors=run.errors)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(
+            e, event="training.run_training_sync.failed", public_message="Training run failed.", status_code=500
+        ) from e
 
 
 @router.get("/datasets")
