@@ -43,6 +43,8 @@ async function openQueryWithResults(page: Page): Promise<void> {
   await page.evaluate(() => { window.location.hash = "#/query"; });
   const connector = page.locator("#query-connector");
   await expect(connector).toBeVisible();
+  // The saved connectors arrive after the page paints; wait for one before picking it.
+  await expect(connector.locator("option:not([value=''])").first()).toBeAttached();
   const first = await connector.locator("option").evaluateAll(
     (options) => options.map((o) => (o as HTMLOptionElement).value).filter(Boolean)[0],
   );
