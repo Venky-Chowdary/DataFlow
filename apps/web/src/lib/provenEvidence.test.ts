@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  BACKEND_SUITE,
+  CONNECTOR_CLAIMS,
   MARKETING_STACK,
   NOT_PROVEN,
+  PENDING_DRIVERS,
+  PROVEN_DRIVERS,
   PROVEN_EVIDENCE,
-  TRANSFER_READY_DRIVERS,
   catalogHonestyLead,
 } from "./provenEvidence";
 
@@ -28,18 +29,32 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-test("every evidence row names the artifact that backs it", () => {
-  assert.ok(PROVEN_EVIDENCE.length > 0);
+test("every evidence row is an engine a CI run proved (CLM-5)", () => {
+  assert.equal(PROVEN_EVIDENCE.length, CONNECTOR_CLAIMS.proof_rows.length);
   for (const row of PROVEN_EVIDENCE) {
-    assert.ok(row.cases > 0, `${row.claim} claims no cases`);
-    assert.match(row.artifact, /\.json/, `${row.claim} has no artifact file`);
-    assert.ok(row.engines.trim().length > 0, `${row.claim} names no engine`);
+    assert.ok(row.cases > 0, `${row.engines} ran no tests`);
+    assert.ok(row.artifact.trim().length > 0, `${row.engines} names no CI job`);
+    assert.equal(row.result, "green");
+  }
+  if (PROVEN_EVIDENCE.length) {
+    assert.match(CONNECTOR_CLAIMS.evidence_source_run, /^https:\/\/github\.com\/.+\/actions\/runs\/\d+/);
   }
 });
 
-test("the backend suite is only published while it is green", () => {
-  assert.equal(BACKEND_SUITE.failed, 0);
-  assert.ok(BACKEND_SUITE.passed > 0);
+test("public pages publish no hand-typed evidence figure (CLM-5)", () => {
+  // These figures traced to artifacts that no longer ship and could not be re-run.
+  const untraceable = /Every figure here traces|Live schema-drift cases|Measured on live engines|measured on live engines|48 live cases|value: "48"/;
+  const files = [
+    ...sourceFiles(path.join(SRC, "pages", "marketing")),
+    path.join(SRC, "pages", "LandingPage.tsx"),
+    ...sourceFiles(path.join(SRC, "components", "landing")),
+    ...sourceFiles(path.join(SRC, "components", "marketing")),
+    path.join(SRC, "lib", "provenEvidence.ts"),
+  ];
+  for (const file of files) {
+    const hit = readFileSync(file, "utf8").match(untraceable);
+    assert.equal(hit, null, `${path.relative(SRC, file)} publishes "${hit?.[0]}"`);
+  }
 });
 
 test("unproven areas carry a reason, never a promise", () => {
@@ -81,19 +96,29 @@ test("marketing pages never publish CI blockers as product gaps", () => {
   }
 });
 
-test("catalog lead states the measured driver count, never the tile count", () => {
+test("catalog lead states the CI-proven driver count, never the tile count (CLM-6)", () => {
+  assert.equal(PROVEN_DRIVERS, CONNECTOR_CLAIMS.proven_drivers.length);
+  assert.equal(PENDING_DRIVERS, CONNECTOR_CLAIMS.pending_drivers.length);
   const lead = catalogHonestyLead();
-  assert.match(lead, new RegExp(`^${TRANSFER_READY_DRIVERS} drivers are transfer-ready`));
-  assert.doesNotMatch(lead, /650|700\+|717|certified connectors/i);
+  assert.match(lead, new RegExp(`^${PROVEN_DRIVERS} drivers? proven in CI`));
+  if (PENDING_DRIVERS > 0) assert.match(lead, new RegExp(`${PENDING_DRIVERS} more are implemented`));
+  assert.doesNotMatch(lead, /650|700\+|717|certified connectors|transfer-ready/i);
+  assert.equal(catalogHonestyLead(3, 0), "3 drivers proven in CI: each one's CI jobs ran green with no skipped test.");
+  assert.doesNotMatch(catalogHonestyLead(), /verifies the load/);
 });
 
-test("marketing stack names only transfer-ready drivers", () => {
+test("marketing stack badges are derived from CI evidence", () => {
   // Catalog status `planned` in docs/CONNECTOR_READINESS_MATRIX.md. Naming one
   // of these on a public page would sell a tile as a live transfer.
   const planned = /\b(Redshift|Databricks|ClickHouse|MariaDB|CockroachDB|Shopify)\b/;
   assert.ok(MARKETING_STACK.length > 0);
   for (const row of MARKETING_STACK) {
-    assert.equal(row.badge, "Transfer-ready");
+    // The badge counts the family's CI-proven members (CLM-7).
+    const family = CONNECTOR_CLAIMS.families.find((f) => f.family === row.family);
+    assert.ok(family, row.family);
+    const proven = family.items.filter((i) => i.proven).length;
+    const expected = proven === family.items.length ? "Proven in CI" : proven > 0 ? "Partly proven in CI" : "Implemented";
+    assert.equal(row.badge, expected, row.family);
     assert.doesNotMatch(row.items, planned, `${row.family} names a planned driver`);
     assert.doesNotMatch(row.note, planned, `${row.family} note names a planned driver`);
     assert.doesNotMatch(row.note, /Native MERGE/i);

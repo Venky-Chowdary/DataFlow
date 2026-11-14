@@ -98,17 +98,21 @@ def test_transfer_live_driver_count_excludes_email_and_matches_fe_constant():
     else:
         assert set(live) <= set(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
 
-    proven = (
+    # The public count is generated from CI evidence (CLM-6): proven plus
+    # pending is the product's declared driver set, whatever this host has.
+    claims = (
         Path(__file__).resolve().parents[2]
         / "web"
         / "src"
         / "lib"
-        / "provenEvidence.ts"
+        / "connectorClaims.generated.ts"
     )
-    body = proven.read_text(encoding="utf-8")
-    match = re.search(r"export const TRANSFER_READY_DRIVERS = (\d+);", body)
-    assert match, f"TRANSFER_READY_DRIVERS missing in {proven}"
-    assert int(match.group(1)) == len(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
+    body = claims.read_text(encoding="utf-8")
+    proven_n = re.search(r'"proven_count": (\d+)', body)
+    pending_n = re.search(r'"pending_count": (\d+)', body)
+    assert proven_n and pending_n, f"counts missing in {claims}"
+    assert int(proven_n.group(1)) + int(pending_n.group(1)) == len(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
+    assert "TRANSFER_READY_DRIVERS" not in (claims.parent / "provenEvidence.ts").read_text(encoding="utf-8")
 
 
 def test_synthetic_sdk_descriptors_are_not_transfer_live():

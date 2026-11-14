@@ -186,7 +186,7 @@ export function EvidencePlatesArt() {
         your sources · your destinations
       </ArtText>
 
-      <ArtSeal cx={800} cy={378} r={44} label={`measured ${EVIDENCE_AS_OF}`} />
+      <ArtSeal cx={800} cy={378} r={44} label={EVIDENCE_AS_OF ? `CI ${EVIDENCE_AS_OF}` : "CI evidence"} />
       <ArtText x={800} y={496} anchor="middle" size={14} tone="muted">
         read back from the destination
       </ArtText>

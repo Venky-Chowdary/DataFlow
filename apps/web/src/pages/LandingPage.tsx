@@ -12,7 +12,15 @@ import { VideoPlayer, videoThumb } from "../components/marketing/VideoPlayer";
 import { FEATURED_VIDEO_ID, MARKETING_VIDEOS } from "../lib/videoCatalog";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
-import { EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
+import {
+  EVIDENCE_AS_OF,
+  EVIDENCE_SOURCE_RUN,
+  PENDING_DRIVERS,
+  PROVEN_CDC_SOURCES,
+  PROVEN_DRIVERS,
+  catalogHonestyLead,
+  provenDriversPhrase,
+} from "../lib/provenEvidence";
 import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -278,7 +286,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </button>
             </div>
             <p className="lp-hero-meta">
-              {TRANSFER_READY_DRIVERS} transfer-ready drivers
+              {provenDriversPhrase()}
               <span aria-hidden>·</span>
               G1–G9 preflight
               <span aria-hidden>·</span>
@@ -553,28 +561,29 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
       </section>
 
-      <section className="lp-home-measured" id="measured" aria-label="Measured evidence">
+      <section className="lp-home-measured" id="measured" aria-label="CI evidence">
         <div className="lp-home-measured-inner">
           <Reveal className="lp-home-section-head">
-            <p className="lp-section-kicker">Measured {EVIDENCE_AS_OF}</p>
-            <h2>Numbers from named, re-runnable fixtures.</h2>
+            <p className="lp-section-kicker">CI evidence{EVIDENCE_AS_OF ? ` · ${EVIDENCE_AS_OF}` : ""}</p>
+            <h2>Counted from the CI run, not typed in.</h2>
             <p>
-              Every figure here traces to a recorded run against real engines, with the destination
-              read back afterwards.
+              A driver counts as proven when the CI jobs that prove its engine ran green with no
+              skipped test.{" "}
+              {EVIDENCE_SOURCE_RUN ? <a href={EVIDENCE_SOURCE_RUN}>See the run.</a> : null}
             </p>
           </Reveal>
           <dl className="lp-home-measured-grid">
             <div>
-              <dt>{TRANSFER_READY_DRIVERS}</dt>
-              <dd>Transfer-ready drivers across databases, warehouses, files, streams, and vectors</dd>
+              <dt>{PROVEN_DRIVERS}</dt>
+              <dd>Drivers proven in CI across databases, warehouses, files, streams, and vectors</dd>
             </div>
             <div>
-              <dt>4</dt>
-              <dd>Native CDC engines: SQL Server, PostgreSQL, MySQL, Oracle</dd>
+              <dt>{PENDING_DRIVERS}</dt>
+              <dd>More drivers implemented and running their CI proof</dd>
             </div>
             <div>
-              <dt>48</dt>
-              <dd>Live schema-drift cases on PostgreSQL, MySQL, SQL Server, Oracle</dd>
+              <dt>{PROVEN_CDC_SOURCES.length}</dt>
+              <dd>CDC sources proven in CI{PROVEN_CDC_SOURCES.length ? `: ${PROVEN_CDC_SOURCES.join(", ")}` : ""}</dd>
             </div>
             <div>
               <dt>9</dt>
@@ -715,8 +724,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <h2>Load Snowflake, BigQuery, and your lake</h2>
             <p>
               Native drivers for warehouses, object storage, databases, streams, vector stores, and
-              apps. Map once, validate before write, quarantine bad rows, and verify every load —
-              one catalog, one governed path, <strong>{TRANSFER_READY_DRIVERS} transfer-ready drivers</strong>.
+              apps. Map once, validate before write, quarantine bad rows, and get a verification report for every load —
+              one catalog, one governed path, <strong>{provenDriversPhrase()}</strong>.
             </p>
           </Reveal>
         </div>
