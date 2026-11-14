@@ -6,7 +6,7 @@ state that tombstones exist instead of comparing live rows as if they were
 the whole table.
 
 Soft delete (``_deleted``) is the product contract the UI, help docs and
-docs/ZERO_LOSS_PROPERTIES.md promise; QA demo 1030 found an undeclared
+docs/use/sync-modes.md promise; QA demo 1030 found an undeclared
 contract hard-deleting instead. A hard DELETE is now an explicit
 ``delete_mode="hard"`` on the stream contract (tests/test_r7_mirror_soft_delete_rest_e2e.py
 pins the soft default end to end).

@@ -740,6 +740,8 @@ export function TransferPage({
   // D276: on the hosted cloud file exports and the local-file variant of
   // DuckDB / Iceberg land on the server's own disk; the API says so, with why.
   const [fileExportUnavailable, setFileExportUnavailable] = useState<FileExportAvailability | null>(null);
+  // A route already on file export (restored draft) keeps its tab usable; otherwise refused.
+  const fileExportRefused = Boolean(fileExportUnavailable) && destKindMode !== "file_export";
   const [localVariantNotes, setLocalVariantNotes] = useState<LocalVariantNote[]>([]);
   const [liveExportFormats, setLiveExportFormats] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_EXPORT_FORMATS.map((id) => ({ id, label: id.toUpperCase() })),
@@ -8377,20 +8379,26 @@ export function TransferPage({
                       >
                         Database
                       </button>
+                      {/* The label is fixed: an unavailable tab says so by looking
+                          disabled, and the reason is the hint under the control
+                          (and this tab's title and description), never tab text. */}
                       <button
                         type="button"
                         role="tab"
                         aria-selected={destKindMode === "file_export"}
-                        className={`df2-dest-mode-btn${destKindMode === "file_export" ? " active" : ""}`}
-                        disabled={Boolean(fileExportUnavailable) && destKindMode !== "file_export"}
-                        title={fileExportUnavailable?.message}
+                        className={`df2-dest-mode-btn${destKindMode === "file_export" ? " active" : ""}${fileExportRefused ? " is-unavailable" : ""}`}
+                        aria-disabled={fileExportRefused || undefined}
+                        aria-describedby={fileExportUnavailable ? "dest-mode-hint" : undefined}
+                        title={fileExportUnavailable
+                          ? [fileExportUnavailable.reason, fileExportUnavailable.message].filter(Boolean).join(": ")
+                          : undefined}
                         onClick={() => {
+                          if (fileExportRefused) return;
                           setDestKindMode("file_export");
                           resetRouteForDestinationChange();
                         }}
                       >
                         File export
-                        {fileExportUnavailable ? ` (${fileExportUnavailable.reason})` : ""}
                       </button>
                     </div>
                     <Button
@@ -8403,6 +8411,11 @@ export function TransferPage({
                       Advanced
                     </Button>
                   </div>
+                  {fileExportUnavailable && (
+                    <p className="df2-label-hint df2-dest-mode-hint" id="dest-mode-hint" data-testid="dest-mode-hint">
+                      File export: {fileExportUnavailable.reason}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -8422,9 +8435,9 @@ export function TransferPage({
                       <option key={f.id} value={f.id}>{f.label}</option>
                     ))}
                   </select>
-                  {fileExportUnavailable && (
+                  {fileExportUnavailable?.message && (
                     <p className="df2-label-hint" role="note">
-                      {fileExportUnavailable.reason}. {fileExportUnavailable.message}
+                      {fileExportUnavailable.message}
                     </p>
                   )}
                   {formulaGuardApplies(exportFormat) && (

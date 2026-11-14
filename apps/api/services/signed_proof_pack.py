@@ -572,7 +572,7 @@ def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
         raise ProofClaimError(
             "Proof pack must not claim migration proven without post-write "
             f"full_checksum assurance (claim_level={assurance.get('claim_level')!r}). "
-            "See docs/PROOF_POST_WRITE_CONTRACT.md."
+            "See docs/use/verification.md."
         )
     if assurance.get("claim_level") != "full_checksum":
         raise ProofClaimError(
@@ -915,7 +915,7 @@ def build_signed_proof_pack(
             ),
         },
         "governance_operations": _governance_operations_for_pack(governance_operations),
-        "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
+        "documentation": "docs/use/verification.md",
         "control_totals": (
             (reconciliation or {}).get("control_totals")
             if isinstance(reconciliation, dict)

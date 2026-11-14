@@ -4,7 +4,7 @@
  * One viewBox (1000×640) so a hero scales fluidly without breakpoints, one grid,
  * one light direction, one type scale. Art modules contribute geometry only —
  * never their own background, palette, or font sizes. See
- * docs/MARKETING_HERO_DESIGN_SYSTEM.md for the per-page concepts.
+ * (the per-page concept notes were removed with the old docs).
  */
 
 import { useEffect, useId, useState, type ReactNode } from "react";

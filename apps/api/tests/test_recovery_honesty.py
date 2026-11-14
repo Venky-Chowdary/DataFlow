@@ -50,7 +50,7 @@ def test_recovery_honesty_refuses_product_undo_claims() -> None:
     assert caps["transfer_undo"]["available"] is False
     assert caps["staging_swap"]["available"] is False
     assert caps["warehouse_restore"]["available"] is False
-    assert "MIGRATION_ROLLBACK" in h["operator_runbook"]
+    assert h["operator_runbook"] == "docs/operate/runbooks.md"
 
 
 def test_workspace_security_posture_includes_recovery_honesty(client):

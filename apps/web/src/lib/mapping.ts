@@ -1133,7 +1133,9 @@ const FALSE_FRIEND_KIND_ORDER: MappingReviewKind[] = [
 export interface MappingReviewKindMeta {
   kind: MappingReviewKind;
   chip: string;
+  /** One of it ("user≠customer pair"); ``nounPlural`` for more than one. */
   noun: string;
+  nounPlural: string;
   detail: string;
   primaryLabel: string;
   confirmLabel: string;
@@ -1142,56 +1144,64 @@ export interface MappingReviewKindMeta {
 const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "kind">> = {
   measure_kind: {
     chip: "qty≠amt",
-    noun: "quantity≠amount pair(s)",
+    noun: "quantity≠amount pair",
+    nounPlural: "quantity≠amount pairs",
     detail: "Count is not money. Remap the destination column — do not write quantity into amount.",
     primaryLabel: "Remap dest",
     confirmLabel: "Confirm this pair",
   },
   entity_identity: {
     chip: "user≠customer",
-    noun: "user≠customer pair(s)",
+    noun: "user≠customer pair",
+    nounPlural: "user≠customer pairs",
     detail: "Different entities share an id leaf. Remap to the intended destination — user is not customer.",
     primaryLabel: "Remap dest",
     confirmLabel: "Confirm this pair",
   },
   dest_collision: {
     chip: "dest collision",
-    noun: "destination identifier collision(s)",
+    noun: "destination identifier collision",
+    nounPlural: "destination identifier collisions",
     detail: "Two destination names fold to the same identifier (UserID vs userid). Remap to the intended column.",
     primaryLabel: "Remap dest",
     confirmLabel: "Confirm this pair",
   },
   identity_leaf: {
     chip: "sku≠id",
-    noun: "sku≠product_id pair(s)",
+    noun: "sku≠product_id pair",
+    nounPlural: "sku≠product_id pairs",
     detail: "Identity kinds differ (sku vs id/key). Remap to the matching destination column.",
     primaryLabel: "Remap dest",
     confirmLabel: "Confirm this pair",
   },
   temporal_polarity: {
     chip: "created≠updated",
-    noun: "created≠updated pair(s)",
+    noun: "created≠updated pair",
+    nounPlural: "created≠updated pairs",
     detail: "Created and updated are opposite time polarity. Remap — do not write one into the other.",
     primaryLabel: "Remap dest",
     confirmLabel: "Confirm this pair",
   },
   lossy: {
     chip: "lossy",
-    noun: "lossy type pair(s)",
+    noun: "lossy type pair",
+    nounPlural: "lossy type pairs",
     detail: "Type path narrows or mutates. Sign a Risk Contract — Approve eligible will not clear this.",
     primaryLabel: "Sign Risk Contract",
     confirmLabel: "Approve",
   },
   create_new: {
     chip: "create-new",
-    noun: "create-new column(s)",
+    noun: "create-new column",
+    nounPlural: "create-new columns",
     detail: "This source will ADD a destination column. Confirm the name and type before Validate.",
     primaryLabel: "Review dest name",
     confirmLabel: "Approve",
   },
   rename: {
     chip: "possible rename",
-    noun: "possible rename(s)",
+    noun: "possible rename",
+    nounPlural: "possible renames",
     detail:
       "Proposed match, not a confirmed one: the old destination column is gone from the source and this new source name was only auto-matched onto it. Approve to accept the rename, or remap.",
     primaryLabel: "Remap dest",
@@ -1199,7 +1209,8 @@ const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "k
   },
   generic: {
     chip: "review",
-    noun: "mapping(s)",
+    noun: "mapping",
+    nounPlural: "mappings",
     detail: "Engine held this pair below the auto-approve floor. Remap or confirm the pair.",
     primaryLabel: "Remap dest",
     confirmLabel: "Approve",
@@ -2830,8 +2841,12 @@ export function mappingHealthSummary(
   } else if (falseFriendCount > 0) {
     const parts = FALSE_FRIEND_KIND_ORDER
       .filter((k) => (falseFriendKinds[k] || 0) > 0)
-      .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
-    headline = `${parts.join(" · ")} need confirm`;
+      .map((k) => {
+        const n = falseFriendKinds[k] || 0;
+        const meta = mappingReviewKindMeta(k);
+        return `${n} ${n === 1 ? meta.noun : meta.nounPlural}`;
+      });
+    headline = `${parts.join(" · ")} ${falseFriendCount === 1 ? "needs" : "need"} confirming`;
     detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
   } else if (failClosedContract > 0) {
     headline = `${failClosedContract} contract(s) signed with a fail-closed policy`;

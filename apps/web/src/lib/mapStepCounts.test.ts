@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { countByFilter, filterMappings, mapRowState, mapStepCounts } from "./columnWorkbench";
-import { mapStatusLine } from "../components/mapping/MapIssueList";
+import { mapIssueSummary, mapStatusLine } from "../components/mapping/MapIssueList";
 import type { EditableMapping } from "./mapping";
 
 const row = (source: string, inferredType: string, destType: string): EditableMapping => ({
@@ -72,5 +72,26 @@ describe("Map step counts come from one selector", () => {
     assert.deepEqual([counts.attention, counts.approvable, counts.approved, counts.ready], [2, 2, 1, 3]);
     assert.equal(counts.attention + counts.ready, counts.total);
     assert.equal(mapStatusLine(counts), "4 of 5 mapped · 2 need your review");
+  });
+});
+
+describe("the Map banner's one sentence (W9)", () => {
+  it("names false-friend pairs apart from the other rows, with real plurals", () => {
+    assert.equal(
+      mapIssueSummary({ destinationIssues: 2, falseFriends: 1, review: 3 }),
+      "2 destination column issues block Validate · 1 false-friend pair needs confirming · 3 columns need review",
+    );
+    assert.equal(
+      mapIssueSummary({ destinationIssues: 1, falseFriends: 2, review: 1 }),
+      "1 destination column issue blocks Validate · 2 false-friend pairs need confirming · 1 column needs review",
+    );
+  });
+
+  it("drops what is zero and never writes '(s)'", () => {
+    assert.equal(mapIssueSummary({ destinationIssues: 0, falseFriends: 0, review: 4 }), "4 columns need review");
+    assert.equal(mapIssueSummary({ destinationIssues: 0, falseFriends: 0, review: 0 }), "");
+    for (const n of [0, 1, 2, 12]) {
+      assert.doesNotMatch(mapIssueSummary({ destinationIssues: n, falseFriends: n, review: n }), /\(s\)/);
+    }
   });
 });

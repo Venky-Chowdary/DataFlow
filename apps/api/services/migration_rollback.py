@@ -22,7 +22,7 @@ Honesty
 ``transfer_undo_claimed`` remains False in recovery_honesty.
 Only ``staging_discard`` is marked available.
 
-See ``docs/MIGRATION_ROLLBACK.md``.
+See ``docs/operate/runbooks.md`` (Rolling back a migration).
 """
 
 from __future__ import annotations
@@ -189,7 +189,7 @@ def plan_rollback(
         guarantees=list(guarantees),
         non_guarantees=list(non_guarantees),
         recovery_steps=list(recovery_steps),
-        documentation="docs/MIGRATION_ROLLBACK.md",
+        documentation="docs/operate/runbooks.md",
         created_at=_now(),
         signature="",  # filled below
         status="planned",
@@ -221,7 +221,7 @@ def execute_rollback(
     if strategy not in EXECUTABLE_STRATEGIES or not raw.get("executable"):
         raise RollbackRefuseError(
             f"Strategy {strategy} is not executable by Datawrap — "
-            "follow docs/MIGRATION_ROLLBACK.md (warehouse restore / staging re-land). "
+            "follow docs/operate/runbooks.md (warehouse restore / staging re-land). "
             "Population undo is not claimed."
         )
 
@@ -265,7 +265,7 @@ def execute_rollback(
         },
         "guarantees": list(raw.get("guarantees") or []),
         "non_guarantees": list(raw.get("non_guarantees") or []),
-        "documentation": raw.get("documentation") or "docs/MIGRATION_ROLLBACK.md",
+        "documentation": raw.get("documentation") or "docs/operate/runbooks.md",
     }
 
 

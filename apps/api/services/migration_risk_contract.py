@@ -10,7 +10,7 @@ migration risk must produce an immutable, signed artifact that records:
 
 Default execution policy is FAIL_JOB — never silent continue.
 
-See ``docs/MIGRATION_RISK_CONTRACT.md``.
+See ``docs/use/verification.md`` (Accepting a known loss).
 """
 
 from __future__ import annotations

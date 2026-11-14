@@ -1,10 +1,11 @@
 """Read-only: which saved connectors would the ENFORCING egress rule refuse?
 
-The newer egress sites (connector save, transfer reads/writes, introspection,
-precount, shared HTTP/SMTP/Mongo clients, redirects) only audit by default.
-Setting ``DATAFLOW_EGRESS_ENFORCE_NEW=1`` makes them refuse private, loopback
-and CGNAT hosts. Run this against the connector store BEFORE flipping that
-flag to get the number of saved connectors that would stop working, and why:
+The egress sites (connector save, transfer reads/writes, introspection,
+precount, shared HTTP/SMTP/Mongo clients, redirects) refuse private, loopback
+and CGNAT hosts by default; ``DATAFLOW_EGRESS_ENFORCE_NEW=0`` puts them back in
+audit-only mode. Run this against the connector store before upgrading (or
+before removing that opt-out) to get the number of saved connectors that will
+be refused, and why:
 
     python scripts/audit_egress_impact.py                      # store as configured
     python scripts/audit_egress_impact.py --file connectors.json

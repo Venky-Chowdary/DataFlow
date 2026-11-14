@@ -52,6 +52,38 @@ CDC_CAPABLE_SOURCES = frozenset({
     "amazon_aurora_mysql",
 })
 
+#: Products that speak a CDC-capable engine's wire protocol but are judged by
+#: the name the operator saved, not by the driver that reads them. A driver
+#: alias rewrites their format (TimescaleDB to ``postgresql``); this set is
+#: what stops the alias from carrying the engine's CDC route with it.
+SOURCE_PRODUCTS_JUDGED_BY_OWN_NAME = frozenset({
+    "timescaledb",
+    "timescale",
+    "cockroachdb",
+    "citus",
+    "greenplum",
+    "yugabytedb",
+    "redshift",
+    "duckdb",
+})
+
+
+def cdc_source_supported(source_type: str, driver_type: str = "") -> bool:
+    """The one answer to "can this source drive CDC": the list this gate enforces.
+
+    ``source_type`` is the id the operator saved; ``driver_type`` is the driver
+    it resolves to. A product in :data:`SOURCE_PRODUCTS_JUDGED_BY_OWN_NAME` is
+    never promoted by its driver. Being a valid CDC *destination* is a separate
+    question this does not answer.
+    """
+    name = (source_type or "").strip().lower()
+    if name in CDC_CAPABLE_SOURCES:
+        return True
+    if name in SOURCE_PRODUCTS_JUDGED_BY_OWN_NAME:
+        return False
+    return (driver_type or "").strip().lower() in CDC_CAPABLE_SOURCES
+
+
 MODES_REQUIRING_CURSOR = frozenset(
     {"incremental_append", "incremental_deduped", "cdc"}
 )

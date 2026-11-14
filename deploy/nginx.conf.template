@@ -2,7 +2,7 @@
 # is the edge. Keep the scheme the edge saw, and append (never overwrite) the
 # client chain: the API reads X-Forwarded-For hops[-N] with
 # DATAWRAP_TRUSTED_PROXY_COUNT=3 (browser -> edge -> nginx -> edge -> API) or 2
-# over private networking. See docs/DEPLOYMENT.md.
+# over private networking. See docs/operate/deploy.md (client IP behind proxies).
 map $http_x_forwarded_proto $dw_forwarded_proto {
     default $http_x_forwarded_proto;
     ""      $scheme;

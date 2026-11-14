@@ -28,7 +28,7 @@ def redis_ttl_policy_gate(dest_type: str, source_type: str) -> dict | None:
         "message": (
             "Redis TTL/EXPIRE is not preserved as a migration guarantee — "
             "values transfer; set EXPIRE in a post-load job if needed. "
-            "See docs/REDIS_TTL_SEMANTICS.md."
+            "See docs/reference/connectors.md."
         ),
         "blocks_transfer": False,
         "details": {"honesty": "ttl_not_productized"},

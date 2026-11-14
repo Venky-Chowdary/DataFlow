@@ -597,7 +597,7 @@ def build_field_reduction_ledger(
             "authenticated. A signed ledger proves the reduction decisions were "
             "not edited after approval — not that the reduction was correct."
         ),
-        "documentation": "docs/FIELD_REDUCTION_LEDGER.md",
+        "documentation": "docs/use/verification.md",
     }
 
 

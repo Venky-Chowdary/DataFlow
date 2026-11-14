@@ -597,12 +597,17 @@ describe("Map step layout (W6): one header, a compact toolbar, triage filter, ex
     await key(document.activeElement ?? document.body, "Escape");
   });
 
-  it("the header carries the route and one status line", async () => {
+  it("the header carries the table facts (not the route the stepper shows) and one status line", async () => {
     await render([
       m("order_id", "legacy_ref", "BIGINT", { approved: false }),
       m("first_name", "", "VARCHAR(40)", { approved: false }),
     ]);
-    assert.match(q(".df2-map-route").textContent ?? "", /mysql\.orders → warehouse\.orders_dest/);
+    // W9: the stepper's route line names source and destination; the header
+    // keeps the facts it does not carry, and the full route in its title.
+    const route = q(".df2-map-route");
+    assert.equal(route.textContent, "existing table · 5 columns");
+    assert.doesNotMatch(route.textContent ?? "", /mysql\.orders|warehouse\.orders_dest/);
+    assert.match(route.getAttribute("title") ?? "", /mysql\.orders → warehouse\.orders_dest/);
     assert.match(
       q('[data-testid="map-status-line"]').textContent ?? "",
       /^1 of 2 mapped · 1 needs your review( · \d+ destination column issues?)?$/,

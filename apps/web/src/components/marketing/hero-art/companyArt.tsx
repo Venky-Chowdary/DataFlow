@@ -1,6 +1,6 @@
 /**
  * Company-surface hero drawings (pricing, customers) —
- * see docs/MARKETING_HERO_DESIGN_SYSTEM.md.
+ * (the hero design notes were removed with the old docs).
  */
 
 import { EVIDENCE_AS_OF } from "../../../lib/provenEvidence";

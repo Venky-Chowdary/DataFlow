@@ -108,7 +108,7 @@ test("catalog lead states the CI-proven driver count, never the tile count (CLM-
 });
 
 test("marketing stack badges are derived from CI evidence", () => {
-  // Catalog status `planned` in docs/CONNECTOR_READINESS_MATRIX.md. Naming one
+  // Catalog status `planned` (see docs/reference/connectors.md). Naming one
   // of these on a public page would sell a tile as a live transfer.
   const planned = /\b(Redshift|Databricks|ClickHouse|MariaDB|CockroachDB|Shopify)\b/;
   assert.ok(MARKETING_STACK.length > 0);
@@ -126,9 +126,9 @@ test("marketing stack badges are derived from CI evidence", () => {
 });
 
 test("public pages never name a planned connector or an unbuilt control", () => {
-  // MFA enforcement is design-only (docs/MFA_ENFORCEMENT_DESIGN.md); the IP
+  // MFA enforcement was design-only when this list was written; the IP
   // allowlist only applies to tenant custom domains; zero-loss absolutes and
-  // planned connectors are left out (docs/MARKETING_AUDIT_2026-10.md §4).
+  // planned connectors are left out.
   const forbidden =
     /\b(MFA|multi-factor|IP allow-?list|zero data loss|0 silent drops|Redshift|Databricks|ClickHouse|Shopify)\b|"(redshift|databricks|clickhouse|shopify)"/i;
   const marketingFiles = [

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "policy": "freeze",
-  "description": "Phase F8 — god-module LOC freeze. Fail CI if a listed file grows past max_lines. Lower max only after a real extraction; never raise without ADR note in docs/GOD_MODULE_DECOMPOSITION.md.",
+  "description": "Phase F8 — god-module LOC freeze. Fail CI if a listed file grows past max_lines. Lower max only after a real extraction; never raise a budget; split the module instead.",
   "modules": [
     {"path": "services/type_system.py", "max_lines": 8100, "facade": "services.decision_kernel.type_invent"},
     {"path": "services/reconciliation.py", "max_lines": 5100, "facade": "services.reconciliation_api"},

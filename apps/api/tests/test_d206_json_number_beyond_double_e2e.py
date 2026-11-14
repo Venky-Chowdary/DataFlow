@@ -2,7 +2,7 @@
 cannot hold exactly is refused at preflight, never rounded on write.
 
 QA: PG jsonb ``{"n": 12345678901234567890.123}`` into MySQL. MySQL ``JSON``
-stores numbers as IEEE doubles (docs/ZERO_LOSS_PROPERTIES.md, Property 8,
+stores numbers as IEEE doubles (docs/use/verification.md, numbers inside JSON,
 "JSON number spelling"), so the document landed as ``1.2345678901234567e19``
 and Gate-8 failed the run *after* the write; preflight said nothing.
 

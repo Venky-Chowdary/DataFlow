@@ -5,7 +5,8 @@
 # excluding generated/vendored trees and test fixtures, and by recording the
 # patterns that naive scanners misread as vulnerabilities.
 #
-# See docs/SECURITY_SCANNING.md for the false-positive catalogue and evidence.
+# See docs/operate/security.md (static analysis in CI). The written
+# false-positive catalogue was removed with the old docs and not rebuilt.
 
 exclude_dirs:
   - "/node_modules"

@@ -95,7 +95,7 @@ def ai_may_decide_preflight_gate(gate_id: str | None = None) -> bool:
     """Product policy: AI never decides G1–G9 pass/fail (suggestions only).
 
     ``gate_id`` is accepted for call-site clarity; the answer is always False
-    for any numbered preflight gate. See docs/AI_GATE_POLICY.md.
+    for any numbered preflight gate. See docs/use/pilot.md.
     """
     _ = gate_id  # documented parameter for call-site readability
     return False

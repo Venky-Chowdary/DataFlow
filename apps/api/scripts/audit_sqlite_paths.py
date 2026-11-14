@@ -1,9 +1,10 @@
 """Read-only: where do saved SQLite/DuckDB connectors point, and are they inside the proposed root?
 
-Production can confine local database files to the persistent volume
-(``DATAFLOW_CONFINE_LOCAL_FILES=1``, off by default). That rule refuses a file
-anywhere else, and anchors a relative name at the root, so a connector that works
-today can point at a different (empty) file after the flag. Run this first:
+Local database files are confined to the persistent volume by default
+(``DATAFLOW_CONFINE_LOCAL_FILES``; ``0`` opts out). That rule refuses a file
+anywhere else, and anchors a relative name at the root, so a connector saved
+before the upgrade can point at a different (empty) file. Run this before
+upgrading, or before turning an opt-out back off:
 
     python scripts/audit_sqlite_paths.py                     # store as configured
     python scripts/audit_sqlite_paths.py --file connectors.json --data-dir /data
