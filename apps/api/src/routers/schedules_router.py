@@ -777,6 +777,16 @@ async def get_pipeline_schedule(
     return ScheduleResponse.from_schedule(sched)
 
 
+def _claim_warnings(sched: Any) -> list[str]:
+    """Unproven engines and unrefreshable Salesforce tokens (CLM-7, CLM-13)."""
+    from services.schedule_claim_warnings import schedule_claim_warnings
+
+    return schedule_claim_warnings(
+        str(getattr(sched, "source_connector_id", "") or ""),
+        str(getattr(sched, "dest_connector_id", "") or ""),
+    )
+
+
 @router.post("/", response_model=ScheduleResponse, status_code=201)
 async def create_pipeline_schedule(
     body: ScheduleCreate,
@@ -819,6 +829,7 @@ async def create_pipeline_schedule(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_schedule_created(sched, request=request)
     audit_schedule_acknowledgment(sched, request=request, via="rest")
+    warnings.extend(_claim_warnings(sched))
     return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
@@ -896,6 +907,7 @@ async def patch_pipeline_schedule(
         updated.acknowledgment_at != existing.acknowledgment_at
     ):
         audit_schedule_acknowledgment(updated, request=request, via="rest")
+    warnings.extend(_claim_warnings(updated))
     return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
