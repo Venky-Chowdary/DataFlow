@@ -8,6 +8,7 @@ import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import {
   executeQuery,
+  downloadExportFile,
   exportQuery,
   fetchQuerySchema,
   type QueryExportResult,
@@ -106,6 +107,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [result, setResult] = useState<QueryResult | null>(null);
   const [lastRunText, setLastRunText] = useState("");
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
   // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
@@ -381,6 +383,22 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
     }
     void runText(`${explainPrefix(dialect)}${q}`, "all");
   }, [active?.query, dialect, runText, selected?.type, toast]);
+
+  const downloadExport = async () => {
+    if (!exportResult?.download_url) return;
+    setDownloading(true);
+    try {
+      await downloadExportFile(exportResult.download_url, exportResult.filename || `query-export.${exportResult.format || "csv"}`);
+    } catch (err) {
+      toast({
+        title: "Download failed",
+        message: err instanceof Error ? err.message : "Could not download the export.",
+        tone: "error",
+      });
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const runExport = async () => {
     const text = (lastRunText || active?.query || "").trim();
@@ -848,13 +866,18 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         .
                       </p>
                       {exportResult.download_url && (
-                        <a
-                          className="df2-btn df2-btn-primary df2-btn-sm"
-                          href={exportResult.download_url}
-                          download={exportResult.filename}
+                        // UX-2: fetched with the session, never a bare link (401).
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          loading={downloading}
+                          loadingLabel="Downloading…"
+                          onClick={() => void downloadExport()}
+                          leadingIcon={<DtIcon name="download" size={14} />}
+                          data-testid="query-export-download"
                         >
-                          <DtIcon name="download" size={14} /> Download {exportResult.filename}
-                        </a>
+                          Download {exportResult.filename}
+                        </Button>
                       )}
                     </div>
                   </div>
