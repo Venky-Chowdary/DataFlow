@@ -383,8 +383,36 @@ html:has(.df2-app) #root {
 }
 
 .df2-app .df2-topbar,
-.df2-app .df2-api-offline-banner {
+.df2-app .df2-api-offline-banner,
+.df2-app .df2-first-run-banner {
   flex: 0 0 auto !important;
+}
+
+/* UX-1: first-run workspace banner and create form. */
+.df2-app .df2-first-run-banner.df2-alert {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin: 0;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.df2-app .df2-first-run-banner.df2-alert > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-app .df2-first-run-banner.df2-alert p {
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.df2-first-run-form {
+  display: grid;
+  gap: 6px;
 }
 
 .df2-app .df2-content {

@@ -4,6 +4,7 @@ import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { exportDownloadError, type JobExportDownload } from "./jobExportDownload";
+import { workspaceRefusalCopy } from "./firstRunWorkspace";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
@@ -175,6 +176,9 @@ async function readApiRefusal(
   } catch {
     /* keep the fallback */
   }
+  // UX-1: the header-level workspace refusals name an HTTP header, not a next step.
+  const workspaceCopy = workspaceRefusalCopy(detail);
+  if (workspaceCopy) detail = workspaceCopy;
   if (res.status === 502 || res.status === 504) {
     if (detail === fallback || /<html/i.test(detail)) {
       detail = (

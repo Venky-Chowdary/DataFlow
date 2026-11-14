@@ -11,6 +11,7 @@ import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
+import { FirstRunWorkspace } from "./components/ui/FirstRunWorkspace";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { ForcePasswordChange } from "./components/ForcePasswordChange";
@@ -793,6 +794,8 @@ function AppShell({
             </div>
           </div>
         )}
+
+        <FirstRunWorkspace />
 
         <div className={`df2-content ${contentModeClass}`}>
         {bootLoading && (
