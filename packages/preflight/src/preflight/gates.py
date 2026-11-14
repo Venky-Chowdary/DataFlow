@@ -2376,6 +2376,34 @@ def _g6_dynamodb_key_refusal(
     return "; ".join(str(violation) for violation in violations) if violations else None
 
 
+def _g6_mysql_row_limit_refusal(ctx: PreflightContext, dest_kind: str) -> dict[str, Any] | None:
+    """DATA-17: a create-new MySQL table past 1117 / 1118 limits, refused here.
+
+    The writer asks the same rule before CREATE; asking it at Validate means the
+    run never starts only to die with the raw driver error.
+    """
+    if dest_kind not in {"mysql", "mariadb"} or ctx.plan.destination.table_exists is not False:
+        return None
+    try:
+        from services.mysql_row_limits import mysql_create_limit_refusal
+        from services.type_system import materialize_dest_ddl
+    except ImportError:
+        return None
+    declared = {c.name: c.inferred_type for c in ctx.plan.source.columns}
+    cols: list[str] = []
+    types: list[str] = []
+    for m in ctx.plan.mappings:
+        if not m.target or _is_intentional_omit_mapping(m) or m.target in cols:
+            continue
+        cols.append(m.target)
+        types.append(m.target_type or materialize_dest_ddl(dest_kind, declared.get(m.source) or "string"))
+    _sources, key_targets = _g6_sample_identity(ctx, dest_kind)
+    return mysql_create_limit_refusal(
+        cols, types, key_cols=key_targets,
+        table=str(getattr(ctx.plan.destination, "table", "") or getattr(ctx.plan, "stream_name", "") or ""),
+    )
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
 
@@ -2597,6 +2625,24 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     "scrubbed_drift_issues": scrubbed,
                 },
                 note="Declared DDL compatibility issues",
+            ),
+        )
+
+    row_limit = _g6_mysql_row_limit_refusal(ctx, dest_kind)
+    if row_limit:
+        return _block(
+            GateId.G6_TARGET_DDL,
+            str(row_limit["message"]),
+            start,
+            _scope(
+                {
+                    "issues": [row_limit["message"]],
+                    "rule_id": "g6_target_ddl.mysql_row_limit",
+                    "remediation_kind": "fix_ddl",
+                    "error_code": row_limit["code"],
+                    "columns": row_limit["columns"],
+                },
+                note="MySQL CREATE TABLE column and row-size limits",
             ),
         )
 

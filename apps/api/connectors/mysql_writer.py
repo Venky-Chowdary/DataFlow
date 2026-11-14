@@ -1537,6 +1537,27 @@ def write_mapped_rows(
                         warnings=transform_errors,
                     )
 
+            if not table_existed and create_table:
+                # DATA-17: Validate asks the same rule; a run that skipped it
+                # still never reaches CREATE only to die on 1117 / 1118.
+                from services.mysql_row_limits import mysql_create_limit_refusal
+
+                row_limit = mysql_create_limit_refusal(
+                    target_cols, target_types, key_cols=conflict_columns or (), table=table_name
+                )
+                if row_limit:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        error=str(row_limit["message"]),
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+
             setup_attempt = 0
             setup_started = time.monotonic()
             while True:
