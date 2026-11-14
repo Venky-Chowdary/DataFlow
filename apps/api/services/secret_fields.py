@@ -187,3 +187,17 @@ def keep_stored_secrets(new: Any, stored: Any, *, also: frozenset[str] = DSN_KEY
         else:
             out[key] = item
     return out
+
+
+def public_plan_dict(plan: Any) -> dict[str, Any]:
+    """A transfer plan's ``to_dict()`` with its endpoint credentials masked (SEC-4).
+
+    Pure (no store read), so an async route may call it on the event loop.
+    """
+    from services.secret_config import mask_secrets_in_text
+
+    d = plan.to_dict()
+    for side in ("source", "destination"):
+        if isinstance(d.get(side), dict):
+            d[side] = mask_secret_tree(d[side], mask_url=mask_secrets_in_text)
+    return d

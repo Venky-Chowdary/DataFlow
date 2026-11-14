@@ -10,7 +10,7 @@ from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
-from services.transfer_plan_store import public_plan_dict
+from services.secret_fields import public_plan_dict
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
 from typing import Any, Optional

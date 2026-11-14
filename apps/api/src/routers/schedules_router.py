@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
 from typing import Any, Literal, Optional
 
@@ -629,14 +630,16 @@ async def gitops_apply_manifest(
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
-        result = apply_manifest(
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
             workspace_filter=tenant_scope(request, workspace_id).filter,
             # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
-            authorize_schedule=lambda spec: assert_schedule_body_ids(request, spec),
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
@@ -984,13 +987,15 @@ async def import_pipeline_schedule(
     from services.gitops_manifest import WorkspaceScopeError
 
     try:
-        result = apply_manifest(
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
             payload,
             dry_run=False,
             workspace_id=ws,
             workspace_filter=tenant_scope(request, workspace_id).filter,
             # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
-            authorize_schedule=lambda spec: assert_schedule_body_ids(request, spec),
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)

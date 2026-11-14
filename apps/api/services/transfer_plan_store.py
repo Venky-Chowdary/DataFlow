@@ -249,18 +249,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def public_plan_dict(plan: Any) -> dict[str, Any]:
-    """A plan's ``to_dict()`` with its endpoint credentials masked (SEC-4)."""
-    from services.secret_config import mask_secrets_in_text
-    from services.secret_fields import mask_secret_tree
-
-    d = plan.to_dict()
-    for side in ("source", "destination"):
-        if isinstance(d.get(side), dict):
-            d[side] = mask_secret_tree(d[side], mask_url=mask_secrets_in_text)
-    return d
-
-
 def _seal_endpoint(endpoint: dict[str, Any], encrypt: Callable[[str], str]) -> dict[str, Any]:
     from services.secret_fields import DSN_KEYS, seal_secret_tree
 
@@ -405,6 +393,8 @@ class TransferPlanRecord:
 
     def public_dict(self) -> dict[str, Any]:
         """The plan as an API response: endpoint credentials masked (SEC-4)."""
+        from services.secret_fields import public_plan_dict
+
         return public_plan_dict(self)
 
     def stored_dict(self) -> dict[str, Any]:
