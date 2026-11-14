@@ -71,6 +71,17 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
     return True
 
 
+def _public_destination(summary: Any) -> Any:
+    """A destination summary without this server's file-system path (SEC-12).
+
+    A file export is named by its ``filename`` and ``download_url``; where it
+    sits on the API host is not the caller's business.
+    """
+    if not isinstance(summary, dict) or not summary.get("download_url"):
+        return summary
+    return {k: v for k, v in summary.items() if k not in ("path", "export_path")}
+
+
 def _stamp_job_mapping_artifacts(
     job_id: str,
     *,
@@ -1545,7 +1556,7 @@ async def execute_transfer_json(
         "elapsed_seconds": result.elapsed_seconds,
         "records_per_second": result.records_per_second,
         "source": result.source_summary,
-        "destination": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
@@ -2158,8 +2169,8 @@ async def run_universal_transfer(
         "records_per_second": result.records_per_second,
         "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
-        "destination": result.destination_summary,
-        "destination_summary": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
+        "destination_summary": _public_destination(result.destination_summary),
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,
