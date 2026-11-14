@@ -76,3 +76,19 @@ def test_pg_and_mysql_emission_unchanged():
     assert "REGEXP_REPLACE" in _call("collapse_whitespace", {}, "`n`", "mysql")
     sql = _call("default_if_null", {"value": "d"}, "`n`", "mysql")
     assert "CAST(`n` AS CHAR)" in sql
+
+
+def test_a_non_text_null_if_sentinel_compares_as_text_like_the_engine():
+    """test_g2 (PR 424, first CI run of test_scd2_pg_live): null_if with
+    values [1.5] on a TEXT column built NULLIF(price, 1.5). PostgreSQL refused
+    it ("operator does not exist: text = numeric"), the whole SQL oracle did
+    not run, and every step of the recipe went uncovered. The engine compares
+    the cell's text with the sentinel's text, so the oracle does the same."""
+    params: dict = {}
+    sql = _need_fn()("null_if", {"values": [1.5]}, '"price"', params, src_type="postgresql")
+    assert sql == 'CASE WHEN "price"::text = :ov0 THEN NULL ELSE "price" END'
+    assert params == {"ov0": "1.5"}
+    tsql = _call("null_if", {"values": [True]}, "[b]", "sqlserver")
+    assert tsql == "CASE WHEN CAST([b] AS nvarchar(max)) = :ov0 THEN NULL ELSE [b] END"
+    # A text sentinel keeps the portable NULLIF form.
+    assert _call("null_if", {"values": ["x"]}, "[n]", "mssql") == "NULLIF([n], :ov0)"

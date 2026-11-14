@@ -1010,9 +1010,17 @@ def _recipe_step_sql(
             f"ELSE {txt} END"
         )
     if op == "null_if":
+        # The engine nulls a cell whose text equals a sentinel's text. A text
+        # sentinel keeps NULLIF; any other (1.5, True) is compared as text,
+        # since NULLIF(text_col, 1.5) is an operator error on PostgreSQL.
+        from services.shape_expr import _as_text
+
         expr = col_expr
         for v in opts.get("values") or []:
-            expr = f"NULLIF({expr}, {_lit(v)})"
+            if isinstance(v, str):
+                expr = f"NULLIF({expr}, {_lit(v)})"
+            elif (text := _as_text(v)) is not None:
+                expr = f"CASE WHEN {_text_cast(expr)} = {_lit(text)} THEN NULL ELSE {expr} END"
         return expr
     if op == "cast_column":
         to_type = str(opts.get("to_type") or "").casefold()

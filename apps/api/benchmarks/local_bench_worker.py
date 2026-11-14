@@ -8,10 +8,12 @@ benchmark in its own process and writes JSON lines to stdout:
 * one ``{"type": "result", "report": {...}}`` at the end.
 
 Its own process because: the hosted API must not have its environment
-switched to the benchmark's in-memory store; ``ru_maxrss`` of a fresh process
-is the benchmark's peak memory (in the long-lived API process the per-job
-delta of a lifetime high-water mark reads 0 MB); and the request returns at
-once instead of timing out behind a proxy.
+switched to the benchmark's in-memory store; the peak memory of its own
+process is the benchmark's (in the long-lived API process the per-job delta
+of a lifetime high-water mark reads 0 MB); and the request returns at once
+instead of timing out behind a proxy. The peak is VmHWM
+(``services.process_peak_rss``): on Linux this process's ``ru_maxrss``
+starts at the spawning API process's RSS.
 """
 
 from __future__ import annotations
@@ -29,12 +31,10 @@ def _emit(payload: dict) -> None:
 
 
 def _peak_rss_bytes() -> int:
-    try:
-        import resource
-    except ImportError:  # pragma: no cover - non-POSIX
-        return 0
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak if sys.platform == "darwin" else peak * 1024)
+    # Not ru_maxrss: on Linux it carries the spawning API process's RSS.
+    from services.process_peak_rss import own_peak_rss_bytes
+
+    return own_peak_rss_bytes()
 
 
 def main(argv: list[str]) -> int:

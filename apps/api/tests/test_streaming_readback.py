@@ -9,6 +9,8 @@ early fingerprints zero columns and returns the digest of an empty table, i.e.
 a proof that quietly proves nothing.
 """
 
+import os
+
 import pytest
 
 from services.reconciliation import (
@@ -70,14 +72,16 @@ def test_streamed_digest_equals_buffered_digest():
 
 
 def _pg_conn():
+    """The PostgreSQL the environment names (libpq PG* variables: CI's
+    .github/ci-live-engines.vars), else the compose lab's localhost:5433."""
     psycopg2 = pytest.importorskip("psycopg2")
     try:
         return psycopg2.connect(
-            host="localhost",
-            port=5433,
-            dbname="dataflow",
-            user="postgres",
-            password="postgres",  # nosec B106 - local fixture
+            host=os.environ.get("PGHOST", "localhost"),
+            port=int(os.environ.get("PGPORT", "5433")),
+            dbname=os.environ.get("PGDATABASE", "dataflow"),
+            user=os.environ.get("PGUSER", "postgres"),
+            password=os.environ.get("PGPASSWORD", "postgres"),  # nosec B106 - local fixture
             connect_timeout=3,
         )
     except Exception as exc:  # noqa: BLE001 - env dependent, any failure means skip

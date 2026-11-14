@@ -638,6 +638,49 @@ def destination_missing(target: ContinuityTarget) -> bool | None:
     return dest_object_missing(target.db_type, cfg, target.table)
 
 
+def _router_tables(request: Any) -> list[str]:
+    """The route tables a shape-router run writes (``targets`` or ``{dest}__{route}``).
+
+    The same naming as ``src.transfer.stream_routes._split_routed_batch``. A
+    routed run never writes the request's destination table itself, so that
+    table cannot be the continuity target.
+    """
+    raw = getattr(request, "shape_recipe", None)
+    if not raw:
+        return []
+    try:
+        from services.shape_models import ShapeRecipe
+
+        recipe = raw if isinstance(raw, ShapeRecipe) else ShapeRecipe.parse(raw)
+    except Exception:  # noqa: BLE001 - an unparseable recipe is refused elsewhere
+        return []
+    step = recipe.router_step
+    if step is None:
+        return []
+    dest_table = str(getattr(getattr(request, "destination", None), "table", "") or "")
+    targets = dict(step.options.get("targets") or {})
+    names = [str(r.get("name") or "") for r in step.options.get("routes") or []]
+    return list(dict.fromkeys(str(targets.get(n) or f"{dest_table}__{n}") for n in names if n))
+
+
+def resolve_targets(request: Any) -> list[ContinuityTarget]:
+    """Every table this run's continuity covers: the route tables of a routed
+    run, else the destination table."""
+    import dataclasses
+
+    endpoint = getattr(request, "destination", None)
+    tables = _router_tables(request)
+    if tables and dataclasses.is_dataclass(endpoint) and not isinstance(endpoint, type):
+        out = []
+        for table in tables:
+            target = resolve_target(dataclasses.replace(endpoint, table=table))
+            if target is not None:
+                out.append(target)
+        return out
+    target = resolve_target(endpoint)
+    return [target] if target is not None else []
+
+
 def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViolation | None:
     """Fail an append whose destination drifted since the last verified run."""
     if resume:
@@ -647,9 +690,14 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     mode = effective_sync_mode(request)
     if mode is None or not is_append_sync(mode):
         return None
-    target = resolve_target(getattr(request, "destination", None))
-    if target is None:
-        return None
+    for target in resolve_targets(request):
+        violation = _check_target(target)
+        if violation is not None:
+            return violation
+    return None
+
+
+def _check_target(target: ContinuityTarget) -> ContinuityViolation | None:
     try:
         pending = unfinished_append(target)
         baseline = load_baseline(target.key)
@@ -755,13 +803,15 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     """Re-baseline after a successful run; drop the baseline otherwise unknown."""
     if not getattr(result, "success", False):
         return
+    mode = effective_sync_mode(request)
+    for target in resolve_targets(request):
+        _record_target(target, mode, job_id)
+
+
+def _record_target(target: ContinuityTarget, mode: str | None, job_id: str) -> None:
     from services.sync_cursor import is_append_sync, is_overwrite_sync, requires_upsert
 
-    target = resolve_target(getattr(request, "destination", None))
-    if target is None:
-        return
     _clear_accepted_reset(target)
-    mode = effective_sync_mode(request)
     if mode is not None and is_overwrite_sync(mode):
         # Only a rebuild settles a failed append's leftover rows. Any other
         # success (a one-row upsert) proved its own rows, not that the table

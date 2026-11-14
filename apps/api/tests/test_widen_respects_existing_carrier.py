@@ -86,12 +86,14 @@ def test_unknown_source_type_keeps_previous_widen_behaviour():
     assert ddl, "no source evidence must not silently disable widen"
 
 
+# The PostgreSQL the environment names (libpq PG* variables: CI's
+# .github/ci-live-engines.vars), else the compose lab's localhost:5433.
 PG = {
-    "host": "localhost",
-    "port": 5433,
-    "database": "dataflow",
-    "username": "postgres",
-    "password": "postgres",  # nosec B106 - local test container
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5433")),
+    "database": os.environ.get("PGDATABASE", "dataflow"),
+    "username": os.environ.get("PGUSER", "postgres"),
+    "password": os.environ.get("PGPASSWORD", "postgres"),  # nosec B106 - local test container
 }
 
 

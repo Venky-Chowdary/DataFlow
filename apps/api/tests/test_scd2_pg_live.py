@@ -973,11 +973,18 @@ def test_scd2_small_change_run_dq_gate_pg(tmp_path, monkeypatch):
     assert res2.success, res2.error
     assert not str(res2.error or "").startswith("Data quality anomaly")
 
-    # Above the minimum sample the same shift must still block under strict.
+    # Above the minimum sample the same shift must still block under strict,
+    # once the route has the history a blocking verdict needs: the gate blocks
+    # only with MIN_BLOCKING_HISTORY (8) comparable prior loads; with fewer the
+    # shift is an advisory (audit 8, db57a6ac1). This test predates that rule
+    # and never ran in CI until DATAFLOW_PG_TEST_DSN was wired (PR 424).
+    from services.data_quality_history import MIN_BLOCKING_HISTORY
+
     _mk_src_bulk(cur, _bulk_rows(30), table="scd2_dq_src2")
     req2 = _engine_req("scd2_dq_src2", "scd2_dq_dst2", None, mode="strict")
-    res3 = _exec(fake, req2, prefix="scdq3")
-    assert res3.success, res3.error
+    for i in range(MIN_BLOCKING_HISTORY):
+        res3 = _exec(fake, req2, prefix=f"scdq3{i}")
+        assert res3.success, res3.error
     cur.execute(
         "UPDATE scd2_dq_src2 SET name=NULL WHERE id::int % 3 = 0"
     )
@@ -1022,7 +1029,7 @@ def test_g1_dropped_shape_step_fails_gate8_pg(tmp_path, monkeypatch):
     assert recon.get("passed") is False
     assert recon.get("verification_verdict") == "failed"
     proof = recon.get("transform_applied") or {}
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     # The destination really holds unshaped data — the verdict is accurate.
     cur.execute("SELECT note FROM scd2_g1_dst LIMIT 1")
@@ -1441,7 +1448,11 @@ def test_g1d_pinned_wrong_values_fail_pg(tmp_path, monkeypatch):
     fake = _engine_env(monkeypatch)
     conn, parsed = _pg()
     cur = conn.cursor()
-    _mk_src(cur, ROWS * 2, table="ovr_g1w_src")
+    # Key-pinned means one row per id. ROWS * 2 repeated every id under a
+    # declared primary key, which the create-new path now carries onto the
+    # destination, so the load failed on the duplicate key before the pin
+    # ledger could judge the step (PR 424: first CI run of this file).
+    _mk_src(cur, ROWS, table="ovr_g1w_src")
     cur.execute("DROP TABLE IF EXISTS ovr_g1w_dst CASCADE")
 
     from src.transfer.models import EndpointConfig, TransferRequest
@@ -1483,7 +1494,7 @@ def test_g1d_pinned_wrong_values_fail_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert not res.success
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
     conn.close()
 
@@ -1537,7 +1548,7 @@ def test_g1a_partial_chunk_application_fails_pg(tmp_path, monkeypatch):
     proof = recon.get("transform_applied") or {}
     assert not res.success, res.error
     assert recon.get("passed") is False
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     conn.close()
 
@@ -1589,7 +1600,7 @@ def test_g1d_wrong_op_impl_caught_by_sql_oracle_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert not res.success, res.error
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert proof.get("provenance") == "independent SQL oracle", proof
     assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     conn.close()
@@ -1658,7 +1669,7 @@ def test_g1d_mixed_drift_and_wrong_value_fails_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert not res.success
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
     conn.close()
 
@@ -1799,7 +1810,7 @@ def test_g1f_catalog_pk_wrong_values_fail_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert not res.success
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
     conn.close()
 
@@ -1839,7 +1850,7 @@ def test_g1f_catalog_pk_mixed_drift_wrong_fails_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert not res.success
-    assert proof.get("status") == "failed", proof
+    assert proof.get("status") == "failed", (res.error, proof)
     assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
     conn.close()
 
@@ -1933,7 +1944,7 @@ def test_g2_oracle_differential_value_ops_pg(tmp_path, monkeypatch):
     assert proof.get("status") == "verified", proof
     cov = proof.get("oracle_coverage") or {}
     assert cov.get("total") == 5, proof
-    assert cov.get("covered") == 5, proof
+    assert cov.get("covered") == 5, (cov, proof.get("oracle_uncovered_steps"), proof.get("oracle_notes"))
     assert not proof.get("oracle_uncovered_steps"), proof
     conn.close()
 
@@ -1942,8 +1953,10 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     """G-1h: the shaped write+proof path must stay memory-bounded — the
     multiset/pin/oracle state lives on disk, not in Counters/dicts.
 
-    Runs a 120k-row keyed overwrite in a subprocess (ru_maxrss is
-    per-process), asserting peak RSS stays under a ceiling that the old
+    Runs a 120k-row keyed overwrite in a subprocess and reads its own peak
+    (VmHWM, not ru_maxrss: on Linux a child's ru_maxrss starts at the parent's
+    RSS, which read 2075 MB in CI after ~7000 tests grew the pytest process;
+    services.process_peak_rss), asserting it stays under a ceiling that the old
     O(rows) structures blew past (~1.6 KB/row -> ~190 MB at 120k). The
     ceiling is generous for CI variance but far below the defect's cost.
     """
@@ -1952,7 +1965,7 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     import os
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import os, sys, resource, uuid\n"
+        "import os, sys, uuid\n"
         "sys.path.insert(0, 'tests')\n"
         "import psycopg2\n"
         "from urllib.parse import urlparse\n"
@@ -1989,8 +2002,8 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
         "res = engine_mod.UniversalTransferEngine().execute_tracked(req, job)\n"
         "proof = (res.reconciliation or {}).get('transform_applied') or {}\n"
         "assert res.success and proof.get('status') == 'verified'\n"
-        "print('peakMB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss"
-        " // 1024)\n"
+        "from services.process_peak_rss import own_peak_rss_bytes\n"
+        "print('peakMB', own_peak_rss_bytes() // (1024 * 1024))\n"
     )
     env = dict(os.environ)
     _api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

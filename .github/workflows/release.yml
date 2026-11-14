@@ -44,8 +44,12 @@ jobs:
         include:
           - image: api
             dockerfile: Dockerfile.api
+            # The API image's large copyleft sources (Debian packages, GCC) are
+            # in a companion image, <name>:<tag>-sources, published first.
+            companion: true
           - image: web
             dockerfile: Dockerfile.web
+            companion: false
     permissions:
       contents: read
       packages: write
@@ -88,6 +92,76 @@ jobs:
         run: |
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Every shipped source is pinned by SHA-2 (not MD5 alone)
+        # keyutils 1.5.8 has only a published MD5. CI's api-image job records
+        # its SHA-256 after verifying the MD5; it must be committed as the
+        # UPSTREAM sha256 before a release, so the release build enforces it.
+        run: python3 scripts/source_bundle.py --require-sha2-pins
+
+      - name: Build and push the companion source image (tag + -sources)
+        # Owner decision 2026-11-13: the Debian system-package sources and the
+        # GCC source are not in the runtime image. They are published here, in
+        # the same registry, under the runtime tag plus -sources, before the
+        # runtime image. If this fails, nothing is released.
+        if: ${{ matrix.companion }}
+        id: sources
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: sources
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}-sources
+          labels: |
+            org.opencontainers.image.title=Datawrap API corresponding source
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=release-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
+          provenance: mode=max
+
+      - name: Require the companion source image to be published
+        # Before anything else is pushed: the companion must be in the
+        # registry, and its SHA256SUMS is what the release image must point at.
+        if: ${{ matrix.companion }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
+          docker buildx imagetools inspect "$ref" >/dev/null || { echo "::error::$ref is not published"; exit 1; }
+          docker pull -q "$ref" >/dev/null
+          cid=$(docker create "$ref" none)
+          docker cp "$cid":/SHA256SUMS "$RUNNER_TEMP/companion-SHA256SUMS"
+          docker rm "$cid" >/dev/null
+          test -s "$RUNNER_TEMP/companion-SHA256SUMS"
+
+      - name: Build the release image locally (not pushed yet)
+        if: ${{ matrix.companion }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: release
+          load: true
+          push: false
+          tags: datawrap-release-check:${{ github.ref_name }}
+          build-args: SOURCES_REF=${{ steps.image.outputs.name }}:${{ github.ref_name }}-sources
+          cache-from: type=gha,scope=release-${{ matrix.image }}
+
+      - name: The release image points at exactly the published companion
+        if: ${{ matrix.companion }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
+          img="datawrap-release-check:${GITHUB_REF_NAME}"
+          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' "$img")
+          [ "$label" = "$ref" ] || { echo "::error::the release image points at '$label', not $ref"; exit 1; }
+          docker run --rm "$img" grep -q "$ref" /usr/share/doc/datawrap/SOURCES.md
+          docker run --rm "$img" cat /usr/share/doc/datawrap/companion/SHA256SUMS \
+            | diff - "$RUNNER_TEMP/companion-SHA256SUMS" \
+            || { echo "::error::the release image's companion/SHA256SUMS differs from the published $ref"; exit 1; }
+
       - name: Build and push release image
         id: build
         uses: docker/build-push-action@v6
@@ -96,6 +170,11 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+          # The API release image is the `release` target: the deployable
+          # runtime plus the pointer (SOURCES.md, companion SHA256SUMS) naming
+          # its companion. Deploys keep building the default target.
+          target: ${{ matrix.companion && 'release' || '' }}
+          build-args: ${{ matrix.companion && format('SOURCES_REF={0}:{1}-sources', steps.image.outputs.name, github.ref_name) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ github.ref_name }}
@@ -104,6 +183,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
           provenance: mode=max
           sbom: true
+
+      - name: Attest the companion source image
+        if: ${{ matrix.companion }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.sources.outputs.digest }}
+          push-to-registry: true
 
       - name: Attest published image provenance
         uses: actions/attest-build-provenance@v2
@@ -125,4 +212,6 @@ jobs:
       - name: Create release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes \
+            "Corresponding source of the API image: ghcr.io/${GITHUB_REPOSITORY,,}/api:${GITHUB_REF_NAME}-sources (see /usr/share/doc/datawrap/SOURCES.md in the image)."
