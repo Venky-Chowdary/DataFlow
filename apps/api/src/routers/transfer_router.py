@@ -858,7 +858,7 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
             resource=f"plan/{plan.id}",
             details={"name": plan.name, "source_columns": len(plan.source_columns)},
         )
-        return {"plan": plan.to_dict()}
+        return {"plan": plan.public_dict()}
 
     # A plan write can wait on the store lock: off the loop, on the plan-write pool.
     return await run_plan_write(_create)
@@ -871,7 +871,7 @@ async def get_transfer_plan(plan_id: str):
     plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    return {"plan": plan.to_dict()}
+    return {"plan": plan.public_dict()}
 
 
 @router.patch("/plans/{plan_id}")
@@ -880,7 +880,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
 
     try:
         plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
-        return {"plan": plan.to_dict()}
+        return {"plan": plan.public_dict()}
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -954,7 +954,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         plan = await run_plan_write(
             sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
         )
-        return {"plan": plan.to_dict()}
+        return {"plan": plan.public_dict()}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A newer mapping revision exists than the one this edit was based on. "
@@ -1111,7 +1111,7 @@ async def approve_transfer_plan(
 
     try:
         plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
-        return {"plan": plan.to_dict()}
+        return {"plan": plan.public_dict()}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A different mapping revision is active than the one Validate checked. Review "
@@ -1146,7 +1146,7 @@ async def transfer_plan_run_payload(plan_id: str):
     from services.transfer_plan_service import build_run_payload
 
     try:
-        return await asyncio.to_thread(build_run_payload, plan_id)
+        payload = await asyncio.to_thread(build_run_payload, plan_id)
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -1154,6 +1154,13 @@ async def transfer_plan_run_payload(plan_id: str):
             public_message="Could not build transfer run payload.",
             status_code=400,
         ) from e
+    # A plan never returns raw endpoint credentials (SEC-4).
+    from services.secret_config import mask_secrets_in_text
+    from services.secret_fields import mask_secret_tree
+
+    for side in ("source", "destination"):
+        payload[side] = mask_secret_tree(payload.get(side) or {}, mask_url=mask_secrets_in_text)
+    return payload
 
 
 @router.post("/analyze-file")
