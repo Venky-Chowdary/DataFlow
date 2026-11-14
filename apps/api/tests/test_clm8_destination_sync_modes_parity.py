@@ -70,7 +70,11 @@ def test_capabilities_publish_a_sync_mode_list_for_every_destination() -> None:
 
         assert dest in table or resolve_driver_type(dest) in table, dest
     assert table["kafka"]["sync_modes"] == ["full_refresh_append", "incremental_append"]
-    assert "cdc" not in table["redis"]["sync_modes"]
+    # W2 wired the CDC delete LSN read for Redis (CLM-2), so Redis offers CDC;
+    # destinations with no delete path (Salesforce, Milvus) still don't.
+    assert "cdc" in table["redis"]["sync_modes"]
+    assert "cdc" not in table["salesforce"]["sync_modes"]
+    assert "cdc" not in table["milvus"]["sync_modes"]
     assert "cdc" not in table["csv"]["sync_modes"]
     assert set(table["postgresql"]["sync_modes"]) == {
         "full_refresh_overwrite", "full_refresh_append", "incremental_append",

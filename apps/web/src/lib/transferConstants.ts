@@ -208,6 +208,8 @@ const CDC_DELETE_DESTS = new Set([
   "postgresql", "redshift", "mysql", "sqlite", "generic_sql", "mongodb", "oracle", "sqlserver",
   "mssql", "snowflake", "bigquery", "duckdb", "databricks", "iceberg", "apache_iceberg",
   "pgvector", "qdrant", "weaviate", "pinecone",
+  // CLM-2: the delete LSN read is wired for these key-value and search stores.
+  "redis", "elasticsearch", "dynamodb",
 ]);
 const APPEND_MODES = new Set<SyncModeId>(["full_refresh_append", "incremental_append"]);
 

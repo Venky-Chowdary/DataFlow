@@ -270,7 +270,8 @@ describe("availableSyncModes intersects with /capabilities destination_sync_mode
   });
   it("keeps the offline fallback honest when capabilities are unreachable", () => {
     assert.deepEqual(ids("kafka", null), ["full_refresh_append", "incremental_append"]);
-    assert.ok(!ids("redis", null).includes("cdc"));
+    assert.ok(!ids("salesforce", null).includes("cdc"));
+    assert.ok(ids("redis", null).includes("cdc"));
     assert.ok(ids("postgresql", null).includes("cdc"));
   });
   it("says what overwrite does on a destination with no table", () => {
