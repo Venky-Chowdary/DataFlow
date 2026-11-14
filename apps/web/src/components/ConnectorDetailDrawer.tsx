@@ -196,12 +196,25 @@ export function ConnectorDetailDrawer({
                 key={job._id}
                 className={`df2-drawer-related-row${onOpenJob ? " is-clickable" : ""}`}
                 onClick={onOpenJob ? () => onOpenJob(job._id) : undefined}
-                role={onOpenJob ? "button" : undefined}
-                tabIndex={onOpenJob ? 0 : undefined}
-                onKeyDown={onOpenJob ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenJob(job._id); } } : undefined}
               >
                 <span className="df2-drawer-related-main">
-                  <strong title={job.source_name}>{job.source_name || "Transfer job"}</strong>
+                  <strong title={job.source_name}>
+                    {onOpenJob ? (
+                      // UX-16: a list item keeps its role; the keyboard target is a real button.
+                      <button
+                        type="button"
+                        className="df2-drawer-related-open"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenJob(job._id);
+                        }}
+                      >
+                        {job.source_name || "Transfer job"}
+                      </button>
+                    ) : (
+                      job.source_name || "Transfer job"
+                    )}
+                  </strong>
                   <small>{job.source_type} → {job.destination_type} · {formatRelativeTime(job.created_at)}</small>
                 </span>
                 <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>

@@ -524,7 +524,7 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
                 page
               />
             ) : (
-              <div className="df2-pipeline-rows df2-xform-rows" role="list" aria-label="Transforms">
+              <div className="df2-pipeline-rows df2-xform-rows" role="group" aria-label="Transforms" /* UX-16: rows are buttons; a list may hold only list items */>
                 <div className="df2-pipeline-rows-head df2-xform-rows-head" aria-hidden>
                   <span className="df2-pipeline-rows-head-name">Transform</span>
                   <span>Destination</span>

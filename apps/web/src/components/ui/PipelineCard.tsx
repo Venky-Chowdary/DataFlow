@@ -89,19 +89,10 @@ export function PipelineCard({
           highlighted ? "is-highlighted" : "",
           selected ? "selected" : "",
         ].filter(Boolean).join(" ")}
+        // UX-16: a list item opened by its own Open button, not a button
+        // that holds Sync now and the row menu (nested-interactive).
         onClick={onSelect}
-        onKeyDown={
-          onSelect
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelect();
-                }
-              }
-            : undefined
-        }
-        role={onSelect ? "button" : undefined}
-        tabIndex={onSelect ? 0 : undefined}
+        role="listitem"
         aria-current={selected || undefined}
       >
         <span

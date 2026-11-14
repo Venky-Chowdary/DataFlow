@@ -1682,3 +1682,14 @@ html:has(.df2-app) #root {
   color: var(--df-text-secondary);
   font-size: 12.5px;
 }
+
+/* UX-16: the related-job name is the row's keyboard target. */
+.df2-drawer-related-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
