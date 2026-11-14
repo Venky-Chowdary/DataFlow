@@ -132,7 +132,7 @@ import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import { connectorDisplayName, defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import { icebergDestExtra, inferIcebergCatalogKind, type IcebergCatalogKind } from "../lib/icebergDestCatalog";
 import {
   bindNamesFromSql,
@@ -7140,7 +7140,7 @@ export function TransferPage({
     : sourceKind === "cloud"
       ? `Cloud object${cloudPath ? ` · ${cloudPath}` : ""}`
       : sourceConnector
-        ? `${sourceConnector.type}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
+        ? `${connectorDisplayName(sourceConnector.type)}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
           isMultiStreamSource
             ? ` · ${multiStreamNames.length} streams`
             : primarySourceStream

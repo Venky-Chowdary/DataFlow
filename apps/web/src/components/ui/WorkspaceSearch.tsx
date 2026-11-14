@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { connectorDisplayName } from "../../lib/connectorTypes";
 import { createPortal } from "react-dom";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
@@ -141,7 +142,7 @@ export function WorkspaceSearch({
           id: `conn-${c.id}`,
           kind: "connector",
           label: c.name,
-          meta: `${c.type} · ${c.host || "managed"}${c.port ? `:${c.port}` : ""}`,
+          meta: `${connectorDisplayName(c.type)} · ${c.database || c.host || "managed"}`,
           screen: "connectors",
           connectorType: c.type,
           connectorId: c.id,

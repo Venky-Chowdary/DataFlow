@@ -1,4 +1,5 @@
 import { ConnectorIcon } from "../app/brand-icons";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import {
   connectorHealthBadgeLabel,
   connectorPassedProbe,
@@ -74,7 +75,7 @@ export function ConnectorDetailDrawer({
       ariaLabel={`${c.name} connection details`}
       icon={<ConnectorIcon id={c.type} size={22} />}
       title={c.name}
-      subtitle={`${c.type.replace(/_/g, " ")} · ${endpoint}`}
+      subtitle={`${connectorDisplayName(c.type)} · ${endpoint}`}
       headerExtra={
         <span className={`df2-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
           <span className={`df2-health-dot ${healthy ? "ok" : neverTested ? "" : "err"}`} aria-hidden />
@@ -122,7 +123,7 @@ export function ConnectorDetailDrawer({
       <div className="df2-drawer-facts" aria-label="Connection details">
         <div className="df2-drawer-fact">
           <span>Type</span>
-          <strong>{c.type.replace(/_/g, " ")}</strong>
+          <strong>{connectorDisplayName(c.type)}</strong>
         </div>
         <div className="df2-drawer-fact">
           <span>Capability</span>
@@ -216,7 +217,7 @@ export function ConnectorDetailDrawer({
                       job.source_name || "Transfer job"
                     )}
                   </strong>
-                  <small>{job.source_type} → {job.destination_type} · {formatRelativeTime(job.created_at)}</small>
+                  <small>{connectorDisplayName(job.source_type || "")} → {connectorDisplayName(job.destination_type || "")} · {formatRelativeTime(job.created_at)}</small>
                 </span>
                 <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
               </li>

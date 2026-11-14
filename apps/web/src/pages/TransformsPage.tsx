@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import { SectionLoader } from "../components/LoadingState";
 import { TransformDetailDrawer } from "../components/TransformDetailDrawer";
 import { Button } from "../components/ui/Button";
@@ -384,7 +385,7 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
                   <option value="">Select a warehouse…</option>
                   {destConnectors.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name} · {c.type}
+                      {c.name} · {connectorDisplayName(c.type)}
                     </option>
                   ))}
                 </select>

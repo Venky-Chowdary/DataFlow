@@ -1,4 +1,5 @@
 import { EmptyState } from "./ui/EmptyState";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { Button } from "./ui/Button";
@@ -81,7 +82,7 @@ export function ConnectionWorkbench({
               {connectors.length === 0 ? (
                 <option value="">No saved connections</option>
               ) : connectors.map((c) => (
-                <option key={c.id} value={c.id}>{c.name} · {c.type}</option>
+                <option key={c.id} value={c.id}>{c.name} · {connectorDisplayName(c.type)}</option>
               ))}
             </select>
           </div>
@@ -238,7 +239,7 @@ export function ConnectionWorkbench({
                             return (
                               <>
                                 <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
-                                <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
+                                <div className="df2-cell-meta">{connectorDisplayName(job.source_type || "")} → {connectorDisplayName(job.destination_type || "")}</div>
                               </>
                             );
                           })()}

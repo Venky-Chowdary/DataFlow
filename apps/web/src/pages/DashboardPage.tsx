@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { fetchOpsDlq, fetchOpsFreshness, fetchOpenScheduleApprovals } from "../lib/api";
@@ -454,8 +455,8 @@ export function DashboardPage({
                                 return (
                                   <>
                                     <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
-                                    <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
-                                      {job.source_type} → {job.destination_type}
+                                    <div className="df2-cell-meta" title={`${connectorDisplayName(job.source_type || "")} → ${connectorDisplayName(job.destination_type || "")}`}>
+                                      {connectorDisplayName(job.source_type || "")} → {connectorDisplayName(job.destination_type || "")}
                                     </div>
                                   </>
                                 );
@@ -538,8 +539,8 @@ export function DashboardPage({
                         <ConnectorIcon id={c.type} size={18} />
                         <span className="df2-overview-conn-body">
                           <span className="df2-overview-conn-name" title={c.name}>{c.name}</span>
-                          <span className="df2-overview-conn-meta" title={`${c.type}${c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}`}>
-                            {c.type}{c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
+                          <span className="df2-overview-conn-meta" title={`${connectorDisplayName(c.type)}${c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}`}>
+                            {connectorDisplayName(c.type)}{c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
                           </span>
                         </span>
                       </li>
