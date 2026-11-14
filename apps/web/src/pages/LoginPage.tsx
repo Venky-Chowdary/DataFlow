@@ -270,7 +270,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
               <div className={`lp-field ${emailError ? "is-error" : emailOk && emailTrimmed ? "is-ok" : ""}`}>
                 <div className="lp-label-row">
                   <label className="lp-label" htmlFor="login-email">Work email</label>
-                  {emailOk && emailTrimmed && !emailError && (
+                  {emailOk && emailTrimmed && !emailError && !credentialError && (
                     <span className="lp-field-status lp-field-status--ok">Valid</span>
                   )}
                 </div>

@@ -51,3 +51,36 @@ export function changeEmailConfirmError(err: AuthFlowError): string {
   if (err.code === "unavailable") return "Email change is temporarily unavailable — try again shortly.";
   return codeEntryError(err, "Couldn't confirm the change. Try again.");
 }
+
+/** Raw API text ("that email domain can't receive mail") as a sentence. */
+export function sentence(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  const head = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(head) ? head : `${head}.`;
+}
+
+export type SignupRefusal = { field: "email" | "password" | null; text: string };
+
+/** POST /auth/signup refusals, placed on the field they concern (UX-28). */
+export function signupRefusal(err: AuthFlowError): SignupRefusal {
+  switch (err.code) {
+    case "blocked_address":
+      return { field: "email", text: "This address can't be used to sign up. Use your work email." };
+    case "undeliverable_domain":
+      return { field: "email", text: "This email domain can't receive mail. Check the address." };
+    case "invalid_email":
+      return { field: "email", text: "Enter a valid work email." };
+    case "account_exists":
+      return { field: "email", text: "This email already has an account. Sign in instead." };
+    case "pwned_password":
+      return { field: "password", text: "This password appears in a public breach. Choose a different one." };
+    case "invalid_password":
+      return { field: "password", text: "Use a password of 12 to 128 characters." };
+    case "email_quota_exceeded":
+    case "signup_rate_limited":
+      return { field: null, text: mailSendError(err, "") };
+    default:
+      return { field: null, text: sentence(err.message || "Signup failed. Try again.") };
+  }
+}
