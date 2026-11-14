@@ -1586,3 +1586,60 @@ html:has(.df2-app) #root {
   outline: 2px solid var(--df-focus-ring);
   outline-offset: 2px;
 }
+
+/* UX-3: Studio's schedule form (prefilled, paused by default). */
+.df2-studio-schedule-form {
+  display: grid;
+  gap: 8px;
+}
+
+.df2-studio-schedule-facts {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-bg-subtle);
+}
+
+.df2-studio-schedule-facts > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-studio-schedule-facts dt {
+  flex: 0 0 84px;
+  color: var(--df-text-secondary);
+  font-weight: 600;
+}
+
+.df2-studio-schedule-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-studio-schedule-form .df2-alert {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.df2-studio-schedule-form .df2-alert p {
+  margin: 0;
+}
+
+.df2-studio-schedule-form .df2-checkbox-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+.df2-studio-schedule-form .df2-checkbox-row small {
+  display: block;
+  color: var(--df-text-secondary);
+}

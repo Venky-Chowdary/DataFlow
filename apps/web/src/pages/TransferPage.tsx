@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { StudioScheduleDialog } from "../components/transfer/StudioScheduleDialog";
+import { defaultStudioScheduleDraft, studioScheduleCreatedToast, type StudioScheduleDraft } from "../lib/studioScheduleDraft";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -6664,6 +6666,33 @@ export function TransferPage({
 
   const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
 
+  /** UX-3: the schedule form Studio opens instead of creating one in a click. */
+  const [scheduleDraft, setScheduleDraft] = useState<{
+    payload: Parameters<typeof createSchedule>[0] extends infer P ? Omit<P & object, "name"> : never;
+    initial: StudioScheduleDraft;
+    route: { source: string; destination: string };
+  } | null>(null);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const createScheduleFromDraft = async (draft: StudioScheduleDraft) => {
+    if (!scheduleDraft) return;
+    setScheduleSaving(true);
+    try {
+      await createSchedule({ ...scheduleDraft.payload, name: draft.name, interval: draft.interval, enabled: draft.enabled });
+      setScheduleDraft(null);
+      const copy = studioScheduleCreatedToast(draft);
+      toast({ title: copy.title, message: copy.message, tone: "success" });
+      onOpenSchedules?.();
+    } catch (e) {
+      toast({
+        title: "Could not create the schedule",
+        message: e instanceof Error ? e.message : "The schedule was not saved. Try again.",
+        tone: "error",
+      });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
   /**
    * Persist the Validate-approved mapping contract onto a schedule.
    *
@@ -6725,8 +6754,8 @@ export function TransferPage({
         source_table: sourceTableName,
         dest_connector_id: connectorId,
         dest_table: targetCollection,
-        // A replayed schedule keeps the cadence the operator chose.
-        ...(replayId ? {} : { interval: "daily", enabled: true }),
+        // A replayed schedule keeps the cadence the operator chose; a new one
+        // takes cadence and on/off from the schedule form (UX-3).
         sync_mode: syncMode,
         cursor_column: cursorField,
         primary_key: primaryKeyField,
@@ -6783,15 +6812,14 @@ export function TransferPage({
           tone: "success",
         });
       } else {
-        await createSchedule({
-          ...payload,
-          name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+        // UX-3: never create (let alone start) a schedule in one click. Open
+        // the prefilled form; it starts paused and warns on cursorless append.
+        setScheduleDraft({
+          payload,
+          initial: defaultStudioScheduleDraft(sourceConnector?.name ?? "Source", targetCollection),
+          route: { source: `${sourceConnector?.name ?? "Source"} · ${sourceTableName}`, destination: `${selectedDestConnector?.name ?? "Destination"} · ${targetCollection}` },
         });
-        toast({
-          title: "Pipeline created",
-          message: "Daily sync enabled. Manage cadence in Schedules.",
-          tone: "success",
-        });
+        return false;
       }
       onOpenSchedules?.();
       return true;
@@ -9764,6 +9792,19 @@ export function TransferPage({
       )}
       </section>
       </div>
+
+      {scheduleDraft && (
+        <StudioScheduleDialog
+          open
+          initial={scheduleDraft.initial}
+          route={scheduleDraft.route}
+          syncMode={syncMode}
+          cursorColumn={cursorField}
+          saving={scheduleSaving}
+          onCancel={() => setScheduleDraft(null)}
+          onCreate={(draft) => void createScheduleFromDraft(draft)}
+        />
+      )}
 
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer
