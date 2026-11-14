@@ -1626,15 +1626,18 @@
   gap: var(--df2-qw-gap);
 }
 
+/* Database and Table hold short names ("Default", "Any", a schema); the
+   connector label ("Warehouse (SQLite) · not tested") is the long one, so it
+   takes the slack; the others keep a fixed 120px. */
 .df2-app .df2-qw-shell .df2-qw-field {
-  flex: 1 1 140px;
-  min-width: 0;
+  flex: 0 1 120px;
+  min-width: 88px;
   margin: 0;
 }
 
 .df2-app .df2-qw-shell .df2-qw-field--connector {
-  flex: 2.4 1 260px;
-  min-width: 200px;
+  flex: 1 1 260px;
+  min-width: 220px;
   max-width: 400px;
 }
 
@@ -2497,8 +2500,9 @@
   }
 }
 
-/* Below 1440px the secondary tools show their icon; the name stays for assistive tech and the tooltip. */
-@media (max-width: 1439px) {
+/* Below 1680px the secondary tools show their icon (the connector label needs
+   the room at 1440); the name stays for assistive tech and the tooltip. */
+@media (max-width: 1679px) {
   .df2-app .df2-qw-shell .df2-qw-tool-label {
     position: absolute;
     width: 1px;
