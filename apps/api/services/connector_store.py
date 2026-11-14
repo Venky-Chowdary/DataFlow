@@ -7,6 +7,7 @@ mode it falls back to a JSON file under `data_dir()`.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -803,11 +804,27 @@ def _load_all() -> list[SavedConnector]:
         items = [SavedConnector.from_dict(c) for c in raw.get("connectors", [])]
     except Exception:
         return _seed_defaults() if _seed_enabled() else []
-    if any(has_plaintext_secrets(c.get("extra")) for c in raw.get("connectors", []) if isinstance(c, dict)):
+    if _HEAL_ON_READ.get() and any(
+        has_plaintext_secrets(c.get("extra")) for c in raw.get("connectors", []) if isinstance(c, dict)
+    ):
         _heal_file_extras()
     if not _seed_enabled():
         items = [c for c in items if not c.id.startswith("demo-")]
     return items
+
+
+#: False inside :func:`read_only`: a read never rewrites the store (audit scripts).
+_HEAL_ON_READ: contextvars.ContextVar[bool] = contextvars.ContextVar("connector_heal_on_read", default=True)
+
+
+@contextmanager
+def read_only() -> Iterator[None]:
+    """Reads inside this block never seal legacy plaintext extras (read-only tools)."""
+    token = _HEAL_ON_READ.set(False)
+    try:
+        yield
+    finally:
+        _HEAL_ON_READ.reset(token)
 
 
 def _heal_file_extras() -> None:
@@ -828,7 +845,7 @@ def _heal_file_extras() -> None:
 
 def _heal_mongo_doc(doc: Any) -> None:
     """Seal plaintext secret extras of one stored Mongo connector (SEC-3)."""
-    if not isinstance(doc, dict) or not has_plaintext_secrets(doc.get("extra")):
+    if not _HEAL_ON_READ.get() or not isinstance(doc, dict) or not has_plaintext_secrets(doc.get("extra")):
         return
     try:
         tenant_id = tenant_id_from_workspace(doc.get("workspace_id") or "")
