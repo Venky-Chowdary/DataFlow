@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { connectorDisplayName } from "./connectorTypes.js";
+import { connectorDisplayName, connectorNameWithEngine } from "./connectorTypes.js";
 
 const src = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(src, rel), "utf8");
@@ -17,6 +17,7 @@ describe("engine names are display names wherever users see them", () => {
     assert.equal(connectorDisplayName("postgresql"), "PostgreSQL");
     assert.equal(connectorDisplayName("sqlserver"), "SQL Server");
     assert.equal(connectorDisplayName("mysql"), "MySQL");
+    assert.equal(connectorNameWithEngine("Orders", "sqlserver", "dot"), "Orders · SQL Server");
   });
 
   it("the connection drawer subtitle, TYPE tile and job lines use the helper", () => {
@@ -41,7 +42,8 @@ describe("engine names are display names wherever users see them", () => {
     it(`${file} renders no raw engine id`, () => {
       const text = read(file);
       assert.doesNotMatch(text, raw);
-      assert.match(text, /connectorDisplayName\(/);
+      // connectorNameWithEngine renders the engine through connectorDisplayName.
+      assert.match(text, /connectorDisplayName\(|connectorNameWithEngine\(/);
     });
   }
 });
