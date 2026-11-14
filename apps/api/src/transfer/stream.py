@@ -189,12 +189,16 @@ from .batch_readers import _read_batch_impl  # noqa: E402
 
 
 def _first_page_message(run: Any) -> str:
-    """``Reading the first rows from the source (mysql 10.0.0.5:3306)...``."""
-    from src.ai.copilot.tool_deadline import describe_target
+    """``Reading from the source (MySQL · sales) ...``.
+
+    UX-34: the line lands in the event log users read and share, so it names
+    the engine and database, never the host and port.
+    """
+    from services.engine_names import engine_display_name
 
     cfg = run.cfg.src_cfg if isinstance(run.cfg.src_cfg, dict) else {}
-    where = describe_target(cfg) or str(cfg.get("database") or "")
-    label = " ".join(p for p in (str(run.cfg.src_type or ""), where) if p)
+    where = str(cfg.get("database") or "")
+    label = " · ".join(p for p in (engine_display_name(str(run.cfg.src_type or "")), where) if p)
     return (
         f"Reading from the source ({label or 'source'}) - waiting for it to "
         "answer; rows are counted as they arrive…"
