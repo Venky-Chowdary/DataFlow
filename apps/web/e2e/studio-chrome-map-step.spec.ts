@@ -347,3 +347,143 @@ test.describe("Stepper with very long source and destination names (W9)", () => 
     await context.close();
   });
 });
+
+/* ---- W9 round 2: one step bar on every step; a header that does not repeat
+   the route; the panel's table name on one line ------------------------- */
+
+/** The destination table does not exist yet, so the walk can reach Validate. */
+async function newTable(page: Page): Promise<void> {
+  const intro = JSON.parse(fixture("transfer_introspect.json"));
+  intro.destination = { ...intro.destination, table_exists: false, columns: [], schema: {}, schema_nullability: {},
+    objects: [{ name: "customers", type: "table" }] };
+  const catalog = { ...JSON.parse(fixture("destination_columns.json")), table_exists: false, columns: [] };
+  await page.route("**/api/v1/transfer/introspect", (route) => route.fulfill(json(intro)));
+  await page.route("**/api/v1/transfer/mapping/destination-columns", (route) => route.fulfill(json(catalog)));
+}
+
+async function stepLabelLefts(page: Page): Promise<Record<string, number>> {
+  return page.evaluate(() => {
+    const out: Record<string, number> = {};
+    for (const step of document.querySelectorAll('nav[aria-label="Transfer steps"] .df2-wizard-step')) {
+      const label = [...step.querySelectorAll(".df2-wizard-label, .df2-wizard-label-short")]
+        .find((l) => getComputedStyle(l).display !== "none")!;
+      out[step.getAttribute("aria-label") ?? "?"] = label.getBoundingClientRect().left;
+    }
+    return out;
+  });
+}
+
+test.describe("One step bar on every step (W9 round 2)", () => {
+  for (const key of ["w1440", "w1366", "w1024"]) {
+    test(`${key}: every step label keeps its x position from Source to Validate, toasts included`, async ({ browser }) => {
+      const context = await browser.newContext({ viewport: VIEWS[key] });
+      await context.addInitScript(() => localStorage.setItem("df2.theme", "light"));
+      const page = await context.newPage();
+      await stubMapStudio(page);
+      await newTable(page);
+      await openStudio(page);
+      // Toasts stay on: one arriving must not move the steps.
+      const seen: Array<[string, Record<string, number>]> = [];
+      const record = async (where: string) => {
+        await page.waitForLoadState("networkidle");
+        seen.push([where, await stepLabelLefts(page)]);
+      };
+      await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+      await expect(page.getByRole("button", { name: /Continue to Destination/ })).toBeEnabled();
+      await record("Source");
+      await page.getByRole("button", { name: /Continue to Destination/ }).click();
+      await expect(page.getByRole("radio", { name: /QA Postgres Local/ })).toBeVisible();
+      await record("Destination");
+      await page.getByRole("radio", { name: /QA Postgres Local/ }).click();
+      await page.locator("#dest-col").fill("orders_new");
+      await page.locator("#dest-col").press("Enter");
+      await page.locator("#dest-col").blur();
+      await page.waitForLoadState("networkidle");
+      await page.getByRole("button", { name: /Continue to Transform/ }).click();
+      await expect(page.getByRole("button", { name: /Continue without transforming/ })).toBeVisible();
+      await record("Transform");
+      await page.getByRole("button", { name: /Continue without transforming/ }).click();
+      await expect(page.getByRole("toolbar", { name: "Mapping actions" })).toBeVisible();
+      await record("Map");
+      await page.getByRole("button", { name: /Approve eligible/ }).click();
+      await page.getByRole("button", { name: /Continue to Validate/ }).click();
+      await expect(page.locator('[aria-current="step"]')).toHaveAttribute("aria-label", "5. Validate");
+      await record("Validate");
+
+      const [first, base] = seen[0];
+      for (const [where, lefts] of seen.slice(1)) {
+        for (const [name, x] of Object.entries(lefts)) {
+          expect(Math.abs(x - base[name]), `${key}: "${name}" moved ${(x - base[name]).toFixed(1)}px from ${first} to ${where}`)
+            .toBeLessThanOrEqual(1);
+        }
+      }
+      await context.close();
+    });
+  }
+});
+
+async function headerReport(page: Page) {
+  return page.evaluate(() => {
+    const head = document.querySelector(".df2-map-step-head")!;
+    const title = head.querySelector(".df2-card-title");
+    const copy = head.querySelector(".df2-map-step-head-copy")!.getBoundingClientRect();
+    const toolbar = head.querySelector(".df2-ms-toolbar")!.getBoundingClientRect();
+    const route = head.querySelector(".df2-map-route") as HTMLElement | null;
+    const lineHeight = route ? parseFloat(getComputedStyle(route).lineHeight) : 0;
+    const titleBox = title && getComputedStyle(title).display !== "none" ? title.getBoundingClientRect() : copy;
+    return {
+      height: Math.round(head.getBoundingClientRect().height),
+      toolbarTop: Math.round(toolbar.top),
+      titleTop: Math.round(titleBox.top),
+      routeText: route?.innerText ?? "",
+      routeTitle: route?.getAttribute("title") ?? "",
+      routeLines: route ? Math.round(route.getBoundingClientRect().height / lineHeight) : 0,
+      panelSub: (() => {
+        const sub = document.querySelector(".df2-ms-panel-sub") as HTMLElement | null;
+        if (!sub) return null;
+        return {
+          lines: Math.round(sub.getBoundingClientRect().height / parseFloat(getComputedStyle(sub).lineHeight)),
+          title: sub.getAttribute("title") ?? "",
+          ellipsis: getComputedStyle(sub).textOverflow === "ellipsis",
+        };
+      })(),
+    };
+  });
+}
+
+test.describe("Map header and panel with very long names (W9 round 2)", () => {
+  for (const key of ["w1440", "w1366", "w1024"]) {
+    test(`${key}: the header says only table facts on one line; the toolbar stays on the title row`, async ({ browser }) => {
+      const short = await walk(browser, { view: VIEWS[key] });
+      const shortReport = await headerReport(short.page);
+      await short.context.close();
+
+      const { context, page } = await walk(browser, { view: VIEWS[key], long: true });
+      const toggle = page.getByRole("toolbar", { name: "Mapping actions" }).getByRole("button", { name: "Show destination columns" });
+      if (await toggle.isVisible()) await toggle.click();
+      const report = await headerReport(page);
+      expect(report.routeText, `${key}: the header repeats the route`).not.toContain("Orders Postgres");
+      expect(report.routeText).not.toContain(LONG_TABLE);
+      expect(report.routeText).toMatch(/existing table · 8 columns · /);
+      expect(report.routeTitle, `${key}: the full route stays in the title`).toContain(LONG_SOURCE);
+      expect(report.routeLines, `${key}: header subtitle lines`).toBe(1);
+      expect(Math.abs(report.toolbarTop - report.titleTop), `${key}: the toolbar wrapped under the subtitle`).toBeLessThanOrEqual(4);
+      expect(Math.abs(report.height - shortReport.height), `${key}: header ${report.height}px vs ${shortReport.height}px with short names`)
+        .toBeLessThanOrEqual(4);
+      expect(report.panelSub, `${key}: the panel's table name`).not.toBeNull();
+      expect(report.panelSub!.lines, `${key}: the panel's table name wraps`).toBe(1);
+      expect(report.panelSub!.ellipsis).toBe(true);
+      expect(report.panelSub!.title).toContain(LONG_TABLE);
+      await expect(page.getByRole("complementary", { name: new RegExp(LONG_TABLE) })).toBeVisible();
+      await context.close();
+    });
+  }
+
+  test("390: the header subtitle is at most two lines", async ({ browser }) => {
+    const { context, page } = await walk(browser, { view: VIEWS.w390, long: true });
+    const report = await headerReport(page);
+    expect(report.routeLines).toBeLessThanOrEqual(2);
+    expect(report.routeText).not.toContain("Orders Postgres");
+    await context.close();
+  });
+});
