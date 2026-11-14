@@ -276,7 +276,7 @@ export function ConnectorModal({
         title: "Driver not installed here",
         message:
           item.environment_gap_reason ||
-          `${item.name} is Certified but its driver package is not loadable on this host. You can still save credentials; Test and Execute fail until the package is installed.`,
+          `${item.name}'s driver package is not loadable on this host. You can still save credentials; Test and Execute fail until the package is installed.`,
         tone: "warning",
       });
     }

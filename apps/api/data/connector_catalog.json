@@ -77,7 +77,7 @@
       "name": "Excel",
       "category": "file",
       "status": "live",
-      "description": "Upload .xlsx workbooks \u2014 streamed via openpyxl and written as typed rows to Postgres/Snowflake (automatic conversion; prefer .xlsx over legacy .xls)"
+      "description": "Upload .xlsx workbooks \u2014 read row by row and written as typed rows (prefer .xlsx over legacy .xls)"
     },
     {
       "id": "mysql",

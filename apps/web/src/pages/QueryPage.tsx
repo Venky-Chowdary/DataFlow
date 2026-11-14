@@ -59,7 +59,7 @@ import {
 import { useActiveWorkspaceId } from "../lib/workspace";
 
 /**
- * Unified query workspace — one console for every connector family the engine
+ * Unified query workspace — one console for the queryable connector families the engine
  * transfers, with schema-aware completion, multi-tab sessions, bound
  * parameters and type-honest results.
  *
@@ -494,7 +494,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         className="df2-page-query"
         title="Query"
         kicker="Operations"
-        description="Unified read-only console across every connector family — schema-aware, type-honest, multi-tab."
+        description="Read-only console for databases, warehouses, and files — schema-aware, type-honest, multi-tab. Kafka topics and vector stores are not queried here."
       >
         <PageFrame className="df2-query-page">
           <EmptyState
@@ -515,7 +515,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       className="df2-page-query"
       title="Query"
       kicker="Operations"
-      description="Unified read-only console across every connector family — schema-aware, type-honest, multi-tab."
+      description="Read-only console for databases, warehouses, and files — schema-aware, type-honest, multi-tab. Kafka topics and vector stores are not queried here."
     >
       <PageFrame className="df2-query-page df2-qw">
         {/* ---------------------------------------------------- tab strip --- */}

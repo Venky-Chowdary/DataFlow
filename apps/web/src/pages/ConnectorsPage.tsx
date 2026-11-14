@@ -243,7 +243,7 @@ export function ConnectorsPage({
         title: "Driver not installed here",
         message:
           item.environment_gap_reason ||
-          `${item.name} is Certified but its driver package is not loadable on this host.`,
+          `${item.name}'s driver package is not loadable on this host.`,
         tone: "warning",
       });
     } else if (item.connect_only) {
