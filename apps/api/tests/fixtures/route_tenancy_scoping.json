@@ -1127,6 +1127,49 @@
         "contract_id"
       ],
       "reason": "A multipart form route: its connector ids are checked read/write by the route (test_connector_route_authz) and its contract by assert_body_ids (review 3, Low); the JSON harness here cannot send a form."
+    },
+    "POST /api/v1/ops/cdc-cursors/clear": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Clears a CDC/sync watermark named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    },
+    "POST /api/v1/ops/cdc-leases/force-release": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Breaks the live CDC lease named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    }
+  },
+  "_query_routes_about": "query_routes: routes that take a resource id in the QUERY string, or list resources with no id. tests/test_tenancy_route_scoping.py::test_every_query_id_route_answers_other_tenants_like_a_missing_id calls each as B's administrator and B's API key: an id route answers exactly as for an id that does not exist, a list route never names A's resource, and A's administrator is served (owner control).",
+  "query_routes": {
+    "GET /api/v1/ops/cdc-cursors": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a watermark by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a CDC lease by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-cursors/keys": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists cursor keys: only the caller's workspaces' (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases/list": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists held CDC leases: only the caller's workspaces' (SEC-1)."
     }
   }
 }

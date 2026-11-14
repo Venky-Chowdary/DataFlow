@@ -88,11 +88,15 @@ async def get_dlq(
 
 
 @router.get("/cdc-leases")
-async def get_cdc_lease(cursor_key: str = Query(..., min_length=1, max_length=512)):
-    """Operator snapshot of a CDC resource lease (fencing generation, staleness)."""
-    from services.cdc_lease import lease_backend_name, lease_view, parse_holder_job_id
+async def get_cdc_lease(request: Request, cursor_key: str = Query(..., min_length=1, max_length=512)):
+    """Operator snapshot of a CDC resource lease (fencing generation, staleness).
 
-    view = lease_view(cursor_key)
+    Another workspace's key answers exactly like a key that does not exist (SEC-1).
+    """
+    from services.cdc_lease import lease_backend_name, lease_view, parse_holder_job_id
+    from services.cdc_ops_scope import cursor_visible
+
+    view = lease_view(cursor_key) if cursor_visible(request, cursor_key) else None
     if view is None:
         return {
             "found": False,
@@ -112,6 +116,7 @@ async def get_cdc_lease(cursor_key: str = Query(..., min_length=1, max_length=51
 
 @router.get("/cdc-leases/list")
 async def list_cdc_leases(
+    request: Request,
     resource: str = Query("", max_length=512),
     job_id: str = Query("", max_length=128),
     stale_only: bool = Query(False),
@@ -122,8 +127,11 @@ async def list_cdc_leases(
     cursor key. This is how an operator gets from one to the other.
     """
     from services.cdc_lease import lease_backend_name, list_lease_views
+    from services.cdc_ops_scope import visible_leases
 
-    leases = list_lease_views(resource=resource, job_id=job_id, stale_only=stale_only)
+    leases = visible_leases(
+        request, list_lease_views(resource=resource, job_id=job_id, stale_only=stale_only)
+    )
     return {
         "leases": leases,
         "count": len(leases),
@@ -144,8 +152,12 @@ async def post_force_release_cdc_lease(body: ForceReleaseBody, request: Request)
 
     Honesty: does not stop the prior holder process — that worker will fail on
     the next renew. Prefer cancelling the holder job when it is still running.
+    A key outside the caller's workspaces is a 404, like one that does not exist (SEC-1).
     """
     from services.cdc_lease import force_release_lease
+    from services.cdc_ops_scope import assert_cursor_writable
+
+    assert_cursor_writable(request, body.cursor_key)
 
     actor = ""
     try:
@@ -164,11 +176,15 @@ async def post_force_release_cdc_lease(body: ForceReleaseBody, request: Request)
 
 
 @router.get("/cdc-cursors")
-async def get_cdc_cursor(cursor_key: str = Query(..., min_length=1, max_length=512)):
-    """Read the persisted CDC/sync watermark for operator recovery."""
+async def get_cdc_cursor(request: Request, cursor_key: str = Query(..., min_length=1, max_length=512)):
+    """Read the persisted CDC/sync watermark for operator recovery.
+
+    Another workspace's key answers exactly like a key that does not exist (SEC-1).
+    """
+    from services.cdc_ops_scope import cursor_visible
     from services.sync_cursor import get_watermark
 
-    wm = get_watermark(cursor_key)
+    wm = get_watermark(cursor_key) if cursor_visible(request, cursor_key) else None
     return {
         "cursor_key": cursor_key,
         "found": wm is not None,
@@ -177,11 +193,16 @@ async def get_cdc_cursor(cursor_key: str = Query(..., min_length=1, max_length=5
 
 
 @router.get("/cdc-cursors/keys")
-async def list_cdc_cursor_keys() -> dict[str, Any]:
-    """List persisted cursor keys so a reset can name one instead of guessing."""
-    from services.sync_cursor import list_cursor_keys
+async def list_cdc_cursor_keys(request: Request) -> dict[str, Any]:
+    """List persisted cursor keys so a reset can name one instead of guessing.
 
-    keys = sorted(list_cursor_keys())
+    Only the caller's workspaces' keys; a platform admin with no workspace
+    header sees every key (SEC-1).
+    """
+    from services.cdc_ops_scope import visible_cursor_keys
+    from services.sync_cursor import list_cursor_records
+
+    keys = sorted(visible_cursor_keys(request, list_cursor_records()))
     return {"count": len(keys), "cursor_keys": keys}
 
 
@@ -196,8 +217,12 @@ async def post_clear_cdc_cursor(body: ClearCursorBody, request: Request) -> dict
 
     Honesty: clearing does not rewind the destination — at-least-once upsert
     may re-apply rows from the new snapshot handoff. Prefer when_needed/initial.
+    A key outside the caller's workspaces is a 404, like one that does not exist (SEC-1).
     """
+    from services.cdc_ops_scope import assert_cursor_writable
     from services.sync_cursor import clear_watermark
+
+    assert_cursor_writable(request, body.cursor_key)
 
     actor = ""
     try:
