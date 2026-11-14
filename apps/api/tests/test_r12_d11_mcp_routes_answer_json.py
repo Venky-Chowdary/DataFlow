@@ -146,7 +146,10 @@ def _render(template: Path, port: int, values: dict[str, str], html_root: Path) 
     text = template.read_text(encoding="utf-8")
     for key, value in {"PORT": str(port), **values}.items():
         text = text.replace("${" + key + "}", value)
-    return text.replace("root /usr/share/nginx/html;", f"root {html_root};")
+    text = text.replace("root /usr/share/nginx/html;", f"root {html_root};")
+    # The server's own access log (SEC-14 dw_noquery) lives beside the test's
+    # nginx: CI runs nginx as an unprivileged user that cannot open /var/log/nginx.
+    return text.replace("/var/log/nginx/access.log", str(html_root.parent / "access.log"))
 
 
 def _main_conf(tmp: Path, server_conf: Path) -> Path:
