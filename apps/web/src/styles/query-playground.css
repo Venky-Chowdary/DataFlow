@@ -1619,22 +1619,25 @@
 }
 
 .df2-app .df2-qw-shell .df2-qw-context {
-  flex: 1 1 520px;
+  flex: 1 1 400px;
   min-width: 0;
   display: flex;
   align-items: flex-end;
   gap: var(--df2-qw-gap);
 }
 
+/* Database and Table hold short names ("Default", "Any", a schema); the
+   connector label ("Warehouse (SQLite) · not tested") is the long one, so it
+   takes the slack; the others keep a fixed 120px. */
 .df2-app .df2-qw-shell .df2-qw-field {
-  flex: 1 1 140px;
-  min-width: 0;
+  flex: 0 1 120px;
+  min-width: 88px;
   margin: 0;
 }
 
 .df2-app .df2-qw-shell .df2-qw-field--connector {
-  flex: 2.4 1 260px;
-  min-width: 200px;
+  flex: 1 1 260px;
+  min-width: 220px;
   max-width: 400px;
 }
 
@@ -1653,6 +1656,12 @@
   color: var(--df-text-secondary);
 }
 
+.df2-app .df2-qw-shell .df2-qw-actionbar select {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .df2-app .df2-qw-shell .df2-qw-actionbar :is(.df2-input, .df2-select) {
   height: var(--df-control-height-sm);
   min-height: var(--df-control-height-sm);
@@ -1668,6 +1677,10 @@
   width: var(--df-control-height-sm);
   height: var(--df-control-height-sm);
   min-width: var(--df-control-height-sm);
+}
+
+.df2-app .df2-qw-shell[data-wide="true"] .df2-qw-runrow {
+  display: contents;
 }
 
 .df2-app .df2-qw-shell .df2-qw-actions {
@@ -2318,45 +2331,80 @@
   border-radius: var(--df-radius-lg) var(--df-radius-lg) 0 0;
 }
 
+/* Phones: Insert… and Clear share the SYNTAX row. */
 .df2-app .df2-qw-shell[data-wide="false"] .df2-query-editor-shell[data-variant="workspace"] .df2-query-editor-langbar {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-tabs-right .df2-qw-chip:first-child {
   display: none;
 }
 
+/* Connection fields: a compact grid, every field visible, nothing scrolls
+   sideways — Connector; Database | Table; Row limit + actions. */
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actionbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--df2-qw-gap);
   padding: var(--df2-qw-gap) 0;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-context {
-  flex-basis: 100%;
-  overflow-x: auto;
-  padding-bottom: 2px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--df2-qw-gap);
+  min-width: 0;
 }
 
-.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-context > * {
-  flex: 0 0 auto;
-  min-width: 9.5rem;
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-context > .df2-qw-field {
+  min-width: 0;
+  max-width: none;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-context > .df2-qw-field--connector {
-  min-width: 15rem;
+  grid-column: 1 / -1;
 }
 
-.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-context > .df2-qw-field--limit {
-  min-width: 6rem;
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-runrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--df2-qw-gap);
+  min-width: 0;
+}
+
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-runrow > .df2-qw-field--limit {
+  flex: 0 0 4.75rem;
+}
+
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-field--limit select {
+  --df-select-arrow-gutter: 24px;
+  padding-left: 8px;
+  background-position: right 6px center;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actions {
-  flex-basis: 100%;
+  flex: 1 1 auto;
   flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--df-space-1, 4px);
   margin-left: 0;
 }
 
-.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actions .df2-qw-run {
-  margin-left: auto;
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actions-sep {
+  display: none;
+}
+
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actions .df2-btn {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-actions .df2-qw-tool {
+  min-width: 30px;
+  padding: 0;
+  width: 30px;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-export {
@@ -2379,7 +2427,12 @@
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-pane--editor {
-  height: 260px;
+  height: auto;
+}
+
+.df2-app .df2-qw-shell[data-wide="false"] .df2-qw-pane--editor .df2-query-editor-shell[data-fill="true"] :is(.df2-query-editor-wrap, .df2-query-editor-wrap--powered) {
+  flex: none;
+  height: var(--df2-qw-phone-code-h, 140px);
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-main {
@@ -2424,6 +2477,19 @@
     display: none;
   }
 
+  .df2-app .df2-qw-shell .df2-query-editor-shell[data-variant="workspace"] :is(.df2-query-editor-lang-label, .df2-qe-stat) {
+    display: none;
+  }
+
+  .df2-app .df2-qw-shell .df2-query-editor-shell[data-variant="workspace"] .df2-qe-insert {
+    width: 6.5rem;
+  }
+
+  .df2-app .df2-qw-shell .df2-query-editor-shell[data-variant="workspace"] .df2-query-editor-toolbar-actions {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+
   /* No hardware keyboard hint on a phone; keeps Run on the tools row. */
   .df2-app .df2-qw-shell .df2-qw-run .df2-qw-kbd {
     display: none;
@@ -2434,8 +2500,9 @@
   }
 }
 
-/* Below 1440px the secondary tools show their icon; the name stays for assistive tech and the tooltip. */
-@media (max-width: 1439px) {
+/* Below 1680px the secondary tools show their icon (the connector label needs
+   the room at 1440); the name stays for assistive tech and the tooltip. */
+@media (max-width: 1679px) {
   .df2-app .df2-qw-shell .df2-qw-tool-label {
     position: absolute;
     width: 1px;

@@ -1,5 +1,5 @@
 import { EmptyState } from "./ui/EmptyState";
-import { connectorDisplayName } from "../lib/connectorTypes";
+import { connectorDisplayName, connectorNameWithEngine } from "../lib/connectorTypes";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { Button } from "./ui/Button";
@@ -82,7 +82,7 @@ export function ConnectionWorkbench({
               {connectors.length === 0 ? (
                 <option value="">No saved connections</option>
               ) : connectors.map((c) => (
-                <option key={c.id} value={c.id}>{c.name} · {connectorDisplayName(c.type)}</option>
+                <option key={c.id} value={c.id}>{connectorNameWithEngine(c.name, c.type, "dot")}</option>
               ))}
             </select>
           </div>
