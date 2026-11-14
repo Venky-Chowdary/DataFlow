@@ -248,10 +248,11 @@ def layer_l1_row_balance(
 
 
 def _cell_wire(value: Any) -> str:
-    """One ladder population cell. Same wire as SQL extract."""
-    from services.value_serializer import cell_to_string
+    """One ladder population cell. Same wire as SQL extract (CDC-LIT-1: a driver's
+    text that spells the missing marker is the user's text)."""
+    from services.value_serializer import driver_cell_to_string
 
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)
 
 
 def _row_cells(row: dict[str, Any], columns: list[str] | None = None) -> dict[str, str]:

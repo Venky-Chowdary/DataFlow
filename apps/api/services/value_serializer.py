@@ -128,7 +128,19 @@ class WireCell(str):
 
 def wire_cell(value: Any) -> WireCell:
     """Encode ``value`` once for the wire and mark the result as encoded."""
-    return WireCell(cell_to_string(value, preserve_sql_null=True))
+    return WireCell(driver_cell_to_string(value))
+
+
+def driver_cell_to_string(value: Any) -> str:
+    """A value a database driver returned, onto the wire (CDC-LIT-1).
+
+    A driver never returns absence, so a text that spells the missing sentinel
+    is the user's text: it is escaped like any other colliding literal instead
+    of being encoded as an omitted field (which landed it as ``''``).
+    """
+    if type(value) is str and value == DF_MISSING_SENTINEL:
+        return escape_wire_text(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def reader_wire_cell(value: Any) -> Any:

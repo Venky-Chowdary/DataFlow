@@ -89,7 +89,7 @@ from services.engine_pool import release_engine
 from services.reversibility_enforce import scan_pass
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, driver_cell_to_string
 from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
@@ -3387,7 +3387,7 @@ def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
         from services.json_polarity import json_document_wire
 
         return json_document_wire(value)
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)
 
 
 def _is_json_sa(col: Any) -> bool:
@@ -3452,7 +3452,7 @@ def _read_table_raw(
     result = conn.execute(sa.text(sql))
     headers = _result_headers(dialect, result)
     rows = [
-        [cell_to_string(value, preserve_sql_null=True) for value in row]
+        [driver_cell_to_string(value) for value in row]
         for row in result.fetchall()
     ]
     return headers, rows
@@ -3844,7 +3844,7 @@ def read_table_scan_batch(
         rows = [_serialize_source_row(row, selected_cols, dialect) for row in raw]
     else:
         rows = [
-            [cell_to_string(value, preserve_sql_null=True) for value in row]
+            [driver_cell_to_string(value) for value in row]
             for row in raw
         ]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)

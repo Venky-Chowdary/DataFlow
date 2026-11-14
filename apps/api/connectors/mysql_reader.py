@@ -28,13 +28,13 @@ from services.timezone_policy import (
     is_mysql_timestamp_data_type,
     mysql_timestamp_instant_wire,
 )
-from services.value_serializer import cell_to_string
+from services.value_serializer import driver_cell_to_string
 
 
 def _cell(value: Any, *, instant: bool = False) -> str:
     if instant:
         value = mysql_timestamp_instant_wire(value)
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)  # CDC-LIT-1
 
 
 def _mysql_column_types(cur, table: str) -> list[tuple[str, str]]:

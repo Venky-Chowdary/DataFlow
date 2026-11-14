@@ -18,7 +18,7 @@ _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, driver_cell_to_string
 
 
 def read_table_batch(
@@ -126,7 +126,7 @@ def read_table_batch(
             headers = [field.name for field in job.schema]
         else:
             headers = list(order_cols)
-        rows = [[cell_to_string(v, preserve_sql_null=True) for v in row.values()] for row in rows_iter]
+        rows = [[driver_cell_to_string(v) for v in row.values()] for row in rows_iter]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     except Exception as exc:
         raise RuntimeError(f"BigQuery read failed for {table_ref}: {exc}") from exc
@@ -252,7 +252,7 @@ def read_table_cursor_batch(
             headers = [field.name for field in job.schema]
         else:
             headers = columns or []
-        rows = [[cell_to_string(v, preserve_sql_null=True) for v in row.values()] for row in rows_iter]
+        rows = [[driver_cell_to_string(v) for v in row.values()] for row in rows_iter]
         # Keyset pages are not a cardinality bound — page length must never
         # trip stream early-stop (fetch_offset >= total_rows).
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
@@ -415,7 +415,7 @@ def _bigquery_scan_page(
     if it is not None:
         for row in it:
             page_rows.append(
-                [cell_to_string(v, preserve_sql_null=True) for v in row.values()]
+                [driver_cell_to_string(v) for v in row.values()]
             )
             if len(page_rows) >= max(1, int(limit)):
                 break

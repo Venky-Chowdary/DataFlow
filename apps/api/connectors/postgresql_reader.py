@@ -21,7 +21,7 @@ if str(_api_root) not in sys.path:
 
 from services import reflection_cache
 from services.json_polarity import is_json_catalog_type
-from services.value_serializer import cell_to_string
+from services.value_serializer import driver_cell_to_string
 
 
 def _ensure_psycopg2() -> None:
@@ -32,7 +32,7 @@ def _ensure_psycopg2() -> None:
 
 
 def _cell(value: Any) -> str:
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)  # CDC-LIT-1
 
 
 def _bind(schema: str | None, table: str) -> tuple[str, str]:

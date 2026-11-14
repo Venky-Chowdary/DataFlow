@@ -217,7 +217,12 @@ class PgOutputDecoder:
             elif kind == b"t":
                 length = buf.read_int32()
                 raw = buf.read_bytes(length)
-                out[col] = raw.decode("utf-8", errors="replace")
+                text = raw.decode("utf-8", errors="replace")
+                from services.value_serializer import DF_MISSING_SENTINEL, WireLiteral
+
+                # CDC-LIT-1: a column's text that spells the missing marker is
+                # the user's text, never an omitted field (it landed as '').
+                out[col] = WireLiteral(text) if text == DF_MISSING_SENTINEL else text
             else:
                 break
         return out
