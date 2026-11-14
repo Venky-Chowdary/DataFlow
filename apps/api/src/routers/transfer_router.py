@@ -1437,6 +1437,10 @@ async def execute_transfer_json(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -2045,6 +2049,10 @@ async def run_universal_transfer(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
 
     engine = get_transfer_engine()
     try:

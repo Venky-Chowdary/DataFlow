@@ -799,6 +799,12 @@ async def create_pipeline_schedule(
 
     await asyncio.to_thread(assert_schedule_body_ids, request, payload)  # before the key probe reads any catalog
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, payload)
+    if dropped:
+        warnings.append(dropped)
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
     try:
@@ -853,6 +859,12 @@ async def patch_pipeline_schedule(
     if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
         await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, data, existing.to_dict())
+    if dropped:
+        warnings.append(dropped)
     try:
         if "compliance_acknowledged" in data or (
             {"acknowledgment_actor", "acknowledgment_reason"} & set(data)

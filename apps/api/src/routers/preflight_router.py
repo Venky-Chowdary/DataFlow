@@ -316,7 +316,9 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
         )
 
         with deadline_scope(seconds, progress), collect_budget_findings() as found:
-            return attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+            result = attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+        _record_validate_approval(body, result)
+        return result
 
     work = asyncio.ensure_future(run_in_threadpool(_bounded))
     try:
@@ -328,6 +330,21 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
         return await run_in_threadpool(
             _preflight_deadline_refusal, body, deadline_timeout_message("Preflight", seconds, progress), seconds
         )
+
+
+def _record_validate_approval(body: PreflightRequest, result: Any) -> None:
+    """SEC-APPROVAL-1: record what this Validate approved (destination included)."""
+    if not isinstance(result, dict):
+        return
+    from services.validate_approvals import binding_of, record_validate
+    from services.workspace_filter import current_workspace_stamp
+
+    record_validate(
+        result,
+        workspace_id=current_workspace_stamp(for_write=False) or "",
+        binding=binding_of({}, body.stream_contracts, table=str(body.dest_table or ""),
+                           connector_id=str(body.connector_id or "")),
+    )
 
 
 def _preflight_deadline_refusal(body: PreflightRequest, message: str, seconds: float) -> dict:
