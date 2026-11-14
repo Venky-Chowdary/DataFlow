@@ -1667,6 +1667,82 @@ def _repairable_image(
     return kept, held
 
 
+def _refuse_cdc_without_deletes(dest_type: str, destination: Any, dest_cfg: dict[str, Any], table: str) -> None:
+    """Refuse CDC before the snapshot when the destination can't apply deletes (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.cdc_exactly_once import dest_allow_append_only
+
+    if cdc_deletes_supported(dest_type):
+        return
+    if dest_allow_append_only(destination) or _truthy_cfg(
+        dest_cfg, "allow_append_only", "cdc_allow_append_only"
+    ):
+        return
+    from services.data_errors import CdcDeletesUnsupported
+
+    raise CdcDeletesUnsupported(unsupported_cdc_deletes_message(dest_type, table))
+
+
+def _apply_cdc_deletes(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    change: ChangeBatch,
+    pk_target_cols: list[str],
+) -> int:
+    """LSN-guarded deletes; a failure names the keys this batch already applied (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.data_errors import (
+        CdcBatchPartiallyApplied,
+        CdcDeletesUnsupported,
+        key_list_text,
+    )
+
+    applied = sorted(
+        "|".join(k) for k in _applied_change_keys(
+            ChangeBatch(inserts=change.inserts, updates=change.updates), pk_target_cols
+        )
+    )
+    if not cdc_deletes_supported(dest_type):
+        raise CdcDeletesUnsupported(
+            unsupported_cdc_deletes_message(dest_type, dest_table),
+            details={"applied_keys": applied[:50], "applied_key_count": len(applied)},
+        )
+    try:
+        return delete_by_primary_keys(
+            db_type=dest_type,
+            cfg=dest_cfg,
+            table_name=dest_table,
+            primary_key_column=pk_target_cols,
+            keys=change.deletes,
+            schema=dest_cfg.get("schema"),
+            incoming_lsn=extract_cdc_lsn(change.resume_token),
+            lsn_column=DF_LSN_COL,
+        )
+    except Exception as exc:
+        if not applied:
+            raise
+        raise CdcBatchPartiallyApplied(
+            f"CDC couldn't apply {len(change.deletes)} source delete(s) to {dest_table}: "
+            f"{exc}. This change batch had already written key(s) {key_list_text(applied)}; "
+            "those rows are on the destination at their new values, and the deleted "
+            "rows are still there. The stream position did not move, so the next run "
+            "replays this batch. Fix the cause, then run again.",
+            details={
+                "applied_keys": applied[:50],
+                "applied_key_count": len(applied),
+                "pending_delete_keys": [str(k) for k in change.deletes[:50]],
+                "pending_delete_count": len(change.deletes),
+            },
+        ) from exc
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1922,56 +1998,7 @@ def _apply_change_batch(
     if change.deletes:
         if not pk_target_cols:
             raise ValueError("CDC deletes require a primary key on the destination")
-        deleted = delete_by_primary_keys(
-            db_type=dest_type,
-            cfg=dest_cfg,
-            table_name=dest_table,
-            primary_key_column=pk_target_cols,
-            keys=change.deletes,
-            schema=dest_cfg.get("schema"),
-            incoming_lsn=extract_cdc_lsn(change.resume_token),
-            lsn_column=DF_LSN_COL,
-        )
-        # Fail closed: unsupported destinations used to silently no-op deletes.
-        if deleted == 0 and change.deletes:
-            from connectors.table_manager import UnsupportedCdcDeleteError
-
-            # Re-check: 0 can mean keys already absent (idempotent). Probe support.
-            # Keep in sync with connectors.table_manager.delete_by_primary_keys.
-            supported = (dest_type or "").lower() in {
-                "postgresql",
-                "redshift",
-                "mysql",
-                "sqlite",
-                "generic_sql",
-                "mongodb",
-                "mongo",
-                "sqlserver",
-                "mssql",
-                "oracle",
-                "oracle_db",
-                "oracle_autonomous_warehouse",
-                "snowflake",
-                "bigquery",
-                "duckdb",
-                "databricks",
-                "synapse_analytics",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-                "iceberg",
-                "apache_iceberg",
-                "pgvector",
-                "qdrant",
-                "weaviate",
-                "pinecone",
-            }
-            if not supported:
-                raise UnsupportedCdcDeleteError(
-                    f"CDC deletes are not supported for destination type '{dest_type}'"
-                )
+        deleted = _apply_cdc_deletes(dest_type, dest_cfg, dest_table, change, pk_target_cols)
 
     # Stash a bounded source sample so Gate-8 reconciliation can compare the
     # rows we just wrote against a read-back of the destination.
@@ -2404,6 +2431,7 @@ def _run_cdc_shared_multi_table(
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, "")
     delivery_guarantee = apply_require_exactly_once(
         delivery_guarantee,
         required=dest_require_exactly_once(destination, dest_cfg),
@@ -3494,6 +3522,7 @@ def _run_cdc_single_stream(
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
     dest_table = resolve_dest_table(dest_type, destination, table_name)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, dest_table)
 
     contract = resolve_sync_contract(stream_contracts)
     primary_key = contract.primary_key if contract else ""

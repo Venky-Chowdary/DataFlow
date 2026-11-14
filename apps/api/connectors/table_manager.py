@@ -1595,9 +1595,23 @@ def _fetch_pk_lsn_map(
     """
     from services.cdc_snapshot_window import _pk_columns
 
+    from services.cdc_destination_support import lsn_fetch_route
+
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}
     dt = (db_type or "").lower().strip()
+    route = lsn_fetch_route(dt)
+    if route is None:
+        raise RuntimeError(
+            f"LSN delete fetch is not wired for destination type {dt!r}; "
+            "refusing to invent existing_lsn=None (would always apply deletes)"
+        )
+    if route in {"redis", "elasticsearch", "dynamodb"}:
+        from services import cdc_kv_lsn
+
+        fetch = getattr(cdc_kv_lsn, f"{route}_lsn_map")
+        target = {"redis": "prefix", "elasticsearch": "index"}.get(route, "table_name")
+        return fetch(cfg, cols=pk_cols, keys=list(keys), lsn_column=lsn_column, **{target: table_name})
     if dt == "oracle":
         *pk_cols, lsn_column = _oracle_stored_names(cfg, schema, table_name, [*pk_cols, lsn_column])
     if len(pk_cols) > 1:
