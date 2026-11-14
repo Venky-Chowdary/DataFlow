@@ -6639,7 +6639,8 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-brand-muted);
   border: 1px solid var(--df-border-brand);
   font-size: 12px;
-  color: var(--df-brand);
+  /* UX-16: --df-brand on the brand tint was 3.6:1 at 12px. */
+  color: var(--df-brand-strong);
   margin-top: auto;
 }
 

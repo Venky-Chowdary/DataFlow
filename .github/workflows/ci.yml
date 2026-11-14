@@ -1225,10 +1225,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Wizard and production smoke
+      # The a11y project (UX-16) is the axe-core WCAG 2.2 A/AA gate over the
+      # main screens: any critical or serious violation fails this job.
+      - name: Wizard, accessibility gate and production smoke
         uses: ./.github/actions/studio-surface
         with:
           playwright_project: wizard
+          extra_playwright_projects: a11y
           production_smoke: "true"
           artifact_name: studio-ui-wizard
 

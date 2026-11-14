@@ -57,6 +57,8 @@ export function ConnectorCard({
   const usage = resolveConnectorUsage(c, jobs, schedules);
   const healthy = connectorLooksHealthy(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
+  // The green check means a probe passed; never-tested is neutral, not healthy.
+  const probePassed = connectorTestHealth(c) === "passed";
   const testLabel = connectorTestLabel(c);
   const endpoint = connectorEndpointLabel(c);
   const roleClass =
@@ -71,15 +73,11 @@ export function ConnectorCard({
       <div
         id={`connector-card-${c.id}`}
         className={`df2-connector-row df2-card-interactive ${selected ? "selected" : ""} ${highlighted ? "highlighted" : ""} ${healthy ? "" : "error"}`}
+        // UX-16: a list item, not a button that contains buttons (nested
+        // interactive). The row click is a mouse shortcut; keyboard and
+        // screen-reader users open details with the row's own Open button.
         onClick={onSelect}
-        onKeyDown={(e) => {
-          if (onSelect && (e.key === "Enter" || e.key === " ")) {
-            e.preventDefault();
-            onSelect();
-          }
-        }}
-        role={onSelect ? "button" : undefined}
-        tabIndex={onSelect ? 0 : undefined}
+        role="listitem"
         aria-current={selected || undefined}
       >
         <span
@@ -114,8 +112,8 @@ export function ConnectorCard({
         >
           {roleLabel}
         </span>
-        <span className={`df2-connector-row-signal ${healthy ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
-          <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
+        <span className={`df2-connector-row-signal ${probePassed ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
+          <DtIcon name={probePassed ? "check" : neverTested ? "activity" : "x"} size={12} />
           <span className="df2-connector-row-signal-text">{testLabel}</span>
         </span>
         <span className="df2-connector-row-used" title="Last transfer that used this connection">
@@ -183,8 +181,8 @@ export function ConnectorCard({
       </div>
 
       <div className="df2-connector-row-signals">
-        <span className={`df2-connector-signal ${healthy ? "ok" : neverTested ? "" : "err"}`}>
-          <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
+        <span className={`df2-connector-signal ${probePassed ? "ok" : neverTested ? "" : "err"}`}>
+          <DtIcon name={probePassed ? "check" : neverTested ? "activity" : "x"} size={12} />
           {neverTested ? "Never tested" : healthy ? "Last test passed" : "Last test failed"}
         </span>
         <span className="df2-connector-signal">

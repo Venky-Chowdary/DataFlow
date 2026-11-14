@@ -727,7 +727,7 @@
   font-size: 13px;
   font-weight: 740;
   letter-spacing: 0.06em;
-  color: var(--lp-accent);
+  color: var(--df-brand-deep); /* AA at 13px on white */
   font-variant-numeric: tabular-nums;
 }
 
@@ -1020,7 +1020,7 @@
   font-size: 11px;
   font-weight: 740;
   letter-spacing: 0.08em;
-  color: var(--lp-accent);
+  color: var(--df-brand-deep); /* AA at 11px on white */
   margin-bottom: 6px;
 }
 
@@ -8604,7 +8604,8 @@
   padding: 16px 0 0 !important;
   border-top: 1px solid rgba(94, 234, 212, 0.12) !important;
   font-size: 12.5px !important;
-  color: var(--df-text-tertiary) !important;
+  /* UX-16: --df-text-tertiary on the dark footer was 3.6:1; slate-400 is 7:1. */
+  color: #94a3b8 !important;
 }
 
 @media (max-width: 960px) {

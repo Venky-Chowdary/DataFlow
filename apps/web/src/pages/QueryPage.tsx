@@ -519,14 +519,14 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
     >
       <PageFrame className="df2-query-page df2-qw">
         {/* ---------------------------------------------------- tab strip --- */}
-        <div className="df2-qw-tabs" role="tablist" aria-label="Query tabs">
+        {/* UX-16: editor tabs with their own close buttons are a labelled group
+            of buttons, not an ARIA tablist (which may hold only tabs). */}
+        <div className="df2-qw-tabs" role="group" aria-label="Query tabs">
           {tabs.map((t) => (
             <div
               key={t.id}
               className="df2-qw-tab"
               data-active={t.id === activeId}
-              role="tab"
-              aria-selected={t.id === activeId}
             >
               {renamingId === t.id ? (
                 <input
@@ -544,6 +544,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 <button
                   type="button"
                   className="df2-qw-tab-btn"
+                  aria-current={t.id === activeId ? "true" : undefined}
                   onClick={() => {
                     setActiveId(t.id);
                     setResult(null);
@@ -564,7 +565,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
               </button>
             </div>
           ))}
-          <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab">
+          <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab" aria-label="New query tab">
             <DtIcon name="plus" size={13} />
           </button>
           <div className="df2-qw-tabs-right">
@@ -624,8 +625,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 />
               </div>
               <div className="df2-field df2-field-md">
-                <label className="df2-label">{isMongo ? "Database" : "Database / Schema"}</label>
+                <label className="df2-label" htmlFor="query-database">{isMongo ? "Database" : "Database / Schema"}</label>
                 <input
+                  id="query-database"
                   className="df2-input"
                   value={active?.database ?? ""}
                   onChange={(e) => patchActive({ database: e.target.value })}
@@ -633,8 +635,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 />
               </div>
               <div className="df2-field df2-field-md">
-                <label className="df2-label">{isMongo ? "Collection" : "Table (optional)"}</label>
+                <label className="df2-label" htmlFor="query-collection">{isMongo ? "Collection" : "Table (optional)"}</label>
                 <input
+                  id="query-collection"
                   className="df2-input"
                   value={active?.collection ?? ""}
                   onChange={(e) => patchActive({ collection: e.target.value })}
@@ -642,8 +645,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 />
               </div>
               <div className="df2-field df2-field-sm">
-                <label className="df2-label">Row limit</label>
+                <label className="df2-label" htmlFor="query-row-limit">Row limit</label>
                 <select
+                  id="query-row-limit"
                   className="df2-input"
                   value={active?.limit ?? 1000}
                   onChange={(e) => patchActive({ limit: Number(e.target.value) })}

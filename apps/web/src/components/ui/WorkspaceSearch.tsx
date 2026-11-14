@@ -297,7 +297,8 @@ export function WorkspaceSearch({
         <input
           ref={inputRef}
           type="text"
-          role="searchbox"
+          role="combobox"
+          aria-autocomplete="list"
           placeholder="Search pages, connections, schedules, jobs…"
           value={query}
           onChange={(e) => {
@@ -312,6 +313,7 @@ export function WorkspaceSearch({
           aria-label="Search workspace"
           aria-expanded={Boolean(showDropdown)}
           aria-controls="workspace-search-results"
+          aria-activedescendant={showDropdown && results.length > 0 && activeIndex >= 0 ? `workspace-search-option-${activeIndex}` : undefined}
           autoComplete="off"
           spellCheck={false}
         />
@@ -322,7 +324,8 @@ export function WorkspaceSearch({
         <div
           id="workspace-search-results"
           className="df2-search-dropdown df2-search-dropdown-portal"
-          role="listbox"
+          role={results.length === 0 ? "status" : "listbox"}
+          aria-label={results.length === 0 ? undefined : "Search results"}
           style={{
             position: "fixed",
             top: dropdownRect.top,
@@ -336,7 +339,9 @@ export function WorkspaceSearch({
             results.map((r, i) => (
               <button
                 key={r.id}
+                id={`workspace-search-option-${i}`}
                 type="button"
+                tabIndex={-1}
                 role="option"
                 aria-selected={i === activeIndex}
                 className={`df2-search-result ${i === activeIndex ? "active" : ""}`}
