@@ -573,6 +573,12 @@ def _introspect_endpoint_impl(
                 out["table_exists"] = True
                 out["message"] = f"MongoDB connected — reading `{listed}` in `{db_name}`"
                 _attach_db_sample(out, endpoint)
+                if str((endpoint.extra or {}).get("introspect_purpose") or "").lower() == "destination":
+                    # The Map picker lists nested fields (address.city) with
+                    # their stored BSON types, not only top-level names.
+                    from services.mongo_nested_fields import collection_field_types
+
+                    out["field_paths"] = collection_field_types(db[listed])
             else:
                 colls = db.list_collection_names()
                 out["connected"] = True
