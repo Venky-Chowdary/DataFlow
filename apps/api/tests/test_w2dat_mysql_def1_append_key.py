@@ -14,7 +14,7 @@ from tests import w2dat_live as live
 def test_append_sync_mode_leaves_the_key_unenforced_unless_mysql_requires_one(monkeypatch):
     from services import duplicate_policy as dp
 
-    for mode in ("full_refresh_append", "incremental_append"):
+    for mode in ("full_refresh_append", "append"):
         decided = dp.resolve_duplicate_policy(sync_mode=mode, business_key=True, write_mode="insert")
         assert dp.create_allows_repeated_keys(decided, "postgresql", {}), mode
         monkeypatch.setattr(dp, "_mysql_requires_primary_key", lambda cfg: False)
@@ -22,7 +22,9 @@ def test_append_sync_mode_leaves_the_key_unenforced_unless_mysql_requires_one(mo
         # sql_require_primary_key=ON: the declared key is the only key a CREATE can have.
         monkeypatch.setattr(dp, "_mysql_requires_primary_key", lambda cfg: True)
         assert not dp.create_allows_repeated_keys(decided, "mysql", {}), mode
-    for mode, write_mode in (("full_refresh_overwrite", "insert"), ("upsert", "upsert")):
+    # incremental_append merges its watermark overlap on the key the next run (d334).
+    for mode, write_mode in (("full_refresh_overwrite", "insert"), ("upsert", "upsert"),
+                             ("incremental_append", "insert")):
         decided = dp.resolve_duplicate_policy(sync_mode=mode, business_key=True, write_mode=write_mode)
         assert not dp.create_allows_repeated_keys(decided, "postgresql", {}), mode
 

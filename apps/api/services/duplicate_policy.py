@@ -418,7 +418,13 @@ def resolve_duplicate_policy(
         )
     from services.sync_cursor import is_append_sync
 
-    append_sync = caller != "upsert" and is_append_sync(sync_mode or "")
+    # Not incremental_append: its next run merges on the declared key (the
+    # watermark overlap), so that CREATE must keep the key (d334).
+    append_sync = (
+        caller != "upsert"
+        and is_append_sync(sync_mode or "")
+        and "incremental" not in str(sync_mode or "").lower()
+    )
     return DuplicateDecision(
         "append" if caller != "upsert" else "upsert",
         caller or "insert",
