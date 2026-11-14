@@ -396,178 +396,110 @@ def stream_scd2_mirror_transfer(
                 dest_summary["primary_key_columns"] = list(conflict_columns)
                 rows_written = 0
             else:
-                # Pass 2 — history merge (map already proven on staging snapshot).
-                rejected_all = []
-                for records in _read_staging_batches(
-                    staging, dest_cfg, schema_name, target_cols, batch_size
-                ):
-                    if not records:
-                        break
-                    summary = apply_scd2(
-                        destination,
-                        records,
-                        target_cols,
-                        merge_types,
-                        mappings=merge_mappings,
-                        catalog_mappings=mappings,
-                        conflict_columns=conflict_columns,
-                        batch_size=batch_size,
-                        validation_mode=validation_mode,
-                        scd2_opts=scd2_opts,
-                        source_endpoint=source,
-                        add_new_columns=backfill_new_fields,
-                        # Pass 1 judged the whole population; one batch whose
-                        # rows were all held out is not a refused run.
-                        refuse_all_quarantined=False,
-                    )
-                    rejected_all.extend(list(summary.get("rejected_details") or []))
-                    if summary.get("ok") is False:
-                        # Unexpected after preflight — still report honest partial.
-                        scd2_block_error = str(
-                            summary.get("error")
-                            or "SCD2 map/Risk Contract blocked history merge"
+                # DATA-2: every merge batch and the close pass run in ONE
+                # transaction on one connection. Each apply_scd2 call used to
+                # commit on its own, so a failure at batch 3 left batches 1-2
+                # closed and re-versioned while the run reported nothing written.
+                txn_engine = get_sqlalchemy_engine(dest_cfg)
+                txn_conn = txn_engine.connect()
+                txn = txn_conn.begin()
+                try:
+                    # Pass 2 — history merge (map already proven on staging snapshot).
+                    rejected_all = []
+                    for records in _read_staging_batches(
+                        staging, dest_cfg, schema_name, target_cols, batch_size
+                    ):
+                        if not records:
+                            break
+                        summary = apply_scd2(
+                            destination,
+                            records,
+                            target_cols,
+                            merge_types,
+                            mappings=merge_mappings,
+                            catalog_mappings=mappings,
+                            conflict_columns=conflict_columns,
+                            batch_size=batch_size,
+                            validation_mode=validation_mode,
+                            scd2_opts=scd2_opts,
+                            source_endpoint=source,
+                            add_new_columns=backfill_new_fields,
+                            # Pass 1 judged the whole population; one batch whose
+                            # rows were all held out is not a refused run.
+                            refuse_all_quarantined=False,
+                            connection=txn_conn,
                         )
-                        partial_committed = written_total > 0
+                        rejected_all.extend(list(summary.get("rejected_details") or []))
+                        if summary.get("ok") is False:
+                            # Unexpected after preflight — still report honest partial.
+                            scd2_block_error = str(
+                                summary.get("error")
+                                or "SCD2 map/Risk Contract blocked history merge"
+                            )
+                            partial_committed = written_total > 0
+                            active_rows = int(summary.get("active_rows", 0))
+                            active_checksum = str(summary.get("active_checksum", ""))
+                            break
+                        if summary.get("run_stamp"):
+                            run_stamps.add(str(summary["run_stamp"]))
+                        written_total += int(summary.get("rows_written", 0))
+                        updated_total += int(summary.get("updated_rows", 0))
+                        type1_total += int(summary.get("type1_updated_rows") or 0)
                         active_rows = int(summary.get("active_rows", 0))
                         active_checksum = str(summary.get("active_checksum", ""))
-                        break
-                    if summary.get("run_stamp"):
-                        run_stamps.add(str(summary["run_stamp"]))
-                    written_total += int(summary.get("rows_written", 0))
-                    updated_total += int(summary.get("updated_rows", 0))
-                    type1_total += int(summary.get("type1_updated_rows") or 0)
-                    active_rows = int(summary.get("active_rows", 0))
-                    active_checksum = str(summary.get("active_checksum", ""))
-                    batch_idx += 1
-                    if on_checkpoint:
-                        on_checkpoint(
-                            batch_idx,
-                            approx_batches,
-                            written_total,
-                            checkpoint={"phase": "scd2"},
+                        batch_idx += 1
+                        if on_checkpoint:
+                            on_checkpoint(
+                                batch_idx,
+                                approx_batches,
+                                written_total,
+                                checkpoint={"phase": "scd2"},
+                            )
+
+                    if (
+                        not scd2_block_error
+                        and not limit
+                        and _scd2_cols.get("close_missing", True)
+                    ):
+                        # Staging is the complete source population, so a current
+                        # version with no key in staging was deleted at the source
+                        # — unless the staging load quarantined that key's row.
+                        from services.scd2_engine import (
+                            _active_checksum as _scd2_active_checksum,
+                            close_versions_missing_from_snapshot,
+                            held_out_keys,
                         )
 
-                if (
-                    not scd2_block_error
-                    and not limit
-                    and _scd2_cols.get("close_missing", True)
-                ):
-                    # Staging is the complete source population, so a current
-                    # version with no key in staging was deleted at the source
-                    # — unless the staging load quarantined that key's row.
-                    from services.scd2_engine import (
-                        _active_checksum as _scd2_active_checksum,
-                        close_versions_missing_from_snapshot,
-                        held_out_keys,
-                    )
+                        held_keys = held_out_keys(
+                            destination, stage_rejects, mappings, schema, conflict_columns
+                        )
 
-                    held_keys = held_out_keys(
-                        destination, stage_rejects, mappings, schema, conflict_columns
-                    )
-
-                    engine = get_sqlalchemy_engine(dest_cfg)
-                    try:
-                        with engine.connect() as conn:
-                            # One run clock: the delete-close stamp is an
-                            # explicit instant taken by the caller, never a
-                            # hidden second _now_utc() inside the function —
-                            # D38 "gap in the delete-close timestamp".
-                            closed = close_versions_missing_from_snapshot(
-                                conn,
-                                target_qualified,
-                                staging_qualified,
-                                conflict_columns,
-                                timestamp=_dt_cls.now(_tz.utc),
-                                dialect=dest_type,
-                                cols=_scd2_cols,
-                                # A row the staging load held out is not in
-                                # staging, yet still in the source (SCD2-F2).
-                                keep_keys=held_keys,
-                                key_types=_target_key_types(
-                                    conn, destination.table, schema_name, conflict_columns
-                                ) if held_keys else None,
-                            )
-                            conn.commit()
-                            kept = set(closed.pop("kept_current_keys", None) or ())
-                            dest_summary.update(closed)
-                            if kept:
-                                dest_summary["quarantined_keys_kept_current"] = len(kept)
-                                _stamp_retained_scope(
-                                    conn, dest_summary, kept,
-                                    staging_qualified=staging_qualified,
-                                    target_qualified=target_qualified,
-                                    target_cols=target_cols,
-                                    conflict_columns=conflict_columns,
-                                    dest_type=dest_type,
-                                    digest_types=digest_types,
-                                    scd2_cols=_scd2_cols,
-                                    batch_size=batch_size,
-                                )
-                                conn.commit()
-                            if closed.get("run_stamp"):
-                                run_stamps.add(str(closed["run_stamp"]))
-                            updated_total += int(closed.get("closed_missing_rows") or 0)
-                            if closed.get("closed_missing_rows"):
-                                active_rows, active_checksum = _scd2_active_checksum(
-                                    conn,
-                                    target_qualified,
-                                    target_cols,
-                                    batch_size,
-                                    dest_type,
-                                    dest_types=digest_types,
-                                    cols=_scd2_cols,
-                                )
-                    finally:
-                        release_engine(engine)
-                elif not scd2_block_error and not limit:
-                    # close_missing=False: keys absent from this snapshot stay
-                    # current — retained, not written. Count them (staging
-                    # holds the complete source population) and take a
-                    # source-scoped digest so Gate-8 compares populations
-                    # that actually overlap.
-                    from services.scd2_engine import (
-                        _active_checksum as _scd2_active_checksum,
-                        _compose_key,
-                        scd2_is_current_predicate,
-                    )
-
-                    engine = get_sqlalchemy_engine(dest_cfg)
-                    try:
-                        with engine.connect() as conn:
-                            _cpred = scd2_is_current_predicate(
-                                dest_type,
-                                quote_stored_identifier(dest_type, _scd2_cols["is_current"]),
-                            )
-                            _join = " AND ".join(
-                                f"{staging_qualified}.{quote_stored_identifier(dest_type, c)}"
-                                f" = {target_qualified}.{quote_stored_identifier(dest_type, c)}"
-                                for c in conflict_columns
-                            )
-                            _pkq = ", ".join(
-                                quote_stored_identifier(dest_type, c) for c in conflict_columns
-                            )
-                            import sqlalchemy as sa
-                            from services.reconciliation_api import (
-                                iter_select_row_dicts,
-                            )
-
-                            retained = {
-                                _compose_key(row, conflict_columns)
-                                for batch in iter_select_row_dicts(
-                                    conn,
-                                    sa.text(
-                                        f"SELECT {_pkq} FROM {target_qualified} "  # nosec B608
-                                        f"WHERE {_cpred} AND NOT EXISTS "
-                                        f"(SELECT 1 FROM {staging_qualified} "
-                                        f"WHERE {_join})"
-                                    ),
-                                    conflict_columns,
-                                    itersize=max(1, int(batch_size)),
-                                )
-                                for row in batch
-                            }
+                        conn = txn_conn
+                        # One run clock: the delete-close stamp is an
+                        # explicit instant taken by the caller, never a
+                        # hidden second _now_utc() inside the function —
+                        # D38 "gap in the delete-close timestamp".
+                        closed = close_versions_missing_from_snapshot(
+                            conn,
+                            target_qualified,
+                            staging_qualified,
+                            conflict_columns,
+                            timestamp=_dt_cls.now(_tz.utc),
+                            dialect=dest_type,
+                            cols=_scd2_cols,
+                            # A row the staging load held out is not in
+                            # staging, yet still in the source (SCD2-F2).
+                            keep_keys=held_keys,
+                            key_types=_target_key_types(
+                                conn, destination.table, schema_name, conflict_columns
+                            ) if held_keys else None,
+                        )
+                        kept = set(closed.pop("kept_current_keys", None) or ())
+                        dest_summary.update(closed)
+                        if kept:
+                            dest_summary["quarantined_keys_kept_current"] = len(kept)
                             _stamp_retained_scope(
-                                conn, dest_summary, retained,
+                                conn, dest_summary, kept,
                                 staging_qualified=staging_qualified,
                                 target_qualified=target_qualified,
                                 target_cols=target_cols,
@@ -577,9 +509,91 @@ def stream_scd2_mirror_transfer(
                                 scd2_cols=_scd2_cols,
                                 batch_size=batch_size,
                             )
-                            conn.commit()
-                    finally:
-                        release_engine(engine)
+                        if closed.get("run_stamp"):
+                            run_stamps.add(str(closed["run_stamp"]))
+                        updated_total += int(closed.get("closed_missing_rows") or 0)
+                        if closed.get("closed_missing_rows"):
+                            active_rows, active_checksum = _scd2_active_checksum(
+                                conn,
+                                target_qualified,
+                                target_cols,
+                                batch_size,
+                                dest_type,
+                                dest_types=digest_types,
+                                cols=_scd2_cols,
+                            )
+                    elif not scd2_block_error and not limit:
+                        # close_missing=False: keys absent from this snapshot stay
+                        # current — retained, not written. Count them (staging
+                        # holds the complete source population) and take a
+                        # source-scoped digest so Gate-8 compares populations
+                        # that actually overlap.
+                        from services.scd2_engine import (
+                            _active_checksum as _scd2_active_checksum,
+                            _compose_key,
+                            scd2_is_current_predicate,
+                        )
+
+                        conn = txn_conn
+                        _cpred = scd2_is_current_predicate(
+                            dest_type,
+                            quote_stored_identifier(dest_type, _scd2_cols["is_current"]),
+                        )
+                        _join = " AND ".join(
+                            f"{staging_qualified}.{quote_stored_identifier(dest_type, c)}"
+                            f" = {target_qualified}.{quote_stored_identifier(dest_type, c)}"
+                            for c in conflict_columns
+                        )
+                        _pkq = ", ".join(
+                            quote_stored_identifier(dest_type, c) for c in conflict_columns
+                        )
+                        import sqlalchemy as sa
+                        from services.reconciliation_api import (
+                            iter_select_row_dicts,
+                        )
+
+                        retained = {
+                            _compose_key(row, conflict_columns)
+                            for batch in iter_select_row_dicts(
+                                conn,
+                                sa.text(
+                                    f"SELECT {_pkq} FROM {target_qualified} "  # nosec B608
+                                    f"WHERE {_cpred} AND NOT EXISTS "
+                                    f"(SELECT 1 FROM {staging_qualified} "
+                                    f"WHERE {_join})"
+                                ),
+                                conflict_columns,
+                                itersize=max(1, int(batch_size)),
+                            )
+                            for row in batch
+                        }
+                        _stamp_retained_scope(
+                            conn, dest_summary, retained,
+                            staging_qualified=staging_qualified,
+                            target_qualified=target_qualified,
+                            target_cols=target_cols,
+                            conflict_columns=conflict_columns,
+                            dest_type=dest_type,
+                            digest_types=digest_types,
+                            scd2_cols=_scd2_cols,
+                            batch_size=batch_size,
+                        )
+
+                    if scd2_block_error:
+                        txn.rollback()
+                        partial_committed = False
+                        written_total = updated_total = type1_total = 0
+                    else:
+                        txn.commit()
+                except Exception as exc:
+                    txn.rollback()
+                    raise _scd2_rolled_back(exc, target_qualified, batch_idx) from exc
+                except BaseException:
+                    txn.rollback()
+                    raise
+                finally:
+                    txn_conn.close()
+                    release_engine(txn_engine)
                 dest_summary["active_rows"] = active_rows
                 dest_summary["active_checksum"] = active_checksum
                 dest_summary["updated_rows"] = updated_total
@@ -739,6 +753,21 @@ def stream_scd2_mirror_transfer(
     dest_summary.setdefault("rejected_rows", stage_summary.get("rejected_rows", 0))
     dest_summary.setdefault("coerced_null_rows", stage_summary.get("coerced_null_rows", 0))
     return rows_written, ddl_log, dest_summary, target_cols
+
+
+def _scd2_rolled_back(exc: Exception, target: str, batches: int) -> Exception:
+    """The SCD2 merge failed inside its one transaction: say nothing changed (DATA-2)."""
+    from services.data_errors import DataPathError
+
+    cause = re.sub(r"^\([\w.]+\)\s*", "", str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__)
+    return DataPathError(
+        f"The SCD2 history merge into {target} failed after {batches:,} batch(es): {cause}. "
+        "The merge runs in one transaction and was rolled back, so no version was "
+        "closed or added; the history table is as it was before this run. Fix the "
+        "cause, then run again.",
+        code="SCD2_APPLY_ROLLED_BACK",
+        details={"rows_committed": 0, "history_rolled_back": True},
+    )
 
 
 def _target_key_types(

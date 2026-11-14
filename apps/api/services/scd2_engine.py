@@ -1574,8 +1574,13 @@ def apply_scd2(
     add_new_columns: bool = False,
     catalog_mappings: list[dict[str, Any]] | None = None,
     refuse_all_quarantined: bool = True,
+    connection: Any = None,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``connection`` is a caller-owned connection with an open transaction. The
+    merge then runs on it and does not commit, so a caller that splits one run
+    across several calls commits or rolls back the whole run at once (DATA-2).
 
     ``refuse_all_quarantined`` (default) refuses, before anything is created
     or closed, a call whose every row was held out. A caller that splits one
@@ -1762,7 +1767,9 @@ def apply_scd2(
                     _attr_cols,
                 )
 
-            with engine.begin() as conn:
+            from contextlib import nullcontext
+
+            with (nullcontext(connection) if connection is not None else engine.begin()) as conn:
                 for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
                     columns=columns,
                     ctx=ctx,
