@@ -927,6 +927,12 @@ def build_parity_report(
         differences += diffs
         tables.append(_table(ev, diffs))
     confidence = _confidence(tables)
+    # DATA-25: a binary column a text-valued store holds as base64 is labelled.
+    from services.binary_text_carrier import representation_notes
+
+    carried = [note for ev in tables_ev for note in representation_notes(ev.source_types, engine)]
+    if carried:
+        confidence["statement"] = f"{confidence['statement']} Representation: {'; '.join(carried)}."
     verdict, reason = _verdict(job, tables, confidence)
     parity = _parity_block(tables)
     report: dict[str, Any] = {
@@ -942,6 +948,7 @@ def build_parity_report(
         "explanation": state.get("explanation"),
         "rounds": list(state.get("rounds") or []),
         "evidence": _evidence_block(job, tables_ev),
+        "representation_notes": carried,
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),
         "_cache": cache,

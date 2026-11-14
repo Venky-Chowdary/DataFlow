@@ -3255,13 +3255,19 @@ def prefer_bson_source_carrier(
         str(name).casefold() for name in (homogeneous_date_fields or set())
     }
     for col, bson_type in (bson_types or {}).items():
-        if str(bson_type).strip().upper() != "TIMESTAMPTZ":
-            continue
-        if str(col).casefold() not in homogeneous_dates:
-            continue
+        carrier = str(bson_type).strip().upper()
         name = schema_names.get(str(col).casefold())
-        if name is not None:
-            merged[name] = "TIMESTAMPTZ"
+        if name is None:
+            continue
+        if carrier == "BINARY":
+            # DATA-25: BSON BinData is bytes; its stringified sample is base64
+            # text that inference cannot always tell from a word (one short
+            # 'AP8B' typed VARCHAR and PostgreSQL got the base64 as text).
+            merged[name] = "BINARY"
+            continue
+        if carrier != "TIMESTAMPTZ" or str(col).casefold() not in homogeneous_dates:
+            continue
+        merged[name] = "TIMESTAMPTZ"
     return merged
 
 
