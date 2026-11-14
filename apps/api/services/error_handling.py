@@ -9,6 +9,7 @@ quarantine for malformed records, and resume/replay support.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import time
@@ -1015,12 +1016,39 @@ _CONFIDENCE = {"typed": "high", "structured": "high", "pattern": "medium", "fall
 _PRODUCT_MODULES = ("services.", "src.", "connectors.", "dataflow.")
 
 
+_PRODUCT_SOURCE_DIRS = tuple(
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), sub) + os.sep
+    for sub in ("services", "src", "connectors")
+)
+
+
+def _raised_in_product_code(error: BaseException) -> bool:
+    """A builtin ValueError/RuntimeError that Datawrap's own code raised.
+
+    Many refusals (a text cursor that cannot bound an incremental read, a
+    key widen that needs approval, ...) are plain ``ValueError`` texts written
+    for the operator. The innermost frame names who raised it: Datawrap's own
+    package, or a driver under site-packages.
+    """
+    if type(error) not in (ValueError, RuntimeError):
+        return False
+    tb = error.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    filename = os.path.abspath(tb.tb_frame.f_code.co_filename)
+    return "site-packages" not in filename and filename.startswith(_PRODUCT_SOURCE_DIRS)
+
+
 def _is_product_refusal(error: Any) -> bool:
-    """An exception class Datawrap defines (not a driver's, not a builtin)."""
+    """An exception Datawrap raised itself (its own class, or its own ValueError text)."""
     if not isinstance(error, BaseException):
         return False
+    if getattr(error, "orig", None) is not None:
+        return False
     module = type(error).__module__ or ""
-    return module.startswith(_PRODUCT_MODULES) and getattr(error, "orig", None) is None
+    return module.startswith(_PRODUCT_MODULES) or _raised_in_product_code(error)
 
 
 def _driver_sentence(error: Any) -> str:
