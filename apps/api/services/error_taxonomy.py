@@ -189,7 +189,7 @@ TEMPLATES: dict[str, Template] = {
     ),
     "network.connection_lost": Template(
         "Connection lost",
-        "The connection to {engine} closed while Datawrap was using it.",
+        "The database connection closed while Datawrap was using it.",
         "Run again. If it repeats, check the database server's logs and idle timeouts.",
         "retry", _RETRY_API, retriable=True,
     ),

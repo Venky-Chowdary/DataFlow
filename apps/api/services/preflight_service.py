@@ -504,7 +504,10 @@ def run_file_preflight(
                 # the G1 finding (ERR-32: it no longer claims the catalog lists
                 # the table); dependent gates wait on it instead of repeating
                 # it (ERR-31).
-                source_error = sample_unavailable_reason
+                from services.error_taxonomy import classify as _classify
+
+                _named = _classify(sample_unavailable_reason, side="source", phase="read", fallback=False)
+                source_error = _named.text if _named is not None else sample_unavailable_reason
                 sample_unavailable_reason = "not run: waiting on Source (G1)"
     # A measured COUNT(*) of 0 is the population. Requiring a sample row
     # blocked an empty table whose catalog count was already 0 (R8-005).

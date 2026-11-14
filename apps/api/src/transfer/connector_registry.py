@@ -995,7 +995,11 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         aws_endpoint=aws_sdk_endpoint(cfg, guard_type),
     )
     if refusal:
-        return False, humanize_connection_error(guard_type, refusal)
+        # The policy's own sentence stands; only an unresolvable name is
+        # reworded as Host not found (ERR-18).
+        if str(refusal).lower().startswith("refused connector host"):
+            return False, humanize_connection_error(guard_type, refusal)
+        return False, refusal
 
     db_type = (db_type or "").lower()
     catalog_id = db_type
