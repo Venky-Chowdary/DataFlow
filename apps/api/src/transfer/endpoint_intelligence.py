@@ -155,6 +155,11 @@ def _is_absent_object_error(message: str) -> bool:
 _INTERNAL_OBJECT_PREFIXES = ("_df_mirrorkeys_", "_dataflow_stg_", "_df_dlq_")
 
 
+def _object_name_filter(endpoint: EndpointConfig) -> str:
+    """The browser's "name contains" search, when it sent one (UX-9)."""
+    return str((endpoint.extra or {}).get("object_name_filter") or "").strip()[:200]
+
+
 def _operator_visible_objects(names, type_label: str, type_map: dict | None = None) -> list[dict]:
     """Listing entries for objects the operator owns, in probe order.
 
@@ -480,12 +485,14 @@ def _introspect_endpoint_impl(
             schema=cfg.get("schema", "public"),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            name_filter=_object_name_filter(endpoint),
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(
             probe.tables, "table", getattr(probe, "table_types", None)
         )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
+        out["objects_total"] = getattr(probe, "tables_total", None)
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -623,12 +630,14 @@ def _introspect_endpoint_impl(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            name_filter=_object_name_filter(endpoint),
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(
             probe.tables, "table", getattr(probe, "table_types", None)
         )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
+        out["objects_total"] = getattr(probe, "tables_total", None)
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):

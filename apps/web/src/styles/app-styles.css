@@ -1643,3 +1643,35 @@ html:has(.df2-app) #root {
   display: block;
   color: var(--df-text-secondary);
 }
+
+/* UX-9: connection workbench schema browser. */
+.df2-schema-browse-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin: 8px 0 4px;
+}
+
+.df2-schema-browse-controls .df2-field {
+  min-width: 160px;
+}
+
+.df2-schema-browse-controls .df2-schema-browse-search {
+  flex: 1 1 220px;
+}
+
+.df2-schema-browse-count {
+  margin: 4px 0 8px;
+  color: var(--df-text-secondary);
+  font-size: 13px;
+}
+
+.df2-schema-browse-columns ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}

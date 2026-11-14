@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { searchCatalogNames } from "../lib/schemaBrowse";
 import { StudioScheduleDialog } from "../components/transfer/StudioScheduleDialog";
 import { defaultStudioScheduleDraft, studioScheduleCreatedToast, type StudioScheduleDraft } from "../lib/studioScheduleDraft";
 import { JobTheater } from "../components/JobTheater";
@@ -6666,6 +6667,15 @@ export function TransferPage({
 
   const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
 
+  /** UX-9: the source picker searches the connector's whole catalog, not one page. */
+  const sourceCatalogSearch = useCallback(
+    async (query: string) =>
+      sourceConnectorId
+        ? (await searchCatalogNames(sourceConnectorId, query, String(sourceConnector?.schema || ""))).names
+        : [],
+    [sourceConnectorId, sourceConnector?.schema],
+  );
+
   /** UX-3: the schedule form Studio opens instead of creating one in a click. */
   const [scheduleDraft, setScheduleDraft] = useState<{
     payload: Parameters<typeof createSchedule>[0] extends infer P ? Omit<P & object, "name"> : never;
@@ -8078,6 +8088,7 @@ export function TransferPage({
                     options={sourceObjectNames}
                     loading={sourceIntrospecting && sourceObjectNames.length === 0}
                     allowCreate={false}
+                    searchCatalog={sourceCatalogSearch}
                     objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
                     placeholder={
                       sourceConnector?.type === "mongodb"
@@ -8267,7 +8278,7 @@ export function TransferPage({
           const connectorReady =
             isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
           if (!fileReady && !connectorReady) return null;
-          const hint = fileReady
+          const baseHint = fileReady
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
@@ -8283,8 +8294,16 @@ export function TransferPage({
                     : streamPreviews.some((s) => s.status === "error")
                       ? `${streamPreviews.filter((s) => s.status === "ok").length} of ${multiStreamNames.length} streams ready — continue to pick a destination`
                       : `${multiStreamNames.length} streams selected — continue to pick a destination`)
-                  : "Select connector and table/collection to continue";
+                  : "";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
+          // UX-9: the hint must agree with the button — never "select a table"
+          // beside an enabled Continue.
+          const hint = baseHint
+            || (sourceIntrospecting
+              ? "Reading the source schema…"
+              : disabled
+                ? "Select connector and table/collection to continue"
+                : "Source selected — continue to pick a destination.");
           return (
             <div className="df2-card-footer df2-wizard-footer">
               <span className="df2-label-hint">{hint}</span>

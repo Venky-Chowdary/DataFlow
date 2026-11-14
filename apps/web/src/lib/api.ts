@@ -4574,6 +4574,8 @@ export interface QuerySchemaResult {
   warnings?: string[];
   type_source?: string;
   objects_truncated?: boolean;
+  /** Every matching object the engine counted; ``objects`` may be a page of them. */
+  objects_total?: number | null;
 }
 
 export interface QueryCatalogNodeInfo {
@@ -4675,6 +4677,8 @@ export async function fetchQuerySchema(payload: {
   database?: string;
   schema_name?: string;
   object_name?: string;
+  /** Only objects whose name contains this text (case-insensitive), across the whole schema. */
+  search?: string;
 }): Promise<QuerySchemaResult> {
   const res = await apiFetch(`${API_BASE}/query/schema`, {
     method: "POST",
