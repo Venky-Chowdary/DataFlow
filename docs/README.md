@@ -36,15 +36,15 @@ verified. Where the product does not do something, the page says so.
 |---|---|
 | [operate/deploy.md](operate/deploy.md) | Processes and roles, one node or several, backing services, the Helm chart |
 | [operate/configuration.md](operate/configuration.md) | Every environment flag the code reads (generated) |
-| [operate/security.md](operate/security.md) | Sign-in, roles and permissions, workspace isolation and file areas, the query playground, secrets, egress, residency, the audit chain, browser headers |
-| [operate/runbooks.md](operate/runbooks.md) | Stuck, orphaned and failed jobs, locks, CDC lag, failed verification, error references |
+| [operate/security.md](operate/security.md) | Sign-in, roles and permissions, workspace isolation and file areas, the query playground, secrets, egress, local files, residency, the audit chain, browser headers |
+| [operate/runbooks.md](operate/runbooks.md) | Stuck, orphaned and failed jobs, locks, CDC lag, failed verification, error references, refused hosts and file paths |
 | [operate/backup-and-upgrade.md](operate/backup-and-upgrade.md) | Where state lives, what to back up, what to check after an upgrade |
 
 ## Reference
 
 | Page | What it covers |
 |---|---|
-| [reference/connectors.md](reference/connectors.md) | Capability matrix for every driver and file format (generated) |
+| [reference/connectors.md](reference/connectors.md) | Capability matrix and CI proof for every driver and file format (generated) |
 | [API_VERSIONING.md](API_VERSIONING.md) | The API version policy as implemented |
 | [WEBHOOK_SIGNING.md](WEBHOOK_SIGNING.md) | How to verify a webhook signature |
 | [SCIM.md](SCIM.md) | Provisioning users and groups from an identity provider |

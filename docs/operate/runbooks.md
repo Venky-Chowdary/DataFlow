@@ -72,8 +72,10 @@ The orphan sweeper then does one of these:
 Rows the dead worker already committed are not removed, and the message says
 so. Two replicas sweeping at once cannot both settle the same job.
 
-Workers have no graceful shutdown. Stopping a worker mid-run leaves its job to
-this sweep. Expect a delay of at least the lease time before it moves.
+A worker stopped with SIGTERM drains first: a running transfer is stopped at
+its next batch and put back on the queue (see
+[deploy.md](deploy.md#stopping-a-worker)). A worker killed outright leaves its
+job to this sweep. Expect a delay of at least the lease time before it moves.
 
 To stop the API from re-queuing orphans at start, set
 `DATAWRAP_API_ORPHAN_RESUME=0`.
@@ -263,6 +265,7 @@ starting `[FATAL] Production config:` or naming a topology error. See
 
 ## Verified against
 
+- `apps/api/services/worker_fleet.py` (worker drain)
 - `apps/api/services/job_status.py`, `apps/api/services/job_watchdog.py`,
   `apps/api/services/orphan_jobs.py`, `apps/api/services/lease_heartbeat.py`
 - `apps/api/services/checkpoint_service.py` (resume rules)
