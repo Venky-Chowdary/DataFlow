@@ -1171,6 +1171,40 @@ def reconcile(
         retained_rows=retained_rows,
     )
     if (
+        source_rows > 0
+        and dropped_rows >= source_rows
+        # The destination did not grow: a finding count that over-counts rows
+        # (several bad cells in one row) never hides rows that did land.
+        and target_rows <= max(int(target_rows_before or 0), 0)
+        and checksum_scope != WRITTEN_BATCH_KEYS
+        # A key census that still expects rows is graded below as a mismatch.
+        and not keyed_expected_delta
+    ):
+        # Every source row was quarantined. Two digests of the empty set always
+        # match, so that is no fidelity evidence, and a run that wrote nothing
+        # is never a green Gate-8 (SCD2-F1; the writers refuse it first).
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Nothing was verified: all {source_rows} source row(s) were "
+                "quarantined, so this run wrote nothing to compare. Fix the "
+                "rejected values and replay."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=None,
+            population_proof=False,
+            assurance_level="none",
+            checksum_scope=checksum_scope,
+            target_rows_before=target_rows_before,
+        )
+    if (
         not source_checksum
         and expected_rows == 0
         and target_rows == 0

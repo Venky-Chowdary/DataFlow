@@ -3173,6 +3173,11 @@ def write_mapped_rows(
             overwrite_failed = bool(
                 reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
             )
+        if held and held.active and close_connection and not written and rejected_details:
+            # Every row of this overwrite was held out to quarantine: committing
+            # would publish the TRUNCATE with nothing in its place. Roll back;
+            # the caller refuses the run with the table as it was.
+            overwrite_failed = True
         if held and held.active and (overwrite_failed or close_connection):
             from connectors.write_resilience import finish_held_overwrite
 

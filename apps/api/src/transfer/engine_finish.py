@@ -294,6 +294,20 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
     does not publish an empty table. Other relational engines empty in place
     inside a transaction the writer commits once.
     """
+    # A multi-table run parks each landed stream's backup under its table
+    # until the run's outcome is known: settled with the rest, never early.
+    parked = settle_parked_overwrite_backups(destination, restore=restore)
+    routed = _settle_route_backups(destination, restore=restore)
+    if routed is not None:
+        return routed and parked is not False
+    own = settle_single_overwrite_backup(destination, restore=restore)
+    if own is None:
+        return bool(parked)
+    return own and parked is not False
+
+
+def _settle_route_backups(destination: EndpointConfig, *, restore: bool) -> bool | None:
+    """Settle the routed / strict-keyed ``route_backups``; ``None`` when there are none."""
     extra = dict(getattr(destination, "extra", None) or {})
     # Routed replace-mode runs rename aside each occupied route table
     # (``<t>__dfbak_<job>``) inside the write transaction. A failed post-write
@@ -329,10 +343,20 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
             extra.pop("route_backups", None)
             destination.extra = extra
         return ok
+    return None
+
+
+def settle_single_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool | None:
+    """Settle the one object's ``overwrite_backup``; ``None`` when it has none.
+
+    Touches nothing else: a multi-table stream restores its own cleared table
+    with this, never another stream's backup.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
     backup = extra.get("overwrite_backup")
     engine_name = str(extra.get("overwrite_backup_engine") or "")
     if not backup or engine_name not in RESTORABLE_BACKUP_ENGINES:
-        return False
+        return None
     from .adapters import resolve_connector_config, resolve_dest_table
     from .connector_capabilities import resolve_driver_type
 
@@ -386,4 +410,60 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
         extra.pop("overwrite_backup", None)
         extra.pop("overwrite_backup_engine", None)
         destination.extra = extra
+    return ok
+
+
+#: ``destination.extra`` key: ``{table: {overwrite_backup, overwrite_backup_engine}}``
+#: for the streams of a multi-table run that landed. Kept until the run's
+#: outcome is known, so the multi-table undo (C4) can restore a table an
+#: earlier stream overwrote when a later stream fails.
+PARKED_BACKUPS_KEY = "stream_overwrite_backups"
+
+
+def park_stream_overwrite_backup(destination: EndpointConfig) -> None:
+    """Move the landed stream's overwrite backup under its own table."""
+    from .adapters import resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+
+    extra = dict(getattr(destination, "extra", None) or {})
+    backup = extra.pop("overwrite_backup", None)
+    engine_name = extra.pop("overwrite_backup_engine", None)
+    if backup:
+        table = str(resolve_dest_table(resolve_driver_type(destination.format), destination) or "")
+        parked = dict(extra.get(PARKED_BACKUPS_KEY) or {})
+        parked[table] = {"overwrite_backup": backup, "overwrite_backup_engine": engine_name}
+        extra[PARKED_BACKUPS_KEY] = parked
+    destination.extra = extra
+
+
+def settle_parked_overwrite_backups(
+    destination: EndpointConfig, *, restore: bool, only_table: str | None = None
+) -> bool | None:
+    """Restore or discard parked stream backups, each on its own table.
+
+    ``only_table`` settles that table's backup alone (the multi-table undo).
+    Returns ``None`` when nothing was parked (for ``only_table``: for it).
+    """
+    import dataclasses
+
+    extra = dict(getattr(destination, "extra", None) or {})
+    parked = dict(extra.get(PARKED_BACKUPS_KEY) or {})
+    tables = [t for t in parked if only_table is None or t == only_table]
+    if not tables:
+        return None
+    view_extra = {
+        k: v for k, v in extra.items()
+        if k not in {PARKED_BACKUPS_KEY, "route_backups", "overwrite_backup", "overwrite_backup_engine"}
+    }
+    ok = True
+    for table in tables:
+        pair = dict(parked.pop(table) or {})
+        field = "collection" if getattr(destination, "collection", None) else "table"
+        view = dataclasses.replace(destination, extra={**view_extra, **pair}, **{field: table})
+        ok = bool(settle_single_overwrite_backup(view, restore=restore)) and ok
+    if parked:
+        extra[PARKED_BACKUPS_KEY] = parked
+    else:
+        extra.pop(PARKED_BACKUPS_KEY, None)
+    destination.extra = extra
     return ok

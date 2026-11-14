@@ -37,7 +37,13 @@ def test_decimal_holdout_stamps_full_mapped_values():
 
 
 def test_all_quarantined_file_transfer_keeps_details(tmp_path: Path):
-    """Single unfit row must not be mislabeled 'No records found in file'."""
+    """Single unfit row must not be mislabeled 'No records found in file'.
+
+    It used to assert ``success is True``: that encoded the defect where an
+    overwrite whose every row was quarantined replaced the destination with
+    nothing and reported success. The run now fails with the standard
+    all_rows_quarantined refusal and still keeps every detail.
+    """
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
 
@@ -69,7 +75,9 @@ def test_all_quarantined_file_transfer_keeps_details(tmp_path: Path):
             column_types={"id": "string", "age": "string"},
         )
     )
-    assert result.success is True
+    assert result.success is False
+    assert "were quarantined, so nothing was written" in str(result.error)
+    assert "No records found in file" not in str(result.error)
     assert int(result.destination_summary.get("rejected_rows") or 0) >= 1
     details = result.destination_summary.get("rejected_details") or []
     assert details

@@ -2416,7 +2416,7 @@ class UniversalTransferEngine:
                                     request, "ddl_changes_acknowledged", False
                                 )
                             ),
-                            release_records=True,
+                            release_records=True, refuse_all_quarantined=True,
                             retain_engine_spill=True,
                             collect_mirror_keys=effective_sync_lower
                             in ("full_refresh_mirror", "mirror"),
@@ -2682,7 +2682,7 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
-                            delete_mode=_mirror_delete_mode,
+                            delete_mode=_mirror_delete_mode, rejected_details=dest_summary.get("rejected_details"),
                             source_spool=getattr(spill_holder, "spool", None),
                             source_key_spool=getattr(spill_holder, "key_spool", None),
                             pk_sources=getattr(spill_holder, "pk_sources", None),
