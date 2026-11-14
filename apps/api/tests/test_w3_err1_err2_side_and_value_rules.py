@@ -151,3 +151,16 @@ def test_err2_mysql_value_errors_are_not_missing_columns(my_objects, case, sql, 
     assert human["code"] == expected, (case, human)
     assert "not on the destination" not in human["title"]
     assert "address capacity" not in human["message"]
+
+
+def test_err1_a_replication_grant_is_not_a_table_read_or_write_grant():
+    """42501 for walsender/replication is CDC setup, not \"Grant SELECT\" or \"INSERT\"."""
+    from services.error_taxonomy import classify
+
+    class _Pg(Exception):
+        pgcode = "42501"
+
+    _Pg.__module__ = "psycopg2.errors"
+    named = classify(_Pg("must be superuser or replication role to start walsender"),
+                     side="source", fallback=False)
+    assert named is None or not named.code.startswith("access."), named

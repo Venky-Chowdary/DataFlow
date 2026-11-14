@@ -829,6 +829,7 @@ _SQLITE_NAMES: dict[str, str] = {
     "SQLITE_CONSTRAINT_FOREIGNKEY": "value.fk_violation",
 }
 _ACCESS_CODES = {"42501", "1142", "1143", "13"}
+_REPLICATION_GRANT = re.compile(r"replication|walsender|superuser|binlog|binary log", re.I)
 
 
 def _structured(engine: str, code: str) -> str:
@@ -991,6 +992,10 @@ def classify(
     if not code and drv_code:
         code = _structured(engine, drv_code)
         matched_by = "structured"
+        if code == "access" and _REPLICATION_GRANT.search(raw):
+            # A replication / log privilege is a CDC setup grant with its own
+            # remedy (error_handling's cdc rules), not a table SELECT/INSERT.
+            code = ""
     clean = driver_sentence(exc, limit=2000)
     if not code:
         code = _anchored(raw) or _anchored(clean) or (_anchored(full_raw) if full_raw != raw else "")
