@@ -327,6 +327,12 @@ TEMPLATES: dict[str, Template] = {
         "open_map",
     ),
     # -- timeout ------------------------------------------------------------
+    "timeout.connect_deadline": Template(
+        "Didn't answer in time",
+        "The {side_noun} didn't answer before Datawrap's time limit for this step.",
+        "Check the host and port, the firewall or VPN, and that the database is healthy, then run again.",
+        "retry", _RETRY_API, retriable=True,
+    ),
     "timeout.statement": Template(
         "Statement time limit reached",
         "The database stopped the statement: it ran longer than the statement time limit.",
@@ -768,7 +774,7 @@ def _q(name: str) -> str:
 #: Codes whose source text is Datawrap's own refusal and already names the
 #: object and the fix (the egress policy names the refused host the user
 #: typed). Humanisers keep that text; the code still rides on the envelope.
-PRODUCT_COPY_CODES = frozenset({"network.egress_blocked", "access.path_not_allowed"})
+PRODUCT_COPY_CODES = frozenset({"network.egress_blocked", "access.path_not_allowed", "timeout.connect_deadline"})
 
 _SIDE_NOUN = {"source": "source", "destination": "destination", "query": "database",
               "connection": "database", "platform": "Datawrap server"}

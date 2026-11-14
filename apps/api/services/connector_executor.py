@@ -79,7 +79,14 @@ _NO_WORKSPACE = "(none)"
 
 
 class ConnectorCallTimeout(TimeoutError):
-    """A connector call did not finish inside its deadline."""
+    """A connector call did not finish inside its deadline.
+
+    Its text is Datawrap's own (``describe_timeout``: the target and the
+    deadline), so the error taxonomy keeps it whole instead of the generic
+    "Connection timed out".
+    """
+
+    error_code = "timeout.connect_deadline"
 
 
 class ConnectorCapacityExceeded(RuntimeError):

@@ -1031,15 +1031,21 @@ def _driver_sentence(error: Any) -> str:
 
 def _taxonomy_failure(classified: Any, raw: str) -> dict[str, Any]:
     """Job-failure fields from one :class:`services.error_taxonomy.ClassifiedError`."""
-    from services.error_taxonomy import legacy_code
+    from services.error_taxonomy import PRODUCT_COPY_CODES, legacy_code
 
+    if classified.code in PRODUCT_COPY_CODES and str(raw or "").strip():
+        # Datawrap's own refusal already names the target and the fix (the
+        # egress host the user typed, a confined path, a missed deadline).
+        message = " ".join(str(raw).split())
+    else:
+        message = classified.message
     return {
         # Deprecated, one release: the pre-taxonomy code API / MCP clients key on.
         "legacy_code": legacy_code(classified.code),
         "code": classified.code,
         "category": classified.code.split(".", 1)[0],
         "title": classified.title,
-        "message": classified.message,
+        "message": message,
         "fix": classified.action.get("label", ""),
         "action": dict(classified.action),
         "object": dict(classified.object),

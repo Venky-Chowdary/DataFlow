@@ -16,7 +16,13 @@ DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS = 60.0
 
 
 class DestinationConnectTimeout(TimeoutError):
-    """The destination did not answer its first contact inside the deadline (D19)."""
+    """The destination did not answer its first contact inside the deadline (D19).
+
+    Its text names the destination and the deadline, so it is kept whole
+    (``timeout.connect_deadline`` is a product-copy code in the taxonomy).
+    """
+
+    error_code = "timeout.connect_deadline"
 
 
 def _destination_connect_deadline() -> float:
