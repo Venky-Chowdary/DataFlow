@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 API = Path(__file__).resolve().parents[1]
-for _path in (API, API / "src"):
+# ``apps/api`` must come before ``apps/api/src``: both hold a ``services``
+# package, and the stores these scripts read live in ``apps/api/services``.
+for _path in (API / "src", API):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
