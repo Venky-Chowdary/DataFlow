@@ -27,6 +27,31 @@ interface DestColumnComboboxProps {
   onCommit: (target: string) => void;
   disabled?: boolean;
   inputRef?: (el: HTMLInputElement | null) => void;
+  /**
+   * Where the "new column" / "not a destination column" tag goes. The Map
+   * grid shows it on the row's one meta line (W7) and passes false here.
+   */
+  showTargetTag?: boolean;
+}
+
+/** The tag a target name earns against the catalog: a column to create, one the table refuses, or none. */
+export function destTargetTag(catalog: DestColumnCatalog, value: string): "create" | "refused" | null {
+  if (!value || catalog.columns.length === 0 || findDestColumn(catalog, value)) return null;
+  return catalog.canAddColumns ? "create" : "refused";
+}
+
+/** The tag itself, shared by the picker and the Map grid's meta line. */
+export function DestTargetTag({ kind }: { kind: "create" | "refused" | null }) {
+  if (kind === "create") {
+    // "new" keeps the Map grid's meta line to one line; the full words stay in the text.
+    return (
+      <span className="df2-ms-tag is-create" title="New column: the writer adds it before the first row">
+        new<span className="df2-sr-only"> column</span>
+      </span>
+    );
+  }
+  if (kind === "refused") return <span className="df2-ms-tag is-conflict">not a destination column</span>;
+  return null;
 }
 
 function selectable(o: ComboOption | undefined): boolean {
@@ -53,6 +78,7 @@ export function DestColumnCombobox({
   onCommit,
   disabled = false,
   inputRef,
+  showTargetTag = true,
 }: DestColumnComboboxProps) {
   const listId = useId();
   const hintId = useId();
@@ -313,11 +339,7 @@ export function DestColumnCombobox({
             : ""}
         {" "}Type to search {catalog.columns.length} destination columns; arrow keys choose, Enter maps, Escape cancels.
       </span>
-      {isNew ? (
-        catalog.canAddColumns
-          ? <span className="df2-ms-tag is-create">new column</span>
-          : <span className="df2-ms-tag is-conflict">not a destination column</span>
-      ) : null}
+      {showTargetTag ? <DestTargetTag kind={destTargetTag(catalog, value)} /> : null}
       {menu}
     </div>
   );

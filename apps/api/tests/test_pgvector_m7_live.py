@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 from contextlib import closing
 
 import pytest
 
-_PG_PORT = 5434
+# Compose lab: df-pgvector on 5434. CI serves the pgvector image on 5432
+# (DATAFLOW_TEST_PGVECTOR_PORT, .github/ci-live-engines.vars).
+_PG_PORT = int(os.environ.get("DATAFLOW_TEST_PGVECTOR_PORT", "5434"))
 _CFG = {
     "host": "localhost",
     "port": _PG_PORT,
@@ -28,7 +31,7 @@ def _reachable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _reachable(), reason="pgvector is not reachable on localhost:5434"
+    not _reachable(), reason=f"pgvector is not reachable on localhost:{_PG_PORT}"
 )
 
 

@@ -259,6 +259,31 @@ describe("JobsGrid", () => {
     assert.equal(tab.defaultPrevented, false, "the browser's Tab then moves on from the trigger");
   });
 
+  it("opens a row on the first click: a pointer press does not select (UX-11)", async () => {
+    // The page re-renders on select (the selection bar appears), so selecting
+    // between mousedown and mouseup moved the row and swallowed the click.
+    await render({ selectedId: "" });
+    const row = rowEl("job-bad");
+    await act(async () => {
+      row.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+      (row as HTMLElement).focus();
+    });
+    assert.deepEqual(calls.select, [], "focus from a press must not select");
+    await act(async () => {
+      (row as HTMLElement).click();
+    });
+    assert.deepEqual(calls.open, ["job-bad"]);
+  });
+
+  it("still selects a row that receives keyboard focus", async () => {
+    await render({ selectedId: "" });
+    const row = rowEl("job-ok") as HTMLElement;
+    await act(async () => {
+      row.focus();
+    });
+    assert.deepEqual(calls.select, ["job-ok"]);
+  });
+
   it("announces a status change on refresh in a polite live region", async () => {
     await render();
     const live = host.querySelector('[aria-live="polite"][role="status"]');

@@ -178,3 +178,32 @@ def _purge_route_key_tuples(
                 )
                 removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     return removed
+
+
+def stamp_route_expected(tally: Any) -> None:
+    """Per-route write-pass digests on the summary (``route_expected``).
+
+    The value-level expectation Gate-8 compares against each route table's
+    independent read-back (route_verification), keyed by route name. Stamped
+    whichever checksum branch the run took: before, only the source re-read
+    branch stamped it, so an incremental (write-pass) routed run compared
+    every route against an empty expectation and strict validation refused
+    a correct write (RT-7, PR 424 CI).
+    """
+    accs = getattr(tally, "route_fp_acc", None) or {}
+    if not accs:
+        return
+    tally.dest_summary["route_expected"] = {
+        name: {
+            "rows": acc.total,
+            "checksum": acc.digest(),
+            # Additive multiset digest: proves an append into an occupied
+            # route table (post-read-back sum minus pre-write sum, RT-6).
+            "additive": acc.additive_digest(),
+            # The columns the fingerprint covers: the read-back is projected
+            # to exactly these, so customer-owned extra columns never enter.
+            "columns": (getattr(tally, "route_fp_cols", None) or {}).get(name) or [],
+        }
+        for name, acc in accs.items()
+        if acc.total > 0
+    }

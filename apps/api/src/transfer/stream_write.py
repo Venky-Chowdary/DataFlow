@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.duplicate_policy import restores_match_action
+from services.error_taxonomy import failure_side
 from typing import Any
 from src.transfer.stream import (
     Callable,
@@ -111,6 +113,8 @@ def _raise_write_failure(result: Any, label: str) -> None:
     )
 
 
+@failure_side("destination", "write")
+@restores_match_action
 def _write_batch(
     dest_type: str,
     dest: EndpointConfig,
@@ -209,9 +213,13 @@ def _write_batch(
         decided = None
     if decided is not None and (decided.explicit or (decided.policy == "upsert" and write_mode == "insert" and conflict_columns)):
         write_mode = decided.write_mode
+    from services.duplicate_policy import create_allows_repeated_keys
+
     match_token = set_match_action(
         decided.match_action if decided else "update",
-        duplicates_allowed=duplicates_allowed(decided),
+        duplicates_allowed=(
+            create_allows_repeated_keys(decided, dest_type, cfg) if create_table else duplicates_allowed(decided)
+        ),
     )
     from services.sync_cursor import is_overwrite_sync
 
@@ -365,6 +373,8 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            # G11: an acknowledged legacy_field_policy=write_new, on the run.
+            legacy_field_ack=list((getattr(dest, "extra", None) or {}).get("legacy_field_ack") or []),
         )
         if not result.ok:
             _raise_write_failure(result, "MongoDB batch write failed")
@@ -578,6 +588,12 @@ def _write_batch(
             extra = getattr(dest, "extra", None) or {}
             if isinstance(extra, dict):
                 kwargs["destination_extra"] = dict(extra)
+                kwargs["legacy_field_ack"] = list(extra.get("legacy_field_ack") or [])
+        if dest_type in ("redis", "dynamodb"):
+            # G11: an acknowledged legacy_field_policy=write_new, on the run.
+            kwargs["legacy_field_ack"] = list(
+                (getattr(dest, "extra", None) or {}).get("legacy_field_ack") or []
+            )
         if dest_type == "redis":
             from connectors.redis_reader import redis_key_format
 

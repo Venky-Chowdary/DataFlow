@@ -6,6 +6,8 @@ columns come from information_schema after CREATE TABLE.
 
 from __future__ import annotations
 
+import io
+import os
 import subprocess
 import uuid
 
@@ -16,6 +18,8 @@ from services.rule_compiler.compile import compile_rule_workbook
 
 
 def _psql(sql: str) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("PGHOST"):
+        return _psql_tcp(sql)
     return subprocess.run(
         ["sudo", "-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql],
         capture_output=True,
@@ -23,7 +27,46 @@ def _psql(sql: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _psql_tcp(sql: str) -> subprocess.CompletedProcess[str]:
+    """`psql -At -c` against the PostgreSQL that libpq's PG* variables name.
+
+    CI's PostgreSQL is a container at PGHOST:PGPORT (.github/ci-live-engines.vars),
+    with no host-local server for `sudo -u postgres psql` to reach.
+    """
+    import psycopg2
+
+    args = ["psql", "-At", "-c", sql]
+    try:
+        conn = psycopg2.connect(
+            host=os.environ["PGHOST"],
+            port=int(os.environ.get("PGPORT", "5432")),
+            user=os.environ.get("PGUSER", "postgres"),
+            password=os.environ.get("PGPASSWORD", ""),
+            dbname=os.environ.get("PGDATABASE", "postgres"),
+            connect_timeout=5,
+        )
+    except psycopg2.Error as exc:
+        return subprocess.CompletedProcess(args, 2, "", str(exc))
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        if sql.lstrip().upper().startswith("COPY") and "TO STDOUT" in sql.upper():
+            buf = io.StringIO()
+            cur.copy_expert(sql, buf)
+            return subprocess.CompletedProcess(args, 0, buf.getvalue(), "")
+        cur.execute(sql)
+        rows = cur.fetchall() if cur.description else []
+        out = "".join("|".join("" if v is None else str(v) for v in row) + "\n" for row in rows)
+        return subprocess.CompletedProcess(args, 0, out, "")
+    except psycopg2.Error as exc:
+        return subprocess.CompletedProcess(args, 1, "", str(exc))
+    finally:
+        conn.close()
+
+
 def _postgres_up() -> bool:
+    if os.environ.get("PGHOST"):
+        return _psql_tcp("SELECT 1").returncode == 0
     try:
         ready = subprocess.run(
             ["pg_isready"], capture_output=True, text=True, timeout=10

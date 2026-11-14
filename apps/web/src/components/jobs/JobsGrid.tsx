@@ -150,6 +150,8 @@ export function JobsGrid({
   notice,
 }: JobsGridProps) {
   const stacked = useMediaQuery(JOBS_GRID_STACK_QUERY);
+  /** True from a pointer press on a row until its click (UX-11). */
+  const pointerFocus = useRef(false);
   const hintId = useId();
   const visible = useMemo(
     () => JOBS_GRID_COLUMNS.filter((column) => column.required || columns.includes(column.id)),
@@ -319,9 +321,26 @@ export function JobsGrid({
                   live ? "is-live" : "",
                   status === "failed" || status === "cancelled" ? "is-failed" : "",
                 ].filter(Boolean).join(" ")}
-                onClick={() => onOpen(job._id)}
-                onKeyDown={(event) => onRowKeyDown(event, index, job._id)}
+                onPointerDown={() => {
+                  pointerFocus.current = true;
+                }}
+                onClick={() => {
+                  pointerFocus.current = false;
+                  onOpen(job._id);
+                }}
+                onKeyDown={(event) => {
+                  pointerFocus.current = false;
+                  onRowKeyDown(event, index, job._id);
+                }}
+                onBlur={() => {
+                  pointerFocus.current = false;
+                }}
                 onFocus={(event) => {
+                  // UX-11: focus from a pointer press must not select. Selecting
+                  // re-renders the page (the selection bar appears) between
+                  // mousedown and mouseup, the row moves, and the click that
+                  // should open the job was lost. Keyboard focus still selects.
+                  if (pointerFocus.current) return;
                   if (event.target === event.currentTarget && !selected) onSelect(job._id);
                 }}
               >

@@ -62,7 +62,10 @@ def _refused(res, code: str) -> dict:
     return err
 
 
-def test_create_on_a_missing_source_table_is_422_like_the_mapping_check(live):
+def test_create_on_a_missing_source_table_is_422_like_the_mapping_check(live, ci_evidence):
+    # The scenario is about the source-table probe; PostgreSQL counts as CI-proven
+    # here so the CLM-7 "not yet proven" save warning is not part of it.
+    ci_evidence("postgresql")
     table = pg_table()
     missing = f"r12_missing_{uuid.uuid4().hex[:6]}"
     missing_unicode = f"r12_ünï_表_{uuid.uuid4().hex[:6]}"

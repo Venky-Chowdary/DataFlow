@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from services.audit_coverage import record_security_event
 from services.brand_env import getenv_brand
 from services.workspace_access import tenant_scope as _tenant_scope
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
@@ -742,7 +743,7 @@ async def purge_audit_retention(
     try:
         result = purge_expired_audit_events(dry_run=dry_run)
     except AuditConfigError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="audit.purge_audit_retention.failed", public_message="Audit retention purge failed.", status_code=500) from exc
 
     append_audit_event(
         action="audit.retention.purge",

@@ -126,6 +126,11 @@
   text-overflow: ellipsis;
 }
 
+/* The drawer's health badge is a sentence ("Never tested"), not a title. */
+.df2-connector-health-badge {
+  text-transform: none;
+}
+
 .df2-connector-row-meta {
   font-size: var(--df-list-row-meta);
   line-height: 1.25;
@@ -133,7 +138,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-transform: capitalize;
 }
 
 .df2-connector-row-role {
@@ -175,8 +179,9 @@
   text-overflow: ellipsis;
 }
 
-.df2-connector-row-signal.ok { color: #059669; }
-.df2-connector-row-signal.err { color: #dc2626; }
+/* UX-16: #059669 / #dc2626 on white were 3.8:1 / 4.8:1 at 12px. */
+.df2-connector-row-signal.ok { color: var(--df-success-text); }
+.df2-connector-row-signal.err { color: #b91c1c; }
 
 .df2-connector-row-used {
   font-size: var(--df-list-row-meta);

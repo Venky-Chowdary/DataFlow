@@ -216,6 +216,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   onExplain,
   busy,
 }: QueryEditorProps, ref) {
+  // A SQL connector fixes the dialect; a document connector keeps the JSON / shell choice.
+  const connectorLanguage = connectorType ? guessLanguage(connectorType) : null;
+  const fixedLanguage = connectorLanguage && connectorLanguage !== "json" && connectorLanguage !== "javascript"
+    ? connectorLanguage
+    : null;
   const [lang, setLang] = useState<QueryLanguage>(() => guessLanguage(connectorType));
   const [langPinned, setLangPinned] = useState(false);
   const [cursor, setCursor] = useState({ start: 0, end: 0 });
@@ -232,9 +237,9 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   // Connector changes retarget the dialect, unless the operator chose one —
   // silently overriding an explicit choice is how consoles lose trust.
   useEffect(() => {
-    if (langPinned) return;
+    if (langPinned && !fixedLanguage) return;
     setLang(guessLanguage(connectorType));
-  }, [connectorType, langPinned]);
+  }, [connectorType, langPinned, fixedLanguage]);
 
   const isMongoLike = lang === "json" || lang === "javascript";
   const dialect = useMemo(
@@ -530,6 +535,15 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
     >
       <div className="df2-query-editor-langbar">
         <span className="df2-query-editor-lang-label">Syntax</span>
+        {fixedLanguage ? (
+          // The connector fixes the dialect: say it, don't offer a choice that repeats the connector.
+          <span
+            className="df2-query-editor-lang-fixed"
+            title={`Set by the connector (${connectorType}). ${hint}`}
+          >
+            {label}
+          </span>
+        ) : (
         <select
           className="df2-select df2-select-sm"
           value={lang}
@@ -546,8 +560,9 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
             </option>
           ))}
         </select>
+        )}
         <span className="df2-query-editor-hint">
-          {label} · {hint}
+          {fixedLanguage ? hint : `${label} · ${hint}`}
         </span>
         <span className="df2-query-editor-dialect-pill" title="Active highlighter">
           {lang === "json" ? "JSON" : lang === "javascript" ? "JS" : "SQL"}

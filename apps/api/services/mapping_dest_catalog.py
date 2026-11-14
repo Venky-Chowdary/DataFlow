@@ -151,6 +151,7 @@ def build_destination_column_catalog(
                 "match_key": key,
             }
         )
+    _add_document_field_paths(columns, info.get("field_paths"))
     can_add, add_reason = add_column_decision(
         dest_type=dest_type, table_exists=table_exists, schema_policy=schema_policy
     )
@@ -165,6 +166,58 @@ def build_destination_column_catalog(
         "add_columns_reason": add_reason,
         "message": safe_catalog_message(info.get("message") or info.get("error") or ""),
     }
+
+
+def _add_document_field_paths(columns: list[dict[str, Any]], field_paths: Any) -> None:
+    """MongoDB: stored BSON types on top-level fields, plus every nested path.
+
+    ``field_paths`` comes from ``services.mongo_nested_fields`` (destination
+    reads of an existing collection). A nested path (``address.city``) becomes
+    a pickable target placed after its parent; nullability is unmeasured for
+    a sample-derived path, so ``nullable`` and ``required`` stay ``None``.
+    """
+    if not isinstance(field_paths, list) or not field_paths:
+        return
+    by_key = {str(c["name"]).lower(): c for c in columns}
+    for entry in field_paths:
+        if not isinstance(entry, dict) or not entry.get("path"):
+            continue
+        path = str(entry["path"])
+        bson_type = str(entry.get("bson_type") or "")
+        existing = by_key.get(path.lower())
+        if existing is not None:
+            existing["bson_type"] = bson_type
+            continue
+        if "." not in path:
+            continue
+        column = {
+            "name": path,
+            "ordinal": len(columns),
+            "type": bson_type,
+            "bson_type": bson_type,
+            "nested": True,
+            "parent": str(entry.get("parent") or path.rsplit(".", 1)[0]),
+            "nullable": None,
+            "default": None,
+            "has_default": False,
+            "primary_key": False,
+            "identity": False,
+            "generated": False,
+            "writable": True,
+            "fill": None,
+            "required": None,
+            "match_key": path.lower(),
+        }
+        parent_key = column["parent"].lower()
+        at = len(columns)
+        for i, c in enumerate(columns):
+            key = str(c["name"]).lower()
+            if key == parent_key or key.startswith(parent_key + "."):
+                at = i + 1
+        columns.insert(at, column)
+        by_key[path.lower()] = column
+    for ordinal, c in enumerate(columns):
+        c["ordinal"] = ordinal
 
 
 def read_destination_column_catalog(

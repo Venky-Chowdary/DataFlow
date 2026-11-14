@@ -9,6 +9,10 @@ became NULL while Gate-8 stayed green; ``combine_file_set`` re-encoded through
 row path kept the text. After: wherever NULL is spelled ``\\N``, a text ``\\N``
 is quoted, the fast path and the row path land the same values, and Gate-8
 compares them truthfully.
+
+DATA-21: an unquoted ``\\N`` is NULL only when the source declares it
+(``read_options.null_marker``); these loads declare it, and the combined
+file set (no read options) keeps every ``\\N`` as text.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ def _run(monkeypatch, content: bytes, filename: str, destination, *, fast: bool)
             {"source": "note", "target": "note", "type": "TEXT", "transform": "none"},
         ],
         column_types={"id": "INTEGER", "note": "TEXT"},
+        read_options={"null_marker": "\\N"},
         skip_preflight=True,
     )
     return UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
@@ -124,8 +129,8 @@ def test_combine_file_set_keeps_text_backslash_n(tmp_path):
         text = target.read_text(encoding="utf-8")
         return [r[1] for r in list(iter_csv_records(io.StringIO(text, newline=""), ","))[1:]]
 
-    assert notes([a]) == ["\\N", None, "x", ""]
-    assert notes([a, b]) == ["\\N", None, "x", "", "\\N", None]
+    assert notes([a]) == ["\\N", "\\N", "x", ""]
+    assert notes([a, b]) == ["\\N", "\\N", "x", "", "\\N", "\\N"]
 
 
 def test_writers_quote_a_text_backslash_n_wherever_null_is_spelled_backslash_n():

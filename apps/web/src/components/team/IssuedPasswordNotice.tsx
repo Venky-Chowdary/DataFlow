@@ -14,6 +14,16 @@ interface IssuedPasswordNoticeProps {
  */
 export function IssuedPasswordNotice({ email, password, onDone, initiallyRevealed = false }: IssuedPasswordNoticeProps) {
   const [revealed, setRevealed] = useState(initiallyRevealed);
+  const [copied, setCopied] = useState<"" | "done" | "failed">("");
+  // UX-38: copy without having to reveal it on screen.
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(password);
+      setCopied("done");
+    } catch {
+      setCopied("failed");
+    }
+  };
   return (
     <div className="df2-team-secret">
       <div>
@@ -26,9 +36,15 @@ export function IssuedPasswordNotice({ email, password, onDone, initiallyReveale
       <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => setRevealed((v) => !v)}>
         {revealed ? "Hide" : "Reveal password"}
       </button>
+      <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void copy()}>
+        {copied === "done" ? "Copied" : "Copy password"}
+      </button>
       <button type="button" className="df2-btn df2-btn-sm" onClick={onDone}>
         Done
       </button>
+      <span className="df2-sr-only" role="status" aria-live="polite">
+        {copied === "done" ? "Password copied to the clipboard." : copied === "failed" ? "Copy failed: reveal the password and copy it by hand." : ""}
+      </span>
     </div>
   );
 }

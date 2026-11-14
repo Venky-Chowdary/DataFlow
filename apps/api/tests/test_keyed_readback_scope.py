@@ -130,6 +130,24 @@ def test_sqlite_unkeyed_batch_falls_back_to_whole_table(tmp_path):
     assert no_pk == whole
 
 
+# The PostgreSQL / MySQL the environment names (CI: .github/ci-live-engines.vars),
+# else the compose lab's ports.
+PG = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5433")),
+    "database": os.environ.get("PGDATABASE", "dataflow"),
+    "username": os.environ.get("PGUSER", "postgres"),
+    "password": os.environ.get("PGPASSWORD", "postgres"),  # nosec B106 - local test container
+}
+MYSQL = {
+    "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("MYSQL_PORT", "3307")),
+    "database": os.environ.get("MYSQL_DATABASE", "dataflow"),
+    "username": os.environ.get("MYSQL_USER", "root"),
+    "password": os.environ.get("MYSQL_PASSWORD", os.environ.get("DF_TEST_MYSQL_PASSWORD", "mysql")),
+}
+
+
 @pytest.mark.skipif(
     os.environ.get("SKIP_LIVE_PG") == "1", reason="live postgres disabled"
 )
@@ -148,11 +166,11 @@ def test_postgres_keyed_readback_survives_non_text_pk(pk_ddl, keys):
     psycopg2 = pytest.importorskip("psycopg2")
     try:
         conn = psycopg2.connect(
-            host="localhost",
-            port=5433,
-            dbname="dataflow",
-            user="postgres",
-            password="postgres",  # nosec B106 - local test container
+            host=PG["host"],
+            port=PG["port"],
+            dbname=PG["database"],
+            user=PG["username"],
+            password=PG["password"],
             connect_timeout=3,
         )
     except psycopg2.Error:  # pragma: no cover - env without local postgres
@@ -164,13 +182,7 @@ def test_postgres_keyed_readback_survives_non_text_pk(pk_ddl, keys):
         cur.execute(f"CREATE TABLE {table} (id {pk_ddl} PRIMARY KEY, name TEXT)")
         for i, k in enumerate(keys):
             cur.execute(f"INSERT INTO {table} VALUES (%s, %s)", (k, f"row{i}"))
-    dest = {
-        "host": "localhost",
-        "port": 5433,
-        "database": "dataflow",
-        "username": "postgres",
-        "password": "postgres",  # nosec B106 - local test container
-    }
+    dest = dict(PG)
     try:
         count, chk = verify_target(
             "postgresql",
@@ -206,11 +218,11 @@ def test_mysql_keyed_readback_survives_integer_pk():
     pymysql = pytest.importorskip("pymysql")
     try:
         conn = pymysql.connect(
-            host="127.0.0.1",
-            port=3307,
-            user="root",
-            password=os.environ.get("DF_TEST_MYSQL_PASSWORD", "mysql"),
-            database="dataflow",
+            host=MYSQL["host"],
+            port=MYSQL["port"],
+            user=MYSQL["username"],
+            password=MYSQL["password"],
+            database=MYSQL["database"],
             connect_timeout=3,
         )
     except pymysql.Error:  # pragma: no cover - env without local mysql
@@ -221,13 +233,7 @@ def test_mysql_keyed_readback_survives_integer_pk():
         cur.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, name VARCHAR(32))")
         cur.execute(f"INSERT INTO {table} VALUES (1, 'old'), (2, 'new')")
     conn.commit()
-    dest = {
-        "host": "127.0.0.1",
-        "port": 3307,
-        "database": "dataflow",
-        "username": "root",
-        "password": os.environ.get("DF_TEST_MYSQL_PASSWORD", "mysql"),
-    }
+    dest = dict(MYSQL)
     try:
         count, chk = verify_target(
             "mysql",

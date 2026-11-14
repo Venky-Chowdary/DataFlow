@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any
 
@@ -42,7 +43,7 @@ import services.query_extract as services_query_extract
 from services.brand_env import getenv_brand
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
-from services.safe_errors import public_error, safe_http_exception, user_query_error
+from services.safe_errors import connection_http_exception, public_error, safe_http_exception, user_query_error
 from services.value_serializer import sanitize_json_value
 from src.transfer.connector_registry import humanize_connection_error
 
@@ -231,7 +232,28 @@ def sql_refusal_message(raw: str, *, playground: bool = False) -> str:
             f"SQL syntax error: {shown!r} is not a statement the playground can run. "
             "Start with SELECT, WITH, SHOW, DESCRIBE, or EXPLAIN."
         )
+    refused = _refused_function_name(raw)
+    if refused:
+        # ERR-43: name the function the playground refused.
+        from services.error_taxonomy import DatawrapError, classify
+
+        named = classify(DatawrapError("query.refused_function", object={"function": refused}), side="query")
+        return named.text if named is not None else readonly
     return readonly
+
+
+def _refused_function_name(sql: str) -> str:
+    """The first side-effect function a read query calls, or ``""``."""
+    from services.sql_literals import sql_call_views
+
+    for scrubbed in sql_call_views(sql or ""):
+        for match in _FUNC_CALL_RE.finditer(scrubbed):
+            parts = [part.strip().lower() for part in match.group(1).split(".") if part.strip()]
+            if ".".join(parts[1:] if parts and parts[0] == "sys" else parts) in _PURE_PACKAGE_FUNCTIONS:
+                continue
+            if parts and (_is_side_effect_name(parts[-1]) or any(q.startswith(_SIDE_EFFECT_PREFIXES) for q in parts[:-1])):
+                return match.group(1).strip()
+    return ""
 
 
 # SQLite PRAGMA is not in the documented read allowlist. Catalog reads the
@@ -836,6 +858,11 @@ class QuerySchemaRequest(BaseModel):
     database: str = Field("", description="Database/namespace override")
     schema_name: str = Field("", description="Schema override")
     object_name: str = Field("", description="Optional single table/collection to expand")
+    search: str = Field(
+        "",
+        max_length=200,
+        description="List only objects whose name contains this text (case-insensitive)",
+    )
 
 
 class QuerySchemaColumn(BaseModel):
@@ -861,6 +888,9 @@ class QuerySchemaResult(BaseModel):
     message: str = ""
     warnings: list[str] = Field(default_factory=list)
     objects_truncated: bool = False
+    # How many objects (matching ``search``) the engine counted; ``objects``
+    # may be a page of them. None when the engine does not count (UX-9).
+    objects_total: int | None = None
     # Whatever the connector's own introspection reported. Deliberately not
     # called "ddl": catalog-backed engines return declared types, while
     # dynamically typed sources (SQLite, Mongo, CSV) return value-inferred
@@ -1086,13 +1116,24 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
             on_row=_on_row,
             statement_timeout_seconds=_FULL_EXPORT_STATEMENT_TIMEOUT_SECONDS,
         )
-    except HTTPException:
+        # Close inside the try: the flush is where a full disk raises (ENOSPC).
         handle.close()
-        final_path.unlink(missing_ok=True)
+    except HTTPException:
+        _discard_export(handle, final_path)
         raise
     except Exception as exc:
-        handle.close()
-        final_path.unlink(missing_ok=True)
+        _discard_export(handle, final_path)
+        from services.error_taxonomy import classify
+
+        named = classify(exc, side="destination", phase="export", fallback=False)
+        if named is not None and named.code.startswith(("capacity.", "access.", "object.file")):
+            # ERR-27: a full or unwritable export volume says so; nothing is left behind.
+            from services.safe_errors import classified_http_exception
+
+            raised = classified_http_exception(
+                exc, side="platform", phase="export", status_code=507, event="query.export.failed"
+            )
+            return QueryExportResult(success=False, error=str(raised.detail), format=fmt)
         detail, _cid = public_error(
             exc,
             event="query.export.errored",
@@ -1101,7 +1142,10 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
         return QueryExportResult(success=False, error=detail, format=fmt)
     finally:
         if not handle.closed:
-            handle.close()
+            try:
+                handle.close()
+            except OSError as close_exc:
+                logging.getLogger(__name__).warning("export close failed: %s", close_exc)
 
     filename = final_path.name
     return QueryExportResult(
@@ -1117,6 +1161,16 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
             "A LIMIT, TOP, or FETCH already in the query is still honored."
         ),
     )
+
+
+def _discard_export(handle: Any, path: Any) -> None:
+    """Close and remove a partial export file; a close that fails must not hide the cause."""
+    try:
+        if not handle.closed:
+            handle.close()
+    except OSError as close_exc:
+        logging.getLogger(__name__).warning("export close failed: %s", close_exc)
+    path.unlink(missing_ok=True)
 
 
 def _export_residency_check(request: Request, body: QueryExportRequest, workspace_id: str) -> None:
@@ -1307,6 +1361,9 @@ async def query_schema(
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
+    if body.search.strip() and not body.object_name:
+        # UX-9: search the whole schema, not the first page of it.
+        endpoint.extra["object_name_filter"] = body.search.strip()
     from src.ai.copilot.tool_deadline import run_off_event_loop
 
     def _timed_out(message: str) -> Any:
@@ -1331,9 +1388,9 @@ async def query_schema(
             or getattr(endpoint, "auth_mode", "")
             or ""
         )
-        raise HTTPException(
-            status_code=400,
-            detail=f"Schema introspection failed: {humanize_connection_error(driver, exc, auth_mode=_ep_mode)}",
+        raise connection_http_exception(
+            driver, exc, side="connection", phase="introspect", auth_mode=_ep_mode,
+            event="query.schema.introspect_failed",
         ) from exc
 
     col_types: dict[str, str] = dict(info.get("schema") or {})
@@ -1400,6 +1457,7 @@ async def query_schema(
         # enforce PKs) must reach the console, not die at the adapter edge.
         warnings=[str(w) for w in (info.get("warnings") or []) if w],
         objects_truncated=bool(info.get("objects_truncated")),
+        objects_total=_objects_total(info.get("objects_total"), len(objects)),
     )
 
 
@@ -1431,6 +1489,17 @@ async def query_schemas(
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
+    ok, probe_message = await asyncio.to_thread(_schemas_probe, workspace_id, body.connector_id)
+    if not ok:
+        # ERR-25: a failed connection is not "connected" with a configured node.
+        return QuerySchemasResult(
+            connected=False,
+            connector_type=str(getattr(endpoint, "format", "") or ""),
+            database=body.database or str(getattr(endpoint, "database", "") or ""),
+            schema_name=body.schema_name or str(getattr(endpoint, "schema", "") or ""),
+            nodes=[],
+            message=str(probe_message or ""),
+        )
     live = _in_connector_scope(body.connector_id, live_schema_names, endpoint)
     tree = build_catalog_tree(
         connector_type=str(getattr(endpoint, "format", "") or ""),
@@ -1439,6 +1508,57 @@ async def query_schemas(
         live_schemas=live,
     )
     return QuerySchemasResult(**tree)
+
+
+#: A successful /query/schemas probe is reused this long per (workspace,
+#: connection): the schema selector asks on every render, and a fresh
+#: connection each time is the cost ERR-25's honesty added. Failures are never
+#: cached, so a fixed password shows at once and a broken one is never green.
+_SCHEMAS_PROBE_TTL_SECONDS = 30.0
+_SCHEMAS_PROBE_OK: dict[tuple[str, str], tuple[float, str]] = {}
+_SCHEMAS_PROBE_LOCK = threading.Lock()
+
+
+def _probe_clock() -> float:
+    return time.monotonic()
+
+
+def _clear_schemas_probe_cache() -> None:
+    with _SCHEMAS_PROBE_LOCK:
+        _SCHEMAS_PROBE_OK.clear()
+
+
+def _schemas_probe(workspace_id: str, connector_id: str) -> tuple[bool, str]:
+    """Connection probe for /query/schemas, reusing a recent success only."""
+    from services.connector_probe import probe_saved_connector
+
+    key = (str(workspace_id or ""), str(connector_id or ""))
+    now = _probe_clock()
+    with _SCHEMAS_PROBE_LOCK:
+        hit = _SCHEMAS_PROBE_OK.get(key)
+        if hit is not None and now - hit[0] < _SCHEMAS_PROBE_TTL_SECONDS:
+            return True, hit[1]
+        _SCHEMAS_PROBE_OK.pop(key, None)
+    ok, message, _cfg = _in_connector_scope(connector_id, probe_saved_connector, connector_id)
+    if ok:
+        with _SCHEMAS_PROBE_LOCK:
+            if len(_SCHEMAS_PROBE_OK) >= 1024:  # bounded: drop expired entries first
+                for stale in [k for k, (at, _m) in _SCHEMAS_PROBE_OK.items()
+                              if now - at >= _SCHEMAS_PROBE_TTL_SECONDS]:
+                    _SCHEMAS_PROBE_OK.pop(stale, None)
+                if len(_SCHEMAS_PROBE_OK) >= 1024:
+                    _SCHEMAS_PROBE_OK.clear()
+            _SCHEMAS_PROBE_OK[key] = (now, str(message or ""))
+    return bool(ok), str(message or "")
+
+
+def _objects_total(reported: Any, listed: int) -> int | None:
+    """Every matching object the engine counted, for "N of M" (UX-9); None if it did not count."""
+    try:
+        total = int(reported)
+    except (TypeError, ValueError):
+        return None
+    return max(total, listed)
 
 
 def _in_connector_scope(connector_id: str, fn: Any, *args: Any) -> Any:
@@ -1627,6 +1747,17 @@ def _run_mongodb_query(connector, body):
             status_code=500,
         ) from exc
 
+    from pymongo.errors import PyMongoError
+
+    try:
+        return _run_mongodb_query_checked(connector, body)
+    except PyMongoError as exc:
+        # ERR-23: a Mongo failure is classified like any other driver error,
+        # not a 500 "Query execution failed".
+        raise user_query_error(exc, public_message="Query failed", engine="mongodb") from exc
+
+
+def _run_mongodb_query_checked(connector, body):
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
     client = _mongo_client(conn_str)
     db_name = body.database or connector.database or mongodb_database_from_uri(conn_str) or "test"
@@ -1645,6 +1776,7 @@ def _run_mongodb_query(connector, body):
                 _validate_mongodb_aggregate(parsed)
                 cursor = coll.aggregate(parsed[:_MAX_ROWS])
                 rows = list(cursor)
+                _refuse_missing_collection(db, coll_name, rows)
                 return _normalize_rows(rows)
         except json.JSONDecodeError as exc:
             raise user_query_error(
@@ -1655,7 +1787,25 @@ def _run_mongodb_query(connector, body):
 
     cursor = coll.find(query_filter).limit(body.limit)
     rows = list(cursor)
+    _refuse_missing_collection(db, coll_name, rows)
     return _normalize_rows(rows)
+
+
+def _refuse_missing_collection(db: Any, coll_name: str, rows: list) -> None:
+    """ERR-24: no documents from a collection that does not exist is not "no matches"."""
+    if rows:
+        return
+    from pymongo.errors import PyMongoError
+
+    try:
+        exists = coll_name in set(db.list_collection_names())
+    except PyMongoError:
+        return  # a role that cannot list collections keeps the empty result
+    if not exists:
+        from services.error_taxonomy import DatawrapError
+
+        missing = DatawrapError("object.collection_not_found", object={"collection": coll_name})
+        raise user_query_error(missing, public_message="Query failed", status_code=404, engine="mongodb")
 
 
 def _parse_mongodb_json(raw: str) -> Any:
@@ -1999,17 +2149,12 @@ def _run_sql_query(
         # workspace, never the request header's (security review round 2, H5).
         with connector_export_scope(getattr(connector, "workspace_id", "")):
             engine = get_sqlalchemy_engine(cfg)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=400, detail=redact_log_text(str(exc))
-        ) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=humanize_connection_error(
-                connector.type or "", exc,
-                auth_mode=str(getattr(connector, "auth_mode", "") or ""),
-            ),
+        # ERR-11 / ERR-21: a failed connect reads exactly as it does on Test.
+        raise connection_http_exception(
+            connector.type or "", exc, side="query", phase="connect",
+            auth_mode=str(getattr(connector, "auth_mode", "") or ""),
+            event="query.connect.failed",
         ) from exc
 
     if is_duckdb_engine(engine):

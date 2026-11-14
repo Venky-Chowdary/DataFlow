@@ -128,6 +128,17 @@ def test_every_exposition_line_is_valid_including_pipeline_series():
 
 
 @pytest.fixture
+def store_gauge_owner(monkeypatch):
+    """This process emits the store-derived series (ops_metrics.store_gauges_owner).
+
+    Ownership follows the scheduler role (schedule_loop_enabled), which the
+    test session turns off by default (tests/conftest.py); the owner path is
+    made explicit here instead of read from the environment.
+    """
+    monkeypatch.setattr(ops_metrics, "store_gauges_owner", lambda: True)
+
+
+@pytest.fixture
 def job_store(monkeypatch):
     from services import mongodb_service
 
@@ -137,7 +148,8 @@ def job_store(monkeypatch):
     return store
 
 
-def test_jobs_by_status_queue_depth_and_oldest_running_age_come_from_the_store(job_store):
+def test_jobs_by_status_queue_depth_and_oldest_running_age_come_from_the_store(
+        job_store, store_gauge_owner):
     now = datetime.now(timezone.utc)
     job_store.create_transfer_job({"job_id": "r1", "status": "running", "started_at": now - timedelta(seconds=900)})
     job_store.create_transfer_job({"job_id": "r2", "status": "running", "started_at": now - timedelta(seconds=30)})
@@ -157,7 +169,7 @@ def test_jobs_by_status_queue_depth_and_oldest_running_age_come_from_the_store(j
     assert _samples(text, "dataflow_metrics_store_up")[""] == 1
 
 
-def test_store_read_is_cached_between_scrapes(job_store, monkeypatch):
+def test_store_read_is_cached_between_scrapes(job_store, monkeypatch, store_gauge_owner):
     calls = []
     real = ops_metrics._read_store_gauges
     monkeypatch.setattr(ops_metrics, "_read_store_gauges", lambda: calls.append(1) or real())
@@ -166,7 +178,7 @@ def test_store_read_is_cached_between_scrapes(job_store, monkeypatch):
     assert len(calls) == 1
 
 
-def test_scrape_answers_and_says_so_when_the_store_is_down(monkeypatch):
+def test_scrape_answers_and_says_so_when_the_store_is_down(monkeypatch, store_gauge_owner):
     def down():
         raise RuntimeError("store unreachable")
 
@@ -174,6 +186,18 @@ def test_scrape_answers_and_says_so_when_the_store_is_down(monkeypatch):
     text = ops_metrics.prometheus_text()
     assert _samples(text, "dataflow_metrics_store_up")[""] == 0
     assert not _samples(text, "dataflow_jobs")
+    assert "dataflow_http_requests_total" in text
+
+
+def test_a_process_that_does_not_own_the_store_gauges_emits_none(job_store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ops_metrics, "store_gauges_owner", lambda: False)
+    monkeypatch.setattr(ops_metrics, "_read_store_gauges", lambda: calls.append(1) or {})
+    job_store.create_transfer_job({"job_id": "n1", "status": "running"})
+    text = ops_metrics.prometheus_text()
+    assert calls == []
+    for name in ("dataflow_jobs", "dataflow_job_queue_depth", "dataflow_metrics_store_up"):
+        assert not _samples(text, name), name
     assert "dataflow_http_requests_total" in text
 
 
@@ -208,7 +232,8 @@ def test_worker_metrics_refuse_an_unauthenticated_scrape(worker_metrics_client):
     assert worker_metrics_client.get("/metrics", headers={"Authorization": "Bearer not-a-token"}).status_code == 401
 
 
-def test_worker_metrics_answer_an_authorised_scrape(worker_metrics_client, job_store):
+def test_worker_metrics_answer_an_authorised_scrape(worker_metrics_client, job_store,
+                                                   store_gauge_owner):
     from src.services.auth_service import create_token
 
     job_store.create_transfer_job({"job_id": "w1", "status": "running", "started_at": datetime.now(timezone.utc)})

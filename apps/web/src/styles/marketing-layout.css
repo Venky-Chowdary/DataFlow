@@ -1311,7 +1311,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--lp-teal);
+  color: var(--df-brand-deep); /* UX-16: AA at 11px */
 }
 
 .lp-cust-metric-chip {

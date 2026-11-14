@@ -265,6 +265,19 @@ def reset_fast_path_create_scope(token: Token) -> None:
     _CREATE_SCOPE.reset(token)
 
 
+_LOB_DDL = re.compile(
+    r"\b(?:N?VARCHAR|VARBINARY)\s*\(\s*MAX\s*\)|\b(?:N?TEXT|IMAGE|XML|N?CLOB|BLOB|LONG)\b",
+    re.IGNORECASE,
+)
+#: Engines that refuse a LOB in a key (SQL Server 1919, ORA-02329).
+_LOB_KEY_REFUSING = frozenset({"sqlserver", "mssql", "sql_server", "oracle"})
+
+
+def key_ddl_is_unbounded(ddl: str) -> bool:
+    """Whether ``ddl`` is a LOB type that cannot be (part of) a key."""
+    return bool(_LOB_DDL.search(str(ddl or "")))
+
+
 def plan_fast_path_create(
     *,
     dest_dialect: str,
@@ -315,6 +328,18 @@ def plan_fast_path_create(
         )
     pk = tuple(plan.primary_key) or given
     dialect = dest_dialect.lower()
+    if dialect in _LOB_KEY_REFUSING:
+        ddl_of = dict(zip(targets, ddls))
+        lob_keys = [c for c in pk if key_ddl_is_unbounded(ddl_of.get(c, ""))]
+        if lob_keys:
+            # The row path sizes an unbounded text key to the widest full-value
+            # carrier (upsert_identity.unbounded_key_widths); a fast path CREATE
+            # would put the key on the LOB itself (SQL Server 1919).
+            raise FastPathUnavailable(
+                f"create-new must carry PRIMARY KEY ({', '.join(pk)}) but "
+                f"{', '.join(lob_keys)} would be an unbounded type the engine refuses "
+                "in a key; the row path sizes the key column"
+            )
     if dialect in PLANNER_QUOTED_DIALECTS:
         constraints = tuple(plan.table_constraints)
         if not plan.primary_key and pk:

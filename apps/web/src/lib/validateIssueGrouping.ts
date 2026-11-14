@@ -120,6 +120,18 @@ function knownGateId(rawId: unknown): string | null {
   return GATE_CATALOG.find((gate) => gate.id === id || gate.aliases?.includes(id))?.id ?? null;
 }
 
+/**
+ * The operator's words for an engine message: drop the sentence addressed to
+ * API / MCP callers ("Agents send pii_acknowledgement {…}.") and any
+ * "(API: …)" aside. The screen names the control instead (UX-6).
+ */
+export function operatorText(message: string): string {
+  return String(message || "")
+    .replace(/\s*Agents send [^.]*\.?/g, "")
+    .replace(/\s*\(API:[^)]*\)/g, "")
+    .trim();
+}
+
 function cleanGateDetail(message: string, title: string): string {
   const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return message.replace(new RegExp(`^${escaped}\\s*[:—–-]?\\s*`, "i"), "").trim();
@@ -144,7 +156,7 @@ export function buildBlockingGateSummaries(
     if (!id) return;
     const key = canonicalGateId(id);
     const messages = messagesByGate.get(key) ?? [];
-    const message = String(rawMessage || "").trim();
+    const message = operatorText(String(rawMessage || ""));
     if (message && !messages.includes(message)) messages.push(message);
     messagesByGate.set(key, messages);
   };
@@ -166,6 +178,10 @@ export function buildBlockingGateSummaries(
     const gateId = knownGateId(blocker.guidance?.gate)
       ?? knownGateId(rootGateByBlockerId.get(blocker.id) || detailGate)
       ?? knownGateId(blocker.id);
+    // The same hold reported under a second gate id (the create-table gate and
+    // Target DDL carry one CREATE statement) is one line, not two (UX-6).
+    const sameMessageGate = gateWithMessage(operatorText(String(blocker.message || "")));
+    if (sameMessageGate && sameMessageGate !== gateId) continue;
     if (gateId) {
       add(gateId, blocker.message);
       continue;
@@ -808,8 +824,8 @@ export function buildDisplayBlockers(
     items.push({
       key: b.id,
       kind: "blocker",
-      title: blockerTitle(b.id, b.message),
-      message: b.message,
+      title: blockerTitle(b.id, operatorText(b.message)),
+      message: operatorText(b.message),
       issues: Array.isArray(b.details?.issue_texts)
         ? (b.details.issue_texts as string[])
         : undefined,
@@ -820,6 +836,15 @@ export function buildDisplayBlockers(
     });
   }
   return mergeDuplicateBlockers(items, gateSummaries);
+}
+
+/**
+ * The "blocked" count Validate shows anywhere (hero chip, summary, footer):
+ * the length of the one operator-facing list. Zero once preflight passed.
+ */
+export function validateBlockedCount(preflight: PreflightResult | null | undefined): number {
+  if (!preflight || preflight.passed) return 0;
+  return buildBlockingGateSummaries(preflight).length;
 }
 
 /** True when G9 only sampled uniqueness — Execute may still run a full source probe. */

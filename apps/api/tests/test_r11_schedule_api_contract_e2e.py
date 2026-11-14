@@ -114,7 +114,10 @@ def test_sc11_gitops_yaml_export_survives_int64_and_decimal128_from_mongo(live):
 # ── SC7 ─────────────────────────────────────────────────────────────────────
 
 
-def test_sc7_enabled_true_without_mappings_is_refused_not_silently_disabled(live):
+def test_sc7_enabled_true_without_mappings_is_refused_not_silently_disabled(live, ci_evidence):
+    # The scenario is about the source-table probe; PostgreSQL counts as CI-proven
+    # here so the CLM-7 "not yet proven" save warning is not part of it.
+    ci_evidence("postgresql")
     table = pg_table()
     try:
         src = live.pg_connector()
@@ -157,7 +160,10 @@ def test_sc7_enabled_true_without_mappings_is_refused_not_silently_disabled(live
 # ── SC5 ─────────────────────────────────────────────────────────────────────
 
 
-def test_sc5_create_and_enable_probe_the_source_table(live):
+def test_sc5_create_and_enable_probe_the_source_table(live, ci_evidence):
+    # The scenario is about the source-table probe; PostgreSQL counts as CI-proven
+    # here so the CLM-7 "not yet proven" save warning is not part of it.
+    ci_evidence("postgresql")
     from tests import r4_route_harness as h
 
     table = pg_table()

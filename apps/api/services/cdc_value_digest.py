@@ -17,6 +17,7 @@ job. A finished scan with a missing fingerprint fails the job.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -151,15 +152,67 @@ def _apply_carries(
     return out
 
 
+def _is_uuid_type(declared: str) -> bool:
+    from services.type_system import normalize_logical_type
+
+    return bool(declared) and (
+        normalize_logical_type(declared) == "uuid"
+        or bool(re.search(r"\b(?:uuid|uniqueidentifier|guid)\b", declared, re.IGNORECASE))
+    )
+
+
+def _uuid_columns(
+    columns: list[str],
+    dest_types: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Destination columns that hold a UUID: declared so in ``dest_types``, or
+    mapped from a source (or to a target) typed UUID / UNIQUEIDENTIFIER / GUID.
+    MySQL has no UUID type, so its catalog says CHAR(36); the mapping still
+    knows the column carries a UUID."""
+    folded = {str(k).lower(): str(v or "") for k, v in (dest_types or {}).items()}
+    mapped = set()
+    for raw in mappings or []:
+        if not isinstance(raw, dict):
+            continue
+        target = str(raw.get("target") or raw.get("source") or "").strip().lower()
+        if target and (
+            _is_uuid_type(str(raw.get("source_type") or ""))
+            or _is_uuid_type(str(raw.get("target_type") or ""))
+        ):
+            mapped.add(target)
+    return [
+        c for c in columns
+        if _is_uuid_type(folded.get(c.lower(), "")) or c.lower() in mapped
+    ]
+
+
 def _fingerprint_row(
     row: dict[str, Any],
     columns: list[str],
     *,
     engine: str,
     dest_types: dict[str, str] | None,
+    uuid_columns: list[str] | None = None,
 ) -> str:
     from services.reconciliation import canonical_checksum
 
+    uuid_cols = _uuid_columns(columns, dest_types) if uuid_columns is None else uuid_columns
+    if uuid_cols:
+        # A UUID is a value, not its spelling: SQL Server's read paths return
+        # one GUID upper-case (pyodbc) or lower-case (the batch reader), and an
+        # engine without a UUID type (MySQL CHAR(36)) keeps whichever the
+        # writer bound. Compare the canonical form (PR 424 CI, d196 → MySQL).
+        from connectors.sql_bind import coerce_uuid_wire
+
+        row = dict(row)
+        for column in uuid_cols:
+            value = row.get(column)
+            if value is not None:
+                try:
+                    row[column] = coerce_uuid_wire(value)
+                except (ValueError, TypeError):
+                    pass  # not a UUID: compared as stored, so a bad value still differs
     return canonical_checksum(
         [row],
         columns,
@@ -175,14 +228,16 @@ def compare_row_sets(
     *,
     engine: str,
     dest_types: dict[str, str] | None = None,
+    uuid_columns: list[str] | None = None,
 ) -> CdcValueProof:
     """Source fingerprints must be a subset of dest fingerprints."""
+    uuid_cols = _uuid_columns(columns, dest_types) if uuid_columns is None else uuid_columns
     src = {
-        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types)
+        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types, uuid_columns=uuid_cols)
         for row in source_rows
     }
     dst = {
-        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types)
+        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types, uuid_columns=uuid_cols)
         for row in dest_rows
     }
     missing = src - dst
@@ -364,6 +419,7 @@ def prove_cdc_values(
         columns,
         engine=dest_type,
         dest_types=dest_types,
+        uuid_columns=_uuid_columns(columns, dest_types, mappings),
     )
     if window is None or not key_columns or not (before or later):
         return proof
@@ -477,13 +533,16 @@ def identity_rows_missing_on_dest(
         _rename(source_rows, pairs), _declared_carries(mappings)
     )
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
+    uuid_cols = _uuid_columns(columns, dest_types, mappings)
     present = {
-        _fingerprint_row(row, columns, engine=dest_type, dest_types=dest_types)
+        _fingerprint_row(row, columns, engine=dest_type, dest_types=dest_types, uuid_columns=uuid_cols)
         for row in dest_named
     }
     missing: list[dict[str, Any]] = []
     for raw, renamed in zip(source_rows, renamed_source):
-        fp = _fingerprint_row(renamed, columns, engine=dest_type, dest_types=dest_types)
+        fp = _fingerprint_row(
+            renamed, columns, engine=dest_type, dest_types=dest_types, uuid_columns=uuid_cols
+        )
         if fp not in present:
             missing.append(raw)
     return missing

@@ -9,6 +9,7 @@ quarantine for malformed records, and resume/replay support.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import time
@@ -308,29 +309,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         },
     ),
     (
-        (
-            "lock wait timeout",
-            "lock wait timeout exceeded",
-            "1205",
-            "metadata lock",
-            # SQL Server 1222 and PostgreSQL 55P03: the same bounded wait.
-            "lock request time out period exceeded",
-            "due to lock timeout",
-        ),
-        {
-            "code": "destination_lock_timeout",
-            "category": "destination",
-            "confidence": "high",
-            "title": "Destination table is locked",
-            "fix": (
-                "Another session holds a lock on this destination table (a SQL client, "
-                "a Validate probe, or a stuck earlier attempt). Close it, then re-run. "
-                "Datawrap fails closed after the bounded lock wait instead of waiting "
-                "forever behind it."
-            ),
-        },
-    ),
-    (
         ("cdc_lease_conflict", "cdc lease conflict", "refuse concurrent consumer", "cdc resource"),
         {
             "code": "cdc_lease_conflict",
@@ -404,23 +382,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "title": "Append-only CDC sink blocked",
             "fix": (
                 "Use a PK upsert destination, or enable Allow append-only CDC in Destination Advanced."
-            ),
-        },
-    ),
-    (
-        ("table is full", "er_record_file_full", "(1114,", " 1114,", "error 1114"),
-        {
-            "code": "destination_table_full",
-            "category": "destination_capacity",
-            "confidence": "high",
-            "title": "Destination table is full (MySQL 1114)",
-            "fix": (
-                "MySQL ER_RECORD_FILE_FULL (1114) means the engine could not allocate more space "
-                "for this table. Common verified causes: host disk full, InnoDB tablespace / "
-                "innodb_data_file_path limit, MEMORY/HEAP max size, or MyISAM max_rows. Check "
-                "which applies on your host (SHOW TABLE STATUS / disk / tablespace), free or "
-                "expand capacity, then Resume from checkpoint. Resume alone will fail again "
-                "until capacity is available."
             ),
         },
     ),
@@ -509,46 +470,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         },
     ),
     (
-        ("disk full", "no space left", "enospc"),
-        {
-            "code": "destination_disk_full",
-            "category": "destination_capacity",
-            "confidence": "high",
-            "title": "Destination reported no free disk space",
-            "fix": (
-                "The driver reported ENOSPC / disk full. Free space on the destination host "
-                "(or expand the volume), confirm the write path is not a full mount, then Resume. "
-                "If the message was wrapped by a proxy, confirm on the DB host before assuming disk."
-            ),
-        },
-    ),
-    (
-        ("tablespace is full", "innodb: error: tablespace"),
-        {
-            "code": "destination_tablespace_full",
-            "category": "destination_capacity",
-            "confidence": "high",
-            "title": "Destination tablespace is full",
-            "fix": (
-                "InnoDB tablespace is exhausted. Expand the tablespace / data file, free space "
-                "inside it, or move the table — then Resume. Do not treat this as a mapping issue."
-            ),
-        },
-    ),
-    (
-        ("too many connections", "max_connections"),
-        {
-            "code": "destination_connection_limit",
-            "category": "destination_capacity",
-            "confidence": "medium",
-            "title": "Destination connection limit reached",
-            "fix": (
-                "Likely max_connections (or pool) saturation. Reduce concurrent Datawrap jobs "
-                "or raise the destination limit, then retry. Confirm with the DB admin if shared."
-            ),
-        },
-    ),
-    (
         (
             "json file must be an array of objects",
             "json must be an array of objects",
@@ -594,107 +515,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
-            'dataflow."public"',
-            '."public"',
-            'schema "public"',
-            "schema 'public'",
-        ),
-        {
-            "code": "snowflake_schema_not_found",
-            "category": "source_schema",
-            "confidence": "high",
-            "title": "Snowflake schema not found (check PUBLIC vs public)",
-            "fix": (
-                "Snowflake folds unquoted names to UPPERCASE. A quoted lowercase schema "
-                '"public" is not the same as PUBLIC. Set the connector schema to PUBLIC '
-                "(or the real schema name in uppercase), confirm the role can USE that "
-                "schema, then reload sample preview. If the schema truly is missing, create "
-                "it or pick an existing schema your role can access."
-            ),
-        },
-    ),
-    (
-        (
-            "unknown column",
-            "undefined column",
-            "column does not exist",
-            'column "',
-            "column '",
-            "no such column",
-            "invalid column name",
-            "unrecognized name",
-            "er_bad_field_error",
-            "(1054,",
-            "error 1054",
-        ),
-        {
-            "code": "destination_column_missing",
-            "category": "schema_mismatch",
-            "confidence": "high",
-            "title": "Write referenced a column that is not on the destination",
-            "fix": (
-                "Open Map and rematch the failing field, or run Validate again after the "
-                "destination schema reload. If this is create-new, confirm Destination shows "
-                "Table not found (create on write) — not Existing table with foreign columns. "
-                "Do not Resume until Map/Validate agree with the live destination DDL."
-            ),
-            "primary_action": "open_map",
-        },
-    ),
-    (
-        (
-            # PostgreSQL says 'new row for relation "t" violates check
-            # constraint', which the table_not_found tokens below matched
-            # (D112: a CHECK refusal read "Table was not found").
-            "violates check constraint",
-            "check constraint '",
-            "(3819,",
-            "conflicted with the check constraint",
-            "ora-02290",
-        ),
-        {
-            "code": "destination_check_violation",
-            "category": "data_quality",
-            "confidence": "high",
-            "title": "A row broke a destination CHECK constraint",
-            "fix": (
-                "The destination refused a row its CHECK constraint forbids, so the "
-                "write rolled back. Run Validate: it names the offending rows and the "
-                "constraint. Fix those source rows or map them out, then run again."
-            ),
-            "primary_action": "open_map",
-        },
-    ),
-    (
-        (
-            "relation does not exist",
-            'relation "',
-            "table doesn't exist",
-            "table does not exist",
-            "doesn't exist",
-            "no such table",
-            "unknown table",
-            "er_no_such_table",
-            "(1146,",
-            "error 1146",
-            "invalid object name",
-        ),
-        {
-            "code": "table_not_found",
-            "category": "schema_mismatch",
-            "confidence": "high",
-            "title": "Table was not found",
-            "fix": (
-                "The driver names a table and does not say whether it is the source "
-                "or the destination. Confirm the source object exists and is the one "
-                "selected, and confirm Database + Table on the destination. "
-                "This is not a capacity problem."
-            ),
-            "primary_action": "open_destination",
-        },
-    ),
-    (
-        (
             "replication client",
             "replication slave",
             "(1227,",
@@ -728,30 +548,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
                 "above 0) and restart PostgreSQL. A reload does not apply wal_level. "
                 "Until that restart, logical decoding cannot write a resume LSN, so "
                 "dest-owned watermarks stay empty and delivery stays at-least-once upsert."
-            ),
-        },
-    ),
-    (
-        (
-            "access denied",
-            "permission denied",
-            "insufficient privilege",
-            "not authorized",
-            "authorization failed",
-            "er_accessdenied_error",
-            "(1045,",
-            "(1142,",
-            "error 1142",
-        ),
-        {
-            "code": "destination_permission_denied",
-            "category": "destination_privileges",
-            "confidence": "medium",
-            "title": "Destination rejected the write for privileges/auth",
-            "fix": (
-                "Re-test the connector, then confirm the role can INSERT/UPDATE (and CREATE "
-                "if this is create-new). Validate G2 privilege notes should list what failed — "
-                "fix grants before Resume."
             ),
         },
     ),
@@ -806,6 +602,22 @@ def format_exception_message(error: Exception | str) -> str:
     return msg
 
 
+_PARAMETERS = re.compile(r"\[parameters:.*?\](?=\s*(?:\(Background|$))", re.S)
+_RAW_CAP = 2000
+
+
+def format_raw_failure(error: Exception | str) -> str:
+    """Raw driver text for ``error_details.raw``: no bound row values, bounded.
+
+    SQLAlchemy appends every bound parameter of the failed batch, which put
+    customer rows (DATA-16, ~120 kB) on the job record and the API response.
+    """
+    raw = _PARAMETERS.sub("[parameters: withheld]", format_exception_message(error))
+    if len(raw) > _RAW_CAP:
+        raw = raw[:_RAW_CAP] + " …"
+    return raw
+
+
 def _cursor_gap_fix(error: Any) -> str:
     """Operator next step from the snapshot plan, not a generic reset slogan."""
     plan = getattr(error, "snapshot_plan", None) or {}
@@ -837,7 +649,14 @@ def _cursor_gap_fix(error: Any) -> str:
     )
 
 
-def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
+def humanize_transfer_failure(
+    error: Exception | str,
+    *,
+    side: str = "",
+    phase: str = "",
+    engine: str = "",
+    object: dict[str, Any] | None = None,  # noqa: A002 — the envelope's field name
+) -> dict[str, Any]:
     """Turn a raw driver exception into an operator-facing failure summary.
 
     Honesty rules
@@ -846,9 +665,13 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     - Phrase fixes as *likely checks*, never as a guaranteed one-click remedy.
     - Unknown errors keep the raw message and a neutral next-step — no invented root cause.
 
+    ``side`` (source / destination) and ``phase`` (read / write / ddl) say
+    which end failed; a tagged exception supplies them when the caller does
+    not. Driver failures are classified by :mod:`services.error_taxonomy`.
+
     Returns keys: code, category, title, message, fix, raw, retriable, confidence.
     """
-    raw = format_exception_message(error)
+    raw = format_raw_failure(error)
     text = raw.lower()
     # X-49: a SQL Server self-signed cert failure can arrive wrapped in any
     # error type (e.g. FullRefreshDropFailed) — classify it before the
@@ -1073,7 +896,17 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             }
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    classification = classify_error(error)
+    from services.error_taxonomy import classify, driver_code
+
+    # ERR-2: a driver's structured code (SQLSTATE, MySQL number, Mongo code)
+    # decides before any text rule, so a NOT NULL or type error that names a
+    # column is never read as a missing column.
+    if driver_code(error)[1]:
+        classified = classify(
+            error, side=side, phase=phase, engine=engine, object=object, fallback=False
+        )
+        if classified is not None and classified.matched_by in {"typed", "structured"}:
+            return _taxonomy_failure(classified, raw)
     matched: dict[str, str] | None = None
     for needles, payload in _OPERATOR_FAILURE_RULES:
         if any(n in text for n in needles):
@@ -1083,50 +916,46 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
         title = matched["title"]
         fix = matched["fix"]
         confidence = matched.get("confidence", "medium")
+        sentence = _driver_sentence(error)
         if matched.get("code") == "decimal_overflow":
             message = (
-                f"{title}. Driver reported: {raw}. "
+                f"{title}. Driver reported: {sentence}. "
                 f"Rows already written remain; fix the overflow column then Resume."
             )
         elif matched.get("code") == "cdc_lease_conflict":
             message = (
-                f"{title}. {raw}. "
+                f"{title}. {sentence}. "
                 "Concurrent CDC consumers are blocked — release or wait for the holder, then retry."
             )
         elif matched.get("code") == "mysql_incorrect_datetime":
             message = (
-                f"{title}. Driver reported: {raw}. "
+                f"{title}. Driver reported: {sentence}. "
                 "ISO 'T'/'Z' literals must be normalized before MySQL DATETIME bind."
             )
         elif matched.get("code") == "duplicate_primary_key":
             message = (
-                f"{title}. Driver reported: {raw}. "
+                f"{title}. Driver reported: {sentence}. "
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
-            )
-        elif matched.get("code") in {"cdc_log_privilege", "cdc_wal_level"}:
-            message = f"{title}. Driver reported: {raw}."
-        elif matched.get("code") == "table_not_found":
-            message = (
-                f"{title}. Driver reported: {raw}. "
-                "This does not say the destination was missing, and it is not a capacity problem."
             )
         elif matched.get("code") in {"all_rows_quarantined", "value_conversion_refused"}:
             message = f"{title}. {raw}."
         elif matched.get("code") == "shape_refused_row":
             message = (
-                f"{title}. Driver reported: {raw}. "
+                f"{title}. Driver reported: {sentence}. "
                 "Open Transform and fix that step, or change its error policy, "
                 "then re-run Validate."
             )
         elif matched.get("code") == "shape_recipe_refusal":
             message = (
-                f"{title}. Driver reported: {raw}. "
+                f"{title}. Driver reported: {sentence}. "
                 "Open Transform and fix the recipe, then re-run Validate — "
                 "nothing was written to the destination."
             )
         else:
-            message = f"{title}. Driver reported: {raw}. {ROWS_STAY_NOTE}"
+            # ERR-5: no "until you address capacity" tail. What the run left on
+            # the destination is stated from the job's own row count.
+            message = f"{title}. Driver reported: {sentence}."
         return {
             "code": matched["code"],
             "category": matched["category"],
@@ -1137,6 +966,9 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": confidence,
         }
+    classified = classify(error, side=side, phase=phase, engine=engine, object=object, fallback=False)
+    if classified is not None:
+        return _taxonomy_failure(classified, raw)
     if "circuit_breaker_open" in text or (
         "circuit breaker" in text and "is open" in text
     ):
@@ -1155,20 +987,102 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "confidence": "high",
         }
 
-    # Unknown — never invent a specific root cause or fake remediation path.
+    if _is_product_refusal(error):
+        # Datawrap's own exception: its text already names the cause and the
+        # step (e.g. CdcAddedColumnRefused). Kept whole, sanitised, never
+        # reworded as "cause not identified".
+        from services.error_taxonomy import driver_sentence
+
+        return {
+            "code": "run_refused",
+            "category": "contract",
+            "title": "Transfer stopped",
+            "message": driver_sentence(error, limit=4000),
+            "fix": "",
+            "raw": raw,
+            "retriable": bool(classify_error(error).get("retriable")),
+            "confidence": "high",
+        }
+
+    # Unknown — never invent a specific root cause or fake remediation path (ERR-7).
+    unknown = classify(error, side=side, phase=phase, engine=engine, object=object)
+    assert unknown is not None
+    result = _taxonomy_failure(unknown, raw)
+    result["retriable"] = bool(classify_error(error).get("retriable"))
+    return result
+
+
+_CONFIDENCE = {"typed": "high", "structured": "high", "pattern": "medium", "fallback": "low"}
+_PRODUCT_MODULES = ("services.", "src.", "connectors.", "dataflow.")
+
+
+_PRODUCT_SOURCE_DIRS = tuple(
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), sub) + os.sep
+    for sub in ("services", "src", "connectors")
+)
+
+
+def _raised_in_product_code(error: BaseException) -> bool:
+    """A builtin ValueError/RuntimeError that Datawrap's own code raised.
+
+    Many refusals (a text cursor that cannot bound an incremental read, a
+    key widen that needs approval, ...) are plain ``ValueError`` texts written
+    for the operator. The innermost frame names who raised it: Datawrap's own
+    package, or a driver under site-packages.
+    """
+    if type(error) not in (ValueError, RuntimeError):
+        return False
+    tb = error.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    filename = os.path.abspath(tb.tb_frame.f_code.co_filename)
+    return "site-packages" not in filename and filename.startswith(_PRODUCT_SOURCE_DIRS)
+
+
+def _is_product_refusal(error: Any) -> bool:
+    """An exception Datawrap raised itself (its own class, or its own ValueError text)."""
+    if not isinstance(error, BaseException):
+        return False
+    if getattr(error, "orig", None) is not None:
+        return False
+    module = type(error).__module__ or ""
+    return module.startswith(_PRODUCT_MODULES) or _raised_in_product_code(error)
+
+
+def _driver_sentence(error: Any) -> str:
+    from services.error_taxonomy import driver_sentence
+
+    return driver_sentence(error)
+
+
+def _taxonomy_failure(classified: Any, raw: str) -> dict[str, Any]:
+    """Job-failure fields from one :class:`services.error_taxonomy.ClassifiedError`."""
+    from services.error_taxonomy import PRODUCT_COPY_CODES, legacy_code
+
+    if classified.code in PRODUCT_COPY_CODES and str(raw or "").strip():
+        # Datawrap's own refusal already names the target and the fix (the
+        # egress host the user typed, a confined path, a missed deadline).
+        message = " ".join(str(raw).split())
+    else:
+        message = classified.message
     return {
-        "code": "transfer_failed",
-        "category": "runtime",
-        "title": "Transfer failed",
-        "message": raw,
-        "fix": (
-            "No mapped remediation for this driver message. Use the raw error, event log, and "
-            "Quarantine tab to identify the cause. Fix that cause before Resume — do not assume "
-            "a mapping or capacity issue without evidence."
-        ),
+        # Deprecated, one release: the pre-taxonomy code API / MCP clients key on.
+        "legacy_code": legacy_code(classified.code),
+        "code": classified.code,
+        "category": classified.code.split(".", 1)[0],
+        "title": classified.title,
+        "message": message,
+        "fix": classified.action.get("label", ""),
+        "action": dict(classified.action),
+        "object": dict(classified.object),
+        "driver": dict(classified.driver),
+        "side": classified.side,
+        "phase": classified.phase,
         "raw": raw,
-        "retriable": bool(classification.get("retriable")),
-        "confidence": "low",
+        "retriable": bool(classified.retriable),
+        "confidence": _CONFIDENCE.get(classified.matched_by, "medium"),
     }
 
 

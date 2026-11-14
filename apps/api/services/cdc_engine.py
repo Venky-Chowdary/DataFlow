@@ -239,6 +239,8 @@ class ChangeBatch:
     (``services.cdc_unkeyed_delete``) instead of stopping the stream.
     """
     unkeyed_deletes: list[dict[str, Any]] = field(default_factory=list)
+    """The source table was truncated before the changes in this batch (DATA-1)."""
+    truncated: bool = False
 
     @property
     def total_changes(self) -> int:
@@ -246,7 +248,7 @@ class ChangeBatch:
         # deletes must not read as a position-only heartbeat and be skipped.
         return (
             len(self.inserts) + len(self.updates) + len(self.deletes)
-            + len(self.unkeyed_deletes or [])
+            + len(self.unkeyed_deletes or []) + (1 if self.truncated else 0)
         )
 
 

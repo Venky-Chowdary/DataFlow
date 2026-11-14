@@ -599,6 +599,19 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
 # ═══════════════════════════════════════════════════════════════════════════
 ISSUE_CATALOG: list[dict[str, Any]] = [
     {
+        # ERR-34: a NOT NULL refusal is a missing value, not a narrow type;
+        # "widen the target column type" cannot fix it.
+        "keywords": ["not null contract", "rejects null"],
+        "gate": "g3_schema_contract",
+        "why": "The destination column requires a value, and some source rows have none (NULL or empty).",
+        "fix": (
+            "Map a source column that has a value for every row to it, give the destination "
+            "column a default, or make it nullable, then run Validate again."
+        ),
+        "examples": ["NOT NULL contract: name → name (TEXT) rejects NULL — 1 empty/null sample value(s)."],
+        "suggested_actions": [{"kind": "review_mappings", "label": "Open Map to supply a value"}],
+    },
+    {
         "keywords": ["semantic mapping confidence"],
         "gate": "proof_bundle",
         "why": "The average confidence of the automatic column mappings is below the threshold.",

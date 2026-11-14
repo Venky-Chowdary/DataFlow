@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   catalogFromApi,
+  destPanelSummaryLine,
   catalogFromNames,
   destinationColumnStates,
   filterDestColumns,
@@ -223,4 +224,55 @@ describe("normalizeColumnName matches the API's normalize_name", () => {
   ] as const) {
     it(`${name} → ${norm}`, () => assert.equal(normalizeColumnName(name), norm));
   }
+});
+
+describe("destination panel summary says what is true (W6 round 2, item 2)", () => {
+  // The screenshot: 8 existing columns, the 5 sample columns all written to new
+  // columns, legacy_ref and tenant_id NOT NULL with no source. The panel said
+  // "0 mapped · 8 unmapped", which reads as nothing mapped.
+  const catalog = catalogFromApi({
+    ...API_CATALOG,
+    columns: [
+      { name: "legacy_ref", type: "BIGINT", nullable: false, primary_key: true, required: true, writable: true },
+      { name: "tenant_id", type: "BIGINT", nullable: false, required: true, writable: true },
+      ...["email_address", "order_status", "total_amount", "notes", "created_on", "region"].map((name) => ({
+        name, type: "VARCHAR(120)", nullable: true, required: false, writable: true,
+      })),
+    ],
+  });
+  const rows = ["order_id", "customer_email", "order_amt", "order_date", "status"].map((source) => ({
+    source, target: source, confidence: 0.99, approved: false, inferredType: "VARCHAR", destType: "VARCHAR",
+    existsInDestination: false, createNew: true,
+  }));
+
+  it("counts existing columns, the ones that receive a source and the new columns", () => {
+    const summary = summarizeMapTargets(catalog, rows);
+    assert.equal(summary.requiredUnmapped.length, 2, "the fixture still has two required gaps");
+    // W7: the gaps are the issue banner's to name; the panel line is the inventory.
+    assert.equal(
+      destPanelSummaryLine(summary, catalog),
+      "8 existing columns · 0 receive a source · 5 new columns will be added",
+    );
+  });
+
+  it("uses singulars and drops the parts that are zero", () => {
+    const one = summarizeMapTargets(catalog, [{ ...rows[0], target: "legacy_ref", existsInDestination: true, createNew: false }]);
+    assert.equal(destPanelSummaryLine(one, catalog), "8 existing columns · 1 receives a source");
+  });
+
+  it("never restates a blocker: required gaps, conflicts and refused names stay on the banner (W7)", () => {
+    const clash = [
+      { ...rows[0], target: "email_address", existsInDestination: true, createNew: false },
+      { ...rows[1], target: "email_address", existsInDestination: true, createNew: false },
+    ];
+    const line = destPanelSummaryLine(summarizeMapTargets(catalog, clash), catalog);
+    assert.doesNotMatch(line, /required|no source|twice|cannot/i);
+  });
+
+  it("a table that does not exist yet reads as a new table, not as zero counts (W7)", () => {
+    const fresh = { ...catalog, tableExists: false, columns: [] };
+    const line = destPanelSummaryLine(summarizeMapTargets(fresh, rows), fresh);
+    assert.equal(line, "New table · created from the mapped columns on the first write");
+    assert.doesNotMatch(line, /0 existing/);
+  });
 });

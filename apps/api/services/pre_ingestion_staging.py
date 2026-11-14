@@ -284,9 +284,6 @@ def write_via_pre_ingestion_staging(
     clean_records = [
         r for i, r in enumerate(records, start=1) if i not in rejected_row_nums
     ]
-    if drop_primary:
-        _drop_table(destination)
-
     if not clean_records:
         _retain(stage_ep, staging_meta,
                 f"no clean rows to promote, {len(rejected_row_nums)} row(s) held back", ddl_log)
@@ -304,8 +301,16 @@ def write_via_pre_ingestion_staging(
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append("PRE-INGESTION PROMOTE: 0 clean rows (all quarantined)")
-        return 0, ddl_log, summary
+        # Refused before the primary is dropped: an overwrite with no clean
+        # row would replace the destination with nothing.
+        from src.transfer.engine_destination import all_rows_quarantined_blocked
 
+        raise all_rows_quarantined_blocked(
+            rejected_details, len(rejected_row_nums), summary, rows=int(staged_n or 0) or None
+        )
+
+    if drop_primary:
+        _drop_table(destination)
     try:
         promoted_n, promo_ddl, promo_summary = write_destination_database(
             destination,

@@ -12,6 +12,17 @@ export const RETENTION_HINT =
 export const RETENTION_SCHEDULED_HINT =
   "Purge automatically is on: once a day, finished jobs older than this many days are deleted from every workspace's job history (audited per workspace). Running and queued jobs, audit records and quarantine are never touched. A workspace admin can still run the purge below.";
 
+/**
+ * The "Purge automatically" field hint (UX-24). It used to say "deleted
+ * daily" whatever the switch said, beside "Nothing is deleted on a schedule":
+ * the two read as a contradiction. It now describes the switch's state.
+ */
+export function autoPurgeHint(autoPurge: boolean): string {
+  return autoPurge
+    ? "On: once a day, finished jobs older than the retention window are deleted in every workspace."
+    : "Off: nothing is deleted on a schedule. Old jobs go only when an admin runs Purge old jobs below.";
+}
+
 export function retentionHint(autoPurge: boolean): string {
   return autoPurge ? RETENTION_SCHEDULED_HINT : RETENTION_HINT;
 }

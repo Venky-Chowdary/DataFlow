@@ -7,12 +7,13 @@ volume sub-directories; Iceberg schema, table and catalog names may not climb
 out of the warehouse; an explicit ``DATAFLOW_SQLITE_ROOT`` /
 ``DATAFLOW_DUCKDB_ROOT`` / ``DATAFLOW_ICEBERG_ROOT`` is honoured.
 
-``DATAFLOW_CONFINE_LOCAL_FILES`` (on by default in production, off elsewhere;
-an explicit ``0``/``false``/``off`` opts a production process out, with a
-startup warning and a ``local_file_confinement`` entry in the security-settings
-snapshot): the *implicit* roots. With it on, a production process confines
-SQLite to ``<data_dir>/sqlite``, DuckDB to ``<data_dir>/duckdb`` (or the SQLite
-root) and Iceberg to ``<data_dir>/iceberg``, and anchors relative names there.
+``DATAFLOW_CONFINE_LOCAL_FILES`` (on by default in every environment, SEC-9;
+an explicit ``0``/``false``/``off`` opts the process out, with a startup
+warning and a ``local_file_confinement`` entry in the security-settings
+snapshot): the *implicit* roots. With it on, SQLite is confined to
+``<data_dir>/sqlite`` and DuckDB to ``<data_dir>/duckdb`` (or the SQLite root),
+and relative names are anchored there; a production process also confines
+Iceberg to ``<data_dir>/iceberg``.
 A SQLite/DuckDB connector may also open the platform's upload area (an upload
 its own workspace owns), its export area (its own export folder) and any
 directory the operator lists in ``DATAFLOW_SOURCE_PATH_ROOTS``. With it off, a
@@ -49,36 +50,26 @@ def confinement_opted_out() -> bool:
 
 
 def confine_local_files() -> bool:
-    """On when set on; off when explicitly opted out; otherwise on in production only."""
-    raw = _flag_value()
-    if raw in _FLAG_ON:
-        return True
-    if raw in _FLAG_OFF:
-        return False
-    from services.platform_config import is_production
+    """On unless explicitly opted out, in every environment (SEC-9).
 
-    return is_production()
+    It used to be on in production only: a staging, QA or on-prem install that
+    had not set ``DATAFLOW_ENV=production`` let any editor read and create
+    SQLite files anywhere on the host.
+    """
+    return _flag_value() not in _FLAG_OFF
 
 
 def local_file_settings() -> dict[str, str]:
     """The confinement entry of the startup security-settings snapshot.
 
-    ``enforced`` (production, the default), ``opted_out`` (production with an
-    explicit off value) or ``off`` (development, tests).
+    ``enforced`` (the default, every environment) or ``opted_out`` (an
+    explicit off value).
     """
-    from services.platform_config import is_production
-
-    if confine_local_files() and is_production():
-        state = "enforced"
-    elif confinement_opted_out() and is_production():
-        state = "opted_out"
-    else:
-        state = "off"
-    return {"local_file_confinement": state}
+    return {"local_file_confinement": "opted_out" if confinement_opted_out() else "enforced"}
 
 
 def warn_if_local_file_confinement_off(logger: Any) -> None:
-    """Startup: say once that a production process runs with the confinement opted out."""
+    """Startup: say once that this process runs with the confinement opted out."""
     if local_file_settings()["local_file_confinement"] != "opted_out":
         return
     logger.warning(
@@ -107,9 +98,17 @@ def connector_file_areas() -> list[Path]:
     return areas
 
 
+class PathNotAllowedError(ValueError):
+    """A local file outside every confined area (SEC-9); the text names the fixes."""
+
+    #: Read by ``services.error_taxonomy`` (typed match): the refusal's own
+    #: words reach the user instead of "cause not identified".
+    error_code = "access.path_not_allowed"
+
+
 def confinement_refusal(label: str, env_name: str) -> ValueError:
     """The refusal for a file outside every confined area; names the fixes, never a host path."""
-    return ValueError(
+    return PathNotAllowedError(
         f"{label} file is outside the folders connectors may open on this server (the "
         f"persistent data volume's {label} area, uploads and this workspace's exports). "
         f"Move the file into the {label} data folder or upload it; or ask the operator to add "
@@ -172,11 +171,14 @@ def volume_root(subdir: str) -> Path:
 
 
 def implicit_root(subdir: str) -> Path | None:
-    """The production default root, only while ``DATAFLOW_CONFINE_LOCAL_FILES`` is on
-    (the production default)."""
+    """The default root while ``DATAFLOW_CONFINE_LOCAL_FILES`` is on (the default).
+
+    SQLite and DuckDB are confined in every environment (SEC-9); Iceberg's
+    local warehouse root stays a production default.
+    """
     from services.platform_config import is_production
 
-    if not (confine_local_files() and is_production()):
+    if not confine_local_files() or (subdir == "iceberg" and not is_production()):
         return None
     root = volume_root(subdir)
     try:
@@ -398,7 +400,11 @@ def _duckdb_is_local(endpoint: Any) -> bool:
 
 
 def _iceberg_is_local(endpoint: Any) -> bool:
-    from connectors.iceberg_catalog import _infer_catalog_type, is_remote_location
+    from connectors.iceberg_catalog import (
+        IcebergCatalogNotChosen,
+        _infer_catalog_type,
+        is_remote_location,
+    )
 
     raw_extra = _field(endpoint, "extra")
     extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else {}
@@ -408,7 +414,12 @@ def _iceberg_is_local(endpoint: Any) -> bool:
             extra[key] = _text(endpoint, key)
     cs = _text(endpoint, "connection_string")
     warehouse = _text(endpoint, "warehouse") or _text(endpoint, "database")
-    catalog = _infer_catalog_type(cs, _text(endpoint, "region"), warehouse, extra)
+    try:
+        catalog = _infer_catalog_type(cs, _text(endpoint, "region"), warehouse, extra)
+    except IcebergCatalogNotChosen:
+        # An object-store warehouse with no catalog is refused when it is
+        # used (CLM-12); it is not on this server's disk either way.
+        return False
     local_warehouse = bool(warehouse) and not is_remote_location(warehouse)
     if catalog in {"filesystem", "hadoop", "sqlite"}:
         return True

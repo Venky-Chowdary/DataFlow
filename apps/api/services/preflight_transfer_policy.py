@@ -61,6 +61,8 @@ def run_transfer_policy_gates(
     source_config: dict[str, Any] | None = None,
     resume: bool = False,
     destination_table: str = "",
+    destination_columns: Any = None,
+    destination_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
 
@@ -362,6 +364,21 @@ def run_transfer_policy_gates(
     )
     if eos_gate:
         gates.append(eos_gate)
+    if sync == "cdc" and dest and not allow_append_only:
+        from services.cdc_destination_support import (
+            CDC_DELETES_UNSUPPORTED_CODE,
+            cdc_deletes_supported,
+            unsupported_cdc_deletes_message,
+        )
+
+        if not cdc_deletes_supported(str(dest)):
+            gates.append({
+                "id": "g9d_cdc_dest_deletes",
+                "status": GateStatus.BLOCK.value,
+                "message": unsupported_cdc_deletes_message(str(dest)),
+                "duration_ms": 0,
+                "details": {"dest_type": dest, "error_code": CDC_DELETES_UNSUPPORTED_CODE},
+            })
 
     from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
 
@@ -477,8 +494,56 @@ def run_transfer_policy_gates(
     )
     if name_gate:
         gates.append(name_gate)
+    # G11 / Document Modeler PR1: each destination's own naming rule (Mongo
+    # field paths, SQL engine length limits, BigQuery case), refused here
+    # rather than renamed or cut by the writer; an existing table's legacy
+    # columns (an earlier run's spelling) are kept, with an info note.
+    from services.target_name_legacy import (
+        legacy_field_policy_of,
+        selected_streams,
+        stream_target_gates,
+        target_name_gates,
+    )
+
+    from services.target_name_legacy import strip_client_map_targets
+
+    mappings = strip_client_map_targets(mappings)  # final review B1
+    policy = legacy_field_policy_of(destination_endpoint)
+    streams = selected_streams(type("R", (), {"stream_contracts": contracts})())
+    gates.extend(
+        # Multi-stream: every stream against its own object and Map rows.
+        stream_target_gates(
+            dest, mappings, streams, destination_config=destination_config,
+            sync_mode=sync, legacy_field_policy=policy,
+            destination_endpoint=destination_endpoint,
+        )
+        if streams
+        else target_name_gates(
+            dest,
+            mappings,
+            existing_columns=list(destination_columns or []),
+            destination_config=destination_config,
+            destination_table=_legacy_probe_object(
+                destination_table, destination_endpoint, source_endpoint),
+            sync_mode=sync,
+            legacy_field_policy=policy,
+            destination_endpoint=destination_endpoint,
+        )
+    )
 
     return gates
+
+
+def _legacy_probe_object(destination_table: str, destination: Any, source: Any) -> str:
+    """The object the writer will write: Validate probes what Execute probes."""
+    if destination_table:
+        return destination_table
+    try:
+        from services.target_name_legacy import writer_object_name
+
+        return writer_object_name(destination, source)
+    except Exception:  # noqa: BLE001 - an unnamed endpoint keeps the plain lookup
+        return _endpoint_table(destination)
 
 
 def _endpoint_table(endpoint: Any) -> str:

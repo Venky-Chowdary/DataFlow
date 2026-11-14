@@ -284,6 +284,36 @@ def _publication_name(database: str, table: str | list[str], cursor_key: str) ->
     return re.sub(r"[^a-z0-9_]", "_", raw)[:63]
 
 
+def _json_as_engine_text(conn: Any) -> None:
+    """Read json/jsonb snapshot cells as PostgreSQL's own text (DATA-4, DATA-12).
+
+    psycopg2 decodes jsonb into Python: JSON ``null`` became SQL NULL, the JSON
+    string ``"null"`` became the text ``null`` (then JSON null on write), and
+    ``""`` became an empty string the json transform refused. The streaming
+    phase already carries the engine text; the snapshot now does too, as the
+    table reader does (``postgresql_reader._select_list``).
+    """
+    try:
+        import psycopg2.extras
+
+        psycopg2.extras.register_default_json(conn, loads=lambda text: text)
+        psycopg2.extras.register_default_jsonb(conn, loads=lambda text: text)
+    except Exception as exc:  # noqa: BLE001 - not a psycopg2 connection
+        _logger.debug("CDC snapshot JSON text caster not installed: %s", exc)
+
+
+def _raise_truncated_during_snapshot(table: str) -> None:
+    """A TRUNCATE inside an incremental-snapshot window can't be ordered against it."""
+    from services.data_errors import CdcSourceTruncated
+
+    raise CdcSourceTruncated(
+        f"The source table {table} was truncated while CDC was taking an incremental "
+        "snapshot of it, so the snapshot rows can't be trusted. Nothing past that point "
+        "was applied and the stream position did not move. Reset this pipeline's CDC "
+        "position to take a fresh snapshot."
+    )
+
+
 def _slot_name(database: str, table: str | list[str], cursor_key: str) -> str:
     if isinstance(table, (list, tuple)):
         from services.cdc_multi_table import tables_digest
@@ -1451,6 +1481,7 @@ class PostgreSqlChangeStreamCdc:
             tables = tables[tables.index(resume_table) :]
 
         with self._conn() as conn:
+            _json_as_engine_text(conn)
             # One RR transaction spans all tables so the multi-table dump shares
             # a consistent MVCC snapshot (Debezium initial-sync pattern).
             prev_autocommit = getattr(conn, "autocommit", True)
@@ -1815,6 +1846,7 @@ class PostgreSqlChangeStreamCdc:
         lsn_low = ""
         lsn_high = ""
         with self._conn() as conn:
+            _json_as_engine_text(conn)
             with conn.cursor() as cur:
                 # DDD-3 watermarks bracketing the chunk SELECT. Without these the
                 # stream-wins step had no way to tell whether a peeked WAL event
@@ -1966,6 +1998,8 @@ class PostgreSqlChangeStreamCdc:
                 if _is_stale(location):
                     continue
                 for change in decoded:
+                    if change.op == "truncate":
+                        _raise_truncated_during_snapshot(sig_table)
                     if change.op == "insert" and change.new_tuple:
                         events.append({"op": "c", "row": dict(change.new_tuple)})
                     elif change.op == "update" and change.new_tuple:
@@ -1996,6 +2030,8 @@ class PostgreSqlChangeStreamCdc:
             upper = text.upper().strip()
             if upper.startswith(("BEGIN", "COMMIT", "ROLLBACK", "ABORT")):
                 continue
+            if ": TRUNCATE:" in upper and f".{sig_table.lower()}:" in text.lower():
+                _raise_truncated_during_snapshot(sig_table)
             parsed = _parse_change_line(text, self.schema, sig_table)
             if parsed is None:
                 continue
@@ -2130,6 +2166,10 @@ class PostgreSqlChangeStreamCdc:
                         pk = self._pk_value(change.old_tuple, table=tbl)
                         # An unkeyed delete is parked with its image (C2), never skipped.
                         buf.delete(tbl, pk, lsn=lsn, row=change.old_tuple)
+                    elif change.op == "truncate":
+                        buf.truncate(table_by_lower.get(
+                            (change.relation or "").lower(), change.relation or self.table
+                        ), lsn=lsn)
         else:
             for location, line in rows:
                 lsn = str(location) if location else None
@@ -2162,6 +2202,9 @@ class PostgreSqlChangeStreamCdc:
                 if relation.lower() not in table_set:
                     continue
                 tbl = table_by_lower[relation.lower()]
+                if ": TRUNCATE:" in upper:
+                    buf.truncate(tbl, lsn=lsn)
+                    continue
                 parsed = _parse_change_line(text, self.schema, tbl)
                 if parsed is None:
                     continue

@@ -74,7 +74,9 @@ describe("lossy existing-destination mapping is not a dead end", () => {
     const blocker = mappingBlocker(signed, THRESHOLD);
     assert.ok(blocker);
     assert.equal(blocker.code, "fail_closed_contract");
-    assert.match(blocker.title, /FAIL_JOB/);
+    // UX-4: the policy is named in words, not as its wire code.
+    assert.match(blocker.title, /Stop the whole job/);
+    assert.doesNotMatch(blocker.title, /FAIL_JOB/);
   });
 
   it("re-signing a fail-closed row with a continuing policy clears it", () => {

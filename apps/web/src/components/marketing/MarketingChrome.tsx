@@ -3,7 +3,7 @@ import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
-import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
+import { provenDriversPhrase } from "../../lib/provenEvidence";
 
 type NavMenu = "product" | "solutions" | "resources" | null;
 
@@ -159,7 +159,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connectors</strong>
-                    <span>{TRANSFER_READY_DRIVERS} transfer-ready drivers</span>
+                    <span>{provenDriversPhrase()}</span>
                   </a>
                 </div>
               </div>

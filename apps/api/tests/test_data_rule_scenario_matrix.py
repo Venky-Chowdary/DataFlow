@@ -176,8 +176,13 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=fam,
                     mode=mode,
-                    expect="warn" if mode == "balanced" else "block",
-                    note="NUL control byte in description — destinations reject; balanced softens",
+                    # DATA-24: SQLite TEXT and BSON strings keep U+0000 exactly.
+                    expect="pass" if dest in {"sqlite", "mongodb"} else ("warn" if mode == "balanced" else "block"),
+                    note=(
+                        "NUL inside text is data SQLite / MongoDB store byte for byte (DATA-24)"
+                        if dest in {"sqlite", "mongodb"}
+                        else "NUL control byte in description — destinations reject; balanced softens"
+                    ),
                     runner="integrity",
                 )
             )

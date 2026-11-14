@@ -727,7 +727,7 @@ def list_connector_objects(
             return _tool_result(
                 "list_connector_objects",
                 success=False,
-                output={"connector_name": conn.get("name"), "connected": False},
+                output={"connector_name": conn.get("name"), "connected": False, "message": reason},
                 error=f"Could not list objects on {conn.get('name') or 'this connector'}: {reason}",
             )
         total = len(objects)

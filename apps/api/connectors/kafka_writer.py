@@ -358,8 +358,12 @@ def write_mapped_rows(
             driver="kafka",
         )
 
+    # G11: kafka stores field / attribute names exactly as mapped.
+    from connectors.destination_naming import writer_identifier
+
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("kafka"),
     )
     policy = transform_error_policy(error_policy)
     live_dest = _kwargs.get("destination_column_types")
@@ -795,6 +799,8 @@ def write_mapped_rows(
         rejected_rows=len(rejected_details),
         coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         driver="kafka",
+        # G11: an acknowledged legacy_field_policy=write_new, on the run.
+        warnings=[str(a) for a in (_kwargs.get("legacy_field_ack") or [])][:10],
         meta={
             "reconcile_sample": produced_sample,
             "source_row_count": len(mapped_rows),

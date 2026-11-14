@@ -111,8 +111,8 @@ def test_build_engine_refuses_before_the_driver_is_called(url, driver_calls):
 @pytest.mark.parametrize("enforce_new", [False, True])
 @pytest.mark.parametrize("allowlist", ["", "127.0.0.1/32", "127.0.0.0/8", "10.0.0.0/8"])
 def test_every_form_is_saved_exactly_where_loopback_is(monkeypatch, enforce_new, allowlist):
-    if enforce_new:
-        monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "1")
+    # Enforcement is the default (SEC-2); "0" is the explicit audit-only opt-out.
+    monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "1" if enforce_new else "0")
     if allowlist:
         monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", allowlist)
     loopback = bool(eg.connector_save_refusal(

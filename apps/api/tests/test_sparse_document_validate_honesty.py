@@ -18,8 +18,11 @@ from services.value_serializer import DF_MISSING_SENTINEL, project_row_cells
 def test_absent_key_projects_missing_sentinel_not_empty_string():
     cells = project_row_cells({"id": 1, "balance": None}, ["id", "balance", "score"])
     assert cells[0] == "1"
-    # Present-but-null keeps the empty/NULL wire; only the absent key is missing.
-    assert cells[1] == ""
+    # Present-but-null is SQL NULL (DATA-14: never "", which typed casts refuse);
+    # only the absent key is missing.
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert cells[1] == SQL_NULL_SENTINEL
     assert cells[2] == DF_MISSING_SENTINEL
 
 

@@ -513,7 +513,9 @@ def test_live_blocked_preflight_mints_no_approval(pg_route, monkeypatch):
     )
     assert not res.success
     assert "preflight blocked" in res.error.lower()
-    assert "G6_TARGET_DDL" in res.error
+    # UX-19: the blocker is named by its Studio label, not the raw gate id.
+    assert "Target DDL: destination type is narrower" in res.error
+    assert "G6_TARGET_DDL" not in res.error
     assert "pf_blocked_w92" in res.error
     # No ack means the UI has no Confirm button to press.
     assert "ack_id" not in (res.output or {})
@@ -542,7 +544,8 @@ def test_live_blocked_plan_still_shows_the_gate_evidence(pg_route, monkeypatch):
         dest_table=pg_route["dst"],
     )
     text = _render_transfer("plan_transfer", res.output or {})
-    assert "BLOCK G6_TARGET_DDL" in text
+    # UX-19: the blocker is named by its Studio label, not the raw gate id.
+    assert "Blocked · Target DDL**: narrower type" in text
     assert "pf_blocked_w92b" in text
 
 

@@ -934,8 +934,10 @@ export function DestinationAdvancedDrawer({
                 onChange={(e) => onVectorEmbeddingModelChange?.(e.target.value)}
               />
               <small className="df2-label-hint">
-                Prefixes: sentence-transformers/, hash/, deterministic/, openai/, text-embedding-,
-                azure/, openai-compatible/, cohere/, bedrock/.
+                Required: Validate refuses a vector load whose model cannot run here, and no other
+                model is substituted. Prefixes: openai/, text-embedding-, azure/, openai-compatible/,
+                cohere/, bedrock/, sentence-transformers/ (only when installed on the server), or
+                tfidf/local for non-semantic TF-IDF vectors chosen on purpose.
               </small>
             </div>
             <div className="df2-field">

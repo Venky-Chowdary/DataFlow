@@ -39,7 +39,8 @@
 
 .df2-studio-picker-root.is-open .df2-studio-picker-trigger,
 .df2-studio-picker-trigger:focus-visible {
-  outline: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
   border-color: var(--df-brand-strong);
   box-shadow: 0 0 0 3px var(--df-brand-ring, rgba(13, 148, 136, 0.28));
 }
@@ -157,9 +158,14 @@
   padding: 6px 0;
 }
 
-.df2-studio-picker-search .df2-input:focus,
-.df2-studio-picker-search .df2-input:focus-visible {
+.df2-studio-picker-search .df2-input:focus {
   outline: none;
+  box-shadow: none;
+}
+
+.df2-studio-picker-search .df2-input:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: -2px;
   box-shadow: none;
 }
 

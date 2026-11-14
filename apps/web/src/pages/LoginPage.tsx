@@ -4,6 +4,7 @@ import { DtIcon } from "../components/DtIcon";
 import { AuthButton } from "../components/AuthButton";
 import { PasswordToggle } from "../components/AuthFlow";
 import { useToast } from "../components/Toast";
+import { clearAuthAttemptToasts } from "../lib/authToasts";
 import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType, type LoginSession } from "../lib/api";
 import { isMfaChallenge } from "../lib/mfaApi";
 import { LoginMfaStep } from "../components/MfaChallenge";
@@ -46,7 +47,7 @@ const TRUST_METRICS = [
 ];
 
 export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, onForgotPassword, onVerifyPending }: LoginPageProps) {
-  const { toast } = useToast();
+  const { toast, dismissMatching } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -160,6 +161,8 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
       },
       remember,
     );
+    // One toast for the sign-in: the failed attempts' toasts go with it.
+    clearAuthAttemptToasts(dismissMatching);
     if (result.mfa_method === "recovery") {
       toast({
         title: "Signed in with a recovery code",
@@ -267,7 +270,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
               <div className={`lp-field ${emailError ? "is-error" : emailOk && emailTrimmed ? "is-ok" : ""}`}>
                 <div className="lp-label-row">
                   <label className="lp-label" htmlFor="login-email">Work email</label>
-                  {emailOk && emailTrimmed && !emailError && (
+                  {emailOk && emailTrimmed && !emailError && !credentialError && (
                     <span className="lp-field-status lp-field-status--ok">Valid</span>
                   )}
                 </div>

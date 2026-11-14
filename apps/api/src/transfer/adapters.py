@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.error_taxonomy import failure_side
 import logging
 import re
 import sys
@@ -18,16 +19,12 @@ if str(_API_ROOT) not in sys.path:
 
 try:
     from services.file_parser import FileParser
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.file_parser import FileParser
 
 try:
     from services.mongodb_service import get_mongodb_service
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
@@ -234,7 +231,7 @@ def parse_file_content(
     schema = (
         dict(writer_schema)
         if writer_schema
-        else FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+        else FileParser.infer_schema(result.data, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
     )
     from services.value_serializer import payload_record_wire
 
@@ -287,7 +284,7 @@ def parse_file_route_sample(
         dict(writer_schema)
         if writer_schema
         else (
-            FileParser.infer_schema(sample, invalid_calendar_votes=True)
+            FileParser.infer_schema(sample, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
             if sample
             else {c: "string" for c in result.columns}
         )
@@ -874,6 +871,7 @@ def _pack_source_read(
     return records, headers, schema
 
 
+@failure_side("source", "read")
 def read_source_database(
     endpoint: EndpointConfig,
     *,
@@ -1451,6 +1449,7 @@ def read_source_database(
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
+@failure_side("destination", "write")
 def write_destination_database(
     endpoint: EndpointConfig,
     records: list[dict],
@@ -1510,6 +1509,7 @@ def write_destination_database(
     collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
     release_records = bool(options.pop("release_records", False))
     retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    refuse_all_held = bool(options.pop("refuse_all_quarantined", False))
     options.pop("source_spool", None)
     db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
     census_payload = None
@@ -1619,6 +1619,10 @@ def write_destination_database(
             spill.close()
     elif spill is not None:
         spill.close()
+    if refuse_all_held:
+        from .engine_destination import refuse_all_quarantined_write
+
+        refuse_all_quarantined_write(rows_written, summary)
     return rows_written, ddl_log, summary
 
 

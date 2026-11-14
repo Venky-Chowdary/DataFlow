@@ -515,30 +515,55 @@ export const CONTINUE_EXECUTION_POLICIES = new Set<ExecutionPolicy>([
   "STOP_COLUMN",
 ]);
 
-/** Operator-selectable policies — labels match runtime semantics (no placeholders). */
+/**
+ * Operator-selectable policies, in plain words: what happens to a value that
+ * does not convert. The id is the contract's wire value and never shown.
+ * `recommended` marks the default Map preselects for a row (UX-4).
+ */
 export const EXECUTION_POLICY_OPTIONS: Array<{
   id: ExecutionPolicy;
   label: string;
   continueUnlock: boolean;
+  recommended?: boolean;
 }> = [
-  { id: "FAIL_JOB", label: "FAIL_JOB — abort the job write", continueUnlock: false },
-  { id: "STOP_TABLE", label: "STOP_TABLE — abort this table/stream write", continueUnlock: false },
-  { id: "ABORT_TRANSACTION", label: "ABORT_TRANSACTION — abort txn (or fail if none)", continueUnlock: false },
-  { id: "RETRY", label: "RETRY — one re-attempt then abort", continueUnlock: false },
-  { id: "STOP_COLUMN", label: "STOP_COLUMN — omit bad column; write other columns", continueUnlock: true },
-  { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout row to DLQ for replay", continueUnlock: true },
-  {
-    id: "SKIP_ROW",
-    label: "SKIP_ROW — drop from primary (audit only; not DLQ / not replayable)",
-    continueUnlock: true,
-  },
+  { id: "QUARANTINE_ROW", label: "Quarantine failing rows (replayable)", continueUnlock: true, recommended: true },
   {
     id: "CAST_AND_CONTINUE",
-    label: "CAST_FAIL_QUARANTINE — cast fail → holdout (value not written)",
+    label: "Cast and continue (rows that fail the cast are quarantined)",
     continueUnlock: true,
+    recommended: true,
   },
-  { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform fail → quarantine", continueUnlock: true },
+  {
+    id: "TRANSFORM_AND_CONTINUE",
+    label: "Transform and continue (rows that fail the transform are quarantined)",
+    continueUnlock: true,
+    recommended: true,
+  },
+  { id: "STOP_COLUMN", label: "Leave this column out, write the others", continueUnlock: true },
+  { id: "SKIP_ROW", label: "Skip failing rows (logged, not replayable)", continueUnlock: true },
+  { id: "FAIL_JOB", label: "Stop the whole job", continueUnlock: false },
+  { id: "STOP_TABLE", label: "Stop this table", continueUnlock: false },
+  { id: "ABORT_TRANSACTION", label: "Roll back the transaction", continueUnlock: false },
+  { id: "RETRY", label: "Retry once, then stop", continueUnlock: false },
 ];
+
+/** Plain label for a policy id (falls back to the id for an unknown value). */
+export function executionPolicyLabel(policy: string | null | undefined): string {
+  const id = String(policy || "").toUpperCase();
+  return EXECUTION_POLICY_OPTIONS.find((p) => p.id === id)?.label ?? id;
+}
+
+/**
+ * The policy Map preselects on a row that needs a Risk Contract: the run
+ * continues and no failing value is silently lost. A cast keeps casting, a
+ * transform keeps transforming, anything else quarantines the failing row.
+ */
+export function recommendedExecutionPolicy(m: Pick<EditableMapping, "fidelity" | "transform">): ExecutionPolicy {
+  const fidelity = String(m.fidelity || "").toLowerCase();
+  if (fidelity === "cast") return "CAST_AND_CONTINUE";
+  if (fidelity === "mutate") return "TRANSFORM_AND_CONTINUE";
+  return "QUARANTINE_ROW";
+}
 
 export type MigrationRiskContractDraft = {
   risk_id?: string;
@@ -966,7 +991,9 @@ export function mappingAckDoneLabel(m: EditableMapping): string {
   if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
     const policy = m.riskContract?.execution_policy;
     if (policy === "CAST_AND_CONTINUE") return "Contracted · cast";
-    if (policy) return `Contracted · ${policy}`;
+    if (policy) return CONTINUE_EXECUTION_POLICIES.has(String(policy).toUpperCase() as ExecutionPolicy)
+      ? "Contracted · continues"
+      : "Contracted · stops the write";
     return mappingAckTier(m) === "accept_risk" ? "Risk Contract signed" : "Reviewed";
   }
   return "Ready";

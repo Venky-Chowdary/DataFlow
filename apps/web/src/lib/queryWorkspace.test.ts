@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import {
   DEFAULT_LAYOUT,
+  schemaNotConnectedReason,
   clearHistory,
   closeTab,
   createTab,
@@ -347,5 +348,17 @@ describe("query schema error copy", () => {
     assert.equal(connectorMissingFromWorkspace("gone", [{ id: "here" }]), true);
     assert.equal(connectorMissingFromWorkspace("here", [{ id: "here" }]), false);
     assert.equal(connectorMissingFromWorkspace("gone", []), false);
+  });
+});
+
+describe("schemaNotConnectedReason: a connector that did not open says why", () => {
+  it("returns the API's reason when the schema read did not connect", () => {
+    const reason = "SQLite file is outside the folders connectors may open on this server.";
+    assert.equal(schemaNotConnectedReason({ connected: false, objects: [], message: reason }), reason);
+  });
+  it("says nothing when the read connected, or when no reason came back", () => {
+    assert.equal(schemaNotConnectedReason({ connected: true, objects: [], message: "ok" }), "");
+    assert.equal(schemaNotConnectedReason({ connected: false, objects: [] }), "");
+    assert.equal(schemaNotConnectedReason({ connected: false, objects: [], message: "   " }), "");
   });
 });

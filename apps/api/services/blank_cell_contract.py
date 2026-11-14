@@ -96,7 +96,15 @@ def _target_is_text(mapping: dict[str, Any] | None) -> bool:
         return False
     from services.type_system import normalize_logical_type
 
-    return normalize_logical_type(declared) in {"string", "text"}
+    if normalize_logical_type(declared) not in {"string", "text"}:
+        return False
+    # DATA-21: SQLite carries DECIMAL / DATE / TIMESTAMP in a TEXT column. A
+    # typed transform says the cell is a number or a date, so a blank is the
+    # same SQL NULL it is on PostgreSQL / MySQL / MongoDB, not stored ''.
+    from services.transform_engine import _TYPED_TRANSFORMS
+
+    transform = str((mapping or {}).get("transform") or "").strip().lower()
+    return transform not in _TYPED_TRANSFORMS
 
 
 def nullable_typed_blank_is_absence(
@@ -152,6 +160,12 @@ def blank_typed_cell_is_sql_null(
     """
     if not err or not str(err).lower().startswith("empty value cannot coerce"):
         return False
+    # The refusal names the typed transform that ran ("... to decimal"); a
+    # caller that resolved it apart from the mapping still gets the typed
+    # reading of a TEXT carrier (DATA-21, SQLite).
+    named_cast = str(err).lower().split("cannot coerce to", 1)[-1].strip().split(" ", 1)[0]
+    if named_cast:
+        mapping = {**(mapping or {}), "transform": named_cast}
     named = str(
         target
         or (mapping or {}).get("target")

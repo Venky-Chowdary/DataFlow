@@ -110,10 +110,10 @@ describe("real backend payloads (static)", () => {
     const html = renderToStaticMarkup(<MigrationHealthView state="ready" summary={summary} limit={30} onOpenJob={noop} />);
     const t = text(html);
     // The re-sync job is a repair of run 1, not a run (review U4): three runs, two fully proven.
-    assert.match(t, /runs fully proven 66\.6%/);
-    assert.match(t, /runs with unexplained differences 1/);
-    assert.match(t, /sign-offs 1/);
-    assert.match(t, /most-drifting table pay/);
+    assert.match(t, /Runs fully proven 66\.6%/);
+    assert.match(t, /Unexplained differences 1/);
+    assert.match(t, /Sign-offs 1/);
+    assert.match(t, /Most-drifting table: pay/);
     assert.match(html, /aria-label="Parity over the last 3 runs/);
     assert.match(html, /aria-label="1 table over 3 runs\. Unexplained differences: pay in 1 run\."/);
     assert.doesNotMatch(t, /\bdrift\b/, "no run has drift: true (too little route history)");
@@ -251,7 +251,7 @@ describe("real backend payloads (jsdom)", () => {
     getBody = () => summary;
     await mount(<MigrationHealthSection limit={30} />);
     const t = host!.textContent || "";
-    assert.match(t, /runs fully proven/);
+    assert.match(t, /Runs fully proven/);
     assert.match(t, /66\.6%/);
     assert.match(t, /pay backfill|pay nightly/);
     assert.ok(calls.some((c) => /\/parity\/summary\?limit=30$/.test(c.url)));

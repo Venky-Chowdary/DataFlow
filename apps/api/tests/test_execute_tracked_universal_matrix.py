@@ -446,7 +446,18 @@ def _build_db_endpoint(
             password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             schema="dbo",
             table="payments_sqlserver",
-            extra={"trust_server_certificate": True, "encrypt": "yes"},
+            # Encrypt=yes by default. The pymssql CI leg (production's driver:
+            # Dockerfile.api has no Microsoft ODBC driver) sets
+            # DATAFLOW_TEST_MSSQL_ENCRYPT="" because FreeTDS cannot honour
+            # Encrypt and the product refuses it rather than pretend.
+            extra={
+                "trust_server_certificate": True,
+                **(
+                    {"encrypt": os.environ.get("DATAFLOW_TEST_MSSQL_ENCRYPT", "yes")}
+                    if os.environ.get("DATAFLOW_TEST_MSSQL_ENCRYPT", "yes")
+                    else {}
+                ),
+            },
         ),
         "oracle": EndpointConfig(
             kind="database",

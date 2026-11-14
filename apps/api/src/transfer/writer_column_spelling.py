@@ -57,20 +57,24 @@ def rekey_writer_sample(
     return out
 
 
-def physical_column(name: str) -> str:
-    """The column a SQL writer created for the Map target ``name``."""
-    from connectors.sql_identifiers import sanitize_identifier
+def physical_column(name: str, dest_type: str = "") -> str:
+    """The column a SQL writer created for the Map target ``name``.
 
-    return sanitize_identifier(str(name), preserve_case=True) or str(name)
+    With ``dest_type`` the writer's own rule (G11: cut only at the engine's
+    real limit, e.g. 64 on MySQL); without, the historical 63-character rule.
+    """
+    from connectors.destination_naming import writer_identifier
+
+    return writer_identifier(dest_type, preserve_case=True)(str(name)) or str(name)
 
 
-def physical_select_list(columns: list[str], quote: str) -> str:
+def physical_select_list(columns: list[str], quote: str, dest_type: str = "") -> str:
     """``SELECT`` list reading each physical column under its Map name."""
     from connectors.sql_identifiers import quote_sql_identifier
 
     parts = []
     for name in columns:
-        phys = physical_column(name)
+        phys = physical_column(name, dest_type)
         if phys == name:
             parts.append(quote_sql_identifier(name, quote))
         else:

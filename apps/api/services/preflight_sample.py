@@ -44,6 +44,8 @@ class EngineSample:
     #: Execute's own reader raised. The source is not readable — distinct from
     #: a row filter that matched nothing, which is a data fact, not a failure.
     read_failed: bool = False
+    #: The taxonomy code of a failed read (``services.error_taxonomy``).
+    error_code: str = ""
 
 
 def peek_population_empty(population: Any) -> tuple[Any, bool]:
@@ -80,7 +82,7 @@ def source_read_is_privilege_denial(reason: str) -> bool:
     "source readable" let Validate offer a cast contract for a table the
     login will never be allowed to read.
     """
-    return bool(_PRIVILEGE_READ_RE.search(reason or ""))
+    return bool(_PRIVILEGE_READ_RE.search(reason or "")) or "doesn't have SELECT" in (reason or "")
 
 
 def _pattern_sample(endpoint: Any, limit: int) -> list[dict] | None:
@@ -162,10 +164,15 @@ def engine_sample_rows(
             )
     except Exception as exc:  # noqa: BLE001 — the reason is the product output
         logger.warning("Validate source sample read failed for %s: %s", table, exc)
+        from services.error_taxonomy import classify
+
+        # ERR-9: the reason is the taxonomy's copy, never the probe SQL.
+        named = classify(exc, side="source", phase="read", engine=source_format, object={"table": table})
         return EngineSample(
-            unavailable_reason=f"source sample read failed: {exc}"[:400],
+            unavailable_reason=named.text if named is not None else "the source read failed",
             attempted=True,
             read_failed=True,
+            error_code=named.code if named is not None else "",
         )
     rows = [dict(r) for r in (records or [])[:limit] if isinstance(r, Mapping)]
     if not rows:

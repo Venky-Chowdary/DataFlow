@@ -16,12 +16,14 @@ import uuid
 
 import pytest
 
+# The PostgreSQL the environment names (libpq PG* variables: CI's
+# .github/ci-live-engines.vars), else the compose lab's localhost:5433.
 ADMIN = {
-    "host": "localhost",
-    "port": 5433,
-    "database": "dataflow",
-    "user": "postgres",
-    "password": "postgres",  # nosec B106 - local test container
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5433")),
+    "database": os.environ.get("PGDATABASE", "dataflow"),
+    "user": os.environ.get("PGUSER", "postgres"),
+    "password": os.environ.get("PGPASSWORD", "postgres"),  # nosec B106 - local test container
 }
 ROLE_PW = "probe_pw"  # nosec B105 - local test container
 

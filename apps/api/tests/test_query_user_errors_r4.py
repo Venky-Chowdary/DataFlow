@@ -155,7 +155,8 @@ def test_sql_query_error_is_visible_only_in_redacted_response(
     detail = response.json()["detail"]
     assert "Query failed: syntax error near S3NT1NEL-syntax" in detail
     assert "password=***" in detail
-    assert "postgresql://u:***@h/db" in detail
+    # W3 error taxonomy: a connection URI is replaced, never echoed.
+    assert "postgresql://" not in detail and "the connection string" in detail
     assert "S3NT1NEL-pw" not in response.text
     assert "S3NT1NEL-dsn" not in response.text
     rendered = query_error_capture.rendered()
@@ -229,7 +230,7 @@ def test_snowflake_query_error_is_reported_as_user_query_failure(monkeypatch):
     assert caught.value.status_code == 400
     assert "Query failed: syntax error near S3NT1NEL-syntax" in caught.value.detail
     assert "password=***" in caught.value.detail
-    assert "postgresql://u:***@h/db" in caught.value.detail
+    assert "postgresql://" not in caught.value.detail and "the connection string" in caught.value.detail
     assert caught.value.detail.endswith(" Reference: r4-snowflake-query")
     assert caught.value.headers == {"X-Correlation-ID": "r4-snowflake-query"}
 
@@ -317,12 +318,14 @@ def test_sql_engine_creation_failure_uses_connection_humanizer(monkeypatch):
         query_router._run_sql_query(connector, body)
 
     assert caught.value.status_code == 400
-    assert caught.value.detail.startswith("Connection failed: ")
-    assert "db.example:5432" in caught.value.detail
-    assert "S3NT1NEL" not in caught.value.detail
-    assert "pwd=***" in caught.value.detail
-    driver_echo = caught.value.detail.removeprefix("Connection failed: ")
-    assert len(driver_echo) <= 120
+    # W3 error taxonomy (ERR-11): Test's words for an unrecognised connect
+    # failure, the sanitised driver sentence, no host:port, and a reference.
+    detail = caught.value.detail
+    assert detail.startswith("Datawrap couldn't identify the cause of this failure.")
+    assert "db.example" not in detail and ":5432" not in detail
+    assert "S3NT1NEL" not in detail
+    assert "pwd=***" in detail
+    assert " Reference: " in detail
 
 
 def test_sqlalchemy_missing_driver_runtime_error_is_preserved(monkeypatch):
@@ -358,7 +361,13 @@ def test_sqlalchemy_missing_driver_runtime_error_is_preserved(monkeypatch):
         query_router._run_sql_query(connector, body)
 
     assert caught.value.status_code == 400
-    assert caught.value.detail == missing_driver
+    # W3 error taxonomy (ERR-21): one missing-driver copy on every surface;
+    # no package names or install commands.
+    assert caught.value.detail.startswith(
+        "PostgreSQL connections aren't available on this server (driver not installed). "
+        "Contact your administrator."
+    ), caught.value.detail
+    assert "psycopg2" not in caught.value.detail
 
 
 def test_schema_introspection_failure_uses_connection_humanizer(
@@ -385,13 +394,15 @@ def test_schema_introspection_failure_uses_connection_humanizer(
     )
 
     assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert detail.startswith("Schema introspection failed: Connection failed: ")
-    assert "db.example:5432" in detail
+    body = response.json()
+    detail = body["detail"]
+    # W3 error taxonomy: the envelope rides beside the string detail.
+    assert detail.startswith("Datawrap couldn't identify the cause of this failure.")
+    assert body["error"]["code"] == "unclassified"
+    assert body["error"]["reference"] and detail.endswith(body["error"]["reference"])
+    assert "db.example" not in detail and ":5432" not in detail
     assert "S3NT1NEL" not in detail
     assert "pwd=***" in detail
-    driver_echo = detail.removeprefix("Schema introspection failed: Connection failed: ")
-    assert len(driver_echo) <= 120
 
 
 def test_filter_json_error_uses_user_query_error(monkeypatch, query_error_capture):

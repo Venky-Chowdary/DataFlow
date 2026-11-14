@@ -154,8 +154,14 @@ def _consume_quota() -> None:
     try:
         consume_send_slot()
     except EmailQuotaExceeded as exc:
+        # UX-21: name the cause (the deployment's email allowance) and the way
+        # round it, instead of an opaque "try again later".
+        wait = max(1, -(-int(exc.retry_after_sec or 0) // 60)) if exc.retry_after_sec else 0
+        when = f"Try again in {wait} min" if wait else "Try again later"
         raise ApiError(503, "email_quota_exceeded",
-                       "We couldn't send the invitation right now — try again later.",
+                       "Datawrap has reached its email sending limit for now, so no invitation "
+                       f"email was sent and nothing was created. {when}, or use Add directly "
+                       "to give them access now with a one-time password.",
                        retry_after_sec=exc.retry_after_sec) from exc
 
 

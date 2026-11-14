@@ -16,6 +16,8 @@ and drops only once the deployment setting ``cdc_orphan_auto_drop`` is on.
 
 from __future__ import annotations
 
+from tests.pg_slot_guard import track_created_slot
+
 import os
 import socket
 import uuid
@@ -313,6 +315,7 @@ def test_cleanup_never_drops_a_slot_datawrap_did_not_create_or_a_live_route_uses
     lookalike = f"df_dataflow_lookalike_{uuid.uuid4().hex[:8]}"
     for name in (external, lookalike):
         _sql("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')", (name,))
+        track_created_slot(name)  # dropped at session end if a failure skips teardown
     job_id = _run_cdc(route)
     slot = (_ours(route) - {lookalike}).pop()
     # A live CDC schedule on the same route uses the slot.

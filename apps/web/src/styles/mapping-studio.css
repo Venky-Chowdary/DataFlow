@@ -9,7 +9,9 @@
 .df2-ms-automap,
 .df2-ms-computed,
 .df2-ms-templates {
-  --df2-ms-danger-ink: var(--df-danger);
+  /* --df-danger on --df-danger-bg is 4.41:1; a darker ink of the same hue
+     reaches AA (W7: the panel's Required chip). */
+  --df2-ms-danger-ink: color-mix(in srgb, var(--df-danger) 80%, black);
   --df2-ms-row: 76px;
   --df2-ms-option: 48px;
 }
@@ -811,5 +813,854 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   .df2-ms-automap-table th:nth-child(4),
   .df2-ms-automap-table td:nth-child(4) {
     display: none;
+  }
+}
+
+/* ==========================================================================
+   Map step, enterprise layout (W6)
+   One header (route, one status line, a compact toolbar), one issue list,
+   and a triage grid: source, one destination picker, transform, one status
+   chip; the why and the type details open per row. Tokens only.
+   ========================================================================== */
+
+.df2-map-step-panel .df2-card-head.df2-map-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.df2-map-step-head .df2-map-step-head-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.df2-map-step-head .df2-card-title {
+  margin: 0;
+}
+
+.df2-map-route {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 0;
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  color: var(--df-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-map-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-text-tertiary);
+  flex: none;
+}
+
+.df2-map-status.is-warn::before { background: var(--df-warning); }
+.df2-map-status.is-ok::before { background: var(--df-success); }
+
+.df2-map-step-head .df2-map-step-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.df2-map-step-head .df2-ms-toolbar {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.df2-ms-toolbar .df2-btn {
+  white-space: nowrap;
+}
+
+.df2-ms-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning-bg);
+  color: var(--df-text-primary);
+  border: 1px solid var(--df-warning-border);
+  font-size: var(--df-fs-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-ms-toolbar-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+}
+
+.df2-ms-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+
+.df2-ms-icon-btn:hover:not(:disabled) {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-icon-btn.is-on {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong, var(--df-brand));
+}
+
+.df2-ms-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.df2-ms-icon-btn:focus-visible,
+.df2-column-expand:focus-visible,
+.df2-map-issue-action:focus-visible,
+.df2-ms-more:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-ms-more {
+  gap: 6px;
+}
+
+/* ---- issue triage ------------------------------------------------------- */
+
+.df2-map-issues {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface);
+}
+
+.df2-map-issues-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  color: var(--df-text-primary);
+}
+
+.df2-map-issues.is-block .df2-map-issues-summary svg { color: var(--df-danger); }
+.df2-map-issues.is-warn .df2-map-issues-summary svg { color: var(--df-warning); }
+
+.df2-map-issues-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-map-issue {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 4px;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-map-issue-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning);
+}
+
+.df2-map-issue.is-block .df2-map-issue-dot { background: var(--df-danger); }
+
+.df2-map-issue-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.df2-map-issue-title {
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issue-detail {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issues-more {
+  justify-self: start;
+  font-size: var(--df-fs-sm);
+}
+
+/* ---- triage grid -------------------------------------------------------- */
+
+.df2-column-review.is-triage .df2-column-review-table {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 0;
+}
+
+/* W7: fixed tracks for the controls, the rest split between the two names.
+   At 740 px (1440 with the panel open) that is 42 + 24 + 136 + 152 fixed,
+   source 24 % (~178) and destination the rest (~208): every control fits its
+   own cell with 8 px of padding on each side, so neighbours sit 16 px apart.
+   Below 640 px of grid width the rows become cards (container query below). */
+.df2-column-review.is-triage .df2-column-th-expand { width: 42px; }
+.df2-column-review.is-triage .df2-column-th-source { width: 24%; }
+.df2-column-review.is-triage .df2-column-th-arrow { width: 24px; }
+.df2-column-review.is-triage .df2-column-th-destination { width: auto; }
+.df2-column-review.is-triage .df2-column-th-transform { width: 136px; }
+.df2-column-review.is-triage .df2-column-th-status { width: 152px; }
+
+/* One shared first line (W7): every cell starts with a 30 px track whose
+   centre is the row's centre line; secondary text (type, sample, grade) sits
+   on one small line under it. 3 + 30 + 2 + 18 + 2 + 1 (rule) = 56 px a row. */
+.df2-column-review.is-triage {
+  --df2-map-line: 30px;
+}
+
+/* The tracks above are border-box widths, so padding never pushes the table
+   past its scroller (it ran 8 px wide and scrolled sideways). */
+.df2-column-review.is-triage .df2-column-review-table th,
+.df2-column-review.is-triage .df2-column-review-table td {
+  box-sizing: border-box;
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th {
+  padding-inline: 8px;
+  /* Tokens, not the shared table's #f8fafc / #f1f5f9: in dark mode those
+     drew a white header strip and white rules between the rows. */
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-column-review.is-triage .df2-column-review-table td {
+  border-bottom-color: var(--df-border);
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th.df2-column-th-expand {
+  padding-inline: 4px;
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th.df2-column-th-arrow {
+  padding-inline: 0;
+  text-align: center;
+}
+
+.df2-column-review.is-triage .df2-column-row > td {
+  vertical-align: top;
+  padding: 3px 8px 2px;
+}
+
+.df2-column-review.is-triage .df2-column-row.is-expanded > td {
+  border-bottom-color: transparent;
+}
+
+.df2-column-expand-cell {
+  padding-inline: 4px;
+}
+
+.df2-column-expand {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+
+.df2-column-expand:hover,
+.df2-column-expand[aria-expanded="true"] {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-column-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 2px;
+  padding-left: 26px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-source-type {
+  flex: none;
+  font-family: var(--df-font-mono);
+  text-transform: uppercase;
+}
+
+.df2-column-source-meta .df2-column-sample-value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-family: var(--df-font-mono);
+  color: var(--df-text-secondary);
+}
+
+.df2-column-dest-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-dest-type-text {
+  font-family: var(--df-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-destination-cell .df2-column-cell-content,
+.df2-column-review.is-triage .df2-column-source-cell .df2-column-cell-content {
+  min-width: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status {
+  text-align: left;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
+.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.df2-column-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--dt-radius-full);
+  background: var(--df-surface);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  color: var(--df-text-secondary);
+  white-space: nowrap;
+}
+
+.df2-column-status-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-text-tertiary);
+}
+
+.df2-column-status-chip.is-warn::before { background: var(--df-warning); }
+.df2-column-status-chip.is-block::before { background: var(--df-danger); }
+.df2-column-status-chip.is-info::before { background: var(--df-info); }
+
+.df2-column-detail-row > td {
+  padding: 0 12px 12px 48px;
+  background: var(--df-surface-muted);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-column-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding-top: 10px;
+}
+
+.df2-column-detail section {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.df2-column-detail-h {
+  margin: 0;
+  font-size: var(--df-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-detail-text {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  line-height: 1.5;
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-detail-text.is-type {
+  color: var(--df-text-secondary);
+}
+
+.df2-column-detail-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 2px 0 0;
+}
+
+.df2-column-detail-facts > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.df2-column-detail-facts dt {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-detail-facts dd {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-detail-chips:empty {
+  display: none;
+}
+
+.df2-column-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-column-detail-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.df2-column-detail-controls > select,
+.df2-column-detail-field {
+  max-width: 100%;
+}
+
+.df2-column-detail-field {
+  display: grid;
+  gap: 3px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+/* 1366 x 768 (UX-23): the grid keeps every column readable beside the panel. */
+
+@media (max-width: 900px) {
+  .df2-column-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-column-detail-row > td {
+    padding-left: 12px;
+  }
+}
+
+@media (max-width: 639.98px) {
+  .df2-map-step-head .df2-ms-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .df2-map-step-head .df2-map-step-head-actions {
+    justify-content: flex-start;
+  }
+
+}
+
+/* The laptop "reclaim height" rules hide every other step's card head (the
+   wizard names the step). The Map head carries the route, the status line and
+   the toolbar, so it stays; its title is the only part those rules drop. */
+.df2-page-transfer-studio .df2-transfer-step-viewport.df2-map-step-panel > .df2-card-head.df2-map-step-head {
+  padding: 8px 12px;
+}
+
+/* Triage rows sit on a neutral surface: the status chip carries the state,
+   not a tinted row (the tinted rows read as a wall of warnings). */
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.warn > td,
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.block > td,
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.ok > td {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.df2-column-row:hover > td {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.df2-column-detail-row > td {
+  background: var(--df-surface-muted);
+}
+
+.df2-column-review.is-triage .df2-column-transform,
+.df2-column-review.is-triage .df2-column-transform-cell select {
+  min-width: 0;
+  width: 100%;
+}
+
+
+/* ==========================================================================
+   Map step, one clear layout (W7)
+   The step starts under the stepper; one compact blocker line; a toolbar
+   with one leading action and one secondary cluster; grid rows that share a
+   single 30 px first line; rows become cards when the grid itself is narrow.
+   Tokens only.
+   ========================================================================== */
+
+/* -- spacing -------------------------------------------------------------- */
+
+/* The shell's 12 px gap already separates the step from the stepper card;
+   the panel's own 18 px top padding doubled it into an empty band. */
+.df2-page-transfer-studio .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel.df2-map-step-panel {
+  padding-top: 4px;
+}
+
+/* -- toolbar -------------------------------------------------------------- */
+
+.df2-ms-toolbar .df2-btn[hidden] {
+  display: none;
+}
+
+.df2-ms-toolbar-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+
+/* -- the one blocker line ------------------------------------------------- */
+
+.df2-map-issues {
+  padding: 6px 8px 6px 12px;
+}
+
+.df2-map-issues-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-height: 32px;
+}
+
+.df2-map-issues.is-block .df2-map-issues-bar > svg { color: var(--df2-ms-danger-ink); flex: none; }
+.df2-map-issues.is-warn .df2-map-issues-bar > svg { color: var(--df-warning); flex: none; }
+
+.df2-map-issues-bar .df2-map-issues-summary {
+  display: flex;
+  /* On a phone the actions drop under the sentence instead of squeezing it. */
+  flex: 1 1 220px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  min-width: 0;
+}
+
+.df2-map-issues-subjects {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  font-weight: 500;
+  color: var(--df-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issues-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-map-issues-list[hidden] {
+  display: none;
+}
+
+.df2-map-issues.is-open .df2-map-issues-list {
+  margin-top: 4px;
+}
+
+/* -- destination panel ---------------------------------------------------- */
+
+.df2-ms-panel-help {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-help > summary {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  cursor: pointer;
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-help > .df2-ms-panel-note {
+  margin: 4px 0 0;
+}
+
+.df2-ms-panel-help:not([open]) > .df2-ms-panel-note {
+  display: none;
+}
+
+/* -- grid: one first line per row ----------------------------------------- */
+
+.df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
+  padding-inline: 4px;
+}
+
+.df2-column-review.is-triage .df2-column-expand {
+  margin-top: 2px;
+}
+
+/* Items align on the first line, not the middle of the cell: a long name
+   wraps under itself and the grip stays level with its first line. */
+.df2-column-review.is-triage .df2-column-source-cell > .df2-column-cell-content {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  min-height: var(--df2-map-line);
+}
+
+.df2-column-review.is-triage .df2-column-source-cell .df2-ms-grip {
+  height: 28px;
+  min-height: 28px;
+  margin: 1px 0 0;
+}
+
+.df2-column-review.is-triage .df2-column-source {
+  min-width: 0;
+  padding-block: 5px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-source-cell .df2-badge {
+  flex: none;
+  margin-top: 6px;
+}
+
+.df2-column-review.is-triage .df2-column-source-meta {
+  display: block;
+  margin-top: 2px;
+  padding-left: 28px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
+  padding-inline: 0;
+  line-height: var(--df2-map-line);
+  text-align: center;
+}
+
+.df2-column-review.is-triage .df2-column-destination-cell > .df2-column-cell-content {
+  display: block;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta {
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  min-height: 18px;
+  margin-top: 2px;
+}
+
+.df2-column-review.is-triage .df2-column-dest-type-text {
+  min-width: 0;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-tag,
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-compat-wrap {
+  flex: none;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-tag,
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-compat {
+  min-height: 18px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
+.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: var(--df2-map-line);
+  margin: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-btn {
+  min-height: var(--df2-map-line);
+  height: var(--df2-map-line);
+  max-width: 100%;
+  padding-block: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-status-chip {
+  margin-top: 2px;
+}
+
+/* -- the grid as cards, by its own width ---------------------------------- */
+/* A phone, and 1024 px with the panel open, leave the grid under 640 px: the
+   five columns would squeeze, so every row becomes a card whose first line is
+   the grip and the name. The header row is not drawn (each control carries
+   its own label). */
+
+.df2-map-editor-scroll-host {
+  container: df2-map-grid / inline-size;
+}
+
+@container df2-map-grid (max-width: 639.98px) {
+  .df2-column-review.is-triage .df2-column-review-table,
+  .df2-column-review.is-triage .df2-column-review-table tbody,
+  .df2-column-review.is-triage .df2-column-review-table tr,
+  .df2-column-review.is-triage .df2-column-review-table td {
+    display: block;
+    width: auto;
+  }
+
+  .df2-column-review.is-triage .df2-column-review-table thead {
+    display: none;
+  }
+
+  .df2-column-review.is-triage .df2-column-row {
+    position: relative;
+    padding: 8px 8px 8px 40px;
+    border-bottom: 1px solid var(--df-border);
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td {
+    padding: 2px 0;
+    border: 0;
+  }
+
+  /* The chevron sits on the name line whatever padding a cell gets: the cell
+     steps out of the layout and the button is placed on the card itself.
+     Its centre: card padding 8 + cell padding 2 + half the 30 px line 15 −
+     half the button 13 = 12 px. */
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
+    display: contents;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell .df2-column-expand {
+    position: absolute;
+    left: 6px;
+    top: 12px;
+    margin-top: 0;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
+    display: none;
+  }
+
+  .df2-column-detail-row > td {
+    padding: 8px 12px 12px;
+  }
+
+  /* The three filter tabs fit a phone's grid on one track: tighter tabs,
+     the small type size (they ran 16 px past the track and scrolled). */
+  .df2-app .df2-column-review.is-triage .df2-filter-tabs {
+    flex-wrap: nowrap;
+    overflow: visible;
+  }
+
+  .df2-app .df2-column-review.is-triage .df2-filter-tabs .df2-tab {
+    padding: 0 6px;
+    font-size: var(--df-fs-xs);
+  }
+}
+
+/* -- phone: the step uses the width --------------------------------------- */
+
+@media (max-width: 639.98px) {
+  .df2-page-transfer-studio .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel.df2-map-step-panel {
+    padding-inline: 8px;
+  }
+}
+
+/* -- footer on a phone: two rows ------------------------------------------ */
+/* Back, Clear key and Advanced share the first row; Continue to Validate,
+   the step's one primary action, has the second to itself. */
+
+@media (max-width: 639.98px) {
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions {
+    display: contents;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer > .df2-btn,
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn:not(.df2-btn-primary) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn-primary {
+    flex: 1 0 100%;
   }
 }

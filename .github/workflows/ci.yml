@@ -28,9 +28,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A push that changes only the web app reuses the backend checks of the
+  # newest ancestor whose backend jobs all passed (.github/scripts/ci_backend_reuse.py).
+  # Any change outside apps/web, packages/design-system, the npm manifests or
+  # Markdown runs everything. The gate below accepts a skipped backend job only
+  # when this job said reuse=true.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      from: ${{ steps.decide.outputs.from }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reuse the backend checks of a green ancestor?
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_backend_reuse.py
+
   # Lean evidence pack — no databases. Regenerates claim→metric catalog and
   # fails when marketing floors exceed measured fixture proofs.
   mapping-evidence:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,7 +71,7 @@ jobs:
       - name: Install API + preflight
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
           python -m pip install -e packages/preflight
 
       - name: Build evidence catalog
@@ -94,6 +121,8 @@ jobs:
   # AI ITEM 1 — full Map/LLM suite with no network and no API keys.
   # Proves offline claim: LLM cannot change mapping decisions / checksums.
   ai-offline-correctness:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -107,7 +136,7 @@ jobs:
       - name: Install API deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
 
       - name: Offline LLM-off correctness (ITEM 1)
         working-directory: apps/api
@@ -135,6 +164,8 @@ jobs:
   # the stores say — plus outage honesty, abstention, workspace isolation,
   # error masking and AI egress. All of it runs offline.
   pilot-answer-quality:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -148,7 +179,7 @@ jobs:
       - name: Install API deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
 
       - name: Pilot policy, retrieval, narration guards and answer audit
         working-directory: apps/api
@@ -199,6 +230,8 @@ jobs:
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
   # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
   no-config-transfer:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     # No `services:` — a public.ecr.aws/docker.io rate-limit on a service
     # container aborts the job before checkout with no retry. Postgres starts
@@ -225,7 +258,7 @@ jobs:
       - name: Install API deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
 
       - name: Golden-path no-config transfer (Property 2)
         working-directory: apps/api
@@ -245,21 +278,28 @@ jobs:
           P2_MYSQL_PASSWORD: dataflow
           P2_MONGO_URI: mongodb://127.0.0.1:27017
         run: |
-          # Fail the job if any golden-path test is skipped (services must be up).
-          out="$(mktemp)"
+          # Any golden-path skip fails the job (services must be up): the
+          # shared live-engine checker, manifest entry `no-config-transfer`.
           set +e
-          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short | tee "$out"
-          rc=${PIPESTATUS[0]}
+          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/golden-path.xml"
+          rc=$?
           set -e
-          if grep -Eq '[1-9][0-9]* skipped' "$out"; then
-            echo "Property 2 golden path must not skip when CI services are present" >&2
-            cat "$out" >&2
-            exit 1
-          fi
+          python scripts/check_live_skips.py --job no-config-transfer --junit "$RUNNER_TEMP/live-junit/golden-path.xml" --out "$RUNNER_TEMP/live-engine/no-config-transfer.json"
           exit "$rc"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-no-config-transfer
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -273,7 +313,7 @@ jobs:
       - name: Install API deps (CLI --local imports services.*)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
 
       - name: Validate example dataflow.yaml
         run: |
@@ -302,6 +342,8 @@ jobs:
   # 6-hour job limit. A file's shard is a stable hash of its path
   # (tests/conftest.py::_select_ci_shard), so each file runs exactly once.
   api-tests:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -322,7 +364,8 @@ jobs:
         working-directory: apps/api
         run: |
           set -o pipefail
-          python -m pytest tests -v --timeout=900 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
+          python -m pytest tests -v --timeout=900 \
+            --junitxml="$RUNNER_TEMP/live-junit/api-tests.xml" 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
         env:
           DATAFLOW_TEST_SHARD: ${{ matrix.shard }}/6
           DATAFLOW_JOB_STORE: memory
@@ -351,10 +394,30 @@ jobs:
           grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
 
+      - name: No live-engine test may skip (engine-scoped)
+        # A skip whose message names PostgreSQL, MySQL, Mongo or Redis (which
+        # this job starts) fails the shard, even when it also names an engine
+        # the job lacks, unless it is an expected skip in
+        # apps/api/scripts/live_engine_jobs.json
+        # (`api-tests`). BigQuery / GCS / ADLS emulator skips are counted and
+        # published but do not fail yet (report_engines).
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job api-tests --label shard=${{ matrix.shard }} --junit "$RUNNER_TEMP/live-junit/api-tests.xml" --out "$RUNNER_TEMP/live-engine/api-tests-${{ matrix.shard }}.json"
+
+      - name: Upload live-engine result
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-api-tests-${{ matrix.shard }}
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
   api-and-web:
     runs-on: ubuntu-latest
     # Gates on the API shards, and still runs (and fails) when one of them failed.
-    needs: api-tests
+    needs: [changes, api-tests]
     if: ${{ !cancelled() }}
     # No service containers. Redis used to be one; a Docker Hub
     # "toomanyrequests" pull failed Initialize containers, skipped Checkout,
@@ -379,20 +442,23 @@ jobs:
         run: npm ci
 
       - name: Start CI services + install Python deps
+        if: ${{ needs.changes.outputs.reuse != 'true' }}
         uses: ./.github/actions/ci-services
 
       # The API suite runs in the api-tests shards above; preflight stays here.
       - name: Preflight package tests
+        if: ${{ needs.changes.outputs.reuse != 'true' }}
         id: preflight_tests
         run: npm run test:preflight
 
       # Phase B9 — proof steps MUST run even when a test step fails (audit §3.2).
       # Never silently omit CDC / warehouse evidence from the CI record.
       - name: CDC matrix report
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: cdc_matrix
-        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run test:cdc
         env:
+          CDC_MATRIX_JUNIT: ${{ runner.temp }}/live-junit/cdc-matrix.xml
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           PGHOST: 127.0.0.1
@@ -408,9 +474,16 @@ jobs:
           DATAFLOW_CDC_LEASE_BACKEND: redis
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
+      - name: CDC matrix live-engine skips
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
+        id: cdc_skips
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job cdc-matrix --junit "$RUNNER_TEMP/live-junit/cdc-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-matrix.json"
+
       - name: Warehouse SKU proof report
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: warehouse_sku
-        if: ${{ !cancelled() && (success() || failure()) }}
         # Always-on Snowflake (fakesnow) + BigQuery (goccy emulator) proof.
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
@@ -421,7 +494,7 @@ jobs:
             | sed 's/^/emulator panics logged during api slice: /' || true
           bash ../../.github/scripts/start_ci_databases.sh bigquery
           set +e
-          python scripts/warehouse_sku_report.py
+          WAREHOUSE_SKU_JUNIT="$RUNNER_TEMP/live-junit/warehouse-sku.xml" python scripts/warehouse_sku_report.py
           code=$?
           docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
           docker logs --tail 80 dataflow-bigquery-emulator || true
@@ -449,9 +522,24 @@ jobs:
           DATAFLOW_ALLOW_STUB_WRITES: "1"
           DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
 
+      - name: Warehouse SKU live-engine skips
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
+        id: warehouse_skips
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job warehouse-sku --junit "$RUNNER_TEMP/live-junit/warehouse-sku.xml" --out "$RUNNER_TEMP/live-engine/warehouse-sku.json"
+
+      - name: Upload live-engine results (CDC matrix, warehouse SKU)
+        if: ${{ (always()) && needs.changes.outputs.reuse != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-api-and-web
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
       - name: TRANSFER_READY certification matrix
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: transfer_ready_matrix
-        if: ${{ !cancelled() && (success() || failure()) }}
         # Phase E2 — publish PRODUCTION_SKU × unique_drivers honesty artifact.
         working-directory: apps/api
         run: |
@@ -468,7 +556,7 @@ jobs:
           PY
 
       - name: Upload migration proof artifacts
-        if: ${{ always() }}
+        if: ${{ (always()) && needs.changes.outputs.reuse != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: migration-proof-ci
@@ -517,9 +605,14 @@ jobs:
         if: ${{ always() && !cancelled() }}
         run: |
           api="${{ needs.api-tests.result }}"
+          if [ "$api" = "skipped" ] && [ "${{ needs.changes.outputs.reuse }}" = "true" ]; then
+            api="success"  # reused from ${{ needs.changes.outputs.from }} (web-only change)
+          fi
           pre="${{ steps.preflight_tests.outcome }}"
           cdc="${{ steps.cdc_matrix.outcome }}"
+          cdcskip="${{ steps.cdc_skips.outcome }}"
           wh="${{ steps.warehouse_sku.outcome }}"
+          whskip="${{ steps.warehouse_skips.outcome }}"
           trm="${{ steps.transfer_ready_matrix.outcome }}"
           fe="${{ steps.frontend_tests.outcome }}"
           web="${{ steps.web_build.outcome }}"
@@ -532,10 +625,16 @@ jobs:
           echo "bundle_brand=$brand"
           echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp a11y_hex=$a11y"
           fail=0
-          for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
+          echo "cdc_live_skips=$cdcskip warehouse_live_skips=$whskip"
+          for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "cdc_live_skips:$cdcskip" "warehouse_sku:$wh" "warehouse_live_skips:$whskip" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
-            # skipped only acceptable when job cancelled mid-flight; otherwise require success
+            # skipped only acceptable when job cancelled mid-flight; otherwise require success.
+            # A web-only change reuses the backend proofs (changes job), so those steps skip.
+            if [ "$out" = "skipped" ] && [ "${{ needs.changes.outputs.reuse }}" = "true" ] \
+              && [[ " preflight_tests cdc_matrix cdc_live_skips warehouse_sku warehouse_live_skips transfer_ready_matrix " == *" $name "* ]]; then
+              continue
+            fi
             if [ "$out" != "success" ]; then
               fail=1
             fi
@@ -544,6 +643,8 @@ jobs:
           echo "- api_tests: \`$api\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- preflight_tests: \`$pre\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- cdc_matrix: \`$cdc\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdc_live_skips: \`$cdcskip\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- warehouse_live_skips: \`$whskip\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- warehouse_sku: \`$wh\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
@@ -558,207 +659,281 @@ jobs:
           fi
           echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build + chunk budgets)." >> "$GITHUB_STEP_SUMMARY"
 
-  # Separate job: SQL Server image is large/slow; keep main CI lean.
+  # SQL Server live proof: Change Tracking + native CDC (SQL Server Agent on),
+  # the PRODUCTION_SKU SQL Server routes and the SQL Server cells of the
+  # universal matrix whose peer engine this job starts. Separate job: the
+  # SQL Server image is large/slow; keep the API shards lean.
+  #
+  # Until this job was rewired every live test here skipped in seconds: no
+  # SA password reached pytest (DATAFLOW_TEST_MSSQL_PASSWORD / _SQLSERVER_
+  # PASSWORD were never set), Agent was off (capture jobs cannot run), the
+  # native CDC readiness probe had no TLS trust for the self-signed lab
+  # certificate under Driver 18, and `pytest | tee` without pipefail could
+  # not fail the step.
+  #
+  # Two legs, one per SQL Server DBAPI. Production (Dockerfile.api) ships
+  # unixODBC but no Microsoft ODBC driver, so the product dials SQL Server
+  # through pymssql (FreeTDS) there; the pymssql leg reproduces that (no
+  # Microsoft driver registered) and asserts the product picked pymssql. The
+  # pyodbc leg proves the ODBC Driver 18 path operators can opt into.
   cdc-sqlserver:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    name: cdc-sqlserver (${{ matrix.driver }})
     runs-on: ubuntu-latest
-    # No `services:` — same rate-limit fragility as no-config-transfer; MySQL
-    # starts via the shared script (binlog/GTID flags are a superset of what
-    # this job's destination needs).
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [pyodbc, pymssql]
+    env:
+      SQLSERVER_LEG: ${{ matrix.driver }}
+      # FreeTDS cannot honour Encrypt=yes and the product refuses it rather
+      # than pretend, so the pymssql leg's matrix template declares none.
+      DATAFLOW_TEST_MSSQL_ENCRYPT: ${{ matrix.driver == 'pyodbc' && 'yes' || '' }}
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_PII_HASH_KEY: test-pii-key
+      DATAFLOW_ALLOW_STUB_WRITES: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_CDC_LEASE_BACKEND: memory
+      # SQL Server. The password is NOT here: a per-run value is generated
+      # and masked in the first step (throwaway container, no stored secret).
+      DATAFLOW_SQLSERVER_ENABLE: "1"
+      DATAFLOW_SQLSERVER_HOST: localhost
+      DATAFLOW_SQLSERVER_PORT: "1433"
+      DATAFLOW_SQLSERVER_DATABASE: dataflow
+      DATAFLOW_SQLSERVER_USER: sa
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
+      DATAFLOW_TEST_MSSQL_USER: sa
+      # Postgres peer (Dockerfile.postgres-cdc: pgvector + wal_level=logical).
+      # CI-only container credentials, same as every other job.
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: dataflow
+      PGPASSWORD: dataflow
+      PGDATABASE: dataflow
+      DATAFLOW_PG_HOST: 127.0.0.1
+      DATAFLOW_PG_PORT: "5432"
+      DATAFLOW_PG_DB: dataflow
+      DATAFLOW_PG_USER: dataflow
+      DATAFLOW_PG_PASSWORD: dataflow
+      # MySQL peer (start_ci_databases.sh mysql grants dataflow CDC rights).
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: dataflow
+      MYSQL_USER: dataflow
+      MYSQL_PASSWORD: dataflow
+      DATAFLOW_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_MYSQL_PORT: "3306"
+      DATAFLOW_MYSQL_DB: dataflow
+      DATAFLOW_MYSQL_USER: dataflow
+      DATAFLOW_MYSQL_PASSWORD: dataflow
+      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MYSQL_PORT: "3306"
+      DATAFLOW_TEST_MYSQL_DB: dataflow
+      DATAFLOW_TEST_MYSQL_USER: dataflow
+      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+    # No `services:` — a registry rate-limit on a service container aborts the
+    # job before checkout; start_ci_databases.sh retries pulls with backoff.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Start MySQL
+      - name: Generate a per-run SQL Server SA password (masked)
         run: |
-          bash .github/scripts/start_ci_databases.sh mysql
+          # Meets the SQL Server policy (upper, lower, digit, symbol). Masked
+          # before it is written anywhere; lives only for this run's container.
+          pw="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${pw}"
+          {
+            echo "MSSQL_SA_PASSWORD=${pw}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${pw}"
+            echo "DATAFLOW_SQLSERVER_PASSWORD=${pw}"
+          } >> "$GITHUB_ENV"
 
-      - name: Start Postgres with logical CDC
+      - name: Start MySQL, Postgres (logical CDC) and SQL Server (Agent on, CT + CDC init)
         run: |
-          bash .github/scripts/start_ci_databases.sh postgres-cdc
+          bash .github/scripts/start_ci_databases.sh mysql postgres-cdc sqlserver
 
-      - name: Start SQL Server
-        run: |
-          docker run -d --name dataflow-sqlserver \
-            -e ACCEPT_EULA=Y \
-            -e MSSQL_SA_PASSWORD='DataFlow_CDC_2022!' \
-            -e MSSQL_PID=Developer \
-            -p 1433:1433 \
-            mcr.microsoft.com/mssql/server:2022-latest
-          for i in $(seq 1 60); do
-            if docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-              -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -Q "SELECT 1" >/dev/null 2>&1; then
-              echo "SQL Server ready"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "SQL Server failed to become ready" >&2
-          docker logs dataflow-sqlserver || true
-          exit 1
-
-      - name: Install Microsoft ODBC Driver 18
-        run: |
-          # --batch/--yes: runners have no TTY; gpg otherwise prompts to overwrite and fails.
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-            | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Init Change Tracking + native CDC
-        run: |
-          docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
-          docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
-          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/ct_init.sql
-          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/cdc_init.sql
-
+      # Python setup runs even when an engine failed to start (PR 424 CI: the
+      # start step failed, setup was skipped, and the `!cancelled()` pytest
+      # steps ran on /usr/bin/python with no pytest, 0 executed).
       - name: Set up Python
+        if: ${{ !cancelled() }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install API deps
+        if: ${{ !cancelled() }}
         run: |
-          cd apps/api
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r apps/api/requirements-dev.txt
 
-      - name: Grant MySQL CDC privileges
+      - name: The test interpreter has pytest and both SQL Server DBAPIs
+        id: python_ready
+        if: ${{ !cancelled() }}
+        run: |
+          command -v python
+          python -c "import pytest, pymssql, pyodbc; print('pytest', pytest.__version__, 'pymssql', pymssql.__version__)"
+
+      - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
+        if: ${{ !cancelled() && matrix.driver == 'pyodbc' }}
+        run: bash .github/scripts/install_msodbcsql18.sh
+
+      - name: Assert the product dials SQL Server through ${{ matrix.driver }}
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
         run: |
           python - <<'PY'
-          import sys, time
-          import pymysql
-          conn = None
-          for _ in range(60):
-              try:
-                  conn = pymysql.connect(
-                      host="127.0.0.1",
-                      port=3306,
-                      user="root",
-                      password="dataflow",
-                      database="dataflow",
-                  )
-                  break
-              except Exception:
-                  time.sleep(1)
-          if conn is None:
-              print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
-              sys.exit(0)
-          with conn.cursor() as cur:
-              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
-              cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
-              cur.execute("FLUSH PRIVILEGES")
-          conn.close()
+          import os
+          import sys
+
+          from connectors.generic_sql import _mssql_drivername
+
+          want = "mssql+" + os.environ["SQLSERVER_LEG"]
+          got = _mssql_drivername()
+          print(f"SQL Server DBAPI in use: {got} (leg wants {want})")
+          sys.exit(0 if got == want else 1)
           PY
 
-      - name: Run SQL Server CDC tests
+      - name: SQL Server CDC — Change Tracking, native CDC, CDC transfers
+        id: sqlserver_cdc
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         working-directory: apps/api
+        shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          # D196 / D203 seed their source rows through pyodbc + ODBC Driver 18
+          # (test fixtures, not the product path), so they run in the pyodbc
+          # leg; the product's CT / native CDC paths run in both legs.
+          odbc_fixture_tests=()
+          if [ "$SQLSERVER_LEG" = pyodbc ]; then
+            odbc_fixture_tests=(
+              tests/test_d196_sqlserver_change_tracking_cdc_live.py
+              tests/test_d203_sqlserver_native_cdc_null_live.py
+            )
+          fi
           python -m pytest \
             tests/test_cdc_sqlserver_ct_integration.py \
             tests/test_cdc_sqlserver_native_integration.py \
+            tests/test_cdc_sqlserver_native_transfer_e2e.py \
+            tests/test_cdc_sqlserver_capture_removal.py \
+            tests/test_cdc_sqlserver_capture_switch.py \
+            "${odbc_fixture_tests[@]}" \
+            tests/test_r12_d249_cdc_eos_sqlserver_fractional_bind.py \
+            tests/test_cdc_sqlserver_connection_options.py \
+            tests/test_cdc_sqlserver_live_helpers.py \
             tests/test_sqlserver_native_cdc.py \
             tests/test_sqlserver_oracle_cdc.py \
             tests/test_c3_lossy_pairs_sqlserver_live.py \
-            -v --tb=short
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_CDC_LEASE_BACKEND: memory
+            -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-cdc.xml"
 
-      - name: SQL Server warehouse SKU proof report
-        # Prove the production SQL Server routes (PG↔SQL Server, MySQL↔SQL Server)
-        # against the real mssql/server container without cloud credentials.
+      - name: SQL Server CDC — exactly-once apply (live)
+        id: sqlserver_cdc_eos
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         working-directory: apps/api
+        shell: bash
         run: |
-          python -m pytest \
-            tests/test_production_sku_matrix.py \
-            -k "sqlserver" \
-            -q --tb=short --durations=0 \
-            | tee sqlserver_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
-          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container; PG/MySQL peers via service containers)" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_PII_HASH_KEY: test-pii-key
-          DATAFLOW_ALLOW_STUB_WRITES: "1"
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          python -m pytest tests/test_cdc_exactly_once_live_engines.py \
+            -k sqlserver -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml"
 
-      - name: SQL Server warehouse SKU proof report
-        # SQL Server is a first-class production destination; prove file→SQL Server
-        # and database→SQL Server routes with the local mssql/server container.
+      - name: SQL Server SKU + matrix routes (peers started in this job)
+        id: sqlserver_matrix
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        # PRODUCTION_SKU routes (PG <-> SQL Server, MySQL -> SQL Server) and the
+        # universal-matrix cells pairing SQL Server with an engine this job
+        # starts: PostgreSQL, pgvector, MySQL, SQLite, generic_sql (SQLite
+        # file), every file format, and SQL Server itself. Cells whose peer
+        # has no emulator here (SaaS, Oracle, Kafka, cloud stores, vector
+        # DBs) are deselected, not skipped: they are not this job's claim.
         working-directory: apps/api
+        shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
           python -m pytest \
             tests/test_production_sku_matrix.py \
             tests/test_execute_tracked_universal_matrix.py \
-            -k "sqlserver" \
-            -q --tb=short --durations=0 \
-            | tee sqlserver_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
-          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Oracle routes remain credential-gated and skipped when no secret is present" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_PII_HASH_KEY: test-pii-key
-          DATAFLOW_ALLOW_STUB_WRITES: "1"
+            -k "sqlserver and (postgresql or pgvector or mysql or sqlite or generic_sql or file_ or sqlserver_to_database_sqlserver)" \
+            -v --tb=short -rs --durations=20 \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-matrix.xml"
+
+      - name: No SQL Server live test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job cdc-sqlserver --label driver=${{ matrix.driver }} --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-sqlserver-${{ matrix.driver }}.json"
+
+      - name: Upload SQL Server junit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlserver-live-junit-${{ matrix.driver }}
+          path: ${{ runner.temp }}/live-junit/
+          if-no-files-found: warn
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-cdc-sqlserver-${{ matrix.driver }}
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
   # Optional live IT: enable via repo variable ENABLE_ORACLE_CDC=true plus the
   # DATAFLOW_ORACLE_* secrets. The job always runs so the opt-out is a visible
   # skip reason, not an absent job.
+  # CLM-5: an Oracle job whose every live step skipped used to finish green.
+  # Opt-in now happens at the job: without ENABLE_ORACLE_CDC=true the job is
+  # *skipped* (grey, never a green check), and live-engine-evidence records
+  # Oracle as not_run. Enabled without the password secret is a broken
+  # setup and fails; enabled and configured, every step runs and the strict
+  # skip checker fails any skipped Oracle test.
   cdc-oracle:
+    if: ${{ vars.ENABLE_ORACLE_CDC == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Require Oracle enable + password secret
-        id: oracle_creds
+      - name: Require the Oracle password secret
         env:
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
-          ENABLE_ORACLE_CDC: ${{ vars.ENABLE_ORACLE_CDC }}
         run: |
-          if [ "${ENABLE_ORACLE_CDC}" != "true" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "ENABLE_ORACLE_CDC repo variable is not 'true' — Oracle CDC live IT stays opt-in"
-          elif [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "DATAFLOW_ORACLE_PASSWORD secret not set — skipping Oracle CDC live IT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
+            echo "ENABLE_ORACLE_CDC is 'true' but DATAFLOW_ORACLE_PASSWORD is unset: Oracle cannot be proven" >&2
+            exit 1
           fi
 
       - name: Set up Python
-        if: steps.oracle_creds.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install API deps + Oracle client
-        if: steps.oracle_creds.outputs.skip != 'true'
         run: |
           cd apps/api
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
           python -m pip install oracledb
 
       - name: Run Oracle CDC live IT
-        if: steps.oracle_creds.outputs.skip != 'true'
         working-directory: apps/api
         run: |
           python -m pytest \
             tests/test_cdc_oracle_integration.py \
             tests/test_sqlserver_oracle_cdc.py \
             tests/test_c3_lossy_pairs_oracle_live.py \
-            -v --tb=short
+            -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-cdc.xml"
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
@@ -770,7 +945,72 @@ jobs:
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
           DATAFLOW_ORACLE_SCHEMA: ${{ secrets.DATAFLOW_ORACLE_SCHEMA }}
 
+      - name: No Oracle live test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job cdc-oracle --junit "$RUNNER_TEMP/live-junit/oracle-cdc.xml" --out "$RUNNER_TEMP/live-engine/cdc-oracle.json"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-cdc-oracle
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
+  # A4: which engines CI actually ran green. Merges the live-engine results
+  # (scripts/check_live_skips.py) into connector_ci_evidence.json, the file
+  # the connector capability page reads. Configuration alone never makes an
+  # engine "live-verified". Reporting only: the proving jobs carry the gate.
+  live-engine-evidence:
+    name: Connector CI evidence
+    # api-tests proves PostgreSQL / MySQL / Mongo / Redis and the in-process
+    # engines; without it in needs, its results could be missing here.
+    needs: [changes, no-config-transfer, api-tests, cdc-sqlserver, cdc-oracle, api-and-web]
+    if: ${{ always() && !cancelled() && needs.changes.outputs.reuse != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download live-engine results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: live-engine-*
+          path: ${{ runner.temp }}/live-engine
+          merge-multiple: true
+
+      - name: Record that the opt-in Oracle job did not run
+        # The skipped cdc-oracle job wrote nothing. Stdlib only. The evidence
+        # file then says "not_run", and nothing may call Oracle proven.
+        if: ${{ needs.cdc-oracle.result == 'skipped' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-engine"
+          python3 apps/api/scripts/check_live_skips.py --job cdc-oracle --not-run "ENABLE_ORACLE_CDC is not 'true'" --out "$RUNNER_TEMP/live-engine/cdc-oracle.json"
+
+      - name: Build connector CI evidence (stdlib only)
+        run: |
+          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/connector-ci-evidence/connector_ci_evidence.json"
+
+      - name: Upload connector CI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-ci-evidence
+          path: ${{ runner.temp }}/connector-ci-evidence/connector_ci_evidence.json
+          if-no-files-found: error
+
+      # Last step on purpose: these lines sit at the end of the job log, so the
+      # snapshot can be refreshed from them without downloading the artifact.
+      - name: Print the per-job live-engine results
+        run: |
+          for f in "$RUNNER_TEMP"/live-engine/*.json; do
+            python3 -c 'import json,sys; print("DW-LIVE-RESULT", json.dumps(json.load(open(sys.argv[1])), separators=(",", ":"), sort_keys=True))' "$f"
+          done
+
   security:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -784,7 +1024,9 @@ jobs:
       - name: Install audit tools and default API deps
         run: |
           python -m pip install --upgrade pip pip-audit bandit ruff mypy
-          python -m pip install -r apps/api/requirements.txt
+          # Locked like the image, so the licence gate's bundled-library scan
+          # sees exactly the wheels Dockerfile.api installs.
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
 
       - name: Ruff baseline (Phase B8 allowlist)
         # Start narrow — BLE001/S110/DTZ001/F401 on Decision Kernel + Phase A/B paths.
@@ -841,6 +1083,51 @@ jobs:
         run: |
           pip-audit --local
 
+      - name: Licence gate (F3) — no unreviewed copyleft / unknown licence, NOTICE complete
+        # Scans the installed runtime + dev Python closure (importlib.metadata)
+        # and package-lock.json. A new GPL/AGPL/LGPL/SSPL/MPL or unknown licence
+        # fails until it is reviewed in licence-policy.json; a direct production
+        # dependency missing from NOTICE fails until NOTICE is regenerated.
+        run: |
+          python scripts/licence_scan.py --check --check-notice NOTICE --markdown "$RUNNER_TEMP/licence-report.md" --json "$RUNNER_TEMP/licence-report.json"
+          cat "$RUNNER_TEMP/licence-report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: LGPL source shipping step cannot drift (owner decision 2)
+        # Dockerfile.api ships the corresponding source of the approved LGPL
+        # packages. Fails when its package list differs from the approved
+        # entries in licence-policy.json, when one is not a runtime
+        # requirement, when an installed version has no sdist on PyPI, when
+        # pymssql no longer shows the FreeTDS version it links, or when an
+        # installed wheel bundles a native library (<pkg>.libs/) that
+        # scripts/bundled_libraries.py has not reviewed or whose (L)GPL
+        # source it cannot name.
+        run: python scripts/fetch_lgpl_sources.py --verify-dockerfile Dockerfile.api
+
+      - name: Debian package drift check (Dockerfile.api final stage)
+        # Fails when the final stage installs an apt package that
+        # licence-policy.json apt_packages has not reviewed (or no longer
+        # installs a listed one), or a compiler / -dev package. The image
+        # build itself ships the source of every copyleft package; the
+        # api-image job proves it.
+        run: python scripts/fetch_debian_sources.py --verify-dockerfile Dockerfile.api
+
+      - name: Companion source bundle drift check (Dockerfile.api stages)
+        # The companion stage lists exactly UPSTREAM's companion-located
+        # families (the GCC source) and runs the Debian step, which ships every
+        # copyleft package; the runtime stages run neither, and carry the
+        # pointer, the label and the build-time exactness check.
+        run: python scripts/source_bundle.py --verify-dockerfile Dockerfile.api
+
+      - name: Upload licence report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: licence-report
+          path: |
+            ${{ runner.temp }}/licence-report.md
+            ${{ runner.temp }}/licence-report.json
+          if-no-files-found: warn
+
       - name: bandit high-severity gate (production code)
         # Fail on High only — Medium SQL f-string debt is tracked separately;
         # key identifier paths are hardened via connectors/sql_identifiers.py.
@@ -850,6 +1137,143 @@ jobs:
           -r apps/api/connectors apps/api/services apps/api/src
           -lll
           -q
+
+  api-image:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    # Builds Dockerfile.api's three targets without a layer cache (so the
+    # source steps really run):
+    # - the deployable default target (what Railway builds), first and on its
+    #   own: it must not run any companion stage;
+    # - the companion source bundle (--target sources, what release.yml
+    #   publishes as <image>:<tag>-sources);
+    # - the release image (--target release): the runtime plus the pointer.
+    # Runtime checks: no compiler or build-essential; the small wheel sources
+    # and inventory present; no Debian or GCC source and no pointer; pip check;
+    # imports. Release checks: the SOURCES.md pointer, the label and the
+    # companion's SHA256SUMS. Companion checks: every file matches its
+    # SHA256SUMS, which equals the release image's copy. keyutils 1.5.8 has only a published MD5: this job
+    # records its SHA-256 once (after the MD5 check) and fails if it changes.
+    name: API image (runtime + companion source bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the deployable default target (no companion stages)
+        # What Railway builds for api, worker and scheduler. It must not run
+        # sources-collect: a deploy never downloads the Debian / GCC sources.
+        shell: bash
+        run: |
+          docker buildx build --load --progress=plain -f Dockerfile.api -t datawrap-api:ci . 2>&1 \
+            | tee "$RUNNER_TEMP/runtime-build.log"
+          if grep -qE "\[sources-collect|fetch_debian_sources\.py --dest|fetch_lgpl_sources\.py --companion" \
+              "$RUNNER_TEMP/runtime-build.log"; then
+            echo "the default target ran a companion stage (sources-collect)"; exit 1
+          fi
+
+      - name: Build the companion source bundle (target sources)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          target: sources
+          load: true
+          push: false
+          tags: datawrap-api:ci-sources
+
+      - name: Build the release image (target release, with the pointer)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          target: release
+          load: true
+          push: false
+          tags: datawrap-api:ci-release
+          build-args: SOURCES_REF=datawrap-api:ci-sources
+
+      - name: Check the runtime image
+        run: |
+          docker image ls datawrap-api:ci --format 'runtime image size: {{.Size}}'
+          cat > "$RUNNER_TEMP/check-runtime.sh" <<'CHECK'
+          set -e
+          if dpkg -s build-essential >/dev/null 2>&1; then echo "build-essential is in the image"; exit 1; fi
+          if command -v gcc >/dev/null 2>&1; then echo "gcc is in the image"; exit 1; fi
+          src=/usr/share/doc/datawrap/third-party-source
+          cd "$src"
+          for f in SHA256SUMS MANIFEST.json BUNDLED_LIBRARIES.json; do test -s "$f" || { echo "missing $src/$f"; exit 1; }; done
+          sha256sum --check --quiet SHA256SUMS
+          ls freetds-*.tar.bz2 paramiko-*.tar.gz psycopg2-*.tar.gz pymssql-*.tar.gz keyutils-*.tar.bz2 libxcrypt-*.tar.xz
+          if ls *.dsc gcc-* 2>/dev/null | grep -q .; then echo "Debian or GCC source is in the runtime image"; exit 1; fi
+          test ! -e DEBIAN_SOURCES.json || { echo "DEBIAN_SOURCES.json is in the runtime image"; exit 1; }
+          test ! -e /tmp/lgpl || { echo "the source-step scripts are in the runtime image"; exit 1; }
+          du -sh "$src"
+          pip check
+          python -c 'import fastapi, psycopg2, pymssql, pyodbc, snowflake.connector, preflight'
+          CHECK
+          docker run --rm -v "$RUNNER_TEMP/check-runtime.sh:/check-runtime.sh:ro" datawrap-api:ci sh /check-runtime.sh
+
+      - name: Check the release image (pointer to the companion)
+        run: |
+          docker image ls datawrap-api:ci-release --format 'release image size: {{.Size}}'
+          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' datawrap-api:ci-release)
+          [ "$label" = "datawrap-api:ci-sources" ] || { echo "the source label is '$label'"; exit 1; }
+          docker run --rm datawrap-api:ci-release sh -ec '
+            grep -q "datawrap-api:ci-sources" /usr/share/doc/datawrap/SOURCES.md
+            grep -q "Debian source packages" /usr/share/doc/datawrap/SOURCES.md
+            test -s /usr/share/doc/datawrap/companion/SHA256SUMS'
+          if docker run --rm datawrap-api:ci test -e /usr/share/doc/datawrap/SOURCES.md; then
+            echo "the deployable runtime carries the release pointer"; exit 1
+          fi
+
+      - name: Check the companion source bundle
+        run: |
+          docker image ls datawrap-api:ci-sources --format 'companion image size: {{.Size}}'
+          cid=$(docker create datawrap-api:ci-sources none)
+          mkdir -p "$RUNNER_TEMP/companion"
+          docker export "$cid" | tar -x -C "$RUNNER_TEMP/companion"
+          docker rm "$cid" >/dev/null
+          cd "$RUNNER_TEMP/companion"
+          sha256sum --check --quiet SHA256SUMS
+          ls *.dsc gcc-*.tar.xz DEBIAN_SOURCES.json MANIFEST.json
+          docker run --rm datawrap-api:ci-release cat /usr/share/doc/datawrap/companion/SHA256SUMS | diff - SHA256SUMS
+          python3 -c 'import json; d = json.load(open("DEBIAN_SOURCES.json")); print(len(d["sources"]), "Debian source packages in the companion")'
+          du -sh .
+
+      - name: Restore the recorded keyutils 1.5.8 SHA-256
+        uses: actions/cache@v4
+        with:
+          path: .ci-pins/keyutils-1.5.8.sha256
+          key: keyutils-1.5.8-sha256-v1
+
+      - name: keyutils 1.5.8 - MD5 verified, SHA-256 recorded and held
+        # Only an MD5 was ever published for keyutils-1.5.8.tar.bz2 (Arch
+        # Linux's 1.5.8-1 PKGBUILD). The image build verified it; this step
+        # re-checks it, records the tarball's SHA-256 on the first run, and
+        # fails if a later download differs. Commit the recorded value as
+        # UPSTREAM sha256 in scripts/bundled_libraries.py to make the build
+        # itself enforce it.
+        run: |
+          out=$(docker run --rm datawrap-api:ci sh -c 'cd /usr/share/doc/datawrap/third-party-source && md5sum keyutils-1.5.8.tar.bz2 && sha256sum keyutils-1.5.8.tar.bz2')
+          md5=$(echo "$out" | awk 'NR==1 {print $1}')
+          sha256=$(echo "$out" | awk 'NR==2 {print $1}')
+          [ "$md5" = "3c7f463039b83833c12a9414c2fcb389" ] || { echo "::error::keyutils-1.5.8.tar.bz2 MD5 is $md5"; exit 1; }
+          pin=.ci-pins/keyutils-1.5.8.sha256
+          if [ -f "$pin" ]; then
+            if [ "$(cat "$pin")" != "$sha256" ]; then
+              echo "::error::keyutils-1.5.8.tar.bz2 sha256 changed: recorded $(cat "$pin"), now $sha256"
+              exit 1
+            fi
+            echo "keyutils-1.5.8.tar.bz2 sha256 $sha256 matches the recorded value"
+          else
+            mkdir -p .ci-pins && echo "$sha256" > "$pin"
+            echo "::notice::recorded keyutils-1.5.8.tar.bz2 sha256 $sha256 (MD5 verified); commit it as UPSTREAM sha256"
+          fi
 
   # Wizard project plus the production pageerror smoke. Flag-off Transfer
   # Studio stays on the dev server; prod-smoke loads `vite preview` of the
@@ -862,10 +1286,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Wizard and production smoke
+      # The a11y project (UX-16) is the axe-core WCAG 2.2 A/AA gate over the
+      # main screens: any critical or serious violation fails this job. The
+      # phone project (UX-5) taps every Destination card at 390 px.
+      - name: Wizard, accessibility gate and production smoke
         uses: ./.github/actions/studio-surface
         with:
           playwright_project: wizard
+          extra_playwright_projects: a11y phone
           production_smoke: "true"
           artifact_name: studio-ui-wizard
 
@@ -902,6 +1330,7 @@ jobs:
     name: Required PR gate
     if: ${{ always() && !cancelled() }}
     needs:
+      - changes
       - mapping-evidence
       - ai-offline-correctness
       - pilot-answer-quality
@@ -912,6 +1341,7 @@ jobs:
       - cdc-sqlserver
       - cdc-oracle
       - security
+      - api-image
       - studio-ui
       - plan-conflict-e2e
     runs-on: ubuntu-latest
@@ -927,11 +1357,22 @@ jobs:
           API_AND_WEB: ${{ needs.api-and-web.result }}
           CDC_SQLSERVER: ${{ needs.cdc-sqlserver.result }}
           CDC_ORACLE: ${{ needs.cdc-oracle.result }}
+          ENABLE_ORACLE_CDC: ${{ vars.ENABLE_ORACLE_CDC }}
           SECURITY: ${{ needs.security.result }}
+          API_IMAGE: ${{ needs.api-image.result }}
           STUDIO_UI: ${{ needs.studio-ui.result }}
           PLAN_CONFLICT_E2E: ${{ needs.plan-conflict-e2e.result }}
+          CHANGES: ${{ needs.changes.result }}
+          REUSE: ${{ needs.changes.outputs.reuse }}
+          REUSED_FROM: ${{ needs.changes.outputs.from }}
+          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests cdc-sqlserver security api-image "
         run: |
           failed=0
+          if [ "$CHANGES" != "success" ]; then
+            echo "changes: $CHANGES"
+            failed=1
+          fi
+          [ "$REUSE" = "true" ] && echo "Backend checks reused from $REUSED_FROM (web-only change)."
           for check in \
             "mapping-evidence:$MAPPING_EVIDENCE" \
             "ai-offline-correctness:$AI_OFFLINE" \
@@ -943,11 +1384,19 @@ jobs:
             "cdc-sqlserver:$CDC_SQLSERVER" \
             "cdc-oracle:$CDC_ORACLE" \
             "security:$SECURITY" \
+            "api-image:$API_IMAGE" \
             "studio-ui:$STUDIO_UI" \
             "plan-conflict-e2e:$PLAN_CONFLICT_E2E"; do
             name="${check%%:*}"
             result="${check##*:}"
             echo "$name: $result"
+            if [ "$name" = "cdc-oracle" ] && [ "$result" = "skipped" ] && [ "$ENABLE_ORACLE_CDC" != "true" ]; then
+              # Opt-in and off: skipped (grey), recorded not_run, never green.
+              continue
+            fi
+            if [ "$result" = "skipped" ] && [ "$REUSE" = "true" ] && [[ "$REUSABLE" == *" $name "* ]]; then
+              continue
+            fi
             if [ "$result" != "success" ]; then
               failed=1
             fi

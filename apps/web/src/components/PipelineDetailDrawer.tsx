@@ -61,7 +61,6 @@ interface PipelineDetailDrawerProps {
   onClose: () => void;
   onRun: () => void;
   /** Delta sync on the signed contract. One confirm. */
-  onSync?: () => void;
   /** Re-read from the start on the signed contract. One confirm. */
   onFullResync?: () => void;
   onEdit: () => void;
@@ -109,7 +108,6 @@ export function PipelineDetailDrawer({
   breakerHint,
   onClose,
   onRun,
-  onSync,
   onFullResync,
   onEdit,
   onDelete,
@@ -439,17 +437,10 @@ export function PipelineDetailDrawer({
             >
               {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
             </Button>}
-            {!decisionPending && onSync && (
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-                title="Sync the signed contract. One confirm."
-                onClick={onSync}
-              >
-                Sync now
-              </Button>
-            )}
+            {runRefusal ? (
+              // UX-22: the reason is on the page, not only in a tooltip.
+              <p className="df2-permission-inline" data-testid="pipeline-run-refusal">{runRefusal}</p>
+            ) : null}
           </div>
           <div className="df2-drawer-actions-extra">
             {secondaryActions()}
@@ -689,7 +680,7 @@ export function PipelineDetailDrawer({
             )}
             <p className="df2-drawer-empty-line">
               {liveCampaign?.next_action
-                || "Parallel run compares live source vs destination column profiles (Google Dual Run cycles). Overwrite loads record a cycle automatically. Not per-cell Gate-8."}
+                || "Parallel run compares live source and destination column profiles over repeated cycles. Overwrite loads record a cycle automatically. It is a profile check, not a per-cell proof."}
             </p>
             <Button
               size="sm"

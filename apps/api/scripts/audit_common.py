@@ -60,9 +60,10 @@ def configure_store(file: str | None = None, mongo_url_env: str | None = None) -
 def load_saved_connectors(args: argparse.Namespace) -> list[Any]:
     """Every saved connector (system scope), optionally for one workspace."""
     configure_store(args.file, args.mongo_url_env)
-    from services.connector_store import list_connectors
+    from services.connector_store import list_connectors, read_only
 
-    connectors = list_connectors()
+    with read_only():  # an audit reads the store as it is, never rewrites it
+        connectors = list_connectors()
     if args.workspace:
         connectors = [c for c in connectors if c.workspace_id == args.workspace]
     return sorted(connectors, key=lambda c: (c.workspace_id, c.name))

@@ -79,6 +79,60 @@ export async function fetchFormToken(purpose: string): Promise<string | null> {
   }
 }
 
+/** apps/api/services/form_token.py MIN_FILL_MS: a form posted sooner gets a decoy 202. */
+export const FORM_TOKEN_MIN_FILL_MS = 3000;
+/** Slack for the request in flight; the token was issued before we received it. */
+const FORM_TOKEN_MARGIN_MS = 250;
+
+export interface FormTokenGateDeps {
+  fetchToken: (purpose: string) => Promise<string | null>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * UX-28: the API silently drops (decoy 202) a signup or reset posted within
+ * MIN_FILL_MS of its form token, without a token, or with a token it already
+ * used, and the screen then said a code was sent. take() waits out the floor,
+ * hands each token out once (prefetching the next), and refuses to send when
+ * no token can be had, so nothing is dropped silently.
+ */
+export class FormTokenGate {
+  private pending: Promise<{ token: string | null; receivedAt: number }> | null = null;
+  private readonly deps: FormTokenGateDeps;
+
+  constructor(private readonly purpose: string, deps: Partial<FormTokenGateDeps> = {}) {
+    this.deps = {
+      fetchToken: deps.fetchToken ?? fetchFormToken,
+      now: deps.now ?? (() => Date.now()),
+      sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    };
+  }
+
+  prefetch(): void {
+    if (this.pending) return;
+    this.pending = this.deps.fetchToken(this.purpose).then((token) => ({ token, receivedAt: this.deps.now() }));
+  }
+
+  async take(): Promise<string> {
+    this.prefetch();
+    let slot = await this.pending!;
+    this.pending = null;
+    if (!slot.token) {
+      this.prefetch();
+      slot = await this.pending!;
+      this.pending = null;
+    }
+    if (!slot.token) {
+      throw new SignupApiError(0, "form_token_unavailable", "We couldn't prepare this form. Refresh the page and try again.");
+    }
+    const wait = slot.receivedAt + FORM_TOKEN_MIN_FILL_MS + FORM_TOKEN_MARGIN_MS - this.deps.now();
+    if (wait > 0) await this.deps.sleep(wait);
+    this.prefetch();
+    return slot.token;
+  }
+}
+
 export async function signupRequest(input: {
   email: string;
   name: string;

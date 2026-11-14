@@ -241,11 +241,12 @@ def test_mirror_soft_completes_when_a_census_count_fails(client, monkeypatch):
         original = mirror_engine._dest_engine_count
         forced: list[str] = []
 
-        def failing_count(conn, sql):
+        def failing_count(conn, sql, params=None):
             if not forced and "EXISTS" in sql:
                 forced.append(sql)
                 sql = "SELECT COUNT(*) FROM pg_class WHERE 1 / 0 = 1"
-            return original(conn, sql)
+                params = None  # the forced statement binds nothing
+            return original(conn, sql, params)
 
         monkeypatch.setattr(mirror_engine, "_dest_engine_count", failing_count)
         job = r.run(client, args)

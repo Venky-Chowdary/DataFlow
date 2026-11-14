@@ -616,6 +616,8 @@ class MongoDBService:
 
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
+        # G11: a job created after the naming upgrade is never pre-G11 history.
+        job_data.setdefault("naming_scheme", 1)
         job_data["started_at"] = None
         job_data["completed_at"] = None
         job_data["records_processed"] = 0
@@ -1297,6 +1299,51 @@ class MongoDBService:
         result = collection.update_one(query, {"$set": updates})
         return result.matched_count > 0
 
+    def naming_history_jobs(
+        self, destination_object: str, *, workspace_id: str, limit: int = 50,
+        max_time_ms: int = 2000,
+    ) -> list[dict]:
+        """Jobs of ``workspace_id`` that wrote rows to ``destination_object``, newest first.
+
+        G11 naming history (``services.naming_history``): only the fields that
+        identify the destination, its naming stamps, and that rows were
+        written. Index-backed (workspace + object) and time-bounded.
+        """
+        db = self.get_database()
+        jobs = db["transfer_jobs"]
+        obj = str(destination_object)
+        query = {"$and": [
+            # A missing / null / blank workspace_id is "no workspace" here too
+            # (D218 rows), exactly as the memory store reads it (re-check F2).
+            WorkspaceFilter.only(str(workspace_id or "")).mongo_query(),
+            {"$or": [{"destination_collection": obj}, {"naming.object": obj}]},
+            {"$or": [{"records_processed": {"$gt": 0}},
+                     {"status": {"$in": sorted(COMPLETED_STATUSES)}}]},
+        ]}
+        projection = {"destination_type": 1, "dest_connector_id": 1, "status": 1,
+                      "records_processed": 1, "created_at": 1, "naming": 1,
+                      "naming_scheme": 1, "transfer_request.destination.host": 1,
+                      "transfer_request.destination.port": 1,
+                      "transfer_request.destination.connection_string": 1,
+                      "transfer_request.destination.database": 1,
+                      "transfer_request.destination.schema": 1, "destination_database": 1,
+                      "transfer_request.destination.connector_id": 1}
+        cursor = (jobs.find(query, projection).sort([("created_at", -1), ("_id", -1)])
+                  .limit(max(1, int(limit))).max_time_ms(int(max_time_ms)))
+        return [dict(doc, _id=str(doc["_id"])) for doc in cursor]
+
+    def ensure_naming_history_indexes(self, *, max_time_ms: int = 30000) -> bool:
+        """The naming-history indexes, newest-first, so the sort is not in memory.
+
+        Built at API startup in the background (``services.naming_history``),
+        never on a request; each build is bounded by ``max_time_ms``.
+        """
+        jobs = self.get_database()["transfer_jobs"]
+        for field in ("naming.object", "destination_collection"):
+            jobs.create_index([("workspace_id", 1), (field, 1), ("created_at", -1)],
+                              maxTimeMS=int(max_time_ms))
+        return True
+
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace — the legacy rows the D154 backfill assigns.
 
@@ -1852,6 +1899,7 @@ class MemoryMongoDBService:
         job["_id"] = oid
         job.setdefault("status", "pending")
         job.setdefault("created_at", datetime.now(timezone.utc))
+        job.setdefault("naming_scheme", 1)  # G11 naming history (see MongoDBService)
         job.setdefault("started_at", None)
         job.setdefault("completed_at", None)
         job.setdefault("records_processed", 0)
@@ -2124,6 +2172,30 @@ class MemoryMongoDBService:
             if touch_updated_at:
                 rec["updated_at"] = datetime.now(timezone.utc)
         return True
+
+    def ensure_naming_history_indexes(self, *, max_time_ms: int = 30000) -> bool:
+        return True  # the memory store has no indexes to build
+
+    def naming_history_jobs(
+        self, destination_object: str, *, workspace_id: str, limit: int = 50,
+        max_time_ms: int = 2000,
+    ) -> list[dict]:
+        obj = str(destination_object)
+
+        def stamped(job: dict) -> bool:
+            return any(isinstance(n, dict) and n.get("object") == obj
+                       for n in (job.get("naming") or []))
+
+        scope = WorkspaceFilter.only(str(workspace_id or ""))
+        out = [
+            dict(j) for j in list(self._jobs.values())
+            if scope.matches(j.get("workspace_id"))
+            and (str(j.get("destination_collection") or "") == obj or stamped(j))
+            and (int(j.get("records_processed") or 0) > 0 or j.get("status") in COMPLETED_STATUSES)
+        ]
+        out.sort(key=lambda j: (_created_sort_stamp(j.get("created_at")), str(j.get("_id"))),
+                 reverse=True)
+        return out[: max(1, int(limit))]
 
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace (see ``MongoDBService.list_unscoped_jobs``)."""

@@ -26,19 +26,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The whole suite in one process no longer fits: run 42398708790 (2026-11-07)
+  # spent 142 min in pytest and reached 55% when the 150-min limit cancelled
+  # it (18:03 -> 20:26; 11% at 18:34, 23% at 19:25, 46% at 20:07), i.e. about
+  # 260 min for the whole suite. It is split into six shards with the same
+  # file-hash sharding as the PR api-tests (tests/conftest.py::_select_ci_shard),
+  # whose six shards take 27-50 min on the same suite without SQL Server /
+  # Kafka; ~45-60 min per shard is expected, so the 150-min limit per shard is
+  # kept (not raised) and each shard still starts every engine.
   engine-suite:
-    name: Full pytest suite (live engines)
+    name: Full pytest suite (live engines, ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    # SQL Server is started in a step (start_ci_databases.sh sqlserver), not
+    # as a service: a service container cannot take a per-run password or
+    # run the CT / native CDC init, and it ran without SQL Server Agent, so
+    # every native-CDC capture-job test could only skip or fail.
     services:
-      mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        ports:
-          - 1433:1433
-        env:
-          ACCEPT_EULA: "Y"
-          SA_PASSWORD: Dataflow_CI_2026!
-          MSSQL_PID: Developer
       redis:
         image: redis:7
         ports:
@@ -47,6 +55,7 @@ jobs:
 
     env:
       PYTHONPATH: apps/api:packages/preflight/src:apps/api/src:apps/api/tests
+      DATAFLOW_TEST_SHARD: ${{ matrix.shard }}/6
       DATAFLOW_JOB_STORE: memory
       DATAFLOW_DISABLE_OBJECT_STORE: "1"
       DATAFLOW_ENGINE_DIGEST: "1"
@@ -54,44 +63,25 @@ jobs:
       # No background Training Agent inside TestClient lifespans.
       DATAFLOW_TRAINING: "off"
       # Engine credentials come only from env / CI secrets — never literals
-      # in test code (CI-2).
-      MSSQL_SA_PASSWORD: "Dataflow_CI_2026!"
+      # in test code (CI-2). The SQL Server SA password is generated per run
+      # by the "Generate a per-run SQL Server SA password" step and exported
+      # through GITHUB_ENV (it is not a job-level value: one source).
+      #
+      # Precedence: a value appended to $GITHUB_ENV replaces a job-level env
+      # value for every later step; only a step-level env outranks it. The
+      # PostgreSQL / MySQL / Mongo connection settings therefore live only in
+      # .github/ci-live-engines.vars (loaded right after checkout), and none of
+      # its keys is set here (tests/test_ci_live_env_wiring.py checks it). A
+      # step that needs another value sets it on the step: the suite's MySQL
+      # root password, below.
       KAFKA_SASL_CI_PASSWORD: "dataflow-ci-secret"
-      # Postgres (libpq standard — tests/helpers/live_env resolves these first)
-      PGHOST: 127.0.0.1
-      PGPORT: "5432"
-      PGUSER: dataflow
-      PGPASSWORD: dataflow
-      PGDATABASE: dataflow
-      DATAFLOW_PG_HOST: 127.0.0.1
-      # MySQL
-      MYSQL_HOST: 127.0.0.1
-      MYSQL_PORT: "3306"
-      MYSQL_DATABASE: dataflow
-      MYSQL_USER: dataflow
-      MYSQL_PASSWORD: dataflow
-      DATAFLOW_MYSQL_HOST: 127.0.0.1
-      DATAFLOW_MYSQL_PORT: "3306"
-      DATAFLOW_MYSQL_DB: dataflow
-      DATAFLOW_MYSQL_USER: dataflow
-      DATAFLOW_MYSQL_PASSWORD: dataflow
-      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
-      DATAFLOW_TEST_MYSQL_PORT: "3306"
-      DATAFLOW_TEST_MYSQL_DB: dataflow
-      DATAFLOW_TEST_MYSQL_USER: dataflow
-      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
-      # SQL Server
+      # SQL Server (password: generated per run, see the steps)
+      DATAFLOW_SQLSERVER_ENABLE: "1"
       DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
       DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
       DATAFLOW_TEST_MSSQL_USER: sa
-      DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
       DATAFLOW_SQLSERVER_USER: sa
-      DATAFLOW_SQLSERVER_PASSWORD: Dataflow_CI_2026!
-      # Mongo — replica-set URI so sessions/change streams work
-      MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      DATAFLOW_LIVE_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      P2_MONGO_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
       # Redis
       REDIS_URL: redis://127.0.0.1:6379
       DATAFLOW_REDIS_URL: redis://127.0.0.1:6379
@@ -109,6 +99,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Export live-engine connection settings (every name the suite reads)
+        # The one source of the PostgreSQL / MySQL / Mongo settings, under
+        # every spelling the suite reads (PGHOST, DATAFLOW_PG_TEST_DSN,
+        # DATAFLOW_TEST_PGVECTOR_PORT, R11_PG_LOGICAL_*, ...). GITHUB_ENV
+        # outranks job-level env, so the job sets none of these keys.
+        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
+
+      - name: Generate a per-run SQL Server SA password (masked)
+        run: |
+          pw="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${pw}"
+          {
+            echo "MSSQL_SA_PASSWORD=${pw}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${pw}"
+            echo "DATAFLOW_SQLSERVER_PASSWORD=${pw}"
+          } >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -117,14 +124,12 @@ jobs:
       - name: Install API + preflight deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
+          # Runtime + test tools (pytest, hypothesis, moto, fakesnow).
+          # Under the image's lock, so the nightly tests the shipped versions.
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
           python -m pip install -e packages/preflight
-          # pymssql is optional in requirements but one driver-fallback test
-          # asserts the import works.
-          python -m pip install pymssql
           # CI-3: nightly order shuffling so order-dependent tests surface.
           python -m pip install pytest-randomly
-          python -m pip install hypothesis
 
       - name: Start Postgres / MySQL / Mongo (server args need docker run)
         # GH service 'options' go to docker create BEFORE the image — server
@@ -158,21 +163,19 @@ jobs:
             sleep 2
           done
 
-      - name: Wait for SQL Server
-        run: |
-          cid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
-          sqlcmd=""
-          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
-            docker exec "$cid" test -x "$c" && sqlcmd="$c" && break
-          done
-          [ -n "$sqlcmd" ] || { echo "no sqlcmd in image"; exit 1; }
-          for i in $(seq 1 60); do
-            if docker exec "$cid" "$sqlcmd" -S 127.0.0.1 -U sa -P 'Dataflow_CI_2026!' -C -Q 'SELECT 1' >/dev/null 2>&1; then
-              echo "mssql ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "mssql did not become ready" && exit 1
+      - name: Start SQL Server (Agent on, CT + native CDC init)
+        run: bash .github/scripts/start_ci_databases.sh sqlserver
+
+      - name: Start fake-gcs and Azurite (GCS / ADLS -> PostgreSQL tests)
+        # The same emulators the PR jobs start (ci-services action). Without
+        # them test_execute_tracked_gcs_to_postgresql / _adls skipped next to
+        # a running PostgreSQL ("... or PostgreSQL emulator not reachable").
+        run: bash .github/scripts/start_ci_databases.sh gcs adls
+
+      - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
+        # Without it the product falls back to pymssql (FreeTDS), which
+        # refuses encrypt=yes, and every SQL Server matrix cell skipped.
+        run: bash .github/scripts/install_msodbcsql18.sh
 
       - name: Start Kafka (KRaft, PLAINTEXT + SASL_PLAINTEXT)
         # apache/kafka maps KAFKA_* env to server.properties; the SASL
@@ -221,13 +224,10 @@ jobs:
           docker exec mysql \
             mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow >/dev/null 2>&1 \
             && say mysql ok || { say mysql MISS; fail=1; }
-          scid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
-          mssqlok=0
-          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
-            if docker exec "$scid" "$c" -S 127.0.0.1 -U sa -P "$MSSQL_SA_PASSWORD" \
-                 -C -Q 'SELECT 1' >/dev/null 2>&1; then mssqlok=1; break; fi
-          done
-          [ "$mssqlok" = 1 ] && say mssql ok || { say mssql MISS; fail=1; }
+          SQLCMDPASSWORD="$MSSQL_SA_PASSWORD" docker exec -e SQLCMDPASSWORD \
+            dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
+            -C -Q 'SELECT 1' >/dev/null 2>&1 \
+            && say mssql ok || { say mssql MISS; fail=1; }
           docker exec mongo \
             mongosh --quiet --eval 'exit(db.runCommand({ping:1}).ok ? 0 : 1)' \
             >/dev/null 2>&1 && say mongo ok || { say mongo MISS; fail=1; }
@@ -253,32 +253,107 @@ jobs:
           done
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
+          # MySQL 8's auto-generated CA, for the TLS tests (same as the PR jobs).
+          docker cp "$cid":/var/lib/mysql/ca.pem "$RUNNER_TEMP/mysql-ca.pem"
+          echo "DATAFLOW_TEST_MYSQL_CA=$RUNNER_TEMP/mysql-ca.pem" >> "$GITHUB_ENV"
 
-      - name: Full suite
+      - name: Full suite (shard ${{ matrix.shard }}/6)
         working-directory: apps/api
+        env:
+          # This job's MySQL container is started with MYSQL_ROOT_PASSWORD=root_ci,
+          # unlike the PR jobs' (the vars file's value). Step-level env is the
+          # only level that outranks the GITHUB_ENV value from the vars file.
+          DATAFLOW_TEST_MYSQL_ROOT_PASSWORD: root_ci
         run: |
           python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
             --junitxml=/tmp/pytest-junit.xml
+
+      - name: No live-engine test may skip (engine-scoped)
+        # A skip whose message names an engine this job starts (postgres,
+        # mysql, mongo, redis; kafka, sqlserver, gcs and adls are reported
+        # only) fails the shard, even when it also names an engine the job
+        # lacks, unless it is an expected skip in
+        # apps/api/scripts/live_engine_jobs.json (job `engine-suite`).
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job engine-suite --label shard=${{ matrix.shard }} --junit /tmp/pytest-junit.xml --out "$RUNNER_TEMP/live-engine/engine-suite-${{ matrix.shard }}.json"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-engine-suite-${{ matrix.shard }}
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
       - name: Upload pytest junit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-junit-${{ github.run_id }}
+          name: pytest-junit-${{ github.run_id }}-${{ matrix.shard }}
           path: /tmp/pytest-junit.xml
           if-no-files-found: error
 
-      - name: Route certification matrix
-        if: always()
-        working-directory: apps/api
-        # Grades every PRODUCTION_SKU route × sync mode from this run's results.
-        # Exits non-zero when a cell failed.
+  # Whole-run reports need every shard's results.
+  engine-suite-report:
+    name: Route certification + connector CI evidence
+    needs: engine-suite
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
         run: |
-          python scripts/route_certification_report.py --junit /tmp/pytest-junit.xml \
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Download shard junit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-junit-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/junit
+
+      - name: Download live-engine results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: live-engine-engine-suite-*
+          path: ${{ runner.temp }}/live-engine
+          merge-multiple: true
+
+      - name: Connector CI evidence (nightly engines, incl. Kafka)
+        run: |
+          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/connector-ci-evidence/connector_ci_evidence.json"
+
+      - name: Upload connector CI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-ci-evidence-nightly-${{ github.run_id }}
+          path: ${{ runner.temp }}/connector-ci-evidence/connector_ci_evidence.json
+          if-no-files-found: error
+
+      - name: Route certification matrix
+        if: ${{ always() }}
+        working-directory: apps/api
+        # Grades every PRODUCTION_SKU route x sync mode from all shards'
+        # results. Exits non-zero when a cell failed (pipefail: the old
+        # `| tee` without it could never fail the step).
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          python scripts/route_certification_report.py --junit $(find "$RUNNER_TEMP/junit" -name '*.xml' | sort) \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload route certification matrix
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: route-certification-${{ github.run_id }}

@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { createPortal } from "react-dom";
 import { DtIcon } from "./DtIcon";
 import { Dialog } from "./ui/Dialog";
+import { ErrorReferenceChip } from "./ErrorReferenceChip";
+import { splitReference } from "../lib/errorCopy";
 import {
   mergeToastStack,
   toastFingerprint,
@@ -175,7 +177,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             </span>
             <div className="dt-toast-body">
               <strong className="dt-toast-title">{t.title}</strong>
-              {t.message && <span className="dt-toast-message">{t.message}</span>}
+              {t.message && <span className="dt-toast-message">{splitReference(t.message).text}</span>}
+              {t.message && <ErrorReferenceChip reference={splitReference(t.message).reference} />}
             </div>
             <button type="button" className="dt-toast-close" onClick={() => openReview([t])}
               aria-label="View notification details" aria-haspopup="dialog" title="View notification details">
@@ -204,7 +207,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {review.map((item) => (
           <section key={item.id} className={`dt-toast-review-item dt-toast-review-item--${item.tone}`}>
             <h3>{item.title}</h3>
-            {item.message && <p>{item.message}</p>}
+            {item.message && <p>{splitReference(item.message).text}</p>}
+            {item.message && <ErrorReferenceChip reference={splitReference(item.message).reference} />}
           </section>
         ))}
       </Dialog>

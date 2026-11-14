@@ -384,8 +384,9 @@ def describe_session_encryption(enc: dict[str, Any]) -> str:
     asked = _ASKED.get(enc.get("requested") or "", "")
     if enc.get("encrypted"):
         trust = "certificate verified" if enc.get("verified") else "certificate unverified"
-        head = (f"session encrypted ({enc.get('version') or 'TLS'} {enc.get('cipher')}, "
-                f"{trust})")
+        # UX-31: the protocol and trust are what an operator acts on; the
+        # cipher suite name is detail for logs, not for a success message.
+        head = f"session encrypted ({enc.get('version') or 'TLS'}, {trust})"
     else:
         head = "session NOT encrypted"
     note = f"; {enc['note']}" if enc.get("note") else ""

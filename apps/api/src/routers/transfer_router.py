@@ -10,6 +10,7 @@ from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
+from services.secret_fields import public_plan_dict
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
 from typing import Any, Optional
@@ -68,6 +69,17 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
         logging.getLogger(__name__).warning("resource ACL check fail-closed: %s", exc)
         return False
     return True
+
+
+def _public_destination(summary: Any) -> Any:
+    """A destination summary without this server's file-system path (SEC-12).
+
+    A file export is named by its ``filename`` and ``download_url``; where it
+    sits on the API host is not the caller's business.
+    """
+    if not isinstance(summary, dict) or not summary.get("download_url"):
+        return summary
+    return {k: v for k, v in summary.items() if k not in ("path", "export_path")}
 
 
 def _stamp_job_mapping_artifacts(
@@ -483,8 +495,12 @@ def transfer_capabilities():
     from ..transfer.connector_capabilities import manifest_summary
     from ..transfer.registry import get_capabilities
 
+    from services.destination_sync_modes import capabilities_destination_sync_modes
+
     caps = get_capabilities()
     caps["platform"] = manifest_summary()
+    # CLM-8: per destination, the sync modes Validate's destination gates allow.
+    caps["destination_sync_modes"] = capabilities_destination_sync_modes()
     caps["format_conversion"] = __import__(
         "services.format_converter", fromlist=["conversion_matrix"]
     ).conversion_matrix()
@@ -858,7 +874,7 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
             resource=f"plan/{plan.id}",
             details={"name": plan.name, "source_columns": len(plan.source_columns)},
         )
-        return {"plan": plan.to_dict()}
+        return {"plan": public_plan_dict(plan)}
 
     # A plan write can wait on the store lock: off the loop, on the plan-write pool.
     return await run_plan_write(_create)
@@ -871,7 +887,7 @@ async def get_transfer_plan(plan_id: str):
     plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    return {"plan": plan.to_dict()}
+    return {"plan": public_plan_dict(plan)}
 
 
 @router.patch("/plans/{plan_id}")
@@ -880,7 +896,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
 
     try:
         plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
-        return {"plan": plan.to_dict()}
+        return {"plan": public_plan_dict(plan)}
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -954,7 +970,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         plan = await run_plan_write(
             sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
         )
-        return {"plan": plan.to_dict()}
+        return {"plan": public_plan_dict(plan)}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A newer mapping revision exists than the one this edit was based on. "
@@ -1111,7 +1127,7 @@ async def approve_transfer_plan(
 
     try:
         plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
-        return {"plan": plan.to_dict()}
+        return {"plan": public_plan_dict(plan)}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A different mapping revision is active than the one Validate checked. Review "
@@ -1146,7 +1162,7 @@ async def transfer_plan_run_payload(plan_id: str):
     from services.transfer_plan_service import build_run_payload
 
     try:
-        return await asyncio.to_thread(build_run_payload, plan_id)
+        payload = await asyncio.to_thread(build_run_payload, plan_id)
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -1154,6 +1170,13 @@ async def transfer_plan_run_payload(plan_id: str):
             public_message="Could not build transfer run payload.",
             status_code=400,
         ) from e
+    # A plan never returns raw endpoint credentials (SEC-4).
+    from services.secret_config import mask_secrets_in_text
+    from services.secret_fields import mask_secret_tree
+
+    for side in ("source", "destination"):
+        payload[side] = mask_secret_tree(payload.get(side) or {}, mask_url=mask_secrets_in_text)
+    return payload
 
 
 @router.post("/analyze-file")
@@ -1429,6 +1452,10 @@ async def execute_transfer_json(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -1533,7 +1560,7 @@ async def execute_transfer_json(
         "elapsed_seconds": result.elapsed_seconds,
         "records_per_second": result.records_per_second,
         "source": result.source_summary,
-        "destination": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
@@ -1700,6 +1727,11 @@ async def run_universal_transfer(
         "kind": dest_kind, "format": dest_format, "table": dest_table or dest_collection,
         "file_format": dest_extra.get("file_format", ""), "extra": dest_extra,
     })
+    from services.target_name_legacy import legacy_field_policy_refusal
+
+    _policy_err = legacy_field_policy_refusal(dest_extra)
+    if _policy_err:  # G11: a typo must not silently read as "no acknowledgement"
+        raise HTTPException(status_code=422, detail=_policy_err)
 
     _refuse_unavailable_destination(
         {
@@ -2032,6 +2064,10 @@ async def run_universal_transfer(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
 
     engine = get_transfer_engine()
     try:
@@ -2137,8 +2173,8 @@ async def run_universal_transfer(
         "records_per_second": result.records_per_second,
         "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
-        "destination": result.destination_summary,
-        "destination_summary": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
+        "destination_summary": _public_destination(result.destination_summary),
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,

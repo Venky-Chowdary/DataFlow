@@ -153,20 +153,70 @@ class _CatalogFallbackEmbedder:
         return [[float(x) for x in row] for row in data]
 
 
-def _sentence_transformer_or_fallback(model_name: str) -> Embedder:
-    """Local MiniLM when the library is installed; otherwise the TF-IDF fallback."""
-    short = model_name.split("/", 1)[1] if model_name.startswith("sentence-transformers/") else model_name
+#: The explicit, non-semantic choice. Picking it at Map is the only way a
+#: vector load gets TF-IDF vectors (CLM-11).
+TFIDF_MODEL = "tfidf/local"
+_DEFAULT_SEMANTIC_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def sentence_transformers_installed() -> bool:
     try:
         import sentence_transformers  # noqa: F401
     except ImportError:
-        logging.getLogger(__name__).warning(
-            "sentence_transformers is not installed; vector destinations use the "
-            "TF-IDF fallback (%s). Install requirements-rag.txt for MiniLM.",
-            model_name,
-        )
-        note_embedding_fallback("tfidf_fallback", model_name)
-        return _CatalogFallbackEmbedder()
+        return False
+    return True
+
+
+def semantic_model_missing_message(model_name: str) -> str:
+    return (
+        f"The embedding model {model_name} is not installed on this server, and "
+        "Datawrap does not substitute another model silently. Choose the embedding "
+        "provider for this destination (openai/, azure/, cohere/, bedrock/ or "
+        f"openai-compatible/), or choose {TFIDF_MODEL} to store non-semantic TF-IDF "
+        "vectors on purpose."
+    )
+
+
+def _sentence_transformer_or_fallback(model_name: str) -> Embedder:
+    """Local MiniLM when the library is installed; otherwise refuse (CLM-11).
+
+    A load used to fall back to TF-IDF vectors (32 dimensions, not 384) and
+    still read as MiniLM. The fallback is now an explicit choice
+    (``tfidf/local``), never a substitution.
+    """
+    short = model_name.split("/", 1)[1] if model_name.startswith("sentence-transformers/") else model_name
+    if not sentence_transformers_installed():
+        from services.embedding_providers.base import EmbeddingConfigError
+
+        raise EmbeddingConfigError(semantic_model_missing_message(model_name))
     return _SentenceTransformerEmbedder(model_name=short)
+
+
+def embedding_provider_refusal(model: str | None) -> str | None:
+    """Why a vector write cannot embed with ``model`` here, or None (Validate asks)."""
+    resolved = str(model or getenv_brand("EMBEDDING_MODEL", "") or _DEFAULT_SEMANTIC_MODEL).strip()
+    if resolved.startswith("sentence-transformers/") or "/" not in resolved and not resolved.startswith(
+        "text-embedding-"
+    ):
+        if not sentence_transformers_installed():
+            return semantic_model_missing_message(resolved)
+    return None
+
+
+_VECTOR_DESTS = frozenset({"pgvector", "qdrant", "weaviate", "pinecone", "milvus"})
+
+
+def refuse_unchosen_embedding_provider(probe: dict[str, Any], endpoint: Any) -> None:
+    """Validate (G2) refuses a vector destination whose embedding model cannot run."""
+    if str(probe.get("db_type") or "").lower() not in _VECTOR_DESTS:
+        return
+    extra = dict(getattr(endpoint, "extra", None) or {})
+    reason = embedding_provider_refusal(extra.get("embedding_model"))
+    if not reason:
+        return
+    probe["can_write"] = False
+    probe["embedding_provider_refusal"] = reason
+    probe["message"] = reason
 
 
 @lru_cache(maxsize=8)
@@ -177,6 +227,9 @@ def _get_embedder(name: str | None = None) -> Embedder:
 
     if model_name.startswith("openai/"):
         return _OpenAIEmbedder(model_name=model_name.split("/", 1)[1])
+    if model_name.startswith("tfidf/"):
+        # Chosen explicitly at Map: rows are stamped _df_embedding_backend.
+        return _CatalogFallbackEmbedder()
     if model_name.startswith("hash/") or model_name.startswith("deterministic/"):
         # Optional suffix is dimension, e.g. hash/32
         suffix = model_name.split("/", 1)[1]
@@ -272,6 +325,12 @@ def note_embedding_fallback(backend: str, model: str | None = None) -> None:
     if not name or name == "sentence_transformers":
         return
     configured = str(model or "sentence-transformers/all-MiniLM-L6-v2")
+    if configured.startswith("tfidf/"):
+        _embedding_fallback_notice.set(
+            f"Vector embeddings are TF-IDF ({configured} was chosen for this destination): "
+            "they are not semantic. Each row is stamped _df_embedding_backend."
+        )
+        return
     _embedding_fallback_notice.set(
         f"Vector embeddings used the {name} fallback instead of {configured}. "
         "Install requirements-rag.txt for MiniLM. Each row is stamped "

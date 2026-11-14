@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   destColumnFacts,
+  destPanelSummaryLine,
   filterDestColumns,
   type DestColumnCatalog,
   type DestColumnState,
@@ -11,7 +12,7 @@ import { useVirtualWindow } from "./useVirtualWindow";
 export const PANEL_ROW_PX = 76;
 export const DND_MIME = "application/x-datawrap-source-column";
 
-type PanelFilter = "all" | "unmapped" | "required" | "conflicts";
+export type PanelFilter = "all" | "unmapped" | "required" | "conflicts";
 
 const STATUS_LABEL: Record<DestColumnState["status"], string> = {
   mapped: "Mapped",
@@ -44,6 +45,11 @@ interface DestinationColumnsPanelProps {
   onPointerOver: (target: string | null) => void;
   /** The names this panel shows after its search and filter (keyboard drag walks them). */
   onVisibleChange?: (names: string[]) => void;
+  /**
+   * Show a filter on request (the issue banner's Show → Required). A new
+   * ``seq`` re-applies it, clears the search and brings the panel into view.
+   */
+  filterRequest?: { filter: PanelFilter; seq: number } | null;
 }
 
 /**
@@ -71,9 +77,17 @@ export function DestinationColumnsPanel({
   onPointerDrop,
   onPointerOver,
   onVisibleChange,
+  filterRequest = null,
 }: DestinationColumnsPanelProps) {
-  const [filter, setFilter] = useState<PanelFilter>("all");
+  const [filter, setFilter] = useState<PanelFilter>(filterRequest?.filter ?? "all");
   const [query, setQuery] = useState("");
+  const asideRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!filterRequest) return;
+    setFilter(filterRequest.filter);
+    setQuery("");
+    asideRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [filterRequest?.seq]);
 
 
   const visible = useMemo(() => {
@@ -102,7 +116,6 @@ export function DestinationColumnsPanel({
     if (overIndex >= 0 && followDrag) win.scrollToIndex(overIndex);
   }, [overIndex]);
 
-  const blocking = summary.requiredUnmapped.length + summary.conflicts.size + summary.refusedNewTargets.length;
   const counts: Record<PanelFilter, number> = {
     all: states.length,
     unmapped: summary.unmapped,
@@ -110,10 +123,12 @@ export function DestinationColumnsPanel({
     conflicts: summary.conflicts.size,
   };
 
+  const hasColumns = states.length > 0 || Boolean(catalog?.columns.length);
+
   const readSource = (e: DragEvent): string => e.dataTransfer.getData(DND_MIME) || e.dataTransfer.getData("text/plain");
 
   return (
-    <aside id={id} className="df2-ms-panel" aria-label={`Destination columns of ${tableLabel}`}>
+    <aside ref={asideRef} id={id} className="df2-ms-panel" aria-label={`Destination columns of ${tableLabel}`}>
       <div className="df2-ms-panel-head">
         <div>
           <h4 className="df2-ms-panel-title">Destination columns</h4>
@@ -129,31 +144,17 @@ export function DestinationColumnsPanel({
         ) : null}
       </div>
 
-      <p className="df2-ms-panel-counts" role="status">
-        <strong>{summary.mapped}</strong> mapped · <strong>{summary.unmapped}</strong> unmapped
-        {blocking ? <> · <strong className="is-block">{blocking}</strong> blocking</> : null}
+      <p className="df2-ms-panel-counts" role="status" data-testid="dest-panel-summary">
+        {destPanelSummaryLine(summary, catalog)}
       </p>
 
       {error ? (
         <p className="df2-ms-panel-note is-block" role="alert">{error}</p>
       ) : null}
 
-      {blocking > 0 ? (
-        <p className="df2-ms-panel-blockers" role="status">
-          <strong>Validate will block: </strong>
-          {[
-            summary.requiredUnmapped.length
-              ? `${summary.requiredUnmapped.join(", ")} ${summary.requiredUnmapped.length === 1 ? "needs" : "need"} a source (NOT NULL, no default)`
-              : "",
-            ...Array.from(summary.conflicts.entries()).map(([t, srcs]) => `${t} is written by ${srcs.join(" and ")}`),
-            summary.refusedNewTargets.length
-              ? `${summary.refusedNewTargets.join(", ")} cannot be created here`
-              : "",
-          ].filter(Boolean).join("; ")}.
-        </p>
-      ) : null}
 
-      <div className="df2-ms-panel-tools">
+      {/* A table with no columns yet (a new table) has nothing to find or filter. */}
+      {hasColumns ? <div className="df2-ms-panel-tools">
         <input
           aria-label="Find a destination column"
           className="df2-input df2-ms-panel-search"
@@ -176,7 +177,7 @@ export function DestinationColumnsPanel({
             </button>
           ))}
         </div>
-      </div>
+      </div> : null}
 
       <ul
         ref={win.ref}
@@ -189,7 +190,13 @@ export function DestinationColumnsPanel({
       >
         {visible.length === 0 ? (
           <li className="df2-ms-panel-empty">
-            {loading ? "Reading the destination's columns…" : catalog?.columns.length ? "No columns match." : "The destination reported no columns."}
+            {loading
+              ? "Reading the destination's columns…"
+              : catalog?.columns.length
+                ? "No columns match."
+                : catalog?.tableExists === false
+                  ? "No columns yet: the table is created from the mapped source columns."
+                  : "The destination reported no columns."}
           </li>
         ) : (
           <>
@@ -261,10 +268,13 @@ export function DestinationColumnsPanel({
         )}
       </ul>
 
-      <p className="df2-ms-panel-note">
-        Unmapped columns that are not required are written as NULL or their default.
-        {catalog ? ` New target names: ${catalog.addColumnsReason}` : ""}
-      </p>
+      <details className="df2-ms-panel-help">
+        <summary>How unmapped and new columns are written</summary>
+        <p className="df2-ms-panel-note">
+          Unmapped columns that are not required are written as NULL or their default.
+          {catalog ? ` New target names: ${catalog.addColumnsReason}` : ""}
+        </p>
+      </details>
     </aside>
   );
 }

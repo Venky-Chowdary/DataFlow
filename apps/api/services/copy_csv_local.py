@@ -654,6 +654,7 @@ def _iter_csv_source_records(
             handle,
             delim,
             empty_cell=str(getattr(read_options, "empty_cell", "null") or "null"),
+            null_marker=str(getattr(read_options, "null_marker", "") or ""),
         )
         header = next(reader, None)
         if not header:
@@ -789,6 +790,7 @@ def _write_mapped_csv(
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
+        bound_rows: list[dict[str, str | None]] = []
         for rec in rows:
             # C04: '' (a quoted "" or a JSON/Excel empty string) is not a
             # number — NULL on a non-text carrier, on every engine, before
@@ -806,6 +808,10 @@ def _write_mapped_csv(
                     if len(memo) < _MEMO_CAP:
                         memo[cell] = bound
                 copy_cells[col] = bound
+            # DATA-21: the digest reads the cell the write binds (a quoted ""
+            # in a number/date column is NULL), not the parsed text — on a
+            # SQLite TEXT carrier '' and NULL fingerprint apart.
+            bound_rows.append(dict(copy_cells))
             if sqlite_dest:
                 copy_cells = {
                     col: _sqlite_copy_cell_text(
@@ -845,8 +851,8 @@ def _write_mapped_csv(
             else:
                 writer.write(delim.join(out_row) + "\n")
             written += 1
-        if fingerprints is not None and rows:
-            fingerprints(rows)
+        if fingerprints is not None and bound_rows:
+            fingerprints(bound_rows)
         return written
 
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
@@ -1100,7 +1106,7 @@ def copy_csv_to_sqlite(
         # The mapped file spells NULL ``\N`` (``_csv_cell``) and writes ''
         # as a bare empty field, so an empty cell here is '' — not the
         # operator-CSV unquoted-empty NULL (CR-D125).
-        for cells in s3_iter_delimited_rows(mapped_path, delim, empty_cell="keep"):
+        for cells in s3_iter_delimited_rows(mapped_path, delim, empty_cell="keep", null_marker=_MAPPED_NULL):
             if len(cells) != len(converters):
                 raise ValueError(
                     f"CSV width {len(cells)} != dest columns {len(converters)}"

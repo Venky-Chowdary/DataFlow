@@ -28,6 +28,7 @@ _TESTS = Path(__file__).resolve().parent
 if str(_TESTS) not in sys.path:
     sys.path.insert(0, str(_TESTS))
 
+from _boto3_client_stub import stub_boto3_client  # noqa: E402,F401
 from tenancy_world import tenancy_world  # noqa: E402,F401
 
 
@@ -68,7 +69,7 @@ def _s3_connector(world, host: str, name: str = "bucket"):
 
 
 @pytest.fixture
-def writes(monkeypatch):
+def writes(monkeypatch, stub_boto3_client):  # noqa: F811
     """Every attempt to reach a destination or to read the query is recorded, none is made."""
     seen: list[str] = []
     import src.transfer.adapters as adapters
@@ -89,7 +90,7 @@ def writes(monkeypatch):
         return real_run(*a, **k)
 
     monkeypatch.setattr(adapters, "write_destination_database", write)
-    monkeypatch.setattr("connectors.aws_common.boto3_client", boto)
+    stub_boto3_client(boto)
     monkeypatch.setattr(query_router, "_run_query", run_query)
     return seen
 
@@ -252,7 +253,7 @@ def test_resume_route_refuses_and_a_resumed_run_never_writes(eu_workspace, write
     assert not [w for w in writes if w.startswith("boto3")], writes
 
 
-def test_engine_run_in_region_is_not_refused_for_residency(eu_workspace, monkeypatch):
+def test_engine_run_in_region_is_not_refused_for_residency(eu_workspace, stub_boto3_client):  # noqa: F811
     """The control: the same run with the connector left where it was is not a residency refusal."""
     from src.transfer.engine import get_transfer_engine
     from src.transfer.models import transfer_request_from_dict
@@ -264,11 +265,9 @@ def test_engine_run_in_region_is_not_refused_for_residency(eu_workspace, monkeyp
         dialled.append(str(cfg.get("host")))
         raise RuntimeError("no network in this test")
 
-    # s3_writer first: importing it while aws_common is already patched bound
-    # the stand-in into it, and undo then "restored" the stand-in for every
-    # later test in the session.
-    monkeypatch.setattr("connectors.s3_writer.boto3_client", boto, raising=False)
-    monkeypatch.setattr("connectors.aws_common.boto3_client", boto)
+    # Every module that bound the factory at import, and any first imported
+    # during this run, gets the real one back at teardown (T-F3).
+    stub_boto3_client(boto)
     bucket = _s3_connector(world, "eu-west-1")
     job_id, job = _job_into(world, bucket)
     result = get_transfer_engine().execute_tracked(transfer_request_from_dict(job["transfer_request"]), job_id)

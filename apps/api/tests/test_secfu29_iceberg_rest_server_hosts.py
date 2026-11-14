@@ -272,10 +272,12 @@ def test_the_connectors_own_endpoint_is_its_own_choice(server, filesystems, monk
 
 
 def test_without_the_enforce_flag_a_private_server_endpoint_is_audited_like_the_connectors_own(
-    server, filesystems
+    server, filesystems, monkeypatch
 ):
     from connectors.iceberg_catalog import load_catalog
 
+    # Enforcement is the default (SEC-2); "0" is the explicit audit-only opt-out.
+    monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "0")
     server.overrides["s3.endpoint"] = "http://10.0.0.5:9000"
     with pytest.raises(Dialled):
         _open(load_catalog(_endpoint()), "s3://bucket/t")

@@ -10,6 +10,14 @@ inputs:
   artifact_name:
     description: Artifact name uploaded when the surface fails
     required: true
+  extra_playwright_projects:
+    description: More Playwright projects to run against the same dev server, space-separated (e.g. a11y)
+    required: false
+    default: ""
+  update_snapshots:
+    description: "\"true\" rewrites the visual baselines that differ (refresh-visual-baselines workflow only)"
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -46,6 +54,10 @@ runs:
         DATAFLOW_REQUIRE_AUTH: "0"
         DATAFLOW_JOB_STORE: memory
         DATAFLOW_DISABLE_OBJECT_STORE: "1"
+        # Local files are confined by default (SEC-9). The e2e specs build
+        # their SQLite sources under the OS temp folder, so this CI operator
+        # lists it as a connector area, as an operator would for a real one.
+        DATAFLOW_SOURCE_PATH_ROOTS: /tmp
       run: |
         python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 > /tmp/studio-api.log 2>&1 &
         for i in $(seq 1 40); do
@@ -78,7 +90,13 @@ runs:
       env:
         CI: "1"
         PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
-      run: npx playwright test --project=${{ inputs.playwright_project }}
+        EXTRA_PROJECTS: ${{ inputs.extra_playwright_projects }}
+        UPDATE_SNAPSHOTS: ${{ inputs.update_snapshots }}
+      run: |
+        projects=(--project="${{ inputs.playwright_project }}")
+        for extra in $EXTRA_PROJECTS; do projects+=(--project="$extra"); done
+        if [ "$UPDATE_SNAPSHOTS" = "true" ]; then projects+=(--update-snapshots=changed); fi
+        npx playwright test "${projects[@]}"
 
     - name: Production build
       if: success() && inputs.production_smoke == 'true'

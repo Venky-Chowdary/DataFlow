@@ -19,10 +19,12 @@ import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
-  EVIDENCE_AS_OF,
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
-  TRANSFER_READY_DRIVERS,
+  PENDING_DRIVERS,
+  PROVEN_CDC_SOURCES,
+  PROVEN_DRIVERS,
+  provenDriversPhrase,
   catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -154,7 +156,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         "Transfer Studio — table, destination query, stored procedure",
         "G1–G9 preflight + quarantine with replay",
         "Gate-8 read-back with value & key census",
-        `${TRANSFER_READY_DRIVERS} transfer-ready drivers`,
+        provenDriversPhrase(),
       ],
     },
     {
@@ -234,7 +236,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         slas={[
           { value: "Free", label: "Starter forever" },
           { value: "Verified", label: "Every load, every plan" },
-          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready drivers" },
+          { value: String(PROVEN_DRIVERS), label: "Drivers proven in CI" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
         aside={
@@ -591,9 +593,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         }
         slas={[
           { value: "9", label: "Core preflight gates" },
-          { value: "48", label: "Live schema-drift cases" },
-          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready drivers" },
-          { value: "4", label: "Native CDC engines" },
+          { value: String(PROVEN_DRIVERS), label: "Drivers proven in CI" },
+          { value: String(PENDING_DRIVERS), label: "More implemented, in CI proof" },
+          { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
         ]}
         aside={
           <div className="lp-sales-hero-art">
@@ -606,7 +608,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <div className="lp-shell lp-cust3-metrics-row">
           <div>
             <strong>Migrations</strong>
-            <span>Oracle and SQL Server cutover with identity, FK, and Unicode carry</span>
+            <span>Database cutover with identity, FK, and Unicode carry</span>
           </div>
           <div>
             <strong>Warehouses</strong>
@@ -618,7 +620,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div>
             <strong>CDC</strong>
-            <span>SQL Server, PostgreSQL, MySQL, Oracle — snapshot, stream, resume</span>
+            <span>Snapshot, stream from the database log, resume</span>
           </div>
         </div>
       </section>
@@ -636,8 +638,8 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
                   <span className="lp-cust-industry">{row.stat}</span>
                   <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
-                    <strong>Measured {EVIDENCE_AS_OF}</strong>
-                    <span>Live engines · destination re-read</span>
+                    <strong>Every run</strong>
+                    <span>Destination re-read</span>
                   </footer>
                 </article>
               ))}
@@ -1120,12 +1122,12 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
     <div className="lp-mkt-page lp-int-v2">
       <MarketingInkHero
         kicker="Connection catalog"
-        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} transfer-ready drivers.</>}
+        title={<>Connect the systems you already run — {provenDriversPhrase()}.</>}
         lead={
           <>
             Databases, warehouses, object storage, files, Kafka, vector stores, and apps. Every
-            load maps, clears preflight, quarantines held-back rows, and is verified against the
-            destination engine.
+            load maps, clears preflight, quarantines held-back rows, and ends with a verification
+            report that reads the destination back wherever its engine allows.
           </>
         }
         actions={
@@ -1139,14 +1141,14 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           </div>
         }
         slas={[
-          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready" },
-          { value: "4", label: "Native CDC engines" },
+          { value: String(PROVEN_DRIVERS), label: "Proven in CI" },
+          { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
           { value: "5", label: "Vector destinations" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
         aside={
           <div className="lp-sales-hero-art">
-            <LatticeArt readyCount={TRANSFER_READY_DRIVERS} />
+            <LatticeArt readyCount={PROVEN_DRIVERS} />
           </div>
         }
       />
@@ -1154,7 +1156,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-strip" aria-label="Capability labels">
           <div><strong>DLQ</strong><span>Quarantine replay</span></div>
-          <div><strong>CDC</strong><span>SQL Server · PostgreSQL · MySQL · Oracle</span></div>
+          <div><strong>CDC</strong><span>{PROVEN_CDC_SOURCES.join(" · ") || "Database log sources"}</span></div>
           <div><strong>SQLA</strong><span>Generic SQL drivers</span></div>
           <div><strong>Files</strong><span>CSV · JSON · Parquet · Avro · ORC · Excel</span></div>
         </section>
@@ -1167,7 +1169,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <h2>What you can connect</h2>
             <p>
               Grouped the way teams plan loads — warehouses first, then lakes, databases, streams,
-              vector stores, and apps. Every name below is a transfer-ready driver.
+              vector stores, and apps. Each family's badge counts the members its CI run proves.
             </p>
           </div>
           <div className="lp-int-family-grid">

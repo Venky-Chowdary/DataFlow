@@ -13,16 +13,16 @@ admin saves one. Metadata, link-local, multicast, and unspecified addresses
 cannot be allowlisted. ``DATAFLOW_EGRESS_ALLOWLIST`` is an additional process
 list for local proof runs; production deploy leaves it unset.
 
-Two tiers of enforcement. The call sites production already enforced at
-(connector Test, the SQL/MySQL/Postgres/AWS drivers, CDC, webhooks, the
-Copilot connector tools) refuse private and loopback targets as before. The
-newer sites (connector save/update, transfer reads and writes, introspection,
-precount and probes, shared HTTP/SMTP/Mongo clients, redirects and
-pagination) pass a ``point`` name and are AUDIT-ONLY by default: a private or
-loopback target logs an ``egress.would_block`` audit event and is allowed.
-``DATAFLOW_EGRESS_ENFORCE_NEW=1`` (or ``DATAWRAP_EGRESS_ENFORCE_NEW``) turns
-those sites into refusals. Cloud metadata, link-local and multicast targets
-are refused at every site regardless of the flag.
+Every connector dial refuses private and loopback targets by default (SEC-2).
+The newer sites (connector save/update, transfer reads and writes,
+introspection, precount and probes, shared HTTP/SMTP/Mongo/Redis clients,
+redirects and pagination) pass a ``point`` name; they enforce exactly like
+connector Test and the SQL/MySQL/Postgres/AWS drivers. An operator can put
+them back into audit-only mode with an explicit
+``DATAFLOW_EGRESS_ENFORCE_NEW=0`` (or ``DATAWRAP_EGRESS_ENFORCE_NEW``): a
+private or loopback target then logs an ``egress.would_block`` audit event
+and is allowed. Cloud metadata, link-local and multicast targets are refused
+at every site regardless of the flag.
 """
 
 from __future__ import annotations
@@ -383,13 +383,15 @@ _AUDIT_CONNECTOR: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 def enforce_new_points() -> bool:
-    """True when ``DATAFLOW_EGRESS_ENFORCE_NEW`` makes the newer sites refuse.
+    """True unless ``DATAFLOW_EGRESS_ENFORCE_NEW`` explicitly opts out.
 
-    Default off: those sites audit a private or loopback target
-    (``egress.would_block``) and allow it. See :func:`audit_would_block`.
+    Default on in every environment (SEC-2): a reader that only audited
+    let a workspace editor read the platform's own loopback Redis. An
+    explicit ``0``/``false``/``no``/``off`` keeps the old audit-only mode
+    (``egress.would_block``, see :func:`audit_would_block`).
     """
     raw = str(getenv_brand("EGRESS_ENFORCE_NEW", "") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _real_getaddrinfo() -> Any:
@@ -507,8 +509,8 @@ def _refuse_at_new_point(
 ) -> bool:
     """True when a newer enforcement site must refuse ``host``.
 
-    Metadata/link-local always refuse. Anything else refuses only under
-    ``DATAFLOW_EGRESS_ENFORCE_NEW``; otherwise it is audited and allowed. A DNS
+    Metadata/link-local always refuse. Anything else refuses unless
+    ``DATAFLOW_EGRESS_ENFORCE_NEW=0`` opts out; then it is audited and allowed. A DNS
     miss is not a policy hit and is left to the driver's own error.
     ``from_address`` says ``phrase`` came from the address the driver is about
     to use (dial time), so the phrase itself decides; a host-based check would
@@ -548,8 +550,8 @@ def assert_connector_dial_allowed(
     resolved; an unresolved name is left to :func:`pinned_egress`, which
     fail-closes at connect.
 
-    ``point`` names a newer enforcement site: it audits instead of refusing a
-    private or loopback target unless ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set
+    ``point`` names a newer enforcement site: it refuses a private or loopback
+    target too, and only audits it under ``DATAFLOW_EGRESS_ENFORCE_NEW=0``
     (:func:`new_point_refusal`). Without ``point`` the site is one production
     already enforced and always refuses.
     """
@@ -733,7 +735,7 @@ def metadata_endpoint_refusal(
 
     This is the rule production sites enforce unconditionally; see
     :func:`iter_refusals` for what it covers and :func:`new_point_refusal` for
-    the audit-first variant the newer sites use.
+    the variant the newer sites use (audit-only under an explicit opt-out).
     """
     for host, phrase in iter_refusals(
         *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type,
@@ -755,8 +757,8 @@ def new_point_refusal(
     """Refusal text at a newer enforcement site, or ``""`` to allow.
 
     Same rule as :func:`metadata_endpoint_refusal`, but a private, loopback or
-    CGNAT target is only audited (``egress.would_block``) unless
-    ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set. Metadata and link-local always refuse.
+    CGNAT target is only audited (``egress.would_block``) when
+    ``DATAFLOW_EGRESS_ENFORCE_NEW=0`` opts out. Metadata and link-local always refuse.
     """
     for host, phrase in iter_refusals(
         *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type,
@@ -1044,7 +1046,7 @@ def _hosts_from_values(*values: str, socket_values: bool = False) -> list[str]:
 
 
 # (allowlist, workspace_id, point). ``point`` is "" at the sites production
-# already enforced and names a newer, audit-first site otherwise.
+# already enforced and names a newer site otherwise (both enforce by default).
 _DIAL_POLICY: contextvars.ContextVar[tuple[Sequence[str] | None, str, str] | None] = (
     contextvars.ContextVar("egress_dial_policy", default=None)
 )
@@ -1296,9 +1298,9 @@ def pinned_egress(
     context variable, so concurrent transfers and the API's own control-plane
     dials on other threads are not affected and scopes never serialize.
 
-    ``point`` names a newer, audit-first site (see :func:`new_point_refusal`):
-    private and loopback answers are audited and allowed there unless
-    ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set; metadata and link-local still refuse.
+    ``point`` names a newer site (see :func:`new_point_refusal`): private and
+    loopback answers are refused there too, and only audited and allowed under
+    ``DATAFLOW_EGRESS_ENFORCE_NEW=0``; metadata and link-local always refuse.
     """
     policy = (allowlist, str(workspace_id or "") or current_egress_workspace(), point)
     token = _DIAL_POLICY.set(policy)
@@ -1362,8 +1364,8 @@ def _cfg_connector_name(cfg_map: dict[str, Any]) -> str:
 def assert_cfg_dial_allowed(cfg: Any, *extra: str, db_type: str = "", point: str) -> None:
     """Check a connector config's dial targets at the newer site ``point``.
 
-    Audit-first: see :func:`new_point_refusal`. Raises ``EgressRefused`` for
-    metadata/link-local, and for private targets under the enforce flag.
+    See :func:`new_point_refusal`. Raises ``EgressRefused`` for metadata,
+    link-local, and private or loopback targets (unless the deployment opted out).
     """
     cfg_map = cfg if isinstance(cfg, dict) else {}
     values = _cfg_dial_values(cfg_map, extra)
@@ -1384,8 +1386,8 @@ def connector_dial_scope(
 ) -> Iterator[None]:
     """Pre-dial check plus dial-time DNS pinning around one connector call.
 
-    ``point`` names the newer site; both checks are audit-first for private
-    and loopback targets (see :func:`new_point_refusal`).
+    ``point`` names the newer site; both checks refuse private and loopback
+    targets the allowlists do not admit (see :func:`new_point_refusal`).
     """
     cfg_map = cfg if isinstance(cfg, dict) else {}
     assert_cfg_dial_allowed(cfg_map, *extra, db_type=db_type, point=point)
@@ -1408,9 +1410,8 @@ def follow_url_allowed(url: str, origin: str) -> bool:
     Same scheme+host+port as the configured origin keeps the policy that
     already admitted that origin. Any other target must be a public http(s)
     host regardless of a workspace allowlist. Metadata and link-local targets
-    are always refused; a private or loopback target is audited
-    (``egress.would_block``) and followed unless ``DATAFLOW_EGRESS_ENFORCE_NEW``
-    is set.
+    are always refused; a private or loopback target is refused, or audited
+    (``egress.would_block``) and followed under ``DATAFLOW_EGRESS_ENFORCE_NEW=0``.
     """
     try:
         target = urllib.parse.urlparse((url or "").strip())

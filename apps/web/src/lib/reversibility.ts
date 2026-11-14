@@ -342,3 +342,18 @@ export function reversibilityFromPreflight(preflight: unknown): ReversibilityRep
   const r = rev as Partial<ReversibilityReport>;
   return r.verdict && Array.isArray(r.tables) && r.counts && r.gate ? (rev as ReversibilityReport) : null;
 }
+
+
+/**
+ * Proper plurals for API text: "1 of 2 observed row(s)" → "1 of 2 observed
+ * rows", "1 table(s)" → "1 table". The count is the nearest number before the
+ * noun (up to three words back); with no number the plural is used.
+ */
+export function pluralizeText(text: string): string {
+  return String(text ?? "")
+    .replace(/(\d[\d,]*)((?:\s+[A-Za-z_-]+){0,3}?)\s+([A-Za-z]+)\(s\)/g, (_all, num: string, between: string, noun: string) => {
+      const n = Number(num.replace(/,/g, ""));
+      return `${num}${between} ${n === 1 ? noun : `${noun}s`}`;
+    })
+    .replace(/([A-Za-z]+)\(s\)/g, "$1s");
+}

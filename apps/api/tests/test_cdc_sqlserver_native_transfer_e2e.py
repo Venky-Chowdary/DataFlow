@@ -46,6 +46,12 @@ CFG = {
     "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
     "connection_string": "",
     "ssl": False,
+    # Driver 18 verifies the chain; the loopback lab/CI container is
+    # self-signed. Without it the readiness probe failed the handshake and the
+    # module skipped as "not reachable" with SQL Server up (cdc-sqlserver CI),
+    # and the snapshot/resume/delete source endpoint below could not connect.
+    # Under ``extra`` so ``EndpointConfig(**CFG)`` stays valid.
+    "extra": {"trust_server_certificate": True},
 }
 
 
@@ -482,11 +488,14 @@ def test_sqlserver_native_lob_transfer_to_postgres_exactly_once():
         format="sqlserver",
         table=source_table,
         schema="dbo",
-        extra={
-            "cdc_row_filter": "all update old",
-            "trust_server_certificate": True,
+        **{
+            **CFG,
+            "extra": {
+                **CFG["extra"],
+                "cdc_row_filter": "all update old",
+                "trust_server_certificate": True,
+            },
         },
-        **CFG,
     )
     destination = EndpointConfig(
         kind="database",

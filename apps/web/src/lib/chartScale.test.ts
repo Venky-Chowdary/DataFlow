@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  parityAxis,
   areaPath,
   formatPercentTick,
   linearScale,
@@ -155,5 +156,23 @@ describe("percentFraction", () => {
     assert.equal(percentFraction(99.6), 0.996);
     assert.equal(percentFraction(null), 0);
     assert.equal(percentFraction(140), 1);
+  });
+});
+
+describe("parityAxis (W6 Migration health)", () => {
+  it("ends at 100% and starts at a round number with room below the lowest run", () => {
+    assert.deepEqual(parityAxis([100, 99.6, 100])?.domain, [98, 100]);
+    assert.deepEqual(parityAxis([100, 96])?.domain, [95, 100]);
+    assert.deepEqual(parityAxis([100, 90])?.domain, [75, 100]);
+    assert.deepEqual(parityAxis([100, 10])?.domain, [0, 100]);
+  });
+
+  it("labels three evenly spaced, round ticks", () => {
+    assert.deepEqual(parityAxis([99.6, 100])?.ticks.map((t) => t.label), ["100%", "99%", "98%"]);
+    assert.deepEqual(parityAxis([96])?.ticks.map((t) => t.label), ["100%", "97.5%", "95%"]);
+  });
+
+  it("has no axis without a figure", () => {
+    assert.equal(parityAxis([null, undefined]), null);
   });
 });

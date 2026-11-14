@@ -158,11 +158,14 @@ def _checksum_without_fingerprints(
 def _resolve_file_stream_target_columns(
     dest_type: str, mappings: list[dict[str, Any]], column_types: dict[str, str]
 ) -> tuple[list[str], list[str]]:
+    from connectors.destination_naming import writer_identifier
+
     return resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         table_exists=False if dest_type in ("s3", "gcs", "adls") else None,
+        identifier=writer_identifier(dest_type, preserve_case=True),
     )
 
 
@@ -434,6 +437,7 @@ def _peek_parsed_file_source(
                     reader_file,
                     delim,
                     empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                    null_marker=str(getattr(opts, "null_marker", "") or ""),
                 ),
                 opts,
                 header_names=csv_header_names,
@@ -470,7 +474,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True, json_kinds=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
@@ -588,7 +592,7 @@ def _peek_parsed_file_source(
                 '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
             )
         headers = sorted(columns)
-        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True, json_kinds=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "xml":
@@ -736,6 +740,7 @@ def _iter_csv_batches(
                 delim,
                 empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
                 nulled=nulled,
+                null_marker=str(getattr(opts, "null_marker", "") or ""),
             ),
             opts,
             header_names=csv_header_names,
@@ -3113,6 +3118,18 @@ def stream_file_to_database(
             with OrderedChunkRunner(max_workers=max_workers) as runner:
                 for idx, result in runner.run(batch_enum, _process_file_chunk):
                     _apply_file_result(idx, result)
+        if not written and rejected_total and not dest_summary.get("skipped_identity_keys"):
+            # Every row was held out: refused inside the write so the undo
+            # below runs and a held overwrite rolls back instead of
+            # publishing an empty destination.
+            from .engine_destination import all_rows_quarantined_blocked
+
+            dest_summary["all_rows_held_out"] = True
+            if job_id:  # each batch's findings are already on the DLQ
+                dest_summary["quarantine_dlq_persisted_count"] = len(rejected_details)
+            raise all_rows_quarantined_blocked(
+                rejected_details, rejected_total, dest_summary, rows=rejected_total
+            )
         if snowflake_stage:
             from services.snowflake_file_manifest import commit_staged_snowflake_file
 
@@ -3228,8 +3245,7 @@ def stream_file_to_database(
     )
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
-    # All rows may be quarantined (written == 0) — that is a real transfer with
-    # DLQ proof, not an empty file. Continue so rejected_details / checksum land.
+    # A run that held every row out was refused inside the write above.
 
     if fp_book.active:
         fp_book.flush(fp_accumulator)

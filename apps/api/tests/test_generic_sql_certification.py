@@ -12,7 +12,9 @@ from src.transfer.connector_capabilities import (
 
 
 @pytest.mark.parametrize("brand", ["oracle", "sql_server", "mssql"])
-def test_generic_sql_brand_certification_matches_dbapi(brand: str) -> None:
+def test_generic_sql_brand_certification_matches_dbapi(brand: str, ci_evidence) -> None:
+    # Certified also needs CI evidence for the engine (CLM-7).
+    ci_evidence("oracle", "sqlserver")
     certified = _generic_sql_brand_certified(brand)
     # Must agree with driver_available for the dialect.
     expect = driver_available("generic_sql", "oracle" if "oracle" in brand else "sqlserver")

@@ -1,5 +1,6 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
+import json
 import logging
 import os
 import socket
@@ -155,15 +156,35 @@ os.environ.setdefault(
 )
 # Engine fixtures stage file sources under pytest's tmp_path.
 os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
+# The live MySQL TLS tests pass the server's CA file (DATAFLOW_TEST_MYSQL_CA), which CI
+# writes under $RUNNER_TEMP. Connectors may open TLS files only inside connector areas
+# (connectors/tls_file_options.py), so list that folder the way an operator would.
+if os.environ.get("DATAFLOW_TEST_MYSQL_CA"):
+    _ca_dir = os.path.dirname(os.path.abspath(os.environ["DATAFLOW_TEST_MYSQL_CA"]))
+    _roots = [r for r in os.environ["DATAFLOW_SOURCE_PATH_ROOTS"].split(os.pathsep) if r]
+    if _ca_dir not in _roots:
+        os.environ["DATAFLOW_SOURCE_PATH_ROOTS"] = os.pathsep.join([*_roots, _ca_dir])
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
+# Login lockouts stay per process: CI shards (and other suites) share one
+# Redis, and one test's failed sign-ins must not slow another's. The Redis
+# store has its own test (test_w1sec_login_lockout.py).
+os.environ.setdefault("DATAFLOW_AUTH_LOCKOUT_BACKEND", "memory")
 # No background Training Agent under a TestClient: the lifespan defaults it on
 # outside production, and a CPU-bound run (60 s / 120 s after startup) would
 # outlive the test, hold the GIL and slow every later test. The fallback brand
 # var, like DATAFLOW_DATA_DIR above, so a test setting either name wins.
 # Tests that need training call run_full_training directly or set it "on".
 os.environ.setdefault("DATAFLOW_TRAINING", "off")
+# The app's pipeline cadence loop is off under pytest: tests fire scheduler
+# beats themselves, and the TestClient lifespan's loop raced them (CI PR 426,
+# test_d119: the test's beat was skipped as "already in progress"). A test
+# that needs the real loop requests ``schedule_loop_on``; a value the
+# operator set is kept.
+SCHEDULE_LOOP_DEFAULT = "0"
+if not (os.environ.get("DATAFLOW_SCHEDULE_LOOP") or os.environ.get("DATAWRAP_SCHEDULE_LOOP")):
+    os.environ["DATAFLOW_SCHEDULE_LOOP"] = SCHEDULE_LOOP_DEFAULT
 
 # Hermetic env: Railway markers exported by `railway run`, a linked dev
 # shell or CI agents with the CLI installed must not flip the suite into
@@ -176,6 +197,9 @@ os.environ["DATAFLOW_ENV"] = "test"
 
 
 def pytest_configure(config):
+    # No CDC slot outlives this session (an inactive slot pins WAL forever).
+    if not config.pluginmanager.has_plugin("tests.pg_slot_guard"):
+        config.pluginmanager.import_plugin("tests.pg_slot_guard")
     config.addinivalue_line(
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
@@ -703,45 +727,18 @@ def pg_test_cfg(port: int | None = None) -> dict:
     }
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _drop_leaked_pg_replication_slots():
-    """CDC tests create logical replication slots on the local PG and do not
-    always drop them — 20 leaked ``df_dataflow_mt_*``/``s_probe`` slots once
-    filled ``max_replication_slots`` and failed unrelated CDC tests with
-    ``replication_slot_quota: all replication slots are in use``. Best-effort
-    session teardown: drop inactive slots matching the test prefixes.
-    """
-    yield
-    try:
-        import psycopg2
+@pytest.fixture
+def schedule_loop_on(monkeypatch):
+    """Opt in to the app's cadence loop (off for the session: SCHEDULE_LOOP_DEFAULT)."""
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "1")
 
-        cfg = pg_test_cfg()
-        conn = psycopg2.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            dbname=cfg["database"],
-            user=cfg["username"],
-            password=cfg["password"],
-            connect_timeout=3,
-        )
-        try:
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT slot_name FROM pg_replication_slots "
-                    "WHERE NOT active AND ("
-                    "slot_name LIKE 'df_dataflow_mt_%' "
-                    "OR slot_name LIKE 's_probe%' "
-                    "OR slot_name LIKE 'x29_%' "
-                    "OR slot_name LIKE 'df_test_%')"
-                )
-                for (slot_name,) in cur.fetchall():
-                    cur.execute("SELECT pg_drop_replication_slot(%s)", (slot_name,))
-        finally:
-            conn.close()
-    except Exception:
-        # PG absent / creds differ — cleanup is best-effort hygiene.
-        pass
+
+# Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)
+# drops, at session end, only the slots this session provably created. The
+# prefix sweep that stood here dropped every inactive ``df_dataflow_mt_%`` slot
+# on the shared server, including a concurrent session's slot between its
+# polls (test_d344: "replication slot ... does not exist" -> CdcSlotGapError).
 
 
 def _is_mongo_reachable() -> bool:
@@ -1062,3 +1059,35 @@ def _isolated_console_outbox():
         sender.ConsoleEmailSender.OUTBOX.clear()
     yield
 
+
+@pytest.fixture()
+def ci_evidence(tmp_path, monkeypatch):
+    """Point catalog certification at an evidence document naming green engines.
+
+    Certified comes from CI evidence (services/connector_proof.py, CLM-7). A
+    test of tier logic states which engines its scenario treats as proven:
+    ``ci_evidence("postgresql", "mysql")``. ``ci_evidence()`` proves nothing.
+    """
+    from services import catalog_service, connector_proof
+
+    def _use(*green: str) -> None:
+        path = tmp_path / "ci_evidence.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_run": "https://github.com/test/test/actions/runs/1",
+                    "engines": {e: {"status": "ci_green", "live_verified": True} for e in green},
+                    "live_verified": sorted(green),
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(connector_proof.EVIDENCE_ENV, str(path))
+        connector_proof.reset_cache()
+        catalog_service._enriched_connectors.cache_clear()
+
+    yield _use
+    monkeypatch.delenv(connector_proof.EVIDENCE_ENV, raising=False)
+    connector_proof.reset_cache()
+    catalog_service._enriched_connectors.cache_clear()

@@ -249,6 +249,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _seal_endpoint(endpoint: dict[str, Any], encrypt: Callable[[str], str]) -> dict[str, Any]:
+    from services.secret_fields import DSN_KEYS, seal_secret_tree
+
+    # A DSN can carry the password, so it is sealed with the secret-named keys.
+    return seal_secret_tree(dict(endpoint or {}), encrypt, also=DSN_KEYS)
+
+
+def _open_endpoint(endpoint: Any, workspace_id: str) -> dict[str, Any]:
+    from services.secret_fields import open_secret_tree
+    from services.secret_vault import decrypt_for_workspace
+
+    return open_secret_tree(dict(endpoint or {}), lambda v: decrypt_for_workspace(v, workspace_id))
+
+
 def _revision_document_model(
     plan: TransferPlanRecord, document_model: dict[str, Any] | None
 ) -> tuple[dict[str, Any], str]:
@@ -292,6 +306,13 @@ class PlanRevision:
     # identity; empty for plans that do not nest tables into documents.
     document_model: dict[str, Any] = field(default_factory=dict)
     document_model_hash: str = ""
+
+    def __post_init__(self) -> None:
+        # map_target is Execute's own adoption record: a stored plan never
+        # carries one (written or read back; security re-check F1a).
+        from services.target_name_legacy import strip_client_map_targets
+
+        self.mappings = strip_client_map_targets(list(self.mappings or []))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -354,21 +375,50 @@ class TransferPlanRecord:
     #: Bumped by every write of this plan (PS-1); 0 = stored before it existed.
     doc_version: int = 0
 
+    def __post_init__(self) -> None:
+        # The plan's stream contracts never carry map_target either (written
+        # or read back; security re-check F1a, defence in depth).
+        from services.target_name_legacy import strip_contract_map_targets
+
+        contracts = (self.policies or {}).get("stream_contracts")
+        if isinstance(contracts, list):
+            self.policies = {**self.policies,
+                             "stream_contracts": strip_contract_map_targets(contracts)}
+
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
             "revisions": [r.to_dict() for r in self.revisions],
         }
 
+    def public_dict(self) -> dict[str, Any]:
+        """The plan as an API response: endpoint credentials masked (SEC-4)."""
+        from services.secret_fields import public_plan_dict
+
+        return public_plan_dict(self)
+
+    def stored_dict(self) -> dict[str, Any]:
+        """The plan as written to the store: endpoint credentials encrypted (SEC-4)."""
+        from services.secret_vault import encrypt_secret, tenant_id_from_workspace
+
+        tenant = tenant_id_from_workspace(self.workspace_id or "")
+        d = self.to_dict()
+        for side in ("source", "destination"):
+            d[side] = _seal_endpoint(
+                d.get(side) or {}, lambda v: encrypt_secret(v, tenant_id=tenant, label="transfer-plan")
+            )
+        return d
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TransferPlanRecord:
         revisions = [PlanRevision.from_dict(r) for r in data.get("revisions") or []]
+        workspace = str(data.get("workspace_id") or "")
         return cls(
             id=data["id"],
             name=data.get("name", "Transfer plan"),
             status=data.get("status", "draft"),
-            source=dict(data.get("source") or {}),
-            destination=dict(data.get("destination") or {}),
+            source=_open_endpoint(data.get("source"), workspace),
+            destination=_open_endpoint(data.get("destination"), workspace),
             source_columns=list(data.get("source_columns") or []),
             source_schema=dict(data.get("source_schema") or {}),
             target_columns=list(data.get("target_columns") or []),
@@ -477,7 +527,7 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
                 shutil.copy2(STORE_PATH, staging)
         write_json_atomic(
             STORE_PATH,
-            {"plans": [p.to_dict() for p in plans]},
+            {"plans": [p.stored_dict() for p in plans]},
             indent=2,
             default=json_default,
         )
@@ -891,10 +941,13 @@ def update_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord | None
     def change(plan: TransferPlanRecord) -> None:
         if "name" in data and data["name"]:
             plan.name = str(data["name"])
+        from services.secret_fields import keep_stored_secrets
+
+        # A masked ``****`` sent back from a GET keeps the stored credential.
         if source is not None:
-            plan.source = source
+            plan.source = keep_stored_secrets(source, plan.source)
         if destination is not None:
-            plan.destination = destination
+            plan.destination = keep_stored_secrets(destination, plan.destination)
         if "source_columns" in data:
             plan.source_columns = list(data["source_columns"] or [])
         if "source_schema" in data:

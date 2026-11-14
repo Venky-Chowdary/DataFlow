@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { introspectTransferEndpoints } from "../../lib/api";
+import { resolveDriverType } from "../../lib/connectorTypes";
 import { ObjectNameCombobox } from "../transfer/ObjectNameCombobox";
 import { sourceTableMissingFromCatalog } from "../../lib/sourceObjectPick";
 import { DtIcon } from "../DtIcon";
@@ -184,7 +185,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
   const syncModes = useMemo(() => {
     const offered = availableSyncModes({
-      destDriver: destConnector?.type || "",
+      // The capabilities sync-mode table is keyed by driver type (CLM-8).
+      destDriver: resolveDriverType(destConnector?.type || "") || destConnector?.type || "",
       sourceDriver: sourceConnector?.type || "",
       sourceKind: "database",
       isMultiStream: false,
@@ -440,7 +442,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           value={sourceId}
           onChange={setSourceId}
           connectors={connectors}
-          placeholder="Add a connector first"
+          placeholder={connectors.length ? "Choose the source connection" : "Add a connection first"}
           required
           disabled={connectors.length === 0}
         />
@@ -485,7 +487,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           value={destId}
           onChange={setDestId}
           connectors={connectors}
-          placeholder="Add a connector first"
+          placeholder={connectors.length ? "Choose the destination connection" : "Add a connection first"}
           required
           disabled={connectors.length === 0}
         />

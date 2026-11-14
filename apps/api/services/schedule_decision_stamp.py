@@ -51,6 +51,10 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
     dest, source = _engines(merged)
     if not maps or not dest:
         return set()
+    from services.conversion_contract import bind_stream_maps
+
+    # Each stream's own rows are part of the stamp, as at Execute (F1c).
+    maps = bind_stream_maps(maps, list(merged.get("stream_contracts") or []), dest_db=dest)
     mode = str(merged.get("sync_mode") or "").strip() or "full_refresh_overwrite"
     stored_fp = str(merged.get("source_schema_fingerprint") or "").strip()
     source_dbs = [source, ""]
@@ -80,7 +84,13 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
 
 
 def align_schedule_decision_hash(merged: dict[str, Any]) -> None:
-    """Point a non-matching stamp at the replay hash of the rows being saved."""
+    """Point a non-matching stamp at the replay hash of the rows being saved.
+
+    Only when the stamp is a recorded Validate of exactly these rows
+    (SEC-APPROVAL-1 P3): re-stamping whatever rows were saved turned any
+    64-character hash into an approval. A stamp that names other rows is
+    dropped; the schedule is then unvalidated, as before any Validate.
+    """
     approved = str(merged.get("approved_decision_artifact_hash") or "").strip().lower()
     if len(approved) != 64:
         return
@@ -90,12 +100,21 @@ def align_schedule_decision_hash(merged: dict[str, Any]) -> None:
     dest, source = _engines(merged)
     if not dest:
         return
+    from services.validate_approvals import schedule_stamp_verified
+
+    if not schedule_stamp_verified(merged, dest_db=dest):
+        merged["approved_decision_artifact_hash"] = ""
+        merged["approved_ddl_identity_hash"] = ""
+        return
     from services.decision_kernel import build_artifact_from_mappings
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     mode = str(merged.get("sync_mode") or "").strip() or "full_refresh_overwrite"
+    from services.conversion_contract import bind_stream_maps
+
     art = build_artifact_from_mappings(
-        persisted_mapping_rows(merged.get("mappings")),
+        bind_stream_maps(persisted_mapping_rows(merged.get("mappings")),
+                         list(merged.get("stream_contracts") or []), dest_db=dest),
         dest_db=dest,
         source_db=source,
         source_fingerprint="",
@@ -108,3 +127,31 @@ def align_schedule_decision_hash(merged: dict[str, Any]) -> None:
     )
     if art.content_hash:
         merged["approved_decision_artifact_hash"] = art.content_hash
+
+
+UNRECORDED_STAMP_WARNING = (
+    "The Validate approval sent with this pipeline is not a Validate of these rows and this "
+    "destination, so it was not saved. Run Validate, then save the pipeline again."
+)
+
+
+def drop_unrecorded_stamp(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> str | None:
+    """Remove a client-sent stamp that no recorded Validate approved (P3).
+
+    A schedule save over the API keeps ``approved_decision_artifact_hash``
+    only when a real Validate in this workspace returned it for exactly the
+    rows (and destination) being saved. Returns the warning when it dropped one.
+    """
+    sent = str(payload.get("approved_decision_artifact_hash") or "").strip()
+    if not sent:
+        return None
+    merged = {**(existing or {}), **payload}
+    dest, _source = _engines(merged)
+    from services.validate_approvals import schedule_stamp_verified
+
+    if dest and schedule_stamp_verified(merged, dest_db=dest):
+        return None
+    payload.pop("approved_decision_artifact_hash", None)
+    payload.pop("approved_ddl_identity_hash", None)
+    return UNRECORDED_STAMP_WARNING
+

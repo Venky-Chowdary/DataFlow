@@ -638,9 +638,14 @@ def test_saved_connector(
     mark_tested(connector_id, ok)
     # Echo last_test_ok so the UI can patch the list immediately — never leave a
     # sticky "Test failed" badge after a green probe (Test-all vs individual drift).
-    return {
+    body: dict[str, Any] = {
         "success": ok,
         "message": message,
         "last_test_ok": ok,
         "auth_source": cfg.get("auth_source", ""),
     }
+    if not ok:
+        from services.safe_errors import failure_fields
+
+        body.update(failure_fields(message, engine=str(conn.type or "")))
+    return body

@@ -21,7 +21,7 @@ def test_lock_wait_timeout_is_not_retriable():
     assert any("lock wait" in e or "1205" in e for e in classified["evidence"])
 
     op = humanize_transfer_failure(exc)
-    assert op["code"] == "destination_lock_timeout"
+    assert op["code"] == "timeout.lock"
     assert "locked" in op["title"].lower()
 
 

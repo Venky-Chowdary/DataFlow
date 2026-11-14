@@ -283,6 +283,7 @@
   "POST /api/v1/connectors/jobs/{job_id}/rerun": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/resume": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/retry": "connector.write",
+  "POST /api/v1/connectors/jobs/{job_id}/stream-ticket": "connector.read",
   "POST /api/v1/connectors/jobs/{job_id}/sync": "connector.write",
   "POST /api/v1/connectors/saved": "connector.write",
   "POST /api/v1/connectors/saved/{connector_id}/region-verification": "connector.write",

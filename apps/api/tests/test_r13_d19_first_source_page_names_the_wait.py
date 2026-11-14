@@ -131,7 +131,7 @@ def test_the_job_names_the_source_wait_and_pulses_until_the_first_page(world):
     waiting = [(t, m) for t, m in msgs if m.startswith("Reading from the source")]
     assert waiting, [m for _, m in msgs]
     # The wait names the source, not the destination.
-    assert "sqlite" in waiting[0][1] and "Connecting to destination" not in waiting[0][1]
+    assert "sqlite" in waiting[0][1].lower() and "Connecting to destination" not in waiting[0][1]
     # The worker proved it was alive during the wait through heartbeat_at,
     # and never through updated_at: a pulse must not hide a dead worker from
     # job_stall_seconds (review item 1).

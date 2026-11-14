@@ -213,8 +213,10 @@ def evaluate_fast_preflight(
     audit = list(drift.get("non_breaking_audit") or evolution.get("audit") or [])
     acknowledge = False
     if hard or (evolution.get("should_pause") and hard):
+        from services.error_taxonomy import drift_kind_words
+
         message = (
-            f"Breaking schema change: {hard[0].get('kind')} — sync paused"
+            f"Breaking schema change: {drift_kind_words(hard[0].get('kind'))} — sync paused"
             if hard and isinstance(hard[0], dict)
             else "Breaking schema change — sync paused"
         )

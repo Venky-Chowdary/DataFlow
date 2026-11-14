@@ -4,6 +4,7 @@
  * the EU Data Act switching window). The API checks every field again (422).
  */
 
+import { connectorDisplayName } from "../../lib/connectorTypes";
 import { useEffect, useId, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
@@ -138,7 +139,7 @@ export function SystemFormDrawer({ open, system, connectors, onClose, onSubmit }
                 <option value="">Choose a saved connection…</option>
                 {connectorMissing && <option value={draft.connectorId}>{system?.source.connector_name || draft.connectorId}</option>}
                 {sources.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name || c.id} ({c.type})</option>
+                  <option key={c.id} value={c.id}>{c.name || c.id} ({connectorDisplayName(c.type)})</option>
                 ))}
               </select>
               <FieldError id={`${f("connector")}-error`} message={errors.connector} />

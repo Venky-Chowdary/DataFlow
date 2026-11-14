@@ -1,0 +1,25 @@
+# Proprietary vendor database drivers. NOT shipped in the Datawrap API image
+# (owner decision, 2026-11-13): their vendor licences do not clearly allow
+# Datawrap to redistribute them. An operator who has accepted the vendor's
+# licence installs them on the API host:
+#
+#   pip install -r requirements-vendor-drivers.txt
+#   # or: docker build -f Dockerfile.api --build-arg INSTALL_VENDOR_DRIVERS=1 .
+#
+# Without them, the SAP HANA, Teradata and IBM Db2 connectors refuse Test, save and run
+# with the install instruction (connectors/vendor_drivers.py).
+
+# SAP HANA: SAP's client (SAP Developer License Agreement) and the
+# SQLAlchemy dialect the generic SQL path dials through (Apache-2.0).
+hdbcli>=2.18.0
+sqlalchemy-hana>=2.0.0
+
+# Teradata: Teradata's SQL driver and its SQLAlchemy dialect (both under
+# Teradata's own licence terms).
+teradatasql>=17.10.0.0
+teradatasqlalchemy>=20.0.0.0
+
+# IBM Db2: ibm-db bundles IBM's proprietary Db2 client (clidriver, IBM licence
+# and redistribution terms); ibm-db-sa is the SQLAlchemy dialect (Apache-2.0).
+ibm-db>=3.2.0
+ibm-db-sa>=0.4.1

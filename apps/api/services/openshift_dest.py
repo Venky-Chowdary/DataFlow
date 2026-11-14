@@ -19,7 +19,8 @@ NULL vs missing) into PostgreSQL — the same wire as CNPG on OpenShift.
 
 That is **not**:
 
-* DynamoDB Streams CDC exactly-once (default remains at-least-once upsert)
+* CDC from DynamoDB: no DynamoDB Streams reader exists, and Validate refuses
+  CDC from DynamoDB (CLM-10)
 * GSI / LSI / TTL / global-table replica copies
 * attributes the application stored in S3 because of the 400 KB item cap
 * an OpenShift cluster API migration
@@ -140,7 +141,10 @@ def accuracy_contract() -> dict[str, Any]:
             "Item attributes on the named fixture are proven; GSI/LSI/TTL/Streams "
             "are not the snapshot."
         ),
-        "cdc": "at-least-once upsert — DynamoDB Streams exactly-once is not claimed",
+        "cdc": (
+            "none — no DynamoDB Streams reader exists; Validate refuses CDC from "
+            "DynamoDB (it is not in CDC_CAPABLE_SOURCES)"
+        ),
         "openshift": (
             "Hosting plane for PostgreSQL/MySQL/MongoDB. Not a dest engine. "
             "Not a Kubernetes API write."

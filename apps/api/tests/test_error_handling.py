@@ -61,13 +61,13 @@ def test_humanize_mysql_table_full_guides_operator():
     from services.error_handling import humanize_transfer_failure
 
     human = humanize_transfer_failure(RuntimeError('(1114, "The table \'jobs\' is full")'))
-    assert human["code"] == "destination_table_full"
+    # One taxonomy code (services.error_taxonomy), decided on the MySQL number.
+    assert human["code"] == "capacity.table_full"
     assert human["retriable"] is False
     assert human["confidence"] == "high"
-    assert "1114" in human["title"] or "full" in human["title"].lower()
-    assert "Resume" in human["fix"]
-    # Must not pretend a single guaranteed fix
-    assert "Common verified causes" in human["fix"] or "likely" in human["fix"].lower() or "Common" in human["fix"]
+    assert "full" in human["title"].lower()
+    assert "resume" in human["fix"].lower()
+    assert '"jobs"' in human["message"]
     assert "1114" in human["raw"] or "full" in human["raw"].lower()
 
 
@@ -87,10 +87,12 @@ def test_humanize_unknown_error_does_not_invent_root_cause():
     from services.error_handling import humanize_transfer_failure
 
     human = humanize_transfer_failure(RuntimeError("weird proprietary widget glitch 42"))
-    assert human["code"] == "transfer_failed"
+    # ERR-7: the fallback says the cause was not identified and points at support.
+    assert human["code"] == "unclassified"
     assert human["confidence"] == "low"
-    assert "No mapped remediation" in human["fix"]
-    assert human["message"] == "weird proprietary widget glitch 42"
+    assert "couldn't identify the cause" in human["message"]
+    assert "weird proprietary widget glitch 42" in human["message"]
+    assert "support" in human["fix"].lower()
 
 
 def test_humanize_duplicate_primary_key_has_concrete_fix():
@@ -110,25 +112,27 @@ def test_humanize_duplicate_primary_key_has_concrete_fix():
 def test_humanize_missing_column_and_table_guide_to_map():
     from services.error_handling import humanize_transfer_failure
 
-    col = humanize_transfer_failure(RuntimeError("(1054, \"Unknown column 'email' in 'field list'\")"))
-    assert col["code"] == "destination_column_missing"
+    col = humanize_transfer_failure(
+        RuntimeError("(1054, \"Unknown column 'email' in 'field list'\")"), side="destination"
+    )
+    assert col["code"] == "object.column_not_found"
     assert col["confidence"] == "high"
     assert "Map" in col["fix"]
 
     pg_col = humanize_transfer_failure(RuntimeError('column "email" does not exist'))
-    assert pg_col["code"] == "destination_column_missing"
+    assert pg_col["code"] == "object.column_not_found"
 
     missing = humanize_transfer_failure(RuntimeError('relation "railway.users" does not exist'))
-    assert missing["code"] == "table_not_found"
-    assert "source" in missing["fix"].lower()
-    assert "destination" in missing["fix"].lower()
+    assert missing["code"] == "object.table_not_found"
+    assert '"users"' in missing["message"]
     assert "address capacity" not in missing["message"].lower()
-    assert "not a capacity problem" in missing["message"].lower()
-    assert "Destination table" not in missing["title"]
+    # Unattributed: the copy does not claim either end.
+    assert "destination" not in missing["message"].lower()
+    assert "source" not in missing["message"].lower()
     mysql_missing = humanize_transfer_failure(
         RuntimeError("(1146, \"Table 'qa_dataflow.qa6b_sch2' doesn't exist\")")
     )
-    assert mysql_missing["code"] == "table_not_found"
+    assert mysql_missing["code"] == "object.table_not_found"
     assert "address capacity" not in mysql_missing["message"].lower()
     assert "Destination table/relation was not found" not in mysql_missing["message"]
 

@@ -123,6 +123,15 @@ _REASON = {
     "not_analysed": "{why}",
 }
 
+#: UX-33: the same spelling on both sides (two engines) is never "widens X to X".
+_SAME_TYPE_REASON = {
+    "widen": "keeps the same type ({ttype}); every value fits",
+    "narrowing": ("keeps the type name {ttype}, but the destination's {ttype} holds less; values that do not "
+                  "fit lose data"),
+    "lossless_cast": "keeps the same type ({ttype}) without losing information",
+}
+
+
 #: How a conditional column is held to its condition when the run must be reversible (review 3, M3).
 #: ``at_execute``: Validate checked the sample, Execute checks every row. ``while_writing``: this run's
 #: transform stage checks every value and stops on the first that would change
@@ -302,6 +311,9 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
            **fmt: Any) -> dict[str, Any]:
     name = source or target or "column"
     template = _REASON[code]
+    if stype and ttype and _norm(stype).upper() == _norm(ttype).upper() and "{stype} to {ttype}" in template:
+        template = _SAME_TYPE_REASON.get(code) or template.replace("{stype} to {ttype}",
+                                                                    "{ttype} to the destination's {ttype}")
     body = template.format(
         target=target, stype=stype or "?", ttype=ttype or "?", **fmt
     )

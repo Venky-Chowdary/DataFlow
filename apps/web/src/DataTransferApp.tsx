@@ -11,6 +11,7 @@ import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
+import { FirstRunWorkspace } from "./components/ui/FirstRunWorkspace";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { ForcePasswordChange } from "./components/ForcePasswordChange";
@@ -29,6 +30,8 @@ import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connector
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
 import { AcceptInvitePage, ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
+import { fetchSignupConfig } from "./lib/signupApi";
+import { getStartedStage } from "./lib/getStarted";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
@@ -41,6 +44,7 @@ import {
   writePublicHash,
 } from "./lib/publicNavigation"; // help article routes
 import { apiOfflineMessage } from "./lib/runtimeEnv";
+import { staleDataLabel, useConnectivity } from "./lib/connectivity";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import type { JobsStudioIntent } from "./pages/JobsPage";
@@ -63,6 +67,24 @@ const QueryPage = lazyNamed(() => import("./pages/QueryPage"), "QueryPage");
 const SettingsPage = lazyNamed(() => import("./pages/SettingsPage"), "SettingsPage");
 const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
 const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
+
+/** Each lazy screen by the screen id that opens it, so its code can be fetched early (UX-43). */
+const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void }>> = {
+  pilot: PilotPage,
+  transfer: TransferPage,
+  connectors: ConnectorsPage,
+  schedules: SchedulesPage,
+  transforms: TransformsPage,
+  "transform-library": TransformLibraryPage,
+  jobs: JobsPage,
+  contracts: ContractsPage,
+  exit: ExitReadinessPage,
+  mcp: McpPage,
+  query: QueryPage,
+  settings: SettingsPage,
+  docs: DocsPage,
+  benchmarks: BenchmarksPage,
+};
 
 function LazyScreen({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -100,6 +122,13 @@ const PLATFORM_NAV = NAV.filter((item) => item.group === "platform");
 const OPS_NAV = NAV.filter((item) => item.group === "ops");
 const SYSTEM_NAV = NAV.filter((item) => item.group === "system");
 const DEVELOPER_NAV = SYSTEM_NAV;
+/** Move focus to the page content (skip link, WCAG 2.4.1). */
+function focusMainContent() {
+  const main = document.getElementById("datawrap-main-content");
+  if (!main) return;
+  main.focus();
+}
+
 function readStoredUser() {
   return readSession()?.email ?? "";
 }
@@ -304,8 +333,8 @@ function AppShell({
         setApiOnline(false);
         if (notifyOnError) {
           toast({
-            title: "Control plane offline",
-            message: "Check the API URL (VITE_API_BASE / DATAWRAP_API_BASE) and deployment health.",
+            title: "Can't reach Datawrap's server",
+            message: "Check your network connection, then try again. If it persists, contact your administrator.",
             tone: "error",
           });
         }
@@ -575,6 +604,15 @@ function AppShell({
   const showCopilotEdge = screen !== "pilot" && !copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
   const offlineCopy = apiOfflineMessage();
+  const net = useConnectivity();
+  const retryConnection = async () => {
+    const up = await probeApiHealth();
+    if (up) {
+      noteApiSuccess();
+      setApiOnline(true);
+      await Promise.allSettled([loadConnectors(false), loadJobs(false), loadSchedules()]);
+    }
+  };
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
   const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
@@ -584,6 +622,18 @@ function AppShell({
         showCopilotEdge ? "df2-app-with-edge" : ""
       } ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}
     >
+      {/* UX-13 (WCAG 2.4.1): the first tab stop skips the chrome. A hash link
+          would be read as a route, so it moves focus itself. */}
+      <a
+        className="df2-skip-link"
+        href="#datawrap-main-content"
+        onClick={(e) => {
+          e.preventDefault();
+          focusMainContent();
+        }}
+      >
+        Skip to main content
+      </a>
       {mobileNavOpen && (
         <div className="df2-overlay" onClick={() => setMobileNavOpen(false)} role="presentation" />
       )}
@@ -784,17 +834,38 @@ function AppShell({
           </div>
         </header>
 
-        {!apiOnline && (
-          <div className="df2-api-offline-banner df2-alert df2-alert-error" role="alert">
+        {(!apiOnline || !net.online) && (
+          // UX-17: say the connection is gone, say how old the screen is, and
+          // offer the retry — the lists below keep their last data, labelled.
+          <div className="df2-api-offline-banner df2-alert df2-alert-error" role="alert" data-testid="offline-banner">
             <DtIcon name="alert" size={18} />
             <div>
-              <strong>{offlineCopy.title}</strong>
-              <p>{offlineCopy.body}</p>
+              <strong>
+                {net.reason === "browser-offline"
+                  ? "You're offline"
+                  : net.reason === "api-unreachable"
+                    ? "Can't reach Datawrap"
+                    : offlineCopy.title}
+              </strong>
+              <p>
+                {net.online && apiOnline ? offlineCopy.body : `${staleDataLabel(net.lastSyncedAt)} Changes can't be saved until the connection is back.`}
+              </p>
             </div>
+            <Button size="sm" variant="secondary" onClick={() => void retryConnection()}>
+              Retry now
+            </Button>
           </div>
         )}
 
-        <div className={`df2-content ${contentModeClass}`}>
+        <FirstRunWorkspace />
+
+        <main
+          id="datawrap-main-content"
+          className={`df2-content ${contentModeClass}`}
+          tabIndex={-1}
+          aria-label={currentNav?.label ?? "Workspace"}
+          data-stale={!net.online || !apiOnline ? "true" : undefined}
+        >
         {bootLoading && (
           <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
             <div className="df2-boot-progress-fill" />
@@ -851,7 +922,8 @@ function AppShell({
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
-                      toast({ title: "Transfer complete", message: "Gate-8 proof stays on Job Theater.", tone: "success" });
+                      // UX-34: say where the proof is, in the product's own words.
+                      toast({ title: "Transfer complete", message: "The Trust Report and post-write proof are on the job in Jobs.", tone: "success" });
                     }}
                   />
                 </PageErrorBoundary>
@@ -1002,7 +1074,7 @@ function AppShell({
             </LazyScreen>
           </div>
         </div>
-        </div>
+        </main>
       </div>
 
       {showCopilotRail && (
@@ -1166,6 +1238,17 @@ function DataTransferAppInner() {
     setStage(userEmail ? "app" : "login");
   };
 
+  const getStarted = async () => {
+    setEntryScreen("transfer");
+    const stageNext = getStartedStage(Boolean(userEmail), userEmail ? false : (await fetchSignupConfig()).enabled);
+    if (stageNext === "app") {
+      requestApp("transfer");
+      return;
+    }
+    setSignupSeed(null);
+    setStage(stageNext);
+  };
+
   const navigatePublic = (route: PublicRoute) => {
     setPublicRoute(route);
     setStage("landing");
@@ -1210,6 +1293,12 @@ function DataTransferAppInner() {
         : metaForScreen(entryScreen);
   usePageMeta(publicMeta);
 
+  // UX-43: fetch the screen sign-in will open while the form is on screen, not
+  // after the login answers; the content area then paints with the shell.
+  useEffect(() => {
+    if (stage === "login") SCREEN_CHUNKS[entryScreen]?.preload();
+  }, [stage, entryScreen]);
+
   useEffect(() => {
     if (stage === "app") {
       if (isSignedInHelpHash(window.location.hash)) return;
@@ -1224,7 +1313,7 @@ function DataTransferAppInner() {
           route={publicRoute}
           onNavigate={navigatePublic}
           onLogin={() => requestApp("dashboard")}
-          onGetStarted={() => requestApp("transfer")}
+          onGetStarted={() => void getStarted()}
         />
       )}
 

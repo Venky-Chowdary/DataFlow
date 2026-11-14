@@ -1582,9 +1582,12 @@ class SqlServerNativeCdc:
         qualified = _qualified_ref(self.schema, table_name)
         mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
         order_sql = ", ".join(quoted)
+        from connectors.sqlserver_tick import driver_select_list
+
+        select_list = driver_select_list(cur, qualified)  # pymssql: keep DATETIME2(7)
         if mode == "scan":
             cur.execute(
-                f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+                f"SELECT {select_list} FROM {qualified} ORDER BY {order_sql}"  # nosec B608
             )
         while True:
             if mode == "scan":
@@ -1596,13 +1599,14 @@ class SqlServerNativeCdc:
                     last_pk=last_pk,
                     limit=self.batch_size,
                     dialect="sqlserver",
+                    select_list=select_list,
                 )
                 cur.execute(sql, params)
                 rows = cur.fetchall() or []
             else:
                 cur.execute(
                     f"""
-                    SELECT *
+                    SELECT {select_list}
                     FROM {qualified}
                     ORDER BY {order_sql}
                     OFFSET %s ROWS FETCH NEXT %s ROWS ONLY

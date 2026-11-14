@@ -33,6 +33,8 @@ import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
+import { isDuplicateKeyError, jobFailureCopy } from "../lib/errorCopy";
+import { ErrorReferenceChip } from "./ErrorReferenceChip";
 import { ringDasharray } from "../lib/progressRing";
 import { earliestJobStartMs, jobAverageRowsPerSecond, parseServerTimestampMs, publishedEngineElapsedSeconds, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
 import { formatSeconds } from "../lib/phaseProfile";
@@ -642,9 +644,8 @@ export function JobTheaterView({
     )
     : null;
   const capacityFailure = isDestinationCapacityFailure(failureHint, job.error || job.message);
-  const duplicateKeyFailure =
-    failureHint?.code === "duplicate_primary_key"
-    || /duplicate redis key|duplicate primary key|conflict on '/i.test(String(job.error || job.message || ""));
+  // Decided on the API's code, never on the error text (ERR-36..39 family).
+  const duplicateKeyFailure = isDuplicateKeyError(failureHint?.code || job.error_code);
   const breakerContractId = contractIdFromBreakerFailure({
     error: job.error || job.message,
     errorDetails: job.error_details || null,
@@ -658,7 +659,10 @@ export function JobTheaterView({
   const cursorReset = failureDetails.reason === "cursor_destination_reset";
   const acceptContinuity = cursorReset ? undefined : onRebaselineContinuity;
   const continuityControls = continuityFailure && Boolean(acceptContinuity || onRebuildFullRefresh);
-  const failureText = job.error || job.message || "The job stopped before completing. Review the event log below and re-run.";
+  const failureCopy = jobFailureCopy(job);
+  // A classified failure's job text is its message plus its action; the action
+  // renders once, below, as the fix (failureHint.fix).
+  const failureText = failureCopy.message || "The job stopped before completing. Review the event log below and re-run.";
   // The engine's recovery prose names API routes; when the controls below exist, they are the recovery.
   const shownFailureText = continuityControls ? stripContinuityRecoveryProse(failureText) : failureText;
 
@@ -931,6 +935,7 @@ export function JobTheaterView({
                   : "Transfer failed")}
             </strong>
             <p>{shownFailureText}</p>
+            <ErrorReferenceChip reference={failureCopy.reference} />
             {continuityControls && (
               <ContinuityRecoveryForm
                 missing={continuityMissing}

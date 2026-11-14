@@ -231,6 +231,17 @@ class TransferRequest:
     approved_decision_artifact_hash: str = ""
     decision_artifact: dict = field(default_factory=dict)
     source_timezone: str = ""
+    # G11: the legacy-column adoption Execute made in this run and the live
+    # columns it read (``target_name_legacy.adopt_for_request``). Server-side
+    # only: not a constructor argument, never parsed from a request.
+    _g11_adoption: dict | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # G11 final review B1: ``map_target`` is the server's record of an
+        # adoption; a client-supplied one is dropped at ingress.
+        from services.target_name_legacy import strip_client_map_targets
+
+        self.mappings = strip_client_map_targets(self.mappings)
 
     @property
     def operation(self) -> str:

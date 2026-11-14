@@ -1218,49 +1218,10 @@ table.df2-table.df2-exit-tables {
   gap: var(--df-space-2);
 }
 
-.df2-rev-counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--df-space-2);
-  margin: 0;
-}
-
-.df2-rev-counts > div {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 10px;
-  border: 1px solid var(--df-border);
-  border-left-width: 3px;
-  border-radius: var(--df-radius-md);
-  background: var(--df-surface);
-}
-
-.df2-rev-counts > div.is-lossy {
-  border-left-color: var(--df-danger);
-}
-
-.df2-rev-counts > div.is-conditional {
-  border-left-color: var(--df-warning);
-}
-
-.df2-rev-counts > div.is-invertible {
-  border-left-color: var(--df-brand);
-}
-
-.df2-rev-counts dt {
-  order: 2;
-  font-size: var(--df-fs-sm);
-  color: var(--df-text-secondary);
-}
-
-.df2-rev-counts dd {
-  order: 1;
-  margin: 0;
-  font-family: var(--df-font-display);
-  font-size: var(--df-fs-lg);
-  font-weight: var(--df-fw-bold);
-  color: var(--df-text-primary);
+/* Counts use the shared stat tile (ui-consistency.css): neutral surfaces,
+   status as a small dot, not three coloured blocks (W6). */
+.df2-rev-counts.df2-stat-tiles {
+  margin: var(--df-space-1) 0;
 }
 
 table.df2-table.df2-rev-tables {

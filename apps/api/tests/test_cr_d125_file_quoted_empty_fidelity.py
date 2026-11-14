@@ -192,7 +192,12 @@ def test_s3_csv_to_postgres_copy_keeps_null_and_empty_distinct():
 
 
 def test_s3_csv_legacy_backslash_n_null_leaves_the_copy_to_the_codec(tmp_path):
-    """``\\N`` is NULL to the codec but text to a CSV ``NULL ''`` COPY."""
+    """A bare ``\\N`` decides the COPY route, and the codec owns its value.
+
+    DATA-21: with no declared ``null_marker`` the codec reads it as the text
+    ``\\N`` (it was NULL before); the bulk ``NULL ''`` COPY must still step
+    aside so the codec, not the loader, decides.
+    """
     import moto
 
     from services.copy_s3_common import s3_file_has_legacy_null
@@ -213,7 +218,7 @@ def test_s3_csv_legacy_backslash_n_null_leaves_the_copy_to_the_codec(tmp_path):
         result = run_transfer(source=s3_source(bucket, "in/t.csv"), destination=pg_dest(table))
     rows = pg_rows_and_drop(table)
     assert_verified(result)
-    assert rows == [(1, None), (2, "")]
+    assert rows == [(1, "\\N"), (2, "")]
 
 
 def test_object_reader_rows_spell_null_as_the_wire_sentinel(tmp_path):

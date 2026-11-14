@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../../components/DtIcon";
 import { TransformColumnCatalog } from "../../components/transfer/TransformColumnCatalog";
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
@@ -124,6 +125,19 @@ function cellText(value: unknown): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+/**
+ * UX-10: a sample cell as the operator should read it. SQL NULL arrives as
+ * the engine's wire token (or JSON null) and renders as the same NULL marker
+ * the Query grid uses; an absent document field reads "absent". Never the
+ * literal token.
+ */
+export function SampleCell({ value }: { value: unknown }) {
+  const wire = value === null ? "NULL" : nullWireLabel(value);
+  if (wire === "NULL") return <span data-cell="null">NULL</span>;
+  if (wire) return <span data-cell="missing">({wire})</span>;
+  return <>{cellText(value)}</>;
 }
 
 /**
@@ -984,7 +998,7 @@ export function TransferTransformStep({
                     <tbody>
                       {beforeRows.map((row, index) => (
                         <tr key={index}>
-                          {sourceResultColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}
+                          {sourceResultColumns.map((column) => <td key={column}><SampleCell value={row[column]} /></td>)}
                         </tr>
                       ))}
                     </tbody>
@@ -1019,7 +1033,7 @@ export function TransferTransformStep({
                                 title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
                               >
                                 {changed.has(`${index}:${column}`) ? <span className="df2-sr-only">changed</span> : null}
-                                {cellText(row[column])}
+                                <SampleCell value={row[column]} />
                               </td>
                             ))}
                           </tr>

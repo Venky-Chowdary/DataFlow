@@ -462,8 +462,16 @@ def _proof_mongo_source_batches(
     from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     absent = {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL} if absent_as_null else set()
+    # A destination's mapped targets are field paths (Document Modeler PR1):
+    # ``address.city`` is read inside the ``address`` sub-document. The
+    # reader's own flattening names nested leaves ``address_city``.
+    dotted = [c for c in read_cols if "." in str(c)] if absent_as_null else []
 
     def _page(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if dotted:
+            from connectors.mongo_field_paths import path_view
+
+            docs = [{**doc, **path_view(doc, dotted)} for doc in docs]
         rows = _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
         if not absent:
             return rows
@@ -1002,9 +1010,17 @@ def _recipe_step_sql(
             f"ELSE {txt} END"
         )
     if op == "null_if":
+        # The engine nulls a cell whose text equals a sentinel's text. A text
+        # sentinel keeps NULLIF; any other (1.5, True) is compared as text,
+        # since NULLIF(text_col, 1.5) is an operator error on PostgreSQL.
+        from services.shape_expr import _as_text
+
         expr = col_expr
         for v in opts.get("values") or []:
-            expr = f"NULLIF({expr}, {_lit(v)})"
+            if isinstance(v, str):
+                expr = f"NULLIF({expr}, {_lit(v)})"
+            elif (text := _as_text(v)) is not None:
+                expr = f"CASE WHEN {_text_cast(expr)} = {_lit(text)} THEN NULL ELSE {expr} END"
         return expr
     if op == "cast_column":
         to_type = str(opts.get("to_type") or "").casefold()
@@ -1261,8 +1277,11 @@ def _transform_applied_proof_impl(
     )
     scope_pk: list[str] = []
     if scd2_opts:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
@@ -1881,7 +1900,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc0 = physical_select_list(sel_cols0, dq0)
+            qc0 = physical_select_list(sel_cols0, dq0, dest_db_type)
 
             def _scoped_gen(batches):
                 nonlocal actual_rows
@@ -2351,7 +2370,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc = physical_select_list(sel_cols, dq)
+            qc = physical_select_list(sel_cols, dq, dest_db_type)
             stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
             if scd2_opts:
                 from services.scd2_engine import scd2_is_current_predicate
@@ -2625,8 +2644,11 @@ def _compute_source_checksum_from_spool(
     from services.fingerprint_accumulator import FingerprintAccumulator
 
     if target_cols is None:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
     acc = FingerprintAccumulator()
     policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -2690,8 +2712,11 @@ def _compute_source_checksum(
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
     _, data_rows = records_to_matrix(records, columns)
     if target_cols is None:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
     mapped_rows, _rejected = map_rows_for_fingerprint(
         headers=columns,
@@ -3410,6 +3435,73 @@ def _only_rows_recovered_behind_watermark(
     return recovered > 0 and _as_count(report.get("source_rows")) <= recovered
 
 
+def source_rewrites_needed(
+    source_reread: bool, rewrites: bool, rows: list[dict], mappings: list[dict]
+) -> bool:
+    """Whether the ladder's source rows must be mapped to the written image.
+
+    A re-read always is the pre-image. In-memory rows are when they still
+    carry a renamed column under its source name and not its target name.
+    """
+    if not rewrites:
+        return False
+    if source_reread:
+        return True
+    first = rows[0] if rows and isinstance(rows[0], dict) else None
+    if first is None:
+        return False
+    for m in mappings or []:
+        src = str((m or {}).get("source") or "").strip()
+        tgt = str((m or {}).get("target") or "").strip()
+        if src and tgt and src.casefold() != tgt.casefold() and src in first and tgt not in first:
+            return True
+    return False
+
+
+def _run_sub_summary(dest_summary: Any) -> dict[str, Any]:
+    """The history / mirror census a buffered merge nests under its mode."""
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    for key in ("scd2", "mirror"):
+        if isinstance(summary.get(key), dict):
+            return summary[key]
+    return {}
+
+
+def _live_row_column(dest_summary: Any) -> tuple[str, bool]:
+    """``(flag column, value that marks a live row)``, or ``("", True)``.
+
+    SCD2: the is-current flag (true). Soft-delete mirror: the tombstone flag
+    (false). Every other route's table is its live population.
+    """
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    sync = str(summary.get("sync_mode") or summary.get("effective_sync_mode") or "")
+    sync = sync.strip().lower()
+    if sync == "scd2" or isinstance(summary.get("scd2"), dict):
+        from services.scd2_engine import resolve_scd2_cols
+
+        opts = summary.get("scd2_opts")
+        return str(resolve_scd2_cols(opts if isinstance(opts, dict) else None)["is_current"]), True
+    mirror = summary.get("mirror") if isinstance(summary.get("mirror"), dict) else summary
+    if sync in {"mirror", "full_refresh_mirror"} or isinstance(summary.get("mirror"), dict):
+        lattice = str(mirror.get("soft_delete_column") or "")
+        if str(mirror.get("mirror_delete_mode") or "soft").lower() == "soft" and lattice:
+            return lattice, False
+    return "", True
+
+
+def _is_current_cell(value: Any) -> bool:
+    """A boolean flag as any engine reads it back (bool, 1/0, 't'/'f', text)."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    from decimal import Decimal
+
+    if isinstance(value, (int, float, Decimal)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "t", "y", "yes"}
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -3538,15 +3630,28 @@ def _maybe_attach_verification_ladder(
     source_rows: list[dict] = [r for r in (records or []) if isinstance(r, dict)]
     target_rows: list[dict] = []
 
+    # An SCD2 table holds every version; this run's population is the current
+    # one. Grading closed versions against the source failed every SCD2 run
+    # that quarantined a row once history existed (the row-level L3-L5 only
+    # runs when quarantined keys are excluded).
+    # A soft-delete mirror's tombstones are not its live population either.
+    current_col, live_when = _live_row_column(dest_summary)
     # Prefer full SQL population over buffered records (streaming passes []).
     try:
         target_rows = _read_verify_rows(
             dest_type,
             dest_cfg,
             table=str(endpoint.table or dest_cfg.get("table") or ""),
-            columns=target_cols,
+            columns=[*target_cols, current_col] if current_col else target_cols,
             postgres_default=True,
         )
+        if current_col:
+            target_rows = [
+                {c: r.get(c) for c in target_cols}
+                for r in target_rows
+                if isinstance(r, dict)
+                and _is_current_cell(r.get(current_col)) is live_when
+            ]
     except PopulationTooLarge as exc:
         return _return(
             _ladder_declined(report, exc.rows_read, exc.budget),
@@ -3709,7 +3814,10 @@ def _maybe_attach_verification_ladder(
                     r for r in target_rows if _t_window.position(r) == IN_WINDOW
                 ]
                 window_scoped_target = True
-    if source_reread and rewrites:
+    # Buffered records handed in by the engine are the source image too: a
+    # mirror keeps them for its key census, and comparing them unmapped read
+    # every renamed column as NULL ("column 'clv_value' source=None").
+    if source_rewrites_needed(source_reread, rewrites, source_rows, mappings):
         def _as_written(rows: list[dict]) -> list[dict]:
             if not rows:
                 return rows
@@ -3808,6 +3916,21 @@ def _maybe_attach_verification_ladder(
                 for r in source_rows
                 if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _rej_keys
             ]
+    # SCD2-F2: a held-out row's key kept its prior current version. That
+    # version is not this run's write, so neither side grades it, and L1
+    # counts the current rows this run owns (current - kept).
+    _kept_current = _as_count(
+        (dest_summary or {}).get("quarantined_keys_kept_current")
+        or _run_sub_summary(dest_summary).get("quarantined_keys_kept_current")
+    ) or 0
+    if _kept_current and _rej_keys:
+        target_rows = [
+            r
+            for r in target_rows
+            if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _rej_keys
+        ]
+    else:
+        _kept_current = 0
     # dedupe_skip kept the stored row for a key that was already there: that row
     # is not this run's write, so neither side of it is graded against the source.
     _kept_keys = dedupe_skip_kept_keys(dest_summary, key_cols)
@@ -3883,7 +4006,9 @@ def _maybe_attach_verification_ladder(
         # whole-table re-read, so L1 expected every existing row to be new and
         # failed the steady state of every incremental schedule (QA ACC-02).
         source_row_count=_measured_count(report.get("source_rows"), len(source_rows)),
-        target_row_count=_measured_count(report.get("target_rows"), len(target_rows)),
+        target_row_count=(
+            _measured_count(report.get("target_rows"), len(target_rows)) - _kept_current
+        ),
         rejected_rows=int(report.get("rejected_rows") or 0),
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),
@@ -6437,6 +6562,15 @@ def _without_held_out_cells(
     ]
 
 
+def _readback_reason(failure: str) -> str:
+    """A non-transient read-back failure, without the driver's class name or secrets (REL-4)."""
+    from services.log_redaction import redact_log_text
+
+    text = redact_log_text(str(failure or "")).strip()
+    text = re.sub(r"^[A-Za-z_.]*(Error|Exception)\s*:\s*", "", text)
+    return text.splitlines()[0][:300] if text else "the read failed"
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -7492,6 +7626,22 @@ def _run_reconciliation_impl(
                 active_rows = sub_summary.get("active_rows")
                 active_checksum = sub_summary["active_checksum"]
                 break
+    if (
+        not active_checksum
+        and not source_rows
+        and isinstance(dest_summary, dict)
+        and "active_checksum" in dest_summary
+        and dest_summary.get("active_rows") == 0
+        and (dest_summary.get("scd2_opts") or dest_summary.get("mirror_delete_mode"))
+    ):
+        # DATA-3 / DATA-6: an acknowledged empty source closed (SCD2) or
+        # deleted (mirror) every row. The measured current population is
+        # empty, as the source is; "" is the writer's empty-population digest,
+        # and falling through counted closed history as live rows.
+        from services.fingerprint_accumulator import FingerprintAccumulator
+
+        active_rows = 0
+        active_checksum = source_checksum = FingerprintAccumulator().digest()
     if active_checksum and source_checksum_scope_note:
         return _finalize(
             _merge_cardinality_only_report(
@@ -7511,23 +7661,33 @@ def _run_reconciliation_impl(
         # keyed by this run's source.
         _retained = int(
             (dest_summary or {}).get("retained_missing_rows")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "retained_missing_rows"
             )
             or 0
         )
         _scoped = (
             (dest_summary or {}).get("source_scoped_checksum")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "source_scoped_checksum"
             )
         )
         _snapshot_digest = (
             (dest_summary or {}).get("source_snapshot_checksum")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "source_snapshot_checksum"
             )
         )
+        if (
+            not _snapshot_digest
+            and _retained
+            and _scoped
+            and isinstance((dest_summary or {}).get("mirror"), dict)
+        ):
+            # Buffered mirror: the write-pass fingerprint IS the digest of the
+            # rows this run wrote — the population the scoped digest covers
+            # once the kept quarantined keys are left out.
+            _snapshot_digest = source_checksum
         _scoped_pair = bool(
             _retained and _scoped and _snapshot_digest
         )
@@ -7553,12 +7713,25 @@ def _run_reconciliation_impl(
         )
         out = report.to_dict()
         if _retained:
+            # Why the retained keys stayed current: absent from the snapshot
+            # under close_missing=off, or their row was quarantined (SCD2-F2).
+            _held = _as_count(
+                (dest_summary or {}).get("quarantined_keys_kept_current")
+                or _run_sub_summary(dest_summary).get(
+                    "quarantined_keys_kept_current"
+                )
+            )
+            _why = (
+                "their source row was quarantined, so it is not a delete"
+                if _held >= _retained
+                else "close_missing=off"
+            )
             if _scoped_pair and bool(out.get("checksum_match")):
                 # B1-E5a: the digest covered source-keyed rows only — name
                 # that population, not the full current count.
                 _scoped_rows = int(
                     (dest_summary or {}).get("source_scoped_rows")
-                    or ((dest_summary or {}).get("scd2") or {}).get(
+                    or _run_sub_summary(dest_summary).get(
                         "source_scoped_rows"
                     )
                     or source_rows
@@ -7567,7 +7740,7 @@ def _run_reconciliation_impl(
                     "Row fidelity verified — source and target checksums "
                     f"match ({_scoped_rows} source-keyed rows; "
                     f"{_retained} retained key(s) kept current — "
-                    "close_missing=off)"
+                    f"{_why})"
                 )
                 out["source_checksum_provenance"] = (
                     "staging_snapshot_digest"
@@ -7575,8 +7748,10 @@ def _run_reconciliation_impl(
             else:
                 out["message"] = (
                     str(out.get("message") or "")
-                    + f" ({_retained} retained deleted key(s) kept current — "
-                    "close_missing=off"
+                    + f" ({_retained} retained "
+                    + ("" if _held >= _retained else "deleted ")
+                    + "key(s) kept current — "
+                    + _why
                     + (
                         "; digest covers source-keyed rows only)"
                         if _scoped_pair
@@ -8504,19 +8679,21 @@ def _run_reconciliation_impl(
         if strict_checksum and not dest_only and readback_failure:
             # D284: the engine has a verifier; the read itself failed. Say what
             # failed. A transient fault (retried) is not evidence the committed
-            # rows are wrong, so they are kept rather than undone.
+            # rows are wrong, so they are kept rather than undone. REL-4: the
+            # message says how many rows stay where, and never carries the
+            # driver's text (hosts, ports); that goes to the log.
+            _logger.warning("Strict reconciliation read-back failed for %s: %s", db_type, readback_failure)
+            where = f" to '{table_name}'" if table_name else ""
             return _finalize({
                 "passed": False,
                 "verification_unavailable": readback_transient,
+                "rows_kept": rows_written,
                 "message": (
-                    f"Strict reconciliation could not read the {db_type} destination "
-                    f"back ({readback_failure})"
-                    + (
-                        ", after retrying. The committed rows were kept; re-run "
-                        "verification once the destination is reachable."
-                        if readback_transient
-                        else "."
-                    )
+                    f"Verification could not read the {db_type} destination back "
+                    + ("(the connection was lost, after retrying). " if readback_transient
+                       else f"({_readback_reason(readback_failure)}). ")
+                    + f"{rows_written:,} row(s) were written{where} and kept; re-run "
+                    "verification once the destination is reachable, or undo the run."
                 ),
                 "source_rows": source_rows,
                 "target_rows": -1,
@@ -8926,6 +9103,7 @@ def _run_reconciliation_impl(
         keyed_expected_delta=keyed_delta,
         route_digest_match=dest_summary.get("route_digest_match"),
         rows_written=int(rows_written) if rows_written is not None else None,
+        retained_rows=_declared_off_leftover(dest_summary, table_name) if keyed_scope else 0,
     )
     if cdc_poll_drift:
         from services.incremental_drift import attach_drift
@@ -8934,6 +9112,24 @@ def _run_reconciliation_impl(
             attach_drift(report.to_dict(), cdc_poll_drift, resource=str(table_name or ""))
         )
     return _finalize(report.to_dict())
+
+
+def _declared_off_leftover(dest_summary: dict[str, Any] | None, table_name: Any) -> int:
+    """Destination keys a declared ``delete_mode=off`` kept on purpose, disclosed.
+
+    DATA-1 fails CDC reconcile on rows the source no longer has; the operator's
+    own ``delete_mode=off`` keeps them and the snapshot sweep counts them, so
+    they are retained rows, not an unexplained divergence. Any other reason a
+    key was kept (no primary key, a rewritten key) stays a failure.
+    """
+    found = (dest_summary or {}).get("snapshot_leftover")
+    if isinstance(found, dict) and "status" not in found:
+        found = found.get(str(table_name or ""))
+    if not isinstance(found, dict):
+        return 0
+    if found.get("status") != "kept" or found.get("delete_mode") != "off" or not found.get("declared"):
+        return 0
+    return max(int(found.get("leftover") or 0), 0)
 
 
 def _cdc_poll_window(dest_summary: dict[str, Any] | None) -> dict[str, Any]:

@@ -5,7 +5,7 @@ import {
   type QueryCatalogNodeInfo,
 } from "../../lib/api";
 import { filterCatalogNodes, firstExpanded, mergeExpandedObject, toSchemaObject } from "../../lib/querySchema";
-import { querySchemaErrorCopy } from "../../lib/queryWorkspace";
+import { querySchemaErrorCopy, schemaNotConnectedReason } from "../../lib/queryWorkspace";
 import type { SchemaObject } from "../../lib/sqlIntel";
 import { SchemaBrowser } from "../query/SchemaBrowser";
 
@@ -62,6 +62,7 @@ export function TransferSchemaBrowser({
       });
       setObjects(data.objects.map(toSchemaObject));
       setConnected(data.connected);
+      setError(schemaNotConnectedReason(data));
       setTypeSource(data.type_source ?? "");
       setWarnings(data.warnings ?? []);
       setTruncated(data.objects_truncated === true);
@@ -92,6 +93,7 @@ export function TransferSchemaBrowser({
       setTruncated(data.objects_truncated === true);
       setWarnings(data.warnings ?? []);
       setConnected(data.connected);
+      setError(schemaNotConnectedReason(data));
     } catch (err) {
       setError(querySchemaErrorCopy((err as Error).message || "Schema introspection failed"));
     } finally {

@@ -66,7 +66,8 @@ def _same_as_missing(client, method: str, suffix: str, plan_id: str, **kwargs):
     assert foreign.status_code == missing.status_code, (foreign.text, missing.text)
     assert foreign.status_code in {400, 404}, foreign.text
     # safe_http_exception appends a per-response support reference.
-    strip = lambda text: re.sub(r" Reference: [0-9a-f-]{36}", "", text)  # noqa: E731
+    # ... and the error envelope carries the same reference as a field (W3).
+    strip = lambda text: re.sub(r'( Reference: |"reference":")[0-9a-f-]{36}', r"\1", text)  # noqa: E731
     assert strip(foreign.text) == strip(missing.text), (foreign.text, missing.text)
     for sentinel in SENTINELS:
         assert sentinel not in foreign.text, f"{method} {suffix} leaked {sentinel}"

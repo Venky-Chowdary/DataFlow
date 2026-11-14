@@ -128,7 +128,19 @@ class WireCell(str):
 
 def wire_cell(value: Any) -> WireCell:
     """Encode ``value`` once for the wire and mark the result as encoded."""
-    return WireCell(cell_to_string(value, preserve_sql_null=True))
+    return WireCell(driver_cell_to_string(value))
+
+
+def driver_cell_to_string(value: Any) -> str:
+    """A value a database driver returned, onto the wire (CDC-LIT-1).
+
+    A driver never returns absence, so a text that spells the missing sentinel
+    is the user's text: it is escaped like any other colliding literal instead
+    of being encoded as an omitted field (which landed it as ``''``).
+    """
+    if type(value) is str and value == DF_MISSING_SENTINEL:
+        return escape_wire_text(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def reader_wire_cell(value: Any) -> Any:
@@ -1057,6 +1069,12 @@ def project_row_cells(
         # Database rows already crossed the reader leaf: re-escaping their
         # NULL sentinel turned every NULL into ``__DF_ESC____DF_SQL_NULL__``
         # text that typed casts refuse (D118).
+        if cell is None:
+            # DATA-14: a parser's None (Parquet / JSON / Avro null) is SQL NULL,
+            # never "" — a nullable date or timestamp refused "" as
+            # EMPTY_VALUE_NOT_NULLABLE on SQLite.
+            out.append(SQL_NULL_SENTINEL)
+            continue
         out.append(wire_cell_text(cell) if preserve_sql_null else cell_to_string(cell))
     return out
 

@@ -440,7 +440,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # passed as a query parameter.  Only allow this fallback on the SSE
             # stream paths to keep tokens out of general access logs.
             if not token and request.url.path.endswith("/stream"):
-                token = request.query_params.get("token") or request.query_params.get("access_token") or ""
+                ticket = request.query_params.get("ticket") or ""
+                if ticket:
+                    # SEC-14: a short-lived, single-use ticket for this one URL
+                    # keeps the 24-hour bearer out of URLs, proxy logs and history.
+                    from services.auth_state import get_auth_state
+
+                    doc = get_auth_state().take_stream_ticket(ticket) or {}
+                    token = str(doc.get("token") or "") if doc.get("path") == request.url.path else ""
+                else:
+                    token = request.query_params.get("token") or request.query_params.get("access_token") or ""
 
             # Resolved on the module, not copied at import: enforcement is a live
             # setting, and a stale copy means the middleware and the auth service

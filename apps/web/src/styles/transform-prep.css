@@ -1169,7 +1169,8 @@
 .df2-xform-builder textarea.df2-input:focus-visible,
 .df2-xform-builder input.df2-input:focus,
 .df2-xform-builder input.df2-input:focus-visible {
-  outline: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
   border-color: var(--df-brand-strong);
   box-shadow: 0 0 0 3px var(--df-brand-ring, rgba(13, 148, 136, 0.28));
 }

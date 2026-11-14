@@ -487,8 +487,13 @@ def test_mysql_boolean_false_binds_as_zero():
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'
 
 
-def test_all_rows_held_out_is_an_empty_population_not_a_mismatch():
-    """Nothing to write is a provable outcome, not a checksum failure."""
+def test_all_rows_held_out_is_never_a_green_gate8():
+    """Every row quarantined: two empty digests match, which proves nothing.
+
+    This test used to assert ``passed`` — it encoded the defect behind SCD2-F1
+    (a run that quarantined every row and wrote nothing reported a green
+    Gate-8). It is a failed verification now, not a checksum mismatch.
+    """
     from services.reconciliation import EMPTY_POPULATION_DIGEST
 
     r = reconcile(
@@ -498,8 +503,24 @@ def test_all_rows_held_out_is_an_empty_population_not_a_mismatch():
         target_checksum=EMPTY_POPULATION_DIGEST,
         rejected_rows=1,
     )
-    assert r.passed
+    assert r.passed is False
+    assert r.checksum_match is None
     assert r.rejected_rows == 1
+    assert "Nothing was verified: all 1 source row(s) were quarantined" in r.message
+
+
+def test_empty_population_from_a_filter_still_verifies():
+    """Rows a declared filter removed are not held out: an empty projection passes."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST
+
+    r = reconcile(
+        source_rows=2,
+        target_rows=0,
+        source_checksum="",
+        target_checksum=EMPTY_POPULATION_DIGEST,
+        rows_source_filtered=2,
+    )
+    assert r.passed
 
 
 def test_empty_digest_is_not_a_match_when_the_census_still_expects_rows():

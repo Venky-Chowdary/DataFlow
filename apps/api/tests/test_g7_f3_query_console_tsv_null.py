@@ -51,7 +51,7 @@ def _decoded(path: str) -> list[list[str | None]]:
     from services.csv_codec import iter_csv_records
 
     text = Path(path).read_bytes().decode("utf-8")
-    return list(iter_csv_records(io.StringIO(text, newline=""), "\t", empty_cell="keep"))[1:]
+    return list(iter_csv_records(io.StringIO(text, newline=""), "\t", empty_cell="keep", null_marker="\\N"))[1:]
 
 
 @pytest.mark.parametrize("full_population", [False, True])

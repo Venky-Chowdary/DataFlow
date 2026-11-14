@@ -1385,7 +1385,11 @@ def declared_string_logical_type(
 # Stripe / Airtable / Notion answer JSON: a metadata value "3" arrives as a
 # JSON string because the API only stores strings there (D272). Their
 # readers keep the JSON scalar type (connectors.saas_typed_schema).
-_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb", "stripe", "airtable", "notion"})
+# DATA-20: a JSON file's "1" is a string the file declared, like a Kafka JSON
+# message's; samples must not re-type it into a number or a boolean.
+_SELF_DESCRIBING_ENGINES = frozenset({
+    "mongodb", "kafka", "dynamodb", "stripe", "airtable", "notion", "json", "jsonl", "ndjson",
+})
 _UNTYPED_TEXT_TOKENS = frozenset({"TEXT", "VARCHAR", "STRING", "S"})
 
 

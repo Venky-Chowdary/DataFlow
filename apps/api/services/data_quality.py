@@ -18,11 +18,11 @@ from typing import Any
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
     from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
+    from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, key_identity_text
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from src.services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
+    from src.services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, key_identity_text
 
 _UTC = timezone.utc
 
@@ -478,7 +478,7 @@ def run_integrity_audit(
         tuples: list[tuple[str, ...]] = []
         for row in rows:
             cells = tuple(
-                present_cell_text(row[i] if i < len(row) else "")  # type: ignore[operator]
+                key_identity_text(row[i] if i < len(row) else "")  # type: ignore[operator]
                 for i in composite_idx
             )
             if any(c is None for c in cells):
@@ -525,8 +525,11 @@ def run_integrity_audit(
             report.checks_passed += 1
             stats["primary_key"] = pk_source
         else:
+            # DATA-7: exact key text — 'a' and 'a ' are two keys wherever the
+            # destination tells them apart (upsert already landed both); the
+            # trimmed spelling refused them as duplicates on Mongo.
             pk_values = [
-                present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
+                key_identity_text(row[pk_idx] if pk_idx < len(row) else "")
                 for row in rows
             ]
             stats["primary_key"] = pk_source

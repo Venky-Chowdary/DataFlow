@@ -14,7 +14,6 @@ from connectors.saas_common import (
     humanize_http_error,
     object_name,
     request,
-    token,
 )
 
 DEFAULT_HOST = "login.salesforce.com"
@@ -73,11 +72,9 @@ def test_salesforce(
     ssl: bool = False,
     **_kwargs: Any,
 ) -> tuple[bool, str]:
-    """Probe Salesforce connectivity with an access token."""
-    access_token = token(api_key, connection_string, username, password)
-    if not access_token:
-        return False, "Salesforce access token is required. Paste it in the API key field or connection string."
-    resolved = base_url(host, DEFAULT_HOST)
+    """Probe Salesforce connectivity with an access token (pasted or minted)."""
+    from connectors.salesforce_auth import access_token as sf_access_token
+
     host_l = (host or "").strip().lower()
     if not host_l or "login.salesforce.com" in host_l or "test.salesforce.com" in host_l:
         return (
@@ -85,6 +82,20 @@ def test_salesforce(
             "Set Host to your Salesforce instance URL (e.g. https://yourorg.my.salesforce.com). "
             "login.salesforce.com / test.salesforce.com cannot serve REST data APIs.",
         )
+    cfg = {
+        "host": host, "api_key": api_key, "connection_string": connection_string,
+        "username": username, "password": password,
+    }
+    try:
+        access_token = sf_access_token(cfg)
+    except ValueError as exc:
+        return False, str(exc)
+    if not access_token:
+        return False, (
+            "Salesforce needs a credential: OAuth client credentials (Consumer Key in "
+            "Username, Consumer Secret in Password) or a session token in the API key field."
+        )
+    resolved = base_url(host, DEFAULT_HOST)
     url = f"{resolved}/services/data/{API_VERSION}/limits"
     try:
         r = request(method="GET", url=url, token=access_token, timeout=20)
@@ -95,14 +106,8 @@ def test_salesforce(
 
 
 def _access(cfg: dict[str, Any]) -> tuple[str, str]:
-    access_token = token(
-        cfg.get("api_key", ""),
-        cfg.get("connection_string", ""),
-        cfg.get("username", ""),
-        cfg.get("password", ""),
-    )
-    if not access_token:
-        raise ValueError("Salesforce access token is required")
+    from connectors.salesforce_auth import access_token as sf_access_token
+
     host = str(cfg.get("host") or "")
     host_l = host.strip().lower()
     if not host_l or "login.salesforce.com" in host_l or "test.salesforce.com" in host_l:
@@ -110,6 +115,11 @@ def _access(cfg: dict[str, Any]) -> tuple[str, str]:
             "Salesforce Host must be the org instance URL "
             "(https://yourorg.my.salesforce.com), not login.salesforce.com"
         )
+    # Client credentials mint a fresh token per run (CLM-13); a pasted
+    # session token is used as is.
+    access_token = sf_access_token(cfg)
+    if not access_token:
+        raise ValueError("Salesforce access token is required")
     return access_token, base_url(host, DEFAULT_HOST)
 
 

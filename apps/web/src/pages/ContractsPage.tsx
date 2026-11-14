@@ -319,15 +319,10 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                     <div
                       key={c.id}
                       className={`df2-contract-row df2-card-interactive${selected ? " selected" : ""}`}
+                      // UX-16: a list item with its own Open button, not a
+                      // button holding a button (nested-interactive).
                       onClick={() => openDrawer(c.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          openDrawer(c.id);
-                        }
-                      }}
-                      role="button"
-                      tabIndex={0}
+                      role="listitem"
                       aria-current={selected || undefined}
                     >
                       <span

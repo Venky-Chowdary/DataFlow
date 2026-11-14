@@ -8,9 +8,8 @@ through the engine into each SQL writer. They are kept here as suite tests:
   proven at the writer in test_generic_sql_wire_literal.py: through the engine
   its run fails Gate-8 on the missing sample reader for ``generic_sql``, a
   pre-existing gap, and the run's undo empties the table);
-* MySQL stores every literal except ``__DF_MISSING__``, and SQLite stores the
-  rows but fails Gate-8: both are pre-existing and filed apart, pinned here as
-  strict xfails so the fix flips them.
+* MySQL stores every literal, ``__DF_MISSING__`` included, and SQLite passes
+  Gate-8 on them (CDC-LIT-1 fixed both; they were strict xfails until then).
 """
 
 from __future__ import annotations
@@ -92,12 +91,10 @@ def test_mysql_destination_stores_the_literals(mysql_rows):
     assert {i: v for i, v in mysql_rows.items() if i != MISSING_ID} == expected
 
 
-@pytest.mark.xfail(strict=True, reason="pre-existing: '__DF_MISSING__' text lands as '' on MySQL (filed apart)")
 def test_mysql_destination_stores_the_missing_marker_text(mysql_rows):
     assert mysql_rows[MISSING_ID] == "__DF_MISSING__"
 
 
-@pytest.mark.xfail(strict=True, reason="pre-existing: PG -> SQLite marker literals land exact but Gate-8 digests mismatch (filed apart)")
 def test_sqlite_destination_passes_gate8_on_the_literals(pg_src, tmp_path):
     result = run_transfer(pg_endpoint(pg_src), sqlite_dest(tmp_path))
     assert result.success is True, result.error

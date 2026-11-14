@@ -405,7 +405,8 @@ def test_connectors_test_route_keeps_response_and_redacts_config(
         },
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"success", "message", "driver", "auth_source"}
+    # ERR-40: a failed Test also carries the error envelope and its reference.
+    assert set(response.json()) == {"success", "message", "driver", "auth_source", "error", "reference"}
     assert response.json()["success"] is False
     _assert_terminal(event_capture, "probe", "failed", logging.WARNING)
     _assert_no_sentinels(event_capture)

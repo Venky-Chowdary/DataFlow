@@ -1034,6 +1034,14 @@ def is_lossy_coercion(
         source_type, target_type, dest_db=dest_db
     ):
         return False
+    # DATA-23: a list-shaped source whose elements JSON spells exactly.
+    from services.array_json_grade import list_lands_exactly_as_json
+
+    if list_lands_exactly_as_json(
+        source_type, target_type, dest_db=dest_db,
+        source_engine=active_source_engine(), population=population,
+    ):
+        return False
     # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
     if src == LOGICAL_JSON and is_dialect_native_document_wire(
         target_type, dest_db=dest_db

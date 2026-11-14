@@ -428,6 +428,28 @@ def _update_deleted_batch(
     return activated, deactivated
 
 
+def _not_in_keys_pred(
+    pk_columns: list[str],
+    keys: set[str] | list[str] | None,
+    dialect: str,
+    key_types: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """``NOT (key IN …)`` over ``keys`` in predicate-sized chunks; "" when none."""
+    from services.scd2_engine import _pk_or_clause as _owner, iter_pk_key_chunks
+
+    if not keys or not pk_columns:
+        return "", {}
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, chunk in enumerate(iter_pk_key_chunks(sorted(keys))):
+        clause, chunk_params = _owner(
+            pk_columns, chunk, prefix=f"k{i}", dialect=dialect, column_types=key_types
+        )
+        clauses.append(f"NOT ({clause})")
+        params.update(chunk_params)
+    return " AND ".join(clauses), params
+
+
 def _compute_active_checksum(
     conn: Any,
     qualified: str,
@@ -436,8 +458,14 @@ def _compute_active_checksum(
     batch_size: int,
     dest_types: dict[str, str] | None = None,
     physical: dict[str, str] | None = None,
+    pk_columns: list[str] | None = None,
+    exclude_keys: set[str] | None = None,
 ) -> tuple[int, str]:
     """Active-row digest: one streamed SELECT. Never OFFSET.
+
+    ``exclude_keys`` + ``pk_columns`` (physical key columns) leave out the
+    active rows a run kept without writing — keys whose source row was
+    quarantined — so the digest is comparable to the rows the run wrote.
 
     ``physical`` maps a target name to the spelling the catalog stores; the
     digest stays keyed by the target name the write pass fingerprinted.
@@ -455,17 +483,20 @@ def _compute_active_checksum(
     cols_quoted = ",".join(
         quote_stored_identifier(dialect_name, stored.get(c, c)) for c in target_cols
     )
+    preds: list[str] = []
     if soft_delete_column:
         col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
-        pred = sql_bool_is_not_true(dialect_name, col_quoted)
-        sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
-    else:
-        # Hard-delete mirror: no lattice column exists — the whole table is
-        # the live population.
-        sql = f"SELECT {cols_quoted} FROM {qualified}"  # nosec B608
+        preds.append(sql_bool_is_not_true(dialect_name, col_quoted))
+    # Hard-delete mirror: no lattice column exists — the whole table is the
+    # live population.
+    keep_pred, params = _not_in_keys_pred(pk_columns or [], exclude_keys, dialect_name)
+    if keep_pred:
+        preds.append(keep_pred)
+    where = f" WHERE {' AND '.join(preds)}" if preds else ""
+    sql = f"SELECT {cols_quoted} FROM {qualified}{where}"  # nosec B608
     return stream_select_checksum(
         conn,
-        sa.text(sql),
+        sa.text(sql).bindparams(**params) if params else sa.text(sql),
         target_cols,
         itersize=max(1, int(batch_size)),
         dest_db_type=dialect_name,
@@ -473,7 +504,9 @@ def _compute_active_checksum(
     )
 
 
-def _dest_engine_count(conn: Any, sql: str) -> int | None:
+def _dest_engine_count(
+    conn: Any, sql: str, params: dict[str, Any] | None = None
+) -> int | None:
     """Dest-engine COUNT(*). Failure is unmeasured — never 0-from-error.
 
     The COUNT runs inside a savepoint (``begin_nested``): a COUNT cancelled
@@ -496,7 +529,7 @@ def _dest_engine_count(conn: Any, sql: str) -> int | None:
     except Exception:  # noqa: BLE001 - engines without savepoints count bare
         nested = None
     try:
-        row = conn.execute(sa.text(sql)).fetchone()
+        row = conn.execute(sa.text(sql), params or {}).fetchone()
         if nested is not None:
             nested.commit()
     except Exception as exc:
@@ -527,8 +560,14 @@ def apply_inferred_deletes_via_staging(
     dialect: str = "",
     target_table: str = "",
     delete_mode: str = "soft",
+    keep_keys: set[str] | None = None,
+    key_types: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Set-based inferred deletes: keys in staging stay active; dest \\ staging soft-delete.
+
+    ``keep_keys`` are keys whose source row quarantine held out of staging:
+    absent from it, but still in the source, so never deleted (the SCD2-F2
+    rule). The ones that were candidates come back as ``kept_current_keys``.
 
     ``target_table`` is the bare destination table name: the correlated
     predicate refers to the outer row through it (an unaliased table's
@@ -573,6 +612,22 @@ def apply_inferred_deletes_via_staging(
         f"{outer_ref}.{quote_stored_identifier(dialect_name, c)}"
         for c in pk_columns
     )
+    absent_pred = f"NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})"
+    if keep_keys and delete_mode == "soft":
+        # Kept means kept *active*: a key already tombstoned stays as it is.
+        _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
+    kept = _kept_absent_keys(
+        conn,
+        target_qualified,
+        pk_columns,
+        f"{absent_pred} AND {active_pred}" if delete_mode == "soft" else absent_pred,
+        keep_keys,
+        dialect_name,
+    )
+    keep_pred, keep_params = _not_in_keys_pred(pk_columns, kept, dialect_name, key_types)
+    if keep_pred:
+        absent_pred = f"{absent_pred} AND {keep_pred}"
+    kept_out = {"kept_current_keys": kept} if kept else {}
 
     if delete_mode == COUNT_ONLY:
         # Measure only: how many destination keys this snapshot did not
@@ -584,8 +639,8 @@ def apply_inferred_deletes_via_staging(
         )
         would_delete = _dest_engine_count(
             conn,
-            f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
-            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
+            f"SELECT COUNT(*) FROM {target_qualified} WHERE {absent_pred}",  # nosec B608
+            keep_params,
         )
         return {
             "soft_deleted": 0,
@@ -596,6 +651,7 @@ def apply_inferred_deletes_via_staging(
             "tombstone_rows": 0,
             "physical_rows": scanned,
             "rows_scanned": scanned,
+            **kept_out,
         }
 
     if delete_mode == "hard":
@@ -629,8 +685,8 @@ def apply_inferred_deletes_via_staging(
         )
         hard_deleted = _dest_engine_count(
             conn,
-            f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
-            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
+            f"SELECT COUNT(*) FROM {target_qualified} WHERE {absent_pred}",  # nosec B608
+            keep_params,
         )
         if lattice_present:
             at_clear = ""
@@ -644,10 +700,8 @@ def apply_inferred_deletes_via_staging(
                 )
             )
         conn.execute(
-            sa.text(
-                f"DELETE FROM {target_qualified} "  # nosec B608
-                f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})"
-            )
+            sa.text(f"DELETE FROM {target_qualified} WHERE {absent_pred}"),  # nosec B608
+            keep_params,
         )
         physical = _dest_engine_count(
             conn,
@@ -661,6 +715,7 @@ def apply_inferred_deletes_via_staging(
             "tombstone_rows": 0,
             "physical_rows": physical,
             "rows_scanned": scanned,
+            **kept_out,
         }
 
     _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
@@ -673,8 +728,8 @@ def apply_inferred_deletes_via_staging(
     soft_deleted = _dest_engine_count(
         conn,
         f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
-        f"WHERE {active_pred} "
-        f"AND NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
+        f"WHERE {active_pred} AND {absent_pred}",
+        keep_params,
     )
     # ``_deleted_at`` records when the flag was set; a reactivated row clears it.
     at_set = at_clear = ""
@@ -694,9 +749,9 @@ def apply_inferred_deletes_via_staging(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
             f"SET {col_quoted} = {true_lit}{at_set} "
-            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred}) "
-            f"AND {active_pred}"
-        )
+            f"WHERE {absent_pred} AND {active_pred}"
+        ),
+        keep_params,
     )
     # Physical dest population including tombstones. Soft-delete does not
     # drop COUNT(*) (Fivetran _fivetran_deleted hole). Dest-engine COUNT(*)
@@ -717,7 +772,37 @@ def apply_inferred_deletes_via_staging(
         "soft_delete_column": soft_delete_column,
         "physical_rows": physical,
         "rows_scanned": physical,
+        **kept_out,
     }
+
+
+def _kept_absent_keys(
+    conn: Any,
+    target_qualified: str,
+    pk_columns: list[str],
+    absent_pred: str,
+    keep_keys: set[str] | None,
+    dialect: str,
+) -> list[str]:
+    """The ``keep_keys`` the snapshot is missing: rows the delete would hit."""
+    if not keep_keys:
+        return []
+    import sqlalchemy as sa
+    from services.reconciliation_api import iter_select_row_dicts
+    from services.scd2_engine import _compose_key as _wire_key
+
+    pk_quoted = ", ".join(quote_stored_identifier(dialect, c) for c in pk_columns)
+    absent = (
+        _wire_key(row, pk_columns)
+        for batch in iter_select_row_dicts(
+            conn,
+            sa.text(f"SELECT {pk_quoted} FROM {target_qualified} WHERE {absent_pred}"),  # nosec B608
+            pk_columns,
+            itersize=1_000,
+        )
+        for row in batch
+    )
+    return sorted({k for k in absent if k in keep_keys})
 
 
 def mirror_pk_sources(
@@ -960,8 +1045,14 @@ def apply_inferred_soft_deletes(
     pk_sources: list[str] | None = None,
     delete_mode: str = "soft",
     active_checksum: bool = True,
+    rejected_details: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Soft-delete destination rows that are no longer in the source snapshot.
+
+    ``rejected_details`` are the write's quarantine findings. Their keys are
+    in the source key census, so they are never inferred deletes; the ones
+    still live on the destination were kept, not written, by this run and are
+    reported as retained with a digest of the rows this run did write.
 
     ``delete_mode="count"`` measures the keys the snapshot would remove and
     changes nothing. ``active_checksum=False`` skips the full-table active
@@ -1086,15 +1177,40 @@ def apply_inferred_soft_deletes(
             )
             conn.commit()
             if active_checksum:
+                lattice = soft_delete_column if delete_mode == "soft" else ""
                 active_rows, active_digest = _compute_active_checksum(
                     conn,
                     qualified,
                     target_cols,
-                    soft_delete_column if delete_mode == "soft" else "",
+                    lattice,
                     batch_size,
                     dest_types=target_fingerprint_types(mappings, schema),
                     physical=stored,
                 )
+                kept = _live_held_out_keys(
+                    conn, endpoint, rejected_details, mappings, schema,
+                    pk_columns, pk_physical, qualified, lattice, dialect_name,
+                )
+                if kept:
+                    retained = {
+                        "retained_missing_rows": len(kept),
+                        "quarantined_keys_kept_current": len(kept),
+                    }
+                    (
+                        retained["source_scoped_rows"],
+                        retained["source_scoped_checksum"],
+                    ) = _compute_active_checksum(
+                        conn,
+                        qualified,
+                        target_cols,
+                        lattice,
+                        batch_size,
+                        dest_types=target_fingerprint_types(mappings, schema),
+                        physical=stored,
+                        pk_columns=pk_physical,
+                        exclude_keys=kept,
+                    )
+                    census.update(retained)
                 conn.commit()
             _drop_pk_staging(conn, stg_qualified)
     except Exception:
@@ -1130,7 +1246,61 @@ def apply_inferred_soft_deletes(
         ),
         "source_key_rows": source_key_rows,
         "mode": "mirror",
+        **{
+            k: census[k]
+            for k in (
+                "retained_missing_rows",
+                "quarantined_keys_kept_current",
+                "source_scoped_rows",
+                "source_scoped_checksum",
+            )
+            if k in census
+        },
     }
+
+
+def _live_held_out_keys(
+    conn: Any,
+    endpoint: Any,
+    rejected_details: list[dict[str, Any]] | None,
+    mappings: list[dict[str, Any]] | None,
+    schema: dict[str, str] | None,
+    pk_columns: list[str],
+    pk_physical: list[str],
+    qualified: str,
+    lattice: str,
+    dialect: str,
+) -> set[str]:
+    """Keys of quarantined source rows that still have a live destination row."""
+    if not rejected_details:
+        return set()
+    import sqlalchemy as sa
+    from services.dialect_profiles import sql_bool_is_not_true
+    from services.scd2_engine import (
+        _compose_key as _wire_key,
+        _pk_or_clause as _owner,
+        held_out_keys,
+        iter_pk_key_chunks,
+    )
+
+    held = held_out_keys(endpoint, rejected_details, mappings, schema, pk_columns)
+    if not held:
+        return set()
+    pk_quoted = ", ".join(quote_stored_identifier(dialect, c) for c in pk_physical)
+    live = (
+        f" AND {sql_bool_is_not_true(dialect, quote_stored_identifier(dialect, lattice))}"
+        if lattice
+        else ""
+    )
+    found: set[str] = set()
+    for i, chunk in enumerate(iter_pk_key_chunks(sorted(held))):
+        clause, params = _owner(pk_physical, chunk, prefix=f"h{i}", dialect=dialect)
+        for row in conn.execute(
+            sa.text(f"SELECT {pk_quoted} FROM {qualified} WHERE {clause}{live}"),  # nosec B608
+            params,
+        ).mappings():
+            found.add(_wire_key({c: row[p] for c, p in zip(pk_columns, pk_physical)}, pk_columns))
+    return found & held
 
 
 def quote_sql_identifier(name: str, quote_char: str = '"') -> str:

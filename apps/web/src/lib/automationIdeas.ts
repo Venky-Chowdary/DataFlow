@@ -6,6 +6,42 @@ export interface AutomationIdea {
   description: string;
 }
 
+/**
+ * UX-18: the Pilot start page's tiles. Each is answered from this workspace's
+ * own connectors, jobs and schedules, so none dead-ends on a demo dataset
+ * (logistics CSV, HR data, "count airports") the workspace never had.
+ */
+export const WORKSPACE_IDEAS: AutomationIdea[] = [
+  {
+    id: "briefing",
+    category: "workspace",
+    title: "Workspace briefing",
+    prompt: "Give me a workspace briefing",
+    description: "Connections, recent runs and paused schedules, counted from this workspace.",
+  },
+  {
+    id: "connections",
+    category: "connections",
+    title: "My connections",
+    prompt: "Show my connectors",
+    description: "Each saved connection with its last test result.",
+  },
+  {
+    id: "recent_jobs",
+    category: "jobs",
+    title: "Recent runs",
+    prompt: "Show my recent jobs",
+    description: "What ran, how many rows, and which runs need attention.",
+  },
+  {
+    id: "capabilities",
+    category: "help",
+    title: "What Pilot can do",
+    prompt: "What can you do?",
+    description: "The questions and actions Pilot supports, with examples.",
+  },
+];
+
 export interface AutomationCategory {
   id: string;
   label: string;

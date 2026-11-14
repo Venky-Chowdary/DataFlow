@@ -1,5 +1,6 @@
 import { ConnectorIcon } from "../../app/brand-icons";
 import { Connector } from "../../lib/types";
+import { connectorDisplayName } from "../../lib/connectorTypes";
 
 interface ConnectorSelectProps {
   id?: string;
@@ -44,11 +45,12 @@ export function ConnectorSelect({
           onChange={(e) => onChange(e.target.value)}
           required={required}
           disabled={disabled || connectors.length === 0}
+          title={selected ? connectorOptionLabel(selected) : undefined}
         >
           <option value="">{connectors.length === 0 ? "No connectors available" : placeholder}</option>
           {connectors.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} — {c.type}{c.last_test_ok === false ? " (test failed)" : c.last_test_ok == null ? " (not tested)" : ""}
+            <option key={c.id} value={c.id} title={connectorOptionLabel(c)}>
+              {connectorOptionLabel(c)}
             </option>
           ))}
         </select>
@@ -56,4 +58,14 @@ export function ConnectorSelect({
       {hint && <p className="df2-label-hint">{hint}</p>}
     </div>
   );
+}
+
+/**
+ * UX-40: the connection's name first, then its engine's own name, then a test
+ * warning only when there is one, so a narrow picker keeps what tells
+ * connections apart. The full text is the option's and the select's title.
+ */
+export function connectorOptionLabel(c: Pick<Connector, "name" | "type" | "last_test_ok">): string {
+  const status = c.last_test_ok === false ? " · test failed" : c.last_test_ok == null ? " · not tested" : "";
+  return `${c.name} (${connectorDisplayName(c.type)})${status}`;
 }

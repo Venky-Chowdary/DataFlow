@@ -314,14 +314,14 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
   salesforce: {
     title: "Set up Salesforce",
     steps: [
-      "Use your Salesforce username + password plus the security token (My Settings → Reset My Security Token — it arrives by email).",
-      "Or create a Connected App (Setup → App Manager → New Connected App) with OAuth scopes api and refresh_token for client-credentials login.",
-      "Enter the instance URL — https://yourorg.salesforce.com (or .sandbox for sandboxes).",
-      "Test proves OAuth login works — LOGIN_MUST_USE_SECURITY_TOKEN means append the token to the password.",
+      "Create a Connected App (Setup → App Manager → New Connected App) with OAuth scope api, enable the client-credentials flow and set a run-as user.",
+      "Choose OAuth client credentials and enter the Consumer Key and Consumer Secret. Datawrap mints a fresh access token for every run, so schedules keep working.",
+      "Enter the instance URL — https://yourorg.my.salesforce.com (not login.salesforce.com).",
+      "A pasted session access token also works for one-off transfers, but it expires and cannot be refreshed, so a schedule on it fails once it does.",
     ],
     links: [
       { label: "Create a Connected App", url: "https://help.salesforce.com/s/articleView?id=sf.connected_app_create.htm" },
-      { label: "Reset your security token", url: "https://help.salesforce.com/s/articleView?id=sf.user_security_token.htm" },
+      { label: "OAuth client credentials flow", url: "https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_client_credentials_flow.htm" },
     ],
   },
   hubspot: {

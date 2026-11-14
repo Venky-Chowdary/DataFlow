@@ -460,8 +460,10 @@ def apply_schema_drift_gate(
         elif evolution.get("should_pause") and evolution.get("hard_breaking"):
             hard = evolution.get("hard_breaking") or []
             if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
+                from services.error_taxonomy import drift_kind_words
+
                 drift_msg = (
-                    f"Breaking schema change: {hard[0].get('kind')} "
+                    f"Breaking schema change: {drift_kind_words(hard[0].get('kind'))} "
                     "— sync paused for review (Datawrap fail-closed)"
                     f"{column_phrase}"
                 )

@@ -31,6 +31,7 @@ from ..services.auth_service import (
     public_user,
     revoke_token,
 )
+from services.safe_errors import safe_http_exception
 
 try:
     from services import oidc_client
@@ -823,6 +824,45 @@ async def auth_bootstrap(request: Request):
     return auth_bootstrap_status(include_sensitive=sensitive)
 
 
+def _password_ok_with_mfa(email: str, password: str) -> dict | None:
+    """The user, when ``password`` is right and the account has a second factor."""
+    try:
+        from services import mfa
+
+        if not mfa.is_enrolled(_login_audit_actor(email)):
+            return None
+        return authenticate(email, password) or None
+    except Exception:  # noqa: BLE001 - the slowdown answer stands
+        return None
+
+
+def _notify_login_slowdown(request: Request, email: str) -> None:
+    """Tell the account owner once an hour that its sign-ins are being slowed (SEC-7)."""
+    try:
+        import time as _time
+
+        from services import mail_outbox
+        from services.audit_coverage import record_security_event
+
+        record_security_event(
+            "auth.login.account_slowed", outcome="held", request=request,
+            resource="/auth/login", actor=email, reason_code="repeated_failures",
+        )
+        text = (
+            "There were repeated failed sign-in attempts on your account. Sign-ins from "
+            "new addresses are slowed down for a while; addresses you have signed in "
+            "from before are not affected. If this was not you, change your password "
+            "and turn on two-factor authentication."
+        )
+        mail_outbox.enqueue_once(
+            to=email, subject="Repeated failed sign-in attempts", text=text, html=f"<p>{text}</p>",
+            idempotency_key=f"login-slowdown:{email}:{int(_time.time() // 3600)}",
+            purpose="security_notice",
+        )
+    except Exception:  # noqa: BLE001 - a notice never fails the sign-in answer
+        logger.warning("login slowdown notice failed", exc_info=True)
+
+
 def _login_client_ip(request: Request) -> str:
     from services.client_ip import client_ip_from_request
 
@@ -926,6 +966,13 @@ def login(body: LoginRequest, request: Request):
 
     ip = _login_client_ip(request)
     limited = check_login_rate_limit(ip=ip, email=body.email)
+    pre_authenticated = None
+    if not limited.get("allowed") and limited.get("soft"):
+        # SEC-7: the account-wide slowdown never stops the right password of
+        # an account a second factor still protects (the MFA step follows).
+        pre_authenticated = _password_ok_with_mfa(body.email, body.password)
+        if pre_authenticated is not None:
+            limited = {"allowed": True}
     if not limited.get("allowed"):
         actor = _login_audit_actor(body.email)
         if limited.get("newly_locked"):
@@ -971,9 +1018,9 @@ def login(body: LoginRequest, request: Request):
             ),
         )
     try:
-        user = authenticate(body.email, body.password)
+        user = pre_authenticated or authenticate(body.email, body.password)
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="auth.login.failed", public_message="Sign-in is temporarily unavailable.", status_code=503) from exc
     if not user:
         # Flag-on: a pending (unverified) signup gets a fresh code and a 403 —
         # never a session. Banned/disabled/unknown all keep the neutral 401.
@@ -989,13 +1036,15 @@ def login(body: LoginRequest, request: Request):
                     "verify your email first — we sent a new code",
                     extra={"challenge_id": challenge_id},
                 )
-        record_login_failure(ip=ip, email=body.email)
+        failure = record_login_failure(ip=ip, email=body.email)
         _record_login_audit(
             request,
             action="auth.login.failure",
             actor=actor,
             reason="bad_credentials",
         )
+        if (failure or {}).get("account_slowed") and stored_account:
+            _notify_login_slowdown(request, actor)
         # What an anonymous caller is told is exactly what happened: the pair did
         # not authenticate. Deployment advice (env var escaping) belongs to the
         # operator configuring the service, not to an unauthenticated 401 — it
@@ -1036,7 +1085,7 @@ def login(body: LoginRequest, request: Request):
     try:
         token, expires_at = create_token(user["email"], amr=["pwd"], **session_client(request))
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="auth.login.failed", public_message="Sign-in is temporarily unavailable.", status_code=503) from exc
     try:
         from services.audit_coverage import record_security_event, session_label
         from src.services.auth_service import token_jti

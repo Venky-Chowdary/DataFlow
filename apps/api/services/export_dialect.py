@@ -71,9 +71,11 @@ def written_dialect(fmt: str | None, *, tsv_null: str | None = None) -> Any | No
         return None
     from services.read_options import ReadOptions
 
-    empty_cell = "keep" if tsv_null_marker(fmt, tsv_null) else "null"
+    marker = tsv_null_marker(fmt, tsv_null)
+    empty_cell = "keep" if marker else "null"
     # Declared, not sniffed: the delimiter, the codec, and row 1 as the header (never "decide from the data").
-    return ReadOptions(delimiter=delimiter, encoding="utf-8", header_row=1, sniff_header=False, empty_cell=empty_cell)
+    return ReadOptions(delimiter=delimiter, encoding="utf-8", header_row=1, sniff_header=False,
+                       empty_cell=empty_cell, null_marker=marker or "")
 
 
 def format_written_row(cells: list[Any], delimiter: str, *, null_marker: str = "") -> str:

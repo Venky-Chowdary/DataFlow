@@ -122,12 +122,32 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
         update["streams"] = streams
 
 
-def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
+def _failure_side(exc: Exception, request: Any) -> str:
+    """Which end raised ``exc``: the reader/writer tag, else the table it names.
+
+    Readers and writers tag what they raise (``error_taxonomy.failure_side``).
+    An untagged driver error that names exactly one of the run's tables is
+    attributed to that end; anything else stays unattributed rather than
+    guessed (ERR-1: a source SELECT denial was reported as a destination write).
+    """
+    tagged = str(getattr(exc, "datawrap_side", "") or "")
+    if tagged or request is None:
+        return tagged
+    text = str(exc)
+    ends = []
+    for side, endpoint in (("source", getattr(request, "source", None)), ("destination", getattr(request, "destination", None))):
+        table = str(getattr(endpoint, "table", "") or "").split(".")[-1].strip('"`[]')
+        if table and re.search(rf"(?<![\w]){re.escape(table)}(?![\w])", text):
+            ends.append(side)
+    return ends[0] if len(ends) == 1 else ""
+
+
+def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build error_details + top-level job fields for a failed transfer."""
     from services.error_handling import humanize_transfer_failure
 
     classification = classify_error(exc)
-    human = humanize_transfer_failure(exc)
+    human = humanize_transfer_failure(exc, side=_failure_side(exc, request))
     details: dict[str, Any] = {
         "retriable": classification.get("retriable"),
         "evidence": classification.get("evidence"),
@@ -139,17 +159,28 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "message": human.get("message"),
         "confidence": human.get("confidence"),
     }
+    for key in ("action", "object", "driver", "side", "legacy_code"):
+        if human.get(key):
+            details[key] = human[key]
     stamped = getattr(exc, "failure_details", None)
     if isinstance(stamped, dict):
         details.update(stamped)
     # Prefer operator-facing message for job.error / SSE while keeping raw in details.
+    operator_error = human.get("message")
+    if human.get("action"):
+        # A taxonomy failure reads the same on the job, in the schedule
+        # notification, the email and Pilot: its message and its one action.
+        operator_error = f"{human.get('message')} {human.get('fix')}".strip()
     extras: dict[str, Any] = {
         "error_code": human.get("code"),
         "error_title": human.get("title"),
         "error_fix": human.get("fix"),
         "error_confidence": human.get("confidence"),
-        "operator_error": human.get("message"),
+        "operator_error": operator_error,
     }
+    if human.get("legacy_code"):
+        # Deprecated, one release: the pre-taxonomy code (error_details.legacy_code too).
+        extras["error_legacy_code"] = human["legacy_code"]
     dropped = str(getattr(exc, "destination_table_dropped", "") or "")
     if dropped:
         from services.error_handling import ROWS_STAY_NOTE
@@ -521,6 +552,34 @@ def _records_after_failure(prior: Any, incoming: Any) -> int:
     return max(_n(prior), _n(incoming))
 
 
+def _verification_interrupted(display: str, exc: BaseException, prev: dict[str, Any]) -> str:
+    """REL-4: a run that failed while verifying keeps the rows it wrote; say so.
+
+    A connection dropped during Gate-8 failed the job with raw driver text and
+    never said the committed rows were still in the destination.
+    """
+    from connectors.write_resilience import is_connection_lost
+
+    if not is_connection_lost(exc):
+        return display
+    rows = prev.get("records_processed")
+    held = f"The {int(rows):,} row(s) it wrote" if isinstance(rows, int) and rows > 0 else "The rows it wrote"
+    note = (
+        "The connection dropped while the run was verifying the destination, so the "
+        f"check did not finish. {held} are still in the destination and are not "
+        "verified. Re-run the job once the connection is back; it re-verifies."
+    )
+    # The driver's own text stays in error_details["raw"]; the job message is plain.
+    return note
+
+
+#: A failed write whose pre-run backup was restored (DATA-5).
+DESTINATION_RESTORED_NOTE = (
+    "The destination was restored to its pre-run content from the backup taken before "
+    "this run, so no row this run wrote remains."
+)
+
+
 def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, str]:
     """Row count and message for a write that stopped after a committed prefix.
 
@@ -538,8 +597,14 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
             "Blocked-write row count could not read job %s: %s", job_id, exc
         )
         prior = None
-    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    if getattr(blocked, "destination_restored", False):
+        # DATA-5: the pre-run backup was put back, so nothing this run wrote
+        # remains. "N rows committed" / "N rows were already written" next to
+        # a restored table contradicted itself.
+        message = re.sub(r"^partial write \(the failing batch reported [\d,]+ row\(s\) committed\): ", "", message)
+        return 0, f"{message.rstrip()} {DESTINATION_RESTORED_NOTE}"
+    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     if getattr(blocked, "multi_stream_undo", None):
         # C4: the other tables of a failed multi-table run were undone too.
         note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
@@ -622,7 +687,7 @@ def _fail_runtime_job(
     status = "cancelled" if cancelled else "failed"
     if cancelled:
         _release_cancelled_cdc_slot(mongo, job_id, request, identity=capture)
-    error_details, lease_extras = _job_failure_fields(exc)
+    error_details, lease_extras = _job_failure_fields(exc, request)
     prev = {}
     try:
         prev = mongo.get_job(job_id) or {}
@@ -641,6 +706,8 @@ def _fail_runtime_job(
         lease_extras.pop("operator_error", None) or error_details.get("message") or exc
     )
     display = str(exc) if cancelled else operator_msg
+    if not cancelled and failed_at_phase in {"reconcile", "verify", "verifying", "validate_post_write"}:
+        display = _verification_interrupted(display, exc, prev)
     multi_undo = getattr(exc, "multi_stream_undo", None)
     if isinstance(multi_undo, list) and multi_undo:
         # C4: what the undo did to each table of a failed multi-table run is
@@ -970,7 +1037,7 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
-    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_fix
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_action
 
     if any(
         isinstance(b, dict)
@@ -981,9 +1048,14 @@ def _fail_job_preflight(
         # D170: the run was refused whole; say how to load the valid rows.
         # QA r12 D2: the job is failing, so the way out is a retry — name the
         # tool and REST field that accept the acceptance for a failed job.
-        fix = quarantine_retry_fix(job_id)
+        # ERR-33: the job's words are the UI action; the MCP / REST form is
+        # the action's ``api`` and ``remediation_api``.
+        action = quarantine_retry_action(job_id)
+        fix = action["label"]
         error_message = f"{error_message.rstrip('. ')}. {fix}."
         error_details["remediation"] = fix
+        error_details["remediation_api"] = action["api"]
+        error_details["action"] = action
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

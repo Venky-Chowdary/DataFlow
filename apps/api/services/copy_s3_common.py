@@ -430,6 +430,7 @@ def s3_iter_delimited_rows(
     delimiter: str,
     *,
     empty_cell: str = "null",
+    null_marker: str = "",
 ) -> Iterator[list[str | None]]:
     """Yield data rows (header skipped) decoded by the C04 codec.
 
@@ -440,7 +441,7 @@ def s3_iter_delimited_rows(
     from services.csv_codec import iter_csv_records
 
     with open(path, encoding="utf-8", newline="") as handle:
-        reader = iter_csv_records(handle, delimiter, empty_cell=empty_cell)
+        reader = iter_csv_records(handle, delimiter, empty_cell=empty_cell, null_marker=null_marker)
         header = next(reader, None)
         if header is None:
             return

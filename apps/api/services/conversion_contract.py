@@ -469,13 +469,72 @@ def approved_mapping_ddl_fingerprint(
     Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
     this fingerprint and requires re-validation.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "version": CONVERSION_CONTRACT_VERSION,
         "dest_db": (dest_db or "").strip().lower(),
         "columns": ddl_identity_columns(mappings, dest_db=dest_db),
     }
+    streams = getattr(mappings, "stream_maps", None)
+    if streams:
+        # Each stream's own rows, in stream order (security re-check F1c).
+        payload["streams"] = [
+            {"name": name, "columns": ddl_identity_columns(rows, dest_db=dest_db)}
+            for name, rows in streams
+        ]
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+class StreamBoundMaps(list):
+    """Map rows plus every selected stream's own rows that differ from them.
+
+    ``approved_mapping_ddl_fingerprint`` (the DDL identity, and the Decision
+    Artifact's ``ddl_identity_hash``) hashes ``stream_maps`` too, so a stream's
+    Map is approved exactly like the top-level one.
+    """
+
+    stream_maps: list[tuple[str, list[dict[str, Any]]]] = []
+
+
+def carry_stream_maps(rows: list[Any], source: Any) -> list[Any]:
+    """``rows`` keeping ``source``'s per-stream rows (a plain list when it has none)."""
+    streams = getattr(source, "stream_maps", None)
+    if not streams:
+        return rows
+    out = StreamBoundMaps(rows)
+    out.stream_maps = list(streams)
+    return out
+
+
+def bind_stream_maps(
+    mappings: list[Any] | None,
+    stream_contracts: list[Any] | None,
+    *,
+    dest_db: str = "",
+) -> StreamBoundMaps:
+    """``mappings`` with each selected stream's own rows bound in (F1c).
+
+    A stream whose rows equal the top-level Map (compared as the operator's
+    rows, before any legacy-column adoption) adds nothing, so an approval
+    stamped before per-stream binding existed still holds; a stream that
+    differs is hashed, by name and in stream order.
+    """
+    from services.target_name_legacy import operator_rows
+
+    out = StreamBoundMaps(list(mappings or []))
+    top = ddl_identity_columns(operator_rows(out), dest_db=dest_db)
+    streams: list[tuple[str, list[dict[str, Any]]]] = []
+    for contract in stream_contracts or []:
+        c = contract if isinstance(contract, dict) else getattr(contract, "__dict__", {})
+        name = str(c.get("name") or "")
+        own = c.get("mappings")
+        if not name or c.get("selected", True) is False or not isinstance(own, list) or not own:
+            continue
+        rows = operator_rows(own)
+        if ddl_identity_columns(rows, dest_db=dest_db) != top:
+            streams.append((name, rows))
+    out.stream_maps = streams
+    return out
 
 
 def ddl_identity_divergence(

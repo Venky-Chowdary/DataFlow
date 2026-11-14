@@ -65,7 +65,9 @@ def test_failed_read_is_named_not_an_empty_list():
         limit=500,
     )
     assert sample.rows == []
-    assert sample.unavailable_reason.startswith("source sample read failed:")
+    # W3 error taxonomy (ERR-9): the reason is the classified copy and code.
+    assert sample.read_failed and sample.error_code == "network.refused", sample
+    assert sample.unavailable_reason.startswith("Connection refused:"), sample.unavailable_reason
 
 
 def test_file_and_callable_sources_are_not_read_here():
@@ -126,7 +128,8 @@ def test_gate8_names_the_read_failure():
         )
     )
     assert g8["status"] == "block"
-    assert "source sample read failed" in g8["message"]
+    # ERR-31: G1 names the read failure; Gate-8 waits on it instead of repeating it.
+    assert "waiting on Source (G1)" in g8["message"]
     assert g8["details"].get("sample_unavailable_reason")
 
 

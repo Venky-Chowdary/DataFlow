@@ -265,6 +265,7 @@ test.describe("plan conflict (PS-26)", () => {
     await d.getByRole("button", { name: "Cancel" }).click();
     await expect(d).toBeHidden();
     // Map's result was not stored and nothing replaced what is on screen.
-    await expect(page.getByText("Rows 1–5 of 5")).toBeVisible();
+    // (W6: the Map header's status line carries the row count; the one-page pager is gone.)
+    await expect(page.getByTestId("map-status-line")).toContainText("of 5 mapped");
   });
 });

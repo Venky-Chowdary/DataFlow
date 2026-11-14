@@ -135,7 +135,11 @@ def test_source_only_saas_tiers():
 
 
 def test_transfer_ready_saas_tiers():
-    """HubSpot/Salesforce certified duplex; Stripe source-certified; SDK sources beta; rest Planned."""
+    """HubSpot/Salesforce duplex, Stripe source; Implemented until CI proves them; rest Planned.
+
+    No CI job proves the SaaS writers, so their tier is ``implemented``
+    ("Implemented — not yet proven"), never ``certified`` (CLM-7).
+    """
     certified = {"hubspot", "salesforce", "stripe"}
     planned = {"shopify"}
     beta_sources = {"airtable", "zendesk", "notion"}
@@ -144,7 +148,7 @@ def test_transfer_ready_saas_tiers():
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is True, brand
-        assert row["certification_tier"] == "certified", brand
+        assert row["certification_tier"] == "implemented", brand
         assert row["effective_status"] == "live", brand
     stripe = enrich_catalog_entry(
         {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live"}
