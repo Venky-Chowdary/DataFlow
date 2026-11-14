@@ -309,6 +309,20 @@ def test_err22_pilot_reports_the_login_and_the_unreadable_table(pg_objects, clie
     assert SRC in res.error
 
 
+def test_err22_an_empty_allow_list_still_names_the_unreadable_table(pg_objects, client, monkeypatch):
+    """CI: on a fresh database the no-privilege role lists no tables at all, so the
+    allow-list is empty and the refusal used to be the generic
+    "Schema allow-list unavailable" instead of naming the table."""
+    import services.copilot_sql_guard as guard
+    from src.ai.copilot.query_tools import run_connector_query as run_query
+
+    monkeypatch.setattr(guard, "schema_allowlist", lambda *_a, **_k: set())
+    np_ = _conn("postgresql", "source", username=ROLE, password=ROLE_PW)
+    res = run_query(connector_id=np_.id, query=f'select * from "{SRC}"')
+    assert not res.success, res
+    assert "allow-list" not in res.error and SRC in res.error, res.error
+
+
 def test_err23_err24_mongo_query_failures_are_classified(client):
     from urllib.parse import urlparse
 

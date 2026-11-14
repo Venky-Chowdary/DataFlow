@@ -823,9 +823,11 @@ def run_connector_query(
                         assert_identifiers_allowed(sql, allowed=allowed, dialect=ctype)
                     except ValueError as refused:
                         quoted = re.findall(r'\b(?:from|join)\s+[`"\[]([^`"\]]+)[`"\]]', sql, re.I)
+                        # With nothing listed at all (a role that can read no
+                        # table) every relation the SQL names is unseen.
                         unseen = [
                             t for t in _relations_not_listed(table_hints + quoted, table_names)
-                            if t.lower().split(".")[-1] in str(refused).lower()
+                            if not allowed or t.lower().split(".")[-1] in str(refused).lower()
                         ]
                         if not unseen:
                             raise
