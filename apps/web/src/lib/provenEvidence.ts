@@ -238,7 +238,7 @@ export const MARKETING_STACK: ReadonlyArray<{
     items: "Snowflake, BigQuery, Apache Iceberg",
     badge: "Transfer-ready",
     note:
-      "Load and read Snowflake and BigQuery with create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg works with SQL and REST catalogs.",
+      "Load and read Snowflake and BigQuery with create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg connects to a REST catalog or a filesystem warehouse (Glue is Planned).",
   },
   {
     family: "Object storage",
