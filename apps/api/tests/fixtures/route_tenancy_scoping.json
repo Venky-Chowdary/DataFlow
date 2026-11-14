@@ -680,6 +680,11 @@
     "GET /auth/sso/{sso_type}/start": {
       "scope": "exempt",
       "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/stream-ticket": {
+      "scope": "workspace",
+      "resource": "job",
+      "viewer_may_call": "Issues a one-time ticket to watch a job's progress stream; it changes nothing, and a viewer may watch."
     }
   },
   "body_routes": {

@@ -1612,6 +1612,39 @@ def _job_stream_frame(job_id: str) -> tuple[str | None, bool]:
     return f"data: {json.dumps(safe, default=json_default)}\n\n", is_terminal(safe.get("status"))
 
 
+STREAM_TICKET_TTL_SECONDS = 60
+
+
+@router.post("/jobs/{job_id}/stream-ticket")
+async def issue_job_stream_ticket(job_id: str, request: Request):
+    """A single-use ticket for ``GET /jobs/{job_id}/stream`` (SEC-14).
+
+    EventSource cannot send an Authorization header; a ticket that works once,
+    for 60 seconds, on this one URL takes the bearer's place in the query
+    string. Empty when the caller's session needs none (a cookie, or sign-in off).
+    """
+    import secrets
+
+    from starlette.concurrency import run_in_threadpool
+
+    def _visible() -> bool:
+        job = get_mongodb_service().get_job(job_id)
+        return bool(job) and _can_access_job(request, job)
+
+    if not await run_in_threadpool(_visible):
+        raise HTTPException(status_code=404, detail="Job not found")
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        return {"ticket": "", "expires_in": 0}
+    from services.auth_state import get_auth_state
+
+    ticket = secrets.token_urlsafe(24)
+    path = f"/api/v1/connectors/jobs/{job_id}/stream"
+    get_auth_state().put_stream_ticket(ticket, {"token": token, "path": path}, STREAM_TICKET_TTL_SECONDS)
+    return {"ticket": ticket, "expires_in": STREAM_TICKET_TTL_SECONDS}
+
+
 @router.get("/jobs/{job_id}/stream")
 async def stream_transfer_job(job_id: str, request: Request):
     """Server-sent events for live transfer job progress."""

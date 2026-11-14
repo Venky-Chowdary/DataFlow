@@ -2154,14 +2154,15 @@ export function streamJobProgress(
     }, 4_000);
   };
 
-  try {
-    const token = apiBearerToken();
-    const streamUrl = token
-      ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
-      : `${API_BASE}/connectors/jobs/${jobId}/stream`;
-    const es = new EventSource(streamUrl);
-    let closedTerminal = false;
-    es.onmessage = (ev) => {
+  const streamBase = `${API_BASE}/connectors/jobs/${jobId}/stream`;
+  let es: EventSource | null = null;
+  let closedTerminal = false;
+
+  const openStream = (streamUrl: string) => {
+    if (stopped) return;
+    const source = new EventSource(streamUrl);
+    es = source;
+    source.onmessage = (ev) => {
       if (stopped) return;
       try {
         const issued = ++ticket;
@@ -2173,24 +2174,43 @@ export function streamJobProgress(
           closedTerminal = true;
           stopped = true;
           stopTimers();
-          es.close();
+          source.close();
         }
       } catch {
         /* ignore parse errors */
       }
     };
-    es.onerror = () => {
-      es.close();
+    source.onerror = () => {
+      source.close();
       // Closing a completed stream fires onerror in some browsers. Do not
       // reconnect — that re-appends the last log line and makes it jump.
       if (stopped || closedTerminal) return;
       onError?.(new Error(streamDropNotice()));
       startPolling();
     };
+  };
+
+  try {
+    if (apiBearerToken()) {
+      // SEC-14: EventSource cannot send the bearer header, and a bearer in the
+      // URL lands in proxy logs and history. A one-time 60-second ticket for
+      // this URL stands in for it.
+      void (async () => {
+        try {
+          const res = await apiFetch(`${streamBase}-ticket`, { method: "POST" });
+          const issued = res.ok ? String((await res.json() as { ticket?: string }).ticket || "") : "";
+          openStream(issued ? `${streamBase}?ticket=${encodeURIComponent(issued)}` : streamBase);
+        } catch {
+          if (!stopped) startPolling();
+        }
+      })();
+    } else {
+      openStream(streamBase);
+    }
     armCatchUp();
     return () => {
       stopped = true;
-      es.close();
+      es?.close();
       stopTimers();
     };
   } catch {
