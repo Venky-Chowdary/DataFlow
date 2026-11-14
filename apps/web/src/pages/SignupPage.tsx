@@ -2,6 +2,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
+import { clearAuthAttemptToasts } from "../lib/authToasts";
 import {
   acceptInvite,
   type AcceptedInvite,
@@ -133,7 +134,7 @@ function CodeStep({
 }
 
 export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "", initialChallengeId = "" }: AuthFlowProps & { initialEmail?: string; initialChallengeId?: string }) {
-  const { toast } = useToast();
+  const { toast, dismissMatching } = useToast();
   const [step, setStep] = useState<"details" | "verify">(initialChallengeId ? "verify" : "details");
   const [email, setEmail] = useState(initialEmail);
   const [name, setName] = useState("");
@@ -208,6 +209,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
     try {
       const result = await verifyEmail({ challengeId: challenge.id, code });
       writeSession(verifiedSignupSession(result), true);
+      clearAuthAttemptToasts(dismissMatching);
       toast({ title: "Email verified", message: "Your workspace is ready.", tone: "success" });
       onAuthenticated(result.user.email);
     } catch (err) {
