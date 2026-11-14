@@ -72,7 +72,7 @@ def test_dedicated_saas_transfer_ready_drivers() -> None:
 
 
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """HubSpot/Salesforce certified duplex; Stripe source-certified; Shopify Planned."""
+    """HubSpot/Salesforce duplex, Stripe source; Implemented until CI proves them; Shopify Planned."""
     certified = ("hubspot", "salesforce", "stripe")
     planned = ("shopify",)
     for brand in certified:
@@ -80,14 +80,16 @@ def test_dedicated_saas_drivers_activation_and_source_only() -> None:
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
         assert row["transfer_ready"] is True, brand
-        assert row["certification_tier"] == "certified", brand
+        # No CI job proves the SaaS writers (CLM-7).
+        assert row["certification_tier"] == "implemented", brand
         assert row["effective_status"] == "live", brand
     stripe = enrich_catalog_entry(
         {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
     )
     assert stripe["source_ready"] is True
     assert stripe["dest_ready"] is False
-    assert stripe["capability_label"] == "Source certified"
+    assert stripe["capability_label"] == "Implemented — not yet proven"
+    assert stripe["role_label"] == "Source only"
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -106,7 +108,8 @@ def test_first_class_rest_api_is_source_only() -> None:
     assert "Source" in row["capability_label"]
 
 
-def test_postgresql_is_certified_transfer_ready() -> None:
+def test_postgresql_is_certified_transfer_ready(ci_evidence) -> None:
+    ci_evidence("postgresql")
     row = enrich_catalog_entry(
         {"id": "postgresql", "name": "PostgreSQL", "category": "database", "status": "live", "description": ""}
     )
@@ -161,7 +164,10 @@ def test_e1_catalog_summary_prefers_unique_drivers() -> None:
     from services.catalog_service import catalog_summary
 
     summary = catalog_summary()
-    assert summary["unique_drivers"] == summary["transfer_live"] == summary["certified"]
+    assert summary["unique_drivers"] == summary["transfer_live"]
+    # certified counts only CI-proven drivers (CLM-6/7).
+    assert summary["certified"] == len(summary["proven_drivers"]) <= summary["unique_drivers"]
+    assert summary["certified"] + summary["pending_proof_count"] == summary["unique_drivers"]
     assert summary["unique_drivers"] <= summary.get("catalog_tile_total", summary["total"])
     assert "alias_tiles" in summary
     assert "honesty_note" in summary
@@ -282,9 +288,10 @@ def test_db2_with_its_driver_is_still_planned(monkeypatch) -> None:
         cc._module_is_installed.cache_clear()
 
 
-def test_catalog_search_live_is_certified_only() -> None:
+def test_catalog_search_live_is_certified_only(ci_evidence) -> None:
     from services.catalog_service import _enriched_connectors, search_catalog
 
+    ci_evidence("postgresql", "mysql", "mongodb")
     _enriched_connectors.cache_clear()
     try:
         data = search_catalog(status="live", limit=500)
@@ -300,10 +307,11 @@ def test_catalog_search_live_is_certified_only() -> None:
         _enriched_connectors.cache_clear()
 
 
-def test_certified_missing_package_is_environment_gap_not_planned(monkeypatch) -> None:
+def test_certified_missing_package_is_environment_gap_not_planned(monkeypatch, ci_evidence) -> None:
     """Missing psycopg2 is an environment gap, not a Planned catalog tile."""
     from src.transfer import connector_capabilities as cc
 
+    ci_evidence("postgresql")
     monkeypatch.setattr(cc, "driver_available", lambda *a, **k: False)
     row = cc.enrich_catalog_entry(
         {"id": "postgresql", "name": "PostgreSQL", "category": "database", "status": "live", "description": ""}

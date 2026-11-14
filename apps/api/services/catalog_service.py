@@ -181,6 +181,9 @@ def search_catalog(
                 connectors = [c for c in connectors if c.get("dest_ready")]
             else:
                 connectors = [c for c in connectors if c.get("transfer_ready")]
+        elif status in {"certified", "implemented"}:
+            # CLM-7: proven in CI, or implemented and not yet proven.
+            connectors = [c for c in connectors if c.get("certification_tier") == status]
         elif status == "source_only":
             connectors = [c for c in connectors if c.get("certification_tier") == "source_only"]
         elif status == "connect_only":
@@ -214,9 +217,7 @@ def search_catalog(
 
     categories = sorted({c.get("category", "other") for c in data.get("connectors", [])})
     enriched_all = _host_rows()
-    certified_tiles = sum(
-        1 for c in enriched_all if c.get("certification_tier") == "certified" or c.get("transfer_ready")
-    )
+    certified_tiles = sum(1 for c in enriched_all if c.get("certification_tier") == "certified")
     source_only = sum(1 for c in enriched_all if c.get("certification_tier") == "source_only")
     planned = sum(1 for c in enriched_all if c.get("certification_tier") == "planned" or c.get("effective_status") == "planned")
     try:
@@ -248,7 +249,9 @@ def search_catalog(
         "transfer_live_tiles": sum(1 for c in enriched_all if c.get("transfer_ready")),
         "connect_only": sum(1 for c in enriched_all if c.get("connect_only")),
         "roadmap": sum(1 for c in enriched_all if c.get("effective_status") == "planned"),
-        "certified": unique_drivers,
+        # CLM-6/7: certified = drivers a green CI run proves, never the
+        # implemented total.
+        **_proof_counts(),
         "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned,
@@ -261,6 +264,26 @@ def search_catalog(
             else dest_drivers if role == "destination"
             else unique_drivers
         ),
+    }
+
+
+def _proof_counts(drivers: list[str] | None = None) -> dict[str, object]:
+    """Transfer-ready drivers split by CI evidence: proven vs pending (CLM-6)."""
+    from services.connector_proof import proven_and_pending
+
+    if drivers is None:
+        try:
+            from src.transfer.connector_capabilities import transfer_live_driver_types
+
+            drivers = transfer_live_driver_types()
+        except Exception:
+            drivers = []
+    split = proven_and_pending(list(drivers))
+    return {
+        "certified": len(split["proven"]),
+        "proven_drivers": split["proven"],
+        "pending_proof_drivers": split["pending"],
+        "pending_proof_count": len(split["pending"]),
     }
 
 
@@ -328,9 +351,8 @@ def catalog_summary() -> dict:
 
     catalog_tiles = sum(1 for c in enriched if c.get("transfer_ready"))
     connect_only = sum(1 for c in enriched if c.get("connect_only"))
-    certified_tiles = sum(
-        1 for c in enriched if c.get("certification_tier") == "certified" or c.get("transfer_ready")
-    )
+    certified_tiles = sum(1 for c in enriched if c.get("certification_tier") == "certified")
+    implemented_tiles = sum(1 for c in enriched if c.get("certification_tier") == "implemented")
     source_only = sum(1 for c in enriched if c.get("certification_tier") == "source_only")
     planned_tier = sum(1 for c in enriched if c.get("certification_tier") == "planned")
     alias_tiles = sum(1 for c in enriched if c.get("is_hosted_alias"))
@@ -367,9 +389,11 @@ def catalog_summary() -> dict:
         "transfer_live_tiles": catalog_tiles,
         "connect_only": connect_only,
         "roadmap": len(enriched) - catalog_tiles - connect_only,
-        # "certified" = unique duplex/live engines (never alias inflation).
-        "certified": len(unique_types),
+        # "certified" = unique engines a green CI run proves (CLM-6/7), never
+        # alias inflation and never the implemented total.
+        **_proof_counts(unique_types),
         "certified_tiles": certified_tiles,
+        "implemented_tiles": implemented_tiles,
         "source_only": source_only,
         "planned_count": planned_tier,
         # Per-side engine counts. "Usable in a transfer" is not the same question
@@ -379,8 +403,10 @@ def catalog_summary() -> dict:
         "catalog_tiles_are_not_transfer_live": True,
         "customer_tenant_warehouse_sku_claimed": False,
         "honesty_note": (
-            "Catalog tiles are not transfer-live. Public live/certified counts "
-            "are unique engines (unique_drivers). source_live / dest_live are "
+            "Catalog tiles are not transfer-live. live / unique_drivers count the "
+            "implemented transfer engines; certified counts only those a green, "
+            "non-skipped CI run proves (proven_drivers), the rest are pending "
+            "proof (pending_proof_drivers). source_live / dest_live are "
             "the per-side live counts, which differ: a vector store is a destination "
             "only and a REST feed a source only. source_beta / dest_beta count "
             "fixture-proven beta engines, never live. catalog_tile_total includes "

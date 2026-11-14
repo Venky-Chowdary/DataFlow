@@ -14,14 +14,14 @@
       "name": "pgvector (PostgreSQL)",
       "category": "vector",
       "status": "live",
-      "description": "Destination-only: embed text chunks into PostgreSQL + vector extension for RAG"
+      "description": "Read tables and embed text chunks into PostgreSQL + vector extension for RAG"
     },
     {
       "id": "qdrant",
       "name": "Qdrant",
       "category": "vector",
       "status": "live",
-      "description": "Destination-only: upsert embedded chunks into a Qdrant collection"
+      "description": "Read points from, and upsert embedded chunks into, a Qdrant collection"
     },
     {
       "id": "weaviate",
