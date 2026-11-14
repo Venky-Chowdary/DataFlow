@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.duplicate_policy import restores_match_action
 from services.error_taxonomy import failure_side
 from typing import Any
 from src.transfer.stream import (
@@ -113,6 +114,7 @@ def _raise_write_failure(result: Any, label: str) -> None:
 
 
 @failure_side("destination", "write")
+@restores_match_action
 def _write_batch(
     dest_type: str,
     dest: EndpointConfig,

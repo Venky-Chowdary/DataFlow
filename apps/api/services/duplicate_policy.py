@@ -453,6 +453,30 @@ def reset_match_action(token) -> None:
     _MATCH.reset(match_token)
 
 
+def restores_match_action(fn):
+    """Decorator: the match action and duplicates-allowed flag never outlive ``fn``.
+
+    ``stream_write._write_batch`` resets them only on its normal return paths;
+    a writer that raised (or a destination branch with no reset) left the flag
+    set for the next write in the same thread, so a later create-new append
+    silently withheld its declared key (QA1 x MYSQL-DEF-1 in CI shard 5).
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        match, rows = _MATCH.get(), _ROWS_ALLOWED.get()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if _MATCH.get() != match:
+                _MATCH.set(match)
+            if _ROWS_ALLOWED.get() != rows:
+                _ROWS_ALLOWED.set(rows)
+
+    return _wrapped
+
+
 def duplicates_allowed(decision: "DuplicateDecision | None") -> bool:
     """The operator explicitly allowed repeated keys (append / allow_duplicates)."""
     return bool(decision is not None and decision.explicit and decision.policy == "append")
