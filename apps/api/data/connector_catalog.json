@@ -322,7 +322,7 @@
       "name": "OpenShift PostgreSQL (CNPG / Crunchy)",
       "category": "database",
       "status": "live",
-      "description": "Hosted alias of PostgreSQL on OpenShift \u2014 Service DNS dest, not the Kubernetes API. DynamoDB snapshot uses consistent Scan; Streams CDC is at-least-once upsert."
+      "description": "Hosted alias of PostgreSQL on OpenShift \u2014 Service DNS dest, not the Kubernetes API."
     },
     {
       "id": "documentdb",

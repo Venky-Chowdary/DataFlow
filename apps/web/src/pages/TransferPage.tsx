@@ -8874,7 +8874,6 @@ export function TransferPage({
             <p className="df2-label-hint df2-field-note">
               OpenShift hosts PostgreSQL (CloudNativePG / Crunchy) — it is not a destination store.
               Host is the Service DNS (<code>svc.cluster.local</code>), a Route, or a port-forward.
-              DynamoDB snapshot uses consistent Scan. Streams CDC is at-least-once upsert, not exactly-once.
             </p>
           )}
           {destDriverType === "bigquery" && (

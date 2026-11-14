@@ -97,6 +97,8 @@ def test_refuse_blank_openshift_without_a_store_host() -> None:
 
 def test_accuracy_contract_never_claims_streams_exactly_once() -> None:
     c = accuracy_contract()
-    assert "at-least-once" in c["cdc"]
+    # CLM-10: there is no DynamoDB Streams reader, so no CDC delivery claim at all.
+    assert "no DynamoDB Streams reader" in c["cdc"]
+    assert "exactly-once" not in c["cdc"]
     assert "named fixture" in c["one_hundred_percent"]
     assert "GSI / LSI copies" in c["not_migrated"]
