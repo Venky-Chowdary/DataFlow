@@ -6562,6 +6562,15 @@ def _without_held_out_cells(
     ]
 
 
+def _readback_reason(failure: str) -> str:
+    """A non-transient read-back failure, without the driver's class name or secrets (REL-4)."""
+    from services.log_redaction import redact_log_text
+
+    text = redact_log_text(str(failure or "")).strip()
+    text = re.sub(r"^[A-Za-z_.]*(Error|Exception)\s*:\s*", "", text)
+    return text.splitlines()[0][:300] if text else "the read failed"
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -8654,19 +8663,21 @@ def _run_reconciliation_impl(
         if strict_checksum and not dest_only and readback_failure:
             # D284: the engine has a verifier; the read itself failed. Say what
             # failed. A transient fault (retried) is not evidence the committed
-            # rows are wrong, so they are kept rather than undone.
+            # rows are wrong, so they are kept rather than undone. REL-4: the
+            # message says how many rows stay where, and never carries the
+            # driver's text (hosts, ports); that goes to the log.
+            _logger.warning("Strict reconciliation read-back failed for %s: %s", db_type, readback_failure)
+            where = f" to '{table_name}'" if table_name else ""
             return _finalize({
                 "passed": False,
                 "verification_unavailable": readback_transient,
+                "rows_kept": rows_written,
                 "message": (
-                    f"Strict reconciliation could not read the {db_type} destination "
-                    f"back ({readback_failure})"
-                    + (
-                        ", after retrying. The committed rows were kept; re-run "
-                        "verification once the destination is reachable."
-                        if readback_transient
-                        else "."
-                    )
+                    f"Verification could not read the {db_type} destination back "
+                    + ("(the connection was lost, after retrying). " if readback_transient
+                       else f"({_readback_reason(readback_failure)}). ")
+                    + f"{rows_written:,} row(s) were written{where} and kept; re-run "
+                    "verification once the destination is reachable, or undo the run."
                 ),
                 "source_rows": source_rows,
                 "target_rows": -1,
