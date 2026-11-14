@@ -550,8 +550,14 @@ def apply_manifest(
         for resource in resources:
             if _resource_identity(resource)[0] != "PipelineSchedule":
                 continue
-            spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
-            authorize_schedule(apply_schedule_spec(spec))
+            spec = apply_schedule_spec(resource.get("spec") if isinstance(resource.get("spec"), dict) else {})
+            sid = str(spec.get("id") or "").strip()
+            existing = get_schedule(sid) if sid else None
+            if existing and not _visible(
+                getattr(existing, "workspace_id", ""), (workspace_id or "").strip(), workspace_filter
+            ):
+                raise WorkspaceScopeError("Schedule belongs to another workspace")
+            authorize_schedule(spec)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
 
