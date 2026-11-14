@@ -79,7 +79,9 @@ def _name(row: dict[str, Any]) -> str:
 def _tier_sentence(row: dict[str, Any]) -> str:
     tier = row.get("certification_tier")
     if tier == "certified":
-        return f"{_name(row)} is Certified: a green CI run proves its engine."
+        emulated = bool((row.get("ci_evidence") or {}).get("emulated"))
+        where = " against its emulator" if emulated else ""
+        return f"{_name(row)} is Certified: a green CI run proves its engine{where}."
     if tier == "implemented":
         return (
             f"{_name(row)} is Implemented — not yet proven: it runs, but no green CI run "
