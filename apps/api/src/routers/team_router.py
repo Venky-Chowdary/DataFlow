@@ -303,14 +303,19 @@ async def post_user_reset_password(email: str, request: Request):
         user, issued = reset_password(email=email)
     except UserStoreError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    # SEC-6: the old password's sessions end with it (bearer and cookie alike),
+    # as a self-service reset and change-password already do.
+    from services import session_registry
+
+    revoked = session_registry.revoke_all(user["email"])
     _audit(
         "team.user.password_reset",
         actor=actor,
         resource=f"/team/users/{user['email']}",
         level="warn",
-        details={"email": user["email"]},
+        details={"email": user["email"], "sessions_revoked": revoked},
     )
-    return {"user": user, "temporary_password": issued}
+    return {"user": user, "temporary_password": issued, "sessions_revoked": revoked}
 
 
 @router.delete("/users/{email}")

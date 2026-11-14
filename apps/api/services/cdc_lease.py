@@ -176,12 +176,20 @@ def acquire_lease(
     res = (resource or "").strip() or key
     holder = (holder_id or "").strip() or new_holder_id()
     ttl = float(ttl_sec if ttl_sec is not None else _DEFAULT_TTL)
+    # SEC-1: the owning workspace travels with the lease (ops routes scope it).
+    from services.cdc_ops_scope import stamp_owner
+
+    lease_meta = dict(meta or {})
+    probe = {**lease_meta, "job_id": lease_meta.get("job_id") or parse_holder_job_id(holder) or ""}
+    owner = (stamp_owner(probe) or {}).get("workspace_id")
+    if owner and not lease_meta.get("workspace_id"):
+        lease_meta["workspace_id"] = owner
     raw = get_store().acquire(
         cursor_key=key,
         resource=res,
         holder_id=holder,
         ttl_sec=ttl,
-        meta=dict(meta or {}),
+        meta=lease_meta,
         min_generation=int(min_generation),
     )
     return CdcLease.from_dict(raw)

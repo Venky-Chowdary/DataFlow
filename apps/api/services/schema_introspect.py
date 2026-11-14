@@ -337,18 +337,21 @@ def _introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     from services.egress_guard import connector_dial_scope
 
     reader_cfg = kwargs.get("reader_cfg") or {}
+    # The catalog type decides the dial rule: a DuckDB/SQLite file read through
+    # the generic SQL driver has a host label it never dials.
+    db_type_for_egress = str(kwargs.get("catalog_type") or "").strip() or db_type
     scope_cfg = {
         "host": str(kwargs.get("host") or ""),
         "connection_string": str(kwargs.get("connection_string") or ""),
         "endpoint_url": str(kwargs.get("endpoint_url") or ""),
-        "type": db_type,
+        "type": db_type_for_egress,
         "workspace_id": str(
             kwargs.get("workspace_id")
             or (reader_cfg.get("workspace_id") if isinstance(reader_cfg, dict) else "")
             or ""
         ),
     }
-    with connector_dial_scope(scope_cfg, db_type=db_type, point="introspect"):
+    with connector_dial_scope(scope_cfg, db_type=db_type_for_egress, point="introspect"):
         return _introspect_schema_unscoped(db_type, **kwargs)
 
 

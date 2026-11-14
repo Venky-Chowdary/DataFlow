@@ -463,6 +463,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/training-agent/run", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run/sync", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/transfer/execute", Permission.JOB_RUN),
+    # SEC-14: a ticket to watch a job's stream is a read, like the stream.
+    ("POST", "/api/v1/connectors/jobs/{job_id}/stream-ticket", Permission.CONNECTOR_READ),
     ("POST", "/api/v1/transforms/{project_id}/run", Permission.JOB_RUN),
     ("POST", "/api/v1/cdc/signals/ensure-table", Permission.JOB_RUN),
     ("POST", "/api/v1/cdc/signals/execute-snapshot", Permission.JOB_RUN),

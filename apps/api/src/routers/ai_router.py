@@ -6,7 +6,7 @@ REST endpoints for AI semantic analysis capabilities.
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..ai import (
@@ -380,23 +380,43 @@ async def api_vector_routing(request: VectorRoutingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _platform_admin_only(request: Request, permission: str, what: str) -> None:
+    """SEC-10: platform-wide maintenance is for platform administrators only."""
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        request, tenant_scope(request), permission,
+        f"{what} is shared by every workspace: platform administrators only.",
+    )
+
+
 @router.get("/embedding-cache")
 async def api_embedding_cache_stats():
-    """Durable SQLite embedding cache status (entries, session hit rate, path)."""
+    """Durable SQLite embedding cache status (entries, session hit rate).
+
+    The server path is not part of the answer (SEC-12).
+    """
     try:
         from services.embedding_cache import cache_stats
 
-        return cache_stats().to_dict()
+        stats = cache_stats().to_dict()
+        stats.pop("path", None)
+        return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/embedding-cache")
 async def api_embedding_cache_clear(
+    request: Request,
     model: Optional[str] = None,
     clear_memory: bool = True,
 ):
-    """Clear durable embedding cache (and optionally process L1 memory)."""
+    """Clear durable embedding cache (and optionally process L1 memory).
+
+    The cache is shared by every workspace, so platform administrators only (SEC-10).
+    """
+    _platform_admin_only(request, "ai.embedding_cache.clear", "The embedding cache")
     try:
         from services.embedding_cache import clear_cache
         from services.vectorization import clear_memory_cache
@@ -546,12 +566,19 @@ async def api_rag_query(request: RAGQueryRequest):
             grounded=bool(result.get("grounded")),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        from services.safe_errors import safe_http_exception
+
+        raise safe_http_exception(e, event="ai.rag.query.errored", public_message="Could not answer the query.") from e
 
 
 @router.post("/rag/ingest", response_model=RAGIngestResponse)
-async def api_rag_ingest(request: RAGIngestRequest):
-    """Ingest schema/data into the RAG knowledge base."""
+async def api_rag_ingest(request: RAGIngestRequest, http_request: Request):
+    """Ingest schema/data into the RAG knowledge base.
+
+    The knowledge base is one store every workspace's Pilot reads, so only a
+    platform administrator writes to it (SEC-11).
+    """
+    _platform_admin_only(http_request, "ai.rag.ingest", "The knowledge base")
     try:
         from ..ai.rag.pipeline import get_rag_pipeline
         pipeline = get_rag_pipeline()
@@ -564,7 +591,9 @@ async def api_rag_ingest(request: RAGIngestRequest):
             total_documents=status["document_count"],
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        from services.safe_errors import safe_http_exception
+
+        raise safe_http_exception(e, event="ai.rag.ingest.errored", public_message="Could not ingest the schema.") from e
 
 
 @router.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)

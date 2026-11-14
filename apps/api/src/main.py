@@ -12,6 +12,8 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from services.brand_env import getenv_brand
@@ -826,6 +828,10 @@ async def _add_timing_header_response(request: Request, call_next):
 # A redirect to the API's own host (redirect_slashes' 307) goes out relative,
 # never naming the internal host or its plain-http scheme (D339).
 app.add_middleware(OwnHostRedirectMiddleware)
+# SEC-8: a non-upload body over its limit is a 413 before anything parses it.
+from src.middleware.body_size_limit import BodySizeLimitMiddleware  # noqa: E402
+
+app.add_middleware(BodySizeLimitMiddleware)
 # Outermost: client address and scheme from the trusted proxy chain
 # (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
 app.add_middleware(ProxyFixMiddleware)
@@ -1130,6 +1136,16 @@ async def shared_doc_conflict_handler(request: Request, exc: SharedDocConflict):
         },
         headers={"Retry-After": "1"},
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    """422 without the submitted values (SEC-8): no password, no 10 MB echo."""
+    errors = [
+        {key: value for key, value in dict(err).items() if key not in ("input", "ctx", "url")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 @app.exception_handler(PayloadTooLarge)

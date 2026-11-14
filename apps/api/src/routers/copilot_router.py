@@ -540,9 +540,13 @@ async def _run_lifecycle_confirm(
     if kind == "clear_cursor_resnapshot":
         from services.sync_cursor import clear_watermark
 
+        from services.cdc_ops_scope import assert_cursor_writable
+
         cursor_key = str(payload.get("cursor_key") or "").strip()
         if not cursor_key:
             raise HTTPException(status_code=400, detail="cursor_key is required")
+        # SEC-1: the same workspace check as POST /ops/cdc-cursors/clear.
+        assert_cursor_writable(http_request, cursor_key, workspace_id=workspace_id or None)
         role, actor = _caller(http_request)
         result = clear_watermark(cursor_key)
         result["actor"] = actor or None
@@ -1129,7 +1133,14 @@ async def train_copilot(request: TrainRequest, http_request: Request):
     Run the separate Training Agent.
     Feeds universal data, synthesizes conversations, updates RAG knowledge.
     Runs on the app's training runtime thread; API shutdown stops it.
+    Platform-wide, so platform administrators only (SEC-10).
     """
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        http_request, tenant_scope(http_request), "ai.training.run",
+        "Training runs for every workspace: platform administrators only.",
+    )
     try:
         from ..ai.training.training_runtime import app_training_runtime
         from ..ai.training.training_scheduler import run_admin_training

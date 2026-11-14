@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
 from typing import Any, Literal, Optional
 
@@ -625,14 +626,20 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
+    from services.body_id_ownership import assert_schedule_body_ids
+
     ws = resolve_write_workspace(request, workspace_id)
     try:
-        result = apply_manifest(
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
             workspace_filter=tenant_scope(request, workspace_id).filter,
+            # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
@@ -805,6 +812,12 @@ async def create_pipeline_schedule(
 
     await asyncio.to_thread(assert_schedule_body_ids, request, payload)  # before the key probe reads any catalog
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, payload)
+    if dropped:
+        warnings.append(dropped)
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
     try:
@@ -860,6 +873,12 @@ async def patch_pipeline_schedule(
     if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
         await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, data, existing.to_dict())
+    if dropped:
+        warnings.append(dropped)
     try:
         if "compliance_acknowledged" in data or (
             {"acknowledgment_actor", "acknowledgment_reason"} & set(data)
@@ -976,12 +995,23 @@ async def import_pipeline_schedule(
         spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
         if isinstance(spec, dict):
             spec["workspace_id"] = ws
-    result = apply_manifest(
-        payload,
-        dry_run=False,
-        workspace_id=ws,
-        workspace_filter=tenant_scope(request, workspace_id).filter,
-    )
+    from services.body_id_ownership import assert_schedule_body_ids
+    from services.gitops_manifest import WorkspaceScopeError
+
+    try:
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
+            payload,
+            dry_run=False,
+            workspace_id=ws,
+            workspace_filter=tenant_scope(request, workspace_id).filter,
+            # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
+        )
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:

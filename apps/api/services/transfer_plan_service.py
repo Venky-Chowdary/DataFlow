@@ -646,6 +646,11 @@ def run_plan_preflight(
         # Recorded against the revision this run checked, not whatever is active
         # by the time it finishes (a UI save may have landed meanwhile).
         add_preflight_run(plan_id, pf, mapping_version=rev.version, mapping_hash=rev.mapping_hash)
+        from services.validate_approvals import binding_of, record_validate
+
+        # SEC-APPROVAL-1: what this Validate approved, for Execute and schedule saves.
+        record_validate(pf, workspace_id=plan.workspace_id, plan_id=plan_id,
+                        binding=binding_of(dest, stream_contracts))
         drift = pf.get("schema_drift") or {}
         append_audit_event(
             action="transfer_plan.preflight",
