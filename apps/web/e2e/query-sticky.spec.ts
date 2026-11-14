@@ -2,10 +2,11 @@ import { expect, test, type Page } from "@playwright/test";
 import { installHermeticStubs } from "./hermetic";
 
 /**
- * Query workspace: the tabs row and the connection bar (Connector, Database /
- * Schema, Table, Row limit) stay pinned under the app top bar while the
+ * Query workspace: the tabs row and the action bar (Connector, Database /
+ * Schema, Table, Row limit, Run) stay pinned under the app top bar while the
  * operator scrolls a long result set, and the results bar (row count, Filter,
- * Copy, Export) stays reachable under it. Hermetic: no API runs.
+ * Copy) stays reachable under it. At >= 1024px the page itself does not
+ * scroll (the panes do); on phones the header floats. Hermetic: no API runs.
  */
 const COLS = ["id", "customer_email", "status", "order_total", "created_at", "region"];
 const ROWS = Array.from({ length: 500 }, (_, i) => ({
@@ -76,7 +77,18 @@ for (const view of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) 
       grid?.scrollBy(0, 2000);
       scroller?.scrollBy(0, 2000);
     });
-    await expect(header).toHaveAttribute("data-stuck", "true");
+    if (view.width < 1024) {
+      // Phones scroll the page; the header floats over the results.
+      await expect(header).toHaveAttribute("data-stuck", "true");
+    } else {
+      // >= 1024px the workspace fills the viewport and only its panes scroll,
+      // so the page never moves and the header never has to float.
+      const pageScroll = await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>(".df2-content");
+        return scroller ? scroller.scrollHeight - scroller.clientHeight : 0;
+      });
+      expect(pageScroll).toBeLessThanOrEqual(1);
+    }
 
     const topBar = await page.locator("header.df2-topbar").first().boundingBox();
     const box = await header.boundingBox();

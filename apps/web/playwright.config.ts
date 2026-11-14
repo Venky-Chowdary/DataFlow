@@ -73,7 +73,8 @@ export default defineConfig({
     {
       // UX-16: axe-core WCAG 2.2 A/AA gate over the main screens.
       name: "a11y",
-      testMatch: /a11y\.spec\.ts/,
+      // The Query workspace layout/state gate rides with a11y: CI runs this project.
+      testMatch: /(a11y|query-layout)\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1366, height: 768 },

@@ -98,6 +98,26 @@
   --df-border-strong: #d0d6de;
   --df-border-brand: color-mix(in srgb, var(--df-brand) 28%, var(--df-border));
 
+  /* Code surfaces (Query editor) — follow the theme; every ink is AA on --df-code-bg. */
+  --df-code-bg: var(--df-surface);
+  --df-code-gutter-bg: var(--df-surface-muted);
+  --df-code-border: var(--df-border);
+  --df-code-ink: var(--df-text-primary);
+  --df-code-muted: var(--df-text-tertiary);
+  --df-code-caret: var(--df-brand-strong);
+  --df-code-selection: color-mix(in srgb, var(--df-brand) 22%, transparent);
+  --df-code-keyword: #115e59;
+  --df-code-string: #047857;
+  --df-code-number: #b45309;
+  --df-code-function: #1d4ed8;
+  --df-code-bind: #be185d;
+  --df-code-key: #0369a1;
+  /* Result grid: the three kinds of "nothing" and JSON never look alike. */
+  --df-cell-null: var(--df-code-bind);
+  --df-cell-null-bg: color-mix(in srgb, var(--df-code-bind) 10%, transparent);
+  --df-cell-empty: var(--df-code-key);
+  --df-cell-json: var(--df-code-function);
+
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
   /* #5e6e85 clears AA on every surface: 4.58:1 on --df-bg-subtle (the worst
@@ -707,6 +727,18 @@ html.df2-theme-dark:has(.df2-app),
   --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 70%, var(--df-surface));
   /* Platform leftover `.df2-btn { color: var(--df-navy-700) }` — keep ink readable. */
   --df-navy-700: var(--df-text-secondary);
+  --df-code-bg: #0b1220;
+  --df-code-gutter-bg: #080e1a;
+  --df-code-border: #1e293b;
+  --df-code-ink: #e2e8f0;
+  --df-code-muted: #94a3b8;
+  --df-code-caret: #5eead4;
+  --df-code-keyword: #5eead4;
+  --df-code-string: #86efac;
+  --df-code-number: #fdba74;
+  --df-code-function: #7dd3fc;
+  --df-code-bind: #f472b6;
+  --df-code-key: #67e8f9;
 }
 
 @media (prefers-reduced-motion: reduce) {

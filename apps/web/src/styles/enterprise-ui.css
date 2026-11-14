@@ -14728,7 +14728,7 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-qw-col-type[data-tone="number"],
 .df2-app .df2-qw-th-type[data-tone="number"] {
   background: var(--df-info-bg);
-  color: var(--df-info);
+  color: var(--df-info-text);
 }
 
 .df2-app .df2-qw-col-type[data-tone="time"],
@@ -14740,7 +14740,7 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-qw-col-type[data-tone="bool"],
 .df2-app .df2-qw-th-type[data-tone="bool"] {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text);
 }
 
 .df2-app .df2-qw-col-type[data-tone="struct"],
