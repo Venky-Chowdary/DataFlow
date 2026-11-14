@@ -23,6 +23,7 @@ from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .answer_contract import RenderTracker, result_used
 from .pilot_egress import history_for_model, model_payload, narration_allowed
+from . import transfer_answer
 from .schedule_questions import (
     asks_next_run,
     ground_schedule_plan,
@@ -337,9 +338,6 @@ def _live_rows_lead(o: dict[str, Any], *, sample: bool) -> str:
     )
 
 
-_GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
-
-
 def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     """Show the plan an operator has to sign off on: route, casts, gates.
 
@@ -401,23 +399,18 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
                 f"{c.get('to_type')} on `{c.get('target_column')}`"
                 + (f" ({c.get('fidelity')})" if c.get("fidelity") else "")
             )
-    elif conversions:
-        lines.append(
-            f"• {len(conversions)} type conversion(s) stamped preserve — "
-            "no cast/mutate/lossy fidelity risks in the plan."
-        )
+    else:
+        # UX-19: from the plan's own conversions and the gate result shown below,
+        # so "no risks" never sits beside a blocker.
+        conv_line = transfer_answer.conversions_line(plan, pf)
+        if conv_line:
+            lines.append(conv_line)
 
-    gates = pf.get("gates") or []
-    if gates:
-        summary = " ".join(
-            f"{_GATE_ICON.get(str(g.get('status')).lower(), '?')}{g.get('id')}" for g in gates
-        )
-        lines.append(
-            f"• Preflight **{pf.get('passed_count')}/{pf.get('total_gates')}** "
-            f"({pf.get('readiness_score')}%): {summary}"
-        )
-    for blocker in (pf.get("blockers") or [])[:4]:
-        lines.append(f"  – **BLOCK {blocker.get('id')}**: {blocker.get('message')}")
+    gate_line = transfer_answer.gate_summary_line(pf)
+    if gate_line:
+        lines.append(gate_line)
+    for title, text in transfer_answer.honest_blockers(plan, pf):
+        lines.append(f"  – **Blocked · {title}**: {text}")
     if pf.get("run_id"):
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
