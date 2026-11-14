@@ -108,12 +108,26 @@ export interface QueryEditorProps {
   /** Ctrl/Cmd+E. */
   onExplain?: () => void;
   busy?: boolean;
+  /** Keep the text selectable and focused while a run is in flight. */
+  readOnly?: boolean;
+  /**
+   * "workspace": the Query page's action bar owns Run / Format / Explain, so the
+   * editor keeps a slim header (syntax, counters, Insert, Clear) and no
+   * snippet row. "full" (default) is the self-contained editor.
+   */
+  variant?: "full" | "workspace";
+  /** Fill the parent's height; the text area is then the only scroll region. */
+  fill?: boolean;
 }
 
 export interface QueryEditorHandle {
   /** Insert text at the caret, replacing any selection, and refocus. */
   insertAtCaret: (text: string) => void;
   focus: () => void;
+  /** Run the selection, or the statement under the caret (Ctrl/Cmd+Enter). */
+  run: () => void;
+  /** Format the buffer (Ctrl/Cmd+Shift+F); a no-op for the JS shell mode. */
+  format: () => void;
 }
 
 function guessLanguage(connectorType?: string): QueryLanguage {
@@ -215,7 +229,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   onParamsChange,
   onExplain,
   busy,
+  readOnly,
+  variant = "full",
+  fill,
 }: QueryEditorProps, ref) {
+  const workspace = variant === "workspace";
   // A SQL connector fixes the dialect; a document connector keeps the JSON / shell choice.
   const connectorLanguage = connectorType ? guessLanguage(connectorType) : null;
   const fixedLanguage = connectorLanguage && connectorLanguage !== "json" && connectorLanguage !== "javascript"
@@ -230,6 +248,7 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   const [charBox, setCharBox] = useState({ w: 7.8, h: 21 });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const tabLeavesRef = useRef(false);
   const preRef = useRef<HTMLPreElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
@@ -394,7 +413,7 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
 
   const doRun = () => {
     const ta = textareaRef.current;
-    if (!onRun) return;
+    if (!onRun || busy) return;
     if (isMongoLike) {
       onRun(value.trim(), "all");
       return;
@@ -404,6 +423,12 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
     const target = resolveRunTarget(value, start, end);
     if (target.text.trim()) onRun(target.text, target.scope);
   };
+
+  // The handle calls the latest closures without re-creating itself each render.
+  const doRunRef = useRef(doRun);
+  doRunRef.current = doRun;
+  const formatRef = useRef(handleFormat);
+  formatRef.current = handleFormat;
 
   const insertSnippet = useCallback(
     (text: string) => {
@@ -426,6 +451,8 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
     () => ({
       insertAtCaret: insertSnippet,
       focus: () => textareaRef.current?.focus(),
+      run: () => doRunRef.current(),
+      format: () => formatRef.current(),
     }),
     [insertSnippet],
   );
@@ -436,6 +463,17 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
     if (selectionStart == null || selectionEnd == null) return;
     const mod = e.metaKey || e.ctrlKey;
     const popupOpen = completions.length > 0;
+
+    // Ctrl/Cmd+Enter always runs — with the completion popup open it used to
+    // accept a completion instead, so the shortcut the UI advertises did nothing.
+    if (mod && e.key === "Enter") {
+      e.preventDefault();
+      closeCompletions();
+      if (e.shiftKey) {
+        if (!busy) onRunAll?.();
+      } else doRun();
+      return;
+    }
 
     // --- completion navigation takes precedence while the popup is open ---
     if (popupOpen) {
@@ -461,13 +499,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
       }
     }
 
-    if (mod && e.key === "Enter") {
-      e.preventDefault();
-      closeCompletions();
-      if (e.shiftKey) onRunAll?.();
-      else doRun();
+    if (e.key === "Escape") {
+      tabLeavesRef.current = true;
       return;
     }
+    tabLeavesRef.current = false;
 
     if (mod && e.code === "Space") {
       e.preventDefault();
@@ -487,7 +523,14 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
       return;
     }
 
+    if (readOnly) return;
+
     if (e.key === "Tab") {
+      // WCAG 2.1.2: Escape, then Tab, leaves the editor instead of indenting.
+      if (tabLeavesRef.current) {
+        tabLeavesRef.current = false;
+        return;
+      }
       e.preventDefault();
       const { next, cursor: pos } = insertAtCursor(value, selectionStart, selectionEnd, "  ");
       onChange(next);
@@ -529,9 +572,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
   return (
     <div
       className="df2-query-editor-shell"
-      style={{ minHeight: height }}
+      style={fill ? undefined : { minHeight: height }}
       data-invalid={isInvalid}
       data-dialect={highlightDialect}
+      data-variant={variant}
+      data-fill={fill ? "true" : undefined}
     >
       <div className="df2-query-editor-langbar">
         <span className="df2-query-editor-lang-label">Syntax</span>
@@ -564,9 +609,11 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
         <span className="df2-query-editor-hint">
           {fixedLanguage ? hint : `${label} · ${hint}`}
         </span>
-        <span className="df2-query-editor-dialect-pill" title="Active highlighter">
-          {lang === "json" ? "JSON" : lang === "javascript" ? "JS" : "SQL"}
-        </span>
+        {!workspace && (
+          <span className="df2-query-editor-dialect-pill" title="Active highlighter">
+            {lang === "json" ? "JSON" : lang === "javascript" ? "JS" : "SQL"}
+          </span>
+        )}
         {!isMongoLike && statements.length > 1 && (
           <span
             className="df2-qe-stat"
@@ -581,12 +628,35 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
           </span>
         )}
         {schemaObjects.length > 0 && (
-          <span className="df2-qe-stat" title="Objects available to autocomplete">
+          <span
+            className="df2-qe-stat"
+            title="Objects available to autocomplete"
+            aria-label={`${schemaObjects.length} objects available to autocomplete`}
+          >
             <DtIcon name="database" size={11} /> {schemaObjects.length}
           </span>
         )}
         <div className="df2-query-editor-toolbar-actions">
-          {canFormat && (
+          {workspace && (
+            <select
+              aria-label="Insert a snippet at the caret"
+              className="df2-select df2-select-sm df2-qe-insert"
+              value=""
+              onChange={(e) => {
+                const picked = snippets.find((sn) => sn.label === e.target.value);
+                if (picked) insertSnippet(picked.text);
+              }}
+              disabled={disabled || readOnly}
+            >
+              <option value="">Insert…</option>
+              {snippets.map((sn) => (
+                <option key={sn.label} value={sn.label}>
+                  {sn.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {!workspace && canFormat && (
             <button
               type="button"
               className="df2-query-editor-action"
@@ -598,7 +668,7 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
               Format
             </button>
           )}
-          {onExplain && !isMongoLike && (
+          {!workspace && onExplain && !isMongoLike && (
             <button
               type="button"
               className="df2-query-editor-action"
@@ -610,7 +680,7 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
               Explain
             </button>
           )}
-          {onRun && (
+          {!workspace && onRun && (
             <button
               type="button"
               className="df2-query-editor-action df2-query-editor-action--run"
@@ -626,7 +696,7 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
             type="button"
             className="df2-query-editor-action df2-query-editor-action--clear"
             onClick={handleClear}
-            disabled={disabled || !hasContent}
+            disabled={disabled || readOnly || !hasContent}
             title="Clear editor"
           >
             <DtIcon name="x" size={14} />
@@ -668,12 +738,14 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
             }}
             placeholder={placeholder}
             disabled={disabled}
+            readOnly={readOnly}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
             aria-label="Query editor"
-            style={{ minHeight: height }}
+            aria-describedby={workspace ? "query-editor-keys" : undefined}
+            style={fill ? undefined : { minHeight: height }}
           />
           <CompletionList
             items={completions}
@@ -686,24 +758,31 @@ export const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(funct
         </div>
       </div>
 
-      <div className="df2-query-editor-snippets">
-        <span className="df2-query-editor-snippets-label">Insert:</span>
-        {snippets.map((s) => (
-          <button
-            key={s.label}
-            type="button"
-            className="df2-query-editor-snippet"
-            onClick={() => insertSnippet(s.text)}
-            disabled={disabled}
-            title={s.text}
-          >
-            {s.label}
-          </button>
-        ))}
-        <span className="df2-qe-keys">
-          {MOD_LABEL}+Enter run · {MOD_LABEL}+Shift+Enter all · {MOD_LABEL}+Space complete
-        </span>
-      </div>
+      {workspace ? (
+        <p className="df2-sr-only" id="query-editor-keys">
+          {MOD_LABEL}+Enter runs the statement under the caret, {MOD_LABEL}+Shift+Enter runs everything,
+          {" "}{MOD_LABEL}+Space completes. Tab indents; press Escape, then Tab, to leave the editor.
+        </p>
+      ) : (
+        <div className="df2-query-editor-snippets">
+          <span className="df2-query-editor-snippets-label">Insert:</span>
+          {snippets.map((s) => (
+            <button
+              key={s.label}
+              type="button"
+              className="df2-query-editor-snippet"
+              onClick={() => insertSnippet(s.text)}
+              disabled={disabled}
+              title={s.text}
+            >
+              {s.label}
+            </button>
+          ))}
+          <span className="df2-qe-keys">
+            {MOD_LABEL}+Enter run · {MOD_LABEL}+Shift+Enter all · {MOD_LABEL}+Space complete
+          </span>
+        </div>
+      )}
 
       {isInvalid && (
         <div className="df2-query-editor-error" role="alert">

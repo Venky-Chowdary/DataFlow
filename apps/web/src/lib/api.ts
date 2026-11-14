@@ -14,7 +14,7 @@ import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionAct
 import { planWriteResponse, type PlanView } from "./planConcurrency";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
-import { readErrorEnvelope } from "./errorCopy";
+import { readErrorEnvelope, type ErrorCopy } from "./errorCopy";
 import { readOptionsPayload } from "./readOptions";
 import { neutralizeFormulaCell } from "./csvSafety";
 import type { RuleCompileReport } from "./businessRules";
@@ -4745,19 +4745,44 @@ export type QueryPlaygroundRequest = {
   params?: Record<string, unknown>;
 };
 
-export async function executeQuery(payload: QueryPlaygroundRequest): Promise<QueryResult> {
+/**
+ * A refused or failed Query run. `copy` is the API's taxonomy envelope (title,
+ * message, one next action, support reference) when the response carried one,
+ * so the page can render it as designed copy instead of re-reading the text.
+ */
+export class QueryRunError extends ApiError {
+  readonly copy: ErrorCopy | null;
+
+  constructor(message: string, status: number, code: string, copy: ErrorCopy | null) {
+    super(message, status, "", "", code);
+    this.name = "QueryRunError";
+    this.copy = copy;
+  }
+}
+
+export async function executeQuery(
+  payload: QueryPlaygroundRequest,
+  init: { signal?: AbortSignal } = {},
+): Promise<QueryResult> {
   const res = await apiFetch(`${API_BASE}/query/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    signal: init.signal,
   });
   if (!res.ok) {
-    const detail = await parseApiError(res, "Query failed");
-    if (res.status === 400) {
-      throw new Error(detail || "Query rejected — use a safe read-only SQL / Mongo filter");
+    const { detail, code } = await readApiRefusal(res, "Query failed");
+    let copy: ErrorCopy | null = null;
+    try {
+      copy = readErrorEnvelope(await res.clone().json());
+    } catch {
+      /* no JSON body: the detail text is all there is */
     }
-    throw new Error(detail);
+    const message = res.status === 400
+      ? detail || "Query rejected — use a safe read-only SQL / Mongo filter"
+      : detail;
+    throw new QueryRunError(message, res.status, code, copy);
   }
   return res.json();
 }

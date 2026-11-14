@@ -8,6 +8,8 @@
  * durable plaintext on disk.
  */
 
+import { errorTitle, splitReference } from "./errorCopy";
+
 const TABS_KEY = "df2.query.tabs.v1";
 const ACTIVE_KEY = "df2.query.activeTab.v1";
 const HISTORY_KEY = "df2.query.history.v1";
@@ -35,6 +37,8 @@ export interface QueryTab {
   /** Bind parameter values keyed by `:name`. */
   params: Record<string, string>;
   updatedAt: number;
+  /** The buffer as it was when this tab last ran, so the tab can say it changed since. */
+  lastRunQuery?: string;
 }
 
 export interface QueryHistoryEntry {
@@ -127,7 +131,18 @@ export function createTab(partial: Partial<QueryTab> = {}): QueryTab {
     limit: partial.limit ?? 1000,
     params: partial.params ?? {},
     updatedAt: partial.updatedAt ?? Date.now(),
+    ...(partial.lastRunQuery !== undefined ? { lastRunQuery: String(partial.lastRunQuery).slice(0, MAX_QUERY_CHARS) } : {}),
   };
+}
+
+/**
+ * Edited since its last run. Tabs autosave to this browser, so "unsaved" would
+ * be untrue; what the operator needs to know is whether the results on screen
+ * still match the text in the editor.
+ */
+export function editedSinceRun(tab: Pick<QueryTab, "query" | "lastRunQuery">): boolean {
+  if (tab.lastRunQuery === undefined) return tab.query.trim() !== "";
+  return tab.query.trim() !== tab.lastRunQuery.trim();
 }
 
 function sanitizeTab(t: QueryTab): QueryTab {
@@ -285,6 +300,22 @@ export function filterHistory(
 // Layout
 // ---------------------------------------------------------------------------
 
+/** Smallest editor and results panes the split may leave, in px. */
+export const MIN_EDITOR_PANE = 120;
+export const MIN_RESULTS_PANE = 160;
+
+/**
+ * Keep the editor / results split inside the space the workspace has: the
+ * editor never shrinks under MIN_EDITOR_PANE and always leaves the results
+ * pane MIN_RESULTS_PANE. `available` is the height both panes share.
+ */
+export function clampEditorSplit(editorHeight: number, available: number): number {
+  const wanted = Number.isFinite(editorHeight) ? editorHeight : DEFAULT_LAYOUT.editorHeight;
+  if (!(available > 0)) return Math.max(MIN_EDITOR_PANE, Math.round(wanted));
+  const max = Math.max(MIN_EDITOR_PANE, available - MIN_RESULTS_PANE);
+  return Math.round(Math.min(max, Math.max(MIN_EDITOR_PANE, wanted)));
+}
+
 export function loadLayout(): QueryLayout {
   const stored = readJson<Partial<QueryLayout>>(LAYOUT_KEY);
   if (!stored) return { ...DEFAULT_LAYOUT };
@@ -391,5 +422,52 @@ export function playgroundQueryBody(args: {
     collection: args.collection || undefined,
     limit: args.limit,
     params: { ...(args.params ?? {}) },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Run failures
+// ---------------------------------------------------------------------------
+
+export interface QueryFailureCopy {
+  /** What failed, in plain words ("Table not found"). */
+  title: string;
+  /** Why (the API's message, never driver internals). */
+  message: string;
+  /** The one next action, when the API named one. */
+  action: string;
+  /** Support reference for this failure, when the API issued one. */
+  reference: string;
+  /** Taxonomy code, for tests and support — not shown as copy. */
+  code: string;
+}
+
+/**
+ * The copy the Query page shows for a failed run, from the API's taxonomy
+ * envelope when it sent one (title, message, action, reference), else from the
+ * error text with any trailing "Reference: …" split off into its own field.
+ */
+export function queryFailureCopy(error: unknown): QueryFailureCopy {
+  const err = (error ?? {}) as {
+    message?: unknown;
+    code?: unknown;
+    copy?: { code?: string; title?: string; message?: string; action?: { label?: string } | null; reference?: string } | null;
+  };
+  const raw = typeof err.message === "string" && err.message.trim() ? err.message.trim() : "Query failed";
+  const { text, reference: textRef } = splitReference(raw);
+  const envelope = err.copy ?? null;
+  const code = String(envelope?.code || (typeof err.code === "string" ? err.code : "") || "");
+  const action = envelope?.action?.label?.trim() ?? "";
+  let message = (envelope?.message || "").trim();
+  if (!message) {
+    // Without an envelope the action, if any, is already inside the text.
+    message = text;
+  }
+  return {
+    title: (envelope?.title || "").trim() || errorTitle(code, "Query failed"),
+    message,
+    action,
+    reference: (envelope?.reference || "").trim() || textRef,
+    code,
   };
 }
