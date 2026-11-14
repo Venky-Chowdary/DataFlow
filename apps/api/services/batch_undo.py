@@ -268,35 +268,52 @@ def _account_retained_append(
     ledger is told, and refuses that next append until it is settled.
     """
     mode = normalize_sync_mode(sync_mode or dest_summary.get("sync_mode"), default="")
-    if getattr(destination, "kind", "") != "database" or mode != "full_refresh_append":
+    if getattr(destination, "kind", "") != "database":
         return note
     before = dest_summary.get(PRECOUNT_KEY)
     if not isinstance(before, int):
         before = (getattr(destination, "extra", None) or {}).get("dest_rows_before")
-    if not isinstance(before, int) or before <= 0:
+    if not isinstance(before, int):
+        existed = dest_summary.get("dest_table_existed_before")
+        if existed is None:
+            existed = (getattr(destination, "extra", None) or {}).get("dest_table_existed_before")
+        # REL-2: a table this run created held nothing before it; a run whose
+        # undo could not remove its rows (a full disk) is counted too.
+        before = 0 if existed is False else None
+    appending_to_rows = mode == "full_refresh_append" and isinstance(before, int) and before > 0
+    if not isinstance(before, int) or (before > 0 and not appending_to_rows):
+        return note
+    if before == 0 and (dest_summary.get("partial_batch_removed") or "resume_rows_before" in dest_summary):
         return note
     from src.transfer.adapters import resolve_connector_config, resolve_dest_table
 
-    cfg = resolve_connector_config(destination)
-    db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
-    table = str(
-        dest_summary.get("table") or resolve_dest_table(db_type, destination, "dt_import") or ""
-    ).strip()
-    now = precount_table(db_type, cfg, table) if table else None
+    try:
+        cfg = resolve_connector_config(destination)
+        db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
+        table = str(
+            dest_summary.get("table") or resolve_dest_table(db_type, destination, "dt_import") or ""
+        ).strip()
+        now = precount_table(db_type, cfg, table) if table else None
+    except Exception:  # noqa: BLE001 - an unmeasured count keeps the note as it was
+        if not appending_to_rows:
+            return note
+        raise
     if not isinstance(now, int) or now < before:
         return note
     committed = now - before
     dest_summary[ROWS_COMMITTED_KEY] = committed
     if committed == 0:
         return f"{note} No row of this run is in the table: it still holds {before:,} row(s)."
-    from services.append_continuity import record_unfinished_append
+    recorded = False
+    if appending_to_rows:
+        from services.append_continuity import record_unfinished_append
 
-    recorded = record_unfinished_append(
-        destination,
-        job_id=job_id,
-        rows_before=before,
-        rows_committed=committed,
-    )
+        recorded = record_unfinished_append(
+            destination,
+            job_id=job_id,
+            rows_before=before,
+            rows_committed=committed,
+        )
     out = (
         f"This run committed {committed:,} row(s) to '{table}' before it failed "
         f"(the table held {before:,} row(s) before and holds {now:,} now). They "
