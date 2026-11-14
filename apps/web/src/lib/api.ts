@@ -2801,6 +2801,8 @@ export interface EndpointIntrospection {
   data?: Record<string, unknown>[];
   sample_data?: Record<string, unknown>[];
   message: string;
+  /** The taxonomy code of a failed or missing-object introspect (services/error_taxonomy.py). */
+  error_code?: string;
 }
 
 export async function introspectTransferEndpoints(

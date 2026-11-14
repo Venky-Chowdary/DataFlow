@@ -478,3 +478,15 @@ def test_ux7_tls_copy_carries_a_tls_code_for_the_page():
     fields = failure_fields(copy, engine="postgresql")
     assert fields["error"]["code"] == "network.tls_required", fields
     assert fields["reference"]
+
+
+def test_err37_introspect_codes_a_missing_source_table(pg_objects, client):
+    """The page titles a missing source table by the API's code, not by its words."""
+    src = _conn("postgresql", "source")
+    r = client.post("/api/v1/transfer/introspect", json={
+        "source": {"kind": "database", "format": "postgresql", "connector_id": src.id,
+                   "table": f"w3err_rt_nosuch_{TOK}"},
+        "destination": {"kind": "file_export", "format": "csv"}})
+    source = r.json().get("source") or {}
+    assert source.get("table_exists") is False, source
+    assert source.get("error_code") == "object.table_not_found", source

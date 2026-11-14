@@ -372,6 +372,9 @@ def introspect_endpoint(
         out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
         _hide_internal_objects(out)
         _classify_failure_message(out, str(endpoint.format or endpoint.kind or ""))
+        if role == "source" and out.get("connected") and out.get("table_exists") is False:
+            # The page titles a missing source object by this code, not by its text.
+            out.setdefault("error_code", "object.table_not_found")
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),

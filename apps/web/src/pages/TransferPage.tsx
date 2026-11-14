@@ -510,6 +510,7 @@ export function TransferPage({
   const mappingRunRef = useRef(0);
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  const [sourceIntrospectErrorCode, setSourceIntrospectErrorCode] = useState<string | null>(null);
   const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
   /** Per-stream schema previews for comma-separated multi-stream sources. */
   const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
@@ -3827,6 +3828,7 @@ export function TransferPage({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
     });
+    setSourceIntrospectErrorCode(intro.connected && intro.columns?.length ? null : (intro.error_code ?? null));
     const objects = (intro.objects ?? [])
       .map((o) => (o.name || "").trim())
       .filter(Boolean);
@@ -8206,6 +8208,7 @@ export function TransferPage({
                 uploading={uploading}
                 sourceIntrospecting={sourceIntrospecting}
                 sourceIntrospectError={sourceIntrospectError}
+                sourceIntrospectErrorCode={sourceIntrospectErrorCode}
                 onRetrySourceIntrospect={retrySourceIntrospect}
                 sourceObjectNames={sourceObjectNames}
                 onPickSourceObject={(name) => {

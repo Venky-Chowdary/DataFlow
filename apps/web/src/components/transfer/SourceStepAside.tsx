@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { ErrorReferenceChip } from "../ErrorReferenceChip";
-import { isMissingObjectError, splitReference } from "../../lib/errorCopy";
+import { errorTitle, isMissingObjectError, splitReference } from "../../lib/errorCopy";
 import { StructurePreview } from "../ui/StructurePreview";
 import { MultiStreamSchemaPreview } from "./MultiStreamSchemaPreview";
 import type { Connector } from "../../lib/types";
@@ -152,6 +152,13 @@ function SchemaAnalyzingPanel({ target }: { target?: string }) {
   );
 }
 
+/** The panel title, decided on the API's code (never on the message text). */
+export function schemaErrorTitle(code: string | null | undefined, objectNoun = "table"): string {
+  if (isMissingObjectError(code)) return `The ${objectNoun} is not on this source`;
+  if (code === "access.source_read_denied") return `No permission to read this ${objectNoun}`;
+  return code ? errorTitle(code, "Couldn’t read the source") : "Couldn’t read the source";
+}
+
 function SchemaErrorPanel({
   message,
   code,
@@ -174,7 +181,7 @@ function SchemaErrorPanel({
     <div className="df2-source-aside df2-source-aside-error">
       <div className="df2-source-aside-head">
         <div>
-          <h4>{missing ? `The ${objectNoun} is not on this source` : "Couldn’t read the source"}</h4>
+          <h4>{schemaErrorTitle(code, objectNoun)}</h4>
           <p>{text}</p>
           {reference && <ErrorReferenceChip reference={reference} />}
         </div>
