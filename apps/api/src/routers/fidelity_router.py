@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.continuous_fidelity import run_and_record_campaign, run_fidelity_check
 from services.workspace_access import (
@@ -39,6 +39,14 @@ class _FidelityCheckRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     # When set, persist this cycle on the schedule's Dual Run campaign.
     schedule_id: str = ""
+
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 def _deny_cross_workspace(request: Request) -> None:

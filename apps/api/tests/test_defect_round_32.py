@@ -107,7 +107,9 @@ def test_cdc_value_proof_fails_when_an_update_is_missing() -> None:
     assert "full_checksum" not in (report.assurance_level or "")
 
 
-def test_cdc_value_proof_allows_dest_extras() -> None:
+def test_cdc_value_proof_refuses_dest_extras() -> None:
+    # DATA-1: a destination row the source no longer has (a missed TRUNCATE or
+    # delete) is a divergence; the image is not proven.
     columns = ["id", "qty"]
     source = [{"id": 1, "qty": 3}]
     dest = [{"id": 1, "qty": 3}, {"id": 9, "qty": 1}]
@@ -121,8 +123,8 @@ def test_cdc_value_proof_allows_dest_extras() -> None:
         target_checksum=proof.dest_digest,
         checksum_scope=CDC_SOURCE_IMAGE_VALUES,
     )
-    assert report.passed is True
-    assert report.checksum_match is True
+    assert report.passed is False
+    assert report.population_proof is False
     assert report.assurance_level == CDC_SOURCE_IMAGE_VALUES
 
 

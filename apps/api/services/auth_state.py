@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 _SESSION_PREFIX = "dw:auth:sess:"
 _USER_SESSIONS_PREFIX = "dw:auth:user:"
 _RL_PREFIX = "dw:auth:rl:"
+_TICKET_PREFIX = "dw:auth:sse:"
 _MONGO_COLLECTION = "auth_sessions_shared"
 
 
@@ -286,6 +287,25 @@ class SharedAuthState:
                 db[_MONGO_COLLECTION].replace_one({"_id": doc["jti"]}, {"_id": doc["jti"], **doc}, upsert=True)
         except Exception:  # noqa: BLE001 — durability degrade must not 500 auth
             logger.warning("auth session mongo mirror failed")
+
+    # ── SSE stream tickets (SEC-14) ───────────────────────────────────────
+
+    def put_stream_ticket(self, ticket: str, doc: dict[str, Any], ttl_sec: int) -> None:
+        """A short-lived, single-use stand-in for the bearer on one SSE URL."""
+        self._b.set(f"{_TICKET_PREFIX}{ticket}", json.dumps(doc), max(1, int(ttl_sec)))
+
+    def take_stream_ticket(self, ticket: str) -> dict[str, Any] | None:
+        """The ticket's record, once: the first caller wins, every later one gets None."""
+        if not ticket:
+            return None
+        if self._b.incr(f"{_TICKET_PREFIX}{ticket}:used", 600) != 1:
+            return None
+        raw = self._b.get(f"{_TICKET_PREFIX}{ticket}")
+        self._b.delete(f"{_TICKET_PREFIX}{ticket}")
+        try:
+            return json.loads(raw) if raw else None
+        except (ValueError, TypeError):
+            return None
 
     # ── rate limits (fixed-window counters) ───────────────────────────────
 

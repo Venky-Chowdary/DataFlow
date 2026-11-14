@@ -11,9 +11,11 @@ export const HiddenFileInput = forwardRef<
     id: string;
     accept?: string;
     disabled?: boolean;
+    /** -1 when a menu item (not a label) opens the picker: no invisible tab stop. */
+    tabIndex?: number;
     onChange: React.ChangeEventHandler<HTMLInputElement>;
   }
->(function HiddenFileInput({ id, accept, disabled, onChange }, ref) {
+>(function HiddenFileInput({ id, accept, disabled, tabIndex, onChange }, ref) {
   return (
     <input
       id={id}
@@ -21,6 +23,7 @@ export const HiddenFileInput = forwardRef<
       type="file"
       accept={accept}
       disabled={disabled}
+      tabIndex={tabIndex}
       onChange={onChange}
       className="df2-sr-only"
     />

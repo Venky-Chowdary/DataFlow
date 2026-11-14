@@ -582,6 +582,12 @@ def bind_unicode_text(
             f"{shown} exceeds destination {cap.name or cap.form} capacity "
             "— refuse replacement-character invent"
         )
+    from services.value_serializer import WireLiteral
+
+    if isinstance(value, WireLiteral) and cell.text == str(value):
+        # A decoded user literal stays marked: later classifiers (and the
+        # NULL-marker guard) must not read it as absence.
+        return value
     return cell.text
 
 

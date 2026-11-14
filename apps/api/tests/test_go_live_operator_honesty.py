@@ -155,19 +155,21 @@ def test_select_denied_blocks_gate_1_instead_of_a_cast(monkeypatch):
     )
     gate = _gate(result, "g1_source")
     assert gate["status"] == "block"
-    assert "SELECT was denied" in gate["message"]
+    # W3 error taxonomy: access.source_read_denied names the table and SELECT.
+    assert "doesn't have SELECT" in gate["message"] and "qa6c7_cust_upd" in gate["message"], gate["message"]
     assert "Source readable" not in gate["message"]
 
 
 @pytest.mark.parametrize(
-    "error",
+    "error, named",
     [
-        "server closed the connection unexpectedly",
-        'relation "public.orders_v2" does not exist',
-        "canceling statement due to statement timeout",
+        # W3 error taxonomy: G1 names the cause in product words, not the driver's.
+        ("server closed the connection unexpectedly", "database connection closed while Datawrap was using it"),
+        ('relation "public.orders_v2" does not exist', 'Table "orders_v2" does not exist on the source'),
+        ("canceling statement due to statement timeout", "statement time limit"),
     ],
 )
-def test_mx3_22_failed_source_read_blocks_gate_1_not_source_readable(monkeypatch, error):
+def test_mx3_22_failed_source_read_blocks_gate_1_not_source_readable(monkeypatch, error, named):
     """QA MX3-22: a reader that raised left G1 green ("Source readable") —
     catalog columns alone were accepted as a readable source."""
 
@@ -202,7 +204,7 @@ def test_mx3_22_failed_source_read_blocks_gate_1_not_source_readable(monkeypatch
     gate = _gate(result, "g1_source")
     assert gate["status"] == "block"
     assert "Source readable" not in gate["message"]
-    assert error in gate["message"]
+    assert named in gate["message"], gate["message"]
     assert result["passed"] is False
 
 

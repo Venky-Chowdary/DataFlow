@@ -226,6 +226,8 @@ class PipelineSchedule:
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    # Reversibility gate (g24): scheduled runs block unless every table is reversible.
+    require_reversibility: bool = False
     # Validate≡Execute identity — scheduled runs must replay the same locales,
     # pre-load recipe, and approved hashes the operator signed in Studio.
     date_locale: str = ""
@@ -335,6 +337,18 @@ class PipelineSchedule:
     #: resurrect a deleted schedule.
     version: int = 0
 
+    def __post_init__(self) -> None:
+        # map_target is Execute's own adoption record: a saved schedule never
+        # carries one, in its Map or a stream's (security re-check F1a; an
+        # older document loses it when read).
+        from services.target_name_legacy import (
+            strip_client_map_targets,
+            strip_contract_map_targets,
+        )
+
+        self.mappings = strip_client_map_targets(list(self.mappings or []))
+        self.stream_contracts = strip_contract_map_targets(list(self.stream_contracts or []))
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         from src.ai.copilot.schedule_cadence import describe_stored_cadence
@@ -346,6 +360,9 @@ class PipelineSchedule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
+        # The reversibility rule reads its own flag (one parser for plans, requests and schedules).
+        from services.reversibility_sources import flag as _reversibility_flag
+
         cdc_extras = _schedule_cdc_extras(data)
         return cls(
             id=data["id"],
@@ -408,6 +425,7 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            require_reversibility=_reversibility_flag(data.get("require_reversibility")),
             date_locale=str(data.get("date_locale") or "").strip(),
             number_locale=str(data.get("number_locale") or "").strip(),
             shape_recipe=dict(data.get("shape_recipe") or {})
@@ -578,6 +596,15 @@ def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
     from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
 
     refusal = schedule_keep_last_refusal(payload)
+    if refusal:
+        raise DuplicatePolicyError(refusal)
+
+
+def _refuse_dedupe_skip_that_cannot_run(payload: Mapping[str, Any]) -> None:
+    """Save-time twin of Validate's skip_duplicates destination rule."""
+    from services.duplicate_policy import DuplicatePolicyError, schedule_dedupe_skip_refusal
+
+    refusal = schedule_dedupe_skip_refusal(payload)
     if refusal:
         raise DuplicatePolicyError(refusal)
 
@@ -1064,6 +1091,30 @@ def schedule_overdue_seconds(
         due = due.replace(tzinfo=timezone.utc)
     current = now or datetime.now(timezone.utc)
     return max(0, int((current - due).total_seconds()))
+
+
+def schedule_store_unreadable() -> str:
+    """Why the configured schedule store cannot be read right now, or "".
+
+    Read-side only: the engine and the scheduler keep their file fallback. A
+    caller that reports on the workspace (Pilot) must not state the fallback's
+    rows - or an empty list - as the workspace's pipelines when Mongo is the
+    configured store and does not answer, or when the file does not parse.
+    """
+    try:
+        svc = get_mongodb_service()
+    except Exception:  # noqa: BLE001 - an unopenable store is the answer itself
+        return "the pipeline store did not answer"
+    if type(svc).__name__ != "MemoryMongoDBService" and getattr(svc, "client", None) is None:
+        return "the pipeline store did not answer"
+    if _mongo_backend() is None and STORE_PATH.exists():
+        try:
+            raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "the pipeline file could not be read"
+        if not isinstance(raw, dict) or not isinstance(raw.get("schedules", []), list):
+            return "the pipeline file could not be read"
+    return ""
 
 
 def list_schedules(workspace_filter: WorkspaceFilter | None = None) -> list[PipelineSchedule]:
@@ -1611,8 +1662,10 @@ def create_schedule(
     ``warnings`` collects what the caller must be told but that does not refuse
     the save (draft saved disabled; source table unverifiable).
     """
+    from services.connector_request_limits import refuse_control_characters
     from services.transfer_policy_values import canonicalize_policy_fields
 
+    refuse_control_characters("Pipeline name", data.get("name"))
     # QA r12 bugs 6/7: refuse an unknown validation_mode / schema_policy at the
     # store every route shares (REST, MCP create_schedule, GitOps apply).
     data = canonicalize_policy_fields(data)
@@ -1630,6 +1683,7 @@ def create_schedule(
     payload["duplicate_policy"] = policy
     payload["in_file_dedupe"] = dedupe
     _refuse_keep_last_that_cannot_run(payload)
+    _refuse_dedupe_skip_that_cannot_run(payload)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
     interval, cron = canonicalize_cadence(
         str(payload.get("interval") or "daily"),
@@ -2012,8 +2066,11 @@ def update_schedule(
     source catalog first (QA SC5) — outside the lock, so a slow source cannot
     stall every other schedule write.
     """
+    from services.connector_request_limits import refuse_control_characters
     from services.transfer_policy_values import canonicalize_policy_fields
 
+    if "name" in data:
+        refuse_control_characters("Pipeline name", data.get("name"))
     data = canonicalize_policy_fields(data)
     current = get_schedule(schedule_id)
     if current is not None:
@@ -2181,6 +2238,8 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             )
             merged["duplicate_policy"] = policy
             merged["in_file_dedupe"] = dedupe
+        if any(key in data for key in ("duplicate_policy", "dest_connector_id")):
+            _refuse_dedupe_skip_that_cannot_run(merged)
         if any(
             key in data
             for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")
@@ -2261,7 +2320,7 @@ _PLAN_FIX_KEYS = frozenset({
     "source_table", "dest_table", "source_connector_id", "dest_connector_id",
     "source_read_mode", "source_query", "procedure_call", "procedure_params",
     "schema_policy", "validation_mode", "delivery_guarantee", "backfill_new_fields",
-    "contract_id", "require_signed_contract",
+    "contract_id", "require_signed_contract", "require_reversibility",
 })
 
 

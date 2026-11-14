@@ -373,7 +373,9 @@ export function TenantSettings() {
             />
             <p className="df2-settings-hint">
               Off when empty: connector dials refuse private, loopback, link-local, and cloud metadata addresses.
-              An admin CIDR permits an on-prem or VPC host. Metadata and link-local cannot be listed. This does not change deployment config.
+              A listed CIDR permits an on-prem or VPC host. Only a platform administrator can add a range, because private
+              ranges on this server reach the deployment's own services; workspace admins can remove ranges. Metadata and
+              link-local cannot be listed. This does not change deployment config.
             </p>
           </div>
         </div>

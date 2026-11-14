@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,9 @@ async def public_status() -> dict[str, Any]:
         cached = _cache["payload"]
         if cached is not None and now - _cache["at"] < CACHE_SECONDS:
             return cached
-    payload = build_status()
+    # The dependency checks are blocking I/O and this route is public: never
+    # on the event loop (M-8).
+    payload = await run_in_threadpool(build_status)
     with _lock:
         _cache.update(at=now, payload=payload)
     return payload

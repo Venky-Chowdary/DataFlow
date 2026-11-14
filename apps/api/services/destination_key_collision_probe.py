@@ -481,7 +481,11 @@ def probe_append_key_collisions(
     # nothing, so the keys at rest are its own rows, not a collision (D263).
     if resume and resume_write_complete:
         return None
-    if destination_table_exists is not True:
+    from services.kv_key_exists import KEY_ADDRESSED_STORES
+
+    key_store = str(destination_db_type or "").strip().lower() in KEY_ADDRESSED_STORES
+    # A key store has no table to look up first: its keys are the question.
+    if destination_table_exists is not True and not key_store:
         return None
 
     identities = append_identity_pair_sets(
@@ -661,6 +665,11 @@ def _probe_identity(
             "sample_rows": len(sample_rows or []),
             "delta_rows": len(batch_rows),
         }
+    from services.kv_key_exists import KEY_ADDRESSED_STORES
+
+    if str(destination_db_type or "").strip().lower() in KEY_ADDRESSED_STORES:
+        # The writer refuses an append onto a stored key (CLM-16).
+        enforced = True
     result.key_enforced = enforced
     # Resume re-reads from the last committed checkpoint. The overlap is safe
     # only when the destination rejects a second copy of the key. A heap table
@@ -844,10 +853,15 @@ def probe_destination_key_collisions(
     cfg = dict(destination_config)
     cfg.setdefault("type", db_type)
     try:
+        from services.kv_key_exists import KEY_ADDRESSED_STORES, existing_keys
+
         if db_type in ("mongodb", "mongodb_atlas"):
             findings = _mongo_existing_keys(
                 cfg, destination_table, key, probe_values[:MAX_PROBE_VALUES], limit
             )
+        elif db_type in KEY_ADDRESSED_STORES:
+            # CLM-16: Redis / DynamoDB answer at Validate, as the SQL stores do.
+            findings = existing_keys(db_type, cfg, destination_table, key, probe_values, limit)
         elif is_sqlish_source(db_type):
             findings = []
             for start in range(0, len(probe_values), MAX_PROBE_VALUES):

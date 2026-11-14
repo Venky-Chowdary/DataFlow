@@ -11,8 +11,9 @@ at what the digests hash:
   canonicalizer, so a cell the two digests render differently can look equal
   to it.
 
-Each row fingerprint is ``label=cell`` parts joined by ``\\x1f``, built from the
-exact canonical cells the digest hashes. Summing a small hash of every part per
+Each row fingerprint is ``label=<len>:<cell>`` parts joined by ``\\x1f`` (see
+``services.fingerprint_rules``), built from the exact canonical cells the
+digest hashes. Summing a small hash of every part per
 label gives one multiset digest per column on each side at almost no cost
 (the parts are already rendered). When the row digests differ, the columns
 whose sums differ are the columns whose canonical cells differ — named from
@@ -26,6 +27,8 @@ from __future__ import annotations
 import zlib
 from contextvars import ContextVar
 from typing import Any
+
+from services.fingerprint_rules import iter_row_parts
 
 PART_SEP = "\x1f"
 #: A fingerprint that is not ``label=cell`` parts (an unlabelled matrix row)
@@ -54,11 +57,9 @@ class ColumnDigests:
             return
         sums = self.sums
         counts = self.counts
-        for part in fingerprint.split(PART_SEP):
-            cut = part.find("=")
-            if cut <= 0 or cut > _MAX_LABEL_LEN:
+        for label, part in iter_row_parts(fingerprint):
+            if len(label) > _MAX_LABEL_LEN:
                 continue
-            label = part[:cut]
             if label not in sums:
                 if len(sums) >= _MAX_LABELS:
                     self.disable()

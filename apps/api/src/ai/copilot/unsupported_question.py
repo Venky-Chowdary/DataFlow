@@ -136,6 +136,57 @@ def commercial_question_output(query: str) -> dict[str, Any]:
     return out
 
 
+# A live reading no Pilot tool takes. The documentation explains where the
+# number is shown, which is not the number: "what is my CDC lag" answered with
+# the Job Theater article was marked grounded and stated no lag (audit H7).
+_LIVE_CDC_LAG = re.compile(
+    r"\b(?:cdc|replication|change\s+data\s+capture|wal|binlog)\b[^.?!]*"
+    r"\b(?:lag(?:ging)?|behind|delay(?:ed)?|latency|caught\s+up|up\s+to\s+date)\b"
+    r"|\b(?:lag(?:ging)?|behind|delay(?:ed)?|caught\s+up)\b[^.?!]*"
+    r"\b(?:cdc|replication|change\s+data\s+capture)\b",
+    re.I,
+)
+_ASKS_OWN_LIVE_STATE = re.compile(
+    r"\b(?:my|our|this\s+workspace(?:'s)?|current(?:ly)?|right\s+now|at\s+the\s+moment|"
+    r"behind|caught\s+up|up\s+to\s+date|lagging|delayed)\b",
+    re.I,
+)
+
+
+def asks_unreadable_live_metric(query: str) -> bool:
+    """Whether the question asks for the operator's own live CDC lag.
+
+    "What is CDC lag" is a documentation question and stays one; "what is *my*
+    CDC lag" and "is my CDC pipeline behind" ask for a reading Pilot has no
+    tool to take, so they are declined instead of answered around.
+    """
+    text = (query or "").strip()
+    return bool(text and _LIVE_CDC_LAG.search(text) and _ASKS_OWN_LIVE_STATE.search(text))
+
+
+def live_metric_output(query: str) -> dict[str, Any]:
+    """Decline payload for a live reading no tool provides: no sources, not grounded."""
+    return {
+        "query": query,
+        "intent": "live_metric_unsupported",
+        "answer": (
+            "I can't read live CDC lag from chat — none of the tools I answer from takes "
+            "that reading, and I won't state a lag I did not read.\n\n"
+            "Open the CDC job in **Jobs → Job Theater**: it shows WAL/binlog byte lag and, "
+            "when the source proves a commit timestamp, seconds behind. I can list your "
+            "running jobs or your pipelines if that helps you find it."
+        ),
+        "capabilities": [],
+        "actions": [{"label": "Open Jobs", "route": "jobs"}],
+        "hits": [],
+        "count": 0,
+        "empty": True,
+        "sources": [],
+        "grounded": False,
+        "source": "live_metric_unsupported",
+    }
+
+
 def is_answerable_subject(query: str) -> bool:
     """Whether a knowledge question is about this product or the operator's objects.
 

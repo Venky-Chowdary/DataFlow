@@ -20,6 +20,24 @@ from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 from services.shape_models import ShapeRecipe  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _fresh_pipeline_state(tmp_path, monkeypatch):
+    """Each test resets the source and route tables by hand (_setup_source
+    drops them). That is a change outside the pipeline, which append
+    continuity rightly refuses, so each test also starts with no continuity
+    baselines and no sync cursors left by the previous one."""
+    import services.append_continuity as continuity
+    import services.sync_cursor as sc
+
+    data = tmp_path / "data"
+    data.mkdir()
+    # conftest points continuity at one data dir per module; narrow it to this test.
+    monkeypatch.setattr(continuity, "data_dir", lambda: data)
+    monkeypatch.setattr(continuity, "_collection", lambda: None)
+    monkeypatch.setattr(sc, "STORE_PATH", data / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+
+
 def _pg_env(monkeypatch):
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
     fake = _FakeMongo()
@@ -915,7 +933,14 @@ def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
         return rows, checksum, additive
 
     for mode, prefix in (("balanced", "pv2"), ("lenient", "pv3")):
-        req.validation_mode = mode
+        # A non-strict run that fails Gate-8 keeps its rows unverified, and
+        # append continuity rightly refuses the next append on top of them.
+        # Rebuild (full_refresh_overwrite re-baselines) so each mode starts
+        # from a verified, occupied set of route tables, as run 1 left them.
+        req.validation_mode, req.sync_mode = "strict", "full_refresh_overwrite"
+        rebuilt, _ = _run(fake, req, prefix=prefix + "r")
+        assert rebuilt.success, rebuilt.error
+        req.validation_mode, req.sync_mode = mode, "full_refresh_append"
         state["calls"] = 0
         monkeypatch.setattr(
             recon_mod, "verify_postgres_route_table", _corrupt_post_only
@@ -929,7 +954,7 @@ def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
         # gate keeps them under non-strict modes.
         assert not res.success, res.error
         recon = res.reconciliation or {}
-        assert recon.get("checksum_match") is False, recon
+        assert recon.get("checksum_match") is False, (mode, res.error, recon)
         assert recon.get("passed") is False, recon
         assert recon.get("verification_verdict") == "failed", recon
         phase = str(recon.get("phase") or "")

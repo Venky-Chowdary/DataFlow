@@ -11,7 +11,8 @@ Resolution order:
 
 1. ``X-Forwarded-Host`` (else ``Host``) when it is on the allow-list: the
    hosts of the configured origins below, ``DATAWRAP_PUBLIC_ORIGIN_ALLOWED_HOSTS``
-   (comma list), and saved tenant custom domains. A tenant on its own domain
+   (comma list), and saved tenant custom domains (one indexed lookup of the
+   request's host, never a read of every tenant). A tenant on its own domain
    gets links on that domain.
 2. ``DATAWRAP_PUBLIC_API_ORIGIN``, then the web origin (``DATAWRAP_WEB_URL`` /
    ``DATAWRAP_WEB_DOMAIN``): the browser reaches the API same-origin through
@@ -55,7 +56,8 @@ def configured_origin() -> str:
     return _origin(getenv_brand("WEB_URL", "") or "") or _origin(getenv_brand("WEB_DOMAIN", "") or "")
 
 
-def allowed_hosts() -> set[str]:
+def configured_hosts() -> set[str]:
+    """The hosts of the configured origins and ``DATAWRAP_PUBLIC_ORIGIN_ALLOWED_HOSTS``."""
     hosts: set[str] = set()
     for origin in (
         _origin(getenv_brand("PUBLIC_API_ORIGIN", "") or ""),
@@ -66,13 +68,28 @@ def allowed_hosts() -> set[str]:
             hosts.add(urlsplit(origin).netloc.lower())
     extra = getenv_brand("PUBLIC_ORIGIN_ALLOWED_HOSTS", "") or ""
     hosts.update(h.strip().lower() for h in extra.split(",") if h.strip())
-    try:
-        from services.tenant_store import list_tenants
-
-        hosts.update(t.normalized_domain for t in list_tenants() if t.normalized_domain and t.workspace_id)
-    except Exception:  # noqa: BLE001 — the allow-list only ever narrows
-        pass
     return hosts
+
+
+def is_allowed_host(host: str) -> bool:
+    """Whether ``host`` (lower case) is a configured host or the saved custom domain of a tenant with a workspace.
+
+    A tenant's domain is matched with one indexed lookup of that domain, never
+    by reading every tenant (ops review round 3, Medium B): this runs on
+    unauthenticated SAML routes and on the event loop.
+    """
+    if not host:
+        return False
+    if host in configured_hosts():
+        return True
+    try:
+        from services.tenant_store import get_tenant_by_domain
+
+        tenant = get_tenant_by_domain(host)
+    except Exception:  # noqa: BLE001 — the allow-list only ever narrows
+        return False
+    # Exactly the saved domain: a host that only normalises to it (a port, ``www.``) is not listed.
+    return bool(tenant and tenant.workspace_id and tenant.normalized_domain == host)
 
 
 def _production() -> bool:
@@ -88,9 +105,8 @@ def public_origin(request: Any = None) -> str:
         headers = request.headers
         forwarded = (headers.get("x-forwarded-host") or "").split(",")[0].strip().lower()
         own = (headers.get("host") or "").strip().lower()
-        allowed = allowed_hosts()
         for host in (forwarded, own):
-            if host and host in allowed:
+            if is_allowed_host(host):
                 proto = (headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
                 if prod:
                     scheme = "https"
@@ -110,4 +126,4 @@ def public_origin(request: Any = None) -> str:
     return origin
 
 
-__all__ = ["allowed_hosts", "configured_origin", "public_origin"]
+__all__ = ["configured_hosts", "configured_origin", "is_allowed_host", "public_origin"]

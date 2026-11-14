@@ -17,6 +17,9 @@ class ConnectResult:
     #: Optional name -> object kind (``"table"``/``"view"``/…) for entries in
     #: ``tables``. Empty when the engine does not distinguish object kinds.
     table_types: dict[str, str] | None = None
+    #: Every object matching the listing (and its name filter, if any), when
+    #: the engine counted it; ``len(tables)`` can be a page of this (UX-9).
+    tables_total: int | None = None
 
 
 @dataclass
@@ -48,3 +51,15 @@ class ReadBatch:
     #: read scope, exactly as a pushed-down ``WHERE`` would never have read
     #: them — so the run's source population must not count them.
     raw_page_cursor_bounded: int = 0
+
+
+def name_filter_pattern(name_filter: str) -> str:
+    """``LIKE`` pattern for a case-insensitive "name contains" search (UX-9).
+
+    ``%``/``_``/``\\`` in the typed text match themselves, not wildcards.
+    """
+    text = (name_filter or "").strip()[:200]
+    if not text:
+        return ""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"

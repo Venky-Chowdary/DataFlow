@@ -97,6 +97,11 @@ export function concreteWorkspaceId(id: string): string {
   return want === ALL_WORKSPACES_ID || want === UNASSIGNED_WORKSPACE_ID ? "" : want;
 }
 
+/** "1 member" / "3 members": the switcher's bare "· 3" did not say what it counted (UX-44). */
+export function memberCountLabel(count: number): string {
+  return `${count} member${count === 1 ? "" : "s"}`;
+}
+
 /** One switcher option. Views come first, so "All workspaces" heads the list. */
 export type WorkspaceChoice = { id: string; label: string; view: boolean };
 
@@ -114,7 +119,7 @@ export function workspaceChoices(
   }));
   const workspaceRows = rows.map((w) => ({
     id: w.id,
-    label: `${w.name}${typeof w.member_count === "number" ? ` · ${w.member_count}` : ""}`,
+    label: `${w.name}${typeof w.member_count === "number" ? ` · ${memberCountLabel(w.member_count)}` : ""}`,
     view: false,
   }));
   return [...viewChoices, ...workspaceRows];

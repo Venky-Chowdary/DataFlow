@@ -47,10 +47,11 @@ def probe_destination(endpoint) -> tuple[bool, str]:
 def _available_staging_bytes(estimated_bytes: int) -> int:
     """Estimate writable staging capacity from local exports volume."""
     import shutil
-    from pathlib import Path
 
-    export_dir = Path(__file__).resolve().parents[2] / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
+    from services.export_paths import exports_dir
+
+    # The one exports folder (DATAFLOW_EXPORTS_DIR on a read-only image).
+    export_dir = exports_dir()
     try:
         usage = shutil.disk_usage(export_dir)
         # Reserve 15% headroom; require at least 3× estimated transfer size
@@ -550,4 +551,7 @@ def inspect_destination_for_preflight(
     from services.pgvector_layout import document_table_preflight_view, refuse_missing_vector_type
 
     refuse_missing_vector_type(out, endpoint)
+    from services.vectorization import refuse_unchosen_embedding_provider
+
+    refuse_unchosen_embedding_provider(out, endpoint)  # CLM-11: no silent TF-IDF
     return document_table_preflight_view(out)

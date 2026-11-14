@@ -70,6 +70,7 @@ const SHORT: Record<string, string> = {
   rename_column: "Rename",
   cast_column: "Cast",
   constant_column: "Constant",
+  run_timestamp: "Run start",
   derive_column: "Expression",
   split_column: "Split",
   concat_columns: "Concat",

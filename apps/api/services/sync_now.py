@@ -213,8 +213,10 @@ def evaluate_fast_preflight(
     audit = list(drift.get("non_breaking_audit") or evolution.get("audit") or [])
     acknowledge = False
     if hard or (evolution.get("should_pause") and hard):
+        from services.error_taxonomy import drift_kind_words
+
         message = (
-            f"Breaking schema change: {hard[0].get('kind')} — sync paused"
+            f"Breaking schema change: {drift_kind_words(hard[0].get('kind'))} — sync paused"
             if hard and isinstance(hard[0], dict)
             else "Breaking schema change — sync paused"
         )
@@ -332,6 +334,11 @@ def prepare_sync(
             report["blockers"][0]["message"] if report["blockers"] else "Fast preflight failed",
             details={"fast_preflight": report},
         )
+    from services.exit_job_guard import request_refusal
+
+    refused = request_refusal(parent_request, "synced again")
+    if refused:
+        raise SyncNowRefused(refused)
     child = child_request_dict(
         parent_request,
         mode=chosen,
@@ -405,6 +412,11 @@ def begin_sync_now(payload: dict[str, Any]) -> tuple[dict[str, Any], Any | None]
     from src.transfer.engine import get_transfer_engine
     from src.transfer.models import transfer_request_from_dict
 
+    from services.exit_job_guard import request_refusal
+
+    refused = request_refusal(payload.get("transfer_request"), "synced again")
+    if refused:
+        raise SyncNowRefused(refused)
     request = transfer_request_from_dict(dict(payload.get("transfer_request") or {}))
     job_id = get_transfer_engine()._create_pending_job(request)
     parent = str(payload.get("parent_job_id") or getattr(request, "parent_job_id", "") or "")

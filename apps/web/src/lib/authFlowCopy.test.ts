@@ -5,6 +5,7 @@ import {
   changeEmailRequestError,
   codeEntryError,
   mailSendError,
+  signupRefusal,
 } from "./authFlowCopy.js";
 
 describe("codeEntryError", () => {
@@ -80,5 +81,29 @@ describe("changeEmailConfirmError", () => {
     assert.equal(changeEmailConfirmError({ code: "email_taken" }), "That address already belongs to another account.");
     assert.equal(changeEmailConfirmError({ code: "unavailable" }), "Email change is temporarily unavailable — try again shortly.");
     assert.equal(changeEmailConfirmError({ code: "other" }), "Couldn't confirm the change. Try again.");
+  });
+});
+
+/** UX-28: refusals showed raw API text ("this address can't be used for signup") next to a "Valid" badge. */
+describe("signupRefusal", () => {
+  it("puts an address refusal on the email field as a sentence", () => {
+    assert.deepEqual(signupRefusal({ code: "blocked_address", message: "this address can't be used for signup" }), {
+      field: "email",
+      text: "This address can't be used to sign up. Use your work email.",
+    });
+    assert.equal(signupRefusal({ code: "undeliverable_domain", message: "that email domain can't receive mail" }).field, "email");
+    assert.equal(signupRefusal({ code: "invalid_email" }).field, "email");
+  });
+  it("puts a password refusal on the password field", () => {
+    assert.equal(signupRefusal({ code: "pwned_password", message: "x" }).field, "password");
+    assert.equal(signupRefusal({ code: "invalid_password", message: "x" }).field, "password");
+  });
+  it("never shows raw API text: unknown messages become sentences", () => {
+    const r = signupRefusal({ code: "something_new", message: "couldn't verify you're human — try again" });
+    assert.equal(r.field, null);
+    assert.equal(r.text, "Couldn't verify you're human — try again.");
+  });
+  it("keeps the quota and velocity copy", () => {
+    assert.match(signupRefusal({ code: "signup_rate_limited", retryAfterSec: 120 }).text, /Too many attempts/);
   });
 });

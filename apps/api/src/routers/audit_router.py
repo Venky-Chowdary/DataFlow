@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from services.audit_coverage import record_security_event
 from services.brand_env import getenv_brand
 from services.workspace_access import tenant_scope as _tenant_scope
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
@@ -191,7 +192,7 @@ def _reader_view(masker, events: list) -> tuple[list, bool]:
 
 
 @router.get("/events")
-async def list_events(
+def list_events(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
@@ -250,7 +251,7 @@ async def list_events(
 
 
 @router.get("/export")
-async def export_events(
+def export_events(
     request: Request,
     format: str = Query("csv", description="csv | json | ndjson | cef"),
     limit: int = Query(5000, ge=1, le=20000),
@@ -363,6 +364,8 @@ async def export_events(
         "workspace_id", "tenant_id", "event_hash", "prev_hash", "hash_alg",
         "details",
     ]
+    from services.csv_safety import neutralize_export_cell
+
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(columns)
@@ -370,7 +373,9 @@ async def export_events(
         row = [ev.get(col, "") for col in columns[:-1]]
         details = ev.get("details") or {}
         row.append(json.dumps(details, ensure_ascii=False, default=str) if details else "")
-        writer.writerow(row)
+        # G7 (CWE-1236): a reviewer opens this in a spreadsheet — actor names,
+        # resources and details are attacker-influenced text, never formulas.
+        writer.writerow([neutralize_export_cell(cell) for cell in row])
     body = (
         f"# {honesty}\n"
         f"# workspace_id={workspace_id} tenant_id={tenant_id or ''} "
@@ -390,7 +395,7 @@ async def export_events(
 
 
 @router.get("/tip")
-async def get_audit_tip(request: Request):
+def get_audit_tip(request: Request):
     """The chain head for the caller's scope.
 
     A platform admin gets the platform head, the anchor receipts and the
@@ -399,7 +404,7 @@ async def get_audit_tip(request: Request):
     (D220): anchors seal the platform head, and the failure count is the
     whole deployment's.
     """
-    from services.audit_anchor import latest_anchor, list_anchors
+    from services.audit_anchor import latest_anchor, list_anchors, verify_receipt
     from services.audit_coverage import audit_access_failure_count
     from services.audit_log import latest_event_hash, list_audit_events
     from services.workspace_filter import WorkspaceFilter
@@ -414,6 +419,7 @@ async def get_audit_tip(request: Request):
             "workspace_id": workspace_id,
             "tip_hash": head,
             "anchor": None,
+            "anchor_verification": None,
             "anchors_recent": [],
             "matched": False,
             "audit_access_failures": None,
@@ -424,17 +430,22 @@ async def get_audit_tip(request: Request):
         }
     tip = latest_event_hash()
     anchor = latest_anchor()
+    # Verify-on-read: the receipt alone is not the anchor; the write-once object is.
+    # (This handler runs on the thread pool, so the read-back does not block the loop.)
+    verification = verify_receipt(anchor) if anchor else None
     return {
         "scope": "platform",
         "workspace_id": None,
         "tip_hash": tip,
         "anchor": anchor,
+        "anchor_verification": verification,
         "anchors_recent": list_anchors(limit=5),
         "matched": bool(tip and anchor and anchor.get("tip_hash") == tip),
         "audit_access_failures": audit_access_failure_count(),
         "honesty": (
-            "Tip is HMAC-SHA256 chain head. Anchor is a diligence seal "
-            "(stub by default — not auditor WORM / TSA until provider configured)."
+            "Tip is HMAC-SHA256 chain head. The anchor is write-once only with the S3 Object "
+            "Lock provider, and only while anchor_verification reads anchored; the default "
+            "local stub is not anchored."
         ),
     }
 
@@ -732,7 +743,7 @@ async def purge_audit_retention(
     try:
         result = purge_expired_audit_events(dry_run=dry_run)
     except AuditConfigError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise safe_http_exception(exc, event="audit.purge_audit_retention.failed", public_message="Audit retention purge failed.", status_code=500) from exc
 
     append_audit_event(
         action="audit.retention.purge",
@@ -747,7 +758,7 @@ async def purge_audit_retention(
 
 
 @router.post("/tip/anchor")
-async def force_anchor_tip(request: Request):
+def force_anchor_tip(request: Request):
     """Manually seal the current platform tip (ops / compliance export).
 
     Platform administrators only: it seals and returns the platform head.
@@ -760,5 +771,7 @@ async def force_anchor_tip(request: Request):
     tip = latest_event_hash()
     if not tip:
         return {"ok": False, "error": "No audit events yet", "anchor": None}
-    receipt = anchor_tip(tip)
-    return {"ok": bool(receipt), "tip_hash": tip, "anchor": receipt or latest_anchor()}
+    receipt = anchor_tip(tip, force=True)
+    # ``ok``: a receipt was recorded. ``anchored``: it is a confirmed write-once anchor.
+    return {"ok": bool(receipt), "anchored": bool(receipt and receipt.get("anchored")), "tip_hash": tip,
+            "anchor": receipt or latest_anchor()}

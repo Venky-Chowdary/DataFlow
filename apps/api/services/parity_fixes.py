@@ -273,6 +273,11 @@ def rerun_refusal(job: dict[str, Any]) -> str | None:
     ``rerun`` fix is offered only where the route would start one: a failed
     job uses retry, and an append that committed rows would duplicate them.
     """
+    from services.exit_job_guard import refusal as rehearsal_extract_refusal
+
+    refused = rehearsal_extract_refusal(job, "re-run")
+    if refused:
+        return refused
     payload = request_of(job)
     if not payload.get("source"):
         return "This job has no saved configuration to re-run; start it again from Transfer Studio."

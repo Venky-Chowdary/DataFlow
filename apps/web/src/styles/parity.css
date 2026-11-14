@@ -101,9 +101,11 @@
   gap: var(--df-space-2);
   margin: 0;
   padding: var(--df-space-2) var(--df-space-3);
+  /* Neutral surface; the tone is the 3px edge and the icon (W6: no tinted blocks). */
+  border: 1px solid var(--df-border);
   border-left: 3px solid var(--df-warning);
   border-radius: var(--df-radius-md);
-  background: var(--df-warning-bg);
+  background: var(--df-surface);
   color: var(--df-text-primary);
   font-size: var(--df-fs-md);
 }
@@ -116,7 +118,6 @@
 
 .df2-parity-notice.is-danger {
   border-left-color: var(--df-danger);
-  background: var(--df-danger-bg);
 }
 
 .df2-parity-notice.is-danger > svg {
@@ -216,9 +217,10 @@
 }
 
 .df2-parity-kpi {
+  /* Label over value, as the shared stat tile (W6). */
   display: flex;
-  flex-direction: column-reverse;
-  justify-content: flex-end;
+  flex-direction: column;
+  justify-content: flex-start;
   gap: 2px;
   padding: var(--df-space-2) var(--df-space-3);
   border: 1px solid var(--df-border);
@@ -228,8 +230,9 @@
 }
 
 .df2-parity-kpi dt {
-  font-size: var(--df-fs-body);
-  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-secondary);
 }
 
 .df2-parity-kpi dd {
@@ -828,4 +831,104 @@
 
 .df2-parity-health-empty p {
   margin: 0;
+}
+
+/* ---- Migration health (W6): KPI row, drift callout, calmer charts -------- */
+
+.df2-parity-drift-callout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2) var(--df-space-3);
+  margin: var(--df-space-3) 0;
+  padding: var(--df-space-2) var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface-muted);
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-secondary);
+}
+
+.df2-parity-drift-callout b {
+  color: var(--df-text-primary);
+}
+
+.df2-parity-drift-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning);
+}
+
+.df2-parity-drift-callout.is-calm .df2-parity-drift-dot {
+  background: var(--df-success);
+}
+
+.df2-parity-drift-callout .df2-overview-v3-link {
+  margin-left: auto;
+}
+
+.df2-parity-health .df2-parity-grid2 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+}
+
+.df2-parity-h3 .df2-parity-muted {
+  margin-left: var(--df-space-2);
+  font-size: var(--df-fs-xs);
+  font-weight: 400;
+}
+
+/* Not run: a quiet empty cell, no mark. Checked states keep their shapes. */
+.df2-parity-heat-cell.is-none,
+.df2-parity-legend-swatch.is-none {
+  fill: var(--df-surface-muted);
+  background: var(--df-surface-muted);
+  stroke: none;
+}
+
+.df2-parity-heat-glyph.is-proven {
+  stroke: var(--df-brand-strong);
+}
+
+.df2-parity-heat-label {
+  fill: var(--df-text-secondary);
+}
+
+.df2-parity-notice.is-ok {
+  border-left-color: var(--df-success);
+}
+
+.df2-parity-notice.is-ok > svg {
+  color: var(--df-success);
+}
+
+.df2-parity-notice.is-muted {
+  border-left-color: var(--df-border-strong);
+}
+
+.df2-parity-notice.is-muted > svg {
+  color: var(--df-text-tertiary);
+}
+
+/* The legend keeps an outline on the empty "not checked" swatch so it is visible. */
+.df2-parity-legend-swatch.is-none rect {
+  stroke: var(--df-border-strong);
+  stroke-width: 1;
+}
+
+.df2-parity-drift-callout > span:not(.df2-parity-drift-dot) {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+/* The trend scales down with its card instead of pushing past it on a phone. */
+.df2-parity-trend {
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-parity-trend svg {
+  max-width: 100%;
+  height: auto;
 }

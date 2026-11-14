@@ -9,11 +9,17 @@ below is what it exempts.
 
 from __future__ import annotations
 
+import logging
+
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from services.platform_config import docs_enabled
 from services.tenant_store import resolve_tenant_from_host
+
+logger = logging.getLogger(__name__)
 
 # The bare root is public only as an exact match: as a prefix it would cover
 # every path and switch the tenant IP allowlist off.
@@ -75,6 +81,14 @@ def _matches_segment_prefix(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+#: Liveness/readiness probes (API and the worker/scheduler metrics port).
+_PROBE_PREFIXES = ("/health", "/api/v1/health")
+
+
+def _is_probe_path(path: str) -> bool:
+    return any(_matches_segment_prefix(path, prefix) for prefix in _PROBE_PREFIXES)
+
+
 def _is_public_mcp_path(path: str) -> bool:
     if path in ("/api/v1/mcp", "/api/v1/mcp/"):
         return True
@@ -115,8 +129,26 @@ class TenantMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
+        # Probes never read the tenant store: a database outage must not make
+        # the orchestrator restart every pod (ops review High 1).
+        if _is_probe_path(request.url.path):
+            return await call_next(request)
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
-        tenant = resolve_tenant_from_host(host) if host else None
+        try:
+            # The lookup may reach the shared control-plane database (H-5): run
+            # it on the thread pool so a slow or unreachable database never
+            # holds the event loop.
+            tenant = await run_in_threadpool(resolve_tenant_from_host, host) if host else None
+        except Exception:  # noqa: BLE001 - the shared tenant store is configured but unreachable
+            # Without tenant settings the request cannot be attributed to a
+            # tenant, so it is refused rather than served as if no tenant
+            # policy existed (fail closed).
+            logger.warning("tenant settings unavailable; refusing %s", request.url.path, exc_info=True)
+            return JSONResponse(
+                {"detail": "Tenant settings are temporarily unavailable. Retry shortly."},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
         if tenant:
             request.state.tenant_id = tenant.id
             request.state.tenant_workspace_id = tenant.workspace_id

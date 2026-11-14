@@ -1090,8 +1090,14 @@ def _stamp_create_new_mapping_target_type(
     samples: list | None = None,
     source_db: str = "",
 ) -> str:
+    from services.source_engine_semantics import create_new_source_type
     from services.type_system import unicode_safe_target_carrier
 
+    # C3: a carrier that keeps what the source engine stores (SQL Server
+    # tinyint is unsigned, Oracle DATE has a time, MySQL TIMESTAMP is an instant).
+    src_type = create_new_source_type(
+        src_type, dest_db_type, source_db or active_source_engine()
+    )
     stamp = _create_new_mapping_target_type(
         src_type, dest_db_type, samples=samples, source_db=source_db
     )
@@ -2565,7 +2571,10 @@ def temporal_precision_would_narrow(
         and tgt_p >= cap
         and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
     ):
-        return False
+        # C3: the exemption covers a declared tick the rows do not use. When
+        # the measured values carry a digit past the cap, it is rounded away
+        # (DATETIME2(7) → PostgreSQL microseconds): flagged, not green.
+        return population_fits_temporal_precision(population, tgt_p) is False
     if src_p <= tgt_p:
         return False
     # A declared ceiling (a warehouse's nanosecond default) narrows only if the

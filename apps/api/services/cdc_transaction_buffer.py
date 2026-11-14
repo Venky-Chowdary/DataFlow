@@ -15,6 +15,14 @@ When an open transaction grows large, events **spill to a temp JSONL file**
 (``DATAFLOW_CDC_TXN_SPILL_AFTER``, default half of max) so memory stays bounded.
 Oversized open transactions still **raise** :class:`CdcTxnBufferOverflow` past
 ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS`` — never silently truncate or drop events.
+
+A spill line that no longer parses (:class:`CdcSpillCorrupt`) leaves the
+transaction open, so nothing is emitted and the cursor does not move past a
+change that was not applied. A DELETE whose key could not be resolved is
+neither dropped nor fatal (C2): it is parked with its row image and rides the
+committed batch as ``unkeyed_deletes``; the apply records it in the DLQ and the
+audit log before the position moves (:mod:`services.cdc_unkeyed_delete`).
+:class:`CdcUnkeyedDelete` remains for readers that have no row image to park.
 """
 
 from __future__ import annotations
@@ -32,10 +40,32 @@ from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_
 from services.value_serializer import json_loads_exact
 
 
+class CdcUnkeyedDelete(RuntimeError):
+    """A DELETE with no resolvable key: it cannot be applied, so it is not dropped."""
+
+    def __init__(self, table: str = "", lsn: str | None = None) -> None:
+        where = f" on {table}" if table else ""
+        at = f" at {lsn}" if lsn else ""
+        super().__init__(
+            f"CDC delete{where}{at} has no resolvable key, so the change was not "
+            "applied and the stream position was not advanced. Dropping it would "
+            "leave the deleted row at the destination. Give the table a primary "
+            "key (or a replica identity that carries one) and resume."
+        )
+        self.table = table
+        self.lsn = lsn
+
+
+class CdcSpillCorrupt(RuntimeError):
+    """A line of the on-disk transaction spill is not a DML event any more."""
+
+
 def load_cdc_txn_spill_event(line: str) -> dict[str, Any] | None:
     """One spilled CDC txn JSONL event. Numbers match ``json_loads_exact``.
 
-    Invalid JSON or a non-object line is skipped — never invent a DML event.
+    ``None`` for invalid JSON or a non-object line — never an invented DML
+    event. The caller must not skip such a line: it was an event of the
+    transaction (:class:`CdcSpillCorrupt`).
     """
     try:
         rec = json_loads_exact(line)
@@ -93,6 +123,8 @@ class CdcTxnBufferOverflow(RuntimeError):
 class _OpenTxn:
     xid: str
     events: list[CdcTxnEvent] = field(default_factory=list)
+    #: Deletes with no resolvable key, parked with their row image (C2).
+    unkeyed: list[dict[str, Any]] = field(default_factory=list)
     last_lsn: str | None = None
     spilled_count: int = 0
     spill_path: str | None = None
@@ -128,7 +160,7 @@ class TransactionBuffer:
     def open_event_count(self) -> int:
         if self._open is None:
             return 0
-        return self._open.spilled_count + len(self._open.events)
+        return self._open.spilled_count + len(self._open.events) + len(self._open.unkeyed)
 
     def begin(self, xid: str | None = None, *, lsn: str | None = None) -> None:
         if self._open is not None:
@@ -173,12 +205,24 @@ class TransactionBuffer:
         self._open.events.append(CdcTxnEvent(op="u", pk=new_pk, row=dict(row), lsn=lsn))
         self._after_dml()
 
-    def delete(self, pk: str, *, lsn: str | None = None) -> None:
-        if not pk:
-            return
+    def delete(
+        self,
+        pk: str,
+        *,
+        lsn: str | None = None,
+        row: dict[str, Any] | None = None,
+        table: str = "",
+    ) -> None:
+        """Buffer a delete; one with no key is parked with ``row`` (its image)."""
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after delete")
+        if not pk:
+            from services.cdc_unkeyed_delete import unkeyed_delete_record
+
+            self._open.unkeyed.append(unkeyed_delete_record(table, row, lsn))
+            self._maybe_overflow()
+            return
         self._open.events.append(CdcTxnEvent(op="d", pk=str(pk), row=None, lsn=lsn))
         self._after_dml()
 
@@ -191,6 +235,7 @@ class TransactionBuffer:
         if lsn:
             self._open.last_lsn = lsn
         inserts, updates, deletes = self._materialize_open()
+        unkeyed = list(self._open.unkeyed)
         spill_path = self._open.spill_path
         self._open = None
         self._cleanup_spill(spill_path)
@@ -199,8 +244,9 @@ class TransactionBuffer:
             updates=updates,
             deletes=deletes,
             resume_token=resume_token,
+            unkeyed_deletes=unkeyed,
         )
-        if batch.total_changes or resume_token is not None:
+        if batch.total_changes or unkeyed or resume_token is not None:
             return batch
         return None
 
@@ -235,7 +281,7 @@ class TransactionBuffer:
             elif op == "update":
                 self.update(payload["row"], pk=payload.get("pk"), lsn=lsn)
             elif op == "delete":
-                self.delete(str(payload.get("pk") or ""), lsn=lsn)
+                self.delete(str(payload.get("pk") or ""), lsn=lsn, row=payload.get("row"))
             elif op == "commit":
                 batch = self.commit(lsn=lsn, resume_token=token)
                 if batch is not None:
@@ -313,16 +359,21 @@ class TransactionBuffer:
         ordered: list[CdcTxnEvent] = []
         if self._open.spill_path and Path(self._open.spill_path).exists():
             with open(self._open.spill_path, encoding="utf-8") as fh:
-                for line in fh:
+                for number, line in enumerate(fh, start=1):
                     line = line.strip()
                     if not line:
                         continue
                     rec = load_cdc_txn_spill_event(line)
-                    if rec is None:
-                        continue
-                    op = rec.get("op")
+                    op = rec.get("op") if rec is not None else None
                     if op not in {"i", "u", "d"}:
-                        continue
+                        # Every line was an event of this transaction. Skipping
+                        # one commits the transaction without it.
+                        raise CdcSpillCorrupt(
+                            f"CDC transaction spill for xid={self._open.xid} is "
+                            f"unreadable at line {number}: the transaction was not "
+                            "applied and stays open for redelivery (a skipped line "
+                            "would be a change silently lost)."
+                        )
                     row = rec.get("row") if isinstance(rec.get("row"), dict) else None
                     pk = str(rec.get("pk") or "")
                     if not pk and row is not None:

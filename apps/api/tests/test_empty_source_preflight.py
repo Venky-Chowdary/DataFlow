@@ -138,7 +138,9 @@ def test_failed_read_of_a_table_still_blocks():
         source_format="postgresql",
     )
     assert {"g5_dry_run", "g8_reconciliation", "g9_data_integrity"} <= set(_blocks(result))
-    assert "source sample read failed" in _gate(result, "g8_reconciliation")["message"]
+    # ERR-31: G1 names the read failure once; dependent gates wait on it.
+    assert "waiting on Source" in _gate(result, "g8_reconciliation")["message"]
+    assert "Connection refused" in _gate(result, "g1_source")["message"]
 
 
 def _header_only_file(population) -> dict:

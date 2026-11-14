@@ -398,8 +398,13 @@ def classify_mssql_cdc_rows(
     *,
     primary_key: str | list[str],
     row_filter: str = ROW_FILTER_ALL,
+    parked: list[dict[str, Any]] | None = None,
+    table: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Map ``__$operation`` rows into inserts / updates / deletes.
+
+    ``parked``: where a delete with no key goes, with its row image (C2). Without
+    it such a delete still raises :class:`CdcUnkeyedDelete`.
 
     - 1 delete, 2 insert, 3 update-before, 4 update-after
     Before images (op 3) pair with the next after image (op 4) for the same PK
@@ -431,9 +436,21 @@ def classify_mssql_cdc_rows(
         }
         key = _pk_value(clean, pk_cols) or ""
         if op_i == 1:
-            if key:
-                deletes.append(key)
-                pending_before.pop(key, None)
+            if not key:
+                # A delete with no key cannot be applied; skipping it leaves
+                # the row at the destination while the LSN moves on. It is
+                # parked with its image when the caller takes it (C2).
+                lsn_text = _lsn_to_hex(rec.get("__$start_lsn")) if rec.get("__$start_lsn") else ""
+                if parked is None:
+                    from services.cdc_transaction_buffer import CdcUnkeyedDelete
+
+                    raise CdcUnkeyedDelete(lsn=lsn_text or None)
+                from services.cdc_unkeyed_delete import unkeyed_delete_record
+
+                parked.append(unkeyed_delete_record(table, clean, lsn_text or None))
+                continue
+            deletes.append(key)
+            pending_before.pop(key, None)
         elif op_i == 2:
             inserts.append(clean)
             pending_before.pop(key, None)
@@ -1565,9 +1582,12 @@ class SqlServerNativeCdc:
         qualified = _qualified_ref(self.schema, table_name)
         mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
         order_sql = ", ".join(quoted)
+        from connectors.sqlserver_tick import driver_select_list
+
+        select_list = driver_select_list(cur, qualified)  # pymssql: keep DATETIME2(7)
         if mode == "scan":
             cur.execute(
-                f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+                f"SELECT {select_list} FROM {qualified} ORDER BY {order_sql}"  # nosec B608
             )
         while True:
             if mode == "scan":
@@ -1579,13 +1599,14 @@ class SqlServerNativeCdc:
                     last_pk=last_pk,
                     limit=self.batch_size,
                     dialect="sqlserver",
+                    select_list=select_list,
                 )
                 cur.execute(sql, params)
                 rows = cur.fetchall() or []
             else:
                 cur.execute(
                     f"""
-                    SELECT *
+                    SELECT {select_list}
                     FROM {qualified}
                     ORDER BY {order_sql}
                     OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
@@ -1869,6 +1890,8 @@ class SqlServerNativeCdc:
         lsn_groups: list[
             tuple[str, str, list[dict[str, Any]], list[dict[str, Any]], list[str]]
         ] = []
+        #: Deletes with no key per LSN group, parked with their image (C2).
+        unkeyed_by_lsn: dict[str, list[dict[str, Any]]] = {}
         max_lsn = ""
         poll_to_lsn = ""
         window_complete = False
@@ -2038,14 +2061,19 @@ class SqlServerNativeCdc:
                                 {cols[i]: row[i] for i in range(len(cols))}
                                 for row in row_group
                             ]
+                            group_unkeyed: list[dict[str, Any]] = []
                             group_inserts, group_updates, group_deletes = (
                                 classify_mssql_cdc_rows(
                                     records,
                                     primary_key=self.primary_key,
                                     row_filter=self.row_filter,
+                                    parked=group_unkeyed,
+                                    table=self.table,
                                 )
                             )
-                            if group_inserts or group_updates or group_deletes:
+                            if group_unkeyed:
+                                unkeyed_by_lsn.setdefault(group_lsn, []).extend(group_unkeyed)
+                            if group_inserts or group_updates or group_deletes or group_unkeyed:
                                 self._last_event_at = datetime.now(timezone.utc)
                             lsn_groups.append(
                                 (
@@ -2102,6 +2130,7 @@ class SqlServerNativeCdc:
                         lsn=group_lsn, phase="streaming", seqval=group_seq
                     ),
                     table=self.table,
+                    unkeyed_deletes=unkeyed_by_lsn.pop(group_lsn, []),
                 )
             return
 
@@ -2374,8 +2403,10 @@ class SqlServerNativeCdc:
 
                 pk = self.primary_keys.get(table_name, self.primary_key)
                 pk_cols = _pk_columns(pk)
+                unkeyed: list[dict[str, Any]] = []
                 inserts, updates, deletes = classify_mssql_cdc_rows(
-                    records, primary_key=pk, row_filter=self.row_filter
+                    records, primary_key=pk, row_filter=self.row_filter,
+                    parked=unkeyed, table=table_name,
                 )
                 # Explicit PK stops the net-effect coalescer guessing from the
                 # first non-empty column — that collapse silently drops rows
@@ -2396,6 +2427,8 @@ class SqlServerNativeCdc:
                     )
                 for pk_val in deletes:
                     buf.delete(table_name, pk_val, lsn=lsn_h)
+                for parked_rec in unkeyed:
+                    buf.delete(table_name, "", lsn=lsn_h, row=parked_rec.get("row"))
             last_lsn = lsn_h
             token = self._token(lsn=last_lsn, phase="streaming", seqval=last_seq)
             for batch in buf.commit(

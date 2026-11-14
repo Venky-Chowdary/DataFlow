@@ -1506,6 +1506,9 @@ def decimal_params_would_narrow(
         return False
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
+    if sp is None and re.match(r"^\s*BIGINT\s+UNSIGNED\b", str(source_type or ""), re.I):
+        # DATA-15: BIGINT UNSIGNED is exactly 20 integer digits (0..2^64-1).
+        sp, ss = 20, 0
     single_capacity = dest_decimal_single_capacity_digits(dest_db=dest_db)
     if single_capacity is not None:
         # These carriers have one capacity at any in-range scale and no per-field
@@ -3959,6 +3962,11 @@ def parse_vector_length(value: Any) -> int | None:
     return None
 
 
+#: Engines whose bare ``TIMESTAMP`` is read with the engine's own meaning when
+#: the source is the same engine (MySQL/MariaDB: an instant).
+_SAME_ENGINE_TIMESTAMP_POLARITY = frozenset({"mysql", "mariadb"})
+
+
 def is_timezone_polarity_loss(
     source_type: str,
     target_type: str,
@@ -3990,7 +3998,15 @@ def is_timezone_polarity_loss(
     document_instant = _bound_document_instant(source_type)
     if document_instant:
         src_token = instant_date_carrier(active_source_engine(), source_type)
-    src = datetime_timezone_polarity(src_token)
+    # Same engine on both sides: the source token means what that engine means
+    # by it. A MySQL TIMESTAMP is an instant on the source as on the sink, so
+    # TIMESTAMP → TIMESTAMP into the table Datawrap created is no polarity change.
+    same_engine = (
+        not document_instant
+        and dest_db in _SAME_ENGINE_TIMESTAMP_POLARITY
+        and _normalize_dest_db(active_source_engine() or "") == dest_db
+    )
+    src = datetime_timezone_polarity(src_token, dest_db=dest_db if same_engine else "")
     tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
         if document_instant:
@@ -5019,9 +5035,23 @@ def string_width_would_narrow(
         return False
     src_w = parse_string_carrier_width(source_type)
     if src_w is None:
-        # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
-        return is_unlimited_string_carrier(source_type)
+        # Unlimited generic TEXT/CLOB → bounded. A bare VARCHAR is unknown
+        # unless its engine is known to leave it unbounded (audit 12).
+        return is_unlimited_string_carrier(source_type) or _bare_varchar_unbounded(source_type)
     return src_w > tgt_w
+
+
+#: Engines whose introspected bare ``VARCHAR`` / ``CHARACTER VARYING`` is an
+#: unbounded column. SQLite and DuckDB are left out: their bare VARCHAR is also
+#: the stamp of an inferred string whose width the sampled population proves.
+_BARE_VARCHAR_UNBOUNDED_ENGINES = frozenset({"postgresql"})
+
+
+def _bare_varchar_unbounded(source_type: str) -> bool:
+    bare = re.sub(r"\s+", " ", strip_identity_qualifier(source_type).strip().upper())
+    if bare not in {"VARCHAR", "CHARACTER VARYING"}:
+        return False
+    return _normalize_dest_db(active_source_engine() or "") in _BARE_VARCHAR_UNBOUNDED_ENGINES
 
 
 def blocking_string_width_narrowing(
@@ -5187,6 +5217,30 @@ def oracle_char_byte_polarity_loss(source_type: str, target_type: str) -> bool:
         return True
     per_char = 4 if src_u == "CHAR" else 1
     return int(tgt_w.group(1)) < int(src_w.group(1)) * per_char
+
+
+def char_count_into_oracle_bytes_would_truncate(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when a character-counted width lands on Oracle byte semantics.
+
+    ``VARCHAR2(n)`` without a unit is ``n BYTE`` (default NLS_LENGTH_SEMANTICS)
+    and a character is up to 4 bytes in AL32UTF8, so a non-Oracle
+    ``varchar(n)`` needs ``4n`` bytes. An Oracle source in byte semantics, or a
+    source whose engine is unknown, is left to ``oracle_char_byte_polarity_loss``.
+    """
+    if _normalize_dest_db(dest_db) != "oracle" or oracle_char_byte_unit(target_type) == "CHAR":
+        return False
+    tgt = re.match(
+        r"^\s*(VARCHAR2|VARCHAR|CHAR)\s*\(\s*(\d+)", strip_identity_qualifier(target_type).upper()
+    )
+    src_w = parse_string_carrier_width(source_type)
+    engine = _normalize_dest_db(active_source_engine() or "")
+    if not tgt or src_w is None or not engine or engine == "oracle":
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    return int(tgt.group(2)) < src_w * 4
 
 
 def is_oracle_long_text_carrier(inferred: str | None) -> bool:
@@ -7476,10 +7530,9 @@ def value_fractional_second_digits(value: Any) -> int:
         from datetime import date, datetime, time
 
         if isinstance(value, datetime):
-            us = value.microsecond
-            if us == 0:
-                return 0
-            return len(f"{us:06d}".rstrip("0"))
+            from connectors.sqlserver_tick import tick_of  # DATETIME2(7) 100 ns digit
+
+            return len((f"{value.microsecond:06d}" + str(tick_of(value) or "")).rstrip("0"))
         if isinstance(value, time):
             us = value.microsecond
             if us == 0:
@@ -7620,6 +7673,26 @@ def integer_storage_bounds(
 
     bounds: tuple[int, int] | None = _impl(inferred, dest_db=dest_db)
     return bounds
+
+
+def integer_decimal_digits_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when an integer lands on DECIMAL(p,s) with fewer than its digits.
+
+    ``BIGINT`` holds 19 digits; Oracle ``NUMBER(10)`` holds 10 (audit 12). Only
+    an explicit width counts: the ambiguous ``INTEGER``/``INT`` is also the
+    stamp of an inferred file column, whose values the per-cell fit check
+    judges, so it is not read as 64-bit here.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    precision, scale = parse_numeric_precision_scale(target_type)
+    bits = integer_bit_width(source_type)
+    if precision is None or bits is None:
+        return False
+    digits = integer_max_text_width(source_type) - (0 if bits % 2 else 1)
+    return digits > precision - (scale or 0)
 
 
 def integer_width_would_narrow(

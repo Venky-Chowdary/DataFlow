@@ -1,6 +1,7 @@
 {
   "name": "dataflow",
   "private": true,
+  "license": "UNLICENSED",
   "workspaces": [
     "apps/web",
     "packages/design-system"

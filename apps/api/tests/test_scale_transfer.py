@@ -66,7 +66,9 @@ def test_100k_csv_to_sqlite_scale_transfer(tmp_path: Path, monkeypatch) -> None:
     # tests/fixtures is not an upload directory (PR 410 took it out of the
     # dataset roots), so a transfer may not read it unless the operator
     # declares it a source root, as this benchmark does.
-    monkeypatch.setenv("DATAWRAP_SOURCE_PATH_ROOTS", str(FIXTURE.parent))
+    # The destination SQLite file lives in tmp_path: SEC-9 confines local files
+    # by default, so the operator lists that folder too.
+    monkeypatch.setenv("DATAWRAP_SOURCE_PATH_ROOTS", os.pathsep.join([str(FIXTURE.parent), str(tmp_path)]))
 
     db_path = tmp_path / "scale.db"
     request = TransferRequest(

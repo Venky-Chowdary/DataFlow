@@ -12,14 +12,19 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from services.brand_env import getenv_brand
-from fastapi.responses import JSONResponse, PlainTextResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
+from services.control_plane_store import ControlPlaneUnavailable
+from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable, PlanStoreUnreadable
+from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
-from services.health_service import aggregate_health
-from services.safe_errors import public_error
+from services import health_service
+from services.safe_errors import EnvelopeHTTPException, public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
 from services.data_residency import ResidencyRefused
@@ -48,6 +53,7 @@ from .middleware.proxy_fix_middleware import ProxyFixMiddleware
 from .middleware.own_host_redirect_middleware import OwnHostRedirectMiddleware
 from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
+from .middleware.connector_access_middleware import ConnectorAccessMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
@@ -62,9 +68,12 @@ from .routers.contact_router import router as contact_router
 from .routers.contracts_router import router as contracts_router
 from .routers.fidelity_router import router as fidelity_router
 from .routers.parity_router import router as parity_router
+from .routers.reversibility_router import router as reversibility_router
+from .routers.exit_router import router as exit_router
 from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transform_library_router import router as transform_library_router
+from .routers.mapping_studio_router import router as mapping_studio_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import oauth_resource_router, router as mcp_router
@@ -102,6 +111,13 @@ async def lifespan(app: FastAPI):
     Railway ``/health`` liveness can pass within the healthcheck window.
     """
     apply_railway_defaults()
+    # SIGTERM sets a process-wide flag before uvicorn's own handler runs, so
+    # long-lived responses (the job stream) end at once and the teardown below
+    # is reached within --timeout-graceful-shutdown (ops review High 4).
+    from services import shutdown_signal
+
+    shutdown_signal.reset()
+    shutdown_signal.install()
     # Do not sys.exit here. The socket is not accepting yet, so a fatal
     # config used to fail Railway's /health probe as "service unavailable"
     # for the whole window. Liveness stays up; other routes return 503.
@@ -129,6 +145,24 @@ async def lifespan(app: FastAPI):
     from services.brand_env import warn_brand_flag_conflicts
 
     warn_brand_flag_conflicts(logger)
+    from services.local_file_policy import local_file_settings, warn_if_local_file_confinement_off
+
+    warn_if_local_file_confinement_off(logging.getLogger("datawrap.security"))
+    from services.platform_aws_credentials import (
+        platform_aws_settings,
+        warn_if_platform_aws_credentials_allowed,
+    )
+
+    warn_if_platform_aws_credentials_allowed(logging.getLogger("datawrap.security"))
+    from services.platform_gcp_azure_credentials import (
+        platform_gcp_azure_settings,
+        warn_if_platform_gcp_azure_credentials_allowed,
+    )
+
+    warn_if_platform_gcp_azure_credentials_allowed(logging.getLogger("datawrap.security"))
+    from connectors.kafka_sasl_policy import platform_kerberos_settings, warn_if_platform_kerberos_allowed
+
+    warn_if_platform_kerberos_allowed(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -169,6 +203,10 @@ async def lifespan(app: FastAPI):
                     "audit_retention_days": audit_retention_days,
                     "docs_enabled": bool(docs_enabled()),
                     "config_error_count": len(config_errors),
+                    **local_file_settings(),
+                    **platform_aws_settings(),
+                    **platform_gcp_azure_settings(),
+                    **platform_kerberos_settings(),
                 },
             )
         except Exception as exc:
@@ -230,8 +268,17 @@ async def lifespan(app: FastAPI):
     training = TrainingRuntime()
     app.state.training_runtime = training
 
+    # Build the route table now, off the request path: FastAPI would
+    # otherwise do it on the event loop inside the first request (usually the
+    # first health probe), which then takes ~1s instead of milliseconds.
+    from services.route_table_warmup import warm_route_table
+
+    await asyncio.to_thread(warm_route_table, app)
+
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
+    # Loop tasks started below are kept so shutdown can cancel them (M-9).
+    app.state.background_tasks = []
     print("[+] HTTP listener ready (background warm-up starting)")
 
     async def _warm_up():
@@ -258,6 +305,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
 
+        # H-5: tenant settings, BYOK keys, ACLs and the other control-plane
+        # stores live in the shared store on a multi-replica deployment. Import
+        # this node's files once (idempotent; the files are left in place).
+        try:
+            from services.shared_doc_store import import_local_files
+
+            imported_stores = await asyncio.to_thread(import_local_files)
+            if imported_stores:
+                print(f"[+] Imported control-plane store file(s) into the shared store: {sorted(imported_stores)}")
+        except Exception as import_exc:  # noqa: BLE001 - a store that cannot be reached fails closed on use
+            print(f"[!] Control-plane store import skipped: {import_exc}")
+
         # Review M3: exports written before workspaces had folders move to the
         # folder of the workspace whose job records own them. Idempotent, and
         # off the lifespan's critical path (round 2, Low): a large flat folder
@@ -265,6 +324,11 @@ async def lifespan(app: FastAPI):
         from services.export_migration import migrate_flat_exports_at_startup, start_in_background
 
         app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # G11 naming history: its job-store indexes are built here, bounded and
+        # off the critical path, never on the first request that reads history.
+        from services.naming_history import ensure_naming_history_indexes
+
+        app.state.naming_history_indexes = start_in_background(ensure_naming_history_indexes)
         # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
         # workspace. The partition time is recorded before any request is served
         # (connectors saved after it prove no ownership); owned flat files then
@@ -299,7 +363,7 @@ async def lifespan(app: FastAPI):
             if schedule_loop_enabled():
                 from .services.schedule_runner import run_schedule_loop
 
-                asyncio.create_task(run_schedule_loop())
+                app.state.background_tasks.append(asyncio.create_task(run_schedule_loop()))
                 print("[+] Pipeline scheduler started")
             else:
                 print("[+] Pipeline scheduler not started in this process (SCHEDULE_LOOP off)")
@@ -376,6 +440,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    shutdown_signal.request()
+    # Running exit-rehearsal verifications (PR 402) stop inside the budgeted
+    # stop_background_threads below: claims released, nothing closed.
     warm = getattr(app.state, "warm_task", None)
     if warm and not warm.done():
         warm.cancel()
@@ -383,21 +450,25 @@ async def lifespan(app: FastAPI):
             await warm
         except asyncio.CancelledError:
             pass
-    # This lifespan's runtime: sets its stop event, cancels its tasks, waits <= 1 s.
+    # This lifespan's training runtime: sets its stop event, cancels its tasks,
+    # waits <= 1 s (PR 410).
     await training.shutdown()
-    try:
-        from services.otel_logging import shutdown_otel_logging
+    # M-9: nothing this app started may outlive it. The schedule loops are
+    # cancelled; the four threads are stopped and joined off the event loop
+    # (the claim loop drains in-flight transfers first, bounded by
+    # WORKER_DRAIN_SECONDS, and releases their leases), and the OTel log and
+    # trace flushes run last inside that budget.
+    from services.background_lifecycle import cancel_background_tasks, stop_background_threads
 
-        shutdown_otel_logging()
-    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
-        logger.debug("OpenTelemetry log shutdown failed: %s", exc)
-    try:
-        from services.tracing import shutdown_tracing
-
-        shutdown_tracing()
-    except Exception:
-        pass
+    await cancel_background_tasks(getattr(app.state, "background_tasks", []))
+    app.state.background_tasks = []
+    # The OTel log and trace flushes are the last budgeted stop (an unreachable
+    # collector cannot hold the process past the shutdown budget).
+    await asyncio.to_thread(stop_background_threads)
+    app.state.ready = False
     print("[*] Datawrap API shutting down…")
+    # The process exits next; an in-process restart (tests) starts clean.
+    shutdown_signal.reset()
 
 
 _docs = "/docs" if docs_enabled() else None
@@ -405,7 +476,19 @@ _redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
     title="Datawrap API",
-    description="Universal Data Transfer Platform API",
+    description=(
+        "Universal Data Transfer Platform API\n\n"
+        "**Errors.** A failure carries `{error: {code, message, action: {label, ui, api}, "
+        "object, retriable, reference}, detail}`; `detail` stays a string. Failed jobs "
+        "carry the same `code` as `error_code` and `error_details.code`.\n\n"
+        "**Deprecated: `legacy_code`.** For one release, `error.legacy_code`, "
+        "`error_details.legacy_code` and the job's `error_legacy_code` repeat the "
+        "pre-taxonomy code a taxonomy code replaced: `destination_permission_denied` "
+        "(now `access.*`), `destination_column_missing` (`object.column_not_found`), "
+        "`table_not_found` (`object.table_not_found`), `destination_lock_timeout` "
+        "(`timeout.lock`), `transfer_failed` (`unclassified`), and the "
+        "`destination_*` capacity / CHECK codes. Key on `code`; `legacy_code` will be removed."
+    ),
     version="1.0.0",
     docs_url=_docs,
     redoc_url=_redoc,
@@ -453,6 +536,9 @@ _cors_origins = cors_origins()
 # (an operator may still set CORS_ORIGIN_REGEX deliberately).
 _cors_origin_regex = cors_origin_regex()
 
+# Innermost: binds the authenticated caller for saved-connector resolution
+# (services.connector_access.current_caller), inside the tenant scope it narrows.
+app.add_middleware(ConnectorAccessMiddleware)
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
@@ -654,6 +740,15 @@ async def _add_timing_header_response(request: Request, call_next):
         )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    # M-7: request count and latency by route template (never the raw path).
+    from services.ops_metrics import record_http_request, route_template
+
+    record_http_request(
+        method=request.method,
+        route=route_template(request.scope),
+        status_code=response.status_code,
+        duration_seconds=process_time,
+    )
     response.headers["X-Correlation-ID"] = correlation_id
     if trace_id:
         response.headers["X-Trace-Id"] = trace_id
@@ -693,9 +788,12 @@ async def _add_timing_header_response(request: Request, call_next):
     named_admin = False
     if request.method != "GET" and path.startswith("/api/v1/"):
         try:
+            from starlette.concurrency import run_in_threadpool
+
             from services.admin_audit import record_unhandled_admin_change
 
-            named_admin = record_unhandled_admin_change(request, response.status_code)
+            # An audit append can seal the chain tip in the shared anchor store: off the event loop.
+            named_admin = await run_in_threadpool(record_unhandled_admin_change, request, response.status_code)
         except Exception as exc:
             logging.getLogger(__name__).warning("Admin audit suppressed: %s", exc, exc_info=exc)
     if (
@@ -720,7 +818,10 @@ async def _add_timing_header_response(request: Request, call_next):
                 details["correlation_id_rejected"] = True
             if getattr(request.state, "workspace_header_rejected", False):
                 details["workspace_header_rejected"] = True
-            append_audit_event(
+            from starlette.concurrency import run_in_threadpool
+
+            await run_in_threadpool(
+                append_audit_event,
                 action=f"http.{request.method.lower()}",
                 resource=path,
                 actor=actor,
@@ -739,6 +840,10 @@ async def _add_timing_header_response(request: Request, call_next):
 # A redirect to the API's own host (redirect_slashes' 307) goes out relative,
 # never naming the internal host or its plain-http scheme (D339).
 app.add_middleware(OwnHostRedirectMiddleware)
+# SEC-8: a non-upload body over its limit is a 413 before anything parses it.
+from src.middleware.body_size_limit import BodySizeLimitMiddleware  # noqa: E402
+
+app.add_middleware(BodySizeLimitMiddleware)
 # Outermost: client address and scheme from the trusted proxy chain
 # (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
 app.add_middleware(ProxyFixMiddleware)
@@ -752,6 +857,8 @@ app.include_router(contact_router, prefix="/api/v1")
 app.include_router(preflight_router, prefix="/api/v1")
 app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
+# Before transfer_router: its /transfer/{job_id}/… routes must not shadow /transfer/mapping/….
+app.include_router(mapping_studio_router, prefix="/api/v1")
 app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
 app.include_router(oauth_resource_router)
@@ -778,6 +885,8 @@ app.include_router(invite_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(parity_router, prefix="/api/v1")
+app.include_router(reversibility_router, prefix="/api/v1")
+app.include_router(exit_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
 app.include_router(transforms_router, prefix="/api/v1")
 app.include_router(transform_library_router, prefix="/api/v1")
@@ -851,7 +960,11 @@ async def health_ready():
     dependency checks report healthy so Railway does not route traffic
     to a pod that cannot accept transfer jobs.
     """
-    payload = aggregate_health()
+    # Off the event loop and shared between close probes (M-8): the checks
+    # open a database connection and touch the data directory.
+    from starlette.concurrency import run_in_threadpool
+
+    payload = await run_in_threadpool(health_service.cached_health)
     pool = connector_executor.readiness()
     payload["connector_pool"] = pool
     if not pool["ok"] and payload.get("status") == "healthy":
@@ -866,14 +979,15 @@ async def health_ready():
 
 
 @app.get("/metrics")
-async def prometheus_metrics():
-    """Prometheus exposition format for job/CDC/quarantine ops metrics."""
-    from services.ops_metrics import prometheus_text
+async def prometheus_metrics(request: Request):
+    """Prometheus exposition format: HTTP, job-store and CDC ops metrics.
 
-    return PlainTextResponse(
-        content=prometheus_text(),
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
+    The deployment-wide series (HTTP traffic, job gauges) are for platform
+    administrators only (src.metrics_app.metrics_response).
+    """
+    from src.metrics_app import metrics_response
+
+    return await metrics_response(request)
 
 
 @app.get("/api/v1")
@@ -891,6 +1005,16 @@ async def api_info():
 @app.exception_handler(ApiError)
 async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
+
+
+@app.exception_handler(EnvelopeHTTPException)
+async def error_envelope_handler(request: Request, exc: EnvelopeHTTPException):
+    """``{error: {code, message, action, object, retriable, reference}, detail}``."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.envelope,
+        headers=dict(exc.headers or {}),
+    )
 
 
 @app.exception_handler(DuplicateTransferSubmission)
@@ -942,6 +1066,108 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
     )
+
+
+@app.exception_handler(ControlPlaneUnavailable)
+async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneUnavailable):
+    """A control-plane store (tenants, BYOK keys, ACLs, ...) cannot be read: fail closed, retryable.
+
+    Callers never fall back to a permissive default or a node's local file
+    (ops review High 1, Medium 6); the user gets a clean 503 instead of a 500.
+    """
+    logger.warning("Control-plane store unavailable on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "control_plane_unavailable",
+            "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
+        },
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(PlanStoreUnreadable)
+async def plan_store_unreadable_handler(request: Request, exc: PlanStoreUnreadable):
+    """The transfer-plan store file is damaged: refuse, never answer "no plans".
+
+    The store logged the path and error class once at ERROR; the response
+    names the files an operator repairs or restores (the newest backup
+    generation that still parses), not their location.
+    """
+    if exc.readable_backup:
+        remedy = f"restore the newest readable backup, {exc.readable_backup}"
+    else:
+        remedy = (
+            "restore it from your own backups (no readable backup was found in "
+            "transfer_plans.json.bak, .bak.1 or .bak.2)"
+        )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_unreadable",
+            "detail": (
+                "Transfer plans cannot be loaded: the plan store file (transfer_plans.json in "
+                "the data directory) is unreadable or damaged, so nothing was read or changed. "
+                f"An operator must repair it or {remedy}, then retry."
+            ),
+        },
+    )
+
+
+@app.exception_handler(PlanStoreLockUnavailable)
+async def plan_store_lock_unavailable_handler(request: Request, exc: PlanStoreLockUnavailable):
+    """The plan store's lock file is not writable: an operator must fix it; not retryable."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_lock_unavailable",
+            "detail": (
+                "Transfer plans cannot be saved: the plan store's lock file "
+                "(transfer_plans.json.lock in the data directory) cannot be opened for writing, "
+                "so nothing was changed. An operator must make it writable by the API's user "
+                "(mode 0600; it is never written to) or fix the volume."
+            ),
+        },
+    )
+
+
+@app.exception_handler(PlanStoreBusy)
+async def plan_store_busy_handler(request: Request, exc: PlanStoreBusy):
+    """Another writer held the transfer-plan store past the lock timeout: retryable."""
+    logger.warning("Transfer plan store busy on %s", request.url.path)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_busy",
+            "detail": "The plan is being saved by another request. Retry shortly.",
+        },
+        headers={"Retry-After": "2"},
+    )
+
+
+@app.exception_handler(SharedDocConflict)
+async def shared_doc_conflict_handler(request: Request, exc: SharedDocConflict):
+    """Concurrent writers kept winning a control-plane record after every retry: retryable, not a 500."""
+    logger.warning("Control-plane write conflict on %s after retries: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "concurrent_update",
+            "detail": "Another change to the same settings was saved at the same moment. Retry the request.",
+            "retry_after_sec": 1,
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    """422 without the submitted values (SEC-8): no password, no 10 MB echo."""
+    errors = [
+        {key: value for key, value in dict(err).items() if key not in ("input", "ctx", "url")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 @app.exception_handler(PayloadTooLarge)

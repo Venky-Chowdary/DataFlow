@@ -233,5 +233,8 @@ def test_start_transfer_overwrite_still_blocks_infile_duplicates(
         validation_mode="strict",
     )
     assert staged.success is False, staged.output
-    assert "rc-duplicate-identity" in (staged.error or "")
+    # UX-19: the refusal names the root cause by its title; the id stays on the plan.
+    assert "Duplicate identity keys" in (staged.error or "")
+    assert "rc-duplicate-identity" not in (staged.error or "")
+    assert any(str(b.get("id") or "").startswith("rc-duplicate-identity") for b in ((staged.output or {}).get("preflight") or {}).get("blockers") or [])
     assert not (staged.output or {}).get("ack_id")

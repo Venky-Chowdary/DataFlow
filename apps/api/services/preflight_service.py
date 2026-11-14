@@ -411,6 +411,17 @@ def run_file_preflight(
     # with. Done once here because this is the single entry every caller
     # (Studio, Pilot, scheduled runs) goes through.
     column_types = declared_source_column_types(column_types, mappings)
+    # G11: a target an earlier run stored under its legacy spelling (cut at 63,
+    # lowercased on BigQuery) IS that existing column, for every gate and for
+    # the approval hashes; Execute applies the same rename (adopt_for_request).
+    from services.target_name_legacy import adopt_rows_for_run, strip_client_map_targets
+
+    existing = destination_live_column_types or destination_column_types or {}
+    mappings = adopt_rows_for_run(  # a client's map_target never steers adoption (B1)
+        destination_db_type, strip_client_map_targets(mappings),
+        [] if destination_table_exists is False else list(existing), sync_mode,
+        destination_config=destination_config, destination_table=destination_table,
+    )
 
     # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
     try:
@@ -487,21 +498,17 @@ def run_file_preflight(
             # contract the remediation for a grant the role does not have.
             from services.preflight_sample import source_read_is_privilege_denial
 
-            if source_read_is_privilege_denial(sample_unavailable_reason):
-                source_error = (
-                    "SELECT was denied on this table. Columns visible in the catalog "
-                    "are not a readable source. Grant SELECT to the connector role, "
-                    f"then re-validate. ({sample_unavailable_reason})"
-                )
-            elif engine_sample.read_failed:
+            if engine_sample.read_failed or source_read_is_privilege_denial(sample_unavailable_reason):
                 # QA MX3-22: G1 said "Source readable — N columns" beside a
-                # reader that had just raised. Catalog metadata is not a
-                # readable source; the probe failure is the G1 finding.
-                source_error = (
-                    "The source catalog lists this table but Execute's reader "
-                    "could not read rows from it. Fix the source read (connection, "
-                    f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
-                )
+                # reader that had just raised. The classified read failure is
+                # the G1 finding (ERR-32: it no longer claims the catalog lists
+                # the table); dependent gates wait on it instead of repeating
+                # it (ERR-31).
+                from services.error_taxonomy import classify as _classify
+
+                _named = _classify(sample_unavailable_reason, side="source", phase="read", fallback=False)
+                source_error = _named.text if _named is not None else sample_unavailable_reason
+                sample_unavailable_reason = "not run: waiting on Source (G1)"
     # A measured COUNT(*) of 0 is the population. Requiring a sample row
     # blocked an empty table whose catalog count was already 0 (R8-005).
     # A failed read still blocks — a count of 0 does not excuse a grant error.
@@ -1087,6 +1094,11 @@ def run_file_preflight(
         except Exception as fit_exc:
             pre_gate_fit_error = str(fit_exc)[:400]
             logger.warning("pre-gate population fit scan failed: %s", fit_exc, exc_info=fit_exc)
+        if source_error and pre_gate_fit_error and getattr(pre_gate_fit_report, "probe_error", ""):
+            # ERR-31: G1 already names this read failure; the fit gate waits on it.
+            from dataclasses import replace as _dc_replace
+
+            pre_gate_fit_report = _dc_replace(pre_gate_fit_report, probe_error="not run: waiting on Source (G1)")
     from services.population_fit_narrowing import proven_width_narrowings
 
     proven_string_narrowings = proven_width_narrowings(
@@ -1507,6 +1519,23 @@ def run_file_preflight(
     # CREATE UNIQUE INDEX at run time — undisclosed DDL that fails raw on
     # duplicates. Inspect, count duplicates, disclose the DDL, require approval.
     upsert_ddl_gate: dict[str, Any] | None = None
+    # skip_duplicates into a writer that cannot keep a stored key would upsert.
+    from services.duplicate_policy import dedupe_skip_validate_gate
+
+    dup_dest_gate = (
+        dedupe_skip_validate_gate(
+            dest_kind,
+            connection_string=str((destination_config or {}).get("connection_string") or ""),
+        )
+        if _plan_duplicate_policy(source_config, destination_config) == "dedupe_skip"
+        else None
+    )
+    from services.duplicate_policy import keyed_append_cursor_gate
+
+    keyed_append_gate = keyed_append_cursor_gate(
+        dest_kind, sync_mode=sync_mode, cursor_column=read_scope.cursor_column or "",
+        duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
+    )
     try:
         from services.sync_cursor import (
             normalize_sync_mode as _nsm,
@@ -1865,8 +1894,11 @@ def run_file_preflight(
             column_types,
             authoritative=source_types_are_authoritative(source_kind, source_format),
         )
+        from services.conversion_contract import bind_stream_maps
+
+        bound_maps = bind_stream_maps(mappings, stream_contracts, dest_db=dest_for_ddl)  # F1c
         decision_art = build_artifact_from_mappings(
-            list(mappings or []),
+            bound_maps,
             dest_db=dest_for_ddl,
             source_db=src_engine,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
@@ -1911,7 +1943,7 @@ def run_file_preflight(
         proof_bundle = {
             **proof_bundle,
             "ddl_identity": ddl_identity_report(
-                list(mappings or []),
+                bound_maps,
                 dest_db=dest_for_ddl,
             ),
             "decision_artifact": art_dict,
@@ -2014,9 +2046,9 @@ def run_file_preflight(
 
     # D243: execute refuses a pre-load recipe on a route that merges against
     # stored history. Preflight must refuse the same recipe, not pass it green.
-    from services.multi_stream_plan import history_shape_route_gate
+    from services.source_filter_gate import route_request_gate  # + source_filter (audit H2)
 
-    shape_route_gate = history_shape_route_gate(shape_recipe, sync_mode)
+    shape_route_gate = route_request_gate(shape_recipe, sync_mode, source_filter)
     if shape_route_gate:
         blockers.append({k: shape_route_gate[k] for k in ("id", "message")}
                         | {"details": dict(shape_route_gate["details"])})
@@ -2183,13 +2215,18 @@ def run_file_preflight(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
     upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
+    upsert_ddl_blocked = upsert_ddl_blocked or dup_dest_gate is not None
     enriched_blockers.extend(
-        blockers_from_gates((create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"))
+        blockers_from_gates(
+            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None)
+        )
     )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([dup_dest_gate] if dup_dest_gate else [])
+        + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
@@ -2460,6 +2497,12 @@ def run_file_preflight(
     if scan_method:
         code_crosswalk["scan_method"] = scan_method
     out["code_crosswalk"] = code_crosswalk
+    from services.run_clock import run_timestamp_target_gate  # a run start needs a zone
+
+    run_ts_gate = run_timestamp_target_gate(shape_recipe, mappings, destination_column_types)
+    if run_ts_gate:
+        contract_gates = [*contract_gates, run_ts_gate]
+        contract_blockers = [*contract_blockers, {k: run_ts_gate[k] for k in ("id", "message", "details")}]
     contract_gates = [*contract_gates, crosswalk_gate]
     if crosswalk_gate.get("status") == "block":
         contract_blockers = [

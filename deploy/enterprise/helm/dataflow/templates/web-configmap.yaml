@@ -1,0 +1,157 @@
+{{ if .Values.web.enabled -}}
+# The server block is deploy/nginx.conf with the listen port and the API
+# upstream templated (tests/test_helm_chart_static.py fails when they drift).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dataflow.fullname" . }}-web-nginx
+  labels:
+    app.kubernetes.io/component: web
+    {{- include "dataflow.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    # Keep the scheme a TLS-terminating load balancer saw; $scheme when nginx is the edge.
+    map $http_x_forwarded_proto $dw_forwarded_proto {
+        default $http_x_forwarded_proto;
+        ""      $scheme;
+    }
+
+    server {
+        listen {{ .Values.web.containerPort }};
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Browser hardening for the SPA shell and its assets (audit M-1). Applied in
+        # the SPA locations below, not server-wide: /api/ responses carry the API's
+        # own policy, and nginx stops inheriting add_header in any location that
+        # sets one of its own, so each SPA location repeats the set.
+        #
+        # script-src allows no inline script except by hash. The two hashes are the
+        # theme-paint script in apps/web/index.html and the one-line API-base script
+        # deploy/start-nginx.sh writes into it (Railway image); tests/test_audit_m1_spa_security_headers.py
+        # recomputes both, so editing either script fails the build until the hash
+        # here is updated. No 'unsafe-eval'. challenges.cloudflare.com is the signup
+        # Turnstile widget; youtube-nocookie / i.ytimg.com are the marketing videos.
+        set $dw_csp "default-src 'self'; script-src 'self' 'sha256-w2Abo+hIRz3RYBvVq/mAEENRH7y/xHyXeWKBJ15dFa0=' 'sha256-zzHFmAG2tczlGhNOz+fUFb5IbhiIpkrLqE3PUFIOfHo=' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com; font-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://challenges.cloudflare.com; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+        # Baseline security headers (a TLS-terminating proxy upstream can add HSTS).
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+        location /health {
+            access_log off;
+            return 200 'ok';
+            add_header Content-Type text/plain;
+        }
+
+        location /api/ {
+            proxy_pass http://{{ include "dataflow.fullname" . }}-api:{{ .Values.api.service.port }}/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            # Appends $remote_addr: the API reads hops[-N] with
+            # DATAWRAP_TRUSTED_PROXY_COUNT=1 when this nginx is the edge (add one per
+            # load balancer in front). See docs/DEPLOYMENT.md.
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_buffer_size 128k;
+            proxy_buffers 32 256k;
+            proxy_busy_buffers_size 512k;
+            client_max_body_size 256m;
+            # Default 8k/16k spills POST /preflight/explain to client_temp (warn, not 413).
+            client_body_buffer_size 2m;
+            # API clients parse JSON: nginx's own 502/504 must be JSON too.
+            error_page 502 503 504 = @api_unavailable;
+        }
+
+        # /api without a trailing path: JSON 404, never the SPA shell (QA r12 Mongo D11).
+        location = /api {
+            default_type application/json;
+            return 404 '{"detail":"Not Found"}';
+        }
+
+        # MCP OAuth discovery (RFC 9728) lives at the API root. MCP clients fetch it
+        # from this origin after a 401 from /api/v1/mcp; the SPA catch-all used to
+        # answer index.html ("Unexpected token '<' <!DOCTYPE"). QA r12 Mongo D11.
+        location ^~ /.well-known/oauth-protected-resource {
+            proxy_pass http://{{ include "dataflow.fullname" . }}-api:{{ .Values.api.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 30s;
+            error_page 502 503 504 = @api_unavailable;
+        }
+
+        # Other discovery documents: a shipped static file, else JSON 404.
+        location ^~ /.well-known/ {
+            try_files $uri @json_not_found;
+        }
+
+        location @json_not_found {
+            default_type application/json;
+            return 404 '{"detail":"Not Found"}';
+        }
+
+        # A non-GET outside /api/ (QA: MCP client "Invalid OAuth error response:
+        # Unexpected token '<'"). After a 401 from /api/v1/mcp with no OAuth server
+        # advertised, an MCP client POSTs to /register or /token on this origin; a
+        # mistyped MCP URL (/mcp) is a POST here too. nginx answered its own HTML
+        # 405 page. Answer an OAuth-shaped JSON error that names the endpoint.
+        location @json_wrong_method {
+            default_type application/json;
+            return 404 '{"error":"invalid_request","error_description":"No API route here: only GET is served outside /api/. The MCP endpoint is /api/v1/mcp on this origin; authenticate with the header Authorization: Bearer <workspace API key>. A 401 there means the key was not accepted (wrong, revoked, or its creator is no longer an active member).","detail":"Not Found"}';
+        }
+
+        location @api_unavailable {
+            default_type application/json;
+            return 502 '{"detail":"The Datawrap API is unreachable from the web service."}';
+        }
+
+        location /health-api {
+            proxy_pass http://{{ include "dataflow.fullname" . }}-api:{{ .Values.api.service.port }}/health;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            # Health must fail fast when Validate occupies a hung worker.
+            # Do not inherit the 300s /api/ transfer timeout.
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 8s;
+            proxy_send_timeout 8s;
+        }
+
+        location /assets/ {
+            add_header Content-Security-Policy $dw_csp always;
+            add_header X-Frame-Options "DENY" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+            try_files $uri =404;
+        }
+
+        location / {
+            error_page 418 = @json_wrong_method;
+            if ($request_method !~ ^(GET|HEAD)$) {
+                return 418;
+            }
+            add_header Content-Security-Policy $dw_csp always;
+            add_header X-Frame-Options "DENY" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+            add_header Cache-Control "no-cache" always;
+            try_files $uri $uri/ /index.html;
+        }
+    }
+{{- end }}

@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ApiError, fetchEffectiveIdentity, fetchWorkspaces, type EffectiveIdentity } from "./api";
-import { refusalSentence } from "./permissionCopy";
+import { refusalPermissionAttrs, refusalSentence } from "./permissionCopy";
 import {
   WORKSPACE_CHANGED_EVENT,
   clearActiveWorkspaceId,
@@ -151,10 +151,18 @@ export function PermissionsProvider({
  *
  * ``reason`` is empty when allowed, so it can be passed straight to ``title``.
  */
-export function useWriteGate(permission: PermissionName, action?: string): { allowed: boolean; reason: string } {
+export function useWriteGate(
+  permission: PermissionName,
+  action?: string,
+): { allowed: boolean; reason: string; attrs: { "data-required-permission"?: string } } {
   const { can, role } = usePermissions();
   const allowed = can(permission);
-  return { allowed, reason: allowed ? "" : refusalSentence(permission, role, action) };
+  return {
+    allowed,
+    reason: allowed ? "" : refusalSentence(permission, role, action),
+    // UX-22: the permission id for developer details — spread onto the control.
+    attrs: allowed ? {} : refusalPermissionAttrs(permission),
+  };
 }
 
 export function usePermissions(): PermissionsValue {

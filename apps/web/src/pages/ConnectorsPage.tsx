@@ -15,7 +15,7 @@ import { LoadingBlock } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import {
-  connectorLooksHealthy,
+  connectorPassedProbe,
   connectorNeedsAttention,
   statusFromLastTest,
 } from "../lib/connectorHealth";
@@ -131,7 +131,7 @@ export function ConnectorsPage({
       const statusOk = statusFilter === "all"
         || (statusFilter === "error"
           ? connectorNeedsAttention(c)
-          : connectorLooksHealthy(c));
+          : connectorPassedProbe(c));
       if (!statusOk) return false;
       if (!q) return true;
       return [c.name, c.type, c.host, c.database]
@@ -139,7 +139,8 @@ export function ConnectorsPage({
         .some((value) => String(value).toLowerCase().includes(q));
     });
   }, [connectors, query, statusFilter]);
-  const healthyCount = connectors.filter((c) => connectorLooksHealthy(c)).length;
+  // "Healthy" counts connections whose last probe passed; never-tested ones are not healthy.
+  const healthyCount = connectors.filter((c) => connectorPassedProbe(c)).length;
   const errorCount = connectors.filter((c) => connectorNeedsAttention(c)).length;
   const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? null;
   const workbench = useMemo(
@@ -243,7 +244,7 @@ export function ConnectorsPage({
         title: "Driver not installed here",
         message:
           item.environment_gap_reason ||
-          `${item.name} is Certified but its driver package is not loadable on this host.`,
+          `${item.name}'s driver package is not loadable on this host.`,
         tone: "warning",
       });
     } else if (item.connect_only) {

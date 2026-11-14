@@ -10,6 +10,7 @@
 import { classifyGate8Status, presentMultiStreamGate8 } from "../components/transfer/gate8Status";
 import { formatJobRowMetric, destMetricCompact } from "./conservationLedger";
 import { connectorDisplayName } from "./connectorTypes";
+import { delimitedCell } from "./csvSafety";
 import { formatJobRoute, isRestoredEndpointTitle } from "./jobEvidence";
 import { parseServerTimestampMs } from "./jobTheaterProgress";
 import { reconcileBarPercent } from "./progressRing";
@@ -447,11 +448,12 @@ export function formatJobStarted(iso: string | undefined, now = new Date()): str
 
 // ── CSV export of the current page ────────────────────────────────────────
 
-/** RFC 4180 quoting, and a formula-looking cell is defused for spreadsheet apps. */
+/**
+ * RFC 4180 quoting, and a formula-looking cell is defused for spreadsheet apps —
+ * the API's export rule (csvSafety): numerals such as `-2` stay numbers.
+ */
 export function csvCell(value: unknown): string {
-  let text = value == null ? "" : String(value);
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return delimitedCell(value, { formulaProtection: true });
 }
 
 export const JOBS_CSV_HEADER = [

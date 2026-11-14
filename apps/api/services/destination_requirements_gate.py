@@ -1,5 +1,9 @@
 """Gate G14 — a required destination column nothing fills must block at Validate.
 
+It also blocks the opposite mistake: a mapping that writes a column the
+destination computes itself (a generated column, or a GENERATED ALWAYS
+identity). Those reject any written value, so the mapping fails at row 1.
+
 A destination column that is ``NOT NULL``, has no default, and is neither an
 identity nor a generated column has exactly one filler: a mapping. When none
 exists the write is already doomed, and the operator used to learn that from
@@ -55,6 +59,45 @@ def unfilled_required_columns(
     ]
 
 
+def generated_targets(
+    *,
+    generated_columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Mapping targets the destination computes itself (generated / GENERATED ALWAYS).
+
+    The engine rejects a value for such a column (PostgreSQL: "cannot insert a
+    non-DEFAULT value into column"), so a mapping onto one fails the write.
+    """
+    gen = _lower_set(generated_columns)
+    if not gen:
+        return []
+    return [
+        str(m.get("target"))
+        for m in write_mappings(mappings)
+        if str(m.get("target") or "").strip().lower() in gen
+    ]
+
+
+def _generated_target_gate(written: list[str]) -> dict[str, Any]:
+    named = ", ".join(written[:_NAMED_LIMIT])
+    return {
+        "id": GATE_ID,
+        "status": "block",
+        "message": (
+            f"{len(written)} mapping(s) write a column the destination generates itself: "
+            f"{named} — a generated or GENERATED ALWAYS column cannot be written. Unmap it "
+            "or pick another destination column."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "generated_targets": written,
+            "rule_id": f"{GATE_ID}.generated_target",
+            "remediation_kind": "review_mappings",
+        },
+    }
+
+
 def _nullability_covers_dest(
     column_nullability: dict[str, bool] | None,
     dest_columns: list[str] | None,
@@ -86,6 +129,13 @@ def build_destination_requirements_gate(
     """
     if destination_table_exists is not True or dest_recreated:
         return None
+
+    written_generated = generated_targets(
+        generated_columns=generated_columns, mappings=mappings
+    )
+    if written_generated:
+        # Independent of nullability: the generated set is its own reading.
+        return _generated_target_gate(written_generated)
 
     if not (column_nullability or {}):
         # Unmeasured ≠ proven. We could not read the destination's required-column

@@ -234,10 +234,22 @@ class ChangeBatch:
     """Rows refused before dest write (e.g. unparsed Oracle SQL_REDO)."""
     rejected: list[dict[str, Any]] = field(default_factory=list)
     lookup_columns: dict[str, list[str]] = field(default_factory=dict)
+    """Deletes whose key could not be resolved (an unkeyed table). They cannot be
+    applied by key, so they are parked with their row image and audited
+    (``services.cdc_unkeyed_delete``) instead of stopping the stream.
+    """
+    unkeyed_deletes: list[dict[str, Any]] = field(default_factory=list)
+    """The source table was truncated before the changes in this batch (DATA-1)."""
+    truncated: bool = False
 
     @property
     def total_changes(self) -> int:
-        return len(self.inserts) + len(self.updates) + len(self.deletes)
+        # A parked delete is a change event: a batch holding only parked
+        # deletes must not read as a position-only heartbeat and be skipped.
+        return (
+            len(self.inserts) + len(self.updates) + len(self.deletes)
+            + len(self.unkeyed_deletes or []) + (1 if self.truncated else 0)
+        )
 
 
 def diff_by_primary_key(

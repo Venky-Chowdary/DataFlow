@@ -15,6 +15,7 @@ from services.acknowledgment_contract import (
     resolve_acknowledgments,
 )
 from services.duplicate_policy import with_duplicate_route_option
+from services.kafka_field_names import with_kafka_name_options
 from services.fk_parent_preflight import with_fk_route_option
 from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import (
@@ -32,6 +33,7 @@ from ..services.preflight_service import (
     run_transfer_policy_gates,
 )
 from ..transfer.connector_registry import run_probe
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/preflight", tags=["Preflight"])
 
@@ -157,6 +159,8 @@ class PreflightRequest(PolicyFieldsModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # The run must be reversible: Validate adds g24_reversibility, as plan preflight and Execute do.
+    require_reversibility: bool = False
     # Execute-applied sort + cap. Validate names the cap (G17); type-fit stays uncapped.
     priority_column: str = ""
     priority_direction: str = "desc"
@@ -192,6 +196,14 @@ class PreflightRequest(PolicyFieldsModel):
             self.source_config = cfg
             setattr(self, attr, key)
         return self
+
+    @field_validator("dest_extra")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 def _schema_default(db_type: str) -> str:
@@ -237,6 +249,50 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
     return ok, msg
 
 
+def _validate_reversibility(body: Any, source_types: dict[str, str], dest_types: dict[str, str],
+                            result: dict[str, Any]) -> list[dict[str, Any]]:
+    """``g24_reversibility`` for a direct Validate that requires reversibility (else ``[]``).
+
+    The same report Execute builds (``services.reversibility_sources``): the
+    Studio's sample checks conditional columns, which Execute then enforces on
+    every row. ``row_count`` is the caller's figure, never a measured one, so
+    the sample is not said to cover the table (review 3, M4). The report is
+    also returned as ``reversibility``.
+    """
+    if not getattr(body, "require_reversibility", False):
+        return []
+    from types import SimpleNamespace
+
+    from services.reversibility import AT_EXECUTE
+    from services.reversibility_sources import preflight_gate, request_report
+
+    mappings = [m.model_dump() if hasattr(m, "model_dump") else dict(m) for m in body.mappings or []]
+    request = SimpleNamespace(
+        source={**dict(body.source_config or {}), "format": body.source_type or "",
+                "table": body.source_table or body.source_collection or ""},
+        destination={"kind": body.dest_kind or "", "format": body.dest_type or "",
+                     "table": body.dest_table or body.dest_collection or ""},
+        mappings=mappings, shape_recipe=body.shape_recipe, limit=int(body.row_limit or 0),
+        stream_contracts=list(body.stream_contracts or []), source_filter=None, job_id="",
+        read_options=dict((body.source_config or {}).get("read_options") or {}),
+    )
+    report = request_report(request, mappings, dict(source_types or body.column_types or {}),
+                            {**dict(dest_types or {}), **dict(body.destination_column_types or {})},
+                            sample_rows=[r for r in body.sample_rows or [] if isinstance(r, dict)],
+                            population_rows=None, enforce=AT_EXECUTE)
+    result["reversibility"] = report
+    return [preflight_gate(report)]
+
+
+def _with_reference(result: Any) -> Any:
+    """A blocked Validate carries a support reference (ERR-40)."""
+    if isinstance(result, dict) and result.get("blockers") and not result.get("reference"):
+        from services.error_taxonomy import new_reference
+
+        result["reference"] = new_reference()
+    return result
+
+
 @router.post("/run")
 async def run_preflight(body: PreflightRequest, http_request: Request):
     """
@@ -270,7 +326,9 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
         )
 
         with deadline_scope(seconds, progress), collect_budget_findings() as found:
-            return attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+            result = _with_reference(attach_budget_findings(_run_preflight_blocking(body, http_request), found))
+        _record_validate_approval(body, result)
+        return result
 
     work = asyncio.ensure_future(run_in_threadpool(_bounded))
     try:
@@ -278,9 +336,25 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
             asyncio.shield(work), timeout=seconds + ANSWER_RESERVE_SECONDS
         )
     except asyncio.TimeoutError:
-        return _preflight_deadline_refusal(
-            body, deadline_timeout_message("Preflight", seconds, progress), seconds
+        # It records the refused run in the shared store: off the event loop.
+        return await run_in_threadpool(
+            _preflight_deadline_refusal, body, deadline_timeout_message("Preflight", seconds, progress), seconds
         )
+
+
+def _record_validate_approval(body: PreflightRequest, result: Any) -> None:
+    """SEC-APPROVAL-1: record what this Validate approved (destination included)."""
+    if not isinstance(result, dict):
+        return
+    from services.validate_approvals import binding_of, record_validate
+    from services.workspace_filter import current_workspace_stamp
+
+    record_validate(
+        result,
+        workspace_id=current_workspace_stamp(for_write=False) or "",
+        binding=binding_of({}, body.stream_contracts, table=str(body.dest_table or ""),
+                           connector_id=str(body.connector_id or "")),
+    )
 
 
 def _preflight_deadline_refusal(body: PreflightRequest, message: str, seconds: float) -> dict:
@@ -630,12 +704,12 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             destination_indexes_meta=dest_meta.get("indexes_meta"),
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_check_constraints=dest_meta.get("check_constraints") or [],
-            destination_config=with_duplicate_route_option(
+            destination_config=with_kafka_name_options(with_duplicate_route_option(
                 with_fk_route_option(
                     dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
                 ),
                 dict(body.dest_extra or {}),
-            ),
+            ), dict(body.dest_extra or {})),
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
             number_locale=body.number_locale,
@@ -743,9 +817,10 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
                 source_database=str(src_cfg.get("database") or ""),
                 source_config=src_cfg or None,
             )
+    reversibility_gates = _validate_reversibility(body, source_column_types, dest_column_types, result)
     gated = apply_policy_gates(
         result,
-        run_transfer_policy_gates(
+        reversibility_gates + run_transfer_policy_gates(
             sync_mode=body.sync_mode,
             schema_policy=body.schema_policy,
             validation_mode=body.validation_mode,
@@ -799,6 +874,9 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
                 "format": body.dest_type or "",
                 **dict(body.dest_extra or {}),
             },
+            # G11: an existing table's columns / collection's fields.
+            destination_columns=list((dest_meta.get("column_types") or {}).keys()),
+            destination_config=(dest_meta.get("_probe_cfg") or None) if dest_meta.get("connected") else None,
         ),
         validation_mode=body.validation_mode,
     )
@@ -832,7 +910,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
 
 
 @router.get("/runs")
-async def list_preflight_runs(limit: int = 20):
+def list_preflight_runs(limit: int = 20):
     """List recent validation runs (IDs Datawrap Pilot / Jobs can reference)."""
     from services.preflight_run_store import list_preflight_runs as _list
 
@@ -840,7 +918,7 @@ async def list_preflight_runs(limit: int = 20):
 
 
 @router.get("/runs/{run_id}")
-async def get_preflight_run(run_id: str):
+def get_preflight_run(run_id: str):
     """Fetch a stored validation run by ID for Pilot triage and audit."""
     from services.preflight_run_store import get_preflight_run as _get
 
@@ -865,7 +943,7 @@ class ExplainRequest(PolicyFieldsModel):
 
 
 @router.post("/explain")
-async def explain_preflight(body: ExplainRequest):
+def explain_preflight(body: ExplainRequest):
     """AI-assisted 'explain & suggest fix' for a preflight/validation result.
 
     Returns a structured, actionable explanation — what failed, which
@@ -893,7 +971,7 @@ async def explain_preflight(body: ExplainRequest):
             use_llm=body.use_llm,
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.explain_preflight.failed", public_message="Couldn't explain the validation result.", status_code=500)
 
 
 class SchemaDriftRequest(PolicyFieldsModel):
@@ -916,7 +994,7 @@ async def classify_schema_drift(body: SchemaDriftRequest):
             schema_policy=body.schema_policy or "manual_review",
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.classify_schema_drift.failed", public_message="Couldn't classify the schema change.", status_code=500)
 
 
 class CellPreviewRequest(BaseModel):
@@ -1013,4 +1091,4 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.preview_quarantine_cells.failed", public_message="Couldn't preview quarantined cells.", status_code=500)

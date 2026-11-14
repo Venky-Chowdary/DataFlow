@@ -50,6 +50,129 @@ def export_append_refusal(fmt: str, path: str) -> str:
     )
 
 
+def _is_key_merge(sync_mode: str) -> bool:
+    from services.sync_cursor import normalize_sync_mode, resolve_effective_sync_mode
+
+    mode = normalize_sync_mode(resolve_effective_sync_mode(sync_mode), default="")
+    return mode in {"incremental_deduped", "upsert"}
+
+
+def export_key_columns(stream_contracts: Any, mappings: Any) -> list[str]:
+    """The export's key, in the column names the export file carries."""
+    from services.sync_cursor import map_source_to_target, resolve_sync_contract
+
+    contract = resolve_sync_contract(list(stream_contracts or []))
+    if contract is None or not getattr(contract, "primary_key", None):
+        return []
+    return [
+        map_source_to_target(col, list(mappings or [])) or col
+        for col in contract.primary_key_columns()
+    ]
+
+
+def merge_export_by_key(path: str, export_bytes: bytes, key_cols: list[str]) -> tuple[bytes, dict[str, int]]:
+    """The existing export with this run's rows merged in by key (CLM-1).
+
+    The same parse → last-wins merge → encode the object-store destinations
+    use (``connectors.object_store_incremental``). A file it can't parse is
+    refused before anything is written, so the operator's file stays as is.
+    """
+    from connectors.object_store_incremental import (
+        ObjectMergeRefused,
+        _export_from_bytes,
+        _parse_records,
+        _row_identity,
+        merge_object_bytes,
+    )
+
+    name = os.path.basename(path)
+    if not key_cols:
+        raise ValueError(
+            f"Incremental deduped into the existing export {name} needs a primary key to "
+            "merge by; the file was not changed. Set the stream's primary key, or choose append."
+        )
+    with open(path, "rb") as fh:
+        existing = fh.read()
+    spill = 64 * 1024 * 1024
+    try:
+        merged = merge_object_bytes(
+            key=name, existing=existing,
+            new_export=_export_from_bytes(export_bytes, "application/octet-stream", spill),
+            target_cols=[], dest_types=None, conflict_columns=key_cols,
+            strategy="key", spill_max_size=spill,
+        )
+    except ObjectMergeRefused as exc:
+        raise ValueError(
+            f"The export {name} couldn't be merged by key ({exc}); the file was not changed. "
+            "Export to a new file, or choose overwrite."
+        ) from exc
+    prior = {_row_identity(r, key_cols) for r in _parse_records(name, existing)}
+    incoming = {_row_identity(r, key_cols) for r in _parse_records(name, export_bytes)}
+    prior.discard(None)
+    incoming.discard(None)
+    # The Gate-8 key census: new keys grow the file, stored keys are replaced.
+    census = {"unique_batch_keys": len(incoming), "dest_preexisting": len(prior & incoming)}
+    try:
+        return merged.read_all(), census
+    finally:
+        merged.close()
+
+
+def _write_failed(path: str, exc: OSError) -> Exception:
+    import errno
+
+    from services.data_errors import DataPathError
+
+    if getattr(exc, "errno", None) in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG):
+        why = "the server's disk is full or the file is over the size this server allows"
+        action = "Free space (or raise the limit), then run again."
+    else:
+        why = "the server could not write the file"
+        action = "Check the export folder's permissions, then run again."
+    return DataPathError(
+        f"The export file {os.path.basename(path)} couldn't be written: {why}. "
+        f"No partial file was kept: the file is as it was before this run. {action}",
+        code="EXPORT_WRITE_FAILED",
+        details={"rows_committed": 0, "errno": getattr(exc, "errno", None)},
+    )
+
+
+def _replace_file(path: str, data: bytes) -> None:
+    """Write ``data`` beside ``path`` and swap it in: a failed write leaves the old file.
+
+    REL-3: a direct ``wb`` write that hit a full disk left a truncated export
+    (cut mid-row) at the download name.
+    """
+    tmp = f"{path}.w2tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise _write_failed(path, exc) from exc
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _append_file(path: str, payload: bytes) -> None:
+    """Append ``payload``; a failed append is cut back to the file's prior size (REL-3)."""
+    size = os.path.getsize(path)
+    try:
+        with open(path, "ab") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        try:
+            os.truncate(path, size)
+        except OSError:
+            logging.getLogger(__name__).error("export %s could not be cut back after a failed append", path)
+        raise _write_failed(path, exc) from exc
+
+
 def land_export_bytes(
     destination: Any,
     export_bytes: bytes,
@@ -57,6 +180,8 @@ def land_export_bytes(
     job_id: str,
     sync_mode: str,
     export_name: str,
+    stream_contracts: Any = None,
+    mappings: Any = None,
 ) -> dict[str, Any]:
     """Write an export to disk and describe where it landed.
 
@@ -88,6 +213,8 @@ def land_export_bytes(
     fmt = str(getattr(destination, "format", "") or "")
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
+    appending, rows_before = False, None
+    key_census: dict[str, int] = {}
     legacy_note = ""
     # The export lands in the folder of the job's workspace (audit H-2): two
     # workspaces naming the same ``output_path`` never share a file.
@@ -96,8 +223,11 @@ def land_export_bytes(
         target = resolve_export_path(configured, default_ext=ext, workspace_id=workspace_id)
         export_path = str(target)
         target.parent.mkdir(parents=True, exist_ok=True)
+        from services.exit_job_guard import sealed_export_name
+
+        sealed = sealed_export_name(target.name)
         append_mode = is_append_sync(resolve_effective_sync_mode(sync_mode))
-        if append_mode and not os.path.exists(export_path):
+        if append_mode and not sealed and not os.path.exists(export_path):
             # Review M3: the file this export has been appending to may still be
             # in the flat folder from before workspace folders. Continue it when
             # this workspace provably owns it; otherwise say a new file started.
@@ -105,28 +235,75 @@ def land_export_bytes(
 
             legacy_note = adopt_flat_export(target, workspace_id)
         appending = append_mode and os.path.exists(export_path)
-        if appending:
+        if sealed:
+            # A rehearsal's extract is sealed by its SHA-256: created once, never appended to or replaced.
+            try:
+                with open(export_path, "xb") as fh:
+                    fh.write(export_bytes)
+            except FileExistsError as exc:
+                raise ValueError(
+                    f"{target.name} is the sealed extract of an exit rehearsal and is never overwritten. "
+                    "Start a new rehearsal instead."
+                ) from exc
+        elif appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
-            with open(export_path, "ab") as fh:
-                fh.write(payload)
+            rows_before = existing_record_count(fmt or "csv", export_path)
+            _append_file(export_path, payload)
+        elif _is_key_merge(sync_mode) and os.path.exists(export_path):
+            # CLM-1: "wb" here dropped every earlier row the source no longer sent.
+            merged, key_census = merge_export_by_key(
+                export_path, export_bytes, export_key_columns(stream_contracts, mappings)
+            )
+            rows_before = existing_record_count(fmt or "csv", export_path)
+            _replace_file(export_path, merged)
+            appending = True
         else:
-            with open(export_path, "wb") as fh:
-                fh.write(export_bytes)
+            _replace_file(export_path, export_bytes)
         name = target.name
     else:
         name = f"export_{job_id}.{ext}"
         export_path = str(generated_export_path(name, workspace_id=workspace_id))
-        with open(export_path, "wb") as fh:
-            fh.write(export_bytes)
+        _replace_file(export_path, export_bytes)
+    from pathlib import Path
+
+    from services.transfer_journal import _sha256_file
+
+    sha256, size = _sha256_file(Path(export_path)), os.path.getsize(export_path)
     landed = {
         "filename": name,
         "path": export_path,
         "download_url": f"/api/v1/transfer/download/{name}",
+        # The bytes as written: a later read of the file is checked against these.
+        "sha256": sha256,
+        "size_bytes": size,
     }
+    if configured and appending and rows_before is not None:
+        from services.dest_precount import PRECOUNT_KEY
+
+        # The file's records before this run appended: the run's own rows are the delta (review 4, H-3).
+        landed[PRECOUNT_KEY] = rows_before
+        if key_census:
+            from services.row_conservation import CENSUS_KEY
+
+            landed[CENSUS_KEY] = key_census
     if legacy_note:
         logging.getLogger(__name__).warning("Export %s for job %s: %s", name, job_id, legacy_note)
         landed["legacy_flat_export"] = legacy_note
     return landed
+
+
+def existing_record_count(fmt: str, path: str) -> int | None:
+    """The records an existing export holds (``None``: they could not be counted, so nothing is claimed)."""
+    from services.dest_precount import _iter_artifact_records
+
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for _ in _iter_artifact_records(fh, name=os.path.basename(path),
+                                                         fmt=normalize_export_format(fmt), written_here=True))
+    except Exception:  # noqa: BLE001 - an uncounted file leaves the append unproven, never proven
+        logging.getLogger(__name__).info("existing export %s could not be counted", os.path.basename(path),
+                                         exc_info=True)
+        return None
 
 
 def _first_line(data: bytes) -> bytes:
@@ -134,13 +311,98 @@ def _first_line(data: bytes) -> bytes:
     return data if idx < 0 else data[: idx + 1]
 
 
-def _existing_header(path: str) -> bytes:
+def _existing_head(path: str) -> bytes:
     with open(path, "rb") as fh:
-        return _first_line(fh.read(65536))
+        return fh.read(65536)
+
+
+def _existing_header(path: str) -> bytes:
+    return _first_line(_existing_head(path))
 
 
 def _strip_trailing_newline(data: bytes) -> bytes:
-    return data[:-1] if data.endswith(b"\n") else data
+    """A header line without its line ending, whichever it is (review 4, H-3: LF files from earlier builds)."""
+    return data.rstrip(b"\r\n")
+
+
+#: Field delimiter of each headered delimited format.
+_DELIMITERS = {"csv": b",", "tsv": b"\t"}
+
+
+def _fields(data: bytes, delimiter: bytes):
+    """Yield ``(raw, value, quoted, end, well_formed)`` per field of delimited ``data``.
+
+    ``end`` is the bytes that close the field: the delimiter, a record's line
+    ending (``\r\n`` or ``\n``) or ``b""`` at the end. A line break inside a
+    quoted value stays in the value. ``well_formed`` is false for a quoted
+    field whose closing quote is not followed by a delimiter or a line ending.
+    """
+    i, n = 0, len(data)
+    while i < n:
+        well_formed = True
+        if data[i:i + 1] == b'"':
+            j = i + 1
+            while j < n:
+                if data[j:j + 1] == b'"':
+                    if data[j + 1:j + 2] == b'"':
+                        j += 2
+                        continue
+                    break
+                j += 1
+            raw = data[i:j + 1]
+            value = data[i + 1:j].replace(b'""', b'"')
+            quoted, k = True, j + 1
+            while k < n and data[k:k + 1] not in (delimiter, b"\r", b"\n"):
+                well_formed = False
+                k += 1
+            raw = data[i:k]
+        else:
+            k = i
+            while k < n and data[k:k + 1] not in (delimiter, b"\n") and data[k:k + 2] != b"\r\n":
+                k += 1
+            raw = value = data[i:k]
+            quoted = False
+        if k >= n:
+            end = b""
+        elif data[k:k + 1] == delimiter:
+            end = delimiter
+        elif data[k:k + 2] == b"\r\n":
+            end = b"\r\n"
+        else:
+            end = data[k:k + 1]
+        yield raw, value, quoted, end, well_formed
+        i = k + len(end)
+
+
+_BOM = b"\xef\xbb\xbf"
+
+
+def _never_quotes(head: bytes, delimiter: bytes) -> bool:
+    """Whether an existing file shows it was written without quoting (a quote left bare inside a value)."""
+    for _raw, value, quoted, end, well_formed in _fields(head, delimiter):
+        if (not quoted and b'"' in value) or not well_formed:
+            return True
+        if quoted and not end:
+            return False  # the sample ends inside a quoted value: nothing more to read
+    return False
+
+
+def _in_existing_dialect(body: bytes, delimiter: bytes, eol: bytes, *, unquoted: bool) -> bytes:
+    """This run's rows (written CRLF and quoted) re-spelled in the existing file's line ending and quoting.
+
+    ``unquoted``: the existing file never quoted (an earlier build's TSV), so a
+    value quoted only for a quote or for being empty text is written bare as it
+    did; a value holding the delimiter or a line break stays quoted, or it
+    would not stay one cell.
+    """
+    out = bytearray()
+    for raw, value, quoted, end, _ok in _fields(body, delimiter):
+        if unquoted and quoted and not any(c in value for c in (delimiter, b"\r", b"\n")):
+            out += value
+        else:
+            out += raw
+        out += eol if end in (b"\r\n", b"\n") else end
+    return bytes(out)
 
 
 def append_payload(fmt: str, path: str, data: bytes) -> bytes:
@@ -154,10 +416,13 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
     if refusal:
         raise ValueError(refusal)
     body = data
+    separator = b"\n"
     if f in _HEADERED_FORMATS:
         new_header = _first_line(data)
-        old_header = _existing_header(path)
-        if _strip_trailing_newline(old_header) != _strip_trailing_newline(new_header):
+        head = _existing_head(path)
+        old_header = _first_line(head)
+        # A byte order mark (a file re-saved by Excel) is not part of the first column's name (review 5).
+        if _strip_trailing_newline(old_header.removeprefix(_BOM)) != _strip_trailing_newline(new_header):
             raise ValueError(
                 "Append refused: the existing export header "
                 f"({_strip_trailing_newline(old_header).decode('utf-8', 'replace')}) "
@@ -166,6 +431,18 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
                 "— appending would misalign every value."
             )
         body = data[len(new_header):]
+        delimiter = _DELIMITERS.get(f)
+        # The existing file's line ending; a header with none (a header-only file) takes this run's. The
+        # separator before the appended rows uses it too, so one file never mixes line endings (review 5).
+        source = old_header if old_header.endswith(b"\n") else new_header
+        separator = eol = b"\r\n" if source.endswith(b"\r\n") else b"\n"
+        if delimiter is not None and old_header.endswith(b"\n"):
+            # Append in the existing file's own line ending, and its quoting (review 4, H-3): an earlier build
+            # wrote a file-source export with LF, and never quoted a TSV. This build writes CRLF, so an LF TSV
+            # is that build's, whether or not its first bytes show a bare quote (review 5, M-4).
+            unquoted = f == "tsv" and (eol == b"\n" or _never_quotes(head[len(old_header):], delimiter))
+            if eol != b"\r\n" or unquoted:
+                body = _in_existing_dialect(body, delimiter, eol, unquoted=unquoted)
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         size = fh.tell()
@@ -174,4 +451,4 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
             needs_newline = fh.read(1) != b"\n"
         else:
             needs_newline = False
-    return (b"\n" + body) if needs_newline else body
+    return (separator + body) if needs_newline else body

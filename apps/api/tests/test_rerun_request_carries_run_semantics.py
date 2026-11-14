@@ -26,7 +26,11 @@ from src.transfer.models import (
 )
 
 #: Request fields that are per-attempt bookkeeping, not run semantics.
-_NOT_PERSISTED = {"source_content", "rerun_of"}
+#: ``_g11_adoption`` is the server's record of the legacy-column adoption it
+#: made in one run, from the live destination it read then. It is recomputed
+#: every run; a stored copy restored on a rerun could vouch for a Map that no
+#: longer matches the destination, so it is never persisted or restored.
+_NOT_PERSISTED = {"source_content", "rerun_of", "_g11_adoption"}
 
 
 def _request() -> TransferRequest:
@@ -63,3 +67,18 @@ def test_every_request_field_is_persisted_or_deliberately_not():
         if f.name not in stored and f.name not in _NOT_PERSISTED
     ]
     assert missing == [], f"fields a rerun would silently drop: {missing}"
+
+
+def test_a_rerun_never_restores_the_adoption_record(monkeypatch):
+    """A rebuilt request carries no adoption until target_name_legacy makes one."""
+    store = MemoryMongoDBService()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: store)
+    request = _request()
+    request._g11_adoption = {"dest": "sqlite", "live": ["t_cut"]}
+    job_id = UniversalTransferEngine()._create_pending_job(request)
+
+    stored = store.get_job(job_id)["transfer_request"]
+    assert "_g11_adoption" not in stored
+    stored = {**stored, "_g11_adoption": {"dest": "sqlite", "live": ["forged"]}}
+    rebuilt = transfer_request_from_dict(stored)
+    assert rebuilt._g11_adoption is None

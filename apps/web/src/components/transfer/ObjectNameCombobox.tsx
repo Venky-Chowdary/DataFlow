@@ -15,7 +15,15 @@ interface ObjectNameComboboxProps {
   objectNoun?: string;
   /** Destinations may create a missing name. Sources must pick an existing object. */
   allowCreate?: boolean;
+  /**
+   * Search the connector's whole catalog for the typed name (UX-9). ``options``
+   * is one bounded page; without this a table past it, or in another schema
+   * ("schema.table"), read as "No tables match".
+   */
+  searchCatalog?: (query: string) => Promise<string[]>;
 }
+
+const CATALOG_SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * Type-or-pick control for destination table/collection names.
@@ -33,6 +41,7 @@ export function ObjectNameCombobox({
   emptyHint,
   objectNoun = "table",
   allowCreate = true,
+  searchCatalog,
 }: ObjectNameComboboxProps) {
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -49,14 +58,46 @@ export function ObjectNameCombobox({
   } | null>(null);
 
   const draft = useMemo(() => objectNameDraft(value), [value]);
-  const filtered = useMemo(() => filterObjectNames(options, draft.query), [options, draft.query]);
-  const namesSettled = useMemo(() => multiObjectNamesSettled(value, options), [value, options]);
+  const [remote, setRemote] = useState<{ query: string; names: string[]; searching: boolean }>({
+    query: "",
+    names: [],
+    searching: false,
+  });
+  // Page names first, then whatever the catalog search found beyond the page.
+  const known = useMemo(() => {
+    if (!remote.names.length) return options;
+    const seen = new Set(options.map((n) => n.toLowerCase()));
+    return [...options, ...remote.names.filter((n) => !seen.has(n.toLowerCase()))];
+  }, [options, remote.names]);
+  const filtered = useMemo(() => filterObjectNames(known, draft.query), [known, draft.query]);
+  const namesSettled = useMemo(() => multiObjectNamesSettled(value, known), [value, known]);
 
   const exactMatch = useMemo(() => {
     const q = draft.query.toLowerCase();
     if (!q) return false;
-    return options.some((n) => n.toLowerCase() === q);
-  }, [options, draft.query]);
+    return known.some((n) => n.toLowerCase() === q);
+  }, [known, draft.query]);
+
+  useEffect(() => {
+    const q = draft.query;
+    if (!searchCatalog || !open || !q) return;
+    let cancelled = false;
+    setRemote((prev) => (prev.query === q ? prev : { query: q, names: prev.names, searching: true }));
+    const timer = window.setTimeout(() => {
+      searchCatalog(q)
+        .then((names) => {
+          if (!cancelled) setRemote({ query: q, names, searching: false });
+        })
+        .catch(() => {
+          if (!cancelled) setRemote((prev) => ({ ...prev, searching: false }));
+        });
+    }, CATALOG_SEARCH_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchCatalog, open, draft.query]);
+  const searchingCatalog = Boolean(searchCatalog) && remote.searching && remote.query === draft.query;
 
   const computeMenuBox = () => {
     const control = controlRef.current;
@@ -163,9 +204,13 @@ export function ObjectNameCombobox({
               <li className="df2-object-combobox-empty" role="presentation">
                 Loading {objectNoun}s…
               </li>
+            ) : filtered.length === 0 && !showCreateRow && searchingCatalog ? (
+              <li className="df2-object-combobox-empty" role="presentation">
+                Searching every {objectNoun} for “{draft.query}”…
+              </li>
             ) : filtered.length === 0 && !showCreateRow ? (
               <li className="df2-object-combobox-empty" role="presentation">
-                {options.length === 0
+                {known.length === 0
                   ? emptyHint || `No ${objectNoun}s discovered yet — type a name to create.`
                   : `No ${objectNoun}s match “${draft.query || value.trim()}”.`}
               </li>

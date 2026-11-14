@@ -25,6 +25,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from services.fingerprint_rules import FINGERPRINT_VERSION
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES
 from services.parity_errors import safe_error
 from services.parity_evidence import request_of, target_to_source
@@ -327,6 +328,13 @@ def _resync_request(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor
         f"Parity Studio fix {fix['id']}: re-sync {len(keys)} key(s) approved by {actor or 'operator'}."
     )
     req.idempotency_key = f"parity-{job_id}-{fix['id']}"
+    if getattr(req, "require_reversibility", False):
+        # The parent must be reversible; this child restores named keys of it. Its key filter is the
+        # repair itself, not a row change, so g24's row rule is waived for it (its columns are still
+        # analysed and enforced) and the waiver is stored on the request and audited (review 3, M5).
+        from services.reversibility_sources import PARITY_KEY_RESYNC
+
+        req.reversibility_row_rule_exemption = PARITY_KEY_RESYNC
     return req
 
 
@@ -341,6 +349,14 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
     from src.transfer.engine import get_transfer_engine
 
     fix_id = fix["id"]
+    from services.exit_job_guard import refusal as rehearsal_extract_refusal
+
+    refused = rehearsal_extract_refusal(job, "re-synced")
+    if refused:
+        # An exit rehearsal's extract is repaired by a new rehearsal, never by a child of the old job.
+        _repair_decision(job_id, fix, approve=True, actor=actor,
+                         apply_fn=lambda _a: {"applied": False, "error": refused})
+        return settle_fix(job_id, fix_id, ok=False, result=refused)
     try:
         req = _resync_request(job, job_id, fix, actor)
         child_id = get_transfer_engine()._create_pending_job(req)
@@ -360,6 +376,12 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
             record["result"] = f"Re-sync job {child_id} is running."
 
     update_state(job_id, link)
+    if getattr(req, "reversibility_row_rule_exemption", ""):
+        audit("job.parity.resync_row_rule_waived", job=job, job_id=job_id, actor=actor,
+              details={"fix_id": fix_id, "child_job_id": child_id, "keys": len(fix.get("_keys") or []),
+                       "exemption": req.reversibility_row_rule_exemption,
+                       "reason": "a key re-sync restores named keys; the reversibility row-change rule "
+                                 "does not apply to its key filter"})
     _repair_decision(job_id, fix, approve=True, actor=actor,
                      apply_fn=lambda _a: {"applied": False, "reason": "running", "child_job_id": child_id})
     try:
@@ -546,6 +568,7 @@ def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str, stale: bool =
             if table and keys and (after["evidence"]["reread"].get(table) or {}).get("status") == "ok":
                 resolved = set(state["resolved"].get(table) or []) | (set(keys) - still)
                 state["resolved"][table] = sorted(resolved)
+                state["resolved_fingerprint_version"] = FINGERPRINT_VERSION
             state["rounds"].append({
                 "n": len(state["rounds"]) + 1, "at": now_iso(),
                 "unexplained_before": int(record.get("_unexplained_before") or 0),

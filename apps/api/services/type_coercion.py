@@ -51,6 +51,8 @@ from services.type_system import (
     generated_always_overwrite_risk,
     geography_contract_would_collapse,
     identity_domain_would_invent,
+    char_count_into_oracle_bytes_would_truncate,
+    integer_decimal_digits_would_narrow,
     integer_width_would_narrow,
     interval_family_would_collapse,
     interval_precision_would_narrow,
@@ -156,6 +158,14 @@ def is_precision_collapse_coercion(
     ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+
+    # C3: what the token means on the engine that declared it (unsigned
+    # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
+    # numeric) — the bare token alone graded these pairs lossless.
+    if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
+        return True
+    source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display
@@ -836,6 +846,14 @@ def is_lossy_coercion(
                 proven=proven,
             )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+
+    # C3: what the token means on the engine that declared it (unsigned
+    # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
+    # numeric) — the bare token alone graded these pairs lossless.
+    if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
+        return True
+    source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display
@@ -924,6 +942,10 @@ def is_lossy_coercion(
             return True
         if oracle_char_byte_polarity_loss(source_type, target_type):
             return True
+        if char_count_into_oracle_bytes_would_truncate(
+            source_type, target_type, dest_db=dest_db
+        ):
+            return True
         if oracle_long_numeric_invent(source_type, target_type):
             return True
         if geography_contract_would_collapse(source_type, target_type):
@@ -1010,6 +1032,14 @@ def is_lossy_coercion(
     # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
     if nested_to_native_document_wire_preserved(
         source_type, target_type, dest_db=dest_db
+    ):
+        return False
+    # DATA-23: a list-shaped source whose elements JSON spells exactly.
+    from services.array_json_grade import list_lands_exactly_as_json
+
+    if list_lands_exactly_as_json(
+        source_type, target_type, dest_db=dest_db,
+        source_engine=active_source_engine(), population=population,
     ):
         return False
     # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
@@ -1122,6 +1152,12 @@ def is_lossy_coercion(
     if bitstring_pad_polarity_loss(source_type, target_type):
         return True
     if oracle_char_byte_polarity_loss(source_type, target_type):
+        return True
+    if char_count_into_oracle_bytes_would_truncate(
+        source_type, target_type, dest_db=dest_db
+    ):
+        return True
+    if integer_decimal_digits_would_narrow(source_type, target_type):
         return True
     if oracle_long_numeric_invent(source_type, target_type):
         return True

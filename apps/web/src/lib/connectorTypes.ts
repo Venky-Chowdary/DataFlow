@@ -1,5 +1,6 @@
 import { CONNECTOR_CATALOG } from "./types";
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
+import { setDestinationSyncModes } from "./transferConstants";
 
 /**
  * Offline form-routing mirror for catalog IDs → driver types.
@@ -83,6 +84,8 @@ export async function loadTransferLiveCatalog(
   _capsLoadPromise = (async () => {
     try {
       const caps = await fetchCaps();
+      // CLM-8: the sync-mode picker intersects with the server's per-destination list.
+      setDestinationSyncModes(caps.destination_sync_modes);
       const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
       const sources = (caps.source_databases as string[] | undefined) ?? [];
       const dbs = (caps.destination_databases as string[] | undefined) ?? [];

@@ -215,9 +215,10 @@ def _compliance_review_message(compliance: dict[str, Any]) -> str:
         "PII/compliance review required"
         + (f" — {listed}" if listed else "")
         + (f"; {reason}" if reason else "")
-        + f" (risk {float(compliance.get('risk_score') or 0.0):.2f}). Acknowledge with "
-        "pii_acknowledgement {approved_by, reason} (API: compliance_acknowledged + "
-        "acknowledgment_actor/acknowledgment_reason)."
+        + f" (risk {float(compliance.get('risk_score') or 0.0):.2f}). Approve the PII review "
+        "on Validate and record who approved it and why. "
+        # API and MCP callers act on the parameter; the Validate screen drops this sentence.
+        "Agents send pii_acknowledgement {approved_by, reason}."
     )
 
 

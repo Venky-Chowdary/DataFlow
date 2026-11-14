@@ -237,10 +237,20 @@ def stage_and_run(client, tool: str, arguments: dict) -> dict:
 
 
 def use_upload_dir(monkeypatch, uploads) -> None:
-    """Point the Pilot's dataset analyst at ``uploads`` (files QA would upload)."""
+    """Point the Pilot's dataset analyst at ``uploads`` (files QA would upload).
+
+    The Pilot tool executor and agent are process singletons that take the
+    analyst once, when built, so they are dropped for the test as well: one
+    built during the swap must not keep this test's analyst for every later
+    test, and one built before it must not hide the swap from this test.
+    """
     import src.ai.copilot.data_analyst as data_analyst
+    import src.ai.copilot.pilot_agent as pilot_agent
+    import src.ai.copilot.tools as pilot_tools
     from src.ai.training.universal_data_feeder import UniversalDataFeeder
 
+    monkeypatch.setattr(pilot_tools, "_tools", None)
+    monkeypatch.setattr(pilot_agent, "_pilot", None)
     monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(uploads))
     analyst = data_analyst.CopilotDataAnalyst()
     analyst.feeder = UniversalDataFeeder([str(uploads)])

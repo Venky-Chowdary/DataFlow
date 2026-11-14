@@ -208,8 +208,11 @@ def write_via_pre_ingestion_staging(
     # Staging diagnose may coerce_null so the landing table retains every row;
     # primary promote still uses validation_mode policy (never invent silent NULL).
     from connectors.writer_common import allow_job_coerce_null_writes
+    from services.reversibility_enforce import uncounted
 
-    with allow_job_coerce_null_writes(True):
+    # The stage is not the primary table: its rows are checked as written, but only the promote counts them
+    # (review 6), so the backstop compares the primary's own write with its written count.
+    with allow_job_coerce_null_writes(True), uncounted():
         staged_n, stage_ddl, stage_summary = write_destination_database(
             stage_ep,
             records,
@@ -281,9 +284,6 @@ def write_via_pre_ingestion_staging(
     clean_records = [
         r for i, r in enumerate(records, start=1) if i not in rejected_row_nums
     ]
-    if drop_primary:
-        _drop_table(destination)
-
     if not clean_records:
         _retain(stage_ep, staging_meta,
                 f"no clean rows to promote, {len(rejected_row_nums)} row(s) held back", ddl_log)
@@ -301,8 +301,16 @@ def write_via_pre_ingestion_staging(
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append("PRE-INGESTION PROMOTE: 0 clean rows (all quarantined)")
-        return 0, ddl_log, summary
+        # Refused before the primary is dropped: an overwrite with no clean
+        # row would replace the destination with nothing.
+        from src.transfer.engine_destination import all_rows_quarantined_blocked
 
+        raise all_rows_quarantined_blocked(
+            rejected_details, len(rejected_row_nums), summary, rows=int(staged_n or 0) or None
+        )
+
+    if drop_primary:
+        _drop_table(destination)
     try:
         promoted_n, promo_ddl, promo_summary = write_destination_database(
             destination,

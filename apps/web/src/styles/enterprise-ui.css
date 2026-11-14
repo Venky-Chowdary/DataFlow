@@ -91,19 +91,20 @@
   font-size: 11px;
   font-weight: 600;
   background: var(--df-success-bg);
-  color: var(--df-success);
+  /* UX-16: --df-success on its tint was 3.5:1 at 11px. */
+  color: var(--df-success-text);
   border: 1px solid rgba(5, 150, 105, 0.2);
 }
 
 .df2-pilot-status-pill.is-offline {
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: #b91c1c;
   border-color: rgba(220, 38, 38, 0.2);
 }
 
 .df2-pilot-status-pill.is-local {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text);
   border-color: rgba(217, 119, 6, 0.22);
 }
 
@@ -2338,30 +2339,40 @@
   gap: 10px;
 }
 
+/* Same stat tile as Overview / Reversibility (ui-consistency.css): neutral
+   surface, label over value, status as a small dot (W6). */
 .df2-jobs-quarantine-metric {
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  padding: var(--df-space-3) var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
   background: var(--df-surface);
+  box-shadow: var(--df-shadow-xs);
 }
 
 .df2-jobs-quarantine-metric span {
-  display: block;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-secondary);
 }
 
 .df2-jobs-quarantine-metric strong {
   display: block;
-  margin-top: 4px;
-  font-size: 18px;
+  margin-top: 2px;
+  font-family: var(--df-font-display);
+  font-size: var(--df-fs-xl);
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-primary);
 }
 
-.df2-jobs-quarantine-metric.is-warn {
-  border-color: var(--df-warning-border);
-  background: var(--df-warning-bg);
+.df2-jobs-quarantine-metric.is-warn span::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning);
 }
 
 .df2-jobs-quarantine-actions {
@@ -4051,7 +4062,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-toolbar-search:focus-within {
   border-color: var(--df-brand) !important;
   background: var(--df-surface) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  /* UX-14: a 14% tint was not a visible focus indicator (WCAG 2.4.7/2.4.11). */
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar-search input {
@@ -4195,8 +4208,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-toolbar .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar .df2-btn:focus-visible,
@@ -4716,9 +4729,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   outline-offset: 2px;
 }
 
+/* UX-14: an outline, so the later segmented-control rule that clears
+   box-shadow (".df2-app .df2-filter-tabs .df2-tab") cannot erase the ring. */
 .df2-app .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28);
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* Modals / dialogs — consistent radius + field focus */
@@ -4750,8 +4765,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .dt-modal-actions .df2-btn:focus-visible,
 .dt-modal-actions .df2-btn:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -11192,7 +11207,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-success,
 .df2-app .df2-badge-ok {
   background: var(--df-success-bg);
-  color: var(--df-success);
+  color: var(--df-success-text); /* UX-16: AA at 11px on its tint */
   border: 1px solid var(--df-success-border, rgba(5, 150, 105, 0.22));
 }
 
@@ -11207,7 +11222,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-warn,
 .df2-app .df2-badge-warning {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text); /* AA at badge size on its tint */
   border: 1px solid var(--df-warning-border, rgba(217, 119, 6, 0.22));
 }
 
@@ -12303,7 +12318,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     gap: 2px;
   }
 
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+  .df2-page-transfer-studio .df2-transfer-step-viewport:not(.df2-map-step-panel) > .df2-card-head {
     display: none !important; /* wizard already names the step */
   }
 
@@ -12532,7 +12547,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     padding: 10px !important;
   }
 
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+  .df2-page-transfer-studio .df2-transfer-step-viewport:not(.df2-map-step-panel) > .df2-card-head {
     display: none !important;
   }
 
@@ -15752,7 +15767,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
 .df2-app .df2-connectors-list .df2-badge-live {
   background: var(--df-success-bg);
-  color: var(--df-success);
+  color: var(--df-success-text);
 }
 
 .df2-app .df2-connectors-list .df2-badge-error {

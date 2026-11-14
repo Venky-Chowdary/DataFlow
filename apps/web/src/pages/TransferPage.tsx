@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useShellLayoutClass } from "../lib/useShellLayoutClass";
+import { routeMessageText, routeOperationLabel, routePlanItemText } from "../lib/routeLabels";
+import { searchCatalogNames } from "../lib/schemaBrowse";
+import { StudioScheduleDialog } from "../components/transfer/StudioScheduleDialog";
+import { defaultStudioScheduleDraft, studioScheduleCreatedToast, type StudioScheduleDraft } from "../lib/studioScheduleDraft";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -17,6 +22,25 @@ import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
+import { PlanConflictDialog } from "../components/transfer/PlanConflictDialog";
+import {
+  headAfterOwnMap,
+  headIfOurs,
+  headVersion,
+  isClientSideFailure,
+  isPlanVersionConflict,
+  newMapRequestId,
+  type PlanMappingRow,
+} from "../lib/planConcurrency";
+import { usePlanConflict } from "../lib/usePlanConflict";
+import {
+  approveAfterConflict,
+  approveDecision,
+  conflictMineFromEditor,
+  editorFromLatestRevision,
+  planConflictNoteReducer,
+  type PlanConflictNoteEvent,
+} from "../lib/studioPlanConflict";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import {
@@ -49,6 +73,8 @@ import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExi
 import { jobDestinationPath, jobEndpointLabels } from "../lib/jobEvidence";
 import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
+import { PlanReversibilityCard } from "../components/reversibility/ReversibilityPanels";
+import { reversibilityFromPreflight } from "../lib/reversibility";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import {
@@ -69,6 +95,7 @@ import {
   createSchedule,
   updateSchedule,
   createTransferPlan,
+  getTransferPlan,
   fetchJob,
   fetchSchedule,
   fetchTransferCapabilities,
@@ -106,7 +133,7 @@ import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import { connectorDisplayName, defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import { icebergDestExtra, inferIcebergCatalogKind, type IcebergCatalogKind } from "../lib/icebergDestCatalog";
 import {
   bindNamesFromSql,
@@ -136,6 +163,7 @@ import { theaterReturnToValidate } from "../lib/theaterReturn";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
+  setDestinationSyncModes,
   DATE_LOCALES,
   NUMBER_LOCALES,
   DEFAULT_SCHEMA_POLICY,
@@ -247,6 +275,11 @@ import {
 } from "../components/transfer/SourceReadWindowPanel";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
+import { formulaGuardApplies } from "../lib/csvSafety";
+import { FILE_EXPORT_FORMULA_PROTECTION_HELP, tsvNullApplies } from "../lib/fileExportDestination";
+import { useFileExportOptions } from "../lib/exportOptions";
+import { FormulaProtectionToggle } from "../components/export/FormulaProtectionToggle";
+import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import {
@@ -321,6 +354,7 @@ import {
   type RuleCompileReport,
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { mergeComputedSteps } from "../lib/mappingCode";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../lib/mapBlockers";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
@@ -375,6 +409,8 @@ export function TransferPage({
 }: TransferPageProps) {
   const { toast, dismissMatching } = useToast();
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
+  /** UX-22: a viewer cannot plan (map/validate); say so before they build a route. */
+  const jobPlan = useWriteGate(PERMISSIONS.jobPlan, "map, validate or run a transfer");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
@@ -474,6 +510,8 @@ export function TransferPage({
   const [executedRouteKey, setExecutedRouteKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  /** Continue on Destination was pressed while the destination was being re-read. */
+  const [destContinuePending, setDestContinuePending] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [mappingError, setMappingError] = useState<string | null>(null);
@@ -482,6 +520,7 @@ export function TransferPage({
   const mappingRunRef = useRef(0);
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  const [sourceIntrospectErrorCode, setSourceIntrospectErrorCode] = useState<string | null>(null);
   const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
   /** Per-stream schema previews for comma-separated multi-stream sources. */
   const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
@@ -518,6 +557,8 @@ export function TransferPage({
   const [savingContract, setSavingContract] = useState(false);
   const [boundContractId, setBoundContractId] = useState("");
   const [requireSignedContract, setRequireSignedContract] = useState(false);
+  /** Plan policy: Execute is blocked (g24_reversibility) until every table is reversible. */
+  const [requireReversibility, setRequireReversibility] = useState(false);
   const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -537,8 +578,32 @@ export function TransferPage({
   const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
+  // G7-F2 / G7-F3: file_export "Protect against spreadsheet formulas" (on for a new
+  // job; Gate-8 reverses the prefix; a reopened job restores what it stored) and a
+  // TSV file destination's NULL marker (file_export TSV or an object-store .tsv).
+  const fileExportOptions = useFileExportOptions();
+  const exportFormulaProtection = fileExportOptions.formulaProtection;
+  const setExportFormulaProtection = fileExportOptions.setFormulaProtection;
+  const tsvNullMarker = fileExportOptions.tsvNull;
+  const setTsvNullMarker = fileExportOptions.setTsvNull;
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
+  // The newest revision version of the persisted plan as this page last saw
+  // it: sent as base_version so a save never lands on a newer revision the
+  // user has not seen (the API answers 409 instead).
+  const planHeadRef = useRef<number | null>(null);
+  // Validate panel note while a plan conflict is unresolved (the dialog was
+  // cancelled or is open); re-opens the comparison.
+  const [planConflictNote, dispatchPlanConflictNote] = useReducer(
+    (note: string, event: PlanConflictNoteEvent) => planConflictNoteReducer(note, event),
+    "",
+  );
+  const lastPlanConflictRef = useRef<{ planId: string; mine: PlanMappingRow[]; origin: "validate" | "map" | "execute" | "approve" } | null>(null);
+  const mapConflictRef = useRef(false);
+  useEffect(() => {
+    if (!persistedPlanId) planHeadRef.current = null;
+    dispatchPlanConflictNote({ kind: "plan-changed" });
+  }, [persistedPlanId]);
   const [planLoading, setPlanLoading] = useState(false);
   const [targetDb, setTargetDb] = useState("");
   const [targetCollection, setTargetCollection] = useState("");
@@ -631,6 +696,15 @@ export function TransferPage({
   // Regeneration (step change, dest schema reload) must not wipe operator
   // approvals — carryOperatorDecisions replays them by decision fingerprint.
   const columnMappingsRef = useRef<EditableMapping[]>([]);
+  const planConflictApi = useMemo(() => ({
+    getPlan: (planId: string) => getTransferPlan(planId),
+    saveMappings: (planId: string, mappings: PlanMappingRow[], baseVersion: number) =>
+      syncTransferPlanMappings(
+        planId,
+        mappings.map((m) => ({ ...m, confidence: m.confidence ?? 1 })),
+        { baseVersion },
+      ),
+  }), []);
   columnMappingsRef.current = columnMappings;
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
@@ -828,6 +902,7 @@ export function TransferPage({
         ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
         ...foreignKeysDestExtra(foreignKeysMode),
         ...duplicateRowsDestExtra(duplicateRowsMode, syncMode),
+        ...fileExportOptions.objectStoreExtra({ type: destDriverType, objectName: targetCollection }),
         ...(isVector
           ? {
               ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
@@ -1018,6 +1093,7 @@ export function TransferPage({
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
         const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+        setDestinationSyncModes(caps.destination_sync_modes);
         // Reinforce catalog SSOT (app boot also loads; Transfer page refreshes lists).
         setTransferLiveDrivers(drivers.length ? drivers : [...sources, ...dbs]);
         if (sources.length || drivers.length) {
@@ -1519,7 +1595,7 @@ export function TransferPage({
     name: sourceFileName ?? sourceStreamName,
     source: buildSourceEndpoint(),
     destination: destKindMode === "file_export"
-      ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+      ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
       : buildDestinationEndpoint(),
     source_columns: currentSourceColumns,
     source_schema: currentSourceSchema,
@@ -1552,6 +1628,7 @@ export function TransferPage({
           require_signed_contract: bind.requireSigned,
         };
       })(),
+      require_reversibility: requireReversibility,
     },
   }), [
     file,
@@ -1569,6 +1646,8 @@ export function TransferPage({
     cloudPath,
     destKindMode,
     exportFormat,
+    exportFormulaProtection,
+    tsvNullMarker,
     targetDb,
     currentSourceColumns,
     currentSourceSchema,
@@ -1607,6 +1686,7 @@ export function TransferPage({
     destProcedureParamMap,
     boundContractId,
     requireSignedContract,
+    requireReversibility,
   ]);
 
   const ensurePersistedPlan = useCallback(async (
@@ -1645,6 +1725,7 @@ export function TransferPage({
         return persistedPlanId;
       }
       const { plan } = await createTransferPlan(payload);
+      planHeadRef.current = headVersion(plan as { revisions?: Array<{ version?: number }> });
       setPersistedPlanId(plan.id);
       return plan.id;
     } catch (e) {
@@ -1715,6 +1796,53 @@ export function TransferPage({
     },
     [primarySourceStream],
   );
+
+  const applyLatestPlanMappings = useCallback((rows: PlanMappingRow[]) => {
+    // Keeps operator decisions (approved targets, omits) so the next
+    // regeneration does not re-propose them.
+    const latest = editorFromLatestRevision(rows, {
+      sampleRows: parsed?.data ?? parsed?.sample_data,
+      destColumns: destColumns.length ? destColumns : undefined,
+      threshold: confidenceThresholdForMode(validationMode),
+      destSchema: destSchemaMap,
+    });
+    columnMappingsRef.current = latest;
+    setColumnMappings(latest);
+    dispatchPlanConflictNote({ kind: "resolved" });
+  }, [parsed, destColumns, validationMode, destSchemaMap]);
+  const notifyPlanConflict = useCallback(
+    (title: string, message: string, tone: "success" | "info" | "warning" | "error") => {
+      if (tone !== "error") dispatchPlanConflictNote({ kind: "resolved" });
+      toast({ title, message, tone });
+    },
+    [toast],
+  );
+  const planConflict = usePlanConflict({
+    api: planConflictApi,
+    headRef: planHeadRef,
+    onUseLatest: applyLatestPlanMappings,
+    notify: notifyPlanConflict,
+  });
+  /** Show the comparison for `mine`; "resolved" when the plan already holds it. */
+  const openPlanConflict = useCallback(
+    (planId: string, mine: PlanMappingRow[], origin: "validate" | "map" | "execute" | "approve") => {
+      lastPlanConflictRef.current = { planId, mine, origin };
+      return planConflict.open(planId, mine, origin);
+    },
+    [planConflict.open],
+  );
+  /** After a non-conflict failure of this page's own write: adopt the head only if what landed is ours. */
+  const adoptHeadIfOurs = useCallback(async (planId: string, mine: PlanMappingRow[]) => {
+    try {
+      const { plan } = await getTransferPlan(planId);
+      const head = headIfOurs(plan, mine);
+      if (head != null) planHeadRef.current = head;
+    } catch {
+      // Unknown: keep the head; a later save meets the comparison if needed.
+    }
+  }, []);
+  /** The editor's mappings exactly as a save sends them (omits, transforms, overrides). */
+  const editorMappingRows = (): PlanMappingRow[] => conflictMineFromEditor(columnMappingsRef.current);
 
   const applyPipelineMappings = useCallback(
     async (
@@ -1816,6 +1944,8 @@ export function TransferPage({
         setMappingProof(proof);
         return carried;
       };
+      let mappedViaPlan: string | null = null;
+      let mapRequestId = "";
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
@@ -1835,11 +1965,16 @@ export function TransferPage({
             target_schema: mapTargetSchema,
           });
           if (planId) {
+            mappedViaPlan = planId;
+            mapRequestId = newMapRequestId();
             result = await mapTransferPlan(planId, {
+              client_request_id: mapRequestId,
               validation_mode: validationMode,
               use_llm: true,
               source_samples: buildSourceSamples(),
             });
+            const mappedVersion = (result as { version?: unknown }).version;
+            if (typeof mappedVersion === "number") planHeadRef.current = mappedVersion;
           } else {
             result = await mapTransferColumns({
               source_columns: mapSourceCols,
@@ -1912,6 +2047,26 @@ export function TransferPage({
           (result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null,
         );
       } catch (e) {
+        if (isPlanVersionConflict(e) && mappedViaPlan) {
+          // Map's result was not stored: the plan changed while it ran. Keep
+          // what is on screen and show the comparison; goToMapping stops.
+          mapConflictRef.current = true;
+          void openPlanConflict(mappedViaPlan, editorMappingRows(), "map");
+          return columnMappingsRef.current;
+        }
+        if (mappedViaPlan && isClientSideFailure(e)) {
+          // The client gave up (timeout / abort / network) and the server may
+          // still have committed this Map: adopt the head only if the newest
+          // revision carries this request's id. A server answer is never ours.
+          const planId = mappedViaPlan;
+          const requestId = mapRequestId;
+          void getTransferPlan(planId)
+            .then(({ plan }) => {
+              const head = headAfterOwnMap(plan, planHeadRef.current, requestId);
+              if (head != null) planHeadRef.current = head;
+            })
+            .catch(() => undefined);
+        }
         console.error("Mapping pipeline failed:", e);
         let fallback = reapplySeededTargets(
           buildMappingsFromSource(analysisCols, mapTargetCols),
@@ -1961,6 +2116,7 @@ export function TransferPage({
       connectorId,
       targetCollection,
       stampCompiledWorkbookMappings,
+      openPlanConflict,
     ],
   );
 
@@ -2545,9 +2701,11 @@ export function TransferPage({
     if (dst.kind === "file_export") {
       setDestKindMode("file_export");
       setExportFormat(dst.format);
+      fileExportOptions.restore(dst);
       if (dst.outputPath) setDestOutputPath(dst.outputPath);
     } else {
       setDestKindMode("database");
+      setTsvNullMarker(dst.tsvNull);
       if (dst.connectorId) applyConnectorSelection(dst.connectorId);
       else {
         if (dst.type) setDestType(dst.type);
@@ -3034,16 +3192,8 @@ export function TransferPage({
     });
   }, [seedStudioIntent, toast, connectors, connectorsLoading]);
 
-  useEffect(() => {
-    const content = document.querySelector(".df2-content");
-    const inner = document.querySelector(".df2-content-inner");
-    content?.classList.add("is-transfer-studio-view");
-    inner?.classList.add("is-transfer-studio-view");
-    return () => {
-      content?.classList.remove("is-transfer-studio-view");
-      inner?.classList.remove("is-transfer-studio-view");
-    };
-  }, []);
+  // Only while Transfer is the visible screen: it stays mounted behind others.
+  useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
 
   const loadTransferPlan = async () => {
     if (!currentSourceColumns.length && !(sourceKind === "file" && file)) {
@@ -3065,7 +3215,7 @@ export function TransferPage({
     setPlanLoading(true);
     try {
       const destination = destKindMode === "file_export"
-        ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+        ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
         : buildDestinationEndpoint();
       const source = buildSourceEndpoint();
 
@@ -3102,7 +3252,7 @@ export function TransferPage({
       }));
       toast({
         title: plan.supported ? "Route ready" : "Route needs attention",
-        message: plan.message || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
+        message: routeMessageText(plan.message) || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
         tone: plan.supported ? "success" : "warning",
       });
     } catch (e) {
@@ -3681,6 +3831,7 @@ export function TransferPage({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
     });
+    setSourceIntrospectErrorCode(intro.connected && intro.columns?.length ? null : (intro.error_code ?? null));
     const objects = (intro.objects ?? [])
       .map((o) => (o.name || "").trim())
       .filter(Boolean);
@@ -4121,8 +4272,14 @@ export function TransferPage({
 
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
+    if (!jobPlan.allowed) {
+      // UX-22: refuse at the first step that writes a plan, not after Validate.
+      toast({ title: "View only", message: jobPlan.reason, tone: "warning" });
+      return;
+    }
     setStep(STEP_MAP);
     setMappingError(null);
+    mapConflictRef.current = false;
     setAnalyzing(true);
     const startedAt = Date.now();
     mappingRunRef.current = startedAt;
@@ -4264,6 +4421,17 @@ export function TransferPage({
           tone: "warning",
         });
         setStep(STEP_SOURCE);
+        return;
+      }
+      if (mapConflictRef.current) {
+        // Map's result was not stored (the plan changed while it ran): stop
+        // here instead of carrying on as if mapping had succeeded.
+        setAnalyzing(false);
+        setMappingProgress(0);
+        setMappingError(
+          "Map's result was not saved: this plan changed since you opened it. "
+          + "Compare your mappings with the latest revision and choose which to keep.",
+        );
         return;
       }
 
@@ -5208,6 +5376,7 @@ export function TransferPage({
     if (!opts?.stayOnReview) setStep(STEP_VALIDATE);
     setPreflight(null);
     setPreflightError("");
+    dispatchPlanConflictNote({ kind: "validate-started" });
     setValidatedContractKey(null);
     // Resolved outside try so a transport catch can name the same count
     // the run already computed — `number | null` is the Studio estimate type.
@@ -5327,7 +5496,22 @@ export function TransferPage({
       const planId = await ensurePersistedPlan(activeValidation);
       if (planId) {
         try {
-          await syncTransferPlanMappings(planId, mappings);
+          try {
+            const synced = await syncTransferPlanMappings(planId, mappings, { baseVersion: planHeadRef.current });
+            planHeadRef.current = headVersion(synced?.plan);
+          } catch (syncErr) {
+            if (!isPlanVersionConflict(syncErr)) throw syncErr;
+            // The plan already holding exactly these mappings is no conflict
+            // (resolved: carry on); otherwise stop and show the comparison.
+            if (await openPlanConflict(planId, mappings, "validate") !== "resolved") {
+              dispatchPlanConflictNote({
+                kind: "conflict",
+                note: "Validate did not run: this plan changed since you opened it. "
+                  + "Compare your mappings with the latest revision to continue.",
+              });
+              return;
+            }
+          }
           // The plan transport must carry the attestation — a body-less call
           // cannot clear a PII/drift/FK gate, and Execute would stay locked.
           const pf = await preflightTransferPlan(
@@ -5343,12 +5527,59 @@ export function TransferPage({
             recipePayload(shapeSteps),
             setValidateProgress,
           );
+          // The verdict is about the revision Validate read. Unless that is the
+          // revision this page just saved, it is not about the mappings on
+          // screen: no approval, no stamp — show the comparison instead.
+          const checkedVersion = (pf as { mapping_version?: unknown }).mapping_version;
+          let approval = approveDecision(checkedVersion, planHeadRef.current);
+          /** Show the comparison; true when it resolved onto the checked revision after all. */
+          const resolveApproveConflict = async (): Promise<boolean> => {
+            const out = await approveAfterConflict(
+              () => openPlanConflict(planId, mappings, "approve"),
+              checkedVersion,
+              () => planHeadRef.current,
+            );
+            if (out.kind === "approve") {
+              approval = { approve: true, expectedVersion: out.expectedVersion };
+              return true;
+            }
+            if (out.kind === "shown") {
+              dispatchPlanConflictNote({
+                kind: "conflict",
+                note: "Validate checked a different mapping revision than the one on this page, so "
+                  + "nothing was approved. Compare it with your mappings, then run Validate again.",
+              });
+            } else {
+              notifyPlanConflict("Nothing was approved", out.message, "warning");
+            }
+            return false;
+          };
+          if (!approval.approve && !(await resolveApproveConflict())) return;
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
           if (pf.passed && decision === "approve") {
-            await approveTransferPlan(planId);
+            // Approve exactly the revision Validate checked (the API answers
+            // 409 and approves nothing if another became active since).
+            for (let attempt = 0; ; attempt += 1) {
+              try {
+                await approveTransferPlan(planId, undefined, { expectedVersion: approval.expectedVersion });
+                break;
+              } catch (approveErr) {
+                if (!isPlanVersionConflict(approveErr)) throw approveErr;
+                if (attempt > 0) {
+                  notifyPlanConflict(
+                    "Nothing was approved",
+                    "The plan kept changing while Validate approved it. Run Validate again.",
+                    "warning",
+                  );
+                  return;
+                }
+                if (!(await resolveApproveConflict())) return;
+              }
+            }
           }
+          dispatchPlanConflictNote({ kind: "validate-succeeded" });
           setPreflight(pf);
           stampValidatedContract(activeMappings, pf as PreflightResult);
           commitAcknowledgments(pf as PreflightResult);
@@ -5976,21 +6207,30 @@ export function TransferPage({
       // Belt-and-suspenders: sync Studio mappings onto the plan before Execute so
       // an empty draft (Map race) cannot block a green Validate with "no mappings".
       let runPlanId = persistedPlanId ?? undefined;
-      if (runPlanId && transferMappings?.length) {
+      // A sync that failed for another reason: the backend's merge_plan_into_run
+      // may still store these mappings; adopt that head afterwards if so.
+      let unsyncedPlanId: string | null = null;
+      const syncForRun = async (planId: string, rows: NonNullable<typeof transferMappings>) => {
         try {
-          await syncTransferPlanMappings(runPlanId, transferMappings);
-        } catch {
-          // If sync fails, still send mappings_json; backend merge_plan_into_run recovers.
+          const synced = await syncTransferPlanMappings(planId, rows, { baseVersion: planHeadRef.current });
+          planHeadRef.current = headVersion(synced?.plan);
+        } catch (syncErr) {
+          if (!isPlanVersionConflict(syncErr)) {
+            unsyncedPlanId = planId;  // still send mappings_json; the backend recovers
+            return;
+          }
+          // Someone saved this plan since it was loaded: never run a version the
+          // user has not seen. Run only if the plan already holds these mappings.
+          if (await openPlanConflict(planId, rows, "execute") !== "resolved") throw syncErr;
         }
+      };
+      if (runPlanId && transferMappings?.length) {
+        await syncForRun(runPlanId, transferMappings);
       } else if (!runPlanId && transferMappings?.length) {
         const created = await ensurePersistedPlan();
         if (created) {
-          try {
-            await syncTransferPlanMappings(created, transferMappings);
-            runPlanId = created;
-          } catch {
-            runPlanId = created;
-          }
+          await syncForRun(created, transferMappings);
+          runPlanId = created;
         }
       }
       setRunStartupProgress(stagePercent(2, RUN_LAUNCH_STAGES.length));
@@ -6083,7 +6323,9 @@ export function TransferPage({
           return Object.keys(extra).length ? extra : undefined;
         })(),
         destExtra: (() => {
-          const extra: Record<string, unknown> = {};
+          const extra: Record<string, unknown> = destKindMode === "file_export"
+            ? fileExportOptions.destExtra(exportFormat)
+            : fileExportOptions.objectStoreExtra({ type: destDriverType, objectName: targetCollection });
           const provenExists = destTableExists ?? destTableExistsRef.current;
           if (provenExists !== null && provenExists !== undefined) {
             extra.table_exists = provenExists;
@@ -6182,12 +6424,19 @@ export function TransferPage({
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
         contractId: boundContractId.trim() || undefined,
         requireSignedContract: Boolean(boundContractId.trim() && requireSignedContract),
+        requireReversibility,
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"
             ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
             : undefined,
       });
+      if (unsyncedPlanId && transferMappings?.length) {
+        // The run may have stored these mappings on the plan (backend
+        // recovery): adopt that head, so this page's next save is not
+        // refused as a conflict with its own write.
+        void adoptHeadIfOurs(unsyncedPlanId, transferMappings);
+      }
       setRunStartupProgress(stagePercent(3, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       // A double-click / retry that hit an already-running equivalent transfer.
@@ -6231,6 +6480,12 @@ export function TransferPage({
       setStep(STEP_RUN);
       if (data.success) onTransferComplete();
     } catch (transferErr) {
+      if (isPlanVersionConflict(transferErr)) {
+        // The plan changed since this page loaded it: nothing ran. The
+        // comparison dialog is open; the edits stay on screen.
+        setTransferring(false);
+        return;
+      }
       if (
         sourceKind === "file"
         && destKindMode === "file_export"
@@ -6245,6 +6500,8 @@ export function TransferPage({
           format: exportFormat,
           outputBasename: targetCollection || undefined,
           numberLocale,
+          formulaProtection: exportFormulaProtection,
+          tsvNull: tsvNullMarker,
         });
         setResult(localResult);
         setRunStartupProgress(100);
@@ -6417,6 +6674,42 @@ export function TransferPage({
 
   const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
 
+  /** UX-9: the source picker searches the connector's whole catalog, not one page. */
+  const sourceCatalogSearch = useCallback(
+    async (query: string) =>
+      sourceConnectorId
+        ? (await searchCatalogNames(sourceConnectorId, query, String(sourceConnector?.schema || ""))).names
+        : [],
+    [sourceConnectorId, sourceConnector?.schema],
+  );
+
+  /** UX-3: the schedule form Studio opens instead of creating one in a click. */
+  const [scheduleDraft, setScheduleDraft] = useState<{
+    payload: Parameters<typeof createSchedule>[0] extends infer P ? Omit<P & object, "name"> : never;
+    initial: StudioScheduleDraft;
+    route: { source: string; destination: string };
+  } | null>(null);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const createScheduleFromDraft = async (draft: StudioScheduleDraft) => {
+    if (!scheduleDraft) return;
+    setScheduleSaving(true);
+    try {
+      await createSchedule({ ...scheduleDraft.payload, name: draft.name, interval: draft.interval, enabled: draft.enabled });
+      setScheduleDraft(null);
+      const copy = studioScheduleCreatedToast(draft);
+      toast({ title: copy.title, message: copy.message, tone: "success" });
+      onOpenSchedules?.();
+    } catch (e) {
+      toast({
+        title: "Could not create the schedule",
+        message: e instanceof Error ? e.message : "The schedule was not saved. Try again.",
+        tone: "error",
+      });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
   /**
    * Persist the Validate-approved mapping contract onto a schedule.
    *
@@ -6478,8 +6771,8 @@ export function TransferPage({
         source_table: sourceTableName,
         dest_connector_id: connectorId,
         dest_table: targetCollection,
-        // A replayed schedule keeps the cadence the operator chose.
-        ...(replayId ? {} : { interval: "daily", enabled: true }),
+        // A replayed schedule keeps the cadence the operator chose; a new one
+        // takes cadence and on/off from the schedule form (UX-3).
         sync_mode: syncMode,
         cursor_column: cursorField,
         primary_key: primaryKeyField,
@@ -6536,15 +6829,14 @@ export function TransferPage({
           tone: "success",
         });
       } else {
-        await createSchedule({
-          ...payload,
-          name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+        // UX-3: never create (let alone start) a schedule in one click. Open
+        // the prefilled form; it starts paused and warns on cursorless append.
+        setScheduleDraft({
+          payload,
+          initial: defaultStudioScheduleDraft(sourceConnector?.name ?? "Source", targetCollection),
+          route: { source: `${sourceConnector?.name ?? "Source"} · ${sourceTableName}`, destination: `${selectedDestConnector?.name ?? "Destination"} · ${targetCollection}` },
         });
-        toast({
-          title: "Pipeline created",
-          message: "Daily sync enabled. Manage cadence in Schedules.",
-          tone: "success",
-        });
+        return false;
       }
       onOpenSchedules?.();
       return true;
@@ -6587,17 +6879,19 @@ export function TransferPage({
     destProcedureCall,
     destQuerySql,
   });
-  const canRunPreflight =
+  /** Destination fields are complete; a re-read of the catalog may still be running. */
+  const destFieldsReady =
     canConfigureDest &&
     (destKindMode === "file_export" ||
       (isCallableDestMode(destWriteMode)
         ? Boolean(
             destType
             && destSqlReady
-            && (connectorId || targetDb.trim() || destDriverType === "iceberg")
-            && !destSchemaLoading,
+            && (connectorId || targetDb.trim() || destDriverType === "iceberg"),
           )
-        : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+        : Boolean(destType && targetDb && targetCollection)));
+  const canRunPreflight =
+    destFieldsReady && (destKindMode === "file_export" || !destSchemaLoading);
 
   const destContinueBlocker = destinationContinueBlocker({
     sourceReady: canConfigureDest,
@@ -6847,7 +7141,7 @@ export function TransferPage({
     : sourceKind === "cloud"
       ? `Cloud object${cloudPath ? ` · ${cloudPath}` : ""}`
       : sourceConnector
-        ? `${sourceConnector.type}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
+        ? `${connectorDisplayName(sourceConnector.type)}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
           isMultiStreamSource
             ? ` · ${multiStreamNames.length} streams`
             : primarySourceStream
@@ -7018,7 +7312,7 @@ export function TransferPage({
         name,
         source: buildSourceEndpoint() as Record<string, unknown>,
         destination: (destKindMode === "file_export"
-          ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+          ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
           : buildDestinationEndpoint()) as Record<string, unknown>,
         mappings,
         column_types: columnTypes,
@@ -7123,6 +7417,7 @@ export function TransferPage({
     setDestType("");
     setDestKindMode("database");
     setExportFormat("json");
+    fileExportOptions.reset();
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
@@ -7167,13 +7462,37 @@ export function TransferPage({
     setActiveData(null);
   }, [onFreshTransfer, setActiveData]);
 
-  const continueFromDestination = () => {
+  const advanceFromDestination = () => {
     if (studioFlags.canvas) {
       void goToMapping();
       return;
     }
     setStep(STEP_SHAPE);
   };
+
+  // Editing the destination re-reads it 350 ms later. Continue must not be
+  // disabled by that read: a press that began before it and ended during it was
+  // dropped by the browser, and Studio stayed on Destination. A press during the
+  // read waits for it (the read is bounded by DEST_PROBE_TIMEOUT_MS), then
+  // continues.
+  const continueFromDestination = () => {
+    if (destKindMode === "database" && destSchemaLoading) {
+      setDestContinuePending(true);
+      return;
+    }
+    advanceFromDestination();
+  };
+
+  useEffect(() => {
+    if (!destContinuePending) return;
+    if (step !== STEP_DESTINATION || !destFieldsReady) {
+      setDestContinuePending(false);
+      return;
+    }
+    if (destSchemaLoading) return;
+    setDestContinuePending(false);
+    advanceFromDestination();
+  }, [destContinuePending, destSchemaLoading, step, destFieldsReady]);
 
   return (
     <PageShell
@@ -7185,9 +7504,15 @@ export function TransferPage({
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}${studioFlags.canvas && step < STEP_SHAPE ? " is-flow-connect" : ""}${studioFlags.canvas && transformOpen && step <= STEP_SHAPE ? " is-flow-transform" : ""}${studioFlags.canvas && (step === STEP_MAP || step === STEP_VALIDATE) ? " is-flow-review" : ""}`} showHonesty>
       <PermissionNotice
-        allowed={jobRun.allowed}
-        reason={jobRun.reason}
-        what="You can plan a transfer but not run one."
+        allowed={jobPlan.allowed && jobRun.allowed}
+        reason={jobPlan.allowed ? jobRun.reason : jobPlan.reason}
+        what={jobPlan.allowed ? "You can plan a transfer but not run one." : "View only: you can look at sources and destinations here."}
+      />
+      <PlanConflictDialog
+        conflict={planConflict.conflict}
+        onUseLatest={planConflict.useLatest}
+        onKeepMine={() => void planConflict.keepMine()}
+        onCancel={planConflict.cancel}
       />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
@@ -7245,7 +7570,7 @@ export function TransferPage({
       </header>
 
       <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
-      <main className="df2-transfer-main-panel" key={step}>
+      <section className="df2-transfer-main-panel" key={step} aria-label="Transfer step">
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
@@ -7367,6 +7692,25 @@ export function TransferPage({
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
           onClearPrimaryKey={clearPrimaryKey}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
+          destEndpoint={destKindMode === "database" ? (currentDestinationEndpoint as Record<string, unknown>) : null}
+          destProbeKey={currentDestinationProbeKey}
+          destSchemaTypes={destSchemaMap}
+          schemaPolicy={schemaPolicy}
+          syncMode={syncMode}
+          sourceObjectName={mapActiveStream || primarySourceStream || ""}
+          transformSteps={shapeSteps}
+          onAddComputedSteps={(steps) => {
+            // Computed columns are Transform steps for this Map stream: add them
+            // there (replacing the same column on the same stream) and preview.
+            const stream = { table: mapActiveStream || primarySourceStream || "", tableCount: multiStreamNames.length };
+            setShapeSteps((prev) => mergeComputedSteps(prev, steps, stream));
+            setStep(STEP_SHAPE);
+            toast({
+              title: "Computed column added to Transform",
+              message: "Preview it here, then continue to Map: the new column maps onto its destination.",
+              tone: "info",
+            });
+          }}
         />
       )}
 
@@ -7467,12 +7811,11 @@ export function TransferPage({
                 className="df2-policy-toggle df2-source-ocr-toggle"
                 style={{ marginBottom: 8 }}
                 onClick={(e) => e.stopPropagation()}
+                // UX-41: product words for end users; install steps are the admin's (Help).
                 title={
                   ocrStatus?.available === false
-                    ? `OCR not ready: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}`
-                    : ocrStatus?.available
-                      ? "Tesseract is available — OCR scanned PDFs when no text layer exists"
-                      : "OCR scanned PDFs when no text layer exists (requires Tesseract on the API host)"
+                    ? "Reading scanned PDFs is not set up on this Datawrap deployment. Ask your administrator to enable OCR."
+                    : "Read scanned PDFs (no text layer) with text recognition."
                 }
               >
                 <input
@@ -7486,10 +7829,10 @@ export function TransferPage({
                   <strong>OCR scanned PDFs</strong>
                   <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Unavailable — the API host needs Tesseract installed."
+                      ? "Not set up on this deployment — ask your administrator to enable OCR."
                       : ocrStatus?.available
-                        ? "Tesseract ready — used when a PDF has no text layer."
-                        : "Optional · runs Tesseract when a PDF has no text layer."}
+                        ? "Ready — used when a PDF has no text layer."
+                        : "Optional · used when a PDF has no text layer."}
                   </small>
                 </span>
               </label>
@@ -7777,6 +8120,7 @@ export function TransferPage({
                     options={sourceObjectNames}
                     loading={sourceIntrospecting && sourceObjectNames.length === 0}
                     allowCreate={false}
+                    searchCatalog={sourceCatalogSearch}
                     objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
                     placeholder={
                       sourceConnector?.type === "mongodb"
@@ -7933,6 +8277,7 @@ export function TransferPage({
                 uploading={uploading}
                 sourceIntrospecting={sourceIntrospecting}
                 sourceIntrospectError={sourceIntrospectError}
+                sourceIntrospectErrorCode={sourceIntrospectErrorCode}
                 onRetrySourceIntrospect={retrySourceIntrospect}
                 sourceObjectNames={sourceObjectNames}
                 onPickSourceObject={(name) => {
@@ -7966,7 +8311,7 @@ export function TransferPage({
           const connectorReady =
             isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
           if (!fileReady && !connectorReady) return null;
-          const hint = fileReady
+          const baseHint = fileReady
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
@@ -7982,8 +8327,16 @@ export function TransferPage({
                     : streamPreviews.some((s) => s.status === "error")
                       ? `${streamPreviews.filter((s) => s.status === "ok").length} of ${multiStreamNames.length} streams ready — continue to pick a destination`
                       : `${multiStreamNames.length} streams selected — continue to pick a destination`)
-                  : "Select connector and table/collection to continue";
+                  : "";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
+          // UX-9: the hint must agree with the button — never "select a table"
+          // beside an enabled Continue.
+          const hint = baseHint
+            || (sourceIntrospecting
+              ? "Reading the source schema…"
+              : disabled
+                ? "Select connector and table/collection to continue"
+                : "Source selected — continue to pick a destination.");
           return (
             <div className="df2-card-footer df2-wizard-footer">
               <span className="df2-label-hint">{hint}</span>
@@ -8073,6 +8426,18 @@ export function TransferPage({
                     <p className="df2-label-hint" role="note">
                       {fileExportUnavailable.reason}. {fileExportUnavailable.message}
                     </p>
+                  )}
+                  {formulaGuardApplies(exportFormat) && (
+                    <FormulaProtectionToggle
+                      id="dest-export-formula"
+                      className="df2-dest-export-formula"
+                      checked={exportFormulaProtection}
+                      onChange={setExportFormulaProtection}
+                      help={FILE_EXPORT_FORMULA_PROTECTION_HELP}
+                    />
+                  )}
+                  {tsvNullApplies({ kind: "file_export", format: exportFormat }) && (
+                    <TsvNullMarkerField id="dest-export-tsv-null" value={tsvNullMarker} onChange={setTsvNullMarker} />
                   )}
                 </div>
               ) : (
@@ -8415,6 +8780,9 @@ export function TransferPage({
                   setCellPreview(null);
                 }}
               />
+              {tsvNullApplies({ kind: "database", type: destDriverType, objectName: targetCollection }) && (
+                <TsvNullMarkerField id="dest-object-tsv-null" value={tsvNullMarker} onChange={setTsvNullMarker} />
+              )}
               {(destDriverType === "snowflake"
                 || destDriverType.includes("mssql")
                 || getGenericSqlGroup(destType) === "postgresql+psycopg2") && (
@@ -8584,7 +8952,6 @@ export function TransferPage({
             <p className="df2-label-hint df2-field-note">
               OpenShift hosts PostgreSQL (CloudNativePG / Crunchy) — it is not a destination store.
               Host is the Service DNS (<code>svc.cluster.local</code>), a Route, or a port-forward.
-              DynamoDB snapshot uses consistent Scan. Streams CDC is at-least-once upsert, not exactly-once.
             </p>
           )}
           {destDriverType === "bigquery" && (
@@ -8614,12 +8981,19 @@ export function TransferPage({
               <p className="df2-label-hint">
                 {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
               </p>
-              <p className="df2-label-hint">
-                {schemaPolicyHonestyLine(schemaPolicy)}
-              </p>
-              <p className="df2-label-hint">
-                Change overwrite, CDC, schema drift, and identity in Advanced.
-              </p>
+              {/* UX-39: table-schema rules (ADD COLUMN, CDC, drift) say nothing about a file export. */}
+              {destKindMode === "database" ? (
+                <>
+                  <p className="df2-label-hint">
+                    {schemaPolicyHonestyLine(schemaPolicy)}
+                  </p>
+                  <p className="df2-label-hint">
+                    Change overwrite, CDC, schema drift, and identity in Advanced.
+                  </p>
+                </>
+              ) : (
+                <p className="df2-label-hint">Change the file name and format options in Advanced.</p>
+              )}
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
@@ -8653,10 +9027,11 @@ export function TransferPage({
             )}
           </div>
 
-          {transferPlan && (
+          {/* UX-39: no "Route ready" before a destination is chosen. */}
+          {transferPlan && (destKindMode !== "database" || Boolean(connectorId)) && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
               <p className="df2-plan-callout-title">
-                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {transferPlan.operation}
+                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {routeOperationLabel(transferPlan.operation)}
                 {!transferPlan.supported && (
                   <span className="df2-badge df2-badge-run">{transferPlan.message}</span>
                 )}
@@ -8664,7 +9039,7 @@ export function TransferPage({
               {transferPlan.auto_create.length > 0 && (
                 <ul className="df2-plan-callout-list">
                   {transferPlan.auto_create.slice(0, 3).map((item, i) => (
-                    <li key={`${item}-${i}`}>{item}</li>
+                    <li key={`${item}-${i}`}>{routePlanItemText(item)}</li>
                   ))}
                   {transferPlan.auto_create.length > 3 && (
                     <li className="df2-plan-callout-more">+{transferPlan.auto_create.length - 3} more steps</li>
@@ -8703,12 +9078,14 @@ export function TransferPage({
           </button>
           <button
             type="button"
+            aria-busy={analyzing || destContinuePending || undefined}
+            aria-label={analyzing ? "Preparing mappings…" : undefined}
             className="df2-btn df2-btn-primary"
             onClick={continueFromDestination}
-            disabled={!canRunPreflight || analyzing}
+            disabled={!destFieldsReady || analyzing}
           >
             {analyzing ? <ButtonLoader label="Preparing mappings…" /> : (
-              <><DtIcon name="layers" size={18} /> {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
+              <>{destContinuePending ? <ButtonLoader /> : <DtIcon name="layers" size={18} />} {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
             )}
           </button>
           </div>
@@ -8839,6 +9216,12 @@ export function TransferPage({
             onPrimaryFix={primaryFix.onPrimaryFix}
             primaryFixLabel={primaryFix.primaryFixLabel}
             preflightError={preflightError}
+            planConflictNote={planConflictNote}
+            onResolvePlanConflict={() => {
+              // Compare what the editor shows now, not what it showed then.
+              const last = lastPlanConflictRef.current;
+              if (last) void openPlanConflict(last.planId, conflictMineFromEditor(columnMappingsRef.current), last.origin);
+            }}
             running={preflighting}
             progress={validateProgress}
             confidenceThreshold={confidenceThreshold}
@@ -8988,6 +9371,13 @@ export function TransferPage({
                 tone: "success",
               });
             }}
+          />
+          <PlanReversibilityCard
+            planId={persistedPlanId}
+            preflightReport={reversibilityFromPreflight(preflight)}
+            requireReversibility={requireReversibility}
+            onRequireChange={setRequireReversibility}
+            onRevalidate={() => void executePreflight()}
           />
           </div>
           <ValidateActionsRail
@@ -9461,8 +9851,21 @@ export function TransferPage({
           </div>
         </div>
       )}
-      </main>
+      </section>
       </div>
+
+      {scheduleDraft && (
+        <StudioScheduleDialog
+          open
+          initial={scheduleDraft.initial}
+          route={scheduleDraft.route}
+          syncMode={syncMode}
+          cursorColumn={cursorField}
+          saving={scheduleSaving}
+          onCancel={() => setScheduleDraft(null)}
+          onCreate={(draft) => void createScheduleFromDraft(draft)}
+        />
+      )}
 
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer

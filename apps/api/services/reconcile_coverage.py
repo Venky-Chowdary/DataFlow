@@ -146,6 +146,27 @@ def _qualify_last_stream_ladder(report: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def last_stream_rows_written(dest_summary: dict[str, Any] | None, rows_written: int) -> int:
+    """Rows the last stream wrote: the count its job-level Gate-8 compares.
+
+    A multi-stream job's Gate-8 runs once, bound to the last stream (its
+    summary, its pre-run count, its endpoints). Handing it the job's total —
+    every stream summed — put the last table's read-back below "rows written"
+    and sent it to the data-loss compare, which has no notion of pre-run rows:
+    an append into an occupied last table failed although it landed exactly.
+    The last stream's own count makes that check a single-table append's.
+    """
+    if not isinstance(dest_summary, dict) or not dest_summary.get("multi_stream"):
+        return rows_written
+    streams = dest_summary.get("streams")
+    if not isinstance(streams, list) or len(streams) < 2 or not isinstance(streams[-1], dict):
+        return rows_written
+    last = streams[-1].get("records_processed")
+    if isinstance(last, bool) or not isinstance(last, int):
+        return rows_written
+    return last
+
+
 def qualify_multi_stream_reconciliation(
     report: dict[str, Any],
     dest_summary: dict[str, Any] | None,

@@ -21,6 +21,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     compare_lsn,
     gate8_writer_meta,
+    identity_marker,
     lsn_is_newer,
     resolve_target_columns,
     row_checksum,
@@ -37,7 +38,14 @@ from services.document_instant import (
 )
 from services.value_serializer import json_loads_exact
 
+from connectors.destination_naming import writer_identifier
+from connectors.mongo_field_paths import insert_document, path_view, target_refusal
+
 logger = logging.getLogger(__name__)
+
+#: A mapped target is a field path (``address.city``), kept exactly; SQL
+#: identifier rules renamed it ``address_city`` (Document Modeler PR1, G11).
+_field = writer_identifier("mongodb")
 
 
 def bind_mongo_json_document(value: Any) -> Any:
@@ -65,9 +73,22 @@ def bind_mongo_json_document(value: Any) -> Any:
     )
 
 
+def _key_value(doc: Mapping[str, Any], col: str) -> Any:
+    """A key value from an outgoing flat row (``"key.id"``) or a stored nested doc."""
+    if col in doc:
+        return doc[col]
+    from connectors.mongo_field_paths import path_view
+
+    return path_view(doc, [col]).get(col)
+
+
 def _mongo_conflict_key(doc: Mapping[str, Any], pk_cols: list[str]) -> tuple[Any, ...]:
-    """Canonical PK tuple so extract reader-null matches dest None."""
-    return tuple(_conflict_key_identity(doc.get(c)) for c in pk_cols)
+    """Canonical PK tuple so extract reader-null matches dest None.
+
+    A dotted key (``key.id``) is a field path: the stored document the CDC
+    LSN prefetch reads back holds it nested, so it is read by path (G11).
+    """
+    return tuple(_conflict_key_identity(_key_value(doc, c)) for c in pk_cols)
 
 
 def _mongo_incomplete_pk_cols(doc: Mapping[str, Any], pk_cols: list[str]) -> list[str]:
@@ -167,9 +188,7 @@ def _row_projection_column_types(
 
     projected = dict(column_types)
     for mapping in mappings:
-        target_name = sanitize_identifier(
-            mapping.get("target") or mapping.get("source"), preserve_case=True
-        )
+        target_name = _field(mapping.get("target") or mapping.get("source"))
         target_type = (
             dest_types.get(target_name)
             or dest_types.get(target_name.lower())
@@ -219,9 +238,9 @@ def _fetch_mongo_physical_types(
         for doc in coll.find().limit(int(sample_limit)):
             if not isinstance(doc, dict):
                 continue
-            for key, val in doc.items():
-                if key not in wanted:
-                    continue
+            # Mapped targets are field paths: ``address.city`` is read inside
+            # the ``address`` sub-document, not as a top-level key.
+            for key, val in path_view(doc, wanted).items():
                 inferred = _sample_logical_type(val, key)
                 if not inferred or val is None:
                     continue
@@ -479,6 +498,30 @@ def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
     return type(dest_types)(widened)
 
 
+def _upsert_update(doc: dict, pk_cols: list[str]) -> dict:
+    """The update document for one upserted row.
+
+    ``_id`` never goes in ``$set``: MongoDB refuses any update that rewrites it
+    (code 66), even to a numerically equal value of another BSON type (a stored
+    ``NumberLong(5)`` matched by an int ``5``), which ``ReplaceOne`` accepted.
+    As the conflict key it is only in the filter, which seeds it on insert; a
+    mapped ``_id`` off the key is written on insert only (``$setOnInsert``), so
+    a match keeps the stored ``_id`` and a differing value is left for Gate-8 to
+    report instead of failing the batch.
+
+    Dotted keys stay dotted (``{"$set": {"address.city": ...}}``): MongoDB
+    then updates only that field inside the sub-document and keeps its
+    siblings, the same G15 contract one level down.
+    """
+    if "_id" not in doc:
+        return {"$set": doc}
+    fields = {k: v for k, v in doc.items() if k != "_id"}
+    update: dict = {"$set": fields} if fields else {}
+    if "_id" not in pk_cols or not fields:
+        update["$setOnInsert"] = {"_id": doc["_id"]}
+    return update
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -538,7 +581,15 @@ def write_mapped_rows(
         column_types,
         preserve_case=True,
         table_exists=False if create_table else None,
+        identifier=_field,
     )
+    path_error = target_refusal(target_cols)
+    if path_error:
+        # Refused, never renamed: Validate and Execute apply the same rule.
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=schema or "db",
+            checksum="", chunks_completed=0, error=path_error,
+        )
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -836,7 +887,7 @@ def write_mapped_rows(
         from services.transform_resolver import resolve_transform
 
         transform_by_col = {
-            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (
+            _field(m.get("target") or m.get("source")): (
                 resolve_transform(m, column_types=column_types, dest_kind="mongodb")
                 if m.get("transform")
                 else ""
@@ -850,9 +901,7 @@ def write_mapped_rows(
         # requires_contract, so an acknowledged column is exactly the case the
         # policy says may proceed — and it is recorded on the summary.
         utc_normalize_ack = {
-            sanitize_identifier(
-                m.get("target") or m.get("source"), preserve_case=True
-            )
+            _field(m.get("target") or m.get("source"))
             for m in mappings
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
@@ -863,9 +912,7 @@ def write_mapped_rows(
         # blocked plain DATE columns behind a contract that answers a question
         # the value never raised.
         calendar_day_cols = {
-            sanitize_identifier(
-                m.get("target") or m.get("source"), preserve_case=True
-            )
+            _field(m.get("target") or m.get("source"))
             for m in mappings
             if _declares_calendar_day(m, _mapping_source_type(m, column_types))
         }
@@ -880,10 +927,7 @@ def write_mapped_rows(
         for mapping in mappings:
             source_type = _mapping_source_type(mapping, column_types)
             source_logical = normalize_logical_type(source_type)
-            target_name = sanitize_identifier(
-                mapping.get("target") or mapping.get("source"),
-                preserve_case=True,
-            )
+            target_name = _field(mapping.get("target") or mapping.get("source"))
             target_logical = normalize_logical_type(
                 str(
                     dest_types.get(target_name)
@@ -897,19 +941,13 @@ def write_mapped_rows(
                 and target_logical == LOGICAL_DATE
             ):
                 pure_date_target_cols.add(
-                    sanitize_identifier(
-                        mapping.get("target") or mapping.get("source"),
-                        preserve_case=True,
-                    )
+                    _field(mapping.get("target") or mapping.get("source"))
                 )
         calendar_day_truncation_contract_cols = set()
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         for mapping in mappings:
-            column = sanitize_identifier(
-                mapping.get("target") or mapping.get("source"),
-                preserve_case=True,
-            )
+            column = _field(mapping.get("target") or mapping.get("source"))
             contract = mapping.get("risk_contract") or mapping.get("riskContract")
             if (
                 column in calendar_day_cols
@@ -924,9 +962,7 @@ def write_mapped_rows(
         # Polarity is a property of the column, not the cell. Resolving it
         # once keeps a million-row write off the DDL regex.
         instant_cols = {
-            sanitize_identifier(
-                m.get("target") or m.get("source"), preserve_case=True
-            )
+            _field(m.get("target") or m.get("source"))
             for m in mappings
             if declared_source_is_instant(_mapping_source_type(m, column_types))
         }
@@ -962,7 +998,7 @@ def write_mapped_rows(
                 from connectors.sql_bind import coerce_decimal_wire
 
                 coerced = coerce_decimal_wire(value, ddl_type=upper or "DECIMAL")
-                return Decimal128(str(coerced))
+                return _exact_decimal128(coerced)
             if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 from decimal import Decimal
 
@@ -1200,7 +1236,7 @@ def write_mapped_rows(
         )
 
         ms_ack_cols = {
-            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True)
+            _field(m.get("target") or m.get("source"))
             for m in mappings
             if narrowing_acknowledged(m)
         }
@@ -1301,6 +1337,12 @@ def write_mapped_rows(
         # expects one row per key, not every version read.
         collapsed_total = 0
         key_index_ready = False
+        from services.duplicate_policy import current_match_action
+
+        # skip_duplicates (dedupe_skip): insert absent keys only; kept keys are
+        # rows_skipped with a Gate-8 marker, never counted as written.
+        skip_stored = current_match_action() == "skip"
+        kept_markers: list[str] = []
 
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
@@ -1320,20 +1362,12 @@ def write_mapped_rows(
             )
 
             # Convert row tuples to documents; omit Missing, bind reader-null
-            # as None (shared present_field_bindings). Track sparse rows so
-            # upsert uses $set (never ReplaceOne — that would delete dest
-            # keys for fields absent in the CDC image).
-            from connectors.writer_common import (
-                present_field_bindings,
-                row_has_missing_sentinel,
-            )
+            # as None (shared present_field_bindings).
+            from connectors.writer_common import present_field_bindings
 
-            docs: list[dict[str, Any]] = []
-            sparse_flags: list[bool] = []
-            for row in batch:
-                sparse = row_has_missing_sentinel(row)
-                sparse_flags.append(sparse)
-                docs.append(present_field_bindings(dict(zip(target_cols, row))))
+            docs: list[dict[str, Any]] = [
+                present_field_bindings(dict(zip(target_cols, row))) for row in batch
+            ]
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId
@@ -1348,7 +1382,8 @@ def write_mapped_rows(
                             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
             if write_mode == "upsert" and conflict_columns:
-                from pymongo import ReplaceOne, UpdateOne
+                from pymongo import UpdateOne
+                from pymongo.errors import BulkWriteError
 
                 requested_keys = [str(c) for c in conflict_columns if str(c)]
                 pk_cols = [c for c in requested_keys if c in target_cols]
@@ -1402,26 +1437,21 @@ def write_mapped_rows(
                 # Deduplicate within the batch on the conflict key, keeping the
                 # highest _df_lsn so ``bulk_write(ordered=False)`` does not apply
                 # same-PK updates in an undefined order.
-                # Pair each doc with its sparse flag through dedupe.
-                paired = list(zip(docs, sparse_flags))
-                if DF_LSN_COL in target_cols:
-                    best_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
-                    for doc, sparse in paired:
-                        key = _mongo_conflict_key(doc, pk_cols)
-                        prev = best_docs.get(key)
-                        if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev[0].get(DF_LSN_COL)) >= 0:
-                            best_docs[key] = (doc, sparse)
-                    paired = list(best_docs.values())
-                else:
-                    seen_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
-                    for doc, sparse in paired:
-                        key = _mongo_conflict_key(doc, pk_cols)
-                        seen_docs[key] = (doc, sparse)
-                    paired = list(seen_docs.values())
+                kept: dict[tuple, dict[str, Any]] = {}
+                for doc in docs:
+                    key = _mongo_conflict_key(doc, pk_cols)
+                    prev = kept.get(key)
+                    if skip_stored and prev is not None:
+                        continue  # skip_duplicates keeps the first image of a key
+                    if (
+                        DF_LSN_COL not in target_cols
+                        or prev is None
+                        or compare_lsn(doc.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0
+                    ):
+                        kept[key] = doc
                 if write_mode == "upsert" and pk_cols:
-                    collapsed_total += max(0, len(docs) - len(paired))
-                docs = [p[0] for p in paired]
-                sparse_flags = [p[1] for p in paired]
+                    collapsed_total += max(0, len(docs) - len(kept))
+                docs = list(kept.values())
 
                 # Pre-fetch existing _df_lsn values for the batch keys so stale
                 # redelivery cannot regress destination state under CDC.
@@ -1461,8 +1491,9 @@ def write_mapped_rows(
                         )
 
                 ops = []
+                op_keys: list[tuple] = []
                 skipped_stale = 0
-                for doc_idx, (doc, sparse) in enumerate(zip(docs, sparse_flags)):
+                for doc_idx, doc in enumerate(docs):
                     filt = {c: doc.get(c) for c in pk_cols}
                     missing_cols = _mongo_incomplete_pk_cols(filt, pk_cols)
                     if missing_cols:
@@ -1500,18 +1531,62 @@ def write_mapped_rows(
                         if incoming_lsn is not None and not lsn_is_newer(incoming_lsn, prior_lsn):
                             skipped_stale += 1
                             continue
-                    if sparse:
-                        # Partial CDC image: $set present fields only.
-                        # ReplaceOne would delete omitted destination keys.
-                        ops.append(UpdateOne(filt, {"$set": doc}, upsert=True))
-                    else:
-                        ops.append(ReplaceOne(filt, doc, upsert=True))
+                    # $set the mapped fields, never ReplaceOne: replacing the
+                    # document deletes every field this mapping does not write
+                    # (the client's own fields, an earlier mapping's fields, or
+                    # fields a partial CDC image omits). Same contract as the
+                    # SQL upsert (G15): dest-only columns stay off SET. A NULL
+                    # mapped value is written as null.
+                    # skip_duplicates: $setOnInsert writes only when no document
+                    # matches the key — a stored document is left as stored.
+                    ops.append(
+                        UpdateOne(
+                            filt,
+                            {"$setOnInsert": doc} if skip_stored else _upsert_update(doc, pk_cols),
+                            upsert=True,
+                        )
+                    )
+                    op_keys.append(tuple(filt[c] for c in pk_cols))
+                outcome = None
                 if ops:
-                    coll.bulk_write(ops, ordered=False)
+                    try:
+                        outcome = coll.bulk_write(ops, ordered=False)
+                    except BulkWriteError as exc:
+                        # Unordered: every other operation was applied. Count
+                        # them before the batch error fails the write.
+                        details = exc.details or {}
+                        if skip_stored:
+                            # A matched key was kept as stored, not written.
+                            failed = {int(e.get("index", -1)) for e in details.get("writeErrors") or []}
+                            inserted = {int(u.get("index", -1)) for u in details.get("upserted") or []}
+                            held = [
+                                op_keys[n]
+                                for n in range(len(ops))
+                                if n not in inserted and n not in failed
+                            ]
+                            kept_markers.extend(identity_marker(k) for k in held)
+                            written += int(details.get("nUpserted") or 0)
+                            skipped_total += skipped_stale + len(held)
+                        else:
+                            written += int(details.get("nUpserted") or 0) + int(
+                                details.get("nMatched") or 0
+                            )
+                        raise
+                if skip_stored and outcome is not None:
+                    inserted = set((getattr(outcome, "upserted_ids", None) or {}).keys())
+                    held = [op_keys[n] for n in range(len(ops)) if n not in inserted]
+                    kept_markers.extend(identity_marker(k) for k in held)
+                    skipped_stale += len(held)
+                    written -= len(held)
                 written += len(ops)
                 skipped_total += skipped_stale
             else:
-                written += _idempotent_insert_many(coll, docs)
+                # Insert (and overwrite, which recreates then inserts): dotted
+                # targets become sub-documents. Upsert keeps them dotted in
+                # $set above, so sibling fields inside a sub-document survive.
+                written += _idempotent_insert_many(
+                    coll, [insert_document(doc) for doc in docs]
+                )
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written + skipped_total)
 
@@ -1545,6 +1620,8 @@ def write_mapped_rows(
                 mapped_rows,
                 target_cols,
                 dest_db_type="mongodb",
+                # DATA-11: a document column's JSON null is stored as null.
+                dest_types={c: t for c, t in (dest_types or {}).items() if _is_document_type(t)},
             ),
             chunks_completed=chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
@@ -1558,17 +1635,26 @@ def write_mapped_rows(
                     for col in sorted(utc_normalized_cols)
                 ),
                 *truncation_warnings(ms_guard.truncated, "BSON"),
+                # G11: the operator's legacy_field_policy=write_new, on the run.
+                *(str(a) for a in (_kwargs.get("legacy_field_ack") or [])),
             ],
             meta={
                 **gate8_writer_meta(mapped_rows, target_cols),
                 **({"collapsed_duplicate_rows": collapsed_total} if collapsed_total else {}),
                 **({TRUNCATED_KEY: dict(ms_guard.truncated)} if ms_guard.truncated else {}),
+                **({"skipped_identity_keys": kept_markers} if kept_markers else {}),
             },
         )
     except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
             rows_written=written if "written" in locals() else 0,
+            rows_skipped=skipped_total if "skipped_total" in locals() else 0,
+            meta=(
+                {"skipped_identity_keys": list(kept_markers)}
+                if locals().get("kept_markers")
+                else {}
+            ),
             table_name=table_name,
             target_schema=schema or "db",
             checksum="",
@@ -1578,3 +1664,29 @@ def write_mapped_rows(
             rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
             warnings=transform_errors if "transform_errors" in locals() else [],
         )
+
+
+def _is_document_type(type_text: Any) -> bool:
+    """A column the writer stores as a document value (JSON / object / array)."""
+    text = str(type_text or "").strip().lower()
+    return "json" in text or text in {"object", "document", "array", "struct", "map"}
+
+
+def _exact_decimal128(value: Any) -> Any:
+    """Decimal128 that holds ``value`` exactly, or a ValueError the policy holds out.
+
+    DATA-17: Decimal128 keeps 34 significant digits. A 38-digit decimal raised
+    the driver's bare ``decimal.Inexact`` after Validate had passed.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from bson.decimal128 import Decimal128
+
+    try:
+        return Decimal128(str(value))
+    except (InvalidOperation, ArithmeticError) as exc:
+        digits = len(Decimal(str(value)).as_tuple().digits)
+        raise ValueError(
+            f"MongoDB Decimal128 holds 34 significant digits; {value} has {digits}, so it "
+            "can't be stored exactly — map the field as text, or quarantine these rows"
+        ) from exc

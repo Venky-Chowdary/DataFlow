@@ -116,14 +116,14 @@ def test_engine_digest_verdict_matches_python_digest(engine, kind, tmp_path):
     try:
         _seed(dest)
         tgt = _target(dest)
-        e0, p0 = ac.fingerprint(tgt, cd.ALGO), ac.fingerprint(tgt, ac.LEGACY_ALGO)
+        e0, p0 = ac.fingerprint(tgt, cd.ALGO), ac.fingerprint(tgt, ac.GATE8_ALGO)
         assert e0 and e0["algo"] == cd.ALGO and e0["rows"] == 3
         assert p0 and p0["rows"] == 3
         # Unchanged data: both stable.
         assert ac.fingerprint(tgt, cd.ALGO) == e0
-        assert ac.fingerprint(tgt, ac.LEGACY_ALGO)["checksum"] == p0["checksum"]
+        assert ac.fingerprint(tgt, ac.GATE8_ALGO)["checksum"] == p0["checksum"]
         _mutate(dest, kind)
-        e1, p1 = ac.fingerprint(tgt, cd.ALGO), ac.fingerprint(tgt, ac.LEGACY_ALGO)
+        e1, p1 = ac.fingerprint(tgt, cd.ALGO), ac.fingerprint(tgt, ac.GATE8_ALGO)
         engine_caught = (e1["rows"], e1["checksum"]) != (e0["rows"], e0["checksum"])
         python_caught = (p1["rows"], p1["checksum"]) != (p0["rows"], p0["checksum"])
         assert engine_caught, f"engine digest missed {kind}"
@@ -277,9 +277,13 @@ def test_compare_never_passes_across_algorithms():
 
 def _legacy_baseline(dest: _Dest) -> None:
     tgt = _target(dest)
-    fp = ac.fingerprint(tgt, ac.LEGACY_ALGO)
-    ac.save_baseline(tgt.key, {"rows": fp["rows"], "checksum": fp["checksum"]}, "legacy-job")
-    assert ac.load_baseline(tgt.key)["algo"] == ac.LEGACY_ALGO
+    # The Gate-8 Python digest under the current fingerprint rules: still
+    # verified by digest, then moved to the in-engine digest. (A baseline of a
+    # *retired* fingerprint version is covered in
+    # test_audit02_continuity_fingerprint_version.py.)
+    fp = ac.fingerprint(tgt, ac.GATE8_ALGO)
+    ac.save_baseline(tgt.key, fp, "legacy-job")
+    assert ac.load_baseline(tgt.key)["algo"] == ac.GATE8_ALGO
 
 
 def _audit_spy(monkeypatch) -> list[dict[str, Any]]:
@@ -313,7 +317,7 @@ def test_legacy_baseline_verified_then_upgraded(engine, tmp_path, fake_store, mo
         base = ac.load_baseline(_key(dest))
         assert base["algo"] == cd.ALGO and base["rows"] == 12
         up = [e for e in events if e["action"] == "append_continuity.algo_upgraded"]
-        assert len(up) == 1 and up[0]["details"]["from_algo"] == ac.LEGACY_ALGO
+        assert len(up) == 1 and up[0]["details"]["from_algo"] == ac.GATE8_ALGO
     finally:
         dest.drop()
 
@@ -333,7 +337,7 @@ def test_legacy_baseline_on_tampered_destination_still_fails(engine, tmp_path, f
         r2 = run()
         assert not r2.success
         assert r2.error_details["mismatch"] == "checksum"
-        assert ac.load_baseline(_key(dest))["algo"] == ac.LEGACY_ALGO
+        assert ac.load_baseline(_key(dest))["algo"] == ac.GATE8_ALGO
         assert not events
         assert dest.snapshot() == before
     finally:

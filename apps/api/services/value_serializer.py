@@ -128,7 +128,19 @@ class WireCell(str):
 
 def wire_cell(value: Any) -> WireCell:
     """Encode ``value`` once for the wire and mark the result as encoded."""
-    return WireCell(cell_to_string(value, preserve_sql_null=True))
+    return WireCell(driver_cell_to_string(value))
+
+
+def driver_cell_to_string(value: Any) -> str:
+    """A value a database driver returned, onto the wire (CDC-LIT-1).
+
+    A driver never returns absence, so a text that spells the missing sentinel
+    is the user's text: it is escaped like any other colliding literal instead
+    of being encoded as an omitted field (which landed it as ``''``).
+    """
+    if type(value) is str and value == DF_MISSING_SENTINEL:
+        return escape_wire_text(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def reader_wire_cell(value: Any) -> Any:
@@ -263,6 +275,20 @@ def is_null_evidence(value: Any) -> bool:
         return False
     text = str(value).strip()
     return not text or text in NULL_WIRE_SENTINELS
+
+
+def is_encoded_null(value: Any) -> bool:
+    """NULL as the *reader* encoded it — never decided by a string's spelling.
+
+    ``None``, the ``Missing`` singleton, a store's explicit NULL, or a marked
+    reader wire cell (:class:`WireCell`) holding a NULL marker. A plain string is
+    a value whatever it spells: a key whose text really is ``__DF_SQL_NULL__``
+    is that key (review F1). Readers that hand plain wire strings mark them
+    (``reader_wire_cell``) so their NULLs stay recognizable.
+    """
+    if value is None or value is Missing or value is EXPLICIT_NULL:
+        return True
+    return isinstance(value, WireCell) and str(value) in NULL_WIRE_SENTINELS
 
 
 def is_reader_null_cell(value: Any) -> bool:
@@ -1043,6 +1069,12 @@ def project_row_cells(
         # Database rows already crossed the reader leaf: re-escaping their
         # NULL sentinel turned every NULL into ``__DF_ESC____DF_SQL_NULL__``
         # text that typed casts refuse (D118).
+        if cell is None:
+            # DATA-14: a parser's None (Parquet / JSON / Avro null) is SQL NULL,
+            # never "" — a nullable date or timestamp refused "" as
+            # EMPTY_VALUE_NOT_NULLABLE on SQLite.
+            out.append(SQL_NULL_SENTINEL)
+            continue
         out.append(wire_cell_text(cell) if preserve_sql_null else cell_to_string(cell))
     return out
 

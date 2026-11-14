@@ -165,11 +165,21 @@ def export_client() -> Any:
     Same endpoint/credential conventions as the staging store
     (``object_store._get_boto3_client``), with ``EXPORT_S3_*`` taking precedence.
     """
+    return s3_client_for("EXPORT_")
+
+
+def s3_client_for(prefix: str) -> Any:
+    """A boto3 S3 client whose ``<prefix>S3_*`` settings win over the staging store's.
+
+    ``<prefix>S3_ENDPOINT`` / ``_REGION`` / ``_PATH_STYLE`` / ``_ACCESS_KEY`` /
+    ``_SECRET_KEY``, then ``S3_*``, then ``AWS_*``, then boto3's default chain.
+    The export bucket uses ``EXPORT_``; the audit anchor bucket ``AUDIT_ANCHOR_``.
+    """
     import boto3
     from botocore.client import Config
 
     endpoint = (
-        getenv_brand("EXPORT_S3_ENDPOINT")
+        getenv_brand(f"{prefix}S3_ENDPOINT")
         or getenv_brand("S3_ENDPOINT")
         or os.getenv("AWS_ENDPOINT_URL")
         or ""
@@ -178,12 +188,12 @@ def export_client() -> Any:
         insecure = str(getenv_brand("S3_SECURE", "1") or "").lower() in ("0", "false", "no")
         endpoint = f"{'http' if insecure else 'https'}://{endpoint}"
     region = (
-        getenv_brand("EXPORT_S3_REGION")
+        getenv_brand(f"{prefix}S3_REGION")
         or os.getenv("AWS_DEFAULT_REGION")
         or os.getenv("AWS_REGION")
         or "us-east-1"
     )
-    path_style = str(getenv_brand("EXPORT_S3_PATH_STYLE", getenv_brand("S3_PATH_STYLE", "1"))) != "0"
+    path_style = str(getenv_brand(f"{prefix}S3_PATH_STYLE", getenv_brand("S3_PATH_STYLE", "1"))) != "0"
     kwargs: dict[str, Any] = {
         "region_name": region,
         "config": Config(
@@ -195,10 +205,10 @@ def export_client() -> Any:
     if endpoint:
         kwargs["endpoint_url"] = endpoint
     access = (
-        getenv_brand("EXPORT_S3_ACCESS_KEY") or getenv_brand("S3_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+        getenv_brand(f"{prefix}S3_ACCESS_KEY") or getenv_brand("S3_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
     )
     secret = (
-        getenv_brand("EXPORT_S3_SECRET_KEY") or getenv_brand("S3_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        getenv_brand(f"{prefix}S3_SECRET_KEY") or getenv_brand("S3_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
     )
     if access and secret:
         kwargs["aws_access_key_id"] = access

@@ -424,14 +424,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     setRunningId(id);
     try {
       const staged = await stageScheduleSync(id, mode);
-      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
+      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Run now using the signed contract");
       const accepted = await confirm({
-        title: mode === "full" ? "Re-sync from the start" : "Sync now",
+        title: mode === "full" ? "Re-sync from the start" : "Run now",
         message: [
           staged.preview?.note || "This starts one child job from the signed contract.",
           staged.preview?.destructive ? "This replaces the destination." : "",
         ].filter(Boolean).join(" "),
-        confirmLabel: mode === "full" ? "Re-sync" : "Sync now",
+        confirmLabel: mode === "full" ? "Re-sync" : "Run now",
         cancelLabel: "Cancel",
         tone: staged.preview?.destructive || mode === "full" ? "danger" : "default",
         facts: [
@@ -521,6 +521,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         tone: "error",
       });
     }
+  };
+
+  /**
+   * UX-36: one "Run now" per schedule. A schedule with a signed contract runs
+   * through the confirmed sync (the confirm names what will run); one without
+   * runs directly. Schedules no longer offer "Run now" and "Sync now" side by side.
+   */
+  const runSchedule = (id: string) => {
+    const sched = schedules.find((row) => row.id === id);
+    return sched?.contract_id ? handleScheduleSync(id, "sync") : handleRunNow(id);
   };
 
   const handleRunNow = async (id: string) => {
@@ -673,7 +683,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring same-engine syncs — Map → Validate → Execute on a cadence. Not ADF/Informatica DAG orchestration. A draft without mappings stays paused until Transfer Studio persists a contract."
+      description="Recurring syncs between your connections: each run replays a Validate-approved route on a cadence. A draft without mappings stays paused until Transfer Studio saves its mapping."
     >
       <PageFrame className="df2-pipeline-page">
       <PermissionNotice
@@ -910,7 +920,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                 freshnessLagSeconds={freshnessLag[sched.id]?.lag ?? null}
                 freshnessSeverity={freshnessLag[sched.id]?.severity ?? null}
                 onSelect={() => openDrawer(sched.id)}
-                onSync={() => void handleScheduleSync(sched.id, "sync")}
+                // UX-22: no Run now a viewer can press only to be refused.
+                onSync={jobRun.allowed ? () => void runSchedule(sched.id) : undefined}
               />
             ))}
           </div>
@@ -944,10 +955,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         approvalItems={selectedApprovals}
         onApprovalDecided={refreshAfterDecision}
         onReviewMapping={() => selectedSchedule && openEdit(selectedSchedule)}
-        onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onRun={() => selectedSchedule && void runSchedule(selectedSchedule.id)}
         onRecoverDestination={(action, reason) =>
           selectedSchedule ? handleRecoverDestination(selectedSchedule.id, action, reason) : undefined}
-        onSync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "sync")}
         onFullResync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "full")}
         onEdit={() => {
           if (!selectedSchedule) return;

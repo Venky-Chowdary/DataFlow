@@ -34,6 +34,8 @@ from services.value_serializer import json_default
 from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
 from services.rbac import require_admin_connector_access
+from services import shutdown_signal
+from services.threadpool_handler import off_event_loop
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -43,6 +45,7 @@ from ..transfer.connector_registry import run_probe
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 from services.ops_events import emit_event
 from services.execution_engine_contract import job_contract_flags
+from services.safe_errors import coded_http_exception, run_failure_http_exception, safe_http_exception
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +408,10 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
             "driver": driver,
             "auth_source": cfg.get("auth_source", ""),
         }
+        if not ok:
+            from services.safe_errors import failure_fields
+
+            payload.update(failure_fields(msg, engine=driver))
         if ok and driver in {"sqlserver", "oracle"}:  # ``driver`` is resolved above
             try:
                 from services.source_ha_probe import probe_source_ha_safe
@@ -419,12 +426,16 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
 
     except Exception as e:
         op.errored(e)
+        from services.safe_errors import failure_fields
+
+        message = humanize_connection_error(
+            resolve_driver_type(request.type or ""), e,
+            auth_mode=request.auth_mode or "",
+        )
         return {
             "success": False,
-            "message": humanize_connection_error(
-                resolve_driver_type(request.type or ""), e,
-                auth_mode=request.auth_mode or "",
-            ),
+            "message": message,
+            **failure_fields(message, engine=resolve_driver_type(request.type or "")),
         }
 
 
@@ -442,7 +453,8 @@ def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
 
 
 @router.post("/", response_model=ConnectorResponse)
-async def create_connector(
+@off_event_loop
+def create_connector(
     config: ConnectorConfig,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
@@ -526,11 +538,12 @@ async def create_connector(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.create_connector.failed", public_message="Couldn't save the connection.", status_code=500)
 
 
 @router.get("/")
-async def list_connectors(
+@off_event_loop
+def list_connectors(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
@@ -603,7 +616,7 @@ async def list_connectors(
         return {"connectors": result, "count": len(result)}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.list_connectors.failed", public_message="Couldn't list connections.", status_code=500)
 
 
 def _can_access_job(request: Request, job: dict) -> bool:
@@ -697,6 +710,17 @@ async def list_transfer_jobs(
             "degraded": False,
         }
     except (PyMongoError, ConnectionError) as e:
+        # ERR-28: the job store's host and topology stay in the log; the
+        # caller gets the taxonomy's copy and a reference.
+        from services.error_taxonomy import DatawrapError, classify
+        from services.safe_errors import public_error
+
+        _detail, cid = public_error(
+            e, event="connectors.list_transfer_jobs.store_unavailable",
+            public_message="Job history unavailable.", status_code=503,
+        )
+        named = classify(DatawrapError("platform.job_store_unavailable"), side="platform")
+        envelope = named.envelope(cid) if named is not None else {"detail": _detail}
         return {
             "jobs": [],
             "count": 0,
@@ -708,14 +732,16 @@ async def list_transfer_jobs(
             "attention_count": 0,
             "degraded": True,
             "persistence": "unavailable",
-            "detail": str(e),
+            "detail": envelope["detail"],
+            "error": envelope.get("error"),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.list_transfer_jobs.failed", public_message="Couldn't list jobs.", status_code=500)
 
 
 @router.get("/jobs/{job_id}")
-async def get_transfer_job(job_id: str, request: Request):
+@off_event_loop
+def get_transfer_job(job_id: str, request: Request):
     """Get a specific transfer job"""
     try:
         from ..transfer.models import sanitize_job_for_api
@@ -738,7 +764,7 @@ async def get_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.get_transfer_job.failed", public_message="Couldn't load the job.", status_code=500)
 
 
 @router.patch("/jobs/{job_id}")
@@ -786,7 +812,7 @@ async def patch_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.patch_transfer_job.failed", public_message="Couldn't update the job.", status_code=500)
 
 
 @router.post("/jobs/{job_id}/sync")
@@ -833,7 +859,7 @@ async def sync_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.sync_transfer_job.failed", public_message="Couldn't stage the sync.", status_code=500)
 
 
 class RerunRequest(BaseModel):
@@ -904,7 +930,8 @@ def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> li
 
 
 @router.post("/jobs/{job_id}/retry")
-async def retry_transfer_job(
+@off_event_loop
+def retry_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -936,6 +963,7 @@ async def retry_transfer_job(
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "retried")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -952,10 +980,8 @@ async def retry_transfer_job(
 
         hydrate_file_source(xfer_req)
         if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.execution_engine_contract import (
             committed_rows_of,
@@ -1105,11 +1131,21 @@ async def retry_transfer_job(
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.retry_transfer_job.failed", public_message="Couldn't retry the job.", status_code=500)
+
+
+def _refuse_rehearsal_extract(job: dict[str, Any], verb: str) -> None:
+    """409 for a job that is an exit rehearsal's extract: it is re-done by a new rehearsal, never by a job route."""
+    from services.exit_job_guard import refusal
+
+    refused = refusal(job, verb)
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
 
 
 @router.post("/jobs/{job_id}/rerun")
-async def rerun_transfer_job(
+@off_event_loop
+def rerun_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -1138,6 +1174,7 @@ async def rerun_transfer_job(
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "re-run")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -1154,10 +1191,8 @@ async def rerun_transfer_job(
 
         hydrate_file_source(xfer_req)
         if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.execution_engine_contract import (
             committed_rows_of,
@@ -1259,7 +1294,7 @@ async def rerun_transfer_job(
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.rerun_transfer_job.failed", public_message="Couldn't start the job again.", status_code=500)
 
 
 def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
@@ -1348,6 +1383,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "resumed")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -1370,10 +1406,8 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         if xfer_req_probe.source.kind == "file" and not file_source_bytes_available(
             xfer_req_probe
         ):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.checkpoint_service import Checkpoint, evaluate_resume_safety
 
@@ -1465,11 +1499,12 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.resume_transfer_job.failed", public_message="Couldn't resume the job.", status_code=500)
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_transfer_job(job_id: str, request: Request):
+@off_event_loop
+def cancel_transfer_job(job_id: str, request: Request):
     """Request cancellation of a running/pending transfer job."""
     try:
         mongo = get_mongodb_service()
@@ -1560,44 +1595,118 @@ async def cancel_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.cancel_transfer_job.failed", public_message="Couldn't cancel the job.", status_code=500)
+
+
+#: How often the job stream reads the job, how often it re-sends an unchanged
+#: frame (the web client treats 8s of silence as a dropped stream and falls
+#: back to polling), and how long one stream may stay open.
+JOB_STREAM_POLL_SECONDS = 1.0
+JOB_STREAM_REFRESH_SECONDS = 5.0
+JOB_STREAM_MAX_SECONDS = 6 * 3600.0
+
+
+def _job_stream_frame(job_id: str) -> tuple[str | None, bool]:
+    """The job as one SSE data frame and whether it is terminal (None: job gone).
+
+    Synchronous on purpose: the stream runs it on the thread pool, so the
+    store read never holds the event loop.
+    """
+    from services.job_status import is_terminal
+
+    from ..transfer.models import sanitize_job_for_api
+
+    job = get_mongodb_service().get_job(job_id)
+    if not job:
+        return None, True
+    for key in ("created_at", "updated_at", "started_at", "completed_at"):
+        if job.get(key) and hasattr(job[key], "isoformat"):
+            job[key] = job[key].isoformat()
+    safe = sanitize_job_for_api(job)
+    safe["runtime_estimate"] = estimate_for_job_doc(job)
+    return f"data: {json.dumps(safe, default=json_default)}\n\n", is_terminal(safe.get("status"))
+
+
+STREAM_TICKET_TTL_SECONDS = 60
+
+
+@router.post("/jobs/{job_id}/stream-ticket")
+async def issue_job_stream_ticket(job_id: str, request: Request):
+    """A single-use ticket for ``GET /jobs/{job_id}/stream`` (SEC-14).
+
+    EventSource cannot send an Authorization header; a ticket that works once,
+    for 60 seconds, on this one URL takes the bearer's place in the query
+    string. Empty when the caller's session needs none (a cookie, or sign-in off).
+    """
+    import secrets
+
+    from starlette.concurrency import run_in_threadpool
+
+    def _visible() -> bool:
+        job = get_mongodb_service().get_job(job_id)
+        return bool(job) and _can_access_job(request, job)
+
+    if not await run_in_threadpool(_visible):
+        raise HTTPException(status_code=404, detail="Job not found")
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        return {"ticket": "", "expires_in": 0}
+    from services.auth_state import get_auth_state
+
+    ticket = secrets.token_urlsafe(24)
+    path = f"/api/v1/connectors/jobs/{job_id}/stream"
+    get_auth_state().put_stream_ticket(ticket, {"token": token, "path": path}, STREAM_TICKET_TTL_SECONDS)
+    return {"ticket": ticket, "expires_in": STREAM_TICKET_TTL_SECONDS}
 
 
 @router.get("/jobs/{job_id}/stream")
 async def stream_transfer_job(job_id: str, request: Request):
     """Server-sent events for live transfer job progress."""
+    import time
+
+    from starlette.concurrency import run_in_threadpool
+
+    def _authorized_job() -> dict | None:
+        job = get_mongodb_service().get_job(job_id)
+        return job if job and _can_access_job(request, job) else None
 
     # Pre-check workspace access before entering the stream loop.
     try:
-        mongo = get_mongodb_service()
-        job = mongo.get_job(job_id)
-        if not job or not _can_access_job(request, job):
+        if await run_in_threadpool(_authorized_job) is None:
             raise HTTPException(status_code=404, detail="Job not found")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.stream_transfer_job.failed", public_message="Couldn't stream the job's progress.", status_code=500)
 
     async def event_generator():
-        from ..transfer.models import sanitize_job_for_api
-
-        mongo = get_mongodb_service()
+        last_frame: str | None = None
+        last_sent = 0.0
+        opened = time.monotonic()
         while True:
-            job = mongo.get_job(job_id)
-            if not job:
+            # A viewer that closed the tab must not keep a store poll alive.
+            if await request.is_disconnected():
+                break
+            frame, terminal = await run_in_threadpool(_job_stream_frame, job_id)
+            if frame is None:
                 yield f"event: error\ndata: {json.dumps({'error': 'Job not found'}, default=json_default)}\n\n"
                 break
-            for key in ("created_at", "updated_at", "started_at", "completed_at"):
-                if job.get(key) and hasattr(job[key], "isoformat"):
-                    job[key] = job[key].isoformat()
-            safe = sanitize_job_for_api(job)
-            safe["runtime_estimate"] = estimate_for_job_doc(job)
-            yield f"data: {json.dumps(safe, default=json_default)}\n\n"
-            from services.job_status import is_terminal
-
-            if is_terminal(safe.get("status")):
+            now = time.monotonic()
+            if frame != last_frame or terminal or now - last_sent >= JOB_STREAM_REFRESH_SECONDS:
+                yield frame
+                last_frame, last_sent = frame, now
+            if terminal:
                 break
-            await asyncio.sleep(0.4)
+            if now - opened >= JOB_STREAM_MAX_SECONDS:
+                # The client reconnects (EventSource) or falls back to polling.
+                yield f"event: timeout\ndata: {json.dumps({'reason': 'stream_max_age'})}\n\n"
+                break
+            # On SIGTERM the stream ends at once so the server can run its
+            # shutdown; the client reconnects to another replica (ops review High 4).
+            if await shutdown_signal.sleep_unless_shutdown(JOB_STREAM_POLL_SECONDS):
+                yield f"event: shutdown\ndata: {json.dumps({'reason': 'server_restarting'})}\n\n"
+                break
 
     return StreamingResponse(
         event_generator(),
@@ -1624,7 +1733,8 @@ def _operator_csv_cell(value: object) -> str:
 
 
 @router.get("/jobs/{job_id}/quarantine")
-async def get_job_quarantine(job_id: str, request: Request):
+@off_event_loop
+def get_job_quarantine(job_id: str, request: Request):
     """Return quarantined rows for a job with their rejection reasons.
 
     Includes write-time rejects and preflight integrity findings (encoding, etc.)
@@ -1775,7 +1885,8 @@ async def get_job_quarantine(job_id: str, request: Request):
 
 
 @router.post("/jobs/{job_id}/quarantine/export")
-async def export_job_quarantine(job_id: str, request: Request):
+@off_event_loop
+def export_job_quarantine(job_id: str, request: Request):
     """Export quarantined rows to a CSV in the exports folder and return a download URL."""
     import uuid
 
@@ -2295,6 +2406,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_mutate_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace write access required")
+    _refuse_rehearsal_extract(job, "replayed from quarantine")
 
     from services.quarantine_dlq import replay_parent_not_committed
 
@@ -2608,7 +2720,17 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
     except (ValueError, ContractViolation) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The replay writes with skip_preflight, so a job that must be reversible runs g24 here, on the rows
+    # it replays: a lossy override is refused, conditional columns are enforced while writing (review 3).
+    from services.reversibility_sources import execute_gate
+
+    reversibility = execute_gate(child_req, (mappings, schema, None, records, len(records)))
+    if reversibility is not None and reversibility.get("status") == "block":
+        raise HTTPException(status_code=409, detail=str(reversibility.get("message") or "g24_reversibility"))
     child_job_id = engine._create_pending_job(child_req)
+    from services.reversibility_enforce import rekey
+
+    rekey(mappings, child_job_id)  # g24 stamped before the child existed: its tally is the child's (review 4)
     mongo.update_job_status(
         child_job_id,
         "running",
@@ -2772,6 +2894,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         from services.quarantine_dlq import closure_with_promotion_outcome
 
         compact = closure_with_promotion_outcome(compact, promote_meta, job_id=job_id)
+        from services.reversibility_enforce import record_on_success
+
+        child_fields: dict = {"records_processed": rows_written,
+                              "destination_summary": {**dest_summary, "dest_dlq_promoted": promote_meta}}
+        unchecked = record_on_success(child_job_id, child_fields)  # the replay's own enforcement tally
+        if unchecked and status != "failed":
+            status, recon = "failed", {**recon, "message": unchecked}
         phase = "completed" if status != "failed" else "failed"
         mongo.update_job_status(
             child_job_id,
@@ -2786,7 +2915,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             progress_pct=100 if status != "failed" else 99,
             rejected_rows=rejected,
             rejected_details=dest_summary.get("rejected_details") or [],
-            destination_summary={**dest_summary, "dest_dlq_promoted": promote_meta},
+            destination_summary=child_fields["destination_summary"],
             reconciliation=recon,
             ddl_log=ddl_log,
             error=recon.get("message") if status == "failed" else None,
@@ -2939,11 +3068,15 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if typed_refusal:
             raise HTTPException(status_code=409, detail=typed_refusal) from e
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # A refused replay is a failed run: the job record's words, with a reference.
+        raise run_failure_http_exception(
+            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write"
+        ) from e
 
 
 @router.get("/{connector_id}")
-async def get_connector(connector_id: str, request: Request):
+@off_event_loop
+def get_connector(connector_id: str, request: Request):
     """Get a specific connector"""
     try:
         from services.mongodb_service import redact_connector_secrets
@@ -2960,11 +3093,12 @@ async def get_connector(connector_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.get_connector.failed", public_message="Couldn't load the connection.", status_code=500)
 
 
 @router.delete("/{connector_id}")
-async def delete_connector(connector_id: str, request: Request):
+@off_event_loop
+def delete_connector(connector_id: str, request: Request):
     """Delete a connector"""
     try:
         mongo = get_mongodb_service()
@@ -2982,7 +3116,7 @@ async def delete_connector(connector_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.delete_connector.failed", public_message="Couldn't delete the connection.", status_code=500)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3045,6 +3179,10 @@ def profile_file_upload(
         )
 
     schema = FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+    if str(getattr(result, "file_type", "") or "") in {"json", "jsonl"}:
+        from services.file_parser import _json_value_kinds_override
+
+        schema = _json_value_kinds_override(schema, list(result.data or [])[:1000])  # DATA-20
     try:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 
@@ -3192,7 +3330,7 @@ async def upload_file(
     except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.upload_file.failed", public_message="Couldn't read the uploaded file.", status_code=500)
 
 
 @router.post("/transfer")
@@ -3250,15 +3388,15 @@ async def transfer_data(
         if src_fmt == "unknown":
             src_fmt = "csv"
 
-        source_filter: dict = {}
-        if source_filter_json.strip():
-            try:
-                import json as _json
-                parsed = _json.loads(source_filter_json)
-                if isinstance(parsed, dict):
-                    source_filter = parsed
-            except Exception:
-                source_filter = {}
+        from services.row_filter import filter_spec_from_json
+
+        try:
+            # Not a filter object is a 400, never "no filter" (review 1 H3).
+            source_filter = filter_spec_from_json(source_filter_json)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"source_filter_json: {exc}"
+            ) from exc
 
         # The workspace's own region wins over the caller's tag (audit H-4).
         from services.data_residency import job_data_region
@@ -3268,7 +3406,7 @@ async def transfer_data(
         )
         from services.body_id_ownership import assert_body_ids
 
-        assert_body_ids(request, connectors=(connector_id or "",), write=True)  # review 3, body routes
+        await asyncio.to_thread(assert_body_ids, request, connectors=(connector_id or "",), write=True)  # review 3, body routes
         request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
             destination=EndpointConfig(
@@ -3339,6 +3477,11 @@ async def transfer_data(
                 "source": {"type": "file", "filename": file.filename, "file_type": src_fmt},
             }
 
+        from services.exit_job_guard import refuse_synchronous_run
+
+        refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+        if refused:
+            raise HTTPException(status_code=409, detail=refused)
         result = engine.execute_tracked(request_obj, job_id)
         if not result.success:
             raise HTTPException(status_code=422, detail={"error": result.error, "job_id": result.job_id})
@@ -3357,4 +3500,4 @@ async def transfer_data(
     except (HTTPException, PayloadTooLarge, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.transfer_data.failed", public_message="The transfer couldn't start.", status_code=500)

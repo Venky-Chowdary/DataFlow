@@ -1,4 +1,17 @@
 {{ if .Values.api.enabled -}}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.terminationGracePeriodSeconds)) }}
+{{- fail "api.terminationGracePeriodSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.preStopSleepSeconds)) }}
+{{- fail "api.preStopSleepSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.gracefulShutdownSeconds)) }}
+{{- fail "api.gracefulShutdownSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- /* 25: the API teardown's drain bound (the app's default WORKER_DRAIN_SECONDS). */}}
+{{- if lt (int .Values.api.terminationGracePeriodSeconds) (add (int .Values.api.preStopSleepSeconds) (int .Values.api.gracefulShutdownSeconds) 25 5) }}
+{{- fail "api.terminationGracePeriodSeconds must be at least api.preStopSleepSeconds + api.gracefulShutdownSeconds + 30: open connections, then the teardown's 25 s drain, must finish before SIGKILL" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,15 +34,18 @@ spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       containers:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 8000
+              containerPort: {{ .Values.api.containerPort }}
               protocol: TCP
           env:
+            - name: PORT
+              value: {{ .Values.api.containerPort | quote }}
             {{- include "dataflow.commonEnv" . | nindent 12 }}
             - name: DATAFLOW_PROCESS_ROLE
               value: api
@@ -41,7 +57,19 @@ spec:
               value: "0"
             - name: DATAFLOW_ACK_BACKEND
               value: mongo
+            - name: DATAFLOW_GRACEFUL_SHUTDOWN_SECONDS
+              value: {{ .Values.api.gracefulShutdownSeconds | quote }}
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.api.preStopSleepSeconds | quote }}]
+          startupProbe:
+            httpGet:
+              path: {{ .Values.api.health.livenessPath }}
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: {{ .Values.api.health.livenessPath }}
@@ -58,6 +86,10 @@ spec:
             {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "dataflow.runtimeVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "dataflow.runtimeVolumes" . | nindent 8 }}
       nodeSelector:
         {{- toYaml .Values.api.nodeSelector | nindent 8 }}
       tolerations:

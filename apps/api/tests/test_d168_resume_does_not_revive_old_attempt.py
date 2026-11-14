@@ -26,6 +26,20 @@ from services.error_handling import TransferCancelled  # noqa: E402
 from services.mongodb_service import MemoryMongoDBService  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_local_run_outlives_its_test():
+    """Every attempt a test begins is ended: ``begin_run_attempt`` registers the
+    job as running in this process, and a run left registered stays in
+    ``transfer_scheduler.local_job_ids()`` for every later test (the M12 drain
+    test found two such ids) and is never taken for an orphan."""
+    from services import transfer_scheduler
+
+    before = transfer_scheduler.local_job_ids()
+    yield
+    left = transfer_scheduler.local_job_ids() - before
+    assert left == frozenset(), f"runs still registered as local after the test: {sorted(left)}"
+
+
 def _job(store: MemoryMongoDBService) -> str:
     job_id = uuid.uuid4().hex[:24]
     store.update_job_status(job_id, "running", transfer_request={})
@@ -33,8 +47,21 @@ def _job(store: MemoryMongoDBService) -> str:
 
 
 def _new_attempt_in_other_context(store, job_id: str) -> str | None:
-    """What a resumed ``execute_tracked`` does, in its own context."""
-    return contextvars.Context().run(cc.begin_run_attempt, store, job_id)
+    """What a resumed ``execute_tracked`` does, in its own context.
+
+    Only its stamp on the job matters here; the run itself ends at once, as
+    every ``execute_tracked`` ends its attempt in a ``finally`` in the context
+    that began it. Left open, its job stayed in ``local_job_ids()`` for the
+    rest of the process.
+    """
+
+    def _resumed_run() -> str | None:
+        try:
+            return cc.begin_run_attempt(store, job_id)
+        finally:
+            cc.end_run_attempt()
+
+    return contextvars.Context().run(_resumed_run)
 
 
 def test_old_attempt_stops_after_resume_cleared_the_cancel_flag():

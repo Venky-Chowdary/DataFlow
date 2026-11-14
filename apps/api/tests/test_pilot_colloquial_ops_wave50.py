@@ -45,7 +45,12 @@ def test_fire_and_execute_schedule_names():
     assert "run_schedule_now" in _names("execute Nightly")
 
 
-def test_soft_transfer_without_source_is_plan_only():
+def test_soft_transfer_without_source_is_plan_only(tmp_path, monkeypatch):
+    # "orders" names no uploaded dataset here: Pilot reads an empty upload
+    # directory, not whatever earlier tests or runs left behind.
+    from tests.r4_route_harness import use_upload_dir
+
+    use_upload_dir(monkeypatch, tmp_path)
     intent = parse_transfer_intent("transfer orders to warehouse")
     assert intent is not None
     assert intent.get("plan_only") is True

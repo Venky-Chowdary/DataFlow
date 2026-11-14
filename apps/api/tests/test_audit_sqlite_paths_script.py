@@ -30,6 +30,9 @@ def world(tmp_path, monkeypatch):
     for var in ("DATAFLOW_CONNECTOR_STORE", "DATAFLOW_CONNECTOR_STORE_BACKEND", "DATAFLOW_DATA_DIR", "MONGODB_URI"):
         monkeypatch.setenv(var, "")  # recorded, so teardown restores the original
         monkeypatch.delenv(var)
+    # Never unset: data_dir() would be apps/api/data while this test runs, and a background
+    # thread reaching the control-plane store would write there (follow-up review 6).
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "process-data"))
     import services.connector_store as connector_store
 
     monkeypatch.setattr(connector_store, "_backend_choice", None)

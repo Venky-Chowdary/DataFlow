@@ -131,10 +131,72 @@ def should_use_redshift_s3_copy_for_insert(
     return int(row_count) >= max(0, limit)
 
 
+def redshift_text_stage_safe(rows: list[tuple] | list[list]) -> bool:
+    """Whether every cell's TSV stage text is the value itself (no backslash escape).
+
+    The stage text uses PostgreSQL COPY TEXT escaping (``\\`` for a backslash,
+    ``\\t`` / ``\\n`` / ``\\r`` for tab / LF / CR, ``\\N`` for NULL), but the
+    Redshift ``COPY … DELIMITER '\\t' NULL AS '\\N'`` it runs takes a backslash
+    literally (no ``ESCAPE``): a text ``\\N`` (staged ``\\\\N``) loaded as two
+    backslashes and an N, a tab as ``\\t``. A batch holding such a cell takes
+    the exact INSERT path; Parquet staging carries any value.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    for row in rows:
+        for value in row:
+            if is_reader_null_cell(value):
+                continue
+            if "\\" in _copy_text_value(value):
+                return False
+    return True
+
+
+def _parquet_staging_available() -> bool:
+    try:
+        import pyarrow  # noqa: F401
+        import pyarrow.parquet  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def redshift_batch_stage_format(rows: list[tuple] | list[list], requested: str = "tsv") -> str:
+    """The stage format this batch is COPYed with, or ``""`` when it cannot be staged.
+
+    ``parquet`` when the destination asks for it. ``tsv`` when every cell
+    stages as itself (:func:`redshift_text_stage_safe`). Otherwise — a
+    backslash, tab, CR, LF, bytea or a text ``\\N`` in the batch, ordinary in
+    addresses, notes and JSON — typed Parquet staging (``COPY … FORMAT AS
+    PARQUET``), which has no escaping at all, so the load stays a bulk COPY.
+    ``""`` only when Parquet staging is impossible (pyarrow missing): the
+    caller then INSERTs, much slower, and says so.
+    """
+    if str(requested or "tsv").strip().lower() == "parquet":
+        return "parquet"
+    if redshift_text_stage_safe(rows):
+        return "tsv"
+    return "parquet" if _parquet_staging_available() else ""
+
+
+REDSHIFT_INSERT_FALLBACK_WARNING = (
+    "Redshift bulk COPY skipped for a batch: it holds a value the TSV stage cannot carry "
+    "(backslash, tab, CR, LF, bytea or a text \\N) and Parquet staging is unavailable "
+    "(pyarrow is not installed). The batch is INSERTed row by row, which is much slower; "
+    "install pyarrow or set redshift_stage_format=parquet."
+)
+
+
 def render_redshift_copy_text(rows: list[tuple] | list[list]) -> bytes:
     """Same COPY TEXT bytes PostgreSQL ``COPY FROM STDIN`` would send."""
     if not rows:
         return b""
+    if not redshift_text_stage_safe(rows):
+        raise ValueError(
+            "Redshift TSV stage refused a cell that needs a backslash escape "
+            "(\\, tab, CR, LF or a text \\N); Redshift COPY would load the escape "
+            "literally — it stages as Parquet (without pyarrow, the INSERT path keeps the value)"
+        )
     lines = ["\t".join(_copy_text_value(v) for v in row) for row in rows]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -360,7 +422,11 @@ def copy_redshift_rows_from_s3(
     """Stage TSV or Parquet to S3 and execute Redshift COPY. Returns the S3 URI."""
     if not rows:
         return ""
-    fmt = (stage_format or "tsv").strip().lower()
+    # A batch the TSV stage cannot carry is staged as typed Parquet instead
+    # (still a bulk COPY); only with no Parquet available is it refused here.
+    fmt = redshift_batch_stage_format(rows, (stage_format or "tsv").strip().lower())
+    if not fmt:
+        raise ValueError(REDSHIFT_INSERT_FALLBACK_WARNING)
     if fmt == "parquet":
         from services.arrow_write import mapped_rows_to_parquet_bytes
 

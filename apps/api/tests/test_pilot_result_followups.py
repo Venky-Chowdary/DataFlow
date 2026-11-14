@@ -194,7 +194,10 @@ def test_result_store_no_cross_session_leak(tmp_path: Path) -> None:
     assert store.resolve(result_id=rid, session_id="owner") is not None
 
 
-def test_ack_ledger_reload_keeps_consumed_for_idempotent_replay(tmp_path: Path) -> None:
+def test_ack_ledger_reload_keeps_consumed_for_idempotent_replay(tmp_path: Path, monkeypatch) -> None:
+    # A restart reads the ledger back only when it was sealed with a deployment
+    # key: the public default secret is no key (review 2, M5).
+    monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "pilot-followups-deployment-key-0123456789")
     path = tmp_path / "acks_reload.json"
     ledger = PilotAckLedger(path=path, ttl_sec=600)
     aid = ledger.put(
@@ -211,9 +214,11 @@ def test_ack_ledger_reload_keeps_consumed_for_idempotent_replay(tmp_path: Path) 
     assert payload.get("connector_id") == "c9"
 
 
-def test_explicit_result_id_reloads_across_stores(tmp_path: Path) -> None:
+def test_explicit_result_id_reloads_across_stores(tmp_path: Path, monkeypatch) -> None:
     """A sample with no session is readable later by id, including from a store
     that loaded the file before the write."""
+    # Rows reach the file only sealed with a deployment key (review 2, M5).
+    monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "pilot-followups-deployment-key-0123456789")
     path = tmp_path / "results-reload.json"
     reader = PilotResultStore(path=path, ttl_sec=600)
     writer = PilotResultStore(path=path, ttl_sec=600)

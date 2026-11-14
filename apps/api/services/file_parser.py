@@ -135,6 +135,49 @@ def _save_registry() -> None:
 _load_registry()
 
 
+def recorded_upload_files(root: Path) -> tuple[int, int]:
+    """``(recorded, present)``: uploads the registry says live in ``root``, and how many do.
+
+    The registry is read as persisted (Mongo or the registry file), not as
+    loaded: loading drops a record whose file is missing, which is exactly the
+    record that shows a volume came back empty (review 2, M2). Uploads kept in
+    an object store are not counted — their bytes are not on this volume.
+    """
+    rows: dict[str, dict] = {str(r.get("file_id") or ""): r for r in _file_registry.values()}
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for item in coll.find({}, {"file_id": 1, "path": 1, "object_uri": 1}).limit(5000):
+                rows.setdefault(str(item.get("file_id") or item.get("_id") or ""), dict(item))
+        elif REGISTRY_PATH.exists():
+            raw = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            for item in (raw.get("files", []) if isinstance(raw, dict) else []):
+                if isinstance(item, dict):
+                    rows.setdefault(str(item.get("file_id") or ""), item)
+    except (OSError, ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning("upload registry not read: %s", exc)
+    try:
+        base = Path(root).resolve()
+    except OSError:
+        return 0, 0
+    recorded = present = 0
+    for row in rows.values():
+        raw_path = str(row.get("path") or "")
+        if not raw_path or row.get("object_uri"):
+            continue
+        path = Path(raw_path)
+        try:
+            if path.resolve().parent != base:
+                continue
+        except OSError:
+            continue
+        recorded += 1
+        present += int(path.exists())
+    return recorded, present
+
+
 def detect_format(filename: str, content: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".csv"):
@@ -274,7 +317,7 @@ def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
     raise TypeError("JSONL COUNT expects bytes, str, Path, or a readable stream")
 
 
-def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
+def _iter_jsonl_dicts_from_reader(reader: Any, *, keep_literals: bool = False) -> Any:
     """One JSON object per non-blank line. Poison / non-object is unmeasured."""
     from services.dest_precount import UnmeasuredArtifact
 
@@ -283,7 +326,7 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         if not line:
             continue
         try:
-            obj = json_loads_exact(line)
+            obj = json_loads_exact(line, keep_literals=keep_literals)
         except json.JSONDecodeError as exc:
             raise UnmeasuredArtifact("jsonl_poison_line") from exc
         if not isinstance(obj, dict):
@@ -291,16 +334,17 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         yield obj
 
 
-def iter_jsonl_dicts(content: bytes | str | Path) -> Any:
+def iter_jsonl_dicts(content: bytes | str | Path, *, keep_literals: bool = False) -> Any:
     """Same JSONL population as ``count_jsonl_records``, as dicts for Gate-8.
 
     A poison or non-object line raises ``UnmeasuredArtifact`` — never yield
     a prefix (truncated DISTINCT lesson). COUNT is ``sum`` of this walk.
+    ``keep_literals`` keeps each JSON fraction's own text (``JsonFraction``).
     """
     closer = None
     try:
         reader, closer = _jsonl_count_open(content)
-        yield from _iter_jsonl_dicts_from_reader(reader)
+        yield from _iter_jsonl_dicts_from_reader(reader, keep_literals=keep_literals)
     finally:
         if closer is not None:
             try:
@@ -543,6 +587,32 @@ def resolve_attached_upload_path(file_id: str) -> str:
     return publish_upload_path(str(record.get("path") or ""))
 
 
+_STORED_UPLOAD_NAME = re.compile(r"^([0-9a-f]{16})_")
+
+
+def upload_workspace_for_path(path: str | Path) -> str | None:
+    """The workspace that owns the upload stored at ``path``.
+
+    ``""`` for an upload registered with no workspace, ``None`` when no upload
+    record names this file (it was not stored through ``store_upload``). The
+    file id is read from the stored name, so a record another replica wrote is
+    found through the shared registry.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return None
+    named = _STORED_UPLOAD_NAME.match(resolved.name)
+    record = get_file(named.group(1)) if named else None
+    if not record:
+        return None
+    try:
+        same_file = Path(str(record.get("path") or "")).resolve() == resolved
+    except OSError:
+        same_file = False
+    return str(record.get("workspace_id") or "") if same_file else None
+
+
 def get_file(file_id: str) -> dict | None:
     record = _file_registry.get(file_id)
     if not record:
@@ -650,7 +720,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             if isinstance(c, dict)
         }
         with open(path, "r", encoding=encoding) as f:
-            reader = iter_csv_records(f, delimiter)
+            reader = iter_csv_records(f, delimiter, null_marker=str(record.get("null_marker") or ""))
             headers = next(reader, [])
             chunk = []
             for row in reader:
@@ -1117,6 +1187,7 @@ class FileParser:
                     io.StringIO(text),
                     delim,
                     empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                    null_marker=str(getattr(opts, "null_marker", "") or ""),
                 ),
                 opts,
                 header_names=csv_header_names,
@@ -1957,7 +2028,14 @@ class FileParser:
         return cell_to_string(value)
 
     @staticmethod
-    def infer_schema(records: list[dict], *, invalid_calendar_votes: bool = False) -> dict[str, str]:
+    def is_json_result(result: Any) -> bool:
+        """True for a parsed JSON / JSONL file: its values carry JSON types (DATA-20)."""
+        return str(getattr(result, "file_type", "") or "") in {"json", "jsonl"}
+
+    @staticmethod
+    def infer_schema(
+        records: list[dict], *, invalid_calendar_votes: bool = False, json_kinds: bool = False
+    ) -> dict[str, str]:
         """Infer rich schema from records using statistical type inference.
 
         ``invalid_calendar_votes``: True only for a file's own rows (uploads,
@@ -1980,7 +2058,47 @@ class FileParser:
         from services.schema_inference import infer_schema_map
 
         schema, _intel = infer_schema_map(samples, invalid_calendar_votes=invalid_calendar_votes)
+        return _json_value_kinds_override(schema, records[:1000]) if json_kinds else schema
+
+
+def _json_value_kinds_override(schema: dict[str, str], records: list[dict]) -> dict[str, str]:
+    """DATA-20: a JSON value's own type beats what its text looks like.
+
+    Inference reads every cell as text, so a JSON string ``"1"`` voted INTEGER
+    (MongoDB then stored the number 1), ``"true"`` voted BOOLEAN, and the
+    float ``1.5`` voted DECIMAL (MongoDB stored Decimal128). For a JSON / JSONL
+    file (``json_kinds``; records with JSON scalars and no date or bytes
+    objects), a column of strings stays text, BOOLEAN needs a
+    real JSON boolean, and a column of JSON floats is DOUBLE. Dates spelled
+    as strings still infer; only an explicit map turns a float into DECIMAL.
+    """
+    import datetime as _dt
+    from decimal import Decimal
+
+    from services.type_system import normalize_logical_type
+
+    typed = False
+    for rec in records:
+        for value in rec.values():
+            if isinstance(value, (_dt.date, _dt.time, bytes, bytearray, memoryview)):
+                return schema
+            if isinstance(value, (bool, int, float, Decimal, dict, list)):
+                typed = True
+    if not typed:
         return schema
+    out = dict(schema)
+    for col, inferred in schema.items():
+        kinds = {type(r.get(col)) for r in records if r.get(col) is not None}
+        if not kinds:
+            continue
+        logical = normalize_logical_type(inferred)
+        if kinds == {str} and logical in {"integer", "decimal", "float", "boolean"}:
+            out[col] = "TEXT"
+        elif logical == "boolean" and bool not in kinds:
+            out[col] = "TEXT"
+        elif logical == "decimal" and float in kinds and kinds <= {int, float}:
+            out[col] = "DOUBLE"
+    return out
 
 
 def _xml_local_name(tag: object) -> str:

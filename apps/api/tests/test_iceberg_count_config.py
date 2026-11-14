@@ -115,6 +115,10 @@ def test_s3_count_without_endpoint_or_static_keys_uses_aws_defaults(
 ):
     import boto3
 
+    # Only with the operator's opt-in (follow-up review 1, H2); without it the
+    # keyless COUNT stays unmeasured (test_secfu12_platform_aws_credentials_opt_in).
+    monkeypatch.setenv("DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS", "1")
+
     endpoint = {
         "type": "iceberg",
         "connection_string": "http://rest-catalog:8181",

@@ -71,10 +71,15 @@ def test_transfer_ready_catalog_ids_have_honest_tier():
             transfer_ready_flag=ready,
         )
         if ready:
-            assert tier == "certified", (cid, tier, driver)
+            # Certified needs CI evidence for the engine; without it the honest
+            # tier is "implemented" (CLM-7).
+            from src.transfer.connector_capabilities import _tile_proven
+
+            expected = "certified" if _tile_proven(cid, driver) else "implemented"
+            assert tier == expected, (cid, tier, driver)
         else:
             # Package missing on this runner → planned/connect_only/source_only OK
-            assert tier in {"planned", "connect_only", "source_only", "certified"}, (cid, tier)
+            assert tier in {"planned", "connect_only", "source_only", "certified", "implemented"}, (cid, tier)
 
 
 def test_only_live_proven_vector_sinks_claim_cdc():

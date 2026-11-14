@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 from typing import Any
 
 from services.value_serializer import cell_to_string
@@ -21,7 +19,15 @@ def write_destination_file(
     column_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format."""
+    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format.
+
+    ``endpoint.extra["formula_protection"]``: ``"off"`` (default — a transfer
+    job's file is data, byte-exact) or ``"prefix"`` (CSV/TSV text cells that
+    would open as a spreadsheet formula get a leading ``'``; see
+    ``services.csv_safety``). Human-download callers pass ``"prefix"``.
+    ``endpoint.extra["tsv_null"]``: ``"empty"`` (default) or ``"\\N"`` — a TSV
+    then spells NULL ``\\N`` and ``''`` as an empty cell (G7-F3).
+    """
     import sys
     from pathlib import Path
 
@@ -32,12 +38,28 @@ def write_destination_file(
         resolve_target_columns,
         transform_error_policy_for_validation_mode,
     )
+    from services.csv_safety import formula_protection_mode, neutralize_export_cell
     from services.format_converter import can_convert, convert_rows
 
     fmt = (endpoint.format or "json").lower()
     # ndjson is a JSON Lines alias for the conversion engine
     if fmt == "ndjson":
         fmt = "jsonl"
+    # G7 (CWE-1236): opt-in OWASP guard for delimited text a person opens.
+    guard_formulas = (
+        formula_protection_mode(
+            (endpoint.extra if isinstance(endpoint.extra, dict) else {}).get("formula_protection")
+        )
+        == "prefix"
+        and fmt in {"csv", "tsv"}
+    )
+    from services.export_dialect import tsv_null_marker
+
+    # G7-F3: opt-in MySQL/PostgreSQL text NULL convention for a TSV (``\\N``);
+    # unset keeps the export dialect (NULL empty, '' quoted). Refused on non-TSV.
+    null_marker = tsv_null_marker(
+        fmt, (endpoint.extra if isinstance(endpoint.extra, dict) else {}).get("tsv_null")
+    )
     src_fmt = (source_format or fmt).lower()
     if src_fmt == "ndjson":
         src_fmt = "jsonl"
@@ -59,7 +81,12 @@ def write_destination_file(
 
         headers = columns
         data_rows = [matrix_row_from_record(rec, headers) for rec in records]
-        target_cols, _ = resolve_target_columns(mappings, types)
+        from connectors.destination_naming import writer_identifier
+
+        # G11: a file export keeps the mapped header's case (was lowercased).
+        target_cols, _ = resolve_target_columns(
+            mappings, types, identifier=writer_identifier(fmt)
+        )
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
@@ -139,6 +166,18 @@ def write_destination_file(
             return parsed
         return cell_to_string(parsed)
 
+    def _export_delimited_cell(val: Any, col: str) -> str | None:
+        """One CSV/TSV cell for the writer: ``None`` stays NULL (an empty text stays ``''``).
+
+        With the formula guard on ("prefix", G7) a non-NULL text cell that would
+        open as a spreadsheet formula gets a leading ``'``; NULL stays NULL.
+        """
+        parsed = to_delimited_value(val, col, export_dest_types)
+        if parsed is None:
+            return None
+        text = parsed if isinstance(parsed, str) else cell_to_string(parsed)
+        return neutralize_export_cell(text) if guard_formulas else text
+
     def _export_summary(
         filename: str,
         *,
@@ -158,7 +197,19 @@ def write_destination_file(
             out["mime"] = mime
         if converted_from is not None:
             out["converted_from"] = converted_from
+        if guard_formulas:
+            # Gate-8 reads the guarded cells back to the exact values sent.
+            out["formula_protection"] = "prefix"
+        if null_marker:
+            # Gate-8 and the readers read the file back in the same NULL convention.
+            out["tsv_null"] = null_marker
         return out
+
+    def _export_header_cells() -> list[str]:
+        """Header row cells — column names come from data, so the guard covers them."""
+        if not guard_formulas:
+            return list(export_columns)
+        return [neutralize_export_cell(c) for c in export_columns]
 
     grid = [
         [_export_grid_cell(rec.get(col), col) for col in export_columns]
@@ -175,7 +226,10 @@ def write_destination_file(
     # JSON bytes under an ``.avro`` name that no Avro reader can open. An empty
     # population is still that container, not an empty JSON array.
     container = fmt in _CONTAINER_EXPORT_FORMATS
-    if fmt not in {"json", "jsonl", "yaml", "fixed_width", "fwf"} and (
+    # CSV / TSV are always written below in the one export dialect (services.export_dialect), whatever the
+    # source: the grid above has already rendered SQL NULL as an empty cell, which the converter would
+    # then quote as an empty text (review 3, H2).
+    if fmt not in {"json", "jsonl", "yaml", "fixed_width", "fwf", "csv", "tsv"} and (
         container or (can_convert(src_fmt, fmt) and grid)
     ):
         content, mime = convert_rows(
@@ -183,6 +237,7 @@ def write_destination_file(
             grid,
             source_format="csv" if container else src_fmt,
             target_format=fmt,
+            column_types=export_dest_types,
         )
         ext = (
             "tsv"
@@ -226,34 +281,24 @@ def write_destination_file(
         ]
 
     export_mime = ""
-    if fmt == "csv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(
-            [
-                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-                for r in export_records
-            ]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.csv"
-        export_mime = "text/csv"
-    elif fmt == "tsv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore"
-        )
-        writer.writeheader()
-        writer.writerows(
-            [
-                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-                for r in export_records
-            ]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.tsv"
-        export_mime = "text/tab-separated-values"
+    if fmt in {"csv", "tsv"}:
+        from services.export_dialect import DELIMITERS, format_written_row
+
+        # One dialect, declared in services.export_dialect and used again to read the file back:
+        # SQL NULL is an empty unquoted cell, empty text is quoted ``""`` (the C04 codec), so the two
+        # are different bytes in the file. Everything else is quoted only when it has to be.
+        delimiter = DELIMITERS[fmt]
+        # Header names come from data: the formula guard ("prefix") covers them too.
+        lines = [format_written_row(_export_header_cells(), delimiter)]
+        lines += [
+            format_written_row(
+                [_export_delimited_cell(r.get(c), c) for c in export_columns], delimiter, null_marker=null_marker
+            )
+            for r in export_records
+        ]
+        content = ("\r\n".join(lines) + "\r\n").encode("utf-8")
+        filename = f"export.{fmt}"
+        export_mime = "text/csv" if fmt == "csv" else "text/tab-separated-values"
     elif fmt == "jsonl":
         records = _json_export_records(export_records)
         from services.value_serializer import json_dumps_exact_numbers

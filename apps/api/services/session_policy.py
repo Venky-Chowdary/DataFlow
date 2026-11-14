@@ -26,7 +26,13 @@ TOUCH_INTERVAL_SEC = 60
 
 
 def idle_timeout_seconds(email: str) -> int | None:
-    """Strictest enforced idle timeout for this person, or ``None``."""
+    """Strictest enforced idle timeout for this person, or ``None``.
+
+    A control-plane outage propagates (``ControlPlaneUnavailable``, a 503):
+    an unreadable policy is not "no policy" (ops review round 2, Medium 7).
+    """
+    from services.control_plane_store import ControlPlaneUnavailable
+
     try:
         from services.team_store import list_memberships_for_user
         from services.tenant_store import get_tenant_for_workspace
@@ -37,6 +43,8 @@ def idle_timeout_seconds(email: str) -> int | None:
             if tenant and getattr(tenant, "enforce_session_timeout", False):
                 hours.append(max(1, int(tenant.session_timeout_hours or 8)))
         return min(hours) * 3600 if hours else None
+    except ControlPlaneUnavailable:
+        raise
     except Exception:  # noqa: BLE001 — policy lookup must never lock everyone out
         logger.warning("session idle policy lookup failed", exc_info=True)
         return None

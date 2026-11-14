@@ -598,10 +598,15 @@ class ShapeEngine:
         sample_limit: int = _DEFAULT_SAMPLES,
         keep_diverted_records: bool = True,
         workspace_id: str = "",
+        run_started_at: str = "",
+        run_clock_source: str = "run",
     ):
         self.recipe = recipe
         self.steps = recipe.enabled_steps
         self.workspace_id = workspace_id
+        self.run_clock, self._run_instant = _run_clock(
+            self.steps, run_started_at, run_clock_source
+        )
         self.sample_limit = max(0, sample_limit)
         self.keep_diverted_records = keep_diverted_records
         self.effect = ShapeEffect(
@@ -1080,6 +1085,13 @@ class ShapeEngine:
         if op == "constant_column":
             target = str(options.get("to") or "")
             value = options.get("value")
+            self._record_write(tally, before=row.get(target), after=value, existed=target in row)
+            row[target] = value
+            return row
+
+        if op == "run_timestamp":
+            target = str(options.get("to") or "")
+            value = self._run_instant
             self._record_write(tally, before=row.get(target), after=value, existed=target in row)
             row[target] = value
             return row
@@ -1738,6 +1750,29 @@ class ShapeEngine:
 # ---------------------------------------------------------------------------
 # Single-cell transforms — one implementation, shared by preview and execute
 # ---------------------------------------------------------------------------
+
+
+def _run_clock(
+    steps: Sequence[Any], given: str, given_source: str = "run"
+) -> tuple[dict[str, str] | None, Any]:
+    """The one run-start value a ``run_timestamp`` step writes, and its origin.
+
+    ``given`` (a recorded value, e.g. Gate-8 replaying a finished run) wins;
+    inside a job the job's run clock is used (fixed once, replayed on resume);
+    at design time there is no run yet, so one clock is fixed for this engine
+    and labelled ``preview``.
+    """
+    if not any(step.op == "run_timestamp" for step in steps):
+        return None, None
+    from services import run_clock
+
+    if given:
+        value, source = str(given), given_source or "run"
+    else:
+        value = run_clock.current_run_started_at()
+        source = "run" if value else "preview"
+        value = value or run_clock.now_iso()
+    return {"started_at": value, "source": source}, run_clock.as_instant(value)
 
 
 def _call(name: str, *args: Any) -> Any:

@@ -778,7 +778,13 @@ class MongodbChangeStreamCdc:
                 start = time.monotonic()
                 head = self._cluster_head()
                 last_token: Any = None
-                while time.monotonic() - start < self.max_wait_seconds:
+                # Read what the stream has at least once (up to the first empty
+                # read): the window bounds further reads only. A stall before the
+                # loop (a slow ``hello``) used to spend the whole window, and an
+                # available batch was not returned (CI: assert 0 == 1).
+                drained, reads = False, 0
+                while (not drained and reads < self.batch_size) or time.monotonic() - start < self.max_wait_seconds:
+                    reads += 1
                     change = stream.try_next()
                     # Empty getMore still publishes postBatchResumeToken.
                     # Skipping it is the Atlas idle-namespace wrap.
@@ -786,6 +792,7 @@ class MongodbChangeStreamCdc:
                     if token is not None:
                         last_token = token
                     if change is None:
+                        drained = True
                         if _caught_up(last_token, head):
                             break
                         continue

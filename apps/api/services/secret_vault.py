@@ -21,7 +21,10 @@ import os
 from services.brand_env import getenv_brand
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from services.byok_key_manager import BYOKKey
 
 _logger = logging.getLogger(__name__)
 
@@ -318,29 +321,55 @@ def secrets_encryption_ready() -> bool:
 
 
 def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
-    """Resolve the tenant that owns ``workspace_id``, if one exists."""
+    """Resolve the tenant that owns ``workspace_id``, if one exists.
+
+    A tenant store that cannot be read raises (``ControlPlaneUnavailable``):
+    "no tenant" would choose the platform key for a BYOK tenant's secret
+    (ops review Medium 6). The API answers 503.
+    """
     ws = (workspace_id or "").strip()
     if not ws:
         return None
-    try:
-        from services.tenant_store import get_tenant_for_workspace
+    from services.tenant_store import get_tenant_for_workspace
 
-        tenant = get_tenant_for_workspace(ws)
-    except Exception:
-        return None
+    tenant = get_tenant_for_workspace(ws)
     return str(tenant.id) if tenant and getattr(tenant, "id", None) else None
 
 
-def _byok_active_for_tenant(tenant_id: str | None) -> bool:
+def decrypt_for_workspace(stored: str, workspace_id: str | None) -> str:
+    """Decrypt a secret saved for ``workspace_id``. Only a BYOK value needs (and looks up) the tenant.
+
+    A platform-key value decrypts without the tenant store, so a control-plane
+    outage does not break connectors of tenants without BYOK; a BYOK value
+    still fails closed (ops review round 2, Medium 6).
+    """
+    if stored and stored.startswith(_PREFIX_BYOK):
+        return decrypt_secret(stored, tenant_id=tenant_id_from_workspace(workspace_id))
+    return decrypt_secret(stored)
+
+
+def _active_byok_key(tenant_id: str | None) -> BYOKKey | None:
+    """The tenant's active BYOK key, which wraps its secrets; None: the platform key. Store errors propagate.
+
+    A tenant that uses BYOK but has no active key is refused: its secret is
+    never stored under the platform key instead (ops review round 2, High 4).
+    The key returned here is the key the secret is wrapped with: looking it up
+    a second time could land in a rotation's gap and fail untyped (round 3, C).
+    """
     tid = (tenant_id or "").strip()
     if not tid:
-        return False
-    try:
-        from services.byok_key_manager import get_active_key_for_tenant
+        return None
+    from services.byok_key_manager import get_active_key_for_tenant, tenant_uses_byok
 
-        return get_active_key_for_tenant(tid) is not None
-    except Exception:
-        return False
+    active = get_active_key_for_tenant(tid)
+    if active is not None:
+        return active
+    if tenant_uses_byok(tid):
+        raise SecretVaultError(
+            f"Tenant {tid} encrypts its secrets with its own key (BYOK) and has no active key, so the "
+            "secret was not saved. Create or rotate the tenant's encryption key, then try again."
+        )
+    return None
 
 
 def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
@@ -359,10 +388,11 @@ def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "")
         or plain.startswith(_PREFIX_BYOK)
     ):
         return plain
-    if label != _BYOK_WRAP_LABEL and _byok_active_for_tenant(tenant_id):
+    key = _active_byok_key(tenant_id) if label != _BYOK_WRAP_LABEL else None
+    if key is not None:
         from services.byok_key_manager import tenant_encrypt
 
-        return tenant_encrypt(str(tenant_id).strip(), plain, purpose=_BYOK_PURPOSE)
+        return tenant_encrypt(str(tenant_id).strip(), plain, purpose=_BYOK_PURPOSE, key=key)
     return _get_vault().encrypt(plain, tenant_id=tenant_id, label=label)
 
 

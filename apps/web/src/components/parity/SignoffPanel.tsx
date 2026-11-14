@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { Button } from "../ui/Button";
 import { CopyIdChip } from "../ui/CopyIdChip";
 import { DtIcon } from "../DtIcon";
@@ -15,16 +15,49 @@ import {
   signoffRows,
   unsignedRoles,
   type ParityReport,
+  type ParitySignoff,
   type ParityTone,
 } from "../../lib/parity";
 
 export type ParityBusy =
-  | { kind: "refresh" | "explain" | "sign" | "export" | "pack" }
+  | { kind: "refresh" | "explain" | "sign" | "export" | "pack" | "verify" }
   | { kind: "approve" | "dismiss"; id: string }
   | null;
 
+/**
+ * What is being signed, when it is not a Parity trust report: an Exit
+ * rehearsal reuses this panel with its own sign-off block and wording.
+ */
+export interface SignoffSubject {
+  /** Element id of the panel (the "Go to sign-off" target). */
+  anchorId: string;
+  signoff: ParitySignoff;
+  /** Why sign-off is not open, already phrased; "" when it is open. */
+  blockedReason: string;
+  /** Shown under a signed subject when the data moved since. */
+  driftNote?: string | null;
+}
+
+/** The panel's words for a non-Parity subject; every field falls back to Parity's copy. */
+export interface SignoffCopy {
+  intro: string;
+  /** "What the pack contains", without the signature line (the panel adds it). */
+  packItems: ReactNode[];
+  exportLabel: string;
+  /** Tooltip of the report download: which report, and that it is the live reading. */
+  exportTitle: string;
+  signedNote: string;
+  downloadTitle: string;
+  noRoles: string;
+  denied: string;
+  notePlaceholder: string;
+}
+
 export interface SignoffPanelProps {
-  report: ParityReport;
+  /** The Parity trust report being signed. Give this, or `subject` for other evidence. */
+  report?: ParityReport;
+  subject?: SignoffSubject;
+  copy?: Partial<SignoffCopy>;
   busy: ParityBusy;
   /** False hides the sign form and says why (the API refuses regardless). */
   canSign: boolean;
@@ -35,6 +68,35 @@ export interface SignoffPanelProps {
   onDownloadSigned?: () => void;
   /** Last sign-off or export failure, already phrased for the reader. */
   error?: string;
+}
+
+const PARITY_COPY: SignoffCopy = {
+  intro:
+    "Each approval is written to the audit log with your role in this job's workspace, which must hold the "
+    + "authority the role needs. When every required role has signed the same report, the pack is signed with "
+    + "the workspace proof key and the report is final.",
+  packItems: [
+    "Verdict, parity per table and the confidence statement",
+    "Every difference with its cause and how it was resolved",
+    "Transforms applied, PII protection proof, schema changes",
+    "Approvals with names, roles and times",
+  ],
+  exportLabel: "Download report (.md)",
+  exportTitle: "The trust report as Markdown, as it reads now.",
+  signedNote: "The exported pack carries this signature, so anyone can check it was not changed.",
+  downloadTitle: "The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature.",
+  noRoles: "No roles are required to sign this report.",
+  denied: "You don't have permission to sign this report.",
+  notePlaceholder: "What you checked before signing",
+};
+
+function paritySubject(report: ParityReport): SignoffSubject {
+  return {
+    anchorId: `parity-signoff-${report.job_id}`,
+    signoff: report.signoff,
+    blockedReason: signoffBlockedReason(report),
+    driftNote: signedDriftNote(report),
+  };
 }
 
 const STATUS: Record<string, { label: string; tone: ParityTone }> = {
@@ -50,11 +112,14 @@ const STATUS: Record<string, { label: string; tone: ParityTone }> = {
  * enforces all of it
  * with a 409, and this panel says so before anyone tries.
  */
-export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, onExport, onDownloadSigned, error }: SignoffPanelProps) {
-  const { signoff } = report;
+export function SignoffPanel({ report, subject: given, copy: copyOverride, busy, canSign, signDeniedReason, onSign, onExport, onDownloadSigned, error }: SignoffPanelProps) {
+  const subject = given ?? (report ? paritySubject(report) : null);
+  if (!subject) throw new Error("SignoffPanel needs a report or a subject");
+  const copy: SignoffCopy = { ...PARITY_COPY, ...copyOverride };
+  const { signoff } = subject;
   const rows = signoffRows(signoff);
   const waiting = unsignedRoles(signoff);
-  const blockedReason = signoffBlockedReason(report);
+  const blockedReason = subject.blockedReason;
   const status = STATUS[signoff.status] ?? STATUS.open;
   const [role, setRole] = useState(waiting[0] ?? "");
   const [note, setNote] = useState("");
@@ -75,17 +140,13 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
     <section
       className="df2-parity-signoff"
       aria-labelledby={`${formId}-title`}
-      id={`parity-signoff-${report.job_id}`}
+      id={subject.anchorId}
       tabIndex={-1}
     >
       <header className="df2-parity-section-head">
         <div>
           <h3 id={`${formId}-title`} className="df2-parity-h3">Sign-off and evidence pack</h3>
-          <p className="df2-parity-muted">
-            Each approval is written to the audit log with your role in this job's workspace, which must hold the
-            authority the role needs. When every required role has signed the same report, the pack is signed with
-            the workspace proof key and the report is final.
-          </p>
+          <p className="df2-parity-muted">{copy.intro}</p>
         </div>
         <span className={badgeClass(status.tone)}>{status.label}</span>
       </header>
@@ -125,19 +186,18 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
                 )}
               </li>
             ))}
-            {rows.length === 0 && <li className="df2-parity-muted">No roles are required to sign this report.</li>}
+            {rows.length === 0 && <li className="df2-parity-muted">{copy.noRoles}</li>}
           </ul>
 
           {signoff.status === "signed" && signoff.signature ? (
             <div className="df2-parity-signed">
               <p>
-                Signed {formatDateTime(signoff.signed_at)}. The exported pack carries this signature, so anyone can
-                check it was not changed.
+                Signed {formatDateTime(signoff.signed_at)}. {copy.signedNote}
               </p>
               <CopyIdChip id={signoff.signature} label="Signature" className="df2-parity-signature" />
-              {signedDriftNote(report) && (
+              {subject.driftNote && (
                 <p className="df2-parity-notice" role="status">
-                  {signedDriftNote(report)}
+                  {subject.driftNote}
                 </p>
               )}
             </div>
@@ -174,7 +234,7 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
                     disabled={blocked || anyBusy}
-                    placeholder="What you checked before signing"
+                    placeholder={copy.notePlaceholder}
                   />
                 </div>
                 <div className="df2-parity-actions">
@@ -193,7 +253,7 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
               </form>
             )
           ) : (
-            <p className="df2-parity-muted">{signDeniedReason || "You don't have permission to sign this report."}</p>
+            <p className="df2-parity-muted">{signDeniedReason || copy.denied}</p>
           )}
           {error && (
             <p className="df2-parity-notice is-danger" role="alert">
@@ -206,10 +266,9 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
         <div className="df2-parity-card">
           <h4 className="df2-parity-h4">What the pack contains</h4>
           <ul className="df2-parity-list">
-            <li>Verdict, parity per table and the confidence statement</li>
-            <li>Every difference with its cause and how it was resolved</li>
-            <li>Transforms applied, PII protection proof, schema changes</li>
-            <li>Approvals with names, roles and times</li>
+            {copy.packItems.map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
             <li>
               {signoff.signature ? (
                 <>
@@ -228,9 +287,9 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
               loading={exporting}
               loadingLabel="Downloading…"
               leadingIcon={<DtIcon name="download" size={14} />}
-              title="The trust report as Markdown, as it reads now."
+              title={copy.exportTitle}
             >
-              Download report (.md)
+              {copy.exportLabel}
             </Button>
             {signed && onDownloadSigned && (
               <Button
@@ -241,7 +300,7 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
                 loading={busy?.kind === "pack"}
                 loadingLabel="Downloading…"
                 leadingIcon={<DtIcon name="download" size={14} />}
-                title="The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
+                title={copy.downloadTitle}
               >
                 Download signed pack (.json)
               </Button>

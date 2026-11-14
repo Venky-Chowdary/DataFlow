@@ -254,12 +254,12 @@ def iceberg_catalog_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Can I use an Iceberg Glue catalog",
         text=(
-            f"Yes — Iceberg accepts a Glue catalog (catalog_type glue), plus "
-            f"{listed}. "
-            "Nessie is mapped to rest. Glue is selected when the warehouse "
-            "is S3 or GCS or a region is set. "
-            "Upsert and CDC writes still use merge-on-read; overwrite stays "
-            "copy-on-write."
+            f"Glue is Planned: catalog_type glue reaches the Glue catalog, but no CI "
+            f"run proves it. Catalog kinds the factory dispatches: {listed}. "
+            "Nessie is mapped to rest. Glue is never guessed: an s3:// or gs:// "
+            "warehouse with no catalog_type is refused with a message naming rest "
+            "and sql. Upsert and CDC writes still use merge-on-read; overwrite "
+            "stays copy-on-write."
         ),
         source_module="connectors/iceberg_catalog.py · _infer_catalog_type",
         category="connectors",

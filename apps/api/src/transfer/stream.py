@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.error_taxonomy import failure_side
 import sys
 import threading
 import time
@@ -24,6 +25,7 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
+from connectors.destination_naming import target_identifier  # noqa: E402
 from connectors.writer_common import (  # noqa: E402
     CHUNK_SIZE,
     map_rows_for_fingerprint,
@@ -188,18 +190,23 @@ from .batch_readers import _read_batch_impl  # noqa: E402
 
 
 def _first_page_message(run: Any) -> str:
-    """``Reading the first rows from the source (mysql 10.0.0.5:3306)...``."""
-    from src.ai.copilot.tool_deadline import describe_target
+    """``Reading from the source (MySQL · sales) ...``.
+
+    UX-34: the line lands in the event log users read and share, so it names
+    the engine and database, never the host and port.
+    """
+    from services.engine_names import engine_display_name
 
     cfg = run.cfg.src_cfg if isinstance(run.cfg.src_cfg, dict) else {}
-    where = describe_target(cfg) or str(cfg.get("database") or "")
-    label = " ".join(p for p in (str(run.cfg.src_type or ""), where) if p)
+    where = str(cfg.get("database") or "")
+    label = " · ".join(p for p in (engine_display_name(str(run.cfg.src_type or "")), where) if p)
     return (
         f"Reading from the source ({label or 'source'}) - waiting for it to "
         "answer; rows are counted as they arrive…"
     )
 
 
+@failure_side("source", "read")
 def _read_batch(*args, **kwargs):
     """Retry transient source-read errors without leaking partial state."""
     budget = RetryBudget(
@@ -658,9 +665,12 @@ def _stream_database_transfer_impl(
             resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
         )
     if pre_write_rows_before is not None and isinstance(getattr(run.cfg.destination, "extra", None), dict):
-        # C16: a cancelled COPY is measured against this from the job record
-        # (its own key: the write-failure undo keeps reading dest_rows_before).
-        run.cfg.destination.extra.setdefault("cancel_rows_before", int(pre_write_rows_before))
+        # C16: a cancel is measured against this from the job record, per stream object.
+        from services.multi_stream_cancel import pin_rows_before
+        pin_rows_before(run.cfg, _source_name(run.cfg.source), int(pre_write_rows_before))
+    if not (checkpoint and (getattr(checkpoint, "rows_processed", 0) or getattr(checkpoint, "offset", 0))):
+        from services.multi_stream_undo import pin_stream_existence  # C4: each table's own undo facts
+        pin_stream_existence(run.cfg, _source_name(run.cfg.source), pre_write_rows_before)
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.
@@ -752,7 +762,7 @@ def _stream_database_transfer_impl(
     if (
         run.cfg.write_mode == "upsert"
         and run.cfg.pk_target_cols
-        and run.cfg.dest_type == "postgresql"
+        and run.cfg.dest_type in {"postgresql", "mysql"}  # DATA-5: MySQL row-copy backup too
         and not pending_shape
         and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(pre_write_rows_before or 0) > 0
@@ -773,6 +783,8 @@ def _stream_database_transfer_impl(
     _progress_mark = progress_mark()
     fast = None
     try:
+        from services.export_dialect import tsv_null_from
+
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
@@ -788,6 +800,8 @@ def _stream_database_transfer_impl(
                 or bool(risk_contract_columns)
                 or keyless_merge_target
                 or copy_declined_for_replay(run.cfg)
+                # G7-F3: engine COPY routes write the default TSV codec only.
+                or tsv_null_from(run.cfg.dest_cfg) != "empty"
             ) else _try_copy_fast_path(
                 source=run.cfg.source,
                 destination=run.cfg.destination,
@@ -1557,7 +1571,8 @@ def _stream_database_transfer_impl(
                 run.cfg.schema[name] = str(lt)
                 run.cfg.column_types[name] = ddl_carrier_type(str(lt))
     run.cfg.target_cols, logical_types = resolve_target_columns(
-        run.cfg.mappings, run.cfg.column_types, preserve_case=True
+        run.cfg.mappings, run.cfg.column_types, preserve_case=True,
+        identifier=target_identifier(run.cfg.dest_type),  # names the writer stores (PR1/G11)
     )
     # Write-path dest_types for Gate-8 fingerprint remap parity — including the
     # drift widen the backfill write applies, so the digest is taken against the
@@ -1609,15 +1624,12 @@ def _stream_database_transfer_impl(
     try:
         from services.dest_physical_types import (
             apply_physical_temporal_precision,
+            mark_typed_source_text_carriers,
             physical_column_types,
         )
         from services.reconciliation import overlay_physical_dest_types
 
-        # Same type basis as the dest read-back: the carrier the rows land in
-        # steers the digest — a pre-existing non-text column (DECLARED DECIMAL
-        # over a Mongo string carrier) and a degraded TEXT carrier both follow
-        # overlay_physical_dest_types, or write-pass and read-back hash
-        # identical rows differently.
+        # The dest read-back's basis (physical overlay; typed-source text marked, review 1 H1).
         run.cfg.digest_dest_types = overlay_physical_dest_types(
             run.cfg.digest_dest_types,
             physical_column_types(
@@ -1626,6 +1638,9 @@ def _stream_database_transfer_impl(
         )
         run.cfg.digest_dest_types = apply_physical_temporal_precision(
             run.cfg.digest_dest_types, run.cfg.dest_type, run.cfg.dest_cfg, table=str(run.cfg.dest_table)
+        )
+        run.cfg.digest_dest_types = mark_typed_source_text_carriers(
+            run.cfg.digest_dest_types, run.cfg.mappings, run.cfg.src_read_type, run.cfg.src_cfg, str(run.cfg.table or ""), source=run.cfg.source
         )
     except Exception as exc:
         logger.warning(
@@ -1658,7 +1673,7 @@ def _stream_database_transfer_impl(
     # compares against the whole destination — the write-pass digest is not a
     # population checksum for this run.
     resumed_pass = bool(run.tally.written or offset)
-    run.tally.dest_summary: dict[str, Any] = {}
+    run.tally.dest_summary: dict[str, Any] = {"resumed_checkpoint_rows": run.tally.written} if resumed_pass else {}
     if run.cfg.resume_write_complete:
         _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
@@ -1831,7 +1846,7 @@ def _stream_database_transfer_impl(
     # "left in place" report.
     if (
         keyed_upsert_scope
-        and run.cfg.dest_type == "postgresql"
+        and run.cfg.dest_type in {"postgresql", "mysql"}  # DATA-5
         and not resumed_pass
         and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(run.tally.dest_summary.get(PRECOUNT_KEY) or 0) > 0
@@ -2653,7 +2668,13 @@ def _stream_database_transfer_impl(
                 _apply_result(tail_idx, _process_db_chunk(run, tail_idx, tail_batch))
             # Winners can still hit a divert step downstream of the buffer.
             _persist_shape_diverts(run)
-        row_path_ok = True
+        # A run that held every row out wrote nothing: a held overwrite must
+        # roll back, not commit its TRUNCATE (the run then refuses itself).
+        row_path_ok = bool(
+            run.tally.written
+            or not run.tally.rejected_total
+            or run.tally.dest_summary.get("skipped_identity_keys")
+        )
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
         # reject must not leave committed batches.
@@ -2870,6 +2891,7 @@ def _stream_database_transfer_impl(
                     reasons.append(reason)
                 if len(reasons) >= 3:
                     break
+            run.tally.dest_summary["all_rows_held_out"] = True
             raise _undo_failed_write(
                 run,
                 _stamp_all_held_out_ledger(
@@ -2882,9 +2904,9 @@ def _stream_database_transfer_impl(
                     removed_on_read=removed_on_read_total,
                 ),
             )
-        if run.cfg.columns and (getattr(run.cfg.destination, "extra", None) or {}).get(
+        if run.cfg.columns and (run.cfg.total_rows == 0 or (getattr(run.cfg.destination, "extra", None) or {}).get(
             "create_empty_source"
-        ):
+        )):  # measured empty: one stream of several has no engine peek of its own (review 6)
             written_n, checksum, empty_summary = _stream._write_batch(
                 run.cfg.dest_type,
                 run.cfg.destination,
@@ -3330,26 +3352,6 @@ def _stream_database_transfer_impl(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         run.tally.dest_summary["reread_pagination"] = reread_plan.get("mode")
-        if run.tally.route_fp_acc:
-            # Per-route write-pass digests — the value-level expectation
-            # Gate-8 compares against each route table's independent
-            # read-back (route_verification). Keyed by route name.
-            run.tally.dest_summary["route_expected"] = {
-                _rn: {
-                    "rows": _acc.total,
-                    "checksum": _acc.digest(),
-                    # Additive multiset digest — proves an append into an
-                    # occupied route table: post-read-back sum minus the
-                    # pre-write sum must equal this value (RT-6).
-                    "additive": _acc.additive_digest(),
-                    # The columns the fingerprint covers — the read-back is
-                    # projected to exactly these so customer-owned extra
-                    # columns (defaults, generated) never enter the digest.
-                    "columns": run.tally.route_fp_cols.get(_rn) or [],
-                }
-                for _rn, _acc in run.tally.route_fp_acc.items()
-                if _acc.total > 0
-            }
         if run.tally.route_backup_state.get("backups"):
             # Failed-Gate-8 restore guard armed: the renamed-aside route
             # tables land on the job summary so a failed post-write proof
@@ -3404,6 +3406,11 @@ def _stream_database_transfer_impl(
         run.tally.dest_summary["source_independently_reread"] = False
         run.tally.dest_summary["identity_hash_aligned"] = False
 
+    # Per-route write-pass digests, whichever checksum branch ran: a
+    # write-pass (incremental) routed run needs them as much as a re-read one.
+    from src.transfer.stream_routes import stamp_route_expected
+
+    stamp_route_expected(run.tally)
     run.tally.dest_summary["checksum"] = (
         final_checksum
         if run.tally.dest_summary.get("checksum_mode") == "source_reread_unavailable"

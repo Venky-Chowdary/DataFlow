@@ -1530,3 +1530,15 @@ describe("reconcileLiveSourceTypes (Map/Validate parity on source drift)", () =>
     assert.equal(__reconcileLive(rows, { amount: "DECIMAL(10,2)" }), rows);
   });
 });
+
+describe("risk chip wording for a computed column", () => {
+  it("never shows a bare ? for a type the row does not know", () => {
+    const chip = engineStampedRiskChip({
+      source: "stamped_at", target: "stamped_at", confidence: 1, approved: false,
+      destType: "TIMESTAMP", fidelity: "lossy_cast",
+    });
+    assert.ok(chip);
+    assert.doesNotMatch(chip!.detail, /\?/);
+    assert.match(chip!.detail, /stamped_at's value → TIMESTAMP/);
+  });
+});

@@ -79,6 +79,7 @@ def _compare_and_publish_load_history(
                 for a in quality_anomalies
                 if "row count dropped" not in a
                 and "is below 50% of prior median" not in a
+                and "x the prior median" not in a
             ]
             if len(kept) != len(quality_anomalies):
                 load_history_report["population_shift_notes"] = [

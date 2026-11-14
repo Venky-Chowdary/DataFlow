@@ -1,0 +1,185 @@
+{
+ "source": "PR 424 CI run 43447695514 at 9be296013: every api-tests shard's 'unexpected skip' lines, from the check_live_skips step of jobs 131961548629 (1/6), 131961548531 (2/6), 131961548656 (3/6), 131961548514 (4/6), 131961548738 (5/6), 131961549049 (6/6).",
+ "skips": [
+  {
+   "shard": 1,
+   "test": "tests/test_auto_create_rollback_never_drops_existing.py::test_failed_not_null_write_leaves_existing_table_intact",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_keyed_readback_scope.py::test_mysql_keyed_readback_survives_integer_pk",
+   "reason": "local mysql unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_keyed_readback_scope.py::test_postgres_keyed_readback_survives_non_text_pk[BIGINT-keys0]",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_keyed_readback_scope.py::test_postgres_keyed_readback_survives_non_text_pk[INTEGER-keys1]",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_keyed_readback_scope.py::test_postgres_keyed_readback_survives_non_text_pk[TEXT-keys3]",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_keyed_readback_scope.py::test_postgres_keyed_readback_survives_non_text_pk[UUID-keys2]",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_r11_pg_aborted_transaction_e2e.py::test_mysql_family_tinyint_default_lands_as_boolean_default[mariadb]",
+   "reason": "mariadb not configured on :3307"
+  },
+  {
+   "shard": 1,
+   "test": "tests/test_row_contract_quarantine_accounting.py::test_not_null_violation_balances_the_conservation_ledger",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 2,
+   "test": "tests/test_rule_compiler_postgres_catalog.py::test_live_postgres_apply_named_projection_per_table",
+   "reason": "Postgres is not accepting connections"
+  },
+  {
+   "shard": 2,
+   "test": "tests/test_rule_compiler_postgres_catalog.py::test_live_postgres_customers_and_orders_id_is_not_silent",
+   "reason": "Postgres is not accepting connections"
+  },
+  {
+   "shard": 2,
+   "test": "tests/test_rule_compiler_postgres_catalog.py::test_live_postgres_dest_catalog_identity_and_precision",
+   "reason": "Postgres is not accepting connections"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_edit_outside_the_window_is_drift_not_failure[mysql->sqlserver]",
+   "reason": "live mysql->sqlserver engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_edit_outside_the_window_is_drift_not_failure[postgres->sqlserver]",
+   "reason": "live postgres->sqlserver engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_edit_outside_the_window_is_drift_not_failure[sqlserver->mysql]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_edit_outside_the_window_is_drift_not_failure[sqlserver->postgres]",
+   "reason": "live sqlserver->postgres engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_every_incremental_mode_verifies_only_its_window[sqlserver->mysql-append-composite]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_every_incremental_mode_verifies_only_its_window[sqlserver->mysql-append]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_every_incremental_mode_verifies_only_its_window[sqlserver->mysql-deduped]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_every_incremental_mode_verifies_only_its_window[sqlserver->mysql-upsert-composite]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_every_incremental_mode_verifies_only_its_window[sqlserver->mysql-upsert-shaped]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_real_loss_inside_the_window_still_fails[sqlserver->mysql]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_d188_incremental_out_of_window_drift_live.py::test_strict_flag_restores_fail_closed_on_drift[sqlserver->mysql]",
+   "reason": "live sqlserver->mysql engines not reachable"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_execute_tracked_csv_to_all_destinations.py::test_csv_to_all_destinations[mariadb]",
+   "reason": "mariadb emulator not reachable on localhost:3307"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_r14_mysql_ssl_mode_form_options_e2e.py::test_patch_to_disable_is_checked_against_the_saved_ca",
+   "reason": "needs DATAFLOW_TEST_MYSQL_CA (the :3306 server's CA certificate)"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_r14_mysql_ssl_mode_form_options_e2e.py::test_save_refuses_disable_next_to_a_form_ca_naming_the_option",
+   "reason": "needs DATAFLOW_TEST_MYSQL_CA (the :3306 server's CA certificate)"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_r14_mysql_ssl_mode_form_options_e2e.py::test_test_route_refuses_disable_next_to_a_form_ca_naming_the_option",
+   "reason": "needs DATAFLOW_TEST_MYSQL_CA (the :3306 server's CA certificate)"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_streaming_readback.py::test_autocommit_connection_falls_back_to_client_cursor",
+   "reason": "local PostgreSQL unavailable: connection to server at \"localhost\" (::1), port 5433 failed: Connection refused"
+  },
+  {
+   "shard": 3,
+   "test": "tests/test_streaming_readback.py::test_postgres_server_side_cursor_reads_full_table",
+   "reason": "local PostgreSQL unavailable: connection to server at \"localhost\" (::1), port 5433 failed: Connection refused"
+  },
+  {
+   "shard": 4,
+   "test": "tests/test_privilege_probe_grant_signals.py::test_blind_role_reports_unmeasured_not_absent",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 4,
+   "test": "tests/test_privilege_probe_grant_signals.py::test_create_new_path_reports_schema_signals",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 4,
+   "test": "tests/test_privilege_probe_grant_signals.py::test_missing_table_is_reported_as_unresolvable",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 4,
+   "test": "tests/test_privilege_probe_grant_signals.py::test_mixed_case_table_privileges_are_measured",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 4,
+   "test": "tests/test_widen_respects_existing_carrier.py::test_live_backfill_write_leaves_existing_integer_column_intact",
+   "reason": "local postgres unavailable"
+  },
+  {
+   "shard": 5,
+   "test": "tests/test_e3006_cdc_snapshot_removes_deleted_keys.py::test_cdc_snapshot_into_loaded_table_applies_source_deletes[sqlserver-cdc_incremental]",
+   "reason": "live sqlserver / postgresql not reachable"
+  },
+  {
+   "shard": 5,
+   "test": "tests/test_execute_tracked_all_sources_to_postgresql.py::test_all_source_to_postgresql[mariadb]",
+   "reason": "mariadb emulator not reachable on localhost:3307"
+  },
+  {
+   "shard": 6,
+   "test": "tests/test_live_emulator_matrix.py::test_write_destination_database_local_emulator[mariadb]",
+   "reason": "mariadb emulator not reachable on localhost:3307"
+  }
+ ]
+}

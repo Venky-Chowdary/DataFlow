@@ -293,6 +293,7 @@ def verify_s3_object(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
@@ -316,6 +317,7 @@ def verify_s3_object(
                 "ssl": ssl,
                 "database": bucket,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             table_name=key,
             columns=target_columns,
@@ -339,6 +341,7 @@ def verify_gcs_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
@@ -352,6 +355,7 @@ def verify_gcs_blob(
                 "connection_string": connection_string,
                 "database": bucket,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             dest_db_type="gcs",
             dest_types=dest_types,
@@ -378,6 +382,7 @@ def verify_adls_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of Azure Blob / ADLS GET streams. Never JSON ``[]``."""
     try:
@@ -394,6 +399,7 @@ def verify_adls_blob(
                 "service_account": service_account,
                 "database": container,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             table_name=key,
             columns=target_columns,
@@ -985,6 +991,8 @@ def verify_mongodb_collection(
                     pass
             query = {pk: {"$in": expanded}}
 
+        from connectors.mongo_field_paths import readback_record
+
         def _doc_iter():
             yielded = 0
             for doc in coll.find(query):
@@ -992,11 +1000,13 @@ def verify_mongodb_collection(
                     break
                 # The digest reads cells as wire (the way a reader emits them);
                 # a stored text that spells a sentinel is escaped, not NULL.
-                yield payload_record_wire(doc)
+                # Mapped targets are field paths (``address.city``), read
+                # inside sub-documents; unmapped siblings are not compared.
+                yield payload_record_wire(readback_record(doc, target_columns))
                 yielded += 1
 
         columns = target_columns or sorted(
-            set(k for doc in coll.find(query).limit(100) for k in doc.keys())
+            set(k for doc in coll.find(query).limit(100) for k in readback_record(doc))
         )
         checksum = canonical_checksum_from_iter(
             _doc_iter(),
@@ -1027,6 +1037,7 @@ def verify_redis_prefix(
     pk_column: str | None = None,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    key_format: str = "legacy",
 ) -> tuple[int, str]:
     """Reconcile Redis keys under ``prefix:*`` (writer key layout).
 
@@ -1078,7 +1089,7 @@ def verify_redis_prefix(
         if scoped_ids:
             from connectors.redis_reader import redis_key_for
 
-            wanted = {redis_key_for(prefix, i) for i in scoped_ids}
+            wanted = {redis_key_for(prefix, i, key_format=key_format) for i in scoped_ids}
             keys = [k for k in keys if k in wanted]
 
         def _row_iter():
@@ -1106,33 +1117,32 @@ def verify_redis_prefix(
 
 def verify_dynamodb_table(
     *,
-    connection_string: str,
-    database: str,
+    cfg: dict[str, Any],
     table_name: str,
-    username: str = "local",
-    password: str = "local",
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a DynamoDB target by Scan count and item fingerprint."""
+    """Reconcile a DynamoDB target by Scan count and item fingerprint.
+
+    ``cfg`` is the writer's client config (``dynamodb_writer.dynamodb_client_cfg``):
+    the read-back is built like the write's client (endpoint, region, keys,
+    egress check), so it reads where the write went. It used to dial
+    ``connection_string or http://localhost:8000`` signing for us-east-1, so a
+    real-AWS table was "verified" against whatever answered locally. A client
+    that cannot be built or read reports ``(-1, "")``: not verified.
+    """
 
     from services.reconciliation import (
         canonical_checksum_from_iter,
     )
 
     try:
-        import boto3
         from boto3.dynamodb.types import TypeDeserializer
 
-        endpoint = connection_string or "http://localhost:8000"
-        client = boto3.client(
-            "dynamodb",
-            endpoint_url=endpoint,
-            aws_access_key_id=username.strip() or "local",
-            aws_secret_access_key=password.strip() or "local",
-            region_name="us-east-1",
-        )
+        from connectors.aws_common import boto3_client
+
+        client = boto3_client("dynamodb", cfg)
         paginator = client.get_paginator("scan")
         count = sum(
             page["Count"]

@@ -292,8 +292,36 @@ def float_mantissa_would_narrow(
     target carrier under ``dest_db``. Borrowing the sink dialect for the source
     would read a PostgreSQL ``REAL`` (float4) as a SQLite double.
     """
+    from services.source_engine_scope import active_source_engine
+
+    source_db = source_db or active_source_engine()
     src_b = float_mantissa_bits(source_type, dest_db=source_db)
+    if src_b is None:
+        src_b = _engine_bare_float_bits(source_type, source_db)
     tgt_b = float_mantissa_bits(target_type, dest_db=dest_db)
+    if tgt_b is None:
+        tgt_b = _engine_bare_float_bits(target_type, dest_db)
     if src_b is None or tgt_b is None:
         return False
     return src_b > tgt_b
+
+
+#: What a bare ``FLOAT`` column *is* on an engine that defines it. Used only by
+#: the narrowing predicate: ``float_mantissa_bits`` keeps bare FLOAT unknown so
+#: create-new invent and fingerprint folding never read a width into it.
+#: MySQL ``FLOAT`` is binary32; SQL Server ``FLOAT`` is ``FLOAT(53)`` and a
+#: PostgreSQL ``float`` is ``double precision`` (binary64). Oracle ``FLOAT`` is
+#: a decimal carrier and other engines stay unknown.
+_BARE_FLOAT_BITS_BY_ENGINE = {
+    "mysql": 24,
+    "sqlserver": 53,
+    "postgresql": 53,
+}
+
+
+def _engine_bare_float_bits(inferred: str | None, engine: str) -> int | None:
+    from services.type_system import _normalize_dest_db, strip_identity_qualifier
+
+    if not engine or strip_identity_qualifier(inferred).strip().upper() != "FLOAT":
+        return None
+    return _BARE_FLOAT_BITS_BY_ENGINE.get(_normalize_dest_db(engine))

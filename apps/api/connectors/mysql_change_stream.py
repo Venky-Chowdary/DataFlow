@@ -1988,19 +1988,17 @@ class MySqlChangeStreamCdc:
                             else getattr(row, "values", {})
                         )
                         pk = self._pk_value(values, table=tbl)
-                        if pk:
-                            buf.delete(tbl, pk, lsn=str(stream.log_pos or ""))
-                            event_count += 1
-                        else:
-                            # A delete with no key cannot be applied. Advancing
-                            # past it drops the row. Raising keeps the cursor
-                            # and fails the poll instead of spinning "behind".
-                            captured_row_dropped = True
-                            raise RuntimeError(
-                                f"MySQL CDC delete on {tbl} has no primary key, "
-                                "so the change was not applied and the binlog "
-                                "position was not advanced"
-                            )
+                        # A delete with no key cannot be applied by key. It is
+                        # parked with its row image (C2): the apply records it
+                        # in the DLQ and the audit log before the position
+                        # moves, so the stream neither drops it nor stops.
+                        buf.delete(
+                            tbl,
+                            pk,
+                            lsn=str(stream.log_pos or ""),
+                            row=None if pk else self._row_to_record(values, table=tbl),
+                        )
+                        event_count += 1
 
                 if stream.log_pos:
                     last_position = {

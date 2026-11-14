@@ -1,0 +1,63 @@
+{
+ "source": {
+  "connected": true,
+  "columns": [],
+  "schema": {},
+  "message": ""
+ },
+ "destination": {
+  "connected": true,
+  "table_exists": true,
+  "objects": [
+   {
+    "name": "orders_dest",
+    "type": "table"
+   },
+   {
+    "name": "customers",
+    "type": "table"
+   }
+  ],
+  "columns": [
+   "legacy_ref",
+   "email_address",
+   "total_amount",
+   "ordered_on",
+   "order_status",
+   "tenant_id",
+   "created_at",
+   "notes"
+  ],
+  "schema": {
+   "legacy_ref": "BIGINT",
+   "email_address": "VARCHAR(120)",
+   "total_amount": "DECIMAL(12,2)",
+   "ordered_on": "DATE",
+   "order_status": "VARCHAR(20)",
+   "tenant_id": "BIGINT",
+   "created_at": "TIMESTAMP",
+   "notes": "TEXT"
+  },
+  "schema_nullability": {
+   "legacy_ref": false,
+   "email_address": true,
+   "total_amount": false,
+   "ordered_on": true,
+   "order_status": true,
+   "tenant_id": false,
+   "created_at": false,
+   "notes": true
+  },
+  "schema_defaults": {
+   "total_amount": "0",
+   "order_status": "'new'",
+   "created_at": "now()"
+  },
+  "primary_key_columns": [
+   "legacy_ref"
+  ],
+  "identity_columns": [],
+  "generated_columns": [],
+  "message": "PostgreSQL connected \u2014 introspecting table schema"
+ }
+}

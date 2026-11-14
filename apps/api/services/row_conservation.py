@@ -129,6 +129,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, MutableMapping, Sequence
 
+from services.expected_rows import expected_destination_rows, held_out_rows
 from services.value_serializer import key_identity_text
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
@@ -533,7 +534,10 @@ def coerce_pk_part(value: Any) -> Any:
         parsed = coerce_integer_wire(text, ddl_type="BIGINT")
     except ValueError:
         return value
-    if parsed is None:
+    if parsed is None or isinstance(parsed, str):
+        # ``None`` / text back: not an integer (the absent-marker spelling
+        # ``__DF_MISSING__`` passes through the binder as text). A key that
+        # spells a marker is a text key (review F1).
         return value
     return int(parsed)
 
@@ -870,9 +874,9 @@ def hold_outs(rejected_rows: int, coerced_null_rows: int) -> int:
     """Rows the dest engine does not hold.
 
     Coerced-null cells landed; they are not hold-outs. Gate-8's
-    ``dropped_rows = max(rejected - coerced_null, 0)`` is the same number.
+    ``dropped_rows`` is this number (``services.expected_rows.held_out_rows``).
     """
-    return max(int(rejected_rows or 0) - int(coerced_null_rows or 0), 0)
+    return held_out_rows(rejected_rows, coerced_null_rows)
 
 
 def _as_optional_int(value: Any) -> int | None:
@@ -1080,6 +1084,7 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "reactivated": data.get("reactivated"),
             "physical_rows": data.get("physical_rows"),
             "rows_scanned": data.get("rows_scanned"),
+            "retained_missing_rows": data.get("retained_missing_rows"),
             "mode": "mirror",
         }
     return {}
@@ -1469,8 +1474,11 @@ def _account_mirror(
             writer_ack_delta=None,
         )
 
-    unaccounted = read - (int(active) + quarantined + skipped + removed)
-    ack_delta = (int(active) - ack) if ack is not None else None
+    # Keys whose source row was quarantined keep their active row: retained,
+    # not written by this run (read + retained == active + held out).
+    retained = _as_optional_int(payload.get("retained_missing_rows")) or 0
+    unaccounted = read + retained - (int(active) + quarantined + skipped + removed)
+    ack_delta = (int(active) - retained - ack) if ack is not None else None
     leftover = None
     if physical is not None:
         leftover = max(int(physical) - int(active), 0)
@@ -1494,6 +1502,11 @@ def _account_mirror(
             note += f" This run inferred {inferred} delete(s)."
         if reactivated:
             note += f" Reactivated {reactivated} previously deleted key(s)."
+        if retained:
+            note += (
+                f" {retained} key(s) whose source row was quarantined kept their "
+                "active row (not a delete)."
+            )
     elif unaccounted > 0:
         note = (
             f"{unaccounted} source row(s) are not in dest-engine active "
@@ -2080,8 +2093,15 @@ def _close_population(
     ack = writer_ack if writer_ack is not None else None
     # File replace is overwrite regardless of the operator's SQL sync-mode
     # label: the engine opens the artifact ``wb``. Append-delta / keyed
-    # identities do not apply to a replaced file.
-    if dest_count_source == DEST_ARTIFACT_READBACK:
+    # identities do not apply to a replaced file. An append onto an existing
+    # line-delimited export (``services.file_export_append``) records the
+    # file's record count before it wrote: only the delta proves that run.
+    # A key-merged export (CLM-1) records the file's count before and its key
+    # census: new keys grow the file, stored keys are replaced in it.
+    keyed_export = kind == KIND_KEYED and census is not None and dest_count_before is not None
+    if dest_count_source == DEST_ARTIFACT_READBACK and not (
+        (kind == KIND_APPEND_DELTA and dest_count_before) or keyed_export
+    ):
         kind = KIND_OVERWRITE
     # Chunked vector loads are identity conservation regardless of the
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
@@ -2229,7 +2249,9 @@ def _close_population(
         )
 
     if kind == KIND_APPEND_DELTA:
-        if dest_count_source != DEST_READBACK:
+        # An export appended to (review 4, H-3) counts its own records before and after: the same
+        # independent artifact count on both sides, so the delta closes like a SQL COUNT(*) delta.
+        if dest_count_source not in (DEST_READBACK, DEST_ARTIFACT_READBACK):
             return ConservationLedger(
                 rows_read=read,
                 rows_written=None,
@@ -2273,7 +2295,7 @@ def _close_population(
                 writer_ack_delta=None,
             )
         written = dest_count - int(dest_count_before)
-        written_source = DEST_READBACK
+        written_source = dest_count_source
     else:
         written = dest_count
         written_source = dest_count_source
@@ -2288,7 +2310,19 @@ def _close_population(
     if kind == KIND_APPEND_DELTA:
         dest_short = "dest Δ"
 
-    unaccounted = (read + expanded) - (written + quarantined + skipped + removed)
+    # Gate-8's and ladder L1's expected count (services.expected_rows), unclamped
+    # so a ledger can say by how many rows the terms over-account.
+    unaccounted = (
+        expected_destination_rows(
+            read,
+            rejected_rows=quarantined,
+            rows_skipped=skipped,
+            rows_shaped_out=removed,
+            rows_expanded=expanded,
+            clamp=False,
+        )
+        - written
+    )
     ack_delta = (written - ack) if ack is not None else None
     append_delta = written if kind == KIND_APPEND_DELTA else None
 
@@ -3309,6 +3343,18 @@ class KeyCensusAccumulator:
         self._pending_new = list(unseen)
         self._pending_added = added
         self._pending_open = True
+
+    def add_source_truncate(self, rows_removed: int) -> None:
+        """A source TRUNCATE emptied the destination: each row it held is a delete.
+
+        Keys this run already wrote are gone too, so a later re-insert counts as
+        an insert again (data audit DATA-1).
+        """
+        removed = max(int(rows_removed or 0), 0)
+        self._tombstones += removed
+        self._unique_tombstone_fallback += removed
+        self._absent.update(self._seen)
+        self._tomb_seen.clear()
 
     def add_tombstones(
         self,

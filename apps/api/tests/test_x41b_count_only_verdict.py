@@ -17,7 +17,7 @@ from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
 
-def _run(sqlite_src: Path, sqlite_dst: Path, *, digest: bool, monkeypatch):
+def _run(sqlite_src: Path, sqlite_dst: Path, *, digest: bool, monkeypatch, validation_mode: str = "strict"):
     if digest:
         monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
     else:
@@ -52,7 +52,7 @@ def _run(sqlite_src: Path, sqlite_dst: Path, *, digest: bool, monkeypatch):
             {"source": "label", "target": "label", "transform": "none"},
         ],
         sync_mode="full_refresh_overwrite",
-        validation_mode="strict",
+        validation_mode=validation_mode,
         skip_preflight=True,
     )
     return UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
@@ -60,7 +60,12 @@ def _run(sqlite_src: Path, sqlite_dst: Path, *, digest: bool, monkeypatch):
 
 @pytest.mark.parametrize("digest", [False, True])
 def test_count_only_partial_digest_verified(tmp_path: Path, monkeypatch, digest):
-    result = _run(tmp_path / "s.db", tmp_path / "d.db", digest=digest, monkeypatch=monkeypatch)
+    # Strict never settles for the count (algorithm audit H8): without the
+    # flag the count-only "partial" verdict is a balanced-mode outcome.
+    result = _run(
+        tmp_path / "s.db", tmp_path / "d.db", digest=digest, monkeypatch=monkeypatch,
+        validation_mode="strict" if digest else "balanced",
+    )
     assert result.success, result.error
     report = result.reconciliation or {}
     if digest:
@@ -70,3 +75,12 @@ def test_count_only_partial_digest_verified(tmp_path: Path, monkeypatch, digest)
     else:
         assert report.get("checksum_scope") == "dest_count_equals_source_snapshot_count"
         assert report.get("verification_verdict") == "partial"
+
+
+def test_strict_takes_the_reread_digest_without_the_flag(tmp_path: Path, monkeypatch):
+    result = _run(tmp_path / "s.db", tmp_path / "d.db", digest=False, monkeypatch=monkeypatch)
+    assert result.success, result.error
+    report = result.reconciliation or {}
+    assert report.get("checksum_match") is True
+    assert report.get("assurance_level") == "full_checksum"
+    assert report.get("verification_verdict") == "verified"

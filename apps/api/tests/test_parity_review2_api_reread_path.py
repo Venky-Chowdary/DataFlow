@@ -33,16 +33,28 @@ def _clear_cache() -> None:
 
 
 @pytest.fixture()
-def route(tmp_path, monkeypatch):
+def route(ent, monkeypatch):  # noqa: F811
+    """A saved SQLite route whose files live in the workspace's own area.
+
+    The harness's data folder is ``tmp_path``, so its ``sqlite`` folder is the
+    shared SQLite volume: a request binds the caller's workspace
+    (``ConnectorAccessMiddleware``), and a file in the flat part of that volume
+    with no provable owner is refused for every workspace
+    (``services.embedded_volume``). A real workspace's files live in its own
+    area, as here.
+    """
+    from services.embedded_volume import volume_workspace_dir
+
     _clear_cache()
-    # The API confines local SQLite files to an allowed root (never the service data dir).
-    root = tmp_path / "sqlite"
-    root.mkdir()
-    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
-    src, dst = root / "src.sqlite", root / "dst.sqlite"
+    ws = ent.workspace("Parity reread")
+    volume = ent.tmp / "sqlite"
+    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(volume))
+    area = volume_workspace_dir(volume, ws)
+    area.mkdir(parents=True)
+    src, dst = area / "src.sqlite", area / "dst.sqlite"
     _db(src, [(i, f"n{i}") for i in range(1, 11)])
     _db(dst, [(i, "TRUE" if i == 7 else f"n{i}") for i in range(1, 11)])
-    yield {
+    yield ws, {
         "source": {"kind": "database", "format": "sqlite", "database": str(src), "table": "pay"},
         "destination": {"kind": "database", "format": "sqlite", "database": str(dst), "table": "pay"},
         "mappings": [{"source": "id", "target": "id"},
@@ -54,7 +66,7 @@ def route(tmp_path, monkeypatch):
 
 def test_the_get_route_rereads_the_named_keys(ent, route, monkeypatch):  # noqa: F811
     monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "false")
-    ws = ent.workspace("Parity reread")
+    ws, route = route
     viewer = ent.member(email="reread-viewer@example.com", workspace_id=ws, role="viewer")
     job = _job(ws, "sqlite load", transfer_request=route, reconciliation={
         "passed": False, "source_rows": 10, "target_rows": 10,

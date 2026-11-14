@@ -1,24 +1,69 @@
-"""Production health probes — real dependency checks."""
+"""Production health probes — real dependency checks.
+
+The checks open a database connection and touch the data directory, so they
+are blocking I/O: the routes call :func:`cached_health` on the thread pool,
+never on the event loop, and probes that arrive within
+``HEALTH_CACHE_SECONDS`` of each other share one result.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import threading
+import time
 from typing import Any
 
+from services.brand_env import getenv_brand
 from services.cdc_lease_store import resolve_backend_name
 from services.platform_config import data_dir, upload_dir
 
 
-def check_mongodb() -> dict[str, Any]:
-    try:
-        from src.services.mongodb_service import MongoDBService
+def probe_timeout_seconds() -> float:
+    """Upper bound for one dependency check (``HEALTH_PROBE_TIMEOUT_SECONDS``, default 2).
 
-        svc = MongoDBService()
-        if svc.connect():
-            svc.disconnect()
-            return {"status": "up", "detail": "connected"}
-        return {"status": "down", "detail": "connection failed"}
+    A readiness probe that waits out the driver's own 5-20s timeouts answers
+    after the orchestrator has already given up on it.
+    """
+    try:
+        return min(30.0, max(0.2, float(getenv_brand("HEALTH_PROBE_TIMEOUT_SECONDS", "2") or "2")))
+    except ValueError:
+        return 2.0
+
+
+def check_mongodb() -> dict[str, Any]:
+    """Reachability of the metadata database, proven on a fresh connection.
+
+    Every phase (server selection, connect, the ping itself) is bounded by
+    :func:`probe_timeout_seconds`, so a database that accepts the connection
+    and goes silent cannot hold the probe.
+    """
+    client = None
+    try:
+        from pymongo import MongoClient
+
+        from services.platform_config import mongodb_uri
+
+        timeout_ms = int(probe_timeout_seconds() * 1000)
+        client = MongoClient(
+            mongodb_uri(),
+            serverSelectionTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+            socketTimeoutMS=timeout_ms,
+        )
+        client.admin.command("ping")
+        return {"status": "up", "detail": "connected"}
     except Exception as exc:
+        from pymongo.errors import PyMongoError
+
+        if isinstance(exc, PyMongoError):
+            return {"status": "down", "detail": "connection failed"}
         return {"status": "down", "detail": str(exc)[:200]}
+    finally:
+        if client is not None:
+            # Closing a dead client must not fail the probe.
+            with contextlib.suppress(Exception):
+                client.close()
 
 
 def check_storage() -> dict[str, Any]:
@@ -112,3 +157,32 @@ def _workspace_settings_readable(d) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return (d / "workspace.json").exists()
+
+
+
+#: How long one dependency check answers later probes. Kubernetes, the load
+#: balancer and the status page probe independently; they need not each open a
+#: database connection.
+HEALTH_CACHE_SECONDS = 2.0
+_health_lock = threading.Lock()
+_health_cache: dict[str, Any] = {"at": 0.0, "payload": None, "probe": None}
+
+
+def cached_health(max_age_seconds: float | None = None) -> dict[str, Any]:
+    """:func:`aggregate_health`, shared by probes that arrive close together.
+
+    Blocking: call it from a worker thread (``run_in_threadpool``). Probes that
+    arrive while a check is running wait for that one check instead of
+    starting their own. The caller gets its own copy.
+    """
+    ttl = HEALTH_CACHE_SECONDS if max_age_seconds is None else max_age_seconds
+    probe = aggregate_health
+    with _health_lock:
+        fresh = (
+            _health_cache["payload"] is not None
+            and _health_cache["probe"] is probe
+            and time.monotonic() - _health_cache["at"] < ttl
+        )
+        if not fresh:
+            _health_cache.update(payload=probe(), probe=probe, at=time.monotonic())
+        return copy.deepcopy(_health_cache["payload"])

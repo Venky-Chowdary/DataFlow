@@ -232,6 +232,12 @@ class StreamingReplicationTransport:
             str(dial.get("host") or ""),
             str(dial.get("dsn") or dial.get("connection_string") or ""),
         )
+        from connectors.tls_file_options import check_dial
+
+        check_dial(dial)  # libpq sslcert / sslkey / sslrootcert: never a file on this host
+        from connectors.host_config_selectors import check_libpq_kwargs
+
+        check_libpq_kwargs(dial)  # no pg_service.conf section of this host (follow-up review 4)
         conn = psycopg2.connect(
             connection_factory=LogicalReplicationConnection,
             **dial,

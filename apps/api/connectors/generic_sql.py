@@ -34,6 +34,7 @@ from connectors.oracle_tstz import (
 )
 from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
     _clickhouse_replacing_upsert,
+    pop_skip_kept,
     _db2_merge_upsert,
     _duckdb_merge_upsert,
     _firebird_merge_upsert,
@@ -57,6 +58,7 @@ from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
     _vertica_merge_upsert,
     clickhouse_final_table_sql,
 )
+from connectors.upsert_fallback import note_native_upsert_failed, upsert_fallback_warnings
 from connectors.schema_drift import (
     _build_widen_ddl,
     add_missing_columns,
@@ -84,9 +86,10 @@ from services.decision_kernel import (
 from services.dialect_profiles import denormalize_result_key
 from services.cancel_check import cancel_checkpoint
 from services.engine_pool import release_engine
+from services.reversibility_enforce import scan_pass
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, driver_cell_to_string
 from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
@@ -1219,6 +1222,9 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             connect_args=connect_args,
             **pool_settings(),
         )
+        from connectors.tls_file_options import guard_engine
+
+        guard_engine(engine)  # no TLS file on this host (follow-up review 2), before any dial
         if mysql_tls is not None:
             from sqlalchemy import event as _sa_event
 
@@ -1283,9 +1289,11 @@ def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
         "snowflake": "snowflake-sqlalchemy",
         "bigquery": "sqlalchemy-bigquery",
     }
+    from connectors.vendor_drivers import url_driver_message
     from src.transfer.connector_capabilities import planned_driver_message
 
-    if planned := planned_driver_message(dialect_key):  # Databricks here (D345)
+    # Databricks here (D345); a vendor URL on a generic connector too (hana+hdbcli://).
+    if planned := planned_driver_message(dialect_key) or url_driver_message(driver_s):
         return RuntimeError(planned)
     hint = hint_by_dialect.get(dialect_key)
     if not hint:
@@ -1826,7 +1834,7 @@ def _to_sa_value(
     db_type: str = "",
 ) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
-    from services.value_serializer import absent_sql_bind
+    from services.value_serializer import absent_sql_bind, unescape_wire_text
 
     # Reader-null is SQL NULL. Missing stays Missing (sparse omit, never wipe).
     handled, bound = absent_sql_bind(value)
@@ -2161,8 +2169,8 @@ def _to_sa_value(
         # logical stamp collapsed NVARCHAR(MAX) to "string"/"TEXT" (false
         # varchar quarantine) or stamped NVARCHAR over a live VARCHAR (the
         # driver then substitutes '?').
-        return bind_unicode_text(
-            value,
+        return bind_unicode_text(  # one wire-escape layer off: the text, not its escape (F2)
+            unescape_wire_text(value),
             engine=str(db_type or dialect_name or ""),
             dest_type=_encoding_dest_type(
                 str(logical or ""),
@@ -3285,7 +3293,7 @@ def fetch_pk_lsn_map(
         release_engine(engine)
 
 
-def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
+def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any], engine: Any = None) -> list[Any]:
     """Select list that keeps an Oracle TIMESTAMP WITH TIME ZONE offset.
 
     python-oracledb hands back a *naive* ``datetime`` for TIMESTAMP WITH
@@ -3295,7 +3303,8 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
     every other dialect and column is projected unchanged.
     """
     if not _is_oracle_wire(_dialect_key(cfg), str(cfg.get("type") or "")):
-        return list(cols)
+        from connectors.sqlserver_tick import seven_digit_projection  # pymssql DATETIME2(7)
+        return seven_digit_projection(cols, engine)
     out: list[Any] = []
     for col in cols:
         kind = _oracle_tz_kind_sa(getattr(col, "type", None))
@@ -3378,7 +3387,7 @@ def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
         from services.json_polarity import json_document_wire
 
         return json_document_wire(value)
-    return cell_to_string(value, preserve_sql_null=True)
+    return driver_cell_to_string(value)
 
 
 def _is_json_sa(col: Any) -> bool:
@@ -3443,7 +3452,7 @@ def _read_table_raw(
     result = conn.execute(sa.text(sql))
     headers = _result_headers(dialect, result)
     rows = [
-        [cell_to_string(value, preserve_sql_null=True) for value in row]
+        [driver_cell_to_string(value) for value in row]
         for row in result.fetchall()
     ]
     return headers, rows
@@ -3634,7 +3643,7 @@ def read_table_batch(
                 else:
                     columns = selected_cols = list(table_obj.c)
 
-                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
                 # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
                 pk_cols = (
                     [c for c in table_obj.primary_key.columns]
@@ -3771,7 +3780,7 @@ def read_table_scan_batch(
                     if selected_cols
                     else []
                 )
-                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
                 if filter_value is not None:
                     _fname = reflected_column_name(table_obj, str(filter_column))
                     if _fname is None:
@@ -3835,7 +3844,7 @@ def read_table_scan_batch(
         rows = [_serialize_source_row(row, selected_cols, dialect) for row in raw]
     else:
         rows = [
-            [cell_to_string(value, preserve_sql_null=True) for value in row]
+            [driver_cell_to_string(value) for value in row]
             for row in raw
         ]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
@@ -3990,7 +3999,7 @@ def read_table_cursor_batch(
                 )
 
             key_cols = [table_obj.c[n] for n in key_names]
-            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols, engine))
             bookmark = present_cursor_bookmark(cursor_after)
             if bookmark is not None and cursor_inclusive:
                 # D60/D98 — run-seed watermark: re-read the whole tie group
@@ -4163,35 +4172,35 @@ def _upsert_batch(
       * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
         ``ON DUPLICATE KEY`` upsert.
       * SQL Server (mssql): native ``MERGE … WITH (HOLDLOCK)`` + NULL-safe ON;
-        falls back to delete+insert if MERGE fails (missing unique key, etc.).
+        falls back to UPDATE+INSERT if MERGE fails (missing unique key, etc.).
       * Oracle: native ``MERGE INTO`` + NULL-safe ON via private/global temp
-        stage; falls back to delete+insert if MERGE fails.
+        stage; falls back to UPDATE+INSERT if MERGE fails.
       * DuckDB: native ``MERGE INTO`` + NULL-safe ON (no unique index required);
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * ClickHouse: ``INSERT`` into ``ReplacingMergeTree`` (engine-level lazy
         dedupe — Airbyte class). Never delete+insert.
       * DB2 (``ibm_db_sa``): native ``MERGE INTO`` + NULL-safe ON via DGTT;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Teradata (``teradatasql``): native ``MERGE INTO`` via VOLATILE stage;
         PI equality ON only (engine forbids NULL equate); never UPDATE PI cols.
       * Trino/Presto/Athena/Hive/Impala: native ``MERGE INTO`` + NULL-safe ON
         via VALUES chunks (Hive ACID / Impala Iceberg / Athena MoR). Query
         engines fall back to append-only INSERT — never invent delete+insert.
       * SAP HANA (``hana``): native ``MERGE INTO`` + NULL-safe ON via local
-        temporary column table; falls back to delete+insert if MERGE fails.
+        temporary column table; falls back to UPDATE+INSERT if MERGE fails.
       * Vertica: native ``MERGE INTO`` + NULL-safe ON via local temp stage;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Netezza / IBM NPS (``nzpsql``, 7.2.1+): native ``MERGE INTO`` +
-        NULL-safe ON via TEMP stage; falls back to delete+insert if MERGE fails.
+        NULL-safe ON via TEMP stage; falls back to UPDATE+INSERT if MERGE fails.
       * Informix: native ``MERGE INTO`` + NULL-safe ON via TEMP ``WITH NO LOG``;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Firebird: native ``MERGE INTO`` + NULL-safe ON via ``RDB$DATABASE``
-        row stage; falls back to delete+insert if MERGE fails.
+        row stage; falls back to UPDATE+INSERT if MERGE fails.
       * Sybase ASE / SAP ASE (15.7+): native ``MERGE`` + NULL-safe ON via
-        ``#temp`` stage; falls back to delete+insert if MERGE fails.
-      * Everyone else: chunked DELETE by equality keys followed by INSERT,
-        except when dest-owned lattice columns (mirror ``_deleted``) are
-        present — then portable UPDATE+INSERT (never DELETE).
+        ``#temp`` stage; falls back to UPDATE+INSERT if MERGE fails.
+      * Everyone else: portable UPDATE of matched keys then INSERT of new
+        keys (``merge_dialects.update_insert_upsert``) — never DELETE, so
+        unmapped columns, cascades and identities stay (G15).
 
     Returns the number of destination rows actually written in this batch.
     """
@@ -4341,7 +4350,7 @@ def _upsert_batch(
 
                 # MySQL ON DUPLICATE KEY UPDATE reports affected_rows as 2 for
                 # updates and 1 for inserts, so rowcount cannot be trusted for
-                # per-source-row accounting. Use the delete+insert fallback when
+                # per-source-row accounting. Use the UPDATE+INSERT fallback when
                 # an LSN guard is required so the skip count is exact.
                 if lsn_guarded:
                     return None
@@ -4501,13 +4510,11 @@ def _upsert_batch(
                     target_cols,
                     update_cols,
                 )
-        except (sa.exc.SQLAlchemyError, OSError, ValueError):
+        except (sa.exc.SQLAlchemyError, OSError, ValueError) as exc:
             # Native upsert can fail if the table lacks the required unique
-            # index/constraint.  Roll back the aborted transaction so the
-            # delete+insert fallback can run cleanly.
-            logger.debug(
-                "native upsert unavailable; using delete+insert fallback", exc_info=True
-            )
+            # index/constraint. Roll back the aborted transaction so the
+            # UPDATE-then-INSERT fallback can run cleanly; it is a job warning.
+            note_native_upsert_failed(table_obj, dialect_name, exc)
             try:
                 conn.rollback()
             except (sa.exc.SQLAlchemyError, OSError) as exc:
@@ -4519,7 +4526,7 @@ def _upsert_batch(
     if native_count is not None:
         return native_count
 
-    # delete+insert: drop stale CDC rows before deleting so redelivery
+    # UPDATE+INSERT: drop stale CDC rows before writing so redelivery
     # cannot regress state when ``_df_lsn`` is present.
     apply_rows = rows
     if lsn_guarded:
@@ -4569,16 +4576,12 @@ def _upsert_batch(
             return _insert_rows_written(result, len(apply_rows), dialect_name)
         return 0
 
-    if apply_rows:
-        if lattice:
-            from connectors.merge_dialects import update_insert_upsert
+    if apply_rows:  # UPDATE matched keys, INSERT new keys — never DELETE.
+        from connectors.merge_dialects import update_insert_upsert
 
-            return update_insert_upsert(
-                conn, table_obj, apply_rows, conflict_cols, target_cols
-            )
-        _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
-        result = conn.execute(table_obj.insert(), apply_rows)
-        return _insert_rows_written(result, len(apply_rows), dialect_name)
+        return update_insert_upsert(
+            conn, table_obj, apply_rows, conflict_cols, target_cols, update_cols=update_cols
+        )
     return 0
 
 
@@ -4854,17 +4857,14 @@ def iter_generic_sql_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _generic_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 
     dest_db = str(kwargs.get("dest_db") or "sql")
     label = kwargs.get("dialect_label") or _generic_sql_engine_label(dest_db)
-    acc = SqlWriteAccumulator(
-        target_cols=kwargs["target_cols"],
-        dest_db_type=dest_db,
-        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
-        dialect_label=label,
-    )
+    acc = SqlWriteAccumulator(target_cols=kwargs["target_cols"], dest_db_type=dest_db, dialect_label=label,
+                              dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {})
     source_row_count = 0
     for finished in iter_generic_sql_finished_bundles(**kwargs):
         acc.note_rejects(finished.rejected_details, finished.transform_errors)
@@ -4990,7 +4990,7 @@ def write_mapped_rows(
     ledger_unavailable = False
 
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+        mappings, column_types, preserve_case=True, dest_db=type  # G11: engine's own limit
     )
     # Bind every downstream statement to the spelling the destination stores,
     # before mapped rows, types and the Table object are keyed by these names.
@@ -6086,7 +6086,7 @@ def write_mapped_rows(
                                 )
                             chunk_idx += 1
                             continue
-                        chunk_written = 0
+                        chunk_written, chunk_skipped, kept_now = 0, 0, []
                         keyed_chunk = write_mode == "upsert" and bool(conflict_columns)
                         if keyed_chunk:
                             rows_skipped += drop_stored_key_dicts(
@@ -6103,11 +6103,14 @@ def write_mapped_rows(
                                 rejected_details=rejected_details,
                                 policy=policy,
                             )
-                            if DF_LSN_COL in target_cols:
-                                rows_skipped += len(batch) - chunk_written
+                            kept_now = pop_skip_kept(table_obj)  # recorded after commit
+                            if DF_LSN_COL in target_cols or kept_now:
+                                chunk_skipped = len(batch) - chunk_written
                             else:
                                 chunk_written = len(batch)
                         elif not keyed_chunk:
+                            from services.null_marker_guard import refuse_unbound_marker
+                            refuse_unbound_marker(batch, table=table_name)  # no NULL marker as text
                             result = conn.execute(table_obj.insert(), batch)
                             chunk_written = _insert_rows_written(
                                 result, len(batch), dialect_name
@@ -6126,7 +6129,10 @@ def write_mapped_rows(
                             )
                         conn.commit()
                         written += chunk_written
+                        rows_skipped += chunk_skipped
+                        write_acc.skipped_identity_keys.extend(kept_now)
                     except Exception as chunk_exc:
+                        pop_skip_kept(table_obj)  # a rolled-back chunk kept nothing
                         try:
                             conn.rollback()
                         except Exception as rollback_exc:
@@ -6156,10 +6162,8 @@ def write_mapped_rows(
                                             rejected_details=rejected_details,
                                             policy=policy,
                                         )
-                                        if DF_LSN_COL in target_cols:
-                                            if not row_written:
-                                                rows_skipped += 1
-                                        else:
+                                        row_kept = pop_skip_kept(table_obj)
+                                        if DF_LSN_COL not in target_cols and not row_kept:
                                             row_written = 1
                                     else:
                                         result = conn.execute(table_obj.insert(), [row])
@@ -6170,7 +6174,11 @@ def write_mapped_rows(
                                         )
                                     conn.commit()
                                     chunk_written += row_written
+                                    if write_mode == "upsert" and conflict_columns:
+                                        rows_skipped += 0 if row_written else 1
+                                        write_acc.skipped_identity_keys.extend(row_kept)
                                 except Exception as row_exc:
+                                    pop_skip_kept(table_obj)
                                     try:
                                         conn.rollback()
                                     except Exception as rollback_exc:
@@ -6368,7 +6376,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             rows_skipped=rows_skipped,
-            warnings=transform_errors,
+            warnings=[*upsert_fallback_warnings(table_obj), *transform_errors],
         )
     except TransferCancelled:
         # D168: cancel is control flow, not a write failure. The chunks already

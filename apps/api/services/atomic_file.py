@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -26,28 +27,122 @@ TEMP_SUFFIX = ".tmp"
 STALE_TEMP_SECONDS = 60.0
 
 
+try:  # POSIX only; F_FULLFSYNC exists on macOS
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None  # type: ignore[assignment]
+
+#: Directory fsync failures that only mean "not supported here".
+_UNSUPPORTED_DIR_FSYNC = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF}
+
+
+def _flush_to_disk(fd: int) -> None:
+    """fsync, or F_FULLFSYNC where the platform has it (macOS: fsync alone
+    only reaches the drive's cache)."""
+    full = getattr(_fcntl, "F_FULLFSYNC", None) if _fcntl is not None else None
+    if full is not None:
+        try:
+            _fcntl.fcntl(fd, full)
+            return
+        except OSError:
+            pass  # filesystem without F_FULLFSYNC: plain fsync below
+    os.fsync(fd)
+
+
+def fsync_directory(directory: Path) -> None:
+    """Make renames in ``directory`` durable (POSIX); a no-op where unsupported.
+
+    Without it a power loss can lose the rename itself, or keep it and lose
+    the data it pointed at. Platforms without ``O_DIRECTORY`` (Windows) and
+    filesystems that refuse a directory fsync (EINVAL/ENOTSUP) are skipped; an
+    I/O error is logged as a warning (the data may not be durable).
+    """
+    flag = getattr(os, "O_DIRECTORY", None)
+    if flag is None:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY | flag)
+    except OSError:
+        return
+    try:
+        _flush_to_disk(fd)
+    except OSError as exc:
+        if exc.errno in _UNSUPPORTED_DIR_FSYNC:
+            logger.debug("Directory fsync not supported for %s: %s", directory, exc)
+        else:
+            logger.warning("Directory fsync failed for %s (%s): recent renames may not be durable", directory, exc)
+    finally:
+        os.close(fd)
+
+
 def write_json_atomic(
     path: Path,
     data: dict[str, Any],
     *,
     indent: int = 2,
     default: Any | None = json_default,
+    sync_directory: bool = True,
 ) -> None:
-    """Write ``data`` to ``path`` atomically using a temp file and ``os.replace``."""
+    """Write ``data`` to ``path`` atomically and durably.
+
+    A sibling temp file is written and fsynced, then ``os.replace``d over
+    ``path``, then the directory is fsynced: after a crash or power loss the
+    file is the old complete one or the new complete one, never empty or half.
+
+    Only the rename holds the process-wide ``_WRITE_LOCK``; the serialization
+    and both fsyncs run outside it, so one slow flush does not stall every
+    other store. That keeps the old guarantee: concurrent writers of one path
+    each rename a complete file, and which lands last was never ordered by
+    callers anyway (callers that need an order hold their own lock, as the plan
+    store does). ``sync_directory=False`` lets a caller that rewrites many
+    files in one directory call :func:`fsync_directory` once at the end.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _WRITE_LOCK:
-        tmp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=path.parent, delete=False
-            ) as tmp:
-                tmp_path = Path(tmp.name)
-                json.dump(data, tmp, indent=indent, default=default)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            json.dump(data, tmp, indent=indent, default=default)
+            tmp.flush()
+            _flush_to_disk(tmp.fileno())
+        with _WRITE_LOCK:
             os.replace(tmp_path, path)
-        except Exception:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            raise
+    except Exception:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    if sync_directory:
+        fsync_directory(path.parent)
+
+
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def path_update_lock(path: Path) -> threading.RLock:
+    """The process-wide re-entrant lock for one JSON store path."""
+    key = os.path.abspath(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = _PATH_LOCKS[key] = threading.RLock()
+        return lock
+
+
+@contextlib.contextmanager
+def locked_update(path: Path) -> Iterator[None]:
+    """Hold ``path``'s lock across a load-modify-``write_json_atomic`` of it.
+
+    ``write_json_atomic`` makes each write whole, not a read-modify-write
+    sequence: two threads that both load, change and write keep only the
+    last writer's change. Stores without a lock of their own wrap the
+    sequence in this (in-process; cross-process callers need a file lock,
+    as the plan store has).
+    """
+    with path_update_lock(path):
+        yield
 
 
 def _open_sibling_temp(path: str) -> tuple[int, str]:

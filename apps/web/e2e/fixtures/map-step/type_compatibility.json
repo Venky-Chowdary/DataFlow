@@ -1,0 +1,1013 @@
+{
+ "results": [
+  {
+   "source_type": "INTEGER",
+   "target_type": "BIGINT",
+   "verdict": "safe",
+   "conversion_class": "widening",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 BIGINT round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "BIGINT",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 BIGINT is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "INTEGER \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "INTEGER \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "INTEGER \u2192 DECIMAL(12,2) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "INTEGER \u2192 DECIMAL(12,2) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "INTEGER \u2192 DECIMAL(38,2) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "INTEGER \u2192 DECIMAL(38,2) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 TEXT round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 TEXT is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "INTEGER \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "INTEGER \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR(120)",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR(120) round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR(120)",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR(120) is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR(20)",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR(20) round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "INTEGER",
+   "target_type": "VARCHAR(20)",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "INTEGER \u2192 VARCHAR(20) is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DECIMAL(12,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DECIMAL(12,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DECIMAL(38,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 DECIMAL(38,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "representation",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "VARCHAR \u2192 TEXT round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "VARCHAR \u2192 TEXT is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "VARCHAR \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "identity",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "VARCHAR \u2192 VARCHAR round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "VARCHAR \u2192 VARCHAR is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "VARCHAR \u2192 VARCHAR(120) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "VARCHAR \u2192 VARCHAR(120) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "VARCHAR \u2192 VARCHAR(20) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "VARCHAR",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "precision",
+     "message": "VARCHAR \u2192 VARCHAR(20) declares precision, scale or a time zone the source never proved."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DATE",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 DATE changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "safe",
+   "conversion_class": "equivalent",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DECIMAL(6,2) \u2192 DECIMAL(12,2) round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DECIMAL(6,2) \u2192 DECIMAL(12,2) is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "safe",
+   "conversion_class": "equivalent",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DECIMAL(6,2) \u2192 DECIMAL(38,2) round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DECIMAL(6,2) \u2192 DECIMAL(38,2) is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "TEXT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 TEXT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "TEXT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 TEXT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "TIMESTAMP",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 TIMESTAMP changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR(120) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR(120) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR(20) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DECIMAL(6,2)",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DECIMAL(6,2) \u2192 VARCHAR(20) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "BIGINT",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 BIGINT changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DATE",
+   "verdict": "safe",
+   "conversion_class": "identity",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 DATE round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DATE",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 DATE is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 DECIMAL(12,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DECIMAL(12,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 DECIMAL(12,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 DECIMAL(38,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "DECIMAL(38,2)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 DECIMAL(38,2) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 TEXT round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "TEXT",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 TEXT is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "TIMESTAMP",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 TIMESTAMP round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "TIMESTAMP",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 TIMESTAMP is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "lossless",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 VARCHAR round-trips without loss."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR",
+   "verdict": "safe",
+   "conversion_class": "needs_quarantine",
+   "reasons": [
+    {
+     "kind": "safe",
+     "message": "DATE \u2192 VARCHAR is equivalent; 'date' parse guards quarantine unparseable cells only."
+    }
+   ],
+   "requires_risk_contract": false,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 VARCHAR(120) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR(120)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 VARCHAR(120) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 VARCHAR(20) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "none"
+  },
+  {
+   "source_type": "DATE",
+   "target_type": "VARCHAR(20)",
+   "verdict": "lossy",
+   "conversion_class": "needs_user_approval",
+   "reasons": [
+    {
+     "kind": "domain",
+     "message": "DATE \u2192 VARCHAR(20) changes the value domain: values that do not convert are quarantined."
+    }
+   ],
+   "requires_risk_contract": true,
+   "transform": "date"
+  }
+ ],
+ "rules": "conversion_contract+mapping_fidelity"
+}

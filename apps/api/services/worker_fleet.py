@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -25,6 +26,9 @@ _logger = logging.getLogger(__name__)
 
 _api_claim_stop: threading.Event | None = None
 _api_claim_thread: threading.Thread | None = None
+#: Jobs a fleet loop in this process is running, for drain and for operators.
+_fleet_running: set[str] = set()
+_fleet_running_lock = threading.Lock()
 # One pool for the process. Created at the claim cap before the loop so a
 # later larger TRANSFER_WORKERS is not stuck on the first cap that ran.
 _fleet_pool: ThreadPoolExecutor | None = None
@@ -455,20 +459,145 @@ def _finish_queue_row(job_id: str, *, status: str) -> None:
     )
 
 
+def worker_drain_seconds() -> float:
+    """How long a stopping worker lets in-flight transfers reach a safe point.
+
+    ``WORKER_DRAIN_SECONDS`` (default 25). Kubernetes must allow more than
+    this before SIGKILL: the chart sets ``terminationGracePeriodSeconds`` from
+    the same value plus a margin.
+    """
+    try:
+        return max(0.0, float(getenv_brand("WORKER_DRAIN_SECONDS", "25") or "25"))
+    except ValueError:
+        return 25.0
+
+
+def fleet_inflight_job_ids() -> frozenset[str]:
+    """Jobs a fleet loop in this process is running right now."""
+    with _fleet_running_lock:
+        return frozenset(_fleet_running)
+
+
+def _supersede_local_run(job_id: str) -> bool:
+    """Tell this process's writer for ``job_id`` to stop at its next batch boundary.
+
+    Uses the run-attempt fence (``services.cancel_check``): the job gets a new
+    attempt id, so the running attempt finds itself superseded between
+    batches and stops quietly, exactly as it does when a resume takes over.
+    The cancel flag is not touched: a drain is not an operator cancel, and the
+    next worker must be able to claim the job.
+    """
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        return bool(
+            get_mongodb_service().update_job_fields(
+                job_id, {"run_attempt": f"handover-{uuid.uuid4().hex}"}, touch_updated_at=False
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - the job then waits for lease expiry, as before
+        emit_event(_logger, "job.drain.handover", outcome="errored", job_id=job_id, error=exc)
+        return False
+
+
+def _transfer_job_finished(job_id: str) -> bool:
+    """True when the transfer reached a terminal state (it must not run again)."""
+    try:
+        from services.job_status import TERMINAL_STATUSES
+        from services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job(job_id) or {}
+        return str(job.get("status") or "").lower() in TERMINAL_STATUSES
+    except Exception:  # noqa: BLE001 - unknown is treated as "not finished": lease expiry decides
+        _logger.debug("terminal check failed for %s", job_id, exc_info=True)
+        return False
+
+
+def _requeue_claimed_row(job_id: str, worker: str) -> None:
+    """Put this worker's claimed queue row back so another worker claims it now."""
+    coll = _queue_coll()
+    if coll is None:
+        return
+    coll.update_one(
+        {"_id": job_id, "status": "claimed", "worker": worker},
+        {"$set": {"status": "queued", "worker": "", "updated_at": datetime.now(timezone.utc)}},
+    )
+
+
 def run_fleet_loop(
     handler: Callable[[str], None],
     *,
     poll_seconds: float = 2.0,
     stop_event: threading.Event | None = None,
     max_inflight: int | None = None,
+    drain_seconds: float | None = None,
 ) -> None:
     """Blocking loop for a worker process: reclaim → claim → handle → release.
 
     When ``max_inflight`` > 1, claims feed a local thread pool so one worker
     process can run several transfers concurrently (bounded by TRANSFER_WORKERS).
+
+    Once ``stop_event`` is set (SIGTERM, API shutdown) the loop claims nothing
+    more and drains for at most ``drain_seconds``: transfers that finish in
+    that time end normally. Before the time is up, the ones still running are
+    superseded through the run-attempt fence so their writers stop at the
+    next batch boundary; each one that stops has its queue row put back and
+    its lease released, so another worker resumes it at once. A writer that
+    does not stop in time keeps its lease: it is never handed to a second
+    writer while the first may still be writing.
     """
     stop = stop_event or threading.Event()
     store = WorkerLeaseStore(worker_id())
+    grace = float(drain_seconds if drain_seconds is not None else worker_drain_seconds())
+    handed_over: set[str] = set()
+    owned: set[str] = set()
+    drained = threading.Event()
+
+    def _begin(jid: str) -> None:
+        with _fleet_running_lock:
+            _fleet_running.add(jid)
+
+    def _settle(jid: str, *, failed: BaseException | None = None) -> None:
+        """Queue row and lease for a job whose handler has returned."""
+        try:
+            # A job superseded for the drain goes back on the queue — unless it
+            # finished in the same instant: a completed append must not run twice.
+            if jid in handed_over and not _transfer_job_finished(jid):
+                _requeue_claimed_row(jid, store.worker_id)
+                emit_event(_logger, "job.drain.handover", outcome="succeeded", job_id=jid)
+            elif failed is not None:
+                emit_event(
+                    _logger, "job.handler.run", outcome="errored",
+                    job_id=jid, error=failed,
+                )
+                _finish_queue_row(jid, status="failed")
+            else:
+                _finish_queue_row(
+                    jid,
+                    status="cancelled" if _transfer_job_cancelled(jid) else "done",
+                )
+        finally:
+            store.release(jid)
+            with _fleet_running_lock:
+                _fleet_running.discard(jid)
+
+    def _hand_over_running() -> None:
+        for jid in sorted(fleet_inflight_job_ids() & owned):
+            if jid not in handed_over and _supersede_local_run(jid):
+                handed_over.add(jid)
+
+    # The serial path runs the handler on this thread, so the hand-over near
+    # the end of the grace period has to come from another one. The last third
+    # of the period (at most 10s) is what a superseded writer gets to stop in.
+    margin = min(10.0, grace / 3.0)
+
+    def _drain_watch() -> None:
+        stop.wait()
+        if drained.wait(max(0.0, grace - margin)):
+            return
+        _hand_over_running()
+
+    threading.Thread(target=_drain_watch, name="df-fleet-drain", daemon=True).start()
     try:
         inflight_cap = int(
             max_inflight
@@ -495,18 +624,10 @@ def run_fleet_loop(
             fut = inflight.pop(jid)
             try:
                 fut.result()
-                _finish_queue_row(
-                    jid,
-                    status="cancelled" if _transfer_job_cancelled(jid) else "done",
-                )
             except Exception as exc:
-                emit_event(
-                    _logger, "job.handler.run", outcome="errored",
-                    job_id=jid, error=exc,
-                )
-                _finish_queue_row(jid, status="failed")
-            finally:
-                store.release(jid)
+                _settle(jid, failed=exc)
+            else:
+                _settle(jid)
 
     while not stop.is_set():
         reclaim_stale_claims()
@@ -518,21 +639,15 @@ def run_fleet_loop(
         if not job_id:
             stop.wait(poll_seconds)
             continue
+        owned.add(job_id)
+        _begin(job_id)
         if inflight_cap == 1:
             try:
                 _run_with_lease_heartbeat(store, job_id, handler, lease_ttl)
-                _finish_queue_row(
-                    job_id,
-                    status="cancelled" if _transfer_job_cancelled(job_id) else "done",
-                )
             except Exception as exc:
-                emit_event(
-                    _logger, "job.handler.run", outcome="errored",
-                    job_id=job_id, error=exc,
-                )
-                _finish_queue_row(job_id, status="failed")
-            finally:
-                store.release(job_id)
+                _settle(job_id, failed=exc)
+            else:
+                _settle(job_id)
             time.sleep(0.05)
             continue
         # Concurrent path. The lease was already acquired in claim_next_job;
@@ -546,7 +661,21 @@ def run_fleet_loop(
         )
         time.sleep(0.05)
 
+    # Draining: nothing new is claimed. Wait for what is running, bounded.
+    deadline = time.monotonic() + grace
     _reap()
+    while inflight and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        _reap()
+    drained.set()
+    if inflight:
+        # Still writing after the grace period. Their leases stay held (the
+        # heartbeat runs until the process exits) and expire afterwards, so
+        # reclaim hands them on only once this writer is really gone.
+        emit_event(
+            _logger, "job.drain.timeout", outcome="failed",
+            reason_code="grace_period_elapsed", job_count=len(inflight),
+        )
 
 
 def api_claim_inflight() -> int:
@@ -605,9 +734,16 @@ def start_api_claim_loop(*, poll_seconds: float | None = None) -> bool:
     return True
 
 
-def stop_api_claim_loop() -> None:
+def stop_api_claim_loop(timeout: float | None = None) -> None:
+    """Stop claiming, drain in-flight transfers, and wait for the loop to return.
+
+    ``timeout`` bounds the wait (default: the drain period plus a margin).
+    """
     global _api_claim_stop, _api_claim_thread
+    thread = _api_claim_thread
     if _api_claim_stop is not None:
         _api_claim_stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout if timeout is not None else worker_drain_seconds() + 5.0)
     _api_claim_thread = None
     _api_claim_stop = None

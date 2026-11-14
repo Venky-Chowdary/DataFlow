@@ -9,7 +9,27 @@ spec:
   selector:
     matchLabels:
       {{- include "dataflow.selectorLabels" . | nindent 6 }}
+    # Not the web pods: nginx has no /metrics.
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, worker, cdc-worker, scheduler]
   podMetricsEndpoints:
+    # /metrics is authenticated (workspace.manage). The bearer token is an
+    # API key stored in the pods' Secret; a platform administrator's key also
+    # gets the deployment-wide series (HTTP traffic, job gauges).
     - port: http
       path: /metrics
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "dataflow.secretName" . }}
+          key: {{ .Values.metrics.apiKeySecretKey }}
+    - port: metrics
+      path: /metrics
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "dataflow.secretName" . }}
+          key: {{ .Values.metrics.apiKeySecretKey }}
 {{- end }}

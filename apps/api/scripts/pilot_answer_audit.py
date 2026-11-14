@@ -554,6 +554,21 @@ NATURAL_QUESTIONS: list[Case] = [
     ),
 ]
 
+# Capability verdicts (CLM-9, CLM-10, CLM-14): a yes / no question has a
+# verdict in the tables the product enforces, and the answer must state it.
+# Every expected phrase is a word of the verdict's reason, never of the question.
+CAPABILITY_QUESTIONS: list[Case] = [
+    ("can I run CDC from DynamoDB", "capability", ("no change-capture reader",)),
+    ("which sources support CDC", "capability", ("validate enforces",)),
+    ("can I mirror into MongoDB", "capability", ("needs a sql table destination",)),
+    ("can I upsert into Kafka", "capability", ("append only",)),
+    ("can I read from Weaviate", "capability", ("cannot be read",)),
+    ("is Shopify supported", "capability", ("planned",)),
+    ("does Datawrap support ClickHouse", "capability", ("planned",)),
+    ("can I load into Pinecone", "capability", ("destination only",)),
+    ("is Databricks supported", "capability", ("live routes",)),
+]
+
 SUITES: dict[str, list[Case]] = {
     "product": PRODUCT_QUESTIONS,
     "workspace": WORKSPACE_QUESTIONS,
@@ -562,6 +577,7 @@ SUITES: dict[str, list[Case]] = {
     "command": COMMAND_QUESTIONS,
     "meta": META_QUESTIONS,
     "natural": NATURAL_QUESTIONS,
+    "capability": CAPABILITY_QUESTIONS,
     "off_subject": OFF_SUBJECT_QUESTIONS,
 }
 

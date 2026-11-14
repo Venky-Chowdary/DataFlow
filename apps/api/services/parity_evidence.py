@@ -892,7 +892,14 @@ def _expected_images(
         from services.shape_engine import ShapeEngine
         from services.shape_models import ShapeRecipe
 
-        engine = ShapeEngine(ShapeRecipe.parse(recipe))
+        from services.run_clock import recorded_run_started_at
+
+        # A run-start column is re-derived with the value the run recorded.
+        engine = ShapeEngine(
+            ShapeRecipe.parse(recipe),
+            run_started_at=recorded_run_started_at(job)
+            or recorded_run_started_at(job.get("destination_summary") or {}),
+        )
         rows = [engine.apply_row(r) for r in rows]
     present = [r for r in rows if r is not None]
     mapped = _shaped_rows_as_written(

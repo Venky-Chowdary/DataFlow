@@ -32,8 +32,9 @@ def test_sqlserver_oracle_resolve_first_class() -> None:
     assert "oracle" in CONNECTOR_MODULES
 
 
-def test_sqlserver_oracle_certified_when_caps_ready() -> None:
-    """When DBAPI is present, catalog enrichment marks full transfer."""
+def test_sqlserver_oracle_certified_when_caps_ready(ci_evidence) -> None:
+    """When DBAPI is present and CI proves the engine, the tile is Certified."""
+    ci_evidence("sqlserver", "oracle")
     for brand in ("sqlserver", "oracle"):
         caps = get_capabilities(brand, brand)
         if not transfer_ready(caps):
@@ -54,7 +55,7 @@ def test_iceberg_and_kafka_are_dest_modules() -> None:
         {"id": "iceberg", "name": "Iceberg", "category": "lakehouse", "status": "live", "description": ""}
     )
     assert ice["transfer_ready"] is True
-    assert ice["certification_tier"] in {"certified", "destination_only"} or "Destination" in ice.get(
+    assert ice["certification_tier"] in {"certified", "implemented", "destination_only"} or "Destination" in ice.get(
         "capability_label", ""
     )
 

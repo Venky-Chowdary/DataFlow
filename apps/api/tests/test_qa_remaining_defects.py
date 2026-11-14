@@ -386,6 +386,8 @@ def test_query_error_does_not_echo_the_sql() -> None:
         ),
         public_message="Query failed",
     )
-    assert "no such column: missing" in error.detail
+    # W3 error taxonomy: the cause is named in product words (the column),
+    # never by echoing the statement.
+    assert 'Column "missing" does not exist' in error.detail
     assert "SELECT secret" not in error.detail
     assert "sqlalche.me" not in error.detail

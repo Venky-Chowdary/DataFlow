@@ -164,11 +164,12 @@ def test_dev_without_root_keeps_absolute_warehouse(tmp_path: Path, monkeypatch: 
     assert resolve_local_warehouse(str(tmp_path / "wh")) == (tmp_path / "wh").resolve()
 
 
-def test_production_without_the_flag_keeps_today_behaviour_and_audits(
+def test_production_opted_out_keeps_the_old_behaviour_and_audits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _production(tmp_path, monkeypatch)
-    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES", raising=False)
+    # On by default in production (security follow-up 1); the operator opt-out keeps the old behaviour.
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     monkeypatch.delenv("DATAWRAP_CONFINE_LOCAL_FILES", raising=False)
     from services import would_apply_audit
     import services.audit_log as audit_log

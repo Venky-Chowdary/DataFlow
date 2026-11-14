@@ -31,7 +31,6 @@ then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel rea
 from __future__ import annotations
 
 import base64
-import csv
 import gzip
 import io
 import logging
@@ -180,6 +179,39 @@ def _empty_to_none(value: Any) -> str | None:
 
 def _csv_cell(value: str | None) -> str:
     return "\\N" if value is None else value
+
+
+_MAPPED_NULL = "\\N"
+_MAPPED_TEXT_NULL = '"\\N"'
+
+
+def mapped_csv_cell(cell: str | None, delim: str) -> str:
+    """One mapped-file cell: NULL is a bare ``\\N`` (``COPY ... NULL '\\N'``).
+
+    A *text* ``\\N`` is quoted, so neither PostgreSQL CSV COPY (a quoted value
+    equal to the NULL string is not NULL) nor the SQLite re-read (the codec
+    reads a quoted ``"\\N"`` as text) turns it into NULL. Every other cell is
+    written exactly as ``csv.writer`` (QUOTE_MINIMAL) wrote it — quoted when it
+    holds the delimiter, a quote, CR or LF — and *only* ``None`` is NULL: a text
+    cell is never routed through an encoder with an in-band NULL sentinel (a
+    text "\\x00" cell used to land NULL).
+    """
+    if cell is None:
+        return _MAPPED_NULL
+    text = cell if type(cell) is str else str(cell)
+    if text == _MAPPED_NULL:
+        return _MAPPED_TEXT_NULL
+    if delim in text or '"' in text or "\n" in text or "\r" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def mapped_csv_line(cells: list[str | None], delim: str) -> str:
+    """One mapped-file row (:func:`mapped_csv_cell` per cell); a lone ``''`` is ``""``."""
+    out = [mapped_csv_cell(cell, delim) for cell in cells]
+    if len(out) == 1 and out[0] == "":
+        return '""'
+    return delim.join(out)
 
 
 def _read_options_copy_ok(read_options: Any) -> bool:
@@ -622,6 +654,7 @@ def _iter_csv_source_records(
             handle,
             delim,
             empty_cell=str(getattr(read_options, "empty_cell", "null") or "null"),
+            null_marker=str(getattr(read_options, "null_marker", "") or ""),
         )
         header = next(reader, None)
         if not header:
@@ -752,11 +785,12 @@ def _write_mapped_csv(
     _MISS = object()
     _bind_memo: list[dict] = [dict() for _ in source_cols]
     _safe_memo: dict = {}
-    _csv_memo: dict = {}
+    _csv_memo: dict = {}  # cell -> mapped-file text (mapped_csv_cell), per run
     _MEMO_CAP = 500_000
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
+        bound_rows: list[dict[str, str | None]] = []
         for rec in rows:
             # C04: '' (a quoted "" or a JSON/Excel empty string) is not a
             # number — NULL on a non-text carrier, on every engine, before
@@ -774,6 +808,10 @@ def _write_mapped_csv(
                     if len(memo) < _MEMO_CAP:
                         memo[cell] = bound
                 copy_cells[col] = bound
+            # DATA-21: the digest reads the cell the write binds (a quoted ""
+            # in a number/date column is NULL), not the parsed text — on a
+            # SQLite TEXT carrier '' and NULL fingerprint apart.
+            bound_rows.append(dict(copy_cells))
             if sqlite_dest:
                 copy_cells = {
                     col: _sqlite_copy_cell_text(
@@ -799,24 +837,27 @@ def _write_mapped_csv(
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            out_row: list[Any] = []
-            for index, col in enumerate(source_cols):
+            out_row: list[str] = []
+            for col in source_cols:
                 cell = copy_cells.get(col)
                 rendered = _csv_memo.get(cell, _MISS)
                 if rendered is _MISS:
-                    rendered = _csv_cell(cell)
+                    rendered = mapped_csv_cell(cell, delim)
                     if len(_csv_memo) < _MEMO_CAP:
                         _csv_memo[cell] = rendered
                 out_row.append(rendered)
-            writer.writerow(out_row)
+            if len(out_row) == 1 and out_row[0] == "":
+                writer.write('""\n')
+            else:
+                writer.write(delim.join(out_row) + "\n")
             written += 1
-        if fingerprints is not None and rows:
-            fingerprints(rows)
+        if fingerprints is not None and bound_rows:
+            fingerprints(bound_rows)
         return written
 
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, delimiter=delim, lineterminator="\n")
-        writer.writerow(dest_cols)
+        writer = handle
+        writer.write(mapped_csv_line(list(dest_cols), delim) + "\n")
         for record in _iter_source_records(
             content, filename, pairs, read_options, file_type=file_type
         ):
@@ -1065,7 +1106,7 @@ def copy_csv_to_sqlite(
         # The mapped file spells NULL ``\N`` (``_csv_cell``) and writes ''
         # as a bare empty field, so an empty cell here is '' — not the
         # operator-CSV unquoted-empty NULL (CR-D125).
-        for cells in s3_iter_delimited_rows(mapped_path, delim, empty_cell="keep"):
+        for cells in s3_iter_delimited_rows(mapped_path, delim, empty_cell="keep", null_marker=_MAPPED_NULL):
             if len(cells) != len(converters):
                 raise ValueError(
                     f"CSV width {len(cells)} != dest columns {len(converters)}"
@@ -1919,6 +1960,17 @@ def try_copy_local_csv(
     key: a table this COPY creates declares them, as the row path would.
     """
     if not csv_local_copy_enabled():
+        return None
+    from services.reversibility_enforce import enforced_columns
+
+    held_to = enforced_columns(mappings)
+    if held_to:
+        # A run that must be reversible checks these columns value by value as it
+        # writes; COPY never surfaces a value to check (review 4, H-1).
+        from services.copy_fast_path import note_copy_decline
+
+        note_copy_decline("reversibility is required: " + ", ".join(held_to[:6])
+                          + " must be checked row by row while writing")
         return None
     if (dest_cfg or {}).get("vector_layout") == "table":
         return None  # pgvector typed table: the row path embeds each row (D209)

@@ -516,6 +516,7 @@ def probe_destination_privileges(
                 username=username,
                 password=password,
                 connection_string=connection_string,
+                ssl=ssl,
                 table_exists=table_exists,
             )
         if engine == "s3":
@@ -2572,35 +2573,29 @@ def _probe_dynamodb(
     password: str,
     connection_string: str,
     table_exists: bool | None,
+    ssl: bool = False,
 ) -> PrivilegeProbeResult:
     """Measure DynamoDB write/create without PutItem.
 
     DynamoDB has no GRANT catalog. Cloud IAM is the real privilege plane; local
     moto / endpoint_url has none. ``ListTables`` succeeding is the metadata
     analog of sqlite ``os.access`` — the process can call CreateTable. Never
-    writes an item.
+    writes an item. The client is the one the writer builds (follow-up review
+    1, M1): the connector's own keys, the endpoint the egress guard judged, no
+    endpoint from the process environment.
     """
-    import boto3
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_writer import dynamodb_client_cfg
 
-    from connectors.aws_common import resolve_endpoint_url
-
-    endpoint = resolve_endpoint_url(
-        {
-            "host": host,
-            "port": port,
-            "connection_string": connection_string,
-            "endpoint_url": connection_string
-            if str(connection_string or "").startswith("http")
-            else "",
-        }
-    )
-
-    kwargs: dict[str, Any] = {"region_name": "us-east-1"}
-    if endpoint:
-        kwargs["endpoint_url"] = endpoint
-        kwargs["aws_access_key_id"] = username or "test"
-        kwargs["aws_secret_access_key"] = password or "test"
-    client = boto3.client("dynamodb", **kwargs)
+    client = boto3_client("dynamodb", dynamodb_client_cfg({
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "endpoint_url": connection_string if str(connection_string or "").startswith("http") else "",
+        "ssl": ssl,
+    }))
     client.list_tables()
     exists = bool(table_exists)
     if table:

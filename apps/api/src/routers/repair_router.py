@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from services.safe_errors import classified_http_exception
 
 router = APIRouter(tags=["repair"])
 
@@ -47,7 +49,7 @@ async def propose_preflight(body: ProposePreflightBody, request: Request) -> dic
     from services.agentic_repair import propose_from_preflight
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_preflight(
         body.preflight,
@@ -62,7 +64,7 @@ async def propose_quarantine(body: ProposeQuarantineBody, request: Request) -> d
     from services.agentic_repair import propose_from_quarantine
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_quarantine(body.rejected_details, job_id=body.job_id)
     return p.to_dict()
@@ -294,5 +296,7 @@ async def ensure_cdc_signal_table(body: EnsureSignalTableBody) -> dict[str, Any]
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"Could not ensure signal table: {exc}") from exc
+        raise classified_http_exception(
+            exc, side="source", phase="ddl", status_code=502, event="repair.ensure_cdc_signal_table.failed"
+        ) from exc
     return {"ok": True, "table": table, "dialect": dialect}

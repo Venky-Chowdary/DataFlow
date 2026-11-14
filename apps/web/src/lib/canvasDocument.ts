@@ -369,7 +369,7 @@ function applyColumnEffect(step: ShapeStepWire, columns: string[]): void {
     }
     return;
   }
-  if (step.op === "constant_column" || step.op === "derive_column" || step.op === "concat_columns" || step.op === "hash_identity") {
+  if (["constant_column", "run_timestamp", "derive_column", "concat_columns", "hash_identity"].includes(step.op)) {
     const target = typeof options.to === "string" ? options.to : "";
     if (target && !columns.includes(target)) columns.push(target);
   }

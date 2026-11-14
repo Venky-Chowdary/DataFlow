@@ -69,7 +69,9 @@ def _cfg(kind: str, port: int, **extra) -> dict:
 
 
 def _assert_silent_copy(msg: str, port: int) -> None:
-    assert msg.startswith(f"Handshake timed out (127.0.0.1:{port}): the server accepted the "
+    # W3 error taxonomy: the copy names the connection, never its host:port.
+    del port
+    assert msg.startswith("Handshake timed out: the server accepted the "
                           "TCP connection but did not answer the database handshake within "), msg
     assert "proxy, tunnel or firewall" in msg, msg
     for wrong in ("Network unreachable", "Authentication failed", "Connection timed out",
@@ -126,7 +128,7 @@ def test_sqlserver_login_timeout_is_not_an_authentication_failure(black_hole, cl
     assert "HYT00" in msg, msg
 
     ok, msg = run_probe("sqlserver", _cfg("sqlserver", closed_port))
-    assert not ok and msg.startswith(f"Connection refused (127.0.0.1:{closed_port})"), msg
+    assert not ok and msg.startswith("Connection refused:"), msg
 
     # Text-only classification (no endpoint to check): a timeout, never a password.
     text_only = humanize_connection_error("sqlserver", _HYT00)
@@ -152,7 +154,7 @@ def test_refused_and_unreachable_keep_their_own_copy(closed_port, monkeypatch):
     from src.transfer.connector_registry import run_probe
 
     ok, msg = run_probe("postgresql", _cfg("postgresql", closed_port))
-    assert not ok and msg.startswith(f"Connection refused (127.0.0.1:{closed_port})"), msg
+    assert not ok and msg.startswith("Connection refused:"), msg
 
     # No route: the TCP check fails the same way, so the driver's class stands.
     raw = 'connection to server at "10.9.9.9", port 5432 failed: No route to host\n'
@@ -163,4 +165,4 @@ def test_refused_and_unreachable_keep_their_own_copy(closed_port, monkeypatch):
 
     monkeypatch.setattr(sniff.socket, "create_connection", no_route)
     ok, msg = run_probe("postgresql", _cfg("postgresql", 5432))
-    assert not ok and msg.startswith("Network unreachable (10.9.9.9:5432)"), msg
+    assert not ok and msg.startswith("Network unreachable:") and "10.9.9.9" not in msg, msg

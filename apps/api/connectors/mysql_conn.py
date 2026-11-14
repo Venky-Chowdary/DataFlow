@@ -244,7 +244,7 @@ def get_connection(
 
     assert_connector_dial_allowed(ep["host"], connection_string)
     try:
-        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"])
+        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"], local_infile_ok=True)
     except Exception as exc:
         hint = private_cloud_host_hint(ep["host"], connection_string)
         if hint:

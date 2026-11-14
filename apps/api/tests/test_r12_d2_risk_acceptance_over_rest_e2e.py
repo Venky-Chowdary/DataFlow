@@ -156,7 +156,7 @@ def test_block_names_a_retry_route_that_exists(client, collection):
 
 
 @pytest.mark.parametrize("field", ["risk_acceptance", "risk_acceptance_json"])
-def test_run_with_risk_acceptance_quarantines_bad_row(client, collection, field):
+def test_run_with_risk_acceptance_quarantines_bad_row(client, collection, field, tmp_path):
     resp = client.post(
         "/api/v1/transfer/run",
         data=_mongo_form(collection, f"d2_{field}.csv", **{field: json.dumps(ACCEPTANCE)}),
@@ -166,7 +166,14 @@ def test_run_with_risk_acceptance_quarantines_bad_row(client, collection, field)
     acct = body["destination"]["row_accounting"]
     assert acct["rows_written"] == len(_GOOD), acct
     assert acct["rows_quarantined"] == 1, acct
-    _assert_csv(body["destination"]["path"])
+    # The response names the export, not its server path (SEC-12): read it back
+    # through its download route, as an operator would.
+    assert "path" not in body["destination"], body["destination"]
+    download = client.get(body["destination"]["download_url"])
+    assert download.status_code == 200, download.text[:200]
+    exported = tmp_path / body["destination"]["filename"]
+    exported.write_bytes(download.content)
+    _assert_csv(str(exported))
     job = _wait(body["job_id"])
     contract = {m["source"]: m.get("risk_contract") for m in job["transfer_request"]["mappings"]}
     assert contract["amount"]["execution_policy"] == "CAST_AND_CONTINUE"

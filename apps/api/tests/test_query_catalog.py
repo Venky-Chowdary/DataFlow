@@ -54,3 +54,47 @@ def test_non_snowflake_does_not_pretend_to_list():
         format = "postgresql"
 
     assert live_schema_names(Endpoint()) is None
+
+
+def test_postgres_lists_its_schemas_live():
+    """UX-9: a PostgreSQL browser can leave ``public``; the schemas come from the database."""
+    import os
+
+    import pytest
+
+    if not os.environ.get("PGHOST"):
+        pytest.skip("needs a live PostgreSQL (PGHOST)")
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = psycopg2.connect(
+        host=os.environ["PGHOST"],
+        port=int(os.environ.get("PGPORT") or 5432),
+        dbname=os.environ.get("PGDATABASE", "postgres"),
+        user=os.environ.get("PGUSER", "postgres"),
+        password=os.environ.get("PGPASSWORD", ""),
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS w4ux_catalog_probe")
+    try:
+
+        class Endpoint:
+            format = "postgresql"
+            host = os.environ["PGHOST"]
+            port = int(os.environ.get("PGPORT") or 5432)
+            database = os.environ.get("PGDATABASE", "postgres")
+            username = os.environ.get("PGUSER", "postgres")
+            password = os.environ.get("PGPASSWORD", "")
+            connection_string = ""
+            ssl = False
+
+        names = live_schema_names(Endpoint())
+        assert names is not None
+        assert "public" in names and "w4ux_catalog_probe" in names
+        assert not any(n.startswith("pg_") or n == "information_schema" for n in names)
+        tree = build_catalog_tree(connector_type="postgresql", database=Endpoint.database, schema="public", live_schemas=names)
+        assert tree["listed_live"] is True
+        assert "w4ux_catalog_probe" in [c["name"] for c in tree["nodes"][0]["children"]]
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS w4ux_catalog_probe")
+        conn.close()

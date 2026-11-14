@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from services.threadpool_handler import off_event_loop
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
+from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
+from services.secret_fields import public_plan_dict
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
 from typing import Any, Optional
@@ -66,6 +69,17 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
         logging.getLogger(__name__).warning("resource ACL check fail-closed: %s", exc)
         return False
     return True
+
+
+def _public_destination(summary: Any) -> Any:
+    """A destination summary without this server's file-system path (SEC-12).
+
+    A file export is named by its ``filename`` and ``download_url``; where it
+    sits on the API host is not the caller's business.
+    """
+    if not isinstance(summary, dict) or not summary.get("download_url"):
+        return summary
+    return {k: v for k, v in summary.items() if k not in ("path", "export_path")}
 
 
 def _stamp_job_mapping_artifacts(
@@ -165,6 +179,22 @@ def _validated_read_options(raw: dict | str | None) -> dict:
     except ReadOptionsError as exc:
         raise HTTPException(
             status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
+
+
+def _validated_source_filter(raw: str) -> dict:
+    """The form's ``source_filter_json``, or 400 before any job or read.
+
+    Text that is not a filter object used to become "no filter", and every row
+    landed under a filter the operator declared (review 1 H3).
+    """
+    from services.row_filter import filter_spec_from_json
+
+    try:
+        return filter_spec_from_json(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(f"source_filter_json: {exc}")
         ) from exc
 
 
@@ -283,7 +313,34 @@ class EndpointDTO(BaseModel):
     api_key: str = ""
     service_account: str = ""
     # Vector / CDC / writer options (content_column, embedding_model, allow_append_only, …).
-    extra: dict = Field(default_factory=dict)
+    extra: dict = Field(
+        default_factory=dict,
+        description=(
+            "Writer options. file_export CSV/TSV: formula_protection = \"off\" (default: "
+            "the file is data, byte-exact) | \"prefix\" (text cells starting with = + - @ "
+            "tab or CR get a leading ' so a spreadsheet never runs them; numbers are "
+            "untouched). file_export and object-store (S3/GCS/ADLS/SFTP) TSV: tsv_null = "
+            "\"empty\" (default: SQL NULL is an empty cell) | \"\\\\N\" (the MySQL/PostgreSQL "
+            "text convention: NULL is \\N, an empty string an empty cell, a literal \\N text "
+            "quoted; Gate-8 and the TSV readers read it back the same way; refused for "
+            "non-TSV files). Both are also accepted as top-level destination keys."
+        ),
+    )
+
+    def writer_options_payload(self) -> dict[str, Any]:
+        """This endpoint as the shared writer-option validator reads a destination."""
+        return {
+            **dict(self.model_extra or {}), "kind": self.kind, "format": self.format,
+            "table": self.table or self.collection, "extra": self.extra,
+        }
+
+
+def _checked_destination_dto(value: "EndpointDTO") -> "EndpointDTO":
+    """G7: a destination's unknown formula_protection / tsv_null is a 422 (never a source's)."""
+    from services.dest_writer_options import validate_dest_writer_options
+
+    validate_dest_writer_options(value.writer_options_payload())
+    return value
 
 
 class AnalyzeRequest(BaseModel):
@@ -291,6 +348,11 @@ class AnalyzeRequest(BaseModel):
     destination: EndpointDTO
     source_columns: list[str] = Field(default_factory=list)
     source_schema: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 class ExecuteTransferRequest(PolicyFieldsModel):
@@ -334,6 +396,8 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     contract_id: str = ""
     enforce_contract: bool = True
     require_signed_contract: bool = False
+    # Reversibility gate (g24): block unless every table can be turned back into the source.
+    require_reversibility: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
     source_timezone: str = ""
@@ -385,6 +449,11 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     # Set-graph identity. Empty matches a recipe with no set nodes.
     approved_set_hash: str = ""
 
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
+
 
 class MapColumnsRequest(PolicyFieldsModel):
     source_columns: list[str]
@@ -426,8 +495,12 @@ def transfer_capabilities():
     from ..transfer.connector_capabilities import manifest_summary
     from ..transfer.registry import get_capabilities
 
+    from services.destination_sync_modes import capabilities_destination_sync_modes
+
     caps = get_capabilities()
     caps["platform"] = manifest_summary()
+    # CLM-8: per destination, the sync modes Validate's destination gates allow.
+    caps["destination_sync_modes"] = capabilities_destination_sync_modes()
     caps["format_conversion"] = __import__(
         "services.format_converter", fromlist=["conversion_matrix"]
     ).conversion_matrix()
@@ -551,7 +624,7 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
     """
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(str(body.job_id or ""),))  # review 3, body routes
+    await asyncio.to_thread(assert_body_ids, request, jobs=(str(body.job_id or ""),))  # review 3, body routes
     import sys
     from pathlib import Path
 
@@ -684,11 +757,25 @@ class CreatePlanRequest(BaseModel):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
 
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
+    #: Opaque id the caller picks for this Map (stored on the revision as
+    #: plan_summary.client_request_id), so a client that gave up waiting can
+    #: tell its own Map from someone else's.
+    client_request_id: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class UpdatePlanRequest(BaseModel):
@@ -712,9 +799,32 @@ class UpdatePlanRequest(BaseModel):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
 
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+    #: Optimistic concurrency (PS-1): the newest revision version the edit
+    #: started from. Omitted, the save is appended as a new revision.
+    base_version: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The `version` of the newest entry in the plan's `revisions` when this "
+            "edit was loaded (0 for a plan with no revisions). It is compared with "
+            "the newest revision version only — not with `active_version` and not "
+            "with `doc_version`, which also changes on preflight runs, job links and "
+            "plan edits. Any other value — older (a newer mapping revision exists) "
+            "or ahead of it — is refused with 409 and the current version, and "
+            "nothing is saved. Omit it to always append a new revision."
+        ),
+    )
 
     @field_validator("mappings")
     @classmethod
@@ -729,7 +839,7 @@ class SyncMappingsRequest(BaseModel):
 async def list_transfer_plans(limit: int = 50):
     from services.transfer_plan_store import list_plans
 
-    plans = list_plans(limit=limit)
+    plans = await asyncio.to_thread(list_plans, limit=limit)
     return {
         "plans": [
             {
@@ -753,27 +863,31 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
     from services.transfer_plan_store import create_plan
 
     # A plan stores its endpoints' connector ids: they must be the caller's (review 3, Low).
-    assert_body_ids(request, connectors=tuple(
+    await asyncio.to_thread(assert_body_ids, request, connectors=tuple(
         str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
     ))
 
-    plan = create_plan(body.model_dump())
-    append_audit_event(
-        action="transfer_plan.created",
-        resource=f"plan/{plan.id}",
-        details={"name": plan.name, "source_columns": len(plan.source_columns)},
-    )
-    return {"plan": plan.to_dict()}
+    def _create() -> dict:
+        plan = create_plan(body.model_dump())
+        append_audit_event(
+            action="transfer_plan.created",
+            resource=f"plan/{plan.id}",
+            details={"name": plan.name, "source_columns": len(plan.source_columns)},
+        )
+        return {"plan": public_plan_dict(plan)}
+
+    # A plan write can wait on the store lock: off the loop, on the plan-write pool.
+    return await run_plan_write(_create)
 
 
 @router.get("/plans/{plan_id}")
 async def get_transfer_plan(plan_id: str):
     from services.transfer_plan_store import get_plan
 
-    plan = get_plan(plan_id)
+    plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    return {"plan": plan.to_dict()}
+    return {"plan": public_plan_dict(plan)}
 
 
 @router.patch("/plans/{plan_id}")
@@ -781,8 +895,8 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
     from services.transfer_plan_service import patch_plan
 
     try:
-        plan = patch_plan(plan_id, body.model_dump(exclude_none=True))
-        return {"plan": plan.to_dict()}
+        plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
+        return {"plan": public_plan_dict(plan)}
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -792,13 +906,76 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         ) from e
 
 
-@router.post("/plans/{plan_id}/mappings")
-async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
-    from services.transfer_plan_service import sync_plan_mappings
+async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
+    """Record a created run on its plan — best effort.
+
+    The pending job already holds the idempotency key and the destination, so
+    a failure here must not fail the request (that would orphan the job and
+    turn the caller's retry into a 409 duplicate). The run does not need the
+    link, so any failure — a busy or unreadable store, a full or read-only
+    disk, a lock file it may not open — is logged and skipped. The log names
+    the error class and the ids only: the error text can carry store paths.
+    """
+    from services.transfer_plan_store import (
+        PlanStoreBusy,
+        PlanStoreLockUnavailable,
+        PlanStoreReentry,
+        PlanStoreUnreadable,
+        attach_job,
+    )
 
     try:
-        plan = sync_plan_mappings(plan_id, body.mappings)
-        return {"plan": plan.to_dict()}
+        await run_plan_write(attach_job, plan_id, job_id, status="running")
+    except Exception as exc:  # noqa: BLE001 - the job exists; the link is optional
+        # Disk and store refusals are expected operating conditions; anything
+        # else is a bug and keeps its traceback in the log (never the client).
+        expected = isinstance(
+            exc,
+            (OSError, PlanStoreBusy, PlanStoreUnreadable, PlanStoreLockUnavailable, PlanStoreReentry),
+        )
+        logging.getLogger(__name__).warning(
+            "Run %s started but was not linked to plan %s: %s",
+            job_id,
+            plan_id,
+            type(exc).__name__,
+            exc_info=None if expected else exc,
+        )
+
+
+def _plan_version_conflict(exc: Any, message: str) -> HTTPException:
+    """409 for a revision based on anything but the plan's newest one."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "plan_version_conflict",
+            "message": message,
+            "base_version": exc.base_version,
+            "current_version": exc.current_version,
+            "compared": getattr(exc, "compared", "head"),
+        },
+    )
+
+
+@router.post("/plans/{plan_id}/mappings")
+async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
+    """Save edited mappings as a new plan revision.
+
+    With ``base_version``, a save based on an older revision than the plan now
+    holds answers 409 with ``current_version`` instead of replacing it.
+    """
+    from services.transfer_plan_service import sync_plan_mappings
+    from services.transfer_plan_store import PlanVersionConflict
+
+    try:
+        plan = await run_plan_write(
+            sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
+        )
+        return {"plan": public_plan_dict(plan)}
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A newer mapping revision exists than the one this edit was based on. "
+            "Reload the plan and re-apply the edit."
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -811,14 +988,25 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
 @router.post("/plans/{plan_id}/map")
 async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
     from services.transfer_plan_service import run_plan_mapping
+    from services.transfer_plan_store import PlanVersionConflict
 
     try:
-        return run_plan_mapping(
+        # The pipeline on the default executor; its plan write (which can wait
+        # on the store lock) on the plan-write pool.
+        return await compute_then_commit(
+            run_plan_mapping,
             plan_id,
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
             source_samples=body.source_samples or None,
+            client_request_id=body.client_request_id,
         )
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "The plan changed while Map ran (a newer mapping revision was saved, or a "
+            "revision approved or reverted), so its result was not stored. Reload the plan "
+            "and run Map again."
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -854,7 +1042,7 @@ class PlanPreflightRequest(BaseModel):
 async def get_plan_preflight(plan_id: str, run_id: str = ""):
     from services.plan_preflight_job import get_plan_preflight_job
 
-    job = get_plan_preflight_job(plan_id, run_id)
+    job = await asyncio.to_thread(get_plan_preflight_job, plan_id, run_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No Validate run for this plan")
     return job
@@ -875,7 +1063,7 @@ async def preflight_transfer_plan(
     from services.transfer_plan_service import run_plan_preflight
 
     payload = body or PlanPreflightRequest()
-    _refuse_unavailable_plan_destination(plan_id)
+    await asyncio.to_thread(_refuse_unavailable_plan_destination, plan_id)
     try:
         ack = resolve_acknowledgments(
             compliance=payload.compliance_acknowledged,
@@ -891,7 +1079,8 @@ async def preflight_transfer_plan(
         ) from e
 
     if payload.async_run:
-        job = start_plan_preflight_job(
+        job = await asyncio.to_thread(
+            start_plan_preflight_job,
             plan_id,
             acknowledgments=ack,
             shape_recipe=payload.shape_recipe,
@@ -901,7 +1090,9 @@ async def preflight_transfer_plan(
     try:
         # Even the sync path leaves the event loop — /health must answer while
         # a warehouse probe or file walk runs.
-        return await asyncio.to_thread(
+        # The gates on the default executor; the run record (and the
+        # acknowledgments) wait for the store lock on the plan-write pool.
+        return await compute_then_commit(
             run_plan_preflight,
             plan_id,
             acknowledgments=ack,
@@ -921,12 +1112,41 @@ async def preflight_transfer_plan(
 
 
 @router.post("/plans/{plan_id}/approve")
-async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
+async def approve_transfer_plan(
+    plan_id: str, version: Optional[int] = None, expected_version: Optional[int] = None
+):
+    """Approve a mapping revision (default: the active one).
+
+    ``expected_version`` is the revision the caller checked (Validate's
+    ``mapping_version``): when another revision has become active since, the
+    approval is refused with 409 ``plan_version_conflict`` (``compared:
+    "active"``) instead of approving something that was never checked.
+    """
     from services.transfer_plan_service import approve_plan
+    from services.transfer_plan_store import PlanVersionConflict, UnknownPlanVersion
 
     try:
-        plan = approve_plan(plan_id, version)
-        return {"plan": plan.to_dict()}
+        plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
+        return {"plan": public_plan_dict(plan)}
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A different mapping revision is active than the one Validate checked. Review "
+            "the latest revision and run Validate again before approving."
+        ) from e
+    except UnknownPlanVersion as e:
+        have = (
+            f"Its mapping revisions are {e.versions[0]} to {e.versions[-1]}."
+            if e.versions
+            else "It has no mapping revision yet: run Map or save mappings first."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "unknown_plan_version",
+                "message": f"This plan has no mapping revision {e.version}. {have}",
+                "version": e.version,
+            },
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -942,7 +1162,7 @@ async def transfer_plan_run_payload(plan_id: str):
     from services.transfer_plan_service import build_run_payload
 
     try:
-        return build_run_payload(plan_id)
+        payload = await asyncio.to_thread(build_run_payload, plan_id)
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -950,6 +1170,13 @@ async def transfer_plan_run_payload(plan_id: str):
             public_message="Could not build transfer run payload.",
             status_code=400,
         ) from e
+    # A plan never returns raw endpoint credentials (SEC-4).
+    from services.secret_config import mask_secrets_in_text
+    from services.secret_fields import mask_secret_tree
+
+    for side in ("source", "destination"):
+        payload[side] = mask_secret_tree(payload.get(side) or {}, mask_url=mask_secrets_in_text)
+    return payload
 
 
 @router.post("/analyze-file")
@@ -1128,6 +1355,7 @@ async def execute_transfer_json(
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
+        require_reversibility=bool(body.require_reversibility),
         date_locale=body.date_locale,
         number_locale=body.number_locale,
         triggered_by=_actor_email(request),
@@ -1175,11 +1403,12 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids as _assert_body_ids
 
     # The plan and recipe a run uses must be the caller's (review 3, body routes).
-    _assert_body_ids(request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
+    await asyncio.to_thread(_assert_body_ids, request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:
-            payload = merge_plan_into_run(
+            payload = await run_plan_write(
+                merge_plan_into_run,
                 str(body.plan_id).strip(),
                 request_mappings=list(request_obj.mappings or []),
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1202,7 +1431,7 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids
 
     # Another workspace's contract answers like a missing one (review 3, Low).
-    assert_body_ids(request, contracts=(body.contract_id or "",))
+    await asyncio.to_thread(assert_body_ids, request, contracts=(body.contract_id or "",))
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1213,6 +1442,9 @@ async def execute_transfer_json(
             explicit_require=bool(body.require_signed_contract),
             policies=plan_policies if isinstance(plan_policies, dict) else {},
         )
+        from services.reversibility_sources import stamp_plan_requirement
+
+        stamp_plan_requirement(request_obj, plan_policies if isinstance(plan_policies, dict) else {})
     except ValueError as exc:
         raise safe_http_exception(
             exc,
@@ -1220,6 +1452,10 @@ async def execute_transfer_json(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -1270,8 +1506,7 @@ async def execute_transfer_json(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if body.plan_id and str(body.plan_id).strip():
-        from services.transfer_plan_store import attach_job
-        attach_job(str(body.plan_id).strip(), job_id, status="running")
+        await _link_job_to_plan(str(body.plan_id).strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,
@@ -1303,6 +1538,11 @@ async def execute_transfer_json(
             ),
         }
 
+    from services.exit_job_guard import refuse_synchronous_run
+
+    refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
     result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
@@ -1320,7 +1560,7 @@ async def execute_transfer_json(
         "elapsed_seconds": result.elapsed_seconds,
         "records_per_second": result.records_per_second,
         "source": result.source_summary,
-        "destination": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
@@ -1407,6 +1647,7 @@ async def run_universal_transfer(
     decision_artifact_json: str = Form(""),
     contract_id: str = Form(""),
     require_signed_contract: str = Form("false"),
+    require_reversibility: str = Form("false"),
     risk_acceptance: str = Form(""),
     risk_acceptance_json: str = Form(""),
     request: Request = None,
@@ -1478,6 +1719,19 @@ async def run_universal_transfer(
                 dest_extra = parsed
         except Exception:
             dest_extra = {}
+    from services.dest_writer_options import refuse_invalid_dest_writer_options
+
+    # An unknown formula_protection / tsv_null (or \\N on a non-TSV file) is the
+    # request's fault: 422 now, not at run time.
+    refuse_invalid_dest_writer_options({
+        "kind": dest_kind, "format": dest_format, "table": dest_table or dest_collection,
+        "file_format": dest_extra.get("file_format", ""), "extra": dest_extra,
+    })
+    from services.target_name_legacy import legacy_field_policy_refusal
+
+    _policy_err = legacy_field_policy_refusal(dest_extra)
+    if _policy_err:  # G11: a typo must not silently read as "no acknowledgement"
+        raise HTTPException(status_code=422, detail=_policy_err)
 
     _refuse_unavailable_destination(
         {
@@ -1604,15 +1858,7 @@ async def run_universal_transfer(
     )
     require_admin_for_endpoints(request, workspace_id, source, destination)
 
-    source_filter: dict = {}
-    if source_filter_json.strip():
-        try:
-            import json as _json
-            parsed = _json.loads(source_filter_json)
-            if isinstance(parsed, dict):
-                source_filter = parsed
-        except Exception:
-            source_filter = {}
+    source_filter = _validated_source_filter(source_filter_json)
 
     region = _job_region(request, workspace_id, data_region)
     request_obj = TransferRequest(
@@ -1695,7 +1941,8 @@ async def run_universal_transfer(
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
-            payload = merge_plan_into_run(
+            payload = await run_plan_write(
+                merge_plan_into_run,
                 plan_id.strip(),
                 request_mappings=form_mappings,
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1797,7 +2044,7 @@ async def run_universal_transfer(
     from services.body_id_ownership import assert_body_ids
     from src.transfer.contract_engine import stamp_request_contract
 
-    assert_body_ids(request, contracts=(contract_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, contracts=(contract_id,))  # review 3, Low
     try:
         stamp_request_contract(
             request_obj,
@@ -1805,6 +2052,11 @@ async def run_universal_transfer(
             explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
             policies=plan_policies,
         )
+        from services.reversibility_sources import stamp_plan_requirement
+
+        if require_reversibility.strip().lower() in ("true", "1", "yes", "on"):
+            request_obj.require_reversibility = True
+        stamp_plan_requirement(request_obj, plan_policies if isinstance(plan_policies, dict) else {})
     except ValueError as exc:
         raise safe_http_exception(
             exc,
@@ -1812,6 +2064,10 @@ async def run_universal_transfer(
             public_message="Could not validate the transfer request contract.",
             status_code=400,
         ) from exc
+    from services.validate_approvals import assert_execute_approved
+
+    # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
+    await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
 
     engine = get_transfer_engine()
     try:
@@ -1862,8 +2118,7 @@ async def run_universal_transfer(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if plan_id and plan_id.strip():
-        from services.transfer_plan_store import attach_job
-        attach_job(plan_id.strip(), job_id, status="running")
+        await _link_job_to_plan(plan_id.strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,
@@ -1895,6 +2150,11 @@ async def run_universal_transfer(
             ),
         }
 
+    from services.exit_job_guard import refuse_synchronous_run
+
+    refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
     result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
@@ -1913,8 +2173,8 @@ async def run_universal_transfer(
         "records_per_second": result.records_per_second,
         "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
-        "destination": result.destination_summary,
-        "destination_summary": result.destination_summary,
+        "destination": _public_destination(result.destination_summary),
+        "destination_summary": _public_destination(result.destination_summary),
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,
@@ -1927,7 +2187,8 @@ async def run_universal_transfer(
 
 
 @router.get("/{job_id}/explanation")
-async def get_transfer_explanation(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_explanation(job_id: str, request: Request):
     """Return the human-readable pipeline explanation for a transfer job."""
     from ..services.mongodb_service import get_mongodb_service
 
@@ -1953,7 +2214,8 @@ async def get_transfer_explanation(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/mapping-proof")
-async def get_transfer_mapping_proof(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_mapping_proof(job_id: str, request: Request):
     """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
 
@@ -2008,7 +2270,8 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/proof-pack")
-async def get_transfer_proof_pack(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_proof_pack(job_id: str, request: Request):
     """Export a signed Gate-8 + mapping proof pack (HMAC + content SHA-256).
 
     Engineering diligence artifact — not an auditor SOC2 / HIPAA letter.
@@ -2060,7 +2323,8 @@ async def verify_transfer_proof_pack(body: Any = Body(...)):
 
 
 @router.get("/{job_id}/certificate")
-async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
     """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
 
     ``format=markdown`` returns the operator-facing page, ``format=pdf`` the
@@ -2146,7 +2410,8 @@ class RollbackExecuteBody(BaseModel):
 
 
 @router.post("/{job_id}/rollback/execute")
-async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
     """Execute a signed rollback plan — DISCARD_STAGING only.
 
     Warehouse restore / population undo are never executed here (fail closed).
@@ -2286,7 +2551,8 @@ class JobCdcSnapshotBody(BaseModel):
 
 
 @router.get("/{job_id}/cdc/snapshots")
-async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
     """List incremental snapshot signals for this job's CDC source fingerprint."""
     from services.cdc_job_snapshots import (
         list_signals_for_job,
@@ -2332,7 +2598,8 @@ async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""
 
 
 @router.post("/{job_id}/cdc/snapshots")
-async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
     """Enqueue a Debezium-style incremental snapshot using the job's source_key."""
     from services.cdc_job_snapshots import request_snapshot_for_job
 
@@ -2368,7 +2635,8 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
 
 
 @router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
-async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
     """Cancel a pending/running incremental snapshot signal for this job."""
     from services.cdc_incremental_snapshot import cancel_signal, get_signal
     from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context
@@ -2431,6 +2699,11 @@ async def download_export(filename: str, request: Request):
 class ContinuityRebaselineBody(BaseModel):
     destination: EndpointDTO
     reason: str = Field("", max_length=2000)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 @router.post("/continuity/rebaseline")

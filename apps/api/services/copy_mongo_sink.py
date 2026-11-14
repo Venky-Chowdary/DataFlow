@@ -88,6 +88,23 @@ def bson_to_python(value: Any, ddl: str) -> Any:
     return value
 
 
+def nest_copy_documents(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Documents as the row path writes them: dotted Map targets nest (G11 / PR1).
+
+    A Map target ``address.city`` is the field ``city`` inside ``address``;
+    building ``{target: value}`` stored a literal ``"address.city"`` key, a
+    second document shape beside the row path's. A path the rules refuse
+    declines the COPY (the first batch, before anything is written).
+    """
+    from connectors.mongo_field_paths import insert_document
+    from services.document_paths import PathError
+
+    try:
+        return [insert_document(doc) for doc in docs]
+    except PathError as exc:
+        raise FastPathUnavailable(f"Mongo COPY declined: {exc}") from exc
+
+
 def insert_many_documents(coll: Any, docs: list[dict[str, Any]]) -> int:
     if not docs:
         return 0
@@ -96,6 +113,7 @@ def insert_many_documents(coll: Any, docs: list[dict[str, Any]]) -> int:
     from services.cancel_check import cancel_checkpoint
 
     cancel_checkpoint()
+    docs = nest_copy_documents(docs)
     result = coll.insert_many(docs, ordered=False)
     inserted = len(result.inserted_ids)
     if inserted != len(docs):

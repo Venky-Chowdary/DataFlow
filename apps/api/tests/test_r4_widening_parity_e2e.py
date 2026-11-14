@@ -502,7 +502,9 @@ def test_d191_null_or_empty_key_names_g9(transfer_client, tmp_path):
             cursor_semantics="monotonic_sequence",
         )
         assert not staged.success
-        assert _headline(staged.error) == "g9_data_integrity", staged.error
+        # UX-19: the refusal names the lead blocker by its Studio label, not its gate id.
+        assert _headline(staged.error) == "Data integrity", staged.error
+        assert (staged.output or {}).get("preflight", {}).get("blockers", [{}])[0].get("id") == "g9_data_integrity"
         assert "null/empty" in str(staged.error)
         assert "fidelity collapse" not in str(staged.error).lower()
     finally:
@@ -524,7 +526,8 @@ def test_d191_unreachable_destination_and_source_read_error_lead(transfer_client
             dest_table=table, sync_mode="full_refresh_overwrite",
         )
         assert not unreachable.success
-        assert _headline(unreachable.error) == "g2_destination", unreachable.error
+        # UX-19: labelled, not the raw gate id.
+        assert _headline(unreachable.error) == "Destination write access", unreachable.error
         assert "fidelity collapse" not in str(unreachable.error).lower()
 
         unreadable = _stage(
@@ -533,7 +536,8 @@ def test_d191_unreachable_destination_and_source_read_error_lead(transfer_client
             dest_table=f"{table}_v", sync_mode="full_refresh_overwrite",
         )
         assert not unreadable.success
-        assert _headline(unreadable.error) == "g1_source", unreadable.error
+        # UX-19: labelled, not the raw gate id.
+        assert _headline(unreadable.error) == "Source readable", unreadable.error
         assert "fidelity collapse" not in str(unreadable.error).lower()
     finally:
         _sql("postgresql", tmp_path, f"DROP VIEW IF EXISTS {table}_v")

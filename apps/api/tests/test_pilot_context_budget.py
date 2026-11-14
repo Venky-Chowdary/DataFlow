@@ -16,7 +16,9 @@ that failed must not be reported as a workspace that is empty.
 from __future__ import annotations
 
 import sys
+import threading
 import time
+from concurrent.futures import wait as wait_for_futures
 from pathlib import Path
 
 import pytest
@@ -28,11 +30,36 @@ if str(_API_ROOT) not in sys.path:
 from src.ai.copilot import context_builder as cb  # noqa: E402
 
 
+#: Set when a test ends: a slow read it abandoned returns then, not seconds
+#: into later tests.
+_test_over = threading.Event()
+
+
 @pytest.fixture(autouse=True)
-def _forget_cooldowns():
-    """Each test starts with every source eligible to be redialled."""
+def _forget_cooldowns(monkeypatch):
+    """Each test starts with every source eligible to be redialled, and ends
+    with none of its reads still running.
+
+    The context pool is the process's own. A read a test abandoned would hold
+    one of its four workers past the test (every Pilot turn in later tests
+    then waits out the budget and reports its context unread), and on
+    finishing would store its result in the reuse cache after the reset below.
+    """
+    submitted = []
+    submit = cb.submit_in_context
+
+    def recorded(pool, fn, /, *args, **kwargs):
+        future = submit(pool, fn, *args, **kwargs)
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(cb, "submit_in_context", recorded)
+    _test_over.clear()
     cb.reset_context_cooldowns()
     yield
+    _test_over.set()
+    _done, running = wait_for_futures(submitted, timeout=30.0)
+    assert not running, f"{len(running)} context read(s) still running after the test"
     cb.reset_context_cooldowns()
 
 
@@ -43,7 +70,7 @@ def _reads(**fns):
 
 def _slow(seconds: float, value):
     def read():
-        time.sleep(seconds)
+        _test_over.wait(seconds)
         return value
     return read
 
@@ -294,3 +321,25 @@ def test_the_rag_read_is_only_attempted_when_it_is_switched_on(monkeypatch):
     ctx = builder.build(None, "what gets quarantined")
     assert called == []
     assert ctx["rag_knowledge"] == []
+
+
+# --- what a test here leaves behind ------------------------------------------
+
+
+def test_no_read_abandoned_here_is_still_running_after_its_test():
+    """Runs last: the dead-store tests above abandon 30-second reads.
+
+    The context pool is the process's own (four workers). Left running, those
+    reads held every worker for 30 seconds after this file ended, so every
+    Pilot turn in the next tests waited out the 3-second budget and reported
+    its context unread, and each one then stored its stale empty result in the
+    reuse cache: test_pilot_truth_totals failed on PR 402 CI, shard 1 ("assert
+    [] == [1, 18]" for the greeting, "assert 0 == 8" recent jobs).
+    """
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    try:
+        cb._pool.submit(lambda: None).result(timeout=2.0)
+    except FutureTimeout:
+        pytest.fail("an earlier test here left its abandoned reads holding the shared context pool")
+    assert cb._recent == {}, f"an abandoned read stored its result after its test: {cb._recent}"

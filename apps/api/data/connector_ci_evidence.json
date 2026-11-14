@@ -1,0 +1,911 @@
+{
+  "engines": {
+    "adls": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [],
+      "proving_jobs": [],
+      "runs": [],
+      "status": "no_ci_job"
+    },
+    "bigquery": {
+      "drivers": [],
+      "emulated": true,
+      "live_verified": true,
+      "missing_results": [],
+      "proving_jobs": [
+        "warehouse-sku"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 14,
+          "job": "warehouse-sku",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_green"
+    },
+    "files": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]"
+      ],
+      "proving_jobs": [
+        "api-tests"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "gcs": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [],
+      "proving_jobs": [],
+      "runs": [],
+      "status": "no_ci_job"
+    },
+    "kafka": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "engine-suite"
+      ],
+      "runs": [],
+      "status": "no_ci_result"
+    },
+    "mongodb": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "engine-suite",
+        "no-config-transfer"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 262,
+          "job": "cdc-matrix",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 23,
+          "job": "no-config-transfer",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "mysql": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "engine-suite",
+        "no-config-transfer"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 262,
+          "job": "cdc-matrix",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 23,
+          "job": "no-config-transfer",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "oracle": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [],
+      "proving_jobs": [
+        "cdc-oracle"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 0,
+          "job": "cdc-oracle",
+          "labels": {},
+          "not_run_reason": "ENABLE_ORACLE_CDC is not 'true' or DATAFLOW_ORACLE_PASSWORD is unset",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "not_run",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "not_run"
+    },
+    "postgresql": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "engine-suite",
+        "no-config-transfer"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 262,
+          "job": "cdc-matrix",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 23,
+          "job": "no-config-transfer",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "redis": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "engine-suite"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 262,
+          "job": "cdc-matrix",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "snowflake": {
+      "drivers": [],
+      "emulated": true,
+      "live_verified": true,
+      "missing_results": [],
+      "proving_jobs": [
+        "warehouse-sku"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 14,
+          "job": "warehouse-sku",
+          "labels": {},
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_green"
+    },
+    "sqlite": {
+      "drivers": [],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "api-tests[shard=1]",
+        "api-tests[shard=2]",
+        "api-tests[shard=3]",
+        "api-tests[shard=5]"
+      ],
+      "proving_jobs": [
+        "api-tests"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 7723,
+          "job": "api-tests",
+          "labels": {
+            "shard": "1"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 5969,
+          "job": "api-tests",
+          "labels": {
+            "shard": "2"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7564,
+          "job": "api-tests",
+          "labels": {
+            "shard": "3"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 1,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7586,
+          "job": "api-tests",
+          "labels": {
+            "shard": "4"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7631,
+          "job": "api-tests",
+          "labels": {
+            "shard": "5"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 7611,
+          "job": "api-tests",
+          "labels": {
+            "shard": "6"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    },
+    "sqlserver": {
+      "drivers": [
+        "pyodbc"
+      ],
+      "emulated": false,
+      "live_verified": false,
+      "missing_results": [
+        "engine-suite",
+        "cdc-sqlserver[driver=pymssql]",
+        "engine-suite[shard=1]",
+        "engine-suite[shard=2]",
+        "engine-suite[shard=3]",
+        "engine-suite[shard=4]",
+        "engine-suite[shard=5]",
+        "engine-suite[shard=6]"
+      ],
+      "proving_jobs": [
+        "cdc-sqlserver",
+        "engine-suite"
+      ],
+      "runs": [
+        {
+          "engine_skips": 0,
+          "executed": 111,
+          "job": "cdc-sqlserver",
+          "labels": {
+            "driver": "pymssql"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "red",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        },
+        {
+          "engine_skips": 0,
+          "executed": 116,
+          "job": "cdc-sqlserver",
+          "labels": {
+            "driver": "pyodbc"
+          },
+          "not_run_reason": "",
+          "run_id": "43541342717",
+          "sha": "86143c6d09833429fb3efa354de1085035f6134f",
+          "status": "green",
+          "unexpected_skips": 0,
+          "workflow": ".github/workflows/ci.yml"
+        }
+      ],
+      "status": "ci_red"
+    }
+  },
+  "generated_at": "2026-11-14T02:39:02.518434+00:00",
+  "honesty_note": "live_verified means a CI job that proves the engine ran green in the runs supplied here. Workflow configuration alone never makes an engine live-verified.",
+  "jobs_reported": [
+    "api-tests",
+    "cdc-matrix",
+    "cdc-oracle",
+    "cdc-sqlserver",
+    "no-config-transfer",
+    "warehouse-sku"
+  ],
+  "live_verified": [
+    "bigquery",
+    "snowflake"
+  ],
+  "schema_version": 1,
+  "source": "scripts/check_live_skips.py results; manifest scripts/live_engine_jobs.json",
+  "source_run": "https://github.com/Venky-Chowdary/DataFlow/actions/runs/43541342717"
+}

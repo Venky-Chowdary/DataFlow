@@ -311,9 +311,8 @@ def _url_hosts(text: str) -> list[str] | None:
     the first ``/``, the driver at the last ``@``), is unreadable (security
     review round 2, H1).
     """
-    from urllib.parse import parse_qs
-
     from connectors.url_authority import parse_url_authority
+    from services.residency_addressing import url_query_pairs
 
     after = text.split("://", 1)[-1]
     if "@" in after[len(re.split(r"[/?#]", after, maxsplit=1)[0]):]:
@@ -331,14 +330,13 @@ def _url_hosts(text: str) -> list[str] | None:
             names.append(_hostname(part))
     if authority and "," not in authority and _hostname(dialled) not in names:
         return None
-    for key, values in parse_qs(parsed.query).items():
+    # The query as SQLAlchemy reads it: a ``#`` is part of it (security follow-up 7).
+    for key, value in url_query_pairs(text):
         if key.lower() in _URL_HOST_PARAMS:
-            for value in values:
-                names.extend(_hostname(part) for part in value.split(",") if part.strip())
+            names.extend(_hostname(part) for part in value.split(",") if part.strip())
         elif key.lower() in _URL_ADDRESS_PARAMS:
-            for value in values:
-                found = _address_param_hosts(key.lower(), value)
-                names.extend(found if found is not None else [None])
+            found = _address_param_hosts(key.lower(), value)
+            names.extend(found if found is not None else [None])
     if not names or any(name is None for name in names):
         return None
     return [name for name in names if name is not None]

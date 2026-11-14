@@ -65,6 +65,8 @@ class ShapeRunner:
         sample_limit: int = 25,
         workspace_id: str = "",
         typed_values: bool = False,
+        run_started_at: str = "",
+        run_clock_source: str = "run",
     ) -> None:
         self.recipe = recipe
         # typed_values: source is a database — '' and whitespace-only text
@@ -72,7 +74,11 @@ class ShapeRunner:
         self.typed_values = typed_values
         self._sample_limit = sample_limit
         self._engine = ShapeEngine(
-            recipe, sample_limit=sample_limit, workspace_id=workspace_id
+            recipe,
+            sample_limit=sample_limit,
+            workspace_id=workspace_id,
+            run_started_at=run_started_at,
+            run_clock_source=run_clock_source,
         )
 
     def fork(self) -> "ShapeRunner":
@@ -90,6 +96,9 @@ class ShapeRunner:
             sample_limit=self._sample_limit,
             workspace_id=self.workspace_id,
             typed_values=self.typed_values,
+            # A probe sees the same run start the write stamps.
+            run_started_at=(self.run_clock or {}).get("started_at", ""),
+            run_clock_source=(self.run_clock or {}).get("source", "run"),
         )
 
     def _apply(self, fn):
@@ -104,6 +113,11 @@ class ShapeRunner:
     @property
     def recipe_hash(self) -> str:
         return self.recipe.recipe_hash
+
+    @property
+    def run_clock(self) -> dict[str, str] | None:
+        """``{"started_at", "source"}`` when a step stamps the run start, else None."""
+        return self._engine.run_clock
 
     @property
     def workspace_id(self) -> str:
@@ -481,7 +495,12 @@ def recipe_output_schema(
     from services.shape_type_propagation import propagated_derive_types
 
     propagated = propagated_derive_types(recipe, prior)
-    cast_steps = _final_cast_steps(recipe)
+    last_writers = _final_writing_steps(recipe)
+    cast_steps = {c: st for c, st in last_writers.items() if st.op == "cast_column"}
+    # ``nest_json`` builds an object by construction: declare it JSON, as a
+    # cast declares its type, so the writer binds a sub-document / JSON column
+    # even when no shaped sample was measured (Document Modeler PR1).
+    nested = {c for c, st in last_writers.items() if st.op == "nest_json"}
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -493,6 +512,8 @@ def recipe_output_schema(
             out[column] = prior[origin]
             continue
         declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
+        if column in nested:
+            declared = "JSON"
         cast = cast_steps.get(column)
         if cast is not None:
             declared = _cast_carrier(
@@ -505,8 +526,8 @@ def recipe_output_schema(
     return out
 
 
-def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
-    """Columns whose last writing step is ``cast_column``, with that step.
+def _final_writing_steps(recipe: ShapeRecipe) -> dict[str, Any]:
+    """Each written column's last writing step (``cast_column``, ``nest_json``...).
 
     ``cast_column`` declares the column's logical type. The values it leaves
     can still read as another type (``1`` cast to text is the string "1"), so
@@ -529,7 +550,7 @@ def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
         for column in step.writes:
             if column:
                 last[column] = step
-    return {c: st for c, st in last.items() if st.op == "cast_column"}
+    return last
 
 
 _CAST_FAMILIES: dict[str, frozenset[str]] = {

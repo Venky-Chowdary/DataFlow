@@ -624,8 +624,31 @@ def detect_pii_fields(
 
     Returns a structured report with the sensitive fields, their detected risk
     categories, and a coarse risk level suitable for preflight gating.
+
+    The rows read are a sample spread over every row supplied — the head, the
+    tail and a seeded reservoir of the middle — never just the first
+    ``sample_limit``: a column whose identifiers begin at row 101 was reported
+    clean. ``sampling`` in the report states what was read. It is still a
+    sample of the rows the caller holds, not a scan of the table.
     """
-    sample_rows = (rows or [])[:sample_limit]
+    from services.sample_strategy import position_reservoir_sample
+
+    available = list(rows or [])
+    sample_rows = position_reservoir_sample(available, sample_limit, seed="pii_detection")
+    sampling = {
+        "strategy": "all_rows" if len(sample_rows) == len(available) else "head_tail_reservoir",
+        "rows_available": len(available),
+        "rows_sampled": len(sample_rows),
+        "note": (
+            "Every supplied row was read."
+            if len(sample_rows) == len(available)
+            else (
+                f"A sample of {len(sample_rows)} of the {len(available)} supplied rows was "
+                "read (head, tail and a seeded reservoir of the middle). A value "
+                "present in few rows can be missed: this is a guard, not a scan."
+            )
+        ),
+    }
     sensitive_fields: list[str] = []
     field_risk: dict[str, list[str]] = {}
     high_risk_fields: list[str] = []
@@ -747,6 +770,8 @@ def detect_pii_fields(
         "sensitive_count": len(sensitive_fields),
         "field_evidence": field_evidence,
         "sampled_fields": sorted(sampled_fields),
+        # Which rows the verdict above was read from (audit H7).
+        "sampling": sampling,
         # Non-blocking notes (never counted in the risk score or the hold).
         "advisories": advisories,
     }

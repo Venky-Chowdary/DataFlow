@@ -76,6 +76,35 @@ def writer_extra_kwargs(
     }
 
 
+_FILE_WRITER_OPTIONS = ("tsv_null", "formula_protection", "file_format")
+
+
+def file_writer_dest_extra(cfg: dict[str, Any], dest: Any = None) -> dict[str, Any]:
+    """The ``dest_extra`` a file-like writer (S3/GCS/ADLS/SFTP/email) receives.
+
+    The saved connector's nested ``extra`` overlaid with the run's inline
+    ``dest.extra``, plus the writer options :func:`resolve_connector_config`
+    flattened onto ``cfg`` (``tsv_null``, ``formula_protection``,
+    ``file_format``). Gate-8 reads ``tsv_null`` from that same ``cfg``, so the
+    writer and the read-back can never disagree on the TSV NULL convention
+    (review H2: the S3/GCS/ADLS stream writers got no ``dest_extra`` at all).
+    """
+    saved = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    raw = getattr(dest, "extra", None)
+    # A blank writer option (None / "") is "not set" — the same rule Gate-8's
+    # tsv_null_from applies — so it never masks a saved connector's value on the
+    # write side while the read-back still honours it.
+    inline = {
+        k: v for k, v in (raw.items() if isinstance(raw, dict) else ())
+        if not (k in _FILE_WRITER_OPTIONS and (v is None or not str(v).strip()))
+    }
+    merged = {**saved, **inline}
+    for key in _FILE_WRITER_OPTIONS:
+        if not merged.get(key) and cfg.get(key):
+            merged[key] = cfg[key]
+    return merged
+
+
 def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     """Writer kwargs every driver needs, on every path.
 
@@ -103,6 +132,10 @@ def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     )
     if prior:
         out["dest_table_prior_spelling"] = prior
+    # G11: an acknowledged legacy_field_policy=write_new, recorded by the writer.
+    ack = dest_extra.get("legacy_field_ack") or nested.get("legacy_field_ack")
+    if ack:
+        out["legacy_field_ack"] = list(ack)
     return out
 
 
@@ -140,6 +173,11 @@ def _driver_writer_kwargs(
             # The producer must dial the SASL listener Test verified (D83).
             **kafka_security_options(cfg),
         }
+    if driver == "redis":
+        from connectors.redis_reader import redis_key_format
+
+        # The key layout must match on every path that writes or re-reads keys.
+        return {"key_format": redis_key_format(cfg, getattr(dest, "extra", None))}
     if driver == "iceberg":
         # Forward catalog properties (warehouse, region, catalog_type, token,
         # rest.*, glue.*, …) that are not already part of the common kwargs.

@@ -235,6 +235,58 @@ def _refine_columns_by_samples(
     return columns
 
 
+def _refine_mysql_tinyint1_by_samples(
+    conn: Any, columns: list[dict], table: str, schema: str, sample_limit: int = 200,
+) -> list[dict]:
+    """DATA-15: a MySQL ``TINYINT(1)`` is boolean-like only while it holds 0/1.
+
+    MySQL spells BOOLEAN as ``TINYINT(1)`` but the column stores -128..127. A
+    sampled value outside {0, 1} makes the column ``TINYINT``: a cross-engine
+    destination then gets an integer carrier, and the value is never cast to
+    a boolean (refused, or worse, read as true). ``declared_type`` keeps the
+    physical ``TINYINT(1)`` for a MySQL destination.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    candidates = [
+        c for c in columns
+        if str(c.get("inferred_type") or "").upper() == "BOOLEAN"
+        and str(c.get("data_type") or "").lower().startswith("tinyint(1)")
+    ]
+    if not candidates:
+        return columns
+    cols_sql = ", ".join(quote_sql_identifier(c["name"], "`") for c in candidates)
+    qualified = f"{quote_sql_identifier(schema, '`')}.{quote_sql_identifier(table, '`')}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))  # nosec B608
+            rows = cur.fetchall()
+    except Exception:
+        logger.warning("tinyint(1) sample failed for %s.%s", schema, table, exc_info=True)
+        return columns
+    wide = [any(r[i] is not None and int(r[i]) not in (0, 1) for r in rows) for i in range(len(candidates))]
+    if not all(wide):
+        # The sample can miss a 2 further down; one capped pass over the
+        # column decides (MAX_EXECUTION_TIME bounds it; on timeout the
+        # sample stands and the boolean cast still refuses, never true).
+        probes = ", ".join(
+            f"MAX({quote_sql_identifier(c['name'], '`')} NOT IN (0, 1))" for c in candidates
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT /*+ MAX_EXECUTION_TIME(5000) */ {probes} FROM {qualified}")  # nosec B608
+                found = cur.fetchone() or ()
+            wide = [w or bool(found[i]) if i < len(found) else w for i, w in enumerate(wide)]
+        except Exception:
+            logger.warning("tinyint(1) range pass failed for %s.%s", schema, table, exc_info=True)
+    for idx, c in enumerate(candidates):
+        if wide[idx]:
+            c["declared_type"] = "TINYINT(1)"
+            c["sample_refined"] = True
+            c["inferred_type"] = "TINYINT"
+    return columns
+
+
 #: Engines whose catalog keys on (namespace, bare object name). Studio may carry
 #: a qualified name ("public.orders", "SALES.PUBLIC.ORDERS"), and
 #: ``information_schema`` stores ``orders`` — never ``public.orders`` — so the
@@ -337,18 +389,21 @@ def _introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     from services.egress_guard import connector_dial_scope
 
     reader_cfg = kwargs.get("reader_cfg") or {}
+    # The catalog type decides the dial rule: a DuckDB/SQLite file read through
+    # the generic SQL driver has a host label it never dials.
+    db_type_for_egress = str(kwargs.get("catalog_type") or "").strip() or db_type
     scope_cfg = {
         "host": str(kwargs.get("host") or ""),
         "connection_string": str(kwargs.get("connection_string") or ""),
         "endpoint_url": str(kwargs.get("endpoint_url") or ""),
-        "type": db_type,
+        "type": db_type_for_egress,
         "workspace_id": str(
             kwargs.get("workspace_id")
             or (reader_cfg.get("workspace_id") if isinstance(reader_cfg, dict) else "")
             or ""
         ),
     }
-    with connector_dial_scope(scope_cfg, db_type=db_type, point="introspect"):
+    with connector_dial_scope(scope_cfg, db_type=db_type_for_egress, point="introspect"):
         return _introspect_schema_unscoped(db_type, **kwargs)
 
 
@@ -1581,6 +1636,9 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 if columns and not _destination_probe(kwargs):
                     columns = _refine_columns_by_samples(
                         conn, columns, target, db_name, quote_char="`"
+                    )
+                    columns = _refine_mysql_tinyint1_by_samples(
+                        conn, columns, target, db_name
                     )
             unique_meta: dict[str, Any] = {
                 "primary_key_columns": [],
@@ -3200,13 +3258,19 @@ def prefer_bson_source_carrier(
         str(name).casefold() for name in (homogeneous_date_fields or set())
     }
     for col, bson_type in (bson_types or {}).items():
-        if str(bson_type).strip().upper() != "TIMESTAMPTZ":
-            continue
-        if str(col).casefold() not in homogeneous_dates:
-            continue
+        carrier = str(bson_type).strip().upper()
         name = schema_names.get(str(col).casefold())
-        if name is not None:
-            merged[name] = "TIMESTAMPTZ"
+        if name is None:
+            continue
+        if carrier == "BINARY":
+            # DATA-25: BSON BinData is bytes; its stringified sample is base64
+            # text that inference cannot always tell from a word (one short
+            # 'AP8B' typed VARCHAR and PostgreSQL got the base64 as text).
+            merged[name] = "BINARY"
+            continue
+        if carrier != "TIMESTAMPTZ" or str(col).casefold() not in homogeneous_dates:
+            continue
+        merged[name] = "TIMESTAMPTZ"
     return merged
 
 

@@ -138,6 +138,13 @@ class TransferRequest:
     # Recipe identity approved at Validate. Execute refuses when the recipe it was
     # handed hashes to anything else (Validate≡Execute).
     approved_shape_recipe_hash: str = ""
+    # Document model (services.document_model payload): how several source
+    # tables nest into one MongoDB document. None for every other route.
+    document_model: dict | None = None
+    # Model identity approved at Validate (services.document_model.model_hash).
+    # Execute refuses a model that hashes to anything else, and a model that
+    # was never approved (services.execute_document_route).
+    approved_document_model_hash: str = ""
     # Transform Library provenance: which library recipe produced shape_recipe,
     # at what version, and under which parameters. Proof-pack material — the
     # engine executes shape_recipe; it never re-reads the library mid-run.
@@ -162,6 +169,11 @@ class TransferRequest:
     enforce_contract: bool = True
     # When True with contract_id, transfer fails unless the contract is SIGNED.
     require_signed_contract: bool = False
+    # Reversibility gate (g24): when True, preflight blocks unless every table is reversible.
+    require_reversibility: bool = False
+    # Set only by Parity Studio on a key re-sync child ("parity_key_resync"): the g24 row-change rule
+    # does not apply to a repair that restores named keys of its parent job (never a client field).
+    reversibility_row_rule_exemption: str = ""
     # Operator identity for Jobs audit (email / subject).
     triggered_by: str = ""
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
@@ -219,6 +231,17 @@ class TransferRequest:
     approved_decision_artifact_hash: str = ""
     decision_artifact: dict = field(default_factory=dict)
     source_timezone: str = ""
+    # G11: the legacy-column adoption Execute made in this run and the live
+    # columns it read (``target_name_legacy.adopt_for_request``). Server-side
+    # only: not a constructor argument, never parsed from a request.
+    _g11_adoption: dict | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # G11 final review B1: ``map_target`` is the server's record of an
+        # adoption; a client-supplied one is dropped at ingress.
+        from services.target_name_legacy import strip_client_map_targets
+
+        self.mappings = strip_client_map_targets(self.mappings)
 
     @property
     def operation(self) -> str:
@@ -353,6 +376,12 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "read_options": request.read_options,
         "shape_recipe": dict(request.shape_recipe or {}),
         "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
+        "document_model": (
+            dict(request.document_model)
+            if isinstance(request.document_model, dict)
+            else request.document_model or None
+        ),
+        "approved_document_model_hash": request.approved_document_model_hash or "",
         "transform_recipe_id": request.transform_recipe_id or "",
         "transform_recipe_version": int(request.transform_recipe_version or 0),
         "transform_recipe_version_mode": request.transform_recipe_version_mode
@@ -368,6 +397,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
         "require_signed_contract": request.require_signed_contract,
+        "require_reversibility": bool(getattr(request, "require_reversibility", False)),
+        "reversibility_row_rule_exemption": str(getattr(request, "reversibility_row_rule_exemption", "") or ""),
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
         "number_locale": request.number_locale,
@@ -590,6 +621,12 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         approved_shape_recipe_hash=str(
             data.get("approved_shape_recipe_hash") or ""
         ).strip(),
+        # Any non-empty stored value is kept, even a malformed one: Execute's
+        # approval check then refuses it, instead of it reading as "no model".
+        document_model=data.get("document_model") or None,
+        approved_document_model_hash=str(
+            data.get("approved_document_model_hash") or ""
+        ).strip(),
         transform_recipe_id=str(data.get("transform_recipe_id") or "").strip(),
         transform_recipe_version=int(data.get("transform_recipe_version") or 0),
         transform_recipe_version_mode=(
@@ -609,6 +646,8 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),
         require_signed_contract=bool(data.get("require_signed_contract", False)),
+        require_reversibility=bool(data.get("require_reversibility", False)),
+        reversibility_row_rule_exemption=str(data.get("reversibility_row_rule_exemption") or "").strip(),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
         number_locale=(

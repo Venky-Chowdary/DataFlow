@@ -6,7 +6,7 @@ REST endpoints for AI semantic analysis capabilities.
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..ai import (
@@ -15,6 +15,7 @@ from ..ai import (
     analyze_schema,
     generate_mappings,
 )
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/ai", tags=["AI Semantic Engine"])
 
@@ -186,7 +187,7 @@ async def api_analyze_column(request: ColumnAnalysisRequest):
             warnings=result.warnings,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_column.failed", public_message="Column analysis failed.", status_code=500)
 
 
 @router.post("/analyze/schema", response_model=SchemaAnalysisResponse)
@@ -235,7 +236,7 @@ async def api_analyze_schema(request: SchemaAnalysisRequest):
             recommendations=result.recommendations,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_schema.failed", public_message="Schema analysis failed.", status_code=500)
 
 
 @router.post("/map", response_model=MappingResponse)
@@ -293,7 +294,7 @@ async def api_generate_mappings(request: MappingRequest):
             overall_confidence=round(overall_confidence, 3),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_generate_mappings.failed", public_message="Mapping suggestions failed.", status_code=500)
 
 
 @router.post("/detect-pii", response_model=PIIDetectionResponse)
@@ -336,7 +337,7 @@ async def api_detect_pii(request: PIIDetectionRequest):
             compliance_summary=compliance_summary,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_detect_pii.failed", public_message="PII detection failed.", status_code=500)
 
 
 class VectorRoutingRequest(BaseModel):
@@ -377,26 +378,46 @@ async def api_vector_routing(request: VectorRoutingRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_vector_routing.failed", public_message="Vector routing recommendation failed.", status_code=500)
+
+
+def _platform_admin_only(request: Request, permission: str, what: str) -> None:
+    """SEC-10: platform-wide maintenance is for platform administrators only."""
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        request, tenant_scope(request), permission,
+        f"{what} is shared by every workspace: platform administrators only.",
+    )
 
 
 @router.get("/embedding-cache")
 async def api_embedding_cache_stats():
-    """Durable SQLite embedding cache status (entries, session hit rate, path)."""
+    """Durable SQLite embedding cache status (entries, session hit rate).
+
+    The server path is not part of the answer (SEC-12).
+    """
     try:
         from services.embedding_cache import cache_stats
 
-        return cache_stats().to_dict()
+        stats = cache_stats().to_dict()
+        stats.pop("path", None)
+        return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_embedding_cache_stats.failed", public_message="Couldn't read the embedding cache status.", status_code=500)
 
 
 @router.delete("/embedding-cache")
 async def api_embedding_cache_clear(
+    request: Request,
     model: Optional[str] = None,
     clear_memory: bool = True,
 ):
-    """Clear durable embedding cache (and optionally process L1 memory)."""
+    """Clear durable embedding cache (and optionally process L1 memory).
+
+    The cache is shared by every workspace, so platform administrators only (SEC-10).
+    """
+    _platform_admin_only(request, "ai.embedding_cache.clear", "The embedding cache")
     try:
         from services.embedding_cache import clear_cache
         from services.vectorization import clear_memory_cache
@@ -407,7 +428,7 @@ async def api_embedding_cache_clear(
             memory_cleared = clear_memory_cache()
         return {**result, "memory_cleared": memory_cleared}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_embedding_cache_clear.failed", public_message="Couldn't clear the embedding cache.", status_code=500)
 
 
 @router.get("/semantic-types")
@@ -546,12 +567,17 @@ async def api_rag_query(request: RAGQueryRequest):
             grounded=bool(result.get("grounded")),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_rag_query.failed", public_message="The data question couldn't be answered.", status_code=500)
 
 
 @router.post("/rag/ingest", response_model=RAGIngestResponse)
-async def api_rag_ingest(request: RAGIngestRequest):
-    """Ingest schema/data into the RAG knowledge base."""
+async def api_rag_ingest(request: RAGIngestRequest, http_request: Request):
+    """Ingest schema/data into the RAG knowledge base.
+
+    The knowledge base is one store every workspace's Pilot reads, so only a
+    platform administrator writes to it (SEC-11).
+    """
+    _platform_admin_only(http_request, "ai.rag.ingest", "The knowledge base")
     try:
         from ..ai.rag.pipeline import get_rag_pipeline
         pipeline = get_rag_pipeline()
@@ -564,7 +590,7 @@ async def api_rag_ingest(request: RAGIngestRequest):
             total_documents=status["document_count"],
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_rag_ingest.failed", public_message="Knowledge base ingest failed.", status_code=500)
 
 
 @router.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
@@ -601,7 +627,7 @@ def api_analyze_enhanced(request: EnhancedAnalysisRequest):
             method="chain_of_thought",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_analyze_enhanced.failed", public_message="Schema analysis failed.", status_code=500)
 
 
 @router.post("/map/enhanced", response_model=EnhancedMappingResponse)
@@ -636,7 +662,7 @@ def api_map_enhanced(request: EnhancedMappingRequest):
             reasoning=reasoning,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_map_enhanced.failed", public_message="Mapping suggestions failed.", status_code=500)
 
 
 @router.post("/suggest/transforms", response_model=TransformSuggestionResponse)
@@ -661,7 +687,7 @@ async def api_suggest_transforms(request: TransformSuggestionRequest):
             requires_human_accept=True,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_suggest_transforms.failed", public_message="Transform suggestions failed.", status_code=500)
 
 
 @router.get("/models/status", response_model=ModelsStatusResponse)
@@ -682,4 +708,4 @@ async def api_models_status(run_evaluation: bool = False):
             evaluation=evaluation,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="ai.api_models_status.failed", public_message="Couldn't read the model status.", status_code=500)

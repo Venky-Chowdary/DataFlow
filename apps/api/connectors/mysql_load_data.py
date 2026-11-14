@@ -252,6 +252,7 @@ def build_load_data_sql(
     field_terminator: str = "\t",
     optionally_enclosed: bool = False,
     ignore_lines: int = 0,
+    line_terminator: str = "\n",
 ) -> str:
     from connectors.writer_common import quote_sql_identifier
 
@@ -262,6 +263,12 @@ def build_load_data_sql(
         term_sql = "','"
     else:
         raise ValueError("LOAD DATA terminator must be tab or comma")
+    if line_terminator == "\n":
+        lines_sql = r"'\n'"
+    elif line_terminator == "\r\n":
+        lines_sql = r"'\r\n'"
+    else:
+        raise ValueError("LOAD DATA line terminator must be \\n or \\r\\n")
     enclosed = " OPTIONALLY ENCLOSED BY '\"'" if optionally_enclosed else ""
     ignore = f" IGNORE {int(ignore_lines)} LINES" if int(ignore_lines) > 0 else ""
     # table_q and infile_sql are already quoted identifiers / literals.
@@ -270,7 +277,7 @@ def build_load_data_sql(
         "CHARACTER SET utf8mb4 "
         f"FIELDS TERMINATED BY {term_sql}{enclosed} "
         r"ESCAPED BY '\\' "
-        r"LINES TERMINATED BY '\n'"
+        f"LINES TERMINATED BY {lines_sql}"
         f"{ignore} "
         f"({col_sql})"
     )
@@ -286,6 +293,7 @@ def execute_load_data_local(
     optionally_enclosed: bool = False,
     ignore_lines: int = 0,
     conn: Any | None = None,
+    line_terminator: str = "\n",
 ) -> None:
     """Run ``LOAD DATA LOCAL INFILE`` for ``path``, the only file the server may read."""
     from connectors.mysql_conn import local_infile_allowed
@@ -297,6 +305,7 @@ def execute_load_data_local(
         field_terminator=field_terminator,
         optionally_enclosed=optionally_enclosed,
         ignore_lines=ignore_lines,
+        line_terminator=line_terminator,
     )
     connection = conn if conn is not None else getattr(cursor, "connection", None)
     with local_infile_allowed(connection, path):

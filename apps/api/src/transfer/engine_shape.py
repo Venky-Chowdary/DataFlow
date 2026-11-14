@@ -42,8 +42,10 @@ def _open_shape_runner(
     recipe that changes source-side truth has to run first or those decisions
     describe data that never reaches the writer.
     """
+    from services.reversibility_sources import note_recipe_inputs
     from services.shape_apply import is_typed_value_source
 
+    note_recipe_inputs(request, columns)
     return build_shape_runner(
         getattr(request, "shape_recipe", None),
         source_columns=list(columns or []),
@@ -85,6 +87,10 @@ def _stamp_shape_evidence(
             terms[key] = prior
     dest_summary.update(terms)
     dest_summary["shape_proof"] = runner.report()
+    if runner.run_clock:
+        # The one run-start value every row got: Gate-8 and later re-checks
+        # recompute the expected rows with it, never with a new clock.
+        dest_summary["shape_run_clock"] = dict(runner.run_clock)
     identity = [str(c) for c in (getattr(runner.recipe, "identity_columns", ()) or ()) if c]
     if identity:
         dest_summary.setdefault("shape_identity_columns", identity)

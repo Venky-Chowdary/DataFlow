@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.keyset_pagination import (
     KEYSET_SEP,
     canonical_cursor_bookmark,
@@ -917,7 +917,7 @@ def _claim_legacy_owner(legacy_key: str, owner: str) -> bool:
         except Exception:
             _logger.exception("Mongo legacy cursor claim failed for %s", legacy_key)
 
-    with _CURSOR_LOCK:
+    with _CURSOR_LOCK, locked_update(STORE_PATH):
         data = _load()
         for entry in data.get("cursors", []):
             if entry.get("key") != legacy_key:
@@ -1037,6 +1037,11 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
 
     if declared_type_is_zone_bearing((metadata or {}).get("cursor_type")):
         watermark = canonical_cursor_bookmark(watermark)
+    # SEC-1: the owning workspace travels with the bookmark, so the ops
+    # routes can scope it without guessing from the key.
+    from services.cdc_ops_scope import stamp_owner
+
+    metadata = stamp_owner(dict(metadata or {})) or None
     job_id = str((metadata or {}).get("job_id") or "").strip()
     if job_id:
         _stamp_job_watermark(job_id, cursor_key, watermark, str((metadata or {}).get("cursor_column") or ""))
@@ -1063,27 +1068,28 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
         except Exception:
             _logger.exception("Mongo set_watermark failed for %s; falling back to file", cursor_key)
 
-    data = _load()
-    entries = list(data.get("cursors", []))
-    updated = False
-    for entry in entries:
-        if entry.get("key") == cursor_key:
-            entry["watermark"] = watermark
-            entry["updated_at"] = _now()
-            if metadata:
-                entry["metadata"] = {**entry.get("metadata", {}), **metadata}
-            updated = True
-            break
-    if not updated:
-        entries.append({
-            "id": str(uuid.uuid4()),
-            "key": cursor_key,
-            "watermark": watermark,
-            "updated_at": _now(),
-            "metadata": metadata or {},
-        })
-    data["cursors"] = entries[-500:]
-    _save(data)
+    with locked_update(STORE_PATH):  # one load-modify-write at a time
+        data = _load()
+        entries = list(data.get("cursors", []))
+        updated = False
+        for entry in entries:
+            if entry.get("key") == cursor_key:
+                entry["watermark"] = watermark
+                entry["updated_at"] = _now()
+                if metadata:
+                    entry["metadata"] = {**entry.get("metadata", {}), **metadata}
+                updated = True
+                break
+        if not updated:
+            entries.append({
+                "id": str(uuid.uuid4()),
+                "key": cursor_key,
+                "watermark": watermark,
+                "updated_at": _now(),
+                "metadata": metadata or {},
+            })
+        data["cursors"] = entries[-500:]
+        _save(data)
 
 
 def cursor_keys_for_job(job_id: str, *, strict: bool = False) -> list[str]:
@@ -1127,6 +1133,25 @@ def cursor_keys_for_job(job_id: str, *, strict: bool = False) -> list[str]:
     return found
 
 
+def list_cursor_records() -> list[tuple[str, dict[str, Any]]]:
+    """Every persisted cursor key with its metadata (for tenant scoping)."""
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            return [
+                (str(d.get("key")), dict(d.get("metadata") or {}) if isinstance(d.get("metadata"), dict) else {})
+                for d in coll.find({}, {"key": 1, "metadata": 1})
+                if d.get("key")
+            ]
+        except Exception:
+            _logger.exception("Mongo list_cursor_records failed")
+    return [
+        (str(e.get("key")), dict(e.get("metadata") or {}) if isinstance(e.get("metadata"), dict) else {})
+        for e in _load().get("cursors", [])
+        if e.get("key")
+    ]
+
+
 def list_cursor_keys() -> list[str]:
     """Every persisted cursor key, so a reset can be aimed without guessing one.
 
@@ -1159,11 +1184,12 @@ def clear_watermark(cursor_key: str) -> dict[str, Any]:
         except Exception:
             _logger.exception("Mongo clear_watermark failed for %s; falling back to file", key)
 
-    data = _load()
-    entries = [e for e in data.get("cursors", []) if e.get("key") != key]
-    if len(entries) != len(data.get("cursors", [])):
-        data["cursors"] = entries
-        _save(data)
+    with locked_update(STORE_PATH):
+        data = _load()
+        entries = [e for e in data.get("cursors", []) if e.get("key") != key]
+        if len(entries) != len(data.get("cursors", [])):
+            data["cursors"] = entries
+            _save(data)
 
     return {
         "cleared": True,
@@ -1965,16 +1991,17 @@ def forget_job_watermarks(
         if removed and not dry_run:
             coll.delete_many({"key": {"$in": removed}})
         return removed
-    data = _load()
-    kept_entries = []
-    for entry in data.get("cursors", []):
-        key = str(entry.get("key") or "")
-        job = str((entry.get("metadata") or {}).get("job_id") or "")
-        if key and job in ids and key not in keep:
-            removed.append(key)
-            continue
-        kept_entries.append(entry)
-    if removed and not dry_run:
-        data["cursors"] = kept_entries
-        _save(data)
+    with locked_update(STORE_PATH):
+        data = _load()
+        kept_entries = []
+        for entry in data.get("cursors", []):
+            key = str(entry.get("key") or "")
+            job = str((entry.get("metadata") or {}).get("job_id") or "")
+            if key and job in ids and key not in keep:
+                removed.append(key)
+                continue
+            kept_entries.append(entry)
+        if removed and not dry_run:
+            data["cursors"] = kept_entries
+            _save(data)
     return removed

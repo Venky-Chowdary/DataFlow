@@ -735,7 +735,10 @@ def test_query_export_named_file_lands_in_exports(test_client, tmp_path, monkeyp
     })
     assert response.status_code == 200, response.text
     data = response.json()
-    target = _API_ROOT / "exports" / f"{name}.csv"
+    from services.export_paths import exports_dir
+
+    # The configured exports folder (DATAFLOW_EXPORTS_DIR), never the source tree.
+    target = exports_dir(create=False) / f"{name}.csv"
     try:
         assert data["success"] is True, data
         assert Path(data["path"]) == target.resolve()

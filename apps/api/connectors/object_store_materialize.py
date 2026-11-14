@@ -42,11 +42,13 @@ _SAMPLE_LIMIT = 50
 
 
 def source_from_writer(_kwargs: dict[str, Any], extra: dict[str, Any] | None) -> dict[str, Any]:
-    """Records + source-spill settings from a writer ``**_kwargs`` / dest_extra.
+    """Records, source-spill settings and ``tsv_null`` from a writer ``**_kwargs`` / dest_extra.
 
     Engine-owned ``source_spool`` wins so materialize does not re-ingest.
     """
     from connectors.source_row_spool import resolve_source_spill_max
+
+    from services.export_dialect import tsv_null_from
 
     source_spool = _kwargs.get("source_spool")
     if source_spool is not None and not hasattr(source_spool, "iter_bundles"):
@@ -58,6 +60,8 @@ def source_from_writer(_kwargs: dict[str, Any], extra: dict[str, Any] | None) ->
         "records": records,
         "source_spool": source_spool,
         "source_spill_max": resolve_source_spill_max(extra),
+        # G7-F3: the destination's opt-in TSV ``\\N`` NULL convention.
+        "tsv_null": tsv_null_from(extra),
     }
 
 
@@ -127,9 +131,21 @@ class ObjectStoreEncoder:
         target_cols: list[str],
         dest_types: dict[str, str] | None = None,
         spill_max_size: int = 8 * 1024 * 1024,
+        formula_protection: str = "off",
+        tsv_null: str = "empty",
     ) -> None:
+        from services.csv_safety import formula_protection_mode
+        from services.export_dialect import tsv_null_marker
+
         self.key = key or ""
+        # G7: "prefix" guards CSV/TSV header names and text cells for a file a
+        # person opens (the email destination); data destinations stay exact.
+        self._guard_formulas = formula_protection_mode(formula_protection) == "prefix"
         self.key_l = self.key.lower()
+        # G7-F3: opt-in ``\\N`` NULL convention, TSV keys only (refused elsewhere).
+        self._null_marker = tsv_null_marker(
+            "tsv" if self.key_l.endswith(".tsv") else self.key_l.rsplit(".", 1)[-1], tsv_null
+        )
         self.target_cols = list(target_cols)
         self.dest_types = dest_types or {}
         self.spill_max_size = max(1, int(spill_max_size))
@@ -190,9 +206,17 @@ class ObjectStoreEncoder:
         delim = "\t" if self.key_l.endswith(".tsv") else ","
         self._text = _SpoolTextSink(self._spool)
         self._csv = delim
-        self._text.write(format_csv_row(list(self.target_cols), delim) + "\n")
+        header = [self._guard_text(c) for c in self.target_cols]
+        self._text.write(format_csv_row(header, delim) + "\n")
         self._header_written = True
         return delim
+
+    def _guard_text(self, text: str) -> str:
+        if not self._guard_formulas:
+            return text
+        from services.csv_safety import neutralize_export_cell
+
+        return neutralize_export_cell(text)
 
     def _append_delimited(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
@@ -211,11 +235,12 @@ class ObjectStoreEncoder:
                         csv_cell_encode(
                             None
                             if record.get(k) is None
-                            else wire_cell_text(record.get(k))
+                            else self._guard_text(wire_cell_text(record.get(k)))
                         )
                         for k in self.target_cols
                     ],
                     delim,
+                    null_marker=self._null_marker,
                 )
                 + "\n"
             )
@@ -310,21 +335,29 @@ class ObjectStoreEncoder:
             return
         from openpyxl import Workbook
 
+        from services.xlsx_cells import write_only_row
+
         self._xlsx_wb = Workbook(write_only=True)
         self._xlsx_ws = self._xlsx_wb.create_sheet()
-        self._xlsx_ws.append(list(self.target_cols))
+        # G7: explicit cell types — text is a string cell, never a formula.
+        self._xlsx_ws.append(write_only_row(self._xlsx_ws, list(self.target_cols), header=True))
         self._header_written = True
 
     def _append_xlsx(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
 
+        from services.xlsx_cells import write_only_row
+
         self._ensure_xlsx()
+        declared = [self.dest_types.get(c) for c in self.target_cols]
         for record in iter_mapped_delimited_records(
             list(mapped_rows), self.target_cols, self.dest_types
         ):
-            self._xlsx_ws.append(
-                [wire_cell_text(record.get(c)) for c in self.target_cols]
-            )
+            values = [
+                None if record.get(c) is None else wire_cell_text(record.get(c))
+                for c in self.target_cols
+            ]
+            self._xlsx_ws.append(write_only_row(self._xlsx_ws, values, declared))
 
     def finish(self):
         """Write format trailer and return a rewindable ``ObjectStoreExport``."""
@@ -447,6 +480,8 @@ def materialize_object_store_export(
     records: list[dict[str, Any]] | None = None,
     source_spill_max: int | None = None,
     source_spool: Any = None,
+    formula_protection: str = "off",
+    tsv_null: str = "empty",
 ) -> ObjectStoreMaterializeResult:
     """Map, quarantine, and encode without retaining the source matrix.
 
@@ -514,6 +549,8 @@ def materialize_object_store_export(
         target_cols=target_cols,
         dest_types=dest_types,
         spill_max_size=spill_max_size,
+        formula_protection=formula_protection,
+        tsv_null=tsv_null,
     )
     acc = FingerprintAccumulator()
     sample_rows: list[tuple] = []

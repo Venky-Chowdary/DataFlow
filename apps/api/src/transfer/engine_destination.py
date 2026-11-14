@@ -16,7 +16,13 @@ DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS = 60.0
 
 
 class DestinationConnectTimeout(TimeoutError):
-    """The destination did not answer its first contact inside the deadline (D19)."""
+    """The destination did not answer its first contact inside the deadline (D19).
+
+    Its text names the destination and the deadline, so it is kept whole
+    (``timeout.connect_deadline`` is a product-copy code in the taxonomy).
+    """
+
+    error_code = "timeout.connect_deadline"
 
 
 def _destination_connect_deadline() -> float:
@@ -378,6 +384,42 @@ def _failed_batch_undo_note_impl(
         base = message or "Reconciliation failed"
         return base if note in base else f"{base} {note}"
     destination = getattr(request, "destination", None)
+    if dest_summary.get("multi_stream") and destination is not None:
+        from services.batch_undo import keep_failed_validation_for_inspection
+
+        # QA round 12 comes first: a full-refresh overwrite whose complete rows
+        # failed validation (a G22 orphan finding, say) keeps what it landed
+        # for inspection. That is a verdict about the rows, not a broken write,
+        # so the multi-table undo below must not erase the evidence.
+        kept = keep_failed_validation_for_inspection(
+            destination=destination,
+            dest_summary=dest_summary,
+            sync_mode=str(getattr(request, "sync_mode", "") or ""),
+        )
+        if kept:
+            base = message or "Reconciliation failed"
+            return base if kept in base else f"{base} {kept}"
+        # C4: verification of a multi-table run failed. Undo every table it
+        # reached with that table's own pre-run facts — the last stream's
+        # summary describes one object, not the run.
+        from services.multi_stream_undo import (
+            UNDO_KEY,
+            forget_undone_progress,
+            undo_multi_stream_run,
+        )
+
+        note, entries = undo_multi_stream_run(
+            destination,
+            sync_mode=str(getattr(request, "sync_mode", "") or ""),
+            job_id=str(dest_summary.get("job_id") or ""),
+        )
+        forget_undone_progress(str(dest_summary.get("job_id") or ""), entries)
+        if entries:
+            dest_summary[UNDO_KEY] = entries
+            dest_summary["partial_batch_undo"] = "multi_stream"
+            dest_summary["partial_batch_undo_note"] = note
+            base = message or "Reconciliation failed"
+            return base if note in base else f"{base} {note}"
     extra = dict(getattr(destination, "extra", None) or {})
     backup_engine = str(extra.get("overwrite_backup_engine") or "")
     from src.transfer.engine_finish import RESTORABLE_BACKUP_ENGINES
@@ -545,6 +587,58 @@ def _failed_batch_undo_note_impl(
     if note and note not in base:
         return f"{base} {note}"
     return base
+
+
+def refuse_all_quarantined_write(rows_written: int, summary: Any) -> None:
+    """Refuse a buffered write whose every row was held out to quarantine.
+
+    The streaming writer and SCD2 already refuse this run; the buffered path
+    reported it as a success — and an overwrite had already replaced the
+    destination with nothing. Raising :class:`WriteBatchBlocked` takes the
+    engine's blocked-write path: the quarantine is persisted and an overwrite's
+    backup is put back. The writers keep the live table themselves where the
+    clear is deferred (SQLite stage publish, PostgreSQL held TRUNCATE).
+    """
+    data = summary if isinstance(summary, dict) else {}
+    details = list(data.get("rejected_details") or [])
+    rejected = int(data.get("rejected_rows") or 0) or len(details)
+    if rows_written or not rejected or data.get("skipped_identity_keys"):
+        return
+    from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+    spill = data.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+    if spill is not None:
+        spill.close()
+    population = int(data.get("source_row_count") or 0) or None
+    raise all_rows_quarantined_blocked(details, rejected, data, rows=population)
+
+
+def all_rows_quarantined_blocked(
+    details: list[dict[str, Any]],
+    rejected_rows: int,
+    summary: dict[str, Any] | None,
+    *,
+    rows: int | None = None,
+) -> Exception:
+    """The blocked-write refusal for a run that held every row out.
+
+    It carries the quarantine (persisted by the engine's blocked-write path)
+    and a measured commit of 0: no row of this run is in the destination, so
+    the job must not report a progress tally as "already written".
+    """
+    from services.scd2_engine import all_rows_quarantined_error
+
+    from .adapters import WriteBatchBlocked
+
+    exc = WriteBatchBlocked(
+        all_rows_quarantined_error(details, rows=rows),
+        rejected_details=details,
+        rejected_rows=rejected_rows,
+        rows_written=0,
+        dest_summary=summary,
+    )
+    setattr(exc, "rows_committed_measured", 0)
+    return exc
 
 
 def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
@@ -743,6 +837,26 @@ def _clear_destination_table(
             logger.error("full_refresh empty failed for %s: %s", table_name, exc)
             raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
         return True
+    from connectors.overwrite_set_aside import retire_set_aside, set_aside_engine
+
+    aside = set_aside_engine(db_type)
+    if aside:
+        # Snowflake, BigQuery and Elasticsearch replace the object, and S3
+        # replaces the export's objects. Dropping first left nothing to put
+        # back when every row was then quarantined: keep the previous
+        # generation aside and let _settle_overwrite_backup restore or drop it.
+        try:
+            backup = retire_set_aside(aside, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh set-aside failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = aside
+            destination.extra = extra
+        # S3 removes nothing here: its writer replaces the objects.
+        return aside != "s3"
     if db_type in ("postgresql", "redshift"):
         try:
             from connectors.table_manager import postgres_columns_to_keep

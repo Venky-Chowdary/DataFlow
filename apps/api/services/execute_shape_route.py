@@ -156,8 +156,10 @@ def open_execute_shape(
             primary_steps = plan.shape_by_stream.get(primary_name) or []
             if primary_steps and not shape_refusal:
                 try:
+                    from services.reversibility_sources import note_recipe_inputs
                     from services.shape_apply import build_shape_runner
 
+                    note_recipe_inputs(request, columns)
                     plan.design_runner = build_shape_runner(
                         {"steps": primary_steps},
                         source_columns=list(columns),

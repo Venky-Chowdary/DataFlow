@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from services.process_role import (
     ack_backend,
     api_executes_transfers,
@@ -21,6 +23,13 @@ from services.process_role import (
 from services.worker_leases import WorkerLeaseStore
 
 
+@pytest.fixture(autouse=True)
+def _control_store_backend_unset(monkeypatch):
+    """The suite pins the file backend (conftest); a deployment under test here has not."""
+    monkeypatch.delenv("DATAFLOW_CONTROL_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("DATAWRAP_CONTROL_STORE_BACKEND", raising=False)
+
+
 def _honest_api(monkeypatch) -> None:
     monkeypatch.setenv("DATAFLOW_MULTI_REPLICA", "1")
     monkeypatch.setenv("DATAFLOW_WORKER_FLEET", "1")
@@ -28,6 +37,12 @@ def _honest_api(monkeypatch) -> None:
     monkeypatch.setenv("DATAFLOW_SCHEDULE_LOOP", "0")
     monkeypatch.setenv("DATAFLOW_API_CLAIM_LOOP", "0")
     monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "mongo")
+    # The two control-plane stores with no shared backend yet (audit H-5) are
+    # named and accepted; tests/test_h5_shared_control_plane_stores.py covers the refusal.
+    monkeypatch.setenv("DATAFLOW_POD_LOCAL_STORES_ACK", "transfer_plans,pilot_results")
+    monkeypatch.delenv("DATAWRAP_POD_LOCAL_STORES_ACK", raising=False)
+    monkeypatch.delenv("DATAFLOW_CONTROL_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("DATAWRAP_CONTROL_STORE_BACKEND", raising=False)
     for key in (
         "DATAWRAP_MULTI_REPLICA",
         "DATAWRAP_WORKER_FLEET",
@@ -245,7 +260,16 @@ def _match(doc: dict, filt: dict) -> bool:
     return True
 
 
-def test_two_api_processes_share_one_ack():
+def _no_secrets_key(monkeypatch) -> None:
+    for brand in ("DATAFLOW", "DATAWRAP"):
+        for name in ("SECRETS_KEY", "AUTH_SECRET"):
+            monkeypatch.delenv(f"{brand}_{name}", raising=False)
+
+
+def test_two_api_processes_share_one_ack(monkeypatch):
+    # A staged approval holding a secret is sealed in the shared collection,
+    # which needs a deployment key (the public default is no key).
+    monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "topology-test-deployment-key-0123456789abcdef")
     from src.ai.copilot.ack_ledger import MongoAckLedger
 
     coll = _AckColl()
@@ -268,6 +292,27 @@ def test_two_api_processes_share_one_ack():
     peeked = second.peek(ack_id)
     assert peeked is not None
     assert "password" not in peeked["preview"] or peeked["preview"].get("password") == "***"
+
+
+def test_without_a_deployment_key_a_secret_is_never_staged_in_the_shared_ack_store(monkeypatch):
+    """No key (or only the public default): a staged secret cannot be sealed, so
+    it is refused rather than written in clear to a collection every API
+    process reads; an approval with no secret is still shared."""
+    _no_secrets_key(monkeypatch)
+    from src.ai.copilot.ack_ledger import MongoAckLedger
+
+    coll = _AckColl()
+    first = MongoAckLedger(collection=coll, ttl_sec=120)
+    second = MongoAckLedger(collection=coll, ttl_sec=120)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="secret vault is unavailable"):
+        first.put(kind="start_transfer", payload={"path": "/data/rows.csv", "password": "secret"})
+    assert coll.docs == {}, "a refused approval must leave nothing in the shared store"
+
+    ack_id = first.put(kind="start_transfer", payload={"path": "/data/rows.csv"})
+    payload, err = second.claim(ack_id, actor="api-b")
+    assert err == "" and payload is not None and payload["path"] == "/data/rows.csv"
 
 
 def test_blob_root_is_readable_from_another_upload_dir(tmp_path, monkeypatch):

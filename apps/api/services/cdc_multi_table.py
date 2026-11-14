@@ -80,6 +80,10 @@ def can_share_log_reader(src_type: str, table_count: int) -> bool:
 @dataclass
 class _TableBuf:
     events: list[CdcTxnEvent] = field(default_factory=list)
+    #: Deletes with no resolvable key, parked with their row image (C2).
+    unkeyed: list[dict[str, Any]] = field(default_factory=list)
+    #: The source table was truncated in this transaction (before ``events``).
+    truncated: bool = False
 
 
 @dataclass
@@ -183,15 +187,48 @@ class MultiTableTransactionBuffer:
         self._open.event_count += 1
         self._maybe_overflow()
 
-    def delete(self, table: str, pk: str, *, lsn: str | None = None) -> None:
-        if not pk:
-            return
+    def delete(
+        self,
+        table: str,
+        pk: str,
+        *,
+        lsn: str | None = None,
+        row: dict[str, Any] | None = None,
+    ) -> None:
+        """Buffer a delete; one with no key is parked with ``row`` (its image).
+
+        Never dropped (audit M3) and never fatal (C2): an unkeyed delete rides
+        the committed batch as ``unkeyed_deletes``, and the apply records it
+        durably and audits it before the position moves.
+        """
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after delete")
-        self._bucket(table).events.append(CdcTxnEvent(op="d", pk=str(pk), row=None, lsn=lsn))
+        if not pk:
+            from services.cdc_unkeyed_delete import unkeyed_delete_record
+
+            self._bucket(table).unkeyed.append(unkeyed_delete_record(table, row, lsn))
+        else:
+            self._bucket(table).events.append(
+                CdcTxnEvent(op="d", pk=str(pk), row=None, lsn=lsn)
+            )
         self._open.event_count += 1
         self._maybe_overflow()
+
+    def truncate(self, table: str, *, lsn: str | None = None) -> None:
+        """Source TRUNCATE: every earlier change to ``table`` in this txn is moot.
+
+        The committed batch carries ``truncated=True`` and the apply empties the
+        destination before the changes that follow it (data audit DATA-1).
+        """
+        self._ensure_open(lsn)
+        if self._open is None:
+            raise RuntimeError("CDC multi-table buffer is not open after truncate")
+        bucket = self._bucket(table)
+        bucket.events.clear()
+        bucket.unkeyed.clear()
+        bucket.truncated = True
+        self._open.event_count += 1
 
     def _maybe_overflow(self) -> None:
         if self._open and self._open.event_count > self.max_events:
@@ -229,10 +266,10 @@ class MultiTableTransactionBuffer:
         batches: list[ChangeBatch] = []
         for name in order:
             buf = self._open.by_table.get(name)
-            if not buf or not buf.events:
+            if not buf or not (buf.events or buf.unkeyed or buf.truncated):
                 continue
             inserts, updates, deletes = coalesce_cdc_txn_events(list(buf.events))
-            if not (inserts or updates or deletes):
+            if not (inserts or updates or deletes or buf.unkeyed or buf.truncated):
                 continue
             batches.append(
                 ChangeBatch(
@@ -242,6 +279,8 @@ class MultiTableTransactionBuffer:
                     resume_token=resume_token,
                     table=name,
                     ack_barrier=False,
+                    unkeyed_deletes=list(buf.unkeyed),
+                    truncated=buf.truncated,
                 )
             )
         self._open = None
@@ -257,7 +296,7 @@ class MultiTableTransactionBuffer:
 
 
 _TEST_DECODING_TABLE_RE = re.compile(
-    r"^table\s+([^\s.]+)\.([^\s:]+):\s*(INSERT|UPDATE|DELETE):",
+    r"^table\s+([^\s.]+)\.([^\s:]+):\s*(INSERT|UPDATE|DELETE|TRUNCATE):",
     re.IGNORECASE,
 )
 

@@ -59,7 +59,11 @@ def redact_url(url: str) -> str:
 
 def mask_secrets_in_text(text: str) -> str:
     """Mask URI credentials and secret query values embedded in free text."""
-    masked = re.sub(r":([^:@/]+)@", ":****@", str(text))
+    # scheme://user:password@ (a password may hold a space) and a bare
+    # user:password@host. A colon followed by a space is prose ("Error: …
+    # ops@corp"), not a credential: masking it ate the operator's text.
+    masked = re.sub(r"(://[^\s:@/]*):([^:@/]+)@", r"\1:****@", str(text))
+    masked = re.sub(r"(?<![\w.%+-])([\w.%+-]+):(?!\*\*\*\*@)([^\s:@/]+)@", r"\1:****@", masked)
     url_pattern = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"'`]+", re.IGNORECASE)
 
     def redact(match: re.Match[str]) -> str:

@@ -15,6 +15,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedLog
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,11 @@ def _now() -> str:
 def _store_path() -> Path:
     env = (getenv_brand("CDC_MAPPING_REVIEW_STORE", "") or "").strip()
     return Path(env) if env else STORE_PATH
+
+
+# Shared across replicas when a control-plane store is configured: the CDC
+# worker flags a review, an API pod lists and acknowledges it (H-5).
+_LOG = SharedLog("cdc_mapping_reviews", file_path=_store_path, key_field="id")
 
 
 def flag_mapping_review(
@@ -61,10 +67,14 @@ def flag_mapping_review(
             "open Map, review fidelity, and re-Validate before continuing."
         ),
     }
-    path = _store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(signal, default=json_default) + "\n")
+    coll = _LOG.backend()
+    if coll is not None:
+        _LOG.append(coll, signal)
+    else:
+        path = _store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(signal, default=json_default) + "\n")
     logger.warning(
         "CDC mapping review required: %s.%s (%s)",
         signal["source_key"],
@@ -80,24 +90,31 @@ def list_reviews(
     status: str = "open",
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    path = _store_path()
-    if not path.exists():
-        return []
     out: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception as exc:
-        logger.error("Failed reading CDC mapping review store: %s", exc)
-        return []
+    coll = _LOG.backend()
+    if coll is not None:
+        rows: list[Any] = _LOG.records(coll)
+    else:
+        path = _store_path()
+        if not path.exists():
+            return []
+        try:
+            rows = path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            logger.error("Failed reading CDC mapping review store: %s", exc)
+            return []
     from services.workspace_filter import bound_allows
 
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for line in reversed(rows):
+        if isinstance(line, dict):
+            row = line
+        else:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
         if status and status != "all" and row.get("status") != status:
             continue
         if source_key and row.get("source_key") != source_key:
@@ -115,6 +132,19 @@ def list_reviews(
 def acknowledge_review(review_id: str) -> dict[str, Any] | None:
     from services.workspace_filter import bound_allows
 
+    coll = _LOG.backend()
+    if coll is not None:
+        done: list[dict[str, Any]] = []
+
+        def acknowledge(row: dict[str, Any]) -> dict[str, Any] | None:
+            if row.get("status") != "open" or not bound_allows(row.get("workspace_id")):
+                return None
+            row = {**row, "status": "acknowledged", "acknowledged_at": _now()}
+            done[:] = [row]
+            return row
+
+        _LOG.update(coll, review_id, acknowledge)
+        return done[0] if done else None
     path = _store_path()
     if not path.exists():
         return None

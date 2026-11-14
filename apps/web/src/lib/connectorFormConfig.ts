@@ -62,7 +62,8 @@ export function inferConnectorAuthMode(
   if (conn?.connection_string) return "connection_string";
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
-  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
+  if (resolved === "salesforce") return conn?.username ? "user_pass" : "api_key";
+  if (["hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
   if (resolved === "milvus") return conn?.api_key ? "api_key" : "user_pass";
@@ -660,12 +661,12 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           : undefined,
       }),
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
-      textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Access token (Bearer)" : "API token", {
+      textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Session access token (expires, not refreshed)" : "API token", {
         rows: 2,
         sensitive: true,
         placeholder: resolved === "stripe" ? "sk_..." : isSalesforce ? "00D…!AQEA… (session access token)" : "Paste access token",
         hint: isSalesforce
-          ? `Paste a Bearer access token (not username/password). ${objectHint}`
+          ? `A pasted session token expires (two hours by default) and cannot be refreshed, so scheduled runs fail once it does. For schedules, use OAuth client credentials. ${objectHint}`
           : `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
       })
     );
@@ -1226,6 +1227,38 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   }
 
+  // Salesforce OAuth client credentials: the server mints a fresh token for
+  // every run, so schedules keep working (CLM-13).
+  if (resolved === "salesforce") {
+    authModes.unshift(
+      auth(
+        "user_pass",
+        "OAuth client credentials",
+        [
+          text("host", "Instance URL", {
+            placeholder: "https://yourorg.my.salesforce.com",
+            hint: "Use your org instance URL (*.my.salesforce.com). Do not use login.salesforce.com.",
+          }),
+          text("database", "Object / table (optional)", { optional: true, placeholder: "Account" }),
+          text("username", "Consumer Key", {
+            hint: "From a Connected App with the OAuth client-credentials flow enabled and a run-as user.",
+          }),
+          password("password", "Consumer Secret"),
+        ],
+        (values) => {
+          const h = String(fmt(values, "host") || "").toLowerCase();
+          if (!h) return "Salesforce instance URL is required (*.my.salesforce.com).";
+          if (h.includes("login.salesforce.com") || h.includes("test.salesforce.com") || h.includes("yourorg.my.salesforce.com")) {
+            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com or the yourorg placeholder.";
+          }
+          if (!fmt(values, "username") || !fmt(values, "password")) return "Consumer Key and Consumer Secret are required.";
+          return null;
+        },
+        "Connected App client-credentials flow: a fresh access token for every run.",
+      ),
+    );
+  }
+
   // Fallback for anything not yet configured
   if (authModes.length === 0) {
     authModes.push(
@@ -1266,7 +1299,8 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (resolved === "servicenow") return "user_pass";
   if (resolved === "woocommerce") return "user_pass";
   if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk", "airtable", "clickup", "mailjet", "sendgrid", "monday", "linear"].includes(resolved)) return "api_key";
-  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
+  if (resolved === "salesforce") return "user_pass";
+  if (["hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
   if ((FILE_FORMAT_TYPES as readonly string[]).includes(resolved)) return "file_path";

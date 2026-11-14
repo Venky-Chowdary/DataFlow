@@ -333,6 +333,8 @@ def write_mapped_rows(
                             return remote.read()
 
                     try:
+                        from services.export_dialect import tsv_null_from
+
                         export = prepare_incremental_export(
                             key=serialize_key,
                             export=export,
@@ -345,6 +347,7 @@ def write_mapped_rows(
                             dest_types=dest_types,
                             conflict_columns=conflict_columns,
                             spill_max_size=spill_max,
+                            tsv_null=tsv_null_from(extra),  # G7-F3
                         )
                     except ObjectMergeRefused as exc:
                         return WriteResult(

@@ -359,6 +359,24 @@ def _seed_cdc_signal(world) -> Seeded:
     return Seeded({"signal_id": signal.id}, intact)
 
 
+def _seed_cdc_cursor(world) -> Seeded:
+    """A watermark and a held CDC lease on one of workspace A's routes (SEC-1)."""
+    from services import cdc_lease, sync_cursor
+
+    n = _next(world)
+    key = f"postgresql:{SENTINEL}_db:public.t{n}→postgresql:wh:t{n}:stream|id:{SENTINEL}-{n}"
+    sync_cursor.set_watermark(key, f"2026-11-0{1 + n % 8}", metadata={"workspace_id": world.workspace_a})
+    cdc_lease.acquire_lease(
+        key, resource=f"pg:{SENTINEL}-{n}.internal:5432/db", holder_id=cdc_lease.new_holder_id(f"job{n}"),
+        ttl_sec=600, meta={"workspace_id": world.workspace_a},
+    )
+
+    def intact() -> bool:
+        return sync_cursor.get_watermark(key) is not None and cdc_lease.get_lease(key) is not None
+
+    return Seeded({"cursor_key": key}, intact)
+
+
 def _seed_mapping_review(world) -> Seeded:
     from services import cdc_mapping_review
 
@@ -390,6 +408,20 @@ def _seed_recipe(world) -> Seeded:
         return world.admin_a.get(f"/api/v1/transform-library/{recipe_id}").status_code == 200
 
     return Seeded({"recipe_id": recipe_id}, intact)
+
+
+def _seed_mapping_template(world) -> Seeded:
+    made = world.admin_a.post("/api/v1/transfer/mapping/templates", json={
+        "name": SENTINEL, "description": SENTINEL,
+        "mappings": [{"source": "order_id", "target": "legacy_ref"}],
+    })
+    assert made.status_code == 201, made.text
+    template_id = made.json()["id"]
+
+    def intact() -> bool:
+        return world.admin_a.get(f"/api/v1/transfer/mapping/templates/{template_id}").status_code == 200
+
+    return Seeded({"template_id": template_id}, intact)
 
 
 def _seed_transform_project(world) -> Seeded:
@@ -512,7 +544,56 @@ def _seed_sso_config(world) -> Seeded:
     return Seeded({"sso_type": "oidc"})
 
 
+def _seed_exit_system(world) -> Seeded:
+    """A Reversibility Proof exit system of A, declared through the real route on A's own connection."""
+    from services import exit_inventory, exit_store
+
+    connector_id = _seed_saved_connector(world).params["connector_id"]
+    made = world.admin_a.post("/api/v1/exit/systems", json={
+        "name": SENTINEL, "source": {"connector_id": connector_id},
+        "tables": [{"name": "tenancy_a_table", "key_columns": ["id"]}], "exit_window_hours": 24,
+    })
+    assert made.status_code == 201, made.text
+    system_id = made.json()["id"]
+    version = exit_store.get(exit_store.SYSTEMS, system_id)["version"]
+
+    def intact() -> bool:
+        kept = exit_store.get(exit_store.SYSTEMS, system_id)
+        return (kept is not None and kept["name"] == SENTINEL and kept["version"] == version
+                and kept.get("pii_acknowledgement") is None and not exit_inventory.rehearsals_of(system_id))
+
+    return Seeded({"system_id": system_id}, intact)
+
+
+def _seed_exit_rehearsal(world) -> Seeded:
+    """A finished, unsigned rehearsal of one of A's exit systems."""
+    from services import exit_inventory, exit_store
+
+    system = exit_store.get(exit_store.SYSTEMS, _seed_exit_system(world).params["system_id"])
+    rehearsal_id = f"exr_tenancy{_next(world):05d}"
+    exit_store.insert(exit_store.REHEARSALS, {
+        "id": rehearsal_id, "system_id": system["id"], "system_name": SENTINEL,
+        "workspace_id": world.workspace_a, "n": 1, "trigger": "manual", "actor": ADMIN_A,
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:05:00Z",
+        "verdict": "proven", "verdict_reason": SENTINEL, "source": dict(system["source"]),
+        "extract_format": "jsonl", "window_seconds": 86400,
+        "definition_sha256": exit_inventory.definition_sha256(system), "pii_acknowledgement": None,
+        "required_roles": list(system["required_roles"]),
+        "tables": [{"name": "tenancy_a_table", "schema": None, "key_columns": ["id"], "job_id": None,
+                    "status": "proven", "reason": SENTINEL}],
+        "approvals": [], "signed": None, "_verify": None,
+    })
+
+    def intact() -> bool:
+        kept = exit_store.get(exit_store.REHEARSALS, rehearsal_id)
+        return kept is not None and kept["approvals"] == [] and kept["verdict_reason"] == SENTINEL
+
+    return Seeded({"rehearsal_id": rehearsal_id}, intact)
+
+
 SEEDERS: dict[str, Callable[[Any], Seeded]] = {
+    "exit_system": _seed_exit_system,
+    "exit_rehearsal": _seed_exit_rehearsal,
     "plan": _seed_plan,
     "job": _seed_job,
     "proposal": _seed_proposal,
@@ -527,8 +608,10 @@ SEEDERS: dict[str, Callable[[Any], Seeded]] = {
     "benchmark_run": _seed_benchmark_run,
     "acl_grant": _seed_acl_grant,
     "cdc_signal": _seed_cdc_signal,
+    "cdc_cursor": _seed_cdc_cursor,
     "mapping_review": _seed_mapping_review,
     "recipe": _seed_recipe,
+    "mapping_template": _seed_mapping_template,
     "transform_project": _seed_transform_project,
     "notification_channel": _seed_notification_channel,
     "api_key": _seed_api_key,
@@ -581,6 +664,13 @@ _BODIES: dict[str, Any] = {
     "PATCH /api/v1/workspace/ai-providers/{provider}": {"api_key": "sk-tenancy-probe", "enabled": True},
     "PATCH /api/v1/workspace/tenant/{tenant_id}": {"name": "renamed-by-b"},
     "POST /api/v1/transform-library/{recipe_id}/preview": {"rows": [{"a": 1}]},
+    "POST /api/v1/transfer/mapping/templates/{template_id}/apply": {
+        "source_columns": ["order_id"], "destination_columns": ["legacy_ref"],
+    },
+    # The exit bodies refuse unknown fields (422 before the workspace check would run).
+    "PATCH /api/v1/exit/systems/{system_id}": {"name": "renamed-by-b"},
+    "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {"reason": "tenancy probe"},
+    "POST /api/v1/exit/rehearsals/{rehearsal_id}/signoff": {"role": "engineering", "note": "tenancy probe"},
 }
 _QUERY: dict[str, dict[str, str]] = {
     "POST /api/v1/connectors/jobs/{job_id}/resume": {"request": "{}"},
@@ -608,8 +698,9 @@ def _call(client, route: str, params: dict[str, str]):
 
 
 def _without_reference(text: str) -> str:
-    """Drop the per-response support reference ``safe_http_exception`` appends."""
-    return re.sub(r" Reference: [0-9a-f-]{36}", "", text)
+    """Drop the per-response support reference ``safe_http_exception`` appends
+    (in the detail text, and as the error envelope's ``reference`` field)."""
+    return re.sub(r'( Reference: |"reference":")[0-9a-f-]{36}', r"\1", text)
 
 
 def _answer(response) -> tuple[int, str]:
@@ -640,9 +731,11 @@ def _leaks(response) -> bool:
 def world(tenancy_world, monkeypatch):  # noqa: F811
     from fastapi.testclient import TestClient
 
-    from services import contract_store, integrations_store, resource_acl
+    from services import contract_store, exit_store, integrations_store, resource_acl
 
     monkeypatch.setattr(resource_acl, "STORE_PATH", tenancy_world.data_dir / "resource-acls.jsonl")
+    monkeypatch.setattr(exit_store, "STORE_PATH", tenancy_world.data_dir / "exit_inventory.json")
+    monkeypatch.setattr(exit_store, "_db", lambda: None)
     monkeypatch.setattr(integrations_store, "STORE_PATH", tenancy_world.data_dir / "integrations.json")
     monkeypatch.setattr(integrations_store, "_keys_collection", lambda: None)
     contract_store.reset_contract_store()
@@ -823,6 +916,15 @@ def _connector_bodies(*shapes: str) -> Callable[[Any, Seeded], list[dict[str, An
     return bodies
 
 
+def _pipeline_resource(world, source: str, dest: str) -> dict[str, Any]:
+    """A GitOps PipelineSchedule naming ``source`` and ``dest`` (SEC-5)."""
+    name = f"gitops-{_next(world)}"
+    return {"apiVersion": "datawrap.io/v1", "kind": "PipelineSchedule", "metadata": {"name": name},
+            "spec": {"name": name, "interval": "daily", "enabled": False, "source_connector_id": source,
+                     "source_table": "t", "dest_connector_id": dest, "dest_table": "t",
+                     "mappings": [{"source": "id", "target": "id", "confidence": 1.0, "user_override": True}]}}
+
+
 #: Body templates: A's connector id where the route reads it.
 _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "query": lambda w, c: {"connector_id": c, "query": "select 1", "language": "sql"},
@@ -839,6 +941,7 @@ _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
                                     "async_mode": True},
     "execute.destination": lambda w, c: {"source": _a_endpoint(_b_connector(w)), "destination": _a_endpoint(c),
                                          "mappings": _MAP, "async_mode": True},
+    "mapping.memory": lambda w, c: {"destination": _a_endpoint(c), "pairs": [{"source": "a", "target": "b"}]},
     "plans.source": lambda w, c: {"name": "p", "source": _a_endpoint(c), "source_columns": ["id"],
                                   "target_columns": ["id"]},
     "plans.destination": lambda w, c: {"name": "p", "destination": _a_endpoint(c), "source_columns": ["id"],
@@ -850,6 +953,12 @@ _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "schedules.destination": lambda w, c: {"name": f"s{_next(w)}", "interval": "daily",
                                            "source_connector_id": _b_connector(w), "source_table": "t",
                                            "dest_connector_id": c, "dest_table": "t", "mappings": _MAP},
+    "import.source": lambda w, c: _pipeline_resource(w, c, _b_connector(w)),
+    "import.destination": lambda w, c: _pipeline_resource(w, _b_connector(w), c),
+    "gitops.source": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                   "resources": [_pipeline_resource(w, c, _b_connector(w))]},
+    "gitops.destination": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                        "resources": [_pipeline_resource(w, _b_connector(w), c)]},
     "transforms": lambda w, c: {"name": f"z{_next(w)}", "destination_connector_id": c,
                                 "models": [{"name": "m", "sql": "select 1"}]},
 }
@@ -911,6 +1020,10 @@ _BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/contracts/test": lambda w, s: _contract_bodies(w, s)[:1],
     "POST /api/v1/fidelity/check": lambda w, s: _schedule_bodies(w, s)[:1],
     "POST /api/v1/ops/cdc-captures/cleanup": _connector_bodies("cdc.cleanup"),
+    "POST /api/v1/ops/cdc-cursors/clear": lambda w, s: [{"cursor_key": s.params["cursor_key"], "reason": "probe"}],
+    "POST /api/v1/ops/cdc-leases/force-release": lambda w, s: [
+        {"cursor_key": s.params["cursor_key"], "reason": "probe"}
+    ],
     "POST /api/v1/preflight/explain": _preflight_explain_bodies,
     "POST /api/v1/preflight/run": _connector_bodies("preflight.run"),
     "POST /api/v1/query/execute": _connector_bodies("query"),
@@ -922,11 +1035,14 @@ _BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/resource-acls": _job_bodies("acl"),
     "POST /api/v1/schedules/": _connector_bodies("schedules.source", "schedules.destination"),
     "POST /api/v1/schedules/admin/orphans/reconcile": lambda w, s: [{"schedule_ids": [s.params["schedule_id"]]}],
+    "POST /api/v1/schedules/import": _connector_bodies("import.source", "import.destination"),
+    "POST /api/v1/schedules/gitops/apply": _connector_bodies("gitops.source", "gitops.destination"),
     "POST /api/v1/transfer/execute": _connector_bodies("execute.source", "execute.destination"),
     "POST /api/v1/transfer/execute#contract_id": lambda w, s: _contract_bodies(w, s)[1:],
     "POST /api/v1/transfer/execute#plan_id": _plan_bodies,
     "POST /api/v1/transfer/execute#transform_recipe_id": _recipe_bodies,
     "POST /api/v1/transfer/map": _job_bodies("map"),
+    "POST /api/v1/transfer/mapping/memory": _connector_bodies("mapping.memory"),
     "POST /api/v1/transfer/plans": _connector_bodies("plans.source", "plans.destination"),
     "POST /api/v1/transforms/": _connector_bodies("transforms"),
     "POST /api/v1/workspace/tenant": _byok_bodies,
@@ -967,6 +1083,50 @@ def test_every_body_id_route_refuses_other_tenants_and_serves_its_owner(world):
                 own = world.admin_a.request(method, path, json=_as_caller(body, a_own))
                 if own.status_code not in owner_ok or own.status_code in (403, 404):
                     problems.append(f"{route} owner control {body}: {own.status_code} {own.text[:160]}")
+    assert not problems, "\n".join(problems)
+
+
+def _query_declarations() -> dict[str, dict[str, Any]]:
+    return json.loads((FIXTURES / "route_tenancy_scoping.json").read_text(encoding="utf-8")).get("query_routes", {})
+
+
+def test_every_cdc_ops_route_is_declared():
+    """SEC-1: the CDC cursor and lease routes carry their key in the query or the
+    body, so the path-parameter inventory never saw them. Each must be declared."""
+    inventory = json.loads((FIXTURES / "rbac_route_permissions.json").read_text(encoding="utf-8"))
+    declared = set(_body_declarations()) | set(_query_declarations())
+    ops = sorted(r for r in inventory if r.split(" ", 1)[1].startswith(("/api/v1/ops/cdc-cursors", "/api/v1/ops/cdc-leases")))
+    assert len(ops) == 6 and not set(ops) - declared, sorted(set(ops) - declared)
+    for route, entry in _query_declarations().items():
+        assert route in inventory and entry["resource"] in SEEDERS and entry.get("reason"), route
+
+
+def test_every_query_id_route_answers_other_tenants_like_a_missing_id(world):
+    """SEC-1: B's administrator and API key get, for A's id, exactly the answer an
+    id that does not exist gets (a list never names A's resource); A's own
+    administrator is served."""
+    problems: list[str] = []
+    for route, entry in sorted(_query_declarations().items()):
+        method, path = route.split(" ", 1)
+        seeded = SEEDERS[entry["resource"]](world)
+        ids = entry["query_ids"]
+        params = {k: seeded.params[k] for k in ids}
+        missing = {k: f"{seeded.params[k]}-missing" for k in ids}
+        for who, client in (("B's administrator", world.admin_b), ("B's API key", world.key_b)):
+            r = client.request(method, path, params=params)
+            if ids:
+                m = client.request(method, path, params=missing)
+                same = (r.status_code, r.text.replace(params[ids[0]], "")) == (
+                    m.status_code, m.text.replace(missing[ids[0]], ""))
+                if not same:
+                    problems.append(f"{route} {who}: {r.status_code} {r.text[:160]}")
+            elif _leaks(r) or r.status_code != 200:
+                problems.append(f"{route} {who}: {r.status_code} {r.text[:160]}")
+        own = world.admin_a.request(method, path, params=params)
+        if own.status_code != 200 or not _leaks(own):
+            problems.append(f"{route} owner control: {own.status_code} {own.text[:160]}")
+        if not seeded.intact():
+            problems.append(f"{route}: A's resource changed")
     assert not problems, "\n".join(problems)
 
 

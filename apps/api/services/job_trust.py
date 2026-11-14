@@ -17,6 +17,17 @@ from services.reconcile_coverage import (
     LAST_STREAM_CHECKSUM,
 )
 
+#: Reconcile factor of a failed Gate-8, whatever else the report carries.
+_FAILED_RECONCILE_SCORE = 18.0
+#: Reconcile factor when Gate-8 ran but proved nothing — and of a job with no
+#: report at all: missing evidence scores as its worst case, it is not dropped
+#: from the mean (which let "no report" outrank "ran, unproven").
+_UNPROVEN_RECONCILE_SCORE = 45.0
+#: Verdict caps, applied last. The weighted mean orders jobs inside a verdict;
+#: it can never lift a job out of it.
+_FAILED_VERDICT_CAP = 54.0    # top of grade F — tone danger
+_UNPROVEN_VERDICT_CAP = 79.0  # top of grade C — never tone ok
+
 _TERMINAL = frozenset({
     "completed",
     "completed_with_quarantine",
@@ -77,6 +88,16 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     return classify_post_write_assurance(recon).get("claim_level") == "full_checksum"
 
 
+def _is_unproven(recon: dict[str, Any]) -> bool:
+    """Gate-8 ran and did not prove cell fidelity (skipped read-back, file export)."""
+    phase = str(recon.get("phase") or "").lower()
+    return (
+        recon.get("unproven") is True
+        or recon.get("skipped_readback") is True
+        or "post_write_skipped" in phase
+    )
+
+
 def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     """Gate-8 reconcile factor — never invent Verified from writer-ack / sample."""
     passed = recon.get("passed")
@@ -117,18 +138,21 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     last_stream = (
         str(recon.get("checksum_scope") or "").strip().lower() == LAST_STREAM_CHECKSUM
     )
+    # The verdict is read first: a failed Gate-8 is failed however many rows
+    # were fine. ``row_fidelity_score`` (0.999 = one bad row in a thousand) used
+    # to be read before it and scored a failed job 89, grade B, tone ok.
+    if passed is False:
+        recon_score = _FAILED_RECONCILE_SCORE
     # A perfect score on the last table is not a perfect score for the job.
-    if last_stream and passed is not False:
+    elif last_stream:
         recon_score = 70.0
     elif isinstance(fidelity, (int, float)) and fidelity == fidelity:
         recon_score = max(0.0, min(100.0, float(fidelity) * (100.0 if float(fidelity) <= 1.0 else 1.0)))
         if float(fidelity) <= 1.0:
             recon_score = float(fidelity) * 100.0
-    elif passed is False:
-        recon_score = 18.0
     elif unproven or pre_write:
         # Operational / pending — not independent cell fidelity.
-        recon_score = 45.0
+        recon_score = _UNPROVEN_RECONCILE_SCORE
     elif writer_ack:
         recon_score = 58.0
     elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
@@ -279,6 +303,9 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     elif status == "completed_with_quarantine":
         outcome = 78.0
         outcome_note = "Completed with quarantine — not full fidelity."
+    elif status == "completed_with_warnings":
+        outcome = 78.0
+        outcome_note = "Completed with warnings — review them before relying on this run."
     elif status in {"completed", "success"}:
         # Terminal success is not a certificate. Completeness tracks Gate-8 depth.
         if recon and has_full_checksum_proof(recon):
@@ -355,9 +382,9 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         factors.append({
             "id": "reconcile",
             "label": "Reconcile",
-            "score": None,
+            "score": _UNPROVEN_RECONCILE_SCORE,
             "weight": 0.30,
-            "note": "No Gate-8 report on this job yet.",
+            "note": "No Gate-8 report on this job yet — scored as unproven.",
             "present": False,
         })
 
@@ -388,9 +415,15 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
             note = f"CDC lag {lag_f:.1f}s (basis={lag_basis or obs.get('cdc_lag_basis') or 'seconds'})."
         else:
             # Seconds unknown — score from bytes only.
-            if lag_bytes_i is not None and lag_bytes_i <= (1 * 1024 * 1024):
+            if lag_bytes_i == 0:
                 fresh_score = 100.0
-                note = f"CDC caught up on WAL/binlog ({lag_bytes_i:,} B)."
+                note = "CDC caught up on WAL/binlog (0 B unapplied)."
+            elif lag_bytes_i is not None and lag_bytes_i <= (1 * 1024 * 1024):
+                fresh_score = 95.0
+                note = (
+                    f"CDC within the WAL/binlog jitter band ({lag_bytes_i:,} B "
+                    "unapplied) — healthy, not proven zero lag."
+                )
             elif lag_bytes_i is not None and lag_bytes_i >= BYTE_CRITICAL:
                 fresh_score = 0.0
                 note = f"CDC WAL/binlog lag critical ({lag_bytes_i:,} B)."
@@ -452,6 +485,11 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         score = min(score, 84.0)
     elif not has_full_checksum_proof(recon):
         score = min(score, 89.0)
+    # Verdict caps (audit M1), last so no factor can lift a job past them.
+    if recon.get("passed") is False:
+        score = min(score, _FAILED_VERDICT_CAP)
+    elif not recon or _is_unproven(recon):
+        score = min(score, _UNPROVEN_VERDICT_CAP)
 
     if source_ha_role in {"SECONDARY", "PHYSICAL_STANDBY", "LOGICAL_STANDBY", "SNAPSHOT_STANDBY"}:
         # Reading from a standby is unusual for CDC capture — surface in confidence.

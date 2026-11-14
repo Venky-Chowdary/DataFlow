@@ -76,8 +76,13 @@ class ReadOptions:
     fixed_width_layout: tuple[tuple[str, int], ...] = ()
     empty_cell: str = "null"
     sniff_header: bool = True
+    null_marker: str = ""
 
     def __post_init__(self) -> None:
+        if len(self.null_marker) > 32 or "\n" in self.null_marker:
+            raise ReadOptionsError(
+                f"null_marker must be one short spelling such as '\\N', got {self.null_marker!r}"
+            )
         if self.empty_cell not in {"null", "keep"}:
             raise ReadOptionsError(
                 f"empty_cell must be 'null' or 'keep', got {self.empty_cell!r}"
@@ -203,6 +208,7 @@ class ReadOptions:
             fixed_width_layout=_as_fixed_width_layout(
                 data.get("fixed_width_layout", data.get("colspecs"))
             ),
+            null_marker=str(data.get("null_marker", data.get("null_value")) or ""),
         )
 
     @property

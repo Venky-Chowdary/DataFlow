@@ -2605,7 +2605,18 @@ def _iceberg_object_store_cfg(
         else:
             cfg.pop("username", None)
             cfg.pop("password", None)
-            cfg["use_default_aws_credentials"] = True
+            from connectors.aws_common import PLATFORM_DEFAULT_CREDENTIALS
+            from services.platform_aws_credentials import FLAG, platform_aws_credentials_allowed
+
+            if not platform_aws_credentials_allowed():
+                # The tenant's catalog has no keys: never the platform's chain
+                # (follow-up review 1, H2). The count stays unmeasured.
+                logger.warning(
+                    "Iceberg S3 COUNT unavailable (missing_credentials; the connector needs "
+                    "its own keys, or the operator sets %s=1)", FLAG,
+                )
+                return None
+            cfg["use_default_aws_credentials"] = PLATFORM_DEFAULT_CREDENTIALS
             logger.warning(
                 "Iceberg S3 COUNT using default credential chain (missing_credentials)"
             )
@@ -2719,19 +2730,50 @@ def _count_iceberg_data_uri(
 
 
 def _iceberg_local_path(uri: str, *, warehouse: str = "") -> Path | None:
-    from connectors.iceberg_catalog import local_path_from_location
+    """The local file a snapshot path names, kept under the Iceberg warehouse folder.
+
+    Every candidate goes through the Iceberg jail (follow-up review 1, M3): a
+    catalog chooses these paths, so one outside the folder is never opened.
+    """
+    from connectors.iceberg_catalog import _jail_local_path, local_path_from_location
 
     raw = str(uri or "").strip()
     if not raw:
         return None
-    candidates = [local_path_from_location(raw)]
+    candidates = [raw]
     root = str(warehouse or "").strip()
     if root:
-        candidates.append(local_path_from_location(root) / raw)
-    for path in candidates:
+        candidates.append(str(local_path_from_location(root) / raw))
+    for candidate in candidates:
+        try:
+            path = _jail_local_path(candidate, "data file")
+        except ValueError:
+            logger.warning("iceberg data file outside the Iceberg warehouse folder; not read")
+            continue
         if path.is_file():
             return path
     return None
+
+
+#: Catalogs that run elsewhere: the files they list are never on the API host.
+_REMOTE_ICEBERG_CATALOGS = frozenset({"rest", "glue", "hive"})
+
+
+def _remote_catalog_lists_local_file(
+    endpoint: dict[str, Any], parsed: dict[str, Any], paths: Sequence[str]
+) -> bool:
+    """A remote catalog naming a local path (follow-up review 1, M3): not read."""
+    from connectors.iceberg_catalog import is_remote_location
+
+    if str(parsed.get("catalog_type") or "") not in _REMOTE_ICEBERG_CATALOGS:
+        return False
+    warehouse = _iceberg_data_warehouse(endpoint, parsed)
+    for path in paths:
+        resolved = _resolve_iceberg_data_uri(path, warehouse)
+        if resolved and not is_remote_location(resolved):
+            logger.warning("remote iceberg catalog listed a local data file; dest COUNT unmeasured")
+            return True
+    return False
 
 
 def _iceberg_filesystem_file_count(
@@ -2820,6 +2862,9 @@ def _iceberg_catalog_snapshot(
         uris = [str(p) for p in data_files.column("file_path").to_pylist()]
     except Exception as exc:
         logger.info("iceberg catalog file_path listing failed: %s", exc)
+        return None
+    listed = [*uris, *(str(ref.get("path") or "") for ref in delete_refs)]
+    if _remote_catalog_lists_local_file(endpoint, parsed, listed):
         return None
     if not delete_refs:
         return uris, None
@@ -3889,17 +3934,18 @@ def _redis_key_hits(
     ``|``-joined identity, which is the same rule
     ``redis_writer._resolve_redis_key_id`` writes with.
     """
-    from connectors.redis_reader import _redis_client, redis_key_for
+    from connectors.redis_reader import _redis_client, redis_key_for, redis_key_format
     from services.value_serializer import present_cell_text
 
     if not prefix:
         return None
+    key_format = redis_key_format(dict(cfg))
     client = _redis_client(cfg)
     hits = 0
     chunk: list[str] = []
     for tup in keys:
         identity = "|".join(present_cell_text(part) or "" for part in tup)
-        chunk.append(redis_key_for(prefix, identity))
+        chunk.append(redis_key_for(prefix, identity, key_format=key_format))
         if len(chunk) >= 500:
             hits += _redis_exists_count(client, chunk)
             chunk = []
@@ -4219,7 +4265,7 @@ def _redis_delete_keys(
     keys: Sequence[str],
 ) -> int:
     """DEL leftover identities at the same ``prefix:identity`` the writer uses."""
-    from connectors.redis_reader import _redis_client, redis_key_for
+    from connectors.redis_reader import _redis_client, redis_key_for, redis_key_format
     from services.row_conservation import parse_delete_keys
     from services.value_serializer import present_cell_text
 
@@ -4230,7 +4276,7 @@ def _redis_delete_keys(
     to_del: list[str] = []
     for tup in leftover:
         identity = "|".join(present_cell_text(part) or "" for part in tup)
-        to_del.append(redis_key_for(prefix, identity))
+        to_del.append(redis_key_for(prefix, identity, key_format=redis_key_format(dict(cfg))))
     if not to_del:
         return 0
     return int(client.delete(*to_del) or 0)
@@ -4735,7 +4781,9 @@ def _iter_excel_records(source: Any) -> Any:
     except ImportError as exc:
         raise UnmeasuredArtifact("excel_checksum_needs_parser") from exc
     try:
-        yield from iter_excel_dicts(source)
+        # Destination read-back: a missing cell is NULL, an empty string cell
+        # is '' (G7 F1) — the XLSX writers spell them that way.
+        yield from iter_excel_dicts(source, null_blank_cells=True)
     except UnmeasuredArtifact:
         raise
     except Exception as exc:
@@ -4811,17 +4859,25 @@ def _json_null_cells_as_engine_text(records: Any) -> Any:
         yield {key: (JSON_NULL if value is None else value) for key, value in rec.items()}
 
 
-def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
+def _iter_streaming_kind(kind: str, source: Any, *, name: str, exact_numbers: bool = False,
+                         written_here: bool = False, tsv_null: str | None = None) -> Any:
     """CSV/JSON/JSONL/XML/Avro records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import iter_csv_dicts
+        from services.export_dialect import tsv_null_marker, written_dialect
 
-        yield from iter_csv_dicts(source)
+        # An export this product wrote is read with the writer's dialect, never a sniffer.
+        # A TSV written with the opt-in ``\\N`` NULL convention (G7-F3) is read with it too.
+        text_null = kind == "tsv" and bool(tsv_null_marker(kind, tsv_null))
+        options = written_dialect(kind, tsv_null=tsv_null if text_null else None) if (
+            written_here or text_null
+        ) else None
+        yield from iter_csv_dicts(source, options=options)
         return
     if kind == "jsonl":
         from services.file_parser import iter_jsonl_dicts
 
-        yield from _json_null_cells_as_engine_text(iter_jsonl_dicts(source))
+        yield from _json_null_cells_as_engine_text(iter_jsonl_dicts(source, keep_literals=exact_numbers))
         return
     if kind == "json":
         from services.json_tabular import iter_json_dicts
@@ -4907,8 +4963,15 @@ def _iter_artifact_records(
     *,
     name: str,
     fmt: str | None = None,
+    exact_numbers: bool = False,
+    written_here: bool = False,
+    tsv_null: str | None = None,
 ) -> Any:
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
+
+    ``written_here`` says the artifact is an export this product wrote: a
+    delimited file is then read with the writer's own delimiter, quoting and
+    header (:mod:`services.export_dialect`) instead of sniffing them.
 
     CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only.
     Parquet/ORC/Excel gzip stream-decompress into one rewindable image
@@ -4916,11 +4979,15 @@ def _iter_artifact_records(
     or wrapped) and XML unique-path cell dicts are a second StAX pass of
     the COUNT path (one-shot GET is spooled once). Never ``json.loads``
     fallback empty. Never ``gzip.decompress(source.read())``.
+    ``exact_numbers`` keeps a JSON Lines number's own text (``1.50`` stays
+    ``1.50``, as ``JsonFraction.literal``) for a reader that compares it.
+    ``tsv_null="\\N"``: a TSV written with that opt-in NULL convention (G7-F3).
     """
     kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
     try:
         if kind in _STREAMING_COUNT_KINDS:
-            yield from _iter_streaming_kind(kind, handle, name=name)
+            yield from _iter_streaming_kind(kind, handle, name=name, exact_numbers=exact_numbers,
+                                            written_here=written_here, tsv_null=tsv_null)
             return
         if kind in _BYTE_IMAGE_KINDS:
             yield from _iter_byte_image_kind(kind, handle, name=name)
@@ -4986,10 +5053,11 @@ def checksum_artifact_stream(
     limit: int = 0,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    tsv_null: str | None = None,
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of one artifact stream. Never JSON-fallback empty."""
     return _checksum_records(
-        _iter_artifact_records(source, name=name),
+        _iter_artifact_records(source, name=name, tsv_null=tsv_null),
         columns=columns,
         limit=limit,
         dest_db_type=dest_db_type,
@@ -5005,6 +5073,7 @@ def sample_artifact_records(
     sort_key: str = "",
     keys: Any = None,
     columns: list[str] | None = None,
+    tsv_null: str | None = None,
 ) -> list[dict[str, Any]]:
     """Bounded dest-engine sample of an artifact stream.
 
@@ -5027,7 +5096,7 @@ def sample_artifact_records(
         # appended copy and compared the batch against the stale row.
         latest: dict[str, dict[str, Any]] = {}
         order: list[str] = []
-        for rec in _iter_artifact_records(source, name=name):
+        for rec in _iter_artifact_records(source, name=name, tsv_null=tsv_null):
             k = present_cell_text(rec.get(sort_key))
             if k not in wanted:
                 continue
@@ -5038,7 +5107,7 @@ def sample_artifact_records(
             latest[k] = rec
         return [latest[k] for k in order[:lim]]
     out: list[dict[str, Any]] = []
-    for rec in _iter_artifact_records(source, name=name):
+    for rec in _iter_artifact_records(source, name=name, tsv_null=tsv_null):
         if projection is not None:
             rec = {k: rec.get(k) for k in projection}
         out.append(rec)
@@ -5070,6 +5139,10 @@ def sample_object_store(
     if not bucket or not key:
         raise UnmeasuredArtifact("object_store_sample_missing_bucket_or_key")
     kind = _object_store_kind(db_type)
+    from services.export_dialect import tsv_null_from
+
+    # A TSV written with the opt-in ``\\N`` NULL convention is read with it (G7-F3).
+    tsv_null = tsv_null_from(cfg)
     listed = _object_store_list_keys(kind, cfg, bucket, key)
     if listed is None:
         raise UnmeasuredArtifact("object_store_list_unknowable")
@@ -5099,6 +5172,7 @@ def sample_object_store(
                     sort_key=sort_key,
                     keys=keys,
                     columns=columns,
+                    tsv_null=tsv_null,
                 )
             )
             if len(out) >= lim and not wanted:
@@ -5151,6 +5225,9 @@ def checksum_object_store(
     if not bucket or not key:
         return -1, ""
     kind = _object_store_kind(db_type)
+    from services.export_dialect import tsv_null_from
+
+    tsv_null = tsv_null_from(cfg)  # G7-F3: the opt-in TSV ``\\N`` NULL convention
     keys = _object_store_list_keys(kind, cfg, bucket, key)
     if keys is None:
         return -1, ""
@@ -5166,7 +5243,7 @@ def checksum_object_store(
                 raise UnmeasuredArtifact("object_store_get_unknowable")
             stream, closer = opened
             try:
-                yield from _iter_artifact_records(stream, name=str(obj_key))
+                yield from _iter_artifact_records(stream, name=str(obj_key), tsv_null=tsv_null)
             finally:
                 if closer is not None:
                     try:

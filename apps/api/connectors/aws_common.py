@@ -167,16 +167,103 @@ def resolve_region(cfg: dict[str, Any]) -> str:
     return "us-east-1"
 
 
-def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
-    import boto3
+class _PlatformCredentials:
+    """The marker for "sign with this process's own AWS credential chain".
+
+    Only platform code sets it (``PLATFORM_DEFAULT_CREDENTIALS``); a request
+    body, a saved connector or its ``extra`` can only hold JSON values, never
+    this object, so tenant settings cannot switch it on. Copies keep identity.
+    """
+
+    __slots__ = ()
+
+    def __copy__(self) -> "_PlatformCredentials":
+        return self
+
+    def __deepcopy__(self, _memo: Any) -> "_PlatformCredentials":
+        return self
+
+    def __reduce__(self) -> str:
+        return "PLATFORM_DEFAULT_CREDENTIALS"
+
+    def __repr__(self) -> str:
+        return "PLATFORM_DEFAULT_CREDENTIALS"
+
+
+PLATFORM_DEFAULT_CREDENTIALS = _PlatformCredentials()
+_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none"})
+DEFAULT_CREDENTIALS_MESSAGE = (
+    "use_default_aws_credentials is not accepted in a connector's settings: Datawrap does not "
+    "sign a workspace's requests with the platform's own AWS credentials. Enter this "
+    "connector's access key and secret key instead, or ask the operator to set "
+    "DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS=1 (for a single-tenant deployment whose "
+    "connectors use the instance's IAM role)."
+)
+
+
+def _tenant_asks_for_platform_chain(cfg: dict[str, Any]) -> bool:
+    """Tenant settings (top level or ``extra``) ask for the process's AWS credential chain."""
+    extra = cfg.get("extra")
+    for holder in (cfg, extra if isinstance(extra, dict) else {}):
+        value = holder.get("use_default_aws_credentials")
+        if value is PLATFORM_DEFAULT_CREDENTIALS or value is None or value is False:
+            continue
+        if str(value).strip().lower() not in _OFF_VALUES:
+            return True
+    return False
+
+
+def default_credentials_refusal(cfg: Any) -> str:
+    """The refusal when tenant settings (top level or ``extra``) ask for the platform's
+    AWS credential chain and the operator has not allowed it
+    (``DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS``), else ``""``."""
+    from services.platform_aws_credentials import platform_aws_credentials_allowed
+
+    if not isinstance(cfg, dict) or not _tenant_asks_for_platform_chain(cfg):
+        return ""
+    return "" if platform_aws_credentials_allowed() else DEFAULT_CREDENTIALS_MESSAGE
+
+
+def signs_with_platform_chain(cfg: dict[str, Any]) -> bool:
+    """Platform code's marker, or a tenant's request the operator allowed (follow-up review 1, H2)."""
+    if cfg.get("use_default_aws_credentials") is PLATFORM_DEFAULT_CREDENTIALS:
+        return True
+    from services.platform_aws_credentials import platform_aws_credentials_allowed
+
+    return _tenant_asks_for_platform_chain(cfg) and platform_aws_credentials_allowed()
+
+
+def _client_config(service: str, endpoint_url: str, cfg: dict[str, Any]) -> Any:
+    """botocore ``Config`` that never takes an endpoint from the process environment.
+
+    ``AWS_ENDPOINT_URL`` / ``AWS_ENDPOINT_URL_<SERVICE>`` and the shared config
+    file configure the platform's own AWS clients; a connector with no endpoint
+    means real AWS, which is what the egress guard judged.
+    """
     from botocore.config import Config
 
+    options: dict[str, Any] = {"ignore_configured_endpoint_urls": True}
+    # MinIO and other custom endpoints require path-style addressing.
+    # Virtual-hosted style looks up ``bucket.endpoint`` and listing fails
+    # while a hand-typed GetObject can still succeed. Real AWS (no custom
+    # endpoint) stays on the SDK default.
+    if service == "s3" and (endpoint_url or cfg.get("path_style")):
+        options["s3"] = {"addressing_style": "path"}
+    return Config(**options)
+
+
+def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
+    import boto3
+
+    refusal = default_credentials_refusal(cfg)
+    if refusal:
+        raise ValueError(refusal)
     region = resolve_region(cfg)
     endpoint_url = resolve_endpoint_url(cfg)
     kwargs: dict[str, Any] = {
         "region_name": region,
     }
-    if not cfg.get("use_default_aws_credentials"):
+    if not signs_with_platform_chain(cfg):
         kwargs["aws_access_key_id"] = (
             (cfg.get("username") or "").strip() or "local"
         )
@@ -196,12 +283,7 @@ def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
             aws_endpoint=endpoint_url,
         )
         kwargs["endpoint_url"] = endpoint_url
-    # MinIO and other custom endpoints require path-style addressing.
-    # Virtual-hosted style looks up ``bucket.endpoint`` and listing fails
-    # while a hand-typed GetObject can still succeed. Real AWS (no custom
-    # endpoint) stays on the SDK default.
-    if service == "s3" and (endpoint_url or cfg.get("path_style")):
-        kwargs["config"] = Config(s3={"addressing_style": "path"})
+    kwargs["config"] = _client_config(service, endpoint_url, cfg)
     client = boto3.client(service, **kwargs)
     if service == "s3":
         from connectors.s3_residency import install_bucket_region_guard

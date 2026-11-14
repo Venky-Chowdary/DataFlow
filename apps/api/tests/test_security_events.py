@@ -433,6 +433,14 @@ def test_startup_snapshot_is_safe_and_written_once(security_app):
     )
     assert isinstance(details["docs_enabled"], bool)
     assert isinstance(details["config_error_count"], int)
+    # Security follow-up 1, SEC-9: local-file confinement is on in every environment.
+    assert details["local_file_confinement"] == "enforced"
+    # Follow-up review 1, H2: connectors never sign with the platform's AWS chain by default.
+    assert details["platform_aws_chain"] == "refused"
+    # Follow-up review 1: no Iceberg FileIO opens GCS / Azure with the platform's identity by default.
+    assert details["platform_gcp_azure_chain"] == "refused"
+    # Follow-up review 4: Kafka connectors never log in with the host's Kerberos identity by default.
+    assert details["platform_kerberos"] == "refused"
     assert "phase2c-secret-sentinel" not in security_app["audit_log"].STORE_PATH.read_text(
         encoding="utf-8"
     )

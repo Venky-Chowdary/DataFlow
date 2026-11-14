@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter
@@ -72,17 +72,47 @@ def record_transfer_usage(
         except Exception:
             _logger.exception("Mongo usage insert failed; falling back to file")
 
-    data = {"events": []}
-    if STORE_PATH.exists():
-        try:
-            data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"events": []}
-    events = list(data.get("events") or [])
-    events.append(event)
-    data["events"] = events[-5000:]
-    write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+    with locked_update(STORE_PATH):  # one load-append-write at a time
+        data = {"events": []}
+        if STORE_PATH.exists():
+            try:
+                data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                data = {"events": []}
+        events = list(data.get("events") or [])
+        events.append(event)
+        data["events"] = events[-5000:]
+        write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
     return event_id
+
+
+def record_job_usage(request: Any, result: Any) -> str:
+    """Meter one finished transfer (UX-12). Called once, where every run ends.
+
+    The meter used to sit in one success branch of the engine with failures
+    logged at debug, so runs that finished another way wrote nothing and
+    "Rows written today" read 0 after 15,000 rows. A failed run writes no rows
+    and is not metered; a metering failure is logged as a warning and never
+    fails the transfer.
+    """
+    if not getattr(result, "success", False):
+        return ""
+    job_id = str(getattr(result, "job_id", "") or "")
+    if not job_id:
+        return ""
+    source = getattr(request, "source", None)
+    dest = getattr(request, "destination", None)
+    try:
+        return record_transfer_usage(
+            job_id=job_id,
+            workspace_id=str(getattr(request, "workspace_id", "") or ""),
+            rows_written=int(getattr(result, "records_transferred", 0) or 0),
+            source_type=str(getattr(source, "format", "") or ""),
+            dest_type=str(getattr(dest, "format", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - metering must never fail a transfer
+        _logger.warning("Usage metering failed for job %s: %s", job_id, type(exc).__name__)
+        return ""
 
 
 def _load_events(
@@ -221,16 +251,20 @@ def assign_unscoped_workspaces(
             if ws and apply:
                 coll.update_one({"_id": doc["_id"]}, {"$set": {"workspace_id": ws}})
         return counts
-    if not STORE_PATH.exists():
-        return counts
-    data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    for event in data.get("events") or []:
-        if not unscoped.matches(event.get("workspace_id")):
-            continue
-        ws = (workspace_for(event) or "").strip()
-        counts["assigned" if ws else "skipped"] += 1
-        if ws:
-            event["workspace_id"] = ws
-    if apply and counts["assigned"]:
-        write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+    # One load-stamp-write against record_transfer_usage in this process.
+    # The backfill normally runs as a CLI (scripts/backfill_legacy_workspaces.py),
+    # a separate process this lock does not reach: run it with the API stopped.
+    with locked_update(STORE_PATH):
+        if not STORE_PATH.exists():
+            return counts
+        data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        for event in data.get("events") or []:
+            if not unscoped.matches(event.get("workspace_id")):
+                continue
+            ws = (workspace_for(event) or "").strip()
+            counts["assigned" if ws else "skipped"] += 1
+            if ws:
+                event["workspace_id"] = ws
+        if apply and counts["assigned"]:
+            write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
     return counts

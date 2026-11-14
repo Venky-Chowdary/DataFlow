@@ -375,7 +375,20 @@ def write_mapped_rows(
     column_types = column_types or {}
     chunk = max(1, min(int(batch_size or _kwargs.get("activation_batch_size") or _CHUNK), _CHUNK))
     sobject = (table_name or object_name({"table": table_name, "database": database}, "Account")).strip()
-    access = token(api_key, connection_string, username, password)
+    from connectors.salesforce_auth import access_token as sf_access_token
+
+    try:
+        access = sf_access_token(
+            {
+                "host": host, "api_key": api_key, "connection_string": connection_string,
+                "username": username, "password": password,
+            }
+        )
+    except ValueError as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=sobject, target_schema="", checksum="",
+            chunks_completed=0, error=str(exc), driver="salesforce",
+        )
     if not access:
         return WriteResult(
             ok=False,

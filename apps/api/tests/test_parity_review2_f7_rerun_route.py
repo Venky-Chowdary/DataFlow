@@ -99,7 +99,8 @@ def test_a_route_refusal_releases_the_claim(editor_ws):
     assert rerun["applicable"], rerun["not_applicable_reason"]
     res = editor.post(f"/api/v1/jobs/{job}/parity-report/fixes/{rerun['id']}/approve", json={"note": "go"})
     assert res.status_code == 409, res.text
-    assert "re-submitted" in res.text
+    # ERR-38 (W3): the route's refusal is the coded object.upload_expired copy.
+    assert "uploaded file is no longer on the server" in res.text, res.text
     after = editor.get(f"/api/v1/jobs/{job}/parity-report").json()
     assert _writes_used(after) == 0
     assert _rerun_fix(after)["id"] == rerun["id"]  # proposed again, not "failed"

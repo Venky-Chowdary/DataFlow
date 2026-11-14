@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 
 from typing import Any, Literal, Optional
 
@@ -41,6 +42,7 @@ from services.workspace_access import (
     resolve_write_workspace,
     tenant_scope,
 )
+from services.safe_errors import classified_http_exception
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
 
@@ -170,6 +172,7 @@ class ScheduleCreate(PolicyFieldsModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
+    require_reversibility: bool = False
     date_locale: str = ""
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
@@ -256,6 +259,7 @@ class ScheduleUpdate(PolicyFieldsModel):
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
+    require_reversibility: Optional[bool] = None
     date_locale: Optional[str] = None
     number_locale: Optional[str] = None
     shape_recipe: Optional[dict[str, Any]] = None
@@ -322,6 +326,7 @@ class ScheduleResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    require_reversibility: bool = False
     date_locale: str = ""
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
@@ -455,6 +460,7 @@ class ScheduleSummaryResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    require_reversibility: bool = False
     max_retries: int = 0
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
@@ -621,14 +627,20 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
+    from services.body_id_ownership import assert_schedule_body_ids
+
     ws = resolve_write_workspace(request, workspace_id)
     try:
-        result = apply_manifest(
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
             workspace_filter=tenant_scope(request, workspace_id).filter,
+            # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
@@ -773,6 +785,16 @@ async def get_pipeline_schedule(
     return ScheduleResponse.from_schedule(sched)
 
 
+def _claim_warnings(sched: Any) -> list[str]:
+    """Unproven engines and unrefreshable Salesforce tokens (CLM-7, CLM-13)."""
+    from services.schedule_claim_warnings import schedule_claim_warnings
+
+    return schedule_claim_warnings(
+        str(getattr(sched, "source_connector_id", "") or ""),
+        str(getattr(sched, "dest_connector_id", "") or ""),
+    )
+
+
 @router.post("/", response_model=ScheduleResponse, status_code=201)
 async def create_pipeline_schedule(
     body: ScheduleCreate,
@@ -789,8 +811,14 @@ async def create_pipeline_schedule(
         payload[key] = str(payload.get(key) or "").strip()
     from services.body_id_ownership import assert_schedule_body_ids
 
-    assert_schedule_body_ids(request, payload)  # before the key probe reads any catalog
+    await asyncio.to_thread(assert_schedule_body_ids, request, payload)  # before the key probe reads any catalog
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, payload)
+    if dropped:
+        warnings.append(dropped)
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
     try:
@@ -815,6 +843,7 @@ async def create_pipeline_schedule(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_schedule_created(sched, request=request)
     audit_schedule_acknowledgment(sched, request=request, via="rest")
+    warnings.extend(_claim_warnings(sched))
     return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
@@ -841,10 +870,16 @@ async def patch_pipeline_schedule(
         return ScheduleResponse.from_schedule(existing)
     from services.body_id_ownership import assert_schedule_body_ids
 
-    assert_schedule_body_ids(request, data)  # review 3, body routes
+    await asyncio.to_thread(assert_schedule_body_ids, request, data)  # review 3, body routes
     if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
         await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []
+    from services.schedule_decision_stamp import drop_unrecorded_stamp
+
+    # SEC-APPROVAL-1 P3: a stamp is kept only when a real Validate approved these rows.
+    dropped = await asyncio.to_thread(drop_unrecorded_stamp, data, existing.to_dict())
+    if dropped:
+        warnings.append(dropped)
     try:
         if "compliance_acknowledged" in data or (
             {"acknowledgment_actor", "acknowledgment_reason"} & set(data)
@@ -892,6 +927,7 @@ async def patch_pipeline_schedule(
         updated.acknowledgment_at != existing.acknowledgment_at
     ):
         audit_schedule_acknowledgment(updated, request=request, via="rest")
+    warnings.extend(_claim_warnings(updated))
     return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
@@ -960,12 +996,23 @@ async def import_pipeline_schedule(
         spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
         if isinstance(spec, dict):
             spec["workspace_id"] = ws
-    result = apply_manifest(
-        payload,
-        dry_run=False,
-        workspace_id=ws,
-        workspace_filter=tenant_scope(request, workspace_id).filter,
-    )
+    from services.body_id_ownership import assert_schedule_body_ids
+    from services.gitops_manifest import WorkspaceScopeError
+
+    try:
+        # Off the loop: the ownership check reads the connector and plan stores.
+        result = await asyncio.to_thread(
+            apply_manifest,
+            payload,
+            dry_run=False,
+            workspace_id=ws,
+            workspace_filter=tenant_scope(request, workspace_id).filter,
+            # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+            authorize_schedule=functools.partial(assert_schedule_body_ids, request),
+        )
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:
@@ -1049,8 +1096,11 @@ def _probe_source_schema_timed(endpoint, seconds: float = 12.0) -> dict[str, Any
 
     from services.schedule_runner import probe_schedule_source_schema
 
+    import contextvars
+
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(probe_schedule_source_schema, endpoint)
+        # The request's workspace binding goes with the probe (follow-up review 5, H1).
+        future = pool.submit(contextvars.copy_context().run, probe_schedule_source_schema, endpoint)
         try:
             return future.result(timeout=seconds) or {}
         except FuturesTimeout as exc:
@@ -1126,10 +1176,12 @@ async def accept_source_schema(
             _apply_callable_schedule_source(endpoint, sched)
             info = _probe_source_schema_timed(endpoint)
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
+            raise classified_http_exception(
+                exc, side="source", phase="introspect", status_code=504, event="schedules.accept_source_schema.timeout"
+            ) from exc
         except Exception as exc:
-            raise HTTPException(
-                status_code=502, detail=f"Could not read the source schema: {exc}"
+            raise classified_http_exception(
+                exc, side="source", phase="introspect", status_code=502, event="schedules.accept_source_schema.failed"
             ) from exc
         schema = _flat_schema_map(info.get("schema"))
         columns = [str(c) for c in (info.get("columns") or schema.keys())]

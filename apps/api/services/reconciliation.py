@@ -8,6 +8,7 @@ import json
 import logging
 from services.brand_env import getenv_brand
 from services.connector_auth import resolve_api_key
+import math
 import re
 import uuid
 import sys
@@ -60,6 +61,24 @@ from services.transform_engine import (
     set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
+from services.expected_rows import expected_destination_rows, held_out_rows
+from services.fingerprint_rules import (
+    BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
+    CARRIES_BOOLEAN,
+    CARRIES_INSTANT,
+    FINGERPRINT_VERSION,
+    NAN as _NAN_TOKEN,
+    NULL_TOKEN,
+    is_exact_decimal_carrier as _exact_decimal_carrier,
+    is_text_family as _is_text_family,
+    memo_key as _fp_memo_key,
+    nonfinite_token as _nonfinite_token,
+    row_label as _fp_row_label,
+    carrying as _carrying,
+    row_part as _fp_row_part,
+    split_carried as _split_carried,
+    text_cell as _text_cell,
+)
 from services.value_serializer import (
     cell_to_string,
     is_explicit_null,
@@ -103,7 +122,9 @@ _TEXT_FAMILY_DDL_RE = re.compile(
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-_NULL_SENTINEL = "\x00NULL\x00"
+_NULL_SENTINEL = NULL_TOKEN
+#: Non-finite spellings Python and PostgreSQL emit, folded even on an untyped cell.
+_NONFINITE_PLAIN = frozenset({"nan", "inf", "-inf", "NaN", "Infinity", "-Infinity"})
 #: Characters of a sample mismatch value Gate-8 stores (``sample_compare.mismatches``).
 STORED_MISMATCH_VALUE_CHARS = 120
 
@@ -352,6 +373,9 @@ _COMPARE_MODE_BY_COVERAGE = {
 
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out = _stamp_post_write_phase_impl(report)
+    # Which rules produced this run's digests: a stored digest is only ever
+    # compared with one of the same version (services.fingerprint_rules).
+    out.setdefault("fingerprint_version", FINGERPRINT_VERSION)
     # Plain statement of which compare ran, so a large-run "verified" can
     # never read as a stronger claim than it is (pairwise vs digest).
     out["compare_mode"] = _COMPARE_MODE_BY_COVERAGE.get(
@@ -640,8 +664,8 @@ def overlay_physical_dest_types(
             continue
         key = str(k)
         prior = out.get(key, "")
-        if _TEXT_FAMILY_DDL_RE.match(str(v).strip()) and (
-            not _TEXT_FAMILY_DDL_RE.match((prior or "").strip())
+        if _is_text_family(str(v).strip()) and (
+            not _is_text_family((prior or "").strip())
         ):
             # Physical text carrier over an empty or non-text declaration —
             # the writer rendered per declared semantics (or inference), so
@@ -668,6 +692,9 @@ def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
     """
     if not ddl:
         return ""
+    physical_ddl, carried = _split_carried(ddl)
+    if carried:
+        return _carrying(_canonical_fingerprint_ddl(engine, physical_ddl), carried)
     try:
         from services.decision_kernel.types import materialize_dest_ddl
 
@@ -785,7 +812,7 @@ def _iter_fingerprints(
     def _fp_cell(val: Any, ddl: str) -> str:
         nonlocal _memo_full
         try:
-            key = (type(val), val, ddl)
+            key = _fp_memo_key(val, ddl)
             cached = _memo.get(key, _MISS)
         except TypeError:
             return _fingerprint_with_ddl(val, ddl, eng)
@@ -806,7 +833,7 @@ def _iter_fingerprints(
         col_index = {c: i for i, c in enumerate(cols)}
         # Pair each emitted column with its lowered label and resolved DDL so the
         # row loop does no per-cell lookup at all.
-        emit_plan = [(c, c.lower(), _ddl_for(c)) for c in sorted_cols]
+        emit_plan = [(c, _fp_row_label(c), _ddl_for(c)) for c in sorted_cols]
         sort_idx = -1
         if sort_key:
             sort_key_lower = sort_key.lower()
@@ -817,7 +844,7 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{label}={_fp_cell(row.get(c), ddl)}"
+                    _fp_row_part(label, _fp_cell(row.get(c), ddl))
                     for c, label, ddl in emit_plan
                 ]
                 if sort_key:
@@ -832,8 +859,10 @@ def _iter_fingerprints(
             else:
                 n = len(row)
                 parts = [
-                    f"{label}="
-                    f"{_fp_cell(row[col_index[c]] if col_index[c] < n else None, ddl)}"
+                    _fp_row_part(
+                        label,
+                        _fp_cell(row[col_index[c]] if col_index[c] < n else None, ddl),
+                    )
                     for c, label, ddl in emit_plan
                 ]
                 row_key = (
@@ -850,7 +879,7 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 keys = sorted(row.keys(), key=lambda x: x.lower())
-                parts = [f"{k.lower()}={_fp(row.get(k), k)}" for k in keys]
+                parts = [_fp_row_part(_fp_row_label(k), _fp(row.get(k), k)) for k in keys]
                 fingerprint = "\x1f".join(parts)
                 row_key = (
                     _fp(_get_case_insensitive(row, sort_key), sort_key or "")
@@ -858,7 +887,9 @@ def _iter_fingerprints(
                     else ""
                 )
             else:
-                fingerprint = "|".join(sorted(_fp(v) for v in row))
+                # Unlabelled matrix row: a multiset of cells by design (legacy
+                # fallback); the length prefix keeps one cell from reading as two.
+                fingerprint = "|".join(sorted(_fp_row_part("", _fp(v)) for v in row))
                 row_key = ""
             yield (row_key, fingerprint)
 
@@ -1128,17 +1159,52 @@ def reconcile(
     # current on the destination — retained, not written by this run. The
     # expected-current count is source rows plus those retained keys.
     retained_rows = max(int(retained_rows or 0), 0)
-    dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(
-        source_rows
-        + rows_expanded
-        + retained_rows
-        - dropped_rows
-        - rows_skipped
-        - rows_shaped_out
-        - rows_source_filtered,
-        0,
+    dropped_rows = held_out_rows(rejected_rows, coerced_null_rows)
+    # The one identity L1 and row conservation close too (services.expected_rows).
+    expected_rows = expected_destination_rows(
+        source_rows,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
     )
+    if (
+        source_rows > 0
+        and dropped_rows >= source_rows
+        # The destination did not grow: a finding count that over-counts rows
+        # (several bad cells in one row) never hides rows that did land.
+        and target_rows <= max(int(target_rows_before or 0), 0)
+        and checksum_scope != WRITTEN_BATCH_KEYS
+        # A key census that still expects rows is graded below as a mismatch.
+        and not keyed_expected_delta
+    ):
+        # Every source row was quarantined. Two digests of the empty set always
+        # match, so that is no fidelity evidence, and a run that wrote nothing
+        # is never a green Gate-8 (SCD2-F1; the writers refuse it first).
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Nothing was verified: all {source_rows} source row(s) were "
+                "quarantined, so this run wrote nothing to compare. Fix the "
+                "rejected values and replay."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=None,
+            population_proof=False,
+            assurance_level="none",
+            checksum_scope=checksum_scope,
+            target_rows_before=target_rows_before,
+        )
     if (
         not source_checksum
         and expected_rows == 0
@@ -1202,24 +1268,31 @@ def reconcile(
             if checksum_match
             else " One or more source-row fingerprints are missing on the destination."
         )
+        # DATA-1: rows the source no longer has (a missed TRUNCATE or delete)
+        # are a divergence, not a pass; the image is not proven.
+        dest_extra = target_rows > expected_rows
+        extra_note = (
+            f" The destination holds {target_rows - expected_rows:,} row(s) the source "
+            "no longer has, so it is not proven to match."
+            if dest_extra else ""
+        )
         return ReconciliationReport(
-            passed=(not dest_short) and checksum_match,
+            passed=(not dest_short) and checksum_match and not dest_extra,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
                 f"CDC catch-up dest COUNT={target_rows:,} vs source image "
-                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
-                "Dest extras are not a failure. At-least-once upsert. "
-                "Not platform exactly-once."
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note}{extra_note} "
+                "At-least-once upsert. Not platform exactly-once."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
             checksum_match=checksum_match and not dest_short,
-            population_proof=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short and not dest_extra,
             assurance_level=CDC_SOURCE_IMAGE_VALUES,
             checksum_scope=CDC_SOURCE_IMAGE_VALUES,
             target_rows_before=target_rows_before,
@@ -2669,15 +2742,12 @@ def verify_target(
             pk_column=pk,
         )
     elif db_type == "dynamodb":
-        from connectors.aws_common import resolve_endpoint_url
+        from connectors.dynamodb_writer import dynamodb_client_cfg
 
-        conn_str = resolve_endpoint_url(dest) or "http://localhost:8000"
+        # Read where the write went (the writer's client config), never a local fallback.
         count, chk = verify_dynamodb_table(
-            connection_string=conn_str,
-            database=dest.get("database", ""),
+            cfg=dynamodb_client_cfg(dest),
             table_name=table_name,
-            username=dest.get("username", "local"),
-            password=dest.get("password", "local"),
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
@@ -2834,6 +2904,8 @@ def verify_target(
             pk_column=pk,
         )
     elif db_type == "redis":
+        from connectors.redis_reader import redis_key_format
+
         count, chk = verify_redis_prefix(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 6379),
@@ -2849,6 +2921,7 @@ def verify_target(
             pk_column=pk,
             dest_db_type=db_type,
             dest_types=dest_types,
+            key_format=redis_key_format(dest),
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = _reconciliation.verify_elasticsearch_index(
@@ -2961,6 +3034,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -2973,6 +3047,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type in {
         "adls",
@@ -2993,6 +3068,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type == "sftp":
         from connectors.sftp_common import host_key_settings
@@ -3009,6 +3085,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
             **host_key_settings(dest),
         )
     elif db_type in {
@@ -3251,7 +3328,10 @@ def fingerprint_for_reconcile(
     Source samples and destination read-back must share this path so Mongo
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
+    # A carried kind steers normalize_cell only; the bind sees the physical type.
+    ddl_type, _carried = _split_carried(ddl_type)
     ddl_type = instant_date_carrier(engine, ddl_type)
+    _fp_ddl = _carrying(ddl_type, _carried) if _carried else ddl_type
     wire: Any = value
     absent_field = is_missing_sentinel(value)
     if absent_field:
@@ -3281,6 +3361,15 @@ def fingerprint_for_reconcile(
         # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
         wire = None
         value = None
+    _doc_col = str(ddl_type or "").strip().lower()
+    _doc_col = "json" in _doc_col or _doc_col in {"object", "document", "array", "struct", "map"}
+    if str(engine or "").lower() in _DOCUMENT_ENGINES and (
+        type(value).__name__ == "JsonNullToken"
+        or _document_json_null(str(engine or "").lower(), value, None, "json" if _doc_col else transform)
+    ):
+        # DATA-11: a document stores JSON null as its null; the read-back is None.
+        wire = None
+        value = None
     if isinstance(wire, str):
         # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
         # literal ``x`` (one layer — the recursive escape stays provable), so
@@ -3301,7 +3390,7 @@ def fingerprint_for_reconcile(
         # so the source side is fingerprinted as the document it IS, not as
         # what the bind made of it. Replaying the bind on both sides hid a
         # write that turned ``1.10`` into ``1.1`` behind a matching checksum.
-        return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+        return normalize_cell(wire, ddl_type=_fp_ddl, engine=engine)
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
         if absent_field:
@@ -3369,7 +3458,7 @@ def fingerprint_for_reconcile(
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.
         wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
-    return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+    return normalize_cell(wire, ddl_type=_fp_ddl, engine=engine)
 
 
 def operator_cell_text(fingerprint: str) -> str:
@@ -3425,6 +3514,27 @@ def _reject_json_constant(token: str) -> Any:
     raise ValueError(token)
 
 
+_NEG_ZERO_RE = re.compile(r"^-0*\.?0*(?:e[+-]?\d+)?$", re.IGNORECASE)
+
+
+def _negative_zero(value: Any) -> bool:
+    if isinstance(value, float):
+        return value == 0.0 and math.copysign(1.0, value) < 0
+    return isinstance(value, str) and bool(_NEG_ZERO_RE.match(value.strip())) and "0" in value
+
+
+def _float_ddl(ddl_type: str, engine: str = "") -> bool:
+    """A PostgreSQL double column, which stores IEEE -0 (DATA-19).
+
+    SQL Server FLOAT normalizes -0 to 0, and the float4 fold is pinned
+    (x134), so only the double carrier PostgreSQL keeps -0 in is sign-aware.
+    """
+    text = str(ddl_type or "").upper()
+    if str(engine or "").lower() not in {"postgresql", "postgres", ""}:
+        return False
+    return "DOUBLE" in text or text.strip() in {"FLOAT8", "FLOAT"}
+
+
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     """Canonical cell text for Gate-8 checksums.
 
@@ -3444,6 +3554,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
+    if _negative_zero(value) and _float_ddl(ddl_type, engine):
+        # DATA-19: IEEE -0.0 is a distinct value a float column keeps; folding
+        # it into 0 let a write that dropped the sign verify (full_checksum).
+        return "-0"
     if (
         isinstance(value, str)
         and not isinstance(value, WireLiteral)
@@ -3462,15 +3576,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
     if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":
         return _NULL_SENTINEL
-    if isinstance(value, bool):
+    ddl_type, _carried = _split_carried(ddl_type)
+    _text_declared = bool(ddl_type) and _is_text_family(ddl_type)
+    if isinstance(value, bool) and (not _text_declared or _carried == CARRIES_BOOLEAN):
+        # A text column carrying a typed source bool: the writer stored '1' or
+        # 'true' for it (review 1 H1); the text side folds the same four tokens.
         return "1" if value else "0"
-    _text_declared = bool(ddl_type) and bool(
-        _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip())
-    )
     # PostgreSQL json/jsonb and a JSON-as-text column store a number with its
     # scale; there ``1.10`` -> ``1.1`` is a changed value Gate-8 must see (D192).
     _json_keeps_scale = _text_declared or _json_keeps_scale_for(ddl_type, engine)
-    if _text_declared and isinstance(value, (int, float, Decimal)):
+    if _text_declared and isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         # Declared TEXT carrier: compare the bound repr, not a canonicalized
         # number — '1000.00' the writer rendered equals read-back '1000.00',
         # while '01' vs '1' stays a real change. Decimal needs format(d, "f"):
@@ -3478,17 +3593,29 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         # scientific ('1.5E-8') — the reprs of the same value must agree
         # (X-26 live: tiny decimals flagged 'did not apply as declared').
         return format(value, "f") if isinstance(value, Decimal) else str(value)
+    if _text_declared and not isinstance(value, str) and not (
+        _carried == CARRIES_INSTANT and isinstance(value, _datetime)
+    ):
+        # Any other typed value bound for a character column is stored as the
+        # wire text the writer binds for it; that text is the value compared.
+        # (A typed datetime the column carries compares as the instant.)
+        value = cell_to_string(value, preserve_sql_null=True)
+        if isinstance(value, str):
+            value = unescape_wire_text(value)
     if isinstance(value, _datetime):
         from connectors.sqlserver_tick import tick_of
 
         tick = tick_of(value)
-        if value.tzinfo is not None:
+        aware = value.tzinfo is not None
+        if aware:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
         # sources match NTZ sinks that stored the same UTC components, while
         # offset-aware values still differ from a different naive wall clock.
         # A DATETIME2(7) seventh digit is compared too.
-        return _wall_clock_text(value, tick)
+        wall = _wall_clock_text(value, tick)
+        # A text column carrying an instant keeps aware apart from naive text (review 2 F1).
+        return wall + "Z" if (aware and _carried == CARRIES_INSTANT) else wall
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _time):
@@ -3539,24 +3666,21 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if isinstance(value, float):
         # Pass the float through — str(float) keeps IEEE residue and false-fails
         # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
-        return _canonicalize_number(value) or "nan"
+        return _nonfinite_token(value) or _canonicalize_number(value) or _NAN_TOKEN
     if isinstance(value, int):
         return str(value)
     if isinstance(value, Decimal):
-        return _canonicalize_number(value) or "nan"
+        # An exact decimal column keeps every digit; only a float carrier (or
+        # an untyped cell) may hold a double's residue to fold.
+        return (
+            _nonfinite_token(value)
+            or _canonicalize_number(value, exact=_exact_decimal_carrier(ddl_type))
+            or _NAN_TOKEN
+        )
     if isinstance(value, (bytes, bytearray, memoryview)):
-        # Bytes may be raw payload or a base64-encoded string stored as bytes
-        # (common in emulators). When the bytes are a valid base64 string,
-        # decode and re-encode so the canonical checksum matches the original
-        # encoded text; otherwise base64-encode the raw bytes.
-        try:
-            decoded = base64.b64decode(value, validate=True)
-            re_encoded = base64.b64encode(decoded)
-            if re_encoded == value:
-                return re_encoded.decode("ascii")
-        except Exception:
-            logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
-        return base64.b64encode(value).decode("ascii")
+        # Bytes are the bytes. Guessing that a payload "is base64 text" made
+        # b'abcd' equal the three bytes it decodes to.
+        return base64.b64encode(bytes(value)).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         # Same canonical form as the string-JSON branch below — compact,
         # key-sorted, numbers normalized — so a decoded dict fingerprints
@@ -3619,14 +3743,19 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         # TIME(6) read back as text compares to the driver value at full
         # precision whichever spelling the writer or digest used.
         text = text.rstrip("0").rstrip(".")
-    # Type-driven honesty: on a declared TEXT-family column the cell IS text —
-    # '01' vs '1', 'A' vs 'A ', and '30.99' vs '30.990' are real value changes
-    # and must not collapse under the numeric/bool folds below. Format-variant
-    # domains a writer legitimately re-renders (a datetime instant stored as
-    # '2024-06-01 00:00:00' vs '2024-06-01T00:00:00', or a re-serialized JSON
-    # document) still fold — they carry the same value in a different repr.
-    if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
+    # A declared character column holds text and nothing else: '01' vs '1',
+    # 'true' vs '1', '2024-06-01' vs '2024-06-01 00:00:00' and a re-spaced JSON
+    # document are different stored values. The destination's own equality
+    # (blank pad, collation) was applied above; nothing else folds.
+    if _text_declared:
         if text.startswith(("{", "[")):
+            # A character column is the JSON carrier on engines without a JSON
+            # type (SQLite, SQL Server, Oracle), and the two sides of Gate-8 can
+            # be steered by different spellings of that one column (declared
+            # JSON on the write pass, physical TEXT on the read-back). A valid
+            # JSON document therefore compares as the document: key order and
+            # insignificant whitespace are not the value, number scale is
+            # (1.10 is not 1.1 — D192).
             try:
                 canon = canonical_json_text(text, keep_scale=True)
                 if canon is not None and canon.startswith(("{", "[")):
@@ -3637,29 +3766,48 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             text
             and text[0].isdigit()
             and len(text) >= 8
+            and (
+                str(engine or "").lower().startswith("sqlite")
+                or _carried == CARRIES_INSTANT
+            )
             and _DATE_LIKE_CHARS.intersection(text)
             and _DATE_LIKE_RE.search(text)
         ):
-            dtm = _parse_datetime(text)
+            # SQLite has no temporal storage class: TEXT is the carrier of a
+            # timestamp, and DataFlow's own SQLite reader reads date-like text
+            # as one. '2024-06-01 00:00:00' and '2024-06-01T00:00:00' are the
+            # same instant there — and in a text column whose source column
+            # is a typed datetime, which writers spell either way (H2). A
+            # date alone is not how a writer spells a datetime: it stays text.
+            # Carried, an aware instant keeps a marker and naive text stays wall
+            # clock, and only the bare spelling folds: '12:00:00-05:00', '12:00Z'
+            # and '12:00:00\n' are not naive 12:00 (review 2 F1).
+            carried = _carried == CARRIES_INSTANT
+            date_only = carried and ":" not in text
+            unfolded = date_only or (carried and text != text.strip())
+            dtm = None if unfolded else _parse_datetime(text)
             if dtm:
                 return _checksum_datetime_utc_wall(
-                    dtm if isinstance(dtm, str) else str(dtm), original=text
+                    dtm if isinstance(dtm, str) else str(dtm), original=text, mark_aware=carried
                 )
-            dt = _parse_date(text)
+            dt = None if unfolded else _parse_date(text)
             if dt:
                 return f"{dt}T00:00:00"
-        # Strict bool tokens still fold on a declared text column — a writer
-        # that bound a boolean into TEXT renders 'true', which is the same
-        # value as source 1/true. Status enums ('active'…) stay literal.
-        _tl = text.lower()
-        if _tl in _STRICT_BOOL_TRUE:
-            return "1"
-        if _tl in _STRICT_BOOL_FALSE:
-            return "0"
-        return text
+        if _carried == CARRIES_BOOLEAN and text.lower() in _BOOL_STORED_TEXT:
+            return _BOOL_STORED_TEXT[text.lower()]
+        return _text_cell(text)
     # Boolean and empty fast paths.
     if not text:
         return ""
+    _nonfinite = _nonfinite_token(text)
+    if _nonfinite is not None and (
+        _is_numeric_logical(ddl_type) if ddl_type else text in _NONFINITE_PLAIN
+    ):
+        # 'Infinity' / '-inf' / 'NaN' on a numeric or untyped cell is the
+        # number, one token per value. Untyped, only the spellings Python and
+        # PostgreSQL emit fold, so a name such as 'Nan' stays text; on any
+        # other declared type the cell is not a number at all.
+        return _nonfinite
     lowered = text.lower()
     # Align with transform_engine strict boolean tokens only. Status enums
     # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
@@ -3673,10 +3821,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # algorithm and invented ``1.000`` → ``1``. Locale money the write path
     # binds still folds so Gate-8 matches the dest DECIMAL.
     if _looks_like_numeric_wire(text):
-        canonical = _canonicalize_number(text)
+        canonical = _canonicalize_number(text, exact=_exact_decimal_carrier(ddl_type))
         if canonical is not None:
             return canonical
-        return text
+        return _text_cell(text)
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
@@ -3704,15 +3852,19 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         dt = _parse_date(text)
         if dt:
             return f"{dt}T00:00:00"
-    return text
+    return _text_cell(text)
 
 
-def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -> str:
+def _checksum_datetime_utc_wall(
+    iso_text: str, *, original: str | None = None, mark_aware: bool = False
+) -> str:
     """Canonical UTC wall-clock for checksum equality (no Z marker).
 
     Aware/offset/Z strings fold to UTC components. Naive wall-clock strings
     stay as-is. That equates TIMESTAMPTZ→DATETIME UTC storage without equating
-    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``.
+    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``. ``mark_aware`` keeps a ``Z``
+    on an aware value, so it never equals a naive wall clock (a text column
+    carrying a source instant, review 2 F1).
     """
     text = (iso_text or "").strip()
     if not text:
@@ -3732,7 +3884,8 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
     try:
         iso = text[:-1] + "+00:00" if text.endswith("Z") else text
         obj = _datetime.fromisoformat(iso)
-        if obj.tzinfo is not None or aware_or_epoch:
+        aware = obj.tzinfo is not None or aware_or_epoch
+        if aware:
             if obj.tzinfo is None:
                 obj = obj.replace(tzinfo=timezone.utc)
             else:
@@ -3741,8 +3894,11 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         from connectors.sqlserver_tick import tick_from_text
 
         # fromisoformat keeps six digits; DATETIME2(7) text spells a seventh.
-        return _wall_clock_text(obj, tick_from_text(iso))
+        wall = _wall_clock_text(obj, tick_from_text(iso))
+        return wall + "Z" if (aware and mark_aware) else wall
     except ValueError:
+        if mark_aware:
+            return text  # not an instant this parser reads: compared as spelled
         # Fall back: strip invented trailing Z from transform parser.
         if text.endswith("Z") and not aware_or_epoch:
             return text[:-1]
@@ -3903,13 +4059,14 @@ def _is_exact_double(d: Decimal) -> bool:
         return False
 
 
-def _canonicalize_number(value: Any) -> str | None:
+def _canonicalize_number(value: Any, *, exact: bool = False) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
     Strings go through ``decimal_wire_value`` — the same parser the write path
     binds. Auto-ambiguous ``1,234`` / ``1.234`` / ``1.000`` return ``None`` so
     Gate-8 cannot invent ``1.000`` → ``1``. Locale money and both-separator
-    forms still fold. IEEE residue still collapses when information-free.
+    forms still fold. IEEE residue collapses only when ``exact`` is false — a
+    float carrier or an untyped cell; an exact decimal column keeps every digit.
     """
     try:
         if isinstance(value, float):
@@ -3928,7 +4085,8 @@ def _canonicalize_number(value: Any) -> str | None:
                 # ruler that is supposed to detect data loss.
                 has_fraction = isinstance(exp, int) and exp < 0
                 if (
-                    has_fraction
+                    not exact
+                    and has_fraction
                     and (len(digits) > 15 or exp < -12)
                     and _is_exact_double(d)
                 ):
@@ -3962,7 +4120,7 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
-                if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
+                if not exact and len(frac.rstrip("0")) > 12 and _is_exact_double(d):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):
@@ -4228,6 +4386,23 @@ def _align_history_versions(
     return aligned
 
 
+_DOCUMENT_ENGINES = frozenset({"mongodb", "mongo", "documentdb", "cosmosdb"})
+
+
+def _document_json_null(engine: str, raw_src: Any, raw_tgt: Any, transform: Any) -> bool:
+    """DATA-11: a JSON ``null`` lands in a document store as BSON null.
+
+    The document carries the JSON value itself, and JSON ``null`` *is* null
+    there, so the read-back ``None`` is the same value (the false red was
+    source='null' dest='null').
+    """
+    if engine not in _DOCUMENT_ENGINES or raw_tgt is not None:
+        return False
+    if str(transform or "").strip().lower() != "json":
+        return False
+    return isinstance(raw_src, str) and raw_src.strip() == "null"
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -4378,8 +4553,8 @@ def sample_compare_rows(
         if (
             declared
             and ddl
-            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
-            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+            and _is_text_family(ddl.strip())
+            and not _is_text_family(declared.strip())
         ):
             # The physical carrier degraded to TEXT (e.g. SQLite has no
             # DECIMAL affinity) while the write rendered per the declared
@@ -4455,8 +4630,8 @@ def sample_compare_rows(
         if (
             declared
             and ddl
-            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
-            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+            and _is_text_family(ddl.strip())
+            and not _is_text_family(declared.strip())
         ):
             # Same degrade rule as _fingerprint: a TEXT carrier (sqlite has no
             # DECIMAL affinity) still compares under the declared type.
@@ -4471,7 +4646,7 @@ def sample_compare_rows(
             # source has no numeric provenance and stays strict.
             numeric_column = (
                 bool(ddl)
-                and bool(_TEXT_FAMILY_DDL_RE.match(ddl.strip()))
+                and _is_text_family(ddl.strip())
                 and isinstance(raw_source, (Decimal, int, float))
                 and not isinstance(raw_source, bool)
             )
@@ -4804,6 +4979,7 @@ def sample_compare_rows(
                     key=key if keyed else "",
                     inserted_keys=inserted_keys,
                 )
+                and not _document_json_null(eng, raw_src, raw_tgt, transform)
             ):
                 mismatches.append(
                     {

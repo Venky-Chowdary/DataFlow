@@ -198,23 +198,17 @@ def transfer_client(tmp_path, monkeypatch):
     import services.connector_store as connector_store
     import services.mongodb_service as mongo_mod
     import src.ai.copilot.ack_ledger as ack_mod
-    import src.ai.copilot.data_analyst as data_analyst
     from fastapi.testclient import TestClient
     from services.mongodb_service import MemoryMongoDBService
-    from src.ai.copilot import tools as tools_mod
     from src.main import app
+    from tests.r4_route_harness import use_upload_dir
 
     memory = MemoryMongoDBService()
     memory.connect()
     monkeypatch.setattr(mongo_mod, "_mongodb_service", memory)
     monkeypatch.setattr(connector_store, "_backend_choice", None)
     monkeypatch.setattr(ack_mod, "_ledger", None)
-    monkeypatch.setattr(tools_mod, "_tools", None)
-    from src.ai.training.universal_data_feeder import UniversalDataFeeder
-
-    analyst = data_analyst.CopilotDataAnalyst()
-    analyst.feeder = UniversalDataFeeder([str(uploads)])
-    monkeypatch.setattr(data_analyst, "_analyst", analyst)
+    use_upload_dir(monkeypatch, uploads)
 
     with TestClient(app) as client:
         client.sqlite_root = sqlite_root  # type: ignore[attr-defined]

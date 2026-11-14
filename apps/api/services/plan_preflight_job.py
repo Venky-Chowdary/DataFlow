@@ -90,7 +90,7 @@ def start_plan_preflight_job(
                 if _LATEST.get(key) is not job:
                     return
                 job["status"] = "failed"
-                job["error"] = str(exc) or exc.__class__.__name__
+                job["error"] = public_job_error(exc)
                 job["finished_at"] = time.time()
 
     threading.Thread(
@@ -100,6 +100,36 @@ def start_plan_preflight_job(
         daemon=True,
     ).start()
     return accepted
+
+
+def public_job_error(exc: BaseException) -> str:
+    """A worker failure as GET /preflight may show it: no server paths, no secrets.
+
+    The data directory (and the plan store's), and the upload directory — a
+    sibling, not inside it — are cut from the text, leaving file names
+    relative to them. Only absolute roots are replaced: a relative setting
+    such as ``DATAFLOW_DATA_DIR=data`` would otherwise rewrite ordinary words.
+    """
+    import os
+
+    from services import transfer_plan_store
+    from services.log_redaction import redact_log_text
+    from services.platform_config import data_dir_path, upload_dir_path
+
+    text = str(exc) or exc.__class__.__name__
+    labelled = (
+        (transfer_plan_store.STORE_PATH.parent, "<data dir>"),
+        (data_dir_path(), "<data dir>"),
+        (upload_dir_path(), "<upload dir>"),
+    )
+    roots: dict[str, str] = {}
+    for path, label in labelled:
+        for candidate in {str(path), str(path.absolute())}:
+            if os.path.isabs(candidate) and candidate != os.sep:
+                roots.setdefault(candidate, label)
+    for root in sorted(roots, key=len, reverse=True):
+        text = text.replace(root + os.sep, "").replace(root, roots[root])
+    return redact_log_text(text)
 
 
 def get_plan_preflight_job(plan_id: str, run_id: str = "") -> dict[str, Any] | None:

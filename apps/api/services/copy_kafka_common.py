@@ -115,6 +115,9 @@ def kafka_client_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
         "request_timeout_ms": 30000,
     }
     kwargs.update(kafka_sasl_kwargs(cfg))
+    from connectors.kafka_sasl_policy import check_client_kwargs
+
+    check_client_kwargs(kwargs)  # no host identity or host file (follow-up review 4)
     return kwargs
 
 
@@ -131,20 +134,30 @@ def kafka_sasl_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     Consumer, producer and privilege probe all authenticate through this, so a
     broker that accepts the reader cannot reject the writer or the probe. Empty
     when there is no username+password (plaintext / mTLS-less dev brokers).
+    A mechanism that would use the API host's identity is refused with a
+    ``ValueError`` (``connectors.kafka_sasl_policy``, follow-up review 4).
     """
+    from connectors.kafka_sasl_policy import PASSWORD_MECHANISMS, mechanism_kwargs, mechanism_refusal
+
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
     username = str(cfg.get("username") or extra.get("username") or "")
     password = str(cfg.get("password") or cfg.get("api_key") or extra.get("password") or "")
-    if not (username and password):
-        return {}
     declared = kafka_security_options(cfg)
+    mechanism = str(declared.get("sasl_mechanism") or "").strip().upper()
+    refusal = mechanism_refusal(mechanism, cfg) if mechanism else ""
+    if refusal:
+        raise ValueError(refusal)
+    if (mechanism or "PLAIN") in PASSWORD_MECHANISMS and not (username and password):
+        return {}
     security = declared.get("security_protocol", "")
     out: dict[str, Any] = {
         "security_protocol": security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL",
-        "sasl_mechanism": declared.get("sasl_mechanism") or "PLAIN",
-        "sasl_plain_username": username,
-        "sasl_plain_password": password,
+        "sasl_mechanism": mechanism or "PLAIN",
     }
+    if out["sasl_mechanism"] in PASSWORD_MECHANISMS:
+        out.update(sasl_plain_username=username, sasl_plain_password=password)
+    else:
+        out.update(mechanism_kwargs(out["sasl_mechanism"], cfg))
     if out["security_protocol"] == "SASL_SSL":
         out["ssl_context"] = ssl.create_default_context()
     return out
@@ -226,7 +239,7 @@ _CHECKABLE_MECHANISMS = frozenset({"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"})
 
 @dataclass(frozen=True)
 class KafkaSaslCheck:
-    """outcome: ok | auth_failed | tls_mismatch | mechanism_unsupported | inconclusive."""
+    """outcome: ok | auth_failed | tls_mismatch | mechanism_unsupported | inconclusive | refused."""
 
     outcome: str
     message: str
@@ -280,7 +293,10 @@ def kafka_sasl_check(cfg: dict[str, Any], timeout: float = 5.0) -> KafkaSaslChec
     None when the check does not apply (no SASL login, a mechanism it cannot
     run, or an unpinned kafka-python). Messages never carry credentials.
     """
-    sasl = kafka_sasl_kwargs(cfg)
+    try:
+        sasl = kafka_sasl_kwargs(cfg)
+    except ValueError as exc:  # a login the policy refuses (follow-up review 4)
+        return KafkaSaslCheck("refused", str(exc))
     mechanism = str(sasl.get("sasl_mechanism") or "").upper()
     if not sasl or mechanism not in _CHECKABLE_MECHANISMS or not _kafka_python_supported():
         return None

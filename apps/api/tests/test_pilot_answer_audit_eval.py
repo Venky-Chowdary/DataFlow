@@ -63,6 +63,9 @@ ON_TARGET_FLOORS = {
     # the engine could not reach (permissions asked as "who sees", resuming
     # asked as "fails halfway").
     "natural": (33, 33),
+    # CLM-9, CLM-10, CLM-14: capability questions answered from the enforced
+    # tables (CDC sources, destination sync modes, catalog side and tier).
+    "capability": (9, 9),
 }
 
 SESSION_MODES = [

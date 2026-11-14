@@ -295,7 +295,10 @@ def test_stripe_source_certified_dest_not_sku(tmp_path: Path) -> None:
     assert row["transfer_ready"] is True
     assert row["source_ready"] is True
     assert row["dest_ready"] is False
-    assert row["capability_label"] == "Source certified"
+    # No CI job proves Stripe, so the tile is Implemented, not Certified (CLM-7);
+    # the role wording still says it is a source only.
+    assert row["capability_label"] == "Implemented — not yet proven"
+    assert row["role_label"] == "Source only"
     ok_src, _ = endpoint_allowed_for_role("stripe", "source")
     ok_dst, msg = endpoint_allowed_for_role("stripe", "destination")
     assert ok_src is True

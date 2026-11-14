@@ -20,7 +20,7 @@ import threading
 import uuid
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.sync_cursor import build_cursor_key, route_endpoint_identity
 from services.value_serializer import json_default
@@ -194,19 +194,20 @@ def record_manifest_file(
             return
         except Exception:  # noqa: BLE001
             _logger.exception("file manifest write failed for %s", route_key)
-    data = _load()
-    files = data.setdefault("files", [])
-    for entry in files:
-        if entry.get("key") != route_key:
-            continue
-        manifest = [item for item in (entry.get("manifest") or []) if item.get("name") != name]
-        manifest.append(row)
-        entry["manifest"] = manifest[-500:]
-        entry["updated_at"] = _now()
+    with locked_update(STORE_PATH):  # one load-modify-write at a time
+        data = _load()
+        files = data.setdefault("files", [])
+        for entry in files:
+            if entry.get("key") != route_key:
+                continue
+            manifest = [item for item in (entry.get("manifest") or []) if item.get("name") != name]
+            manifest.append(row)
+            entry["manifest"] = manifest[-500:]
+            entry["updated_at"] = _now()
+            _save(data)
+            return
+        files.append({"key": route_key, "digest": str(checksum or ""), "manifest": [row], "updated_at": _now()})
         _save(data)
-        return
-    files.append({"key": route_key, "digest": str(checksum or ""), "manifest": [row], "updated_at": _now()})
-    _save(data)
 
 
 def record_file_loaded(route_key: str, digest: str) -> None:
@@ -229,7 +230,7 @@ def record_file_loaded(route_key: str, digest: str) -> None:
         except Exception:  # noqa: BLE001 — file store answers the same question
             _logger.exception("file load ledger write failed for %s", route_key)
 
-    with _LOCK:
+    with _LOCK, locked_update(STORE_PATH):
         data = _load()
         entries = list(data.get("files", []))
         updated = False

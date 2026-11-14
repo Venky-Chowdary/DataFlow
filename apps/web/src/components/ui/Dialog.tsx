@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { isTopOverlay, pushOverlay } from "../../lib/overlayStack";
 import { DtIcon } from "../DtIcon";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
+import { captureFocusForRestore } from "../../lib/restoreFocus";
 
 interface DialogProps {
   open: boolean;
@@ -42,8 +43,7 @@ export function Dialog({
 
   useEffect(() => {
     if (!open) return;
-    const previousFocus = restoreFocusTo
-      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const restoreFocus = captureFocusForRestore(restoreFocusTo, () => panelRef.current);
     const onKey = (e: KeyboardEvent) => {
       const panel = panelRef.current;
       // The most recently opened overlay owns Escape and Tab (open order, not
@@ -97,7 +97,7 @@ export function Dialog({
       document.removeEventListener("keydown", onKey);
       unlock();
       window.cancelAnimationFrame(t);
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+      restoreFocus();
     };
   }, [open]);
 

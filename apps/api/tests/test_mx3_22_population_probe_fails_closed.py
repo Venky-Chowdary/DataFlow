@@ -103,7 +103,8 @@ def test_walk_error_blocks_with_a_named_probe_failure(narrow_source):
     gate = _gate(result)
     assert gate["status"] == "block", gate
     assert gate["message"].startswith("Population probe failed"), gate["message"]
-    assert "tunnel-host" in gate["message"]
+    # W3 error taxonomy: the cause is named (DNS), never the host name.
+    assert "Host not found" in gate["message"] and "tunnel-host" not in gate["message"], gate["message"]
     assert gate["details"]["probe_failed"] is True
     assert result["passed"] is False
     decision = result["proof_bundle"]["transfer_decision"]["decision"]

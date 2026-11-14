@@ -66,10 +66,13 @@ def _engines():
                            user=pg["username"], password=pg["password"])
     pgc.autocommit = True
     with pgc.cursor() as cur:
-        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+        # Install pgvector when the server ships it (CI's pgvector image does): a check on
+        # pg_extension alone made this test depend on another test having created it first.
+        cur.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
         if not cur.fetchone():
             pgc.close()
             pytest.skip("pgvector extension not installed")
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
     myc = pymysql.connect(host=my["host"], port=my["port"], user=my["username"],
                           password=my["password"], database=my["database"], autocommit=True)
     return pg, my, pgc, myc

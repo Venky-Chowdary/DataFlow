@@ -7,6 +7,8 @@ here so a 99999 port or a multi-megabyte host never reaches a socket.
 
 from __future__ import annotations
 
+import re
+
 PORTLESS_TYPES = frozenset({
     "sqlite",
     "duckdb",
@@ -59,6 +61,26 @@ def connector_port_error(port: object, db_type: str = "") -> str:
     return ""
 
 
+def is_file_path_type(db_type: object) -> bool:
+    """Whether ``database`` names a file for this connector type, in any spelling.
+
+    The engine families the policy layer already knows: SQLite as
+    ``local_file_policy`` and the driver resolver read it (``sqlite3``,
+    ``sqlite_file``), DuckDB as ``copy_duckdb_common.duckdb_family_name`` does
+    (``duck_db``, ``motherduck``). PR 403 review 4, low.
+    """
+    raw = str(db_type or "").strip().lower()
+    if not raw:
+        return False
+    if raw in FILE_PATH_TYPES:
+        return True
+    from services.copy_duckdb_common import duckdb_family_name
+    from services.local_file_policy import SQLITE_DRIVERS
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return raw in SQLITE_DRIVERS or resolve_driver_type(raw) in SQLITE_DRIVERS or duckdb_family_name(raw) == "duckdb"
+
+
 def _length_error(label: str, value: object, maximum: int, *, required: bool = False) -> str:
     text = "" if value is None else str(value)
     if required and not text.strip():
@@ -66,6 +88,28 @@ def _length_error(label: str, value: object, maximum: int, *, required: bool = F
     if len(text) > maximum:
         return f"{label} is longer than {maximum} characters."
     return ""
+
+
+#: C0 / C1 controls and the Unicode line / paragraph separators. A name with one
+#: in it renders as a line break or an invisible mark wherever it is shown, and
+#: a line break is how a name forged a bullet in Pilot's answers (review 2, H2).
+_CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def control_character_error(label: str, value: object) -> str:
+    """A refusal when ``value`` holds a control character, else ""."""
+    if value is not None and _CONTROL_CHARACTERS.search(str(value)):
+        return f"{label} must not contain control characters (line breaks, tabs or other invisible characters)."
+    return ""
+
+
+def refuse_control_characters(label: str, value: object) -> None:
+    """Raise a 422 for a name with a control character, on every path that saves one."""
+    error = control_character_error(label, value)
+    if error:
+        from services.api_errors import ApiError
+
+        raise ApiError(422, "NAME_HAS_CONTROL_CHARACTERS", error)
 
 
 def connector_request_errors(
@@ -83,12 +127,13 @@ def connector_request_errors(
     """First bound that fails, or empty when the draft may be probed."""
     checks = (
         _length_error("Name", name, NAME_MAX, required=require_name),
+        control_character_error("Name", name),
         _length_error("Type", db_type, TYPE_MAX),
         _length_error("Host", host, HOST_MAX),
         _length_error(
             "Database",
             database,
-            PATH_MAX if str(db_type or "").strip().lower() in FILE_PATH_TYPES else IDENT_MAX,
+            PATH_MAX if is_file_path_type(db_type) else IDENT_MAX,
         ),
         _length_error("Username", username, IDENT_MAX),
         _length_error("Schema", schema, IDENT_MAX),

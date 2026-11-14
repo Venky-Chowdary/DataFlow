@@ -1,0 +1,717 @@
+{
+ "_about": "UI Map holds vs server gates on the same inputs (review M6). Regenerate with the API builder; tests/test_map_hold_parity.py proves the catalog and the server outcome.",
+ "cases": [
+  {
+   "name": "required_unmapped_measured",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "b"
+    }
+   ],
+   "expected": [
+    "required_unmapped"
+   ]
+  },
+  {
+   "name": "required_unmeasured_is_not_held",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": null,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": null,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": null,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": false,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "b"
+    }
+   ],
+   "expected": []
+  },
+  {
+   "name": "partial_nullability_holds_nothing",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": null,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": null,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": null,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": false,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "b"
+    }
+   ],
+   "expected": []
+  },
+  {
+   "name": "recreated_table_holds_no_live_constraint",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "pause_on_change",
+   "table_recreated": true,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": false,
+    "add_columns_reason": "Schema policy 'pause_on_change' forbids ADD COLUMN: map onto an existing column or change the policy.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "b"
+    },
+    {
+     "source": "y",
+     "target": "c"
+    }
+   ],
+   "expected": []
+  },
+  {
+   "name": "duplicate_target",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "a"
+    },
+    {
+     "source": "y",
+     "target": "a"
+    }
+   ],
+   "expected": [
+    "target_conflict"
+   ]
+  },
+  {
+   "name": "new_name_refused_by_policy",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "pause_on_change",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": false,
+    "add_columns_reason": "Schema policy 'pause_on_change' forbids ADD COLUMN: map onto an existing column or change the policy.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "a"
+    },
+    {
+     "source": "y",
+     "target": "c"
+    }
+   ],
+   "expected": [
+    "new_target_refused"
+   ]
+  },
+  {
+   "name": "new_name_allowed",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "a"
+    },
+    {
+     "source": "y",
+     "target": "c"
+    }
+   ],
+   "expected": []
+  },
+  {
+   "name": "case_insensitive_is_the_same_column",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "A"
+    }
+   ],
+   "expected": []
+  },
+  {
+   "name": "generated_target",
+   "info": {
+    "connected": true,
+    "table_exists": true,
+    "columns": [
+     "a",
+     "b",
+     "g"
+    ],
+    "schema": {
+     "a": "BIGINT",
+     "b": "VARCHAR(40)",
+     "g": "BIGINT"
+    },
+    "schema_nullability": {
+     "a": false,
+     "b": true,
+     "g": true
+    },
+    "schema_defaults": {},
+    "identity_columns": [],
+    "generated_columns": [
+     "g"
+    ],
+    "primary_key_columns": []
+   },
+   "schema_policy": "manual_review",
+   "table_recreated": false,
+   "catalog": {
+    "version": "dest_column_catalog.v1",
+    "connected": true,
+    "table_exists": true,
+    "dest_type": "postgresql",
+    "columns": [
+     {
+      "name": "a",
+      "ordinal": 0,
+      "type": "BIGINT",
+      "nullable": false,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": true,
+      "match_key": "a"
+     },
+     {
+      "name": "b",
+      "ordinal": 1,
+      "type": "VARCHAR(40)",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": false,
+      "writable": true,
+      "fill": null,
+      "required": false,
+      "match_key": "b"
+     },
+     {
+      "name": "g",
+      "ordinal": 2,
+      "type": "BIGINT",
+      "nullable": true,
+      "default": null,
+      "has_default": false,
+      "primary_key": false,
+      "identity": false,
+      "generated": true,
+      "writable": false,
+      "fill": "generated",
+      "required": false,
+      "match_key": "g"
+     }
+    ],
+    "nullability_measured": true,
+    "can_add_columns": true,
+    "add_columns_reason": "The writer adds the column (ADD COLUMN) before the first row is written.",
+    "message": ""
+   },
+   "mappings": [
+    {
+     "source": "x",
+     "target": "a"
+    },
+    {
+     "source": "y",
+     "target": "g"
+    }
+   ],
+   "expected": [
+    "generated_target"
+   ]
+  }
+ ]
+}

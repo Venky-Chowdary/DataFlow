@@ -373,6 +373,10 @@ def _is_fidelity_signal(
     kind = str(details.get("kind") or "").lower()
     framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}
     framing_kind = str(framing.get("kind") or "").lower()
+    if gid == "g24_reversibility":
+        # An opted-in reversibility requirement, not a type path that loses data on
+        # write: it keeps its own headline (which names every lossy column) and fix.
+        return False
     if gid in {"g5_dry_run", "g5_sample", "g5_sample_validation", "g8_reconciliation"}:
         if kind in {"transform_errors", "duplicate_keys", "identity_transform"}:
             return False
@@ -1014,6 +1018,24 @@ def quarantine_retry_fix(job_id: str) -> str:
         "and the valid rows load (a new run takes it as the risk_acceptance form "
         "field on POST /api/v1/transfer/run)"
     )
+
+
+#: ERR-33: what a person does in the product. The MCP / REST form of the same
+#: action is ``quarantine_retry_fix`` and travels as the action's ``api`` form.
+QUARANTINE_RETRY_UI = (
+    "Retry with quarantine: open the job, choose Retry and turn on "
+    "\"Hold out rows that fail\", so the failing rows are held out for review and the "
+    "valid rows load"
+)
+
+
+def quarantine_retry_action(job_id: str) -> dict[str, str]:
+    """The one next action for a cast-failure refusal, in UI and API form."""
+    return {
+        "label": QUARANTINE_RETRY_UI,
+        "ui": "retry_with_quarantine",
+        "api": quarantine_retry_fix(job_id),
+    }
 
 
 def _confidence_floor_by_mode() -> str:
@@ -1910,19 +1932,22 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             stored = int(details.get("collision_count") or 0)
         else:
             stored = len(details.get("sample_collisions") or [])
-        sync_mode = str(details.get("sync_mode") or "append")
+        from services.error_taxonomy import sync_mode_words
+
+        sync_mode = sync_mode_words(str(details.get("sync_mode") or "append"))
+        sync_mode = f"{'an' if sync_mode[:1] in 'aeiou' else 'a'} {sync_mode}"
         enforced = bool(details.get("key_enforced", True))
         if enforced:
             summary = (
                 f"{stored or 'Some'} key value(s) in this batch are already at rest "
                 f"in the destination on {key}, which enforces uniqueness — "
-                f"a {sync_mode} insert aborts on the first one"
+                f"{sync_mode} insert aborts on the first one"
             )
         else:
             summary = (
                 f"{stored or 'Some'} key value(s) in this batch are already at rest "
                 f"in the destination on {key}. That table does not enforce the key, "
-                f"so a {sync_mode} insert would store a second copy"
+                f"so {sync_mode} insert would store a second copy"
             )
         # D104: another enabled pipeline owns this destination — name it as
         # the cause instead of leaving "the table already has the keys".

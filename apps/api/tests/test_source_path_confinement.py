@@ -124,6 +124,10 @@ def test_repo_test_fixtures_are_not_a_transfer_source(monkeypatch):
     """
     monkeypatch.delenv("DATAFLOW_SOURCE_PATH_ROOTS", raising=False)
     monkeypatch.delenv("DATAWRAP_SOURCE_PATH_ROOTS", raising=False)
+    # The suite's conftest lists tests/fixtures as a Pilot dataset directory
+    # for Pilot's dataset tests; a deployment does not, so neither does this.
+    monkeypatch.delenv("DATAFLOW_PILOT_DATASET_DIRS", raising=False)
+    monkeypatch.delenv("DATAWRAP_PILOT_DATASET_DIRS", raising=False)
     fixtures = Path(dataset_file.__file__).resolve().parents[1] / "tests" / "fixtures"
     assert fixtures.resolve() not in [r.resolve() for r in dataset_file.dataset_roots()]
     with pytest.raises(ValueError, match="outside the upload directory"):

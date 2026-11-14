@@ -11,8 +11,12 @@ from services.brand_env import getenv_brand
 from services.local_file_policy import (
     audit_would_confine,
     confine_local_files,
+    confinement_refusal,
+    connector_file_areas,
+    connector_may_open_upload_path,
     implicit_root,
     is_within,
+    upload_refusal,
     volume_root,
 )
 
@@ -154,8 +158,8 @@ def sqlite_root() -> tuple[str, bool]:
     volume: a relative name used to land in the container's working directory
     and ``/tmp`` in its temp, so a destination file (and the tables DataFlow
     created in it) vanished on the next restart (item 54). With the flag off
-    (the default) and no explicit root, any path is kept; see
-    :mod:`services.local_file_policy`.
+    (the default outside production) and no explicit root, any path is kept;
+    see :mod:`services.local_file_policy`.
     """
     return _runtime_root("sqlite")
 
@@ -166,7 +170,7 @@ def duckdb_root() -> tuple[str, bool]:
     ``DATAFLOW_DUCKDB_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on,
     ``DATAFLOW_SQLITE_ROOT`` then applies to DuckDB too and production
     otherwise confines it to ``<data_dir>/duckdb``. With the flag off (the
-    default, as before) DuckDB is unconfined unless ``DATAFLOW_DUCKDB_ROOT`` is set.
+    default outside production) DuckDB is unconfined unless ``DATAFLOW_DUCKDB_ROOT`` is set.
     """
     return _runtime_root("duckdb")
 
@@ -209,6 +213,8 @@ def _confine_embedded_path(
             for part in (root or "").split(os.pathsep)
             if part.strip()
         ]
+        if roots and not explicit:  # the production default: upload, export and declared areas too
+            roots += [area.expanduser().resolve(strict=False) for area in connector_file_areas()]
         candidate = Path(path).expanduser()
         if roots and not candidate.is_absolute():
             candidate = roots[0] / candidate
@@ -217,21 +223,17 @@ def _confine_embedded_path(
         exports = exports_dir(create=False)
     except OSError as exc:
         raise ValueError(f"Invalid {label} path: {exc}") from exc
+    # No message names a host path the request did not carry (security follow-up 1).
     if roots and not any(is_within(resolved, r) for r in roots):
-        shown = os.pathsep.join(str(r) for r in roots)
         if explicit:
-            raise ValueError(f"{label} path must be under {env_name} ({shown})")
-        raise ValueError(
-            f"{label} path must be under {shown}, on the persistent data "
-            "volume: a file anywhere else is lost when the service restarts. "
-            f"Use a path under it, or set {env_name} to another mounted volume."
-        )
+            raise ValueError(f"{label} path must be under {env_name}, the folder the operator set for {label} files")
+        raise confinement_refusal(label, env_name)
     volume_dir = state_dir / volume_subdir
     if is_within(resolved, state_dir) and not is_within(resolved, volume_dir):
         raise ValueError(
             f"{label} path is inside the Datawrap service data directory and cannot be "
-            f"opened as a connector; place the file under {volume_dir} "
-            f"or set {env_name}"
+            f"opened as a connector; place the file in the data folder's {volume_subdir} "
+            f"area or set {env_name}"
         )
     remapped = False
     if is_within(resolved, volume_dir):
@@ -246,6 +248,8 @@ def _confine_embedded_path(
             "connector's own workspace area, and cannot be opened as a connector; "
             f"place the file elsewhere or set {env_name}"
         )
+    if not connector_may_open_upload_path(resolved):
+        raise upload_refusal(label)
     if not roots:
         audit_would_confine(volume_subdir, resolved)
         return str(resolved) if remapped else path

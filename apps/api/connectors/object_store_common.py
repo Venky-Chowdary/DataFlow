@@ -642,6 +642,7 @@ def serialize_object_store_export(
     target_cols: list[str],
     dest_types: dict[str, str] | None = None,
     spill_max_size: int = 8 * 1024 * 1024,
+    tsv_null: str = "empty",
 ) -> ObjectStoreExport:
     """Serialize JSON / JSONL / CSV / Parquet into a spool that rolls to disk.
 
@@ -657,6 +658,7 @@ def serialize_object_store_export(
         target_cols=target_cols,
         dest_types=dest_types,
         spill_max_size=spill_max_size,
+        tsv_null=tsv_null,
     )
     try:
         encoder.append_rows(mapped_rows)

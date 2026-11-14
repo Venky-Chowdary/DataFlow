@@ -40,16 +40,21 @@ def _rows_to_objects(headers: list[str], rows: list[list[str]]) -> list[dict[str
     return [dict(zip(headers, row)) for row in rows]
 
 
-def _write_excel_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, str]:
+def _write_excel_bytes(
+    headers: list[str],
+    rows: list[list[str]],
+    column_types: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
     from openpyxl import Workbook
+
+    from services.xlsx_cells import fill_sheet
 
     wb = Workbook()
     ws = wb.active
     if ws is None:
         ws = wb.create_sheet()
-    ws.append(headers)
-    for row in rows:
-        ws.append(row)
+    # G7: explicit cell types — text is a string cell, never a formula.
+    fill_sheet(ws, headers, rows, column_types)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -128,8 +133,13 @@ def convert_rows(
     *,
     source_format: str,
     target_format: str,
+    column_types: dict[str, str] | None = None,
 ) -> tuple[bytes, str]:
-    """Convert tabular data between supported file formats."""
+    """Convert tabular data between supported file formats.
+
+    ``column_types`` (column -> declared/destination type) types Excel cells;
+    the text formats carry values verbatim.
+    """
     src = (source_format or "csv").lower()
     tgt = (target_format or "csv").lower()
     # NDJSON is JSON Lines in every conversion path
@@ -168,7 +178,7 @@ def convert_rows(
         return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson"
 
     if tgt == "excel":
-        return _write_excel_bytes(headers, rows)
+        return _write_excel_bytes(headers, rows, column_types)
 
     if tgt == "parquet":
         return _write_parquet_bytes(headers, rows)

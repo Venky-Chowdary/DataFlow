@@ -32,11 +32,16 @@ SECURITY_EVENTS: dict[str, str] = {
     "workspace.ip_allowlist.unenforceable_refused": "A new IP allowlist was refused because the deployment cannot see real client addresses (proxy hop count not configured), so it would not be enforced.",
     "auth.login": "A password authentication attempt completed.",
     "auth.login.locked": "A password login attempt triggered an account lockout.",
+    "auth.login.account_slowed": "Repeated failed sign-ins slowed new-address sign-ins to an account; the owner was told.",
     "auth.logout": "An authenticated session was revoked.",
     "auth.sso.login": "An SSO authentication completed.",
     "auth.login.sso_required": "A password sign-in was refused because a workspace of the person requires single sign-on.",
     "auth.sso_enforced.break_glass": "A platform administrator signed in with a password although a workspace of theirs requires single sign-on.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
+    "connector.extra_type_ignored": "A connector's extra settings named another engine type; the endpoint's own type was used.",
+    "control_store.imported": "A control-plane store file was imported into the shared store.",
+    "control_store.local_file_conflict": "A node's control-plane store file differs from the shared store and was not imported (shared state stays authoritative).",
+    "control_store.import_abandoned": "An import into an empty control-plane store whose owner stopped renewing its lease was taken over and its partial records removed.",
     "acl.grant.create": "A resource ACL grant was created.",
     "acl.grant.revoke": "A resource ACL grant was revoked.",
     "schedule.definition.create": "A schedule definition was created.",
@@ -551,12 +556,15 @@ class AuditAccessMiddleware(BaseHTTPMiddleware):
     """Record sensitive-route metadata after the handler response is available."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        from starlette.concurrency import run_in_threadpool
+
+        # The audit append can seal the chain tip in the shared anchor store: off the event loop.
         try:
             response = await call_next(request)
         except Exception:
-            self._record(request, status=500)
+            await run_in_threadpool(self._record, request, status=500)
             raise
-        self._record(request, status=response.status_code)
+        await run_in_threadpool(self._record, request, status=response.status_code)
         return response
 
     @staticmethod

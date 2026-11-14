@@ -1,0 +1,17 @@
+# Test and local-emulator tools. Not installed in the production image
+# (Dockerfile.api installs requirements.txt only). CI jobs that run pytest
+# install this file, which pulls in the runtime set first.
+-r requirements.txt
+
+pytest>=9.0.3
+pytest-asyncio>=0.23.0
+pytest-timeout>=2.3.1  # makes the per-test @pytest.mark.timeout marks real; a hung test fails instead of eating the 6h CI job
+responses>=0.24.0  # HTTP mocking for SaaS connector tests
+hypothesis>=6.100.0  # property tests (tests/*_property.py importorskip it)
+
+# Local emulators for the S3 / DynamoDB and Snowflake proofs.
+moto[server]>=5.0.0
+# fakesnow 0.11.22 requires duckdb~=1.5.6 and sqlglot~=30.22.0 (pinned in
+# requirements.txt); fakesnow 0.12 moved to duckdb 2.x. Stay on the 0.11 line
+# until duckdb and sqlglot are re-proven on the new majors.
+fakesnow>=0.11.22,<0.12

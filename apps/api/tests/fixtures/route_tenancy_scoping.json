@@ -160,6 +160,46 @@
       "scope": "workspace",
       "resource": "contract"
     },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}/evidence": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "POST /api/v1/exit/rehearsals/{rehearsal_id}/signoff": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "PATCH /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
     "POST /api/v1/iam/api-keys/{key_id}/rotate": {
       "scope": "workspace",
       "resource": "api_key"
@@ -197,6 +237,10 @@
       "resource": "job"
     },
     "POST /api/v1/jobs/{job_id}/parity-report/signoff": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/reversibility": {
       "scope": "workspace",
       "resource": "job"
     },
@@ -441,6 +485,10 @@
       "scope": "workspace",
       "resource": "plan"
     },
+    "GET /api/v1/transfer/plans/{plan_id}/reversibility": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
     "GET /api/v1/transfer/plans/{plan_id}/run-payload": {
       "scope": "workspace",
       "resource": "plan"
@@ -512,6 +560,18 @@
     "GET /api/v1/transform-library/{recipe_id}/where-used": {
       "scope": "workspace",
       "resource": "recipe"
+    },
+    "DELETE /api/v1/transfer/mapping/templates/{template_id}": {
+      "scope": "workspace",
+      "resource": "mapping_template"
+    },
+    "GET /api/v1/transfer/mapping/templates/{template_id}": {
+      "scope": "workspace",
+      "resource": "mapping_template"
+    },
+    "POST /api/v1/transfer/mapping/templates/{template_id}/apply": {
+      "scope": "workspace",
+      "resource": "mapping_template"
     },
     "DELETE /api/v1/transforms/{project_id}": {
       "scope": "workspace",
@@ -620,6 +680,11 @@
     "GET /auth/sso/{sso_type}/start": {
       "scope": "exempt",
       "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/stream-ticket": {
+      "scope": "workspace",
+      "resource": "job",
+      "viewer_may_call": "Issues a one-time ticket to watch a job's progress stream; it changes nothing, and a viewer may watch."
     }
   },
   "body_routes": {
@@ -908,6 +973,20 @@
         422
       ]
     },
+    "POST /api/v1/transfer/mapping/memory": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Records confirmed Map pairs for a destination named in the body: the connector is authorized against its workspace and its catalog is read before anything is remembered (review M4).",
+      "owner_status": [
+        200,
+        422,
+        502,
+        504
+      ]
+    },
     "POST /api/v1/transfer/plans": {
       "scope": "workspace",
       "resource": "saved_connector",
@@ -1053,6 +1132,73 @@
         "contract_id"
       ],
       "reason": "A multipart form route: its connector ids are checked read/write by the route (test_connector_route_authz) and its contract by assert_body_ids (review 3, Low); the JSON harness here cannot send a form."
+    },
+    "POST /api/v1/ops/cdc-cursors/clear": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Clears a CDC/sync watermark named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    },
+    "POST /api/v1/ops/cdc-leases/force-release": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Breaks the live CDC lease named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    },
+    "POST /api/v1/schedules/import": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "spec.source_connector_id",
+        "spec.dest_connector_id",
+        "spec.contract_id",
+        "spec.transform_recipe_id"
+      ],
+      "reason": "Imports a PipelineSchedule GitOps artifact: every connector, contract and recipe it names gets the POST /schedules ownership check before anything is saved (SEC-5).",
+      "owner_status": [
+        201
+      ]
+    },
+    "POST /api/v1/schedules/gitops/apply": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "resources[].spec.source_connector_id",
+        "resources[].spec.dest_connector_id",
+        "resources[].spec.contract_id"
+      ],
+      "reason": "Applies a GitOps manifest: every PipelineSchedule in it gets the POST /schedules ownership check before anything is applied (SEC-5)."
+    }
+  },
+  "_query_routes_about": "query_routes: routes that take a resource id in the QUERY string, or list resources with no id. tests/test_tenancy_route_scoping.py::test_every_query_id_route_answers_other_tenants_like_a_missing_id calls each as B's administrator and B's API key: an id route answers exactly as for an id that does not exist, a list route never names A's resource, and A's administrator is served (owner control).",
+  "query_routes": {
+    "GET /api/v1/ops/cdc-cursors": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a watermark by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a CDC lease by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-cursors/keys": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists cursor keys: only the caller's workspaces' (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases/list": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists held CDC leases: only the caller's workspaces' (SEC-1)."
     }
   }
 }

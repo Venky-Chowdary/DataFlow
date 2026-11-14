@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  parityAxis,
   areaPath,
   formatPercentTick,
   linearScale,
@@ -14,6 +15,7 @@ import {
   percentDomain,
   percentFraction,
   splitWidths,
+  valueDomain,
 } from "./chartScale.js";
 
 describe("linearScale", () => {
@@ -49,6 +51,24 @@ describe("percentDomain", () => {
   it("is null when nothing is known", () => {
     assert.equal(percentDomain([]), null);
     assert.equal(percentDomain([null, null]), null);
+  });
+});
+
+describe("valueDomain", () => {
+  it("pads the min..max span instead of starting at zero", () => {
+    const [lo, hi] = valueDomain([52, 55, 61, 63])!;
+    assert.ok(lo > 50 && lo < 52, `lo ${lo}`);
+    assert.ok(hi > 63 && hi < 65, `hi ${hi}`);
+  });
+
+  it("never goes below zero, skips unknown values, and gives a flat series a scale", () => {
+    assert.equal(valueDomain([0, 1])![0], 0);
+    assert.deepEqual(valueDomain([null, undefined]), null);
+    const [lo, hi] = valueDomain([0, 0, null])!;
+    assert.equal(lo, 0);
+    assert.ok(hi > 0);
+    const [flo, fhi] = valueDomain([100, 100])!;
+    assert.ok(flo < 100 && fhi > 100);
   });
 });
 
@@ -136,5 +156,23 @@ describe("percentFraction", () => {
     assert.equal(percentFraction(99.6), 0.996);
     assert.equal(percentFraction(null), 0);
     assert.equal(percentFraction(140), 1);
+  });
+});
+
+describe("parityAxis (W6 Migration health)", () => {
+  it("ends at 100% and starts at a round number with room below the lowest run", () => {
+    assert.deepEqual(parityAxis([100, 99.6, 100])?.domain, [98, 100]);
+    assert.deepEqual(parityAxis([100, 96])?.domain, [95, 100]);
+    assert.deepEqual(parityAxis([100, 90])?.domain, [75, 100]);
+    assert.deepEqual(parityAxis([100, 10])?.domain, [0, 100]);
+  });
+
+  it("labels three evenly spaced, round ticks", () => {
+    assert.deepEqual(parityAxis([99.6, 100])?.ticks.map((t) => t.label), ["100%", "99%", "98%"]);
+    assert.deepEqual(parityAxis([96])?.ticks.map((t) => t.label), ["100%", "97.5%", "95%"]);
+  });
+
+  it("has no axis without a figure", () => {
+    assert.equal(parityAxis([null, undefined]), null);
   });
 });

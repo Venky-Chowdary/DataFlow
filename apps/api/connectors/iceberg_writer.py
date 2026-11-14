@@ -2271,14 +2271,23 @@ def _write_mapped_rows_pyiceberg(
                 driver="iceberg",
             )
         pa_table, checksum = _prepare_pyiceberg_write(dict_rows, final_arrow, pa)
+        kept_markers: list[str] = []
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
+            from services.duplicate_policy import current_match_action
+
+            # skip_duplicates: insert absent keys only (no WHEN MATCHED update);
+            # the stored keys met are re-decided on every commit attempt.
+            skip_stored = current_match_action() == "skip"
 
             def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                if skip_stored:
+                    kept_markers[:] = _iceberg_stored_key_markers(_fresh_tbl, pa_table, pk_cols)
                 upsert_result = txn.upsert(
                     pa_table,
                     join_cols=pk_cols,
+                    when_matched_update_all=not skip_stored,
                     snapshot_properties=props,
                 )
                 return upsert_result.rows_updated + upsert_result.rows_inserted
@@ -2364,6 +2373,7 @@ def _write_mapped_rows_pyiceberg(
     return WriteResult(
         ok=True,
         rows_written=rows_written,
+        rows_skipped=len(kept_markers),
         table_name=table,
         target_schema=target_schema,
         checksum=checksum,
@@ -2374,7 +2384,27 @@ def _write_mapped_rows_pyiceberg(
         ),
         warnings=type_locked_warnings[:20],
         driver="iceberg",
+        meta={"skipped_identity_keys": list(kept_markers)} if kept_markers else {},
     )
+
+
+def _iceberg_stored_key_markers(tbl: Any, pa_table: Any, pk_cols: list[str]) -> list[str]:
+    """Markers of the batch rows whose key the table already stores (skip_duplicates)."""
+    from pyiceberg.table.upsert_util import create_match_filter
+
+    from connectors.writer_common import identity_marker
+
+    if not pk_cols or pa_table.num_rows == 0:
+        return []
+    stored = tbl.scan(
+        row_filter=create_match_filter(pa_table, pk_cols), selected_fields=tuple(pk_cols)
+    ).to_arrow()
+    found = {
+        identity_marker(key)
+        for key in zip(*(stored.column(c).to_pylist() for c in pk_cols))
+    }
+    batch = zip(*(pa_table.column(c).to_pylist() for c in pk_cols))
+    return [m for m in (identity_marker(key) for key in batch) if m in found]
 
 
 def test_iceberg(
@@ -3125,6 +3155,27 @@ def write_mapped_rows(
             destination_column_nullability=_kwargs.get("destination_column_nullability"),
         )
 
+    from services.duplicate_policy import current_match_action
+
+    if current_match_action() == "skip" and (write_mode or "").lower() in {
+        "upsert", "merge", "cdc", "incremental_deduped",
+    }:
+        # The copy-on-write filesystem writer replaces matched rows; it has no
+        # insert-only path, so skip_duplicates is refused, never ignored.
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "Iceberg 'Skip keys already stored' (skip_duplicates) needs a catalog "
+                "table (REST, Glue, SQL or Hive catalog): the filesystem warehouse "
+                "writer cannot leave a stored key unchanged. Choose upsert or append."
+            ),
+            driver="iceberg",
+        )
     return _write_mapped_rows_filesystem(
         host=host,
         port=port,

@@ -58,6 +58,10 @@ class CopilotDataAnalyst:
         return [
             {
                 "name": s.name,
+                # An upload is stored as ``<file id>_<name>``: the operator
+                # knows it by the file name they uploaded (review H6).
+                "display_name": _upload_filename(s.path) or s.name,
+                "origin": "upload" if _upload_filename(s.path) else "template",
                 "source": s.source,
                 "columns": s.columns,
                 "column_count": len(s.columns),
@@ -75,7 +79,9 @@ class CopilotDataAnalyst:
         return pick_dataset(self.feeder.feed_all(), hint)
 
     def analyze_schema(self, schema: UniversalSchema) -> DataInsight:
-        cache_key = schema.name
+        # The file and its shape, not just the name: a re-upload, or another
+        # workspace's same-named upload, must not be described from old bytes.
+        cache_key = "|".join((schema.name, schema.path, str(schema.row_count), ",".join(schema.columns)))
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -334,3 +340,16 @@ def get_data_analyst() -> CopilotDataAnalyst:
     if _analyst is None:
         _analyst = CopilotDataAnalyst()
     return _analyst
+
+
+def _upload_filename(path: str) -> str:
+    """The original file name of a stored upload at ``path``, or ""."""
+    if not path:
+        return ""
+    from pathlib import Path
+
+    from services.file_parser import _STORED_UPLOAD_NAME, get_file
+
+    named = _STORED_UPLOAD_NAME.match(Path(path).name)
+    record = get_file(named.group(1)) if named else None
+    return str((record or {}).get("filename") or "")

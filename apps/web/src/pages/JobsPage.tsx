@@ -1,4 +1,5 @@
 import { formatRowsProcessed } from "../lib/jobRows";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { BookOpen, ClipboardList, Code2, FileText, Gauge, GitCompareArrows, History, Network, PanelRightOpen, ScrollText, Shield, type LucideIcon } from "lucide-react";
@@ -60,6 +61,7 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { TrustReportTab } from "../components/parity/TrustReportTab";
+import { JobReversibilityTab } from "../components/reversibility/ReversibilityPanels";
 import { destHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
 import { readCoercedNullRows, formatStreamNames, jobDestinationPath, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
@@ -99,6 +101,7 @@ import type {
   TransformationsReport,
 } from "../lib/types";
 import { inferTransferFailureHint } from "../lib/transferFailure";
+import { errorCodeOf, isDuplicateKeyError, isUploadExpired } from "../lib/errorCopy";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
 import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import { MappingProofDrawer, type MappingProof } from "../components/MappingProofDrawer";
@@ -277,7 +280,7 @@ interface JobsPageProps {
 }
 
 type JobFilter = "all" | "running" | "completed" | "failed";
-type JobDetailTab = "detail" | "mapping" | "quarantine" | "trust" | "log";
+type JobDetailTab = "detail" | "mapping" | "quarantine" | "trust" | "reversibility" | "log";
 
 function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   if (status === "completed_with_quarantine" || rejectedRows > 0) return "quarantine";
@@ -595,6 +598,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       setEvidenceDrawer("quarantine");
     } else if (focusPanel === "trust-report") {
       setDetailTab("trust");
+    } else if (focusPanel === "reversibility") {
+      setDetailTab("reversibility");
     }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${focusJobId}`)?.scrollIntoView({
@@ -803,9 +808,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
         return;
       }
       const msg = e instanceof Error ? e.message : "Retry failed";
-      if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
+      // ERR-38: decided on the API's code (object.upload_expired), not on
+      // words in the message; the page stays put and the toast names the step.
+      if (isUploadExpired(errorCodeOf(e))) {
         toast({ title: "Re-upload required", message: msg, tone: "warning" });
-        onStartTransfer?.();
       } else {
         toast({ title: "Retry failed", message: msg, tone: "error" });
       }
@@ -915,6 +921,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     setExplicitPick(true);
     setMobileListOpen(false);
   }, []);
+  const jobRunGate = useWriteGate(PERMISSIONS.jobRun);
   const pickJob = useCallback((jobId: string) => {
     setSelectedId(jobId);
     setExplicitPick(true);
@@ -968,9 +975,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       onRefresh?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Resume failed";
-      if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
+      // ERR-38: decided on the API's code (object.upload_expired), not on
+      // words in the message; the page stays put and the toast names the step.
+      if (isUploadExpired(errorCodeOf(e))) {
         toast({ title: "Re-upload required", message: msg, tone: "warning" });
-        onStartTransfer?.();
       } else {
         toast({ title: "Resume failed", message: msg, tone: "error" });
       }
@@ -1205,10 +1213,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       liveJob.error_confidence,
     )
     : null;
-  const duplicateKeyFailure = Boolean(
-    failureHint?.code === "duplicate_primary_key"
-    || /duplicate redis key|duplicate primary key/i.test(String(liveJob?.error || "")),
-  );
+  // Decided on the API's code, never on the error text.
+  const duplicateKeyFailure = isDuplicateKeyError(failureHint?.code || liveJob?.error_code);
 
   // Reset tabs only when the operator picks a different job.
   useEffect(() => {
@@ -1526,6 +1532,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                             { id: "mapping" as const, label: "Mapping", icon: "connectors", count: mappingCount || undefined },
                             { id: "quarantine" as const, label: "Quarantine", icon: "alert", count: rejectedCount || undefined, hidden: !showQuarantineTab },
                             { id: "trust" as const, label: "Trust Report", icon: "shield" },
+                            { id: "reversibility" as const, label: "Reversibility", icon: "refresh" },
                             { id: "log" as const, label: "Log", icon: "jobs", count: logLineCount || undefined },
                           ] as const
                         ).filter((t) => !("hidden" in t && t.hidden)).map((tab) => (
@@ -1982,6 +1989,12 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                           </div>
                         )}
 
+                        {detailTab === "reversibility" && (
+                          <div className="df2-jobs-detail-pane">
+                            <JobReversibilityTab jobId={selected._id} />
+                          </div>
+                        )}
+
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
                             <JobsEvidenceList
@@ -2045,8 +2058,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               type="button"
                               className="df2-btn df2-btn-primary"
                               onClick={() => void handleSync("sync")}
-                              disabled={retrying}
-                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                              disabled={retrying || !jobRunGate.allowed}
+                              title={jobRunGate.reason || "Reuses the signed contract. One confirm. A second click does not start another run."}
                             >
                               <DtIcon name="activity" size={16} /> Sync now
                             </button>
@@ -2054,11 +2067,15 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               type="button"
                               className="df2-btn"
                               onClick={() => void handleSync("full")}
-                              disabled={retrying}
+                              disabled={retrying || !jobRunGate.allowed}
                               title="Re-reads from the start on the signed contract. Upserts when a key exists."
                             >
                               Re-sync (full)
                             </button>
+                            {!jobRunGate.allowed && (
+                              // UX-22: say why on the page, not only in a tooltip.
+                              <p className="df2-permission-inline" data-testid="jobs-sync-refusal">{jobRunGate.reason}</p>
+                            )}
                           </div>
                         )}
                         {detailTab === "detail" && selected.status === "failed" && (

@@ -48,6 +48,54 @@ export function percentDomain(
   return [lo, hi];
 }
 
+export interface ParityAxis {
+  domain: Domain;
+  ticks: AxisTick[];
+}
+
+/** Spans a parity axis may use: whole, readable steps, never a 0.5-point slice. */
+const PARITY_SPANS = [2, 5, 10, 25, 50, 100];
+
+/**
+ * The parity trend's y axis: always ends at 100%, starts at a round number
+ * below the lowest run with room to spare, and carries three evenly spaced,
+ * round ticks. A 99.5–100% axis made a 0.4-point dip look like a crash; this
+ * one keeps small dips small and still shows them.
+ */
+export function parityAxis(values: ReadonlyArray<number | null | undefined>): ParityAxis | null {
+  const finite = finiteValues(values).map((v) => Math.max(0, Math.min(100, v)));
+  if (finite.length === 0) return null;
+  const need = (100 - Math.min(...finite)) * 1.25;
+  const span = PARITY_SPANS.find((s) => s >= need) ?? 100;
+  const lo = 100 - span;
+  const mid = lo + span / 2;
+  return {
+    domain: [lo, 100],
+    ticks: [
+      { value: 100, label: "100%", kind: "max" },
+      { value: mid, label: formatPercentTick(mid), kind: "floor" },
+      { value: lo, label: formatPercentTick(lo), kind: "min" },
+    ],
+  };
+}
+
+/**
+ * Y domain for a non-negative measure (durations, counts): the lowest to the
+ * highest value seen, padded by ``pad`` of the span on each side so the marks
+ * use the plot instead of hugging its edges, never below zero. A flat series
+ * gets a span of ``pad`` of its value (or 1) so it still has a scale.
+ */
+export function valueDomain(values: ReadonlyArray<number | null | undefined>, pad = 0.12): Domain | null {
+  const finite = finiteValues(values).map((v) => Math.max(0, v));
+  if (finite.length === 0) return null;
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  const span = max - min || Math.max(max * pad * 2, 1);
+  const lo = Math.max(0, min - span * pad);
+  const hi = (max === min ? min + span / 2 : max) + span * pad;
+  return [lo, Math.max(hi, lo + 1e-9)];
+}
+
 /** A percentage tick label with only the precision the axis needs. */
 export function formatPercentTick(value: number): string {
   if (!Number.isFinite(value)) return "";

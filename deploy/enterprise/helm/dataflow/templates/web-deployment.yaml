@@ -17,6 +17,9 @@ spec:
       labels:
         app.kubernetes.io/component: web
         {{- include "dataflow.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pods when the nginx server block changes.
+        dataflow/web-config-port: {{ .Values.web.containerPort | quote }}
     spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
@@ -27,15 +30,49 @@ spec:
           imagePullPolicy: {{ .Values.web.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 3000
+              containerPort: {{ .Values.web.containerPort }}
               protocol: TCP
           env:
             - name: DATAFLOW_API_URL
               value: "https://api.{{ .Values.global.domain }}"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            # The image's server block listens on 80 and proxies to a fixed
+            # host name; this one uses web.containerPort and the API Service.
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            # nginx needs these writable; the root filesystem is read-only.
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ include "dataflow.fullname" . }}-web-nginx
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
       nodeSelector:
         {{- toYaml .Values.web.nodeSelector | nindent 8 }}
       tolerations:

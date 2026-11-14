@@ -5,8 +5,9 @@ The rule (owner spec):
 - an **unquoted empty** field is SQL NULL;
 - a **quoted** ``""`` field is the empty string ``''``;
 - on write, NULL is an **empty unquoted** cell and ``''`` is quoted ``""``;
-- the legacy ``\\N`` spelling still *reads* as NULL for files written by older
-  builds (and for PostgreSQL COPY payloads, which carry their own NULL marker).
+- a ``\\N`` cell is NULL only when the reader is told so (``null_marker``:
+  the source's declared NULL spelling, or a file this product wrote that
+  way); otherwise it is the two-character text (DATA-21).
 
 Python's ``csv.reader`` deliberately erases the quoting distinction, so this
 module reads each record's raw text alongside the reader and aligns the parsed
@@ -21,7 +22,7 @@ interpretation.
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import IO, Any
 
 _QUOTE = '"'
@@ -32,14 +33,20 @@ LEGACY_CSV_NULL = "\\N"
 _CSV_NULL = "\x00"
 
 
-def decode_cell(value: str, was_quoted: bool | None, empty_cell: str = "null") -> str | None:
+def decode_cell(
+    value: str, was_quoted: bool | None, empty_cell: str = "null", null_marker: str = ""
+) -> str | None:
     """One parsed CSV field → its database value.
 
     ``was_quoted=None`` means the mask could not be determined — the cell is
     treated as unquoted, matching the historical reader's behaviour of
     landing an empty field as absent data.
     """
-    if value == LEGACY_CSV_NULL:
+    if null_marker and value == null_marker and was_quoted is not True:
+        # A *quoted* marker is the text (PostgreSQL CSV rule: a quoted NULL
+        # string is not NULL); the G7-F3 TSV ``\\N`` convention writes a
+        # literal ``\\N`` value that way. Without a declared marker a ``\\N``
+        # cell is text: silently landing NULL lost it (DATA-21).
         return None
     if value != "":
         return value
@@ -91,6 +98,7 @@ def iter_csv_records(
     *,
     empty_cell: str = "null",
     nulled: list[int] | None = None,
+    null_marker: str = "",
 ) -> Iterator[list[str | None]]:
     """Yield decoded rows: unquoted empty → ``None``, quoted ``""`` → ``''``.
 
@@ -113,7 +121,7 @@ def iter_csv_records(
         parts.clear()
         masks = _quote_masks(raw, row, delimiter)
         out = [
-            decode_cell(v, q, empty_cell=empty_cell)
+            decode_cell(v, q, empty_cell=empty_cell, null_marker=null_marker)
             for v, q in zip(row, masks, strict=False)
         ]
         if nulled is not None:
@@ -127,8 +135,9 @@ def csv_cell_encode(value: Any) -> str:
     """Encode one database value for an operator CSV file.
 
     ``None`` → the ``\\x00`` NULL sentinel the formatter emits as an empty
-    unquoted cell; ``''`` → ``''`` (the formatter quotes it as ``""``);
-    ``\\N`` is preserved verbatim for COPY-convention writers.
+    unquoted cell; ``''`` → ``''`` (the formatter quotes it as ``""``); a
+    text ``\\N`` stays that text (the formatter quotes it, so it never reads
+    back as the legacy NULL spelling).
     """
     if value is None:
         return _CSV_NULL
@@ -139,23 +148,73 @@ def csv_cell_encode(value: Any) -> str:
     return str(value)
 
 
-def csv_quote_cell(cell: str) -> str:
+def csv_quote_cell(cell: str, delimiter: str = ",") -> str:
     if cell == _CSV_NULL:
         return ""
     if cell == "":
         return '""'
     if cell == LEGACY_CSV_NULL:
-        return LEGACY_CSV_NULL
-    if any(c in cell for c in ',"\n\r'):
+        # A *text* value spelled ``\\N`` is quoted: every reader of this codec
+        # takes a bare ``\\N`` as the legacy NULL spelling, so written bare it
+        # read back as NULL (a 2-file combine, the S3 COPY writers).
+        return _QUOTE + cell + _QUOTE
+    if any(c in cell for c in (delimiter, '"', "\n", "\r")):
         return '"' + cell.replace('"', '""') + '"'
     return cell
 
 
-def format_csv_row(cells: list[str], delimiter: str = ",") -> str:
-    """One encoded row as CSV text (no trailing newline)."""
+def _tsv_quote_cell(cell: str) -> str:
+    """A TSV cell, quoted only when an unquoted cell would split or misparse.
+
+    A tab, CR or LF inside an unquoted TSV cell splits the cell or the row
+    (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula cell),
+    and a leading ``"`` opens a quoted field in every RFC-4180 reader. Those
+    cells are quoted (``"`` doubled). A mid-field ``"`` stays raw: the
+    product's TSV readers take it literally, and loaders that read TSV
+    without quote handling must keep receiving the same bytes (G7 re-review
+    B1). Every other cell — NULL and ``''`` included, both empty — is
+    byte-identical to the writer before H1.
+    """
+    if cell == _CSV_NULL:
+        return ""
+    if cell == LEGACY_CSV_NULL or cell.startswith('"') or any(c in cell for c in "\t\n\r"):
+        # A text ``\\N`` is quoted for the same reason as in csv_quote_cell.
+        return '"' + cell.replace('"', '""') + '"'
+    return cell
+
+
+def text_null_cell(cell: str, marker: str, quote: Callable[[str], str]) -> str:
+    """One encoded cell in the MySQL/PostgreSQL text NULL convention (G7-F3, opt-in).
+
+    NULL is ``marker`` (``\\N``) unquoted, ``''`` an empty unquoted cell, and a
+    text value equal to the marker is quoted so it reads back as that text.
+    Every other cell is quoted exactly as ``quote`` (the writer's own rule) does.
+    """
+    if cell == _CSV_NULL:
+        return marker
+    if cell == "":
+        return ""
+    if cell == marker:
+        return _QUOTE + cell.replace(_QUOTE, _QUOTE * 2) + _QUOTE
+    return quote(cell)
+
+
+def format_csv_row(cells: list[str], delimiter: str = ",", *, null_marker: str = "") -> str:
+    """One encoded row as CSV text (no trailing newline).
+
+    A cell holding the row's own delimiter, a quote, CR or LF is quoted for
+    every delimiter (G7-F1: ``;``/``|`` rows used to quote only on ``,``).
+    ``null_marker`` (``\\N``) opts into :func:`text_null_cell`; empty keeps
+    the default codec (NULL and ``''`` as above).
+    """
     if delimiter == "\t":
-        return "\t".join("" if c == _CSV_NULL else c for c in cells)
-    return delimiter.join(csv_quote_cell(c) for c in cells)
+        quote: Callable[[str], str] = _tsv_quote_cell
+    else:
+        def quote(cell: str) -> str:
+            return csv_quote_cell(cell, delimiter)
+    if null_marker:
+        return delimiter.join(text_null_cell(c, null_marker, quote) for c in cells)
+    return delimiter.join(quote(c) for c in cells)
 
 
 def csv_null_sentinel() -> str:

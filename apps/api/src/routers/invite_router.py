@@ -66,7 +66,7 @@ async def accept(body: InviteAcceptBody, request: Request, response: Response) -
         try:
             # D343: a workspace that requires SSO gets a member who signs in
             # through SSO, not a password session opened by the invitation.
-            refuse_password_sign_in(email, request=request, resource="/invites/accept")
+            await run_in_threadpool(refuse_password_sign_in, email, request=request, resource="/invites/accept")
         except (ApiError, HTTPException) as refusal:
             from services.auth_state import get_auth_state
 

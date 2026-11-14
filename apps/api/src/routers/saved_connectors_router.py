@@ -99,6 +99,10 @@ class ConnectorSaveDTO(BaseModel):
         )
         if err:
             raise ValueError(err)
+        from services.dest_writer_options import validate_dest_writer_options
+
+        # A saved destination's writer options (formula_protection, tsv_null).
+        validate_dest_writer_options({"format": self.type, "extra": self.extra})
         return self
 
 
@@ -142,6 +146,13 @@ class ConnectorPatchDTO(BaseModel):
     group_id: str | None = None
     # Connector-specific fields (SaaS/SDK extras) — replaces the stored set.
     extra: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _dest_writer_options(self) -> "ConnectorPatchDTO":
+        from services.dest_writer_options import validate_dest_writer_options
+
+        validate_dest_writer_options(self.extra)
+        return self
 
 
 def _actor_email(request: Request) -> str:
@@ -627,9 +638,14 @@ def test_saved_connector(
     mark_tested(connector_id, ok)
     # Echo last_test_ok so the UI can patch the list immediately — never leave a
     # sticky "Test failed" badge after a green probe (Test-all vs individual drift).
-    return {
+    body: dict[str, Any] = {
         "success": ok,
         "message": message,
         "last_test_ok": ok,
         "auth_source": cfg.get("auth_source", ""),
     }
+    if not ok:
+        from services.safe_errors import failure_fields
+
+        body.update(failure_fields(message, engine=str(conn.type or "")))
+    return body

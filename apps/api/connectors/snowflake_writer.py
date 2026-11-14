@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.reversibility_enforce import scan_pass
 from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 from services.value_serializer import cell_to_string
 
@@ -475,6 +476,7 @@ def iter_sf_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _sf_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 
@@ -773,6 +775,18 @@ def _bind_rows_for_snowflake(
 _SNOWFLAKE_CSV_NULL = "\\N"
 
 
+def snowflake_stage_copy_safe(mapped_rows: list[tuple]) -> bool:
+    """Whether the CSV stage can carry these rows without a NULL collision.
+
+    The stage writes NULL as ``\\N`` (QUOTE_ALL) and COPY maps it back with
+    ``NULL_IF = ('\\N')``, so a *text* cell spelled ``\\N`` produces the same
+    bytes as NULL and would load as NULL (re-review: (1, None) and (2, '\\N')
+    were identical). Such a batch takes the exact bind (INSERT) path instead;
+    the stage encoding every other batch relies on is unchanged.
+    """
+    return not any(v == _SNOWFLAKE_CSV_NULL for row in mapped_rows for v in row if type(v) is str)
+
+
 def _write_temp_csv(
     path: Path, target_cols: list[str], mapped_rows: list[tuple]
 ) -> None:
@@ -786,6 +800,11 @@ def _write_temp_csv(
                 raise ValueError(
                     "Snowflake COPY path refused DF_MISSING sentinel — "
                     "sparse CDC rows must use omit-from-SET upsert, not CSV stage"
+                )
+            if _SNOWFLAKE_CSV_NULL in row:
+                raise ValueError(
+                    "Snowflake COPY path refused a text cell spelled \\N — it would "
+                    "load as NULL (NULL_IF); the bind path keeps it"
                 )
             # Temporal cells are already warehouse-normalized strings; other
             # types still go through cell_to_string for CSV safety.
@@ -1073,6 +1092,7 @@ def _load_rows_into_table(
     total = len(mapped_rows)
     use_copy = (
         prefer_copy and total >= COPY_THRESHOLD and not _is_fakesnow_connection(conn)
+        and snowflake_stage_copy_safe(mapped_rows)
     )
     if use_copy:
         fd, tmp_path = tempfile.mkstemp(
@@ -1696,14 +1716,15 @@ def write_mapped_rows(
 
             stamp_ceiling_by_col: dict[str, str] = {}
             by_tgt: dict[str, dict] = {}
+            from connectors.destination_naming import column_key
+
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(
-                    str(mapping.get("target") or ""), preserve_case=True
-                )
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in by_tgt:
                     by_tgt[tgt] = mapping
             for col in target_cols:
-                stamp = str((by_tgt.get(col) or {}).get("target_type") or "").strip()
+                stamp = str((by_tgt.get(column_key(col)) or {}).get("target_type") or "").strip()
                 if stamp:
                     # Map≡ALTER ceiling is the approved stamp — never live overlay.
                     stamp_ceiling_by_col[col] = sf_type(stamp)

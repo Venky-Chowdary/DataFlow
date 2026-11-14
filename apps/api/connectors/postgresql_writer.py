@@ -15,8 +15,10 @@ from typing import Any
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.schema_inference import infer_type
 from services.decision_kernel import materialize_dest_ddl
+from services.reversibility_enforce import scan_pass
 from services.value_serializer import json_default
 
+from connectors.destination_naming import column_key, writer_identifier
 from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
@@ -652,7 +654,8 @@ def _redshift_merge_upsert(
         rows_out.append(
             tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
         )
-    if copy_config is not None:
+    batch_stage = _redshift_batch_stage(rows_out, stage_format) if copy_config is not None else ""
+    if batch_stage:
         from connectors.redshift_copy import copy_redshift_rows_from_s3
 
         copy_redshift_rows_from_s3(
@@ -665,7 +668,7 @@ def _redshift_merge_upsert(
             s3_client=s3_client,
             job_id=job_id,
             dest_types=dest_types,
-            stage_format=stage_format,
+            stage_format=batch_stage,
         )
     else:
         cursor.executemany(insert_sql, rows_out)
@@ -1068,6 +1071,7 @@ def iter_pg_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _pg_scan_finished_bundles(**kwargs: Any) -> Any:
     """Map + finish every bundle, keep rejects, discard accepted tuples."""
     from connectors.sql_write_materialize import SqlWriteAccumulator
@@ -1242,12 +1246,29 @@ def _copy_text_value(value: Any) -> str:
 
 
 
+def _redshift_batch_stage(rows: list, requested: str) -> str:
+    """:func:`connectors.redshift_copy.redshift_batch_stage_format` (lazy import: no cycle).
+
+    ``""`` means the batch cannot be staged (no pyarrow for the Parquet the
+    batch needs): the caller INSERTs and this logs the performance warning.
+    """
+    from connectors.redshift_copy import REDSHIFT_INSERT_FALLBACK_WARNING, redshift_batch_stage_format
+
+    stage = redshift_batch_stage_format(rows, requested)
+    if not stage:
+        logger.warning(REDSHIFT_INSERT_FALLBACK_WARNING)
+    return stage
+
+
 def _copy_buffer():
     """Memory-bounded buffer for COPY — spills to disk when wide batches exceed 1 MiB."""
     return tempfile.SpooledTemporaryFile(max_size=1 * 1024 * 1024, mode="w+", encoding="utf-8", newline="")
 
 def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     from psycopg2 import sql
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows, columns, table=table_name, copy_mode=True)  # no undecoded escape
 
     cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
     copy_sql = sql.SQL("COPY {}.{} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')").format(
@@ -1269,6 +1290,9 @@ def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list
 def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     """COPY into a session TEMP table (unqualified identifier)."""
     from psycopg2 import sql
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows, columns, table=table_name, copy_mode=True)  # no undecoded escape
 
     cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
     copy_sql = sql.SQL(
@@ -1287,6 +1311,9 @@ def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple])
 
 def _execute_values_insert(cur, insert_sql: Any, rows: list[tuple] | list[list], *, page_size: int = 1000) -> None:
     """Bulk INSERT via ``execute_values`` (one round-trip per page, not per row)."""
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows)  # a NULL marker is never bound as text
     try:
         from psycopg2.extras import execute_values
     except ImportError:
@@ -1523,6 +1550,11 @@ def write_mapped_rows(
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
         dest_db="postgresql",
+        # G11: Redshift shares this writer but names columns by its own limit.
+        identifier=writer_identifier(
+            str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql"),
+            preserve_case=True,
+        ),
     )
     if not target_cols:
         return WriteResult(
@@ -2143,13 +2175,14 @@ def write_mapped_rows(
 
             active_by_tgt: dict[str, dict] = {}
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
             source_type_by_col: dict[str, str] = {}
             for col in target_cols:
-                mapping = active_by_tgt.get(col) or {}
+                mapping = active_by_tgt.get(column_key(col)) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
                 # Declared source DDL wins over sample inference: inferring from
@@ -2732,7 +2765,11 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
-                        if use_redshift_s3_copy:
+                        batch_stage = (
+                            _redshift_batch_stage(batch, redshift_stage_format)
+                            if use_redshift_s3_copy else ""
+                        )
+                        if batch_stage:
                             from connectors.redshift_copy import copy_redshift_rows_from_s3
 
                             copy_redshift_rows_from_s3(
@@ -2746,7 +2783,7 @@ def write_mapped_rows(
                                 job_id=job_id,
                                 chunk_idx=chunk_idx,
                                 dest_types=dest_types if isinstance(dest_types, dict) else None,
-                                stage_format=redshift_stage_format,
+                                stage_format=batch_stage,
                             )
                         elif use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
@@ -3143,6 +3180,11 @@ def write_mapped_rows(
             overwrite_failed = bool(
                 reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
             )
+        if held and held.active and close_connection and not written and rejected_details:
+            # Every row of this overwrite was held out to quarantine: committing
+            # would publish the TRUNCATE with nothing in its place. Roll back;
+            # the caller refuses the run with the table as it was.
+            overwrite_failed = True
         if held and held.active and (overwrite_failed or close_connection):
             from connectors.write_resilience import finish_held_overwrite
 

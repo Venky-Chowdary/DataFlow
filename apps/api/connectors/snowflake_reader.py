@@ -25,7 +25,7 @@ _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import driver_cell_to_string
 
 
 def snapshot_order_columns(columns: list[str], primary_key: str | None = "") -> list[str]:
@@ -186,7 +186,7 @@ def read_table_batch(
                 f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
+            rows = [[driver_cell_to_string(v) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -350,7 +350,7 @@ def read_table_scan_batch(
     if not raw:
         close_table_scan(scan_state)
         return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
-    rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in raw]
+    rows = [[driver_cell_to_string(v) for v in row] for row in raw]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
@@ -473,7 +473,7 @@ def read_table_cursor_batch(
                         (limit,),
                     )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
+            rows = [[driver_cell_to_string(v) for v in row] for row in cur.fetchall()]
         # Keyset pages are not a cardinality bound — page length must never
         # trip stream early-stop (fetch_offset >= total_rows).
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)

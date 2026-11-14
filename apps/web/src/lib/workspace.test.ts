@@ -141,8 +141,8 @@ describe("platform admin views: All workspaces / Unassigned (D218)", () => {
       [
         ["__all__", "All workspaces", true],
         ["__unassigned__", "Unassigned (legacy data) · 4577 jobs", true],
-        ["ws-test", "Test · 2", false],
-        ["ws-venkatesh", "Venkatesh Boyapati's workspace · 1", false],
+        ["ws-test", "Test · 2 members", false],
+        ["ws-venkatesh", "Venkatesh Boyapati's workspace · 1 member", false],
       ],
     );
     const one = workspaceChoices([], [{ ...views[1], legacy_jobs: 1 }]);

@@ -405,8 +405,12 @@ def write_mapped_rows(
             driver="notion",
         )
 
+    # G11: notion stores field / attribute names exactly as mapped.
+    from connectors.destination_naming import writer_identifier
+
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("notion"),
     )
     policy = transform_error_policy(error_policy)
     properties: dict[str, str] = {}

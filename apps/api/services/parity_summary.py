@@ -107,7 +107,11 @@ def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 
 def _is_repair_job(job: dict[str, Any]) -> bool:
+    """A parity re-sync / quarantine replay, or an exit rehearsal's extract: not a migration run."""
     req = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+    if str(job.get("exit_rehearsal_id") or "").strip() or str(
+            job.get("triggered_by") or req.get("triggered_by") or "").startswith("exit rehearsal "):
+        return True  # its evidence is the rehearsal's (services.exit_rehearsal)
     return bool(str(job.get("parent_job_id") or req.get("parent_job_id") or "").strip())
 
 

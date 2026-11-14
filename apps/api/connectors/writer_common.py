@@ -20,6 +20,8 @@ from sqlalchemy.engine import CursorResult
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.rule_compiler.apply import evaluate_contract
+from services.reversibility_enforce import STAMP as _REVERSIBILITY_STAMP
+from services.reversibility_enforce import note_rows_checked, refuse_changed_value, uncounted
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import (
@@ -42,6 +44,7 @@ from connectors.array_wire import (  # noqa: F401 — re-export canonical helper
     _pg_array_element,
     parse_array_wire_elements,
 )
+from connectors.destination_naming import column_key, writer_identifier
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -628,16 +631,14 @@ def desired_types_honoring_map_stamps(
     candidates = candidate_by_col or {}
     by_tgt: dict[str, dict[str, Any]] = {}
     for mapping in write_mappings(list(mappings or [])):
-        tgt = sanitize_identifier(
-            str(mapping.get("target") or ""), preserve_case=preserve_case
-        )
+        tgt = column_key(str(mapping.get("target") or ""))  # G11: the writer's own spelling
         if tgt and tgt not in by_tgt:
             by_tgt[tgt] = mapping
 
     desired: list[str] = []
     refusals: list[dict[str, Any]] = []
     for col, cur_type in zip(target_cols, current_target_types):
-        mapping = by_tgt.get(col) or {}
+        mapping = by_tgt.get(column_key(col)) or {}
         candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
         ceiling = str(cur_type or "").strip() or candidate
         if explicit_columns is not None:
@@ -1954,24 +1955,16 @@ def map_rows_for_fingerprint(
     whenever destination types are known — typed writers quarantine DECIMAL /
     VARCHAR / BINARY / temporal overflow the same way.
     """
-    mapped, _errors, rejected = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=error_policy,
-        dest_types=dest_types,
-        preserve_case=preserve_case,
-        dest_kind=dest_kind,
-        destination_pk_columns=destination_pk_columns,
-        empty_cells_as_null=empty_cells_as_null,
-        destination_column_nullability=destination_column_nullability,
-        stream_contracts=stream_contracts,
-        contract_primary_key=contract_primary_key,
-        row_number_start=row_number_start,
-        struct_already_materialized=struct_already_materialized,
-    )
+    with uncounted():  # Gate-8's re-read is not a write: its rows are checked, not counted (review 5, H-1)
+        mapped, _errors, rejected = build_mapped_rows_with_details(
+            headers=headers, data_rows=data_rows, mappings=mappings, target_cols=target_cols,
+            column_types=column_types, error_policy=error_policy, dest_types=dest_types,
+            preserve_case=preserve_case, dest_kind=dest_kind, destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
+            destination_column_nullability=destination_column_nullability, stream_contracts=stream_contracts,
+            contract_primary_key=contract_primary_key, row_number_start=row_number_start,
+            struct_already_materialized=struct_already_materialized,
+        )
     rejected_details = list(rejected or [])
     type_map = dict(dest_types or {}) or dict(column_types or {})
     if mapped and target_cols and type_map:
@@ -2163,6 +2156,8 @@ def _convert_mapped_cell(
                         f"failed: {reason}"
                     )
                     break
+    if isinstance(mapping, dict) and _REVERSIBILITY_STAMP in mapping:  # reversible run: stop on a value that changes
+        refuse_changed_value(mapping, val, converted, err)
     return converted, err
 
 
@@ -2211,7 +2206,8 @@ def build_mapped_rows_with_details(
     source_indices = {h: i for i, h in enumerate(headers)}
     # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
     source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
-    sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
+    _name = writer_identifier(dest_kind, preserve_case=preserve_case)  # G11: per-destination names
+    sanitized_target_cols = [_name(c) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
     rejected_details: list[dict[str, Any]] = []
@@ -2224,7 +2220,7 @@ def build_mapped_rows_with_details(
             continue
         dest_nullability[key] = bool(v)
         dest_nullability[key.lower()] = bool(v)
-        dest_nullability[sanitize_identifier(key, preserve_case=preserve_case)] = bool(v)
+        dest_nullability[_name(key)] = bool(v)
 
     mapping_infos = []
     for m in mappings:
@@ -2238,15 +2234,13 @@ def build_mapped_rows_with_details(
                 # it is present in the resolved target set, create-new was
                 # confirmed (``table_exists is False``) and the value must flow —
                 # otherwise every row lands NULL (the direct-write create-new gap).
-                _pending_tgt = sanitize_identifier(
-                    str(m.get("target") or ""), preserve_case=preserve_case
-                )
+                _pending_tgt = _name(str(m.get("target") or ""))
                 if _pending_tgt not in target_index:
                     continue
         except Exception:
             pass
         src = m["source"]
-        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        tgt = _name(m["target"])
         # Never pass source ``column_types`` as dest_types — that invents a
         # "live" VARCHAR dest and suppresses Map ``target_type`` coercion
         # (INTEGER/BOOLEAN/DECIMAL stamps become trim_id/none). Empty dest
@@ -2568,6 +2562,7 @@ def build_mapped_rows_with_details(
         if accepted_source_rows is not None:
             accepted_source_rows.append(row_number)
 
+    note_rows_checked(mappings, start_no, len(data_rows))  # counts only for reversibility-enforced columns
     return mapped, errors, rejected_details
 
 
@@ -3190,8 +3185,13 @@ def resolve_target_columns(
     sample_values_by_source: dict[str, list[str]] | None = None,
     table_exists: bool | None = None,
     dest_db: str = "",
+    identifier: Callable[[Any], str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
+
+    ``identifier`` names each target; by default the ``dest_db`` writer's own
+    rule (``destination_naming.writer_identifier``: Mongo keeps field paths,
+    SQL engines cut only at their real limit); no ``dest_db``: SQL sanitizing.
 
     Prefers live ``dest_types`` on existing tables (table_exists is not False),
     then explicit Map ``target_type``, then source logical type, then ``VARCHAR``.
@@ -3210,6 +3210,7 @@ def resolve_target_columns(
     target_types: list[str] = []
     samples = sample_values_by_source or {}
     live = dest_types or {}
+    name_of = identifier or writer_identifier(dest_db, preserve_case=preserve_case)
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit
@@ -3231,7 +3232,7 @@ def resolve_target_columns(
         except Exception:
             if not m.get("target"):
                 continue
-        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        tgt = name_of(m["target"])
         if tgt not in target_cols:
             target_cols.append(tgt)
             explicit_target = bool(m.get("target_type"))
@@ -3448,6 +3449,8 @@ def fits_decimal(
         return True
     if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
+    if str(value).strip().lower() == "nan" and str(dest_db or "").lower() in {"postgresql", "postgres"}:
+        return True  # DATA-8: PostgreSQL NUMERIC(p,s) stores NaN (not Infinity)
     try:
         if isinstance(value, Decimal):
             # A typed Decimal is already exact. Round-tripping it through

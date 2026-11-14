@@ -8,6 +8,7 @@ const SCREENS: Screen[] = [
   "query",
   "connectors",
   "contracts",
+  "exit",
   "schedules",
   "transforms",
   "transform-library",
@@ -36,6 +37,8 @@ const HASH_ALIASES: Record<string, Screen> = {
   proofs: "benchmarks",
   proof: "benchmarks",
   library: "transform-library",
+  "exit-readiness": "exit",
+  readiness: "exit",
 };
 
 export function screenFromHash(hash: string): Screen | null {
@@ -177,4 +180,30 @@ export function writeAppHash(screen: Screen, replace = false) {
 export function writeJobsDeepLink(jobId: string, panel?: string) {
   if (typeof window === "undefined") return;
   window.location.hash = hashForScreen("jobs", { jobId, panel });
+}
+
+/* ── Exit readiness deep links ─────────────────────────────── */
+
+export interface ExitFocus {
+  system?: string;
+  rehearsal?: string;
+}
+
+/** `#/exit?system=…&rehearsal=…` (the copilot's link) → the ids to open. */
+export function exitFocusFromHash(hash: string): ExitFocus | null {
+  const raw = hash.replace(/^#\/?/, "");
+  const [path, query = ""] = raw.split("?");
+  if (path.trim().toLowerCase() !== "exit") return null;
+  const params = new URLSearchParams(query);
+  const system = (params.get("system") || "").trim() || undefined;
+  const rehearsal = (params.get("rehearsal") || "").trim() || undefined;
+  return system || rehearsal ? { system, rehearsal } : {};
+}
+
+export function exitHash(focus: ExitFocus = {}): string {
+  const params = new URLSearchParams();
+  if (focus.system) params.set("system", focus.system);
+  if (focus.rehearsal) params.set("rehearsal", focus.rehearsal);
+  const qs = params.toString();
+  return qs ? `#/exit?${qs}` : "#/exit";
 }

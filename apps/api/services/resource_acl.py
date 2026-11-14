@@ -22,6 +22,8 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.platform_config import data_dir
+from services.shared_doc_store import tracked
+from services.shared_record_store import SharedRecordSet
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -69,17 +71,69 @@ class ResourceAclGrant:
         )
 
 
-def _load_all() -> list[ResourceAclGrant]:
+def _file_load() -> dict[str, Any]:
     path = _store_path()
     if not path.exists():
+        return {"grants": []}
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return {"grants": out}
+
+
+def _file_save(data: dict[str, Any]) -> None:
+    path = _store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for raw in data.get("grants") or []:
+            fh.write(json.dumps(raw, default=json_default) + "\n")
+    tmp.replace(path)
+
+
+# Grants live in the shared control-plane store when one is configured: a
+# replica with no local grants file would otherwise treat a restricted
+# resource as unrestricted (H-5).
+def _unique_claims(record: dict[str, Any]) -> list[str]:
+    """One grant per principal and resource, across replicas (ops review round 2, High 1)."""
+    principal = str(record.get("principal") or "").strip().lower()
+    if not principal:
         return []
-    out: list[ResourceAclGrant] = []
+    who = [str(record.get(k) or "") for k in ("tenant_id", "resource_type", "resource_id")] + [principal]
+    return ["grant:" + json.dumps(who, separators=(",", ":"))]
+
+
+def _resource_tag(tenant_id: str, resource_type: str, resource_id: str) -> str:
+    return "resource:" + json.dumps([tenant_id or "", resource_type or "", resource_id or ""], separators=(",", ":"))
+
+
+def _lookup_tags(record: dict[str, Any]) -> list[str]:
+    """An ACL check reads one resource's grants, not the tenant's (ops review round 2, High 3)."""
+    return [_resource_tag(*(str(record.get(k) or "") for k in ("tenant_id", "resource_type", "resource_id")))]
+
+
+_DOC = SharedRecordSet(
+    "resource_acls",
+    file_load=_file_load,
+    file_save=_file_save,
+    file_path=_store_path,
+    empty=lambda: {"grants": []},
+    list_key="grants",
+    partition_key="tenant_id",
+    unique=_unique_claims,
+    tags=_lookup_tags,
+)
+
+
+def _load_all(**scope: Any) -> list[ResourceAclGrant]:
+    """Grants in ``scope`` (a file store returns every grant: callers filter)."""
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            out.append(ResourceAclGrant.from_dict(json.loads(line)))
+        data = _DOC.load(**scope)
+        out = tracked(
+            [ResourceAclGrant.from_dict(raw) for raw in data.get("grants") or []], data.rev
+        )
     except Exception as exc:
         # Fail closed: a corrupt/unreadable ACL store must not look like "no grants"
         # (which would open every previously restricted resource).
@@ -88,14 +142,10 @@ def _load_all() -> list[ResourceAclGrant]:
     return out
 
 
-def _rewrite(grants: list[ResourceAclGrant]) -> None:
-    path = _store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        for g in grants:
-            fh.write(json.dumps(g.to_dict(), default=json_default) + "\n")
-    tmp.replace(path)
+def _rewrite(grants: list[ResourceAclGrant], *, rev: int | None = None) -> None:
+    """Write every grant; ``rev`` is the revision the list was read at (shared store)."""
+    read_at = rev if rev is not None else getattr(grants, "rev", None)
+    _DOC.save(tracked({"grants": [g.to_dict() for g in grants]}, read_at))
 
 
 def list_grants(
@@ -105,8 +155,11 @@ def list_grants(
     resource_id: str | None = None,
     principal: str | None = None,
 ) -> list[ResourceAclGrant]:
-    grants = _load_all()
     tid = tenant_id or ""
+    if resource_type and resource_id:
+        grants = _load_all(tag=_resource_tag(tid, resource_type, resource_id))
+    else:
+        grants = _load_all(part=tid)
     out = [g for g in grants if g.tenant_id == tid]
     if resource_type:
         out = [g for g in out if g.resource_type == resource_type]
@@ -118,6 +171,7 @@ def list_grants(
     return out
 
 
+@_DOC.retrying
 def upsert_grant(
     *,
     tenant_id: str,
@@ -134,7 +188,7 @@ def upsert_grant(
     principal_n = principal.strip().lower()
     if not principal_n or not resource_id.strip():
         raise ValueError("principal and resource_id are required")
-    grants = _load_all()
+    grants = _load_all(tag=_resource_tag(tenant_id or "", resource_type, resource_id))
     for g in grants:
         if (
             g.tenant_id == (tenant_id or "")
@@ -160,12 +214,13 @@ def upsert_grant(
     return grant
 
 
+@_DOC.retrying
 def revoke_grant(grant_id: str, *, tenant_id: str = "") -> bool:
-    grants = _load_all()
+    grants = _load_all(keys=[grant_id])
     next_g = [g for g in grants if not (g.id == grant_id and g.tenant_id == (tenant_id or ""))]
     if len(next_g) == len(grants):
         return False
-    _rewrite(next_g)
+    _rewrite(next_g, rev=getattr(grants, "rev", None))
     return True
 
 

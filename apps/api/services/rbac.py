@@ -360,6 +360,15 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("POST", "/api/v1/transfer/rules/import", Permission.JOB_PLAN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
+    # Map-step remapping (destination column catalog, type grades, auto-map,
+    # learned mapping memory): design work on a route, like /transfer/map.
+    # Listing the workspace's learned pairs is a read.
+    ("GET", "/api/v1/transfer/mapping/", Permission.JOB_READ),
+    # Erasing the workspace's learned pairs is a destructive store edit, held
+    # like a transform-library delete.
+    ("DELETE", "/api/v1/transfer/mapping/memory", Permission.CONNECTOR_WRITE),
+    ("DELETE", "/api/v1/transfer/mapping/templates/", Permission.CONNECTOR_WRITE),
+    ("*", "/api/v1/transfer/mapping/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
     # Reading a schedule is schedule.read — the permission every role already
     # holds. Requiring schedule.manage to *list* them refused the viewer's own
@@ -392,6 +401,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/jobs/", Permission.JOB_READ),
     # Parity Studio's workspace summary reads stored job evidence only.
     ("GET", "/api/v1/parity/", Permission.JOB_READ),
+    # Reversibility Proof reads: the exit board, systems, rehearsals, evidence packs.
+    ("GET", "/api/v1/exit/", Permission.JOB_READ),
+    # Any other exit route not ruled above is a management action.
+    ("*", "/api/v1/exit/", Permission.JOB_MANAGE),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -450,6 +463,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/training-agent/run", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run/sync", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/transfer/execute", Permission.JOB_RUN),
+    # SEC-14: a ticket to watch a job's stream is a read, like the stream.
+    ("POST", "/api/v1/connectors/jobs/{job_id}/stream-ticket", Permission.CONNECTOR_READ),
     ("POST", "/api/v1/transforms/{project_id}/run", Permission.JOB_RUN),
     ("POST", "/api/v1/cdc/signals/ensure-table", Permission.JOB_RUN),
     ("POST", "/api/v1/cdc/signals/execute-snapshot", Permission.JOB_RUN),
@@ -475,6 +490,19 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_MANAGE),
+    # Reversibility Proof. Declaring a system configures recurring extracts of a
+    # saved connection (job.manage); a rehearsal runs those extracts (job.run);
+    # signing attests the Exit Evidence Pack (job.manage, plus the authority
+    # services.parity_authority binds to each role); verifying a pack is a read.
+    ("POST", "/api/v1/exit/systems", Permission.JOB_MANAGE),
+    ("PATCH", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
+    ("DELETE", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
+    # Acknowledging PII for a system lets its recurring extracts pass the PII gate.
+    ("POST", "/api/v1/exit/systems/{system_id}/pii-acknowledgement", Permission.JOB_MANAGE),
+    ("DELETE", "/api/v1/exit/systems/{system_id}/pii-acknowledgement", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/exit/systems/{system_id}/rehearsals", Permission.JOB_RUN),
+    ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/exit/evidence/verify", Permission.JOB_READ),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),

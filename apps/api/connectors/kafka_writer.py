@@ -43,6 +43,27 @@ def kafka_produce_key(raw_key: Any) -> str | None:
     return present_cell_text(raw_key)
 
 
+def kafka_message_key(
+    payload: dict[str, Any], key_cols: list[str]
+) -> tuple[str | None, list[str]]:
+    """Produce key for ``payload`` and the key columns that are absent.
+
+    One key column keeps its plain text (existing topics' keys unchanged).
+    A composite key is the canonical JSON object of every key column in
+    declared order — the first column alone collapsed distinct entities
+    onto one key under compaction. Any absent part refuses the row.
+    """
+    if not key_cols:
+        return None, []
+    absent = [str(c) for c in key_cols if kafka_produce_key(payload.get(c)) is None]
+    if absent:
+        return None, absent
+    if len(key_cols) == 1:
+        return kafka_produce_key(payload.get(key_cols[0])), []
+    parts = {str(c): payload.get(c) for c in key_cols}
+    return json_dumps_exact_text(parts, ensure_ascii=True, separators=(",", ":")), []
+
+
 def kafka_json_payload(
     row: Any,
     target_cols: list[str],
@@ -337,8 +358,12 @@ def write_mapped_rows(
             driver="kafka",
         )
 
+    # G11: kafka stores field / attribute names exactly as mapped.
+    from connectors.destination_naming import writer_identifier
+
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("kafka"),
     )
     policy = transform_error_policy(error_policy)
     live_dest = _kwargs.get("destination_column_types")
@@ -688,22 +713,22 @@ def write_mapped_rows(
         or list(_kwargs.get("message_key_columns") or [])
         or list(_kwargs.get("primary_key_columns") or [])
     )
-    key_col = key_cols[0] if key_cols else None
+    key_col = ",".join(str(c) for c in key_cols) if key_cols else None
     null_key_rejected = 0
     produced_sample: list[dict[str, Any]] = []
     try:
         for idx, row in enumerate(mapped_rows):
             payload = kafka_json_payload(row, target_cols, dest_types)
-            raw_key = payload.get(key_col) if key_col else None
-            if key_col and kafka_produce_key(raw_key) is None:
+            key, absent = kafka_message_key(payload, key_cols)
+            if absent:
                 null_key_rejected += 1
                 rejected_details.append({
                     "row": idx + 1,
-                    "column": str(key_col),
+                    "column": ",".join(absent),
                     "target": topic,
                     "value": "",
                     "reason": (
-                        f"Kafka message key `{key_col}` missing/empty — refuse "
+                        f"Kafka message key `{','.join(absent)}` missing/empty — refuse "
                         "null-key produce when conflict_columns are configured "
                         "(compaction / ordering would silently collapse)"
                     ),
@@ -723,7 +748,6 @@ def write_mapped_rows(
                         driver="kafka",
                     )
                 continue
-            key = kafka_produce_key(raw_key) if key_col else None
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1
@@ -775,6 +799,8 @@ def write_mapped_rows(
         rejected_rows=len(rejected_details),
         coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         driver="kafka",
+        # G11: an acknowledged legacy_field_policy=write_new, on the run.
+        warnings=[str(a) for a in (_kwargs.get("legacy_field_ack") or [])][:10],
         meta={
             "reconcile_sample": produced_sample,
             "source_row_count": len(mapped_rows),

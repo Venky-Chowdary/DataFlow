@@ -23,6 +23,7 @@ route it sits on.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 from dataclasses import dataclass
@@ -129,7 +130,9 @@ def _bounded_exists(driver: str, cfg: dict[str, Any], schema: str, table: str) -
         except Exception:  # noqa: BLE001 - unknown is not missing
             box["exists"] = None
 
-    worker = threading.Thread(target=_run, name="schedule-source-probe", daemon=True)
+    # The caller's workspace binding goes with the probe (follow-up review 5, H1).
+    worker = threading.Thread(target=contextvars.copy_context().run, args=(_run,), name="schedule-source-probe",
+                              daemon=True)
     worker.start()
     worker.join(PROBE_SECONDS)
     return box.get("exists") if not worker.is_alive() else None

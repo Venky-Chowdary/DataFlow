@@ -74,7 +74,9 @@ def _list_sqlalchemy_tables(
 
         return False, [], humanize_connection_error(fmt, exc), {}
     if not isinstance(info, dict) or not info.get("ok"):
-        return False, [], str((info or {}).get("error") or "object list failed"), {}
+        from .connector_registry import humanize_connection_error
+
+        return False, [], humanize_connection_error(fmt, str((info or {}).get("error") or "object list failed"), phase="introspect"), {}
     names: list[str] = []
     seen: set[str] = set()
     for raw in info.get("tables") or []:
@@ -153,6 +155,11 @@ def _is_absent_object_error(message: str) -> bool:
 #: They are not the operator's data: showing them wastes the object picker and,
 #: because the listing is bounded, can push a real table out of the page.
 _INTERNAL_OBJECT_PREFIXES = ("_df_mirrorkeys_", "_dataflow_stg_", "_df_dlq_")
+
+
+def _object_name_filter(endpoint: EndpointConfig) -> str:
+    """The browser's "name contains" search, when it sent one (UX-9)."""
+    return str((endpoint.extra or {}).get("object_name_filter") or "").strip()[:200]
 
 
 def _operator_visible_objects(names, type_label: str, type_map: dict | None = None) -> list[dict]:
@@ -369,6 +376,10 @@ def introspect_endpoint(
     ) as op:
         out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
         _hide_internal_objects(out)
+        _classify_failure_message(out, str(endpoint.format or endpoint.kind or ""))
+        if role == "source" and out.get("connected") and out.get("table_exists") is False:
+            # The page titles a missing source object by this code, not by its text.
+            out.setdefault("error_code", "object.table_not_found")
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),
@@ -379,6 +390,40 @@ def introspect_endpoint(
         else:
             op.failed(category="not_connected")
         return out
+
+
+def _classify_failure_message(out: dict, fmt: str) -> None:
+    """A failed introspect speaks the shared taxonomy, never raw driver text (ERR-10).
+
+    Studio, the Query schema browser and Pilot show ``message``/``error`` as-is,
+    so a driver reply is classified here once. Datawrap's own wording (an
+    ``OperatorCopy`` or text the taxonomy does not recognise) is left alone.
+    """
+    if not isinstance(out, dict):
+        return
+    from services.error_taxonomy import PRODUCT_COPY_CODES, OperatorCopy, classify
+
+    from .connector_registry import _DRIVER_DUMP, humanize_connection_error
+
+    for key in ("message", "error"):
+        text = out.get(key)
+        if not isinstance(text, str) or not text or isinstance(text, OperatorCopy):
+            continue
+        if out.get("connected") and key == "message" and not _DRIVER_DUMP.search(text):
+            continue
+        classified = classify(text, side="connection", phase="introspect", engine=fmt, fallback=False)
+        if classified is not None and classified.code in PRODUCT_COPY_CODES:
+            out.setdefault("error_code", classified.code)
+            continue
+        if classified is not None:
+            out[key] = OperatorCopy(classified.text)
+            out.setdefault("error_code", classified.code)
+            if not out.get("connected"):
+                from services.error_taxonomy import new_reference
+
+                out.setdefault("reference", new_reference())  # ERR-40
+        elif _DRIVER_DUMP.search(text):
+            out[key] = humanize_connection_error(fmt, text, side="connection", phase="introspect")
 
 
 def _hide_internal_objects(out: dict) -> None:
@@ -480,12 +525,14 @@ def _introspect_endpoint_impl(
             schema=cfg.get("schema", "public"),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            name_filter=_object_name_filter(endpoint),
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(
             probe.tables, "table", getattr(probe, "table_types", None)
         )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
+        out["objects_total"] = getattr(probe, "tables_total", None)
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -566,6 +613,12 @@ def _introspect_endpoint_impl(
                 out["table_exists"] = True
                 out["message"] = f"MongoDB connected — reading `{listed}` in `{db_name}`"
                 _attach_db_sample(out, endpoint)
+                if str((endpoint.extra or {}).get("introspect_purpose") or "").lower() == "destination":
+                    # The Map picker lists nested fields (address.city) with
+                    # their stored BSON types, not only top-level names.
+                    from services.mongo_nested_fields import collection_field_types
+
+                    out["field_paths"] = collection_field_types(db[listed])
             else:
                 colls = db.list_collection_names()
                 out["connected"] = True
@@ -623,12 +676,14 @@ def _introspect_endpoint_impl(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            name_filter=_object_name_filter(endpoint),
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(
             probe.tables, "table", getattr(probe, "table_types", None)
         )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
+        out["objects_total"] = getattr(probe, "tables_total", None)
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -909,7 +964,9 @@ def _introspect_endpoint_impl(
                 if not probe.ok and probe.error:
                     out["message"] = probe.error
             except Exception as exc:
-                out["message"] = f"SQLite object list failed: {exc}"
+                from .connector_registry import humanize_connection_error
+
+                out["message"] = humanize_connection_error("sqlite", exc, phase="introspect")
             return out
         # No table typed — list the catalog. _attach_db_sample returns immediately
         # without a table name, which left SQL Server (and the other engines on
@@ -1050,7 +1107,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 cursor = coll.find().max_time_ms(5000).limit(sample_limit)
                 records = list(cursor)
             except PyMongoError as exc:
-                out["message"] = f"Collection sample failed: {exc}"
+                from .connector_registry import humanize_connection_error
+
+                out["message"] = humanize_connection_error("mongodb", exc, phase="introspect")
                 return
             # Read the BSON carriers before the docs are stringified/expanded —
             # once ``10.01`` is text the stored ``double`` is unrecoverable.

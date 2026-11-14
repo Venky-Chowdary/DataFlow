@@ -335,6 +335,18 @@ def _mysql_create_sql(
     mysql_ddls: list[str],
     primary_key: list[str],
 ) -> str:
+    # DATA-17: every MySQL fast path (PG, MySQL, Mongo, S3, ...) creates its
+    # table here. A CREATE MySQL would refuse (1117/1118) goes to the row
+    # writer, which refuses it in plain words before any DDL runs.
+    from services.mysql_row_limits import mysql_create_limit_refusal
+
+    if mysql_create_limit_refusal(
+        [target for _source, target in pairs], mysql_ddls, key_cols=primary_key, table=table
+    ):
+        raise FastPathUnavailable(
+            "MySQL would refuse this CREATE TABLE (row size or column count); "
+            "the row writer refuses it before any DDL"
+        )
     create = plan_fast_path_create(
         dest_dialect="mysql", pairs=pairs, ddls=mysql_ddls, primary_key=primary_key,
         dest_table=table,

@@ -103,6 +103,7 @@ def undo_failed_batch_if_dest_was_empty(
     destination: Any,
     dest_summary: dict[str, Any],
     sync_mode: str,
+    job_id: str = "",
 ) -> str:
     """Clear a partial batch or record why it was kept. Never raises.
 
@@ -122,6 +123,11 @@ def undo_failed_batch_if_dest_was_empty(
                 decision = "restored"
             else:
                 decision = "retained"
+        if decision == "retained":
+            note = _account_retained_append(
+                destination, dest_summary, sync_mode, note,
+                job_id=str(job_id or dest_summary.get("job_id") or ""),
+            )
         dest_summary["partial_batch_undo"] = decision
         wm_note = restore_route_watermark_after_undo(dest_summary)
         if wm_note:
@@ -243,6 +249,85 @@ def keep_failed_validation_for_inspection(
     return note
 
 
+#: Stamped on the summary of a failed run whose rows stayed: the measured
+#: number of rows it committed (destination COUNT(*) now minus before).
+ROWS_COMMITTED_KEY = "rows_committed_before_failure"
+
+
+def _account_retained_append(
+    destination: Any, dest_summary: dict[str, Any], sync_mode: str, note: str,
+    *, job_id: str = "",
+) -> str:
+    """State what a failed append left in an occupied table, and remember it.
+
+    The writer's own tallies are per batch (the failing batch's partial count,
+    the batches before it), so a failure named three different row counts and
+    none was the table's. The destination is re-counted here: now minus before
+    is what this run committed. A full-refresh append re-reads the whole
+    source on its next run, so those rows would land twice; the continuity
+    ledger is told, and refuses that next append until it is settled.
+    """
+    mode = normalize_sync_mode(sync_mode or dest_summary.get("sync_mode"), default="")
+    if getattr(destination, "kind", "") != "database":
+        return note
+    before = dest_summary.get(PRECOUNT_KEY)
+    if not isinstance(before, int):
+        before = (getattr(destination, "extra", None) or {}).get("dest_rows_before")
+    if not isinstance(before, int):
+        existed = dest_summary.get("dest_table_existed_before")
+        if existed is None:
+            existed = (getattr(destination, "extra", None) or {}).get("dest_table_existed_before")
+        # REL-2: a table this run created held nothing before it; a run whose
+        # undo could not remove its rows (a full disk) is counted too.
+        before = 0 if existed is False else None
+    appending_to_rows = mode == "full_refresh_append" and isinstance(before, int) and before > 0
+    if not isinstance(before, int) or (before > 0 and not appending_to_rows):
+        return note
+    if before == 0 and (dest_summary.get("partial_batch_removed") or "resume_rows_before" in dest_summary):
+        return note
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+
+    try:
+        cfg = resolve_connector_config(destination)
+        db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
+        table = str(
+            dest_summary.get("table") or resolve_dest_table(db_type, destination, "dt_import") or ""
+        ).strip()
+        now = precount_table(db_type, cfg, table) if table else None
+    except Exception:  # noqa: BLE001 - an unmeasured count keeps the note as it was
+        if not appending_to_rows:
+            return note
+        raise
+    if not isinstance(now, int) or now < before:
+        return note
+    committed = now - before
+    dest_summary[ROWS_COMMITTED_KEY] = committed
+    if committed == 0:
+        return f"{note} No row of this run is in the table: it still holds {before:,} row(s)."
+    recorded = False
+    if appending_to_rows:
+        from services.append_continuity import record_unfinished_append
+
+        recorded = record_unfinished_append(
+            destination,
+            job_id=job_id,
+            rows_before=before,
+            rows_committed=committed,
+        )
+    out = (
+        f"This run committed {committed:,} row(s) to '{table}' before it failed "
+        f"(the table held {before:,} row(s) before and holds {now:,} now). They "
+        "were left in place — deleting by a partial key list would not be a "
+        "rollback."
+    )
+    if recorded:
+        out += (
+            " The next append to this table is refused until that is settled, "
+            "so those rows are not written a second time."
+        )
+    return out
+
+
 def _decide(
     destination: Any,
     dest_summary: dict[str, Any],
@@ -303,6 +388,13 @@ def _decide(
             "retained",
             "Pre-write destination count was not measured, so the failed batch "
             "was left in place.",
+        )
+    if before != 0 and dest_summary.get("all_rows_held_out"):
+        # Every row was quarantined: no row of this run reached the table.
+        return (
+            "retained",
+            f"No row of this run was written; the destination still holds the "
+            f"{before} row(s) it held before.",
         )
     if before != 0:
         if store and _mode_merges_append(mode):

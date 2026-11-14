@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.error_taxonomy import failure_side
 import logging
 import re
 import sys
@@ -18,16 +19,12 @@ if str(_API_ROOT) not in sys.path:
 
 try:
     from services.file_parser import FileParser
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.file_parser import FileParser
 
 try:
     from services.mongodb_service import get_mongodb_service
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
@@ -234,7 +231,7 @@ def parse_file_content(
     schema = (
         dict(writer_schema)
         if writer_schema
-        else FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+        else FileParser.infer_schema(result.data, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
     )
     from services.value_serializer import payload_record_wire
 
@@ -287,7 +284,7 @@ def parse_file_route_sample(
         dict(writer_schema)
         if writer_schema
         else (
-            FileParser.infer_schema(sample, invalid_calendar_votes=True)
+            FileParser.infer_schema(sample, invalid_calendar_votes=True, json_kinds=FileParser.is_json_result(result))
             if sample
             else {c: "string" for c in result.columns}
         )
@@ -486,7 +483,9 @@ def resolve_connector_config(
 
     cfg["role"] = engine_login_role(endpoint.auth_role)
     cfg["auth_role"] = cfg["role"]
-    cfg.update(endpoint.extra)
+    from services.endpoint_extra_guard import engine_extra  # ``extra`` never picks the engine
+
+    cfg.update(engine_extra(endpoint, workspace_id))
     connector_id = endpoint.connector_id or _find_implicit_connector_id(
         endpoint, cfg, fmt, workspace_id=workspace_id
     )
@@ -872,6 +871,7 @@ def _pack_source_read(
     return records, headers, schema
 
 
+@failure_side("source", "read")
 def read_source_database(
     endpoint: EndpointConfig,
     *,
@@ -1449,6 +1449,7 @@ def read_source_database(
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
+@failure_side("destination", "write")
 def write_destination_database(
     endpoint: EndpointConfig,
     records: list[dict],
@@ -1464,6 +1465,9 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
+    from services.duplicate_policy import enforce_dedupe_skip_endpoint
+
+    enforce_dedupe_skip_endpoint(endpoint, str(options.get("duplicate_policy") or ""))
     from connectors.writer_common import active_quarantine_mappings
     from services.dest_precount import PRECOUNT_KEY, precount_destination
     from services.dialect_profiles import schema_from_cfg
@@ -1505,6 +1509,7 @@ def write_destination_database(
     collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
     release_records = bool(options.pop("release_records", False))
     retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    refuse_all_held = bool(options.pop("refuse_all_quarantined", False))
     options.pop("source_spool", None)
     db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
     census_payload = None
@@ -1614,6 +1619,10 @@ def write_destination_database(
             spill.close()
     elif spill is not None:
         spill.close()
+    if refuse_all_held:
+        from .engine_destination import refuse_all_quarantined_write
+
+        refuse_all_quarantined_write(rows_written, summary)
     return rows_written, ddl_log, summary
 
 
@@ -1829,10 +1838,9 @@ def _write_destination_database(
         "email",
         "smtp",
     }:
-        dest_extra = dict(cfg.get("extra") or {})
-        if cfg.get("file_format") and not dest_extra.get("file_format"):
-            dest_extra["file_format"] = cfg["file_format"]
-        common["dest_extra"] = dest_extra
+        from .connector_dispatch import file_writer_dest_extra
+
+        common["dest_extra"] = file_writer_dest_extra(cfg, endpoint)  # review H2: saved + inline extra
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
 
@@ -2079,7 +2087,7 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"DYNAMODB ATTR {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns)
         if not result.ok:
             raise_writer_failure(result, "DynamoDB write failed")
         ddl_log.insert(0, f"BATCH WRITE DynamoDB table {result.table_name}")

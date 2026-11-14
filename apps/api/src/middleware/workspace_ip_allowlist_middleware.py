@@ -10,6 +10,7 @@ admission is audited.
 
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -49,7 +50,8 @@ class WorkspaceIpAllowlistMiddleware(BaseHTTPMiddleware):
 
         if not auth_required():
             return await call_next(request)
-        refusal = policy.evaluate(request)
+        # Reads tenant settings from the shared control-plane store: off the loop.
+        refusal = await run_in_threadpool(policy.evaluate, request)
         if refusal is None:
             return await call_next(request)
 

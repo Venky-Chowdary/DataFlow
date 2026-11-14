@@ -1,5 +1,32 @@
-import { useEffect, useMemo, useState } from "react";
-import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useShellLayoutClass } from "../../lib/useShellLayoutClass";
+import { ColumnReviewPanel, type ColumnRemapControls } from "../../components/ColumnReviewPanel";
+import { AutoMapDialog } from "../../components/mapping/AutoMapDialog";
+import { ComputedColumnDialog } from "../../components/mapping/ComputedColumnDialog";
+import { TemplatesDialog } from "../../components/mapping/TemplatesDialog";
+import { HiddenFileInput } from "../../components/ui/HiddenFileInput";
+import { applyImportedMappings, documentRows, templateUnboundNote } from "../../lib/mappingCode";
+import type { ShapeStepWire } from "../../lib/shape";
+import { DestinationColumnsPanel, DND_MIME, type PanelFilter } from "../../components/mapping/DestinationColumnsPanel";
+import { MappingToolbar } from "../../components/mapping/MappingToolbar";
+import { useTouchDrag } from "../../components/mapping/useTouchDrag";
+import {
+  useDestinationCatalog,
+  useMappingStudio,
+  useTypeGrades,
+} from "../../components/mapping/useMappingStudio";
+import { mapTargetIssues, normalizeColumnName } from "../../lib/destColumnCatalog";
+import { liveCarrierIsDoomedOnThisRun } from "../../lib/destSchemaRecreate";
+import { isIntentionalOmit, type EditableMapping as MapRow } from "../../lib/mapping";
+import {
+  applyMappingTemplate,
+  createMappingTemplate,
+  exportMappingDocument,
+  fetchAutoMap,
+  importMappingDocument,
+  recordMappingMemory,
+  type AutoMapSuggestion,
+} from "../../lib/mappingStudioApi";
 import {
   MappingProofDrawer,
   mergeMappingProof,
@@ -7,17 +34,17 @@ import {
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
-import { ProgressRing } from "../../components/ui/ProgressRing";
+import type { JobsMenuItem } from "../../components/jobs/JobsMenu";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
-import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
+import { mapRowState, mapStepCounts } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
 import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
-import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
+import { MapIssueList, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -89,6 +116,27 @@ interface TransferMapStepProps {
   onAcceptRuleDirect?: (index: number) => void;
   /** Review already owns the action bar. */
   hideFooter?: boolean;
+  /**
+   * The destination endpoint Studio probes (same body as /transfer/introspect).
+   * With it, Map reads the destination's column catalog for the picker/panel.
+   */
+  destEndpoint?: Record<string, unknown> | null;
+  /** Identity of ``destEndpoint`` (connector/host/db/schema/table). */
+  destProbeKey?: string;
+  /** Destination column types Studio already read (picker fallback). */
+  destSchemaTypes?: Record<string, string>;
+  schemaPolicy?: string;
+  /** Raw sync mode id (G14 is moot when an overwrite recreates the table). */
+  syncMode?: string;
+  /** Source table/collection name — auto-map reads ``<entity>_id`` against it. */
+  sourceObjectName?: string;
+  /** The Transform recipe: its column-producing steps travel with exports/templates. */
+  transformSteps?: ShapeStepWire[];
+  /**
+   * Add computed-column steps to Transform (the one expression engine) and
+   * take the operator there to preview them. Absent, computed columns are off.
+   */
+  onAddComputedSteps?: (steps: ShapeStepWire[]) => void;
 }
 
 
@@ -111,7 +159,7 @@ export function TransferMapStep({
   sourceType: _sourceType,
   destRouteLabel,
   destRouteSubtitle: _destRouteSubtitle,
-  mappingReviewCount,
+  mappingReviewCount: _mappingReviewCount,
   confidenceThreshold,
   rowCount,
   sampleRows,
@@ -147,18 +195,275 @@ export function TransferMapStep({
   ruleReport = null,
   onAcceptRuleDirect,
   hideFooter = false,
+  destEndpoint = null,
+  destProbeKey = "",
+  destSchemaTypes,
+  schemaPolicy = "",
+  syncMode = "",
+  sourceObjectName = "",
+  transformSteps = [],
+  onAddComputedSteps,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ColumnFilter>("review");
+  const [filter, setFilter] = useState<ColumnFilter>("attention");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
-  // Collapsed by default: the headline plus one primary control is the whole
-  // decision. Ten expanded reasons buried the mapping grid below the fold.
-  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
+
+  // ---- Remapping onto the destination's own columns -------------------------
+  const remapEnabled = destKindMode === "database";
+  const panelId = useId();
+  const gripHelpId = useId();
+  // Beside the grid on a wide desktop; below 1440 px it would squeeze the grid
+  // (UX-23), so it starts closed there and opens on demand (or when a drag starts).
+  const [panelOpen, setPanelOpen] = useState(
+    () => typeof window === "undefined" || typeof window.matchMedia !== "function"
+      || window.matchMedia("(min-width: 1440px)").matches,
+  );
+  const emptyTypes = useMemo(() => ({}), []);
+  const catalogState = useDestinationCatalog({
+    endpoint: destEndpoint,
+    probeKey: destProbeKey,
+    schemaPolicy,
+    names: destColumns,
+    schema: destSchemaTypes ?? emptyTypes,
+    tableExists: destTableExists,
+    destType,
+    enabled: remapEnabled && Boolean(destEndpoint),
+  });
+  const catalog = remapEnabled ? catalogState.catalog : null;
+  // Once the operator edits, the rows they are working on must not jump out
+  // of view because the issues-first filter re-evaluated behind them.
+  const operatorEdited = useRef(false);
+  const onOperatorEdit = useCallback(
+    (next: MapRow[]) => {
+      operatorEdited.current = true;
+      onChangeMappings(next);
+    },
+    [onChangeMappings],
+  );
+  const [visibleTargets, setVisibleTargets] = useState<string[] | null>(null);
+  // The issue banner's Show: open the panel on the columns that block Validate.
+  const [panelFilterRequest, setPanelFilterRequest] = useState<{ filter: PanelFilter; seq: number } | null>(null);
+  const studio = useMappingStudio({
+    mappings: columnMappings,
+    onChange: onOperatorEdit,
+    catalog,
+    visibleTargets: panelOpen ? visibleTargets : null,
+  });
+  const grades = useTypeGrades(remapEnabled ? columnMappings : [], destType, destTableExists);
+  const tableRecreated = liveCarrierIsDoomedOnThisRun({ syncMode, destDbType: destType, destTableExists });
+  const targetIssues = useMemo(
+    () => (remapEnabled ? mapTargetIssues(studio.summary, columnMappings, { tableRecreated }) : []),
+    [remapEnabled, studio.summary, columnMappings, tableRecreated],
+  );
+  const openSources = columnMappings.filter((m) => !isIntentionalOmit(m) && !m.target.trim()).length;
+
+  const [autoMap, setAutoMap] = useState<{
+    open: boolean;
+    mode: "all" | "remaining" | "template";
+    loading: boolean;
+    error: string;
+    suggestions: AutoMapSuggestion[];
+    templateName?: string;
+    notes?: string[];
+  }>({ open: false, mode: "all", loading: false, error: "", suggestions: [] });
+  const [computedOpen, setComputedOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [codeStatus, setCodeStatus] = useState("");
+  const [pendingComputed, setPendingComputed] = useState<ShapeStepWire[]>([]);
+  const importId = useId();
+  const computedSteps = useMemo(
+    () => transformSteps.filter((s) => ["derive_column", "constant_column", "concat_columns", "run_timestamp"].includes(s.op)),
+    [transformSteps],
+  );
+  const documentBody = () => ({
+    mappings: documentRows(columnMappings),
+    computed: computedSteps.map((s) => ({ op: s.op, options: s.options ?? {} })),
+    name: [sourceObjectName, targetCollection].filter(Boolean).join(" → "),
+    source: { table: sourceObjectName },
+    destination: { table: targetCollection, type: destType },
+  });
+
+  const exportAs = async (format: "yaml" | "json") => {
+    try {
+      const { text, filename } = await exportMappingDocument(documentBody(), format);
+      const url = typeof URL.createObjectURL === "function"
+        ? URL.createObjectURL(new Blob([text], { type: format === "yaml" ? "application/yaml" : "application/json" }))
+        : "";
+      if (url) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      setCodeStatus(`Exported ${filename} (${columnMappings.length} mappings, checksum included).`);
+    } catch (e) {
+      setCodeStatus(e instanceof Error ? e.message : "Export failed");
+    }
+  };
+
+  const importFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const doc = await importMappingDocument(await file.text());
+      const out = applyImportedMappings(columnMappings, doc.mappings, catalog);
+      studio.change(out.rows);
+      setPendingComputed(doc.computed);
+      const parts = [
+        `Imported ${out.applied} mapping${out.applied === 1 ? "" : "s"} from ${file.name}`,
+        doc.checksum_verified ? "unchanged since export" : "no checksum: treated as hand-edited",
+        out.unmatched.length ? `not in this source: ${out.unmatched.join(", ")}` : "",
+        doc.computed.length ? `${doc.computed.length} computed column(s) to add to Transform` : "",
+      ].filter(Boolean);
+      setCodeStatus(`${parts.join(" · ")}. Undo reverts the import.`);
+      studio.announce(parts[0]);
+    } catch (e) {
+      setCodeStatus(e instanceof Error ? e.message : "Import failed");
+    }
+  };
+
+  const applyTemplate = async (t: { id: string; name: string }) => {
+    setTemplatesOpen(false);
+    setAutoMap({ open: true, mode: "template", templateName: t.name, loading: true, error: "", suggestions: [] });
+    try {
+      const out = await applyMappingTemplate(
+        t.id,
+        columnMappings.filter((m) => !isIntentionalOmit(m)).map((m) => m.source),
+        (catalog?.columns ?? []).map((c) => c.name),
+        (catalog?.columns ?? []).filter((c) => c.writable === false).map((c) => c.name),
+      );
+      setPendingComputed(out.computed ?? []);
+      setAutoMap({
+        open: true, mode: "template", templateName: t.name, loading: false, error: "",
+        suggestions: out.suggestions,
+        notes: [
+          ...out.unbound.map(templateUnboundNote),
+          ...(out.computed?.length ? [`The template also adds ${out.computed.length} computed column(s): use “Add to Transform” after applying.`] : []),
+        ],
+      });
+    } catch (e) {
+      setAutoMap({ open: true, mode: "template", templateName: t.name, loading: false, error: e instanceof Error ? e.message : "Template failed", suggestions: [] });
+    }
+  };
+
+  const runAutoMap = async (mode: "all" | "remaining") => {
+    setAutoMap({ open: true, mode, loading: true, error: "", suggestions: [] });
+    try {
+      const suggestions = await fetchAutoMap({
+        sourceColumns: columnMappings
+          .filter((m) => !isIntentionalOmit(m))
+          .map((m) => ({ name: m.source, type: m.inferredType })),
+        destinationColumns: (catalog?.columns ?? []).map((c) => ({ name: c.name, type: c.type, writable: c.writable })),
+        mapped: columnMappings
+          .filter((m) => !isIntentionalOmit(m) && m.target)
+          .map((m) => ({ source: m.source, target: m.target })),
+        mode,
+        sourceTable: sourceObjectName,
+        destTable: targetCollection,
+        destType,
+        destination: destEndpoint,
+      });
+      setAutoMap({ open: true, mode, loading: false, error: "", suggestions });
+    } catch (e) {
+      setAutoMap({
+        open: true,
+        mode,
+        loading: false,
+        error: e instanceof Error ? e.message : "Auto-map failed",
+        suggestions: [],
+      });
+    }
+  };
+
+  const currentTargetOf = useCallback(
+    (source: string) => columnMappings.find((m) => m.source === source)?.target ?? "",
+    [columnMappings],
+  );
+
+  const focusSourceRow = (source: string) => {
+    setSearch("");
+    setFilter("all");
+    setFocusSource(source);
+  };
+
+  const touch = useTouchDrag(studio, () => setPanelOpen(true));
+
+  const renderGrip = (m: MapRow) => {
+    const active = studio.dnd.mode === "dragging" && studio.dnd.source === m.source;
+    return (
+      <button
+        type="button"
+        className={`df2-ms-grip${active ? " is-grabbed" : ""}`}
+        draggable
+        {...touch.handlers(m.source)}
+        aria-roledescription="draggable source column"
+        aria-label={`Move ${m.source} to a destination column`}
+        aria-describedby={gripHelpId}
+        aria-pressed={active}
+        onKeyDown={(e) => {
+          if ((e.key === " " || e.key === "Enter") && !active) setPanelOpen(true);
+          studio.onGripKeyDown(m.source, e);
+        }}
+        onBlur={() => {
+          if (active && studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard") {
+            studio.dispatchDnd({ type: "cancel" });
+          }
+        }}
+        onDragStart={(e) => {
+          e.dataTransfer.setData(DND_MIME, m.source);
+          e.dataTransfer.setData("text/plain", m.source);
+          e.dataTransfer.effectAllowed = "link";
+          setPanelOpen(true);
+          studio.dispatchDnd({ type: "pickUp", source: m.source, via: "pointer" });
+        }}
+        onDragEnd={() => {
+          if (studio.dnd.mode === "dragging") studio.dispatchDnd({ type: "cancel" });
+        }}
+      >
+        <span aria-hidden="true" className="df2-ms-grip-dots" />
+      </button>
+    );
+  };
+
+  const remapControls: ColumnRemapControls | undefined = remapEnabled && catalog
+    ? {
+        catalog,
+        claimedBy: studio.claimedBy,
+        conflicts: studio.conflicts,
+        onRemap: studio.remap,
+        gradeFor: grades.gradeFor,
+        gradesPending: grades.pending,
+        renderGrip,
+      }
+    : undefined;
+
+  // Pairs already sent this session: Map → Validate → back → Continue is not
+  // a second confirmation of the same choice.
+  const rememberedRef = useRef<Set<string>>(new Set());
+  const continueWithMemory = () => {
+    // Only renamed pairs the operator chose (picker, drag, applied auto-map)
+    // and approved teach the learned tier; an engine suggestion left as it
+    // was is not evidence.
+    const learned = columnMappings
+      .filter((m) => m.approved && m.operatorTarget && !isIntentionalOmit(m) && m.target)
+      .filter((m) => normalizeColumnName(m.source) !== normalizeColumnName(m.target))
+      .map((m) => ({ source: m.source, target: m.target }))
+      .filter((p) => !rememberedRef.current.has(`${p.source}\u0000${p.target}`));
+    if (remapEnabled && learned.length && destEndpoint) {
+      for (const p of learned) rememberedRef.current.add(`${p.source}\u0000${p.target}`);
+      void recordMappingMemory(learned, destEndpoint).catch(() => {
+        /* Memory is a suggestion source; Validate never depends on it. */
+      });
+    }
+    onContinue();
+  };
 
 
   const handleFilterChange = (next: ColumnFilter) => {
@@ -168,21 +473,12 @@ export function TransferMapStep({
 
   useEffect(() => {
     // Skip while an identity/focus dialog is open so we don't fight setFilter("all").
-    if (userPickedFilter || focusSource) return;
-    const needs = columnMappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
-    setFilter(needs > 0 ? "review" : "all");
+    if (userPickedFilter || focusSource || operatorEdited.current) return;
+    // Same selector as the header, Review and the tabs.
+    setFilter(mapStepCounts(columnMappings).attention > 0 ? "attention" : "all");
   }, [columnMappings, confidenceThreshold, userPickedFilter, focusSource]);
 
-  useEffect(() => {
-    const content = document.querySelector(".df2-content");
-    const inner = document.querySelector(".df2-content-inner");
-    content?.classList.add(MAP_STEP_SCROLL_CLASS);
-    inner?.classList.add(MAP_STEP_SCROLL_CLASS);
-    return () => {
-      content?.classList.remove(MAP_STEP_SCROLL_CLASS);
-      inner?.classList.remove(MAP_STEP_SCROLL_CLASS);
-    };
-  }, []);
+  useShellLayoutClass(MAP_STEP_SCROLL_CLASS, ".df2-page-transfer-studio");
 
   useEffect(() => {
     if (!initialFocusSource) return;
@@ -196,17 +492,8 @@ export function TransferMapStep({
 
   const destDisplayType = destType || (destKindMode === "database" ? "" : "file");
 
-  const filterCounts = useMemo(
-    () => countByFilter(columnMappings, confidenceThreshold),
-    [columnMappings, confidenceThreshold],
-  );
 
-  const approvedCount = filterCounts.ready;
 
-  const health = useMemo(
-    () => mappingHealthSummary(columnMappings, confidenceThreshold),
-    [columnMappings, confidenceThreshold],
-  );
 
   // Same predicate as the Continue gate — the reason shown is the reason enforced.
   const blockerSummary = useMemo(
@@ -231,17 +518,8 @@ export function TransferMapStep({
       : `${syncModeLabel || "sync"}`;
 
   const approvalPendingCount = mapApprovalPendingCount(columnMappings);
-  const canContinueToValidate = mapCanContinueToValidate(columnMappings, confidenceThreshold);
-  const mappingFooterLabel = health.falseFriendCount > 0
-    ? health.headline
-    : mappingReviewCount > 0
-      ? `${mappingReviewCount} need review`
-      : approvalPendingCount > 0
-        ? `${approvalPendingCount} need approval`
-      : `${approvedCount} ready`;
-  const approvedPct = columnMappings.length
-    ? Math.round((approvedCount / columnMappings.length) * 100)
-    : 0;
+  const canContinueToValidate =
+    mapCanContinueToValidate(columnMappings, confidenceThreshold) && targetIssues.length === 0;
   const showPkSuggest = Boolean(
     requiresPrimaryKey
     && !primaryKeyField
@@ -256,14 +534,109 @@ export function TransferMapStep({
     return `${ruleMixSummary(ruleReport)} · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
   }, [ruleReport]);
 
+  // ---- Header status and issue triage ------------------------------------
+  const mappedCount = columnMappings.filter((m) => !isIntentionalOmit(m) && m.target.trim()).length;
+  // One selector behind every count on this step (W6 round 2): the status
+  // line, Review, the segmented filter and Approve all read stepCounts.
+  const stepCounts = mapStepCounts(columnMappings, targetIssues.length);
+  const mapAttention = stepCounts.attention;
+  const statusLine = mapStatusLine(stepCounts);
+  const destTable = targetDatabase && targetCollection ? `${targetDatabase}.${targetCollection}` : targetCollection;
+  const routeSummary = [
+    `${sourceLabel || "Source"} → ${destRouteLabel || "Destination"}`,
+    destTable && !String(destRouteLabel).includes(destTable) ? destTable : "",
+    destTableExists === true
+      ? `existing table${destColumns.length ? ` (${destColumns.length} columns)` : ""}`
+      : destTableExists === false ? "new table" : "",
+    syncModeLabel,
+    streamNames.length > 1 ? `${streamNames.length} streams` : "",
+  ].filter(Boolean).join(" · ");
+
+  // Review: the rows that need a decision; when only destination columns are
+  // open (nothing maps to a NOT NULL column), the panel where they are fixed.
+  const reviewIssues = () => {
+    const first = columnMappings.find((m) => mapRowState(m) === "attention")?.source;
+    if (!first && targetIssues.length > 0 && remapControls) {
+      setPanelOpen(true);
+      return;
+    }
+    setUserPickedFilter(true);
+    setFilter("attention");
+    setSearch("");
+    if (first) setFocusSource(first);
+  };
+  const showRows = (columns: string[]) => {
+    setUserPickedFilter(true);
+    setSearch("");
+    setFilter("attention");
+    if (columns[0]) setFocusSource(columns[0]);
+  };
+  const showTargetIssues = () => {
+    const filter: PanelFilter = targetIssues.some((t) => t.code === "required_unmapped")
+      ? "required"
+      : targetIssues.some((t) => t.code === "target_conflict") ? "conflicts" : "all";
+    setPanelOpen(true);
+    setPanelFilterRequest((prev) => ({ filter, seq: (prev?.seq ?? 0) + 1 }));
+  };
+  const mapIssues: MapIssue[] = [
+    ...targetIssues.map((t, i) => ({
+      id: `target:${t.code}:${i}`,
+      tone: "block" as const,
+      title: t.title,
+      detail: t.action,
+      subjects: t.columns,
+      action: remapControls && !panelOpen
+        ? { label: "Open panel", onClick: () => setPanelOpen(true) }
+        : undefined,
+    })),
+    // Rows that only wait for Approve are the Approve button's job, not an issue.
+    ...blockerSummary.groups.filter((g) => g.code !== "approval_required").map((g) => ({
+      id: `rows:${g.code}`,
+      tone: (g.clearableFromMap ? "warn" : "block") as MapIssue["tone"],
+      title: g.title,
+      detail: g.action,
+      subjects: g.columns,
+      action: g.code === "dest_schema_unloaded" && onReloadDestSchema
+        ? { label: "Reload schema", onClick: () => void onReloadDestSchema(), disabled: destSchemaLoading }
+        : { label: g.columns.length > 1 ? `Review ${g.columns.length} rows` : "Review row", onClick: () => showRows(g.columns) },
+    })),
+  ];
+  const issueSummary = [
+    targetIssues.length
+      ? `${targetIssues.length} destination column issue${targetIssues.length === 1 ? "" : "s"} block Validate`
+      : "",
+    stepCounts.attention
+      ? `${stepCounts.attention} column${stepCounts.attention === 1 ? " needs" : "s need"} your review`
+      : "",
+  ].filter(Boolean).join(" · ");
+
+  const moreItems: JobsMenuItem[] = [
+    ...(onAddComputedSteps
+      ? [{ id: "computed", label: "Computed column…", onSelect: () => setComputedOpen(true), section: "Build" }]
+      : []),
+    { id: "templates", label: "Templates…", onSelect: () => setTemplatesOpen(true), section: "Build" },
+    { id: "export-yaml", label: "Export YAML", onSelect: () => void exportAs("yaml"), section: "Mapping as code" },
+    { id: "export-json", label: "Export JSON", onSelect: () => void exportAs("json"), section: "Mapping as code" },
+    {
+      id: "import",
+      label: "Import…",
+      onSelect: () => document.getElementById(importId)?.click(),
+      section: "Mapping as code",
+    },
+    { id: "proof", label: "How this map was built", onSelect: () => setProofOpen(true), section: "View" },
+    { id: "expand", label: "Open full table", onSelect: () => setMapDialogOpen(true), section: "View" },
+  ];
+
   const continueToValidate = (
     <button
       type="button"
       className="df2-btn df2-btn-primary"
-      onClick={onContinue}
+      onClick={continueWithMemory}
       disabled={!canContinueToValidate}
       title={
-        blockerSummary.blockers.length > 0
+        targetIssues.length > 0
+          ? `${targetIssues.length} destination column issue(s)\n${targetIssues.slice(0, 4).map((t) => t.title).join("\n")}`
+          : blockerSummary.blockers.length > 0
           ? `${blockerSummary.headline}\n${blockerSummary.detail}`
           : approvalPendingCount > 0
             ? `${approvalPendingCount} column(s) need Approve before Validate.`
@@ -283,18 +656,15 @@ export function TransferMapStep({
           </button>
         </div>
       )}
-      <div
-        className="df2-card-head df2-map-step-head"
-        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : approvalPendingCount > 0 ? ` · ${approvalPendingCount} need approval` : ""}`}
-      >
+      <div className="df2-card-head df2-map-step-head">
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
-          <p className="df2-card-sub">
-            Align source fields to destination types
-            {destDisplayType ? ` · ${destDisplayType}` : ""}
-            {llmUsed ? " · semantic engine" : ""}
-            {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
-            {targetDatabase && targetCollection ? ` · ${targetDatabase}.${targetCollection}` : ""}
+          <p className="df2-map-route" title={routeSummary}>{routeSummary}</p>
+          <p
+            className={`df2-map-status${mapAttention > 0 || stepCounts.destinationIssues > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
+            data-testid="map-status-line"
+          >
+            {statusLine}
           </p>
         </div>
         <div className="df2-map-step-head-actions">
@@ -303,24 +673,35 @@ export function TransferMapStep({
               CDC
             </span>
           )}
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            onClick={() => setProofOpen(true)}
-            title="Inspect how this map works — confidence evidence, transforms, fidelity risks"
-          >
-            <DtIcon name="sparkle" size={14} />
-            <span className="df2-map-btn-label">Proof</span>
-          </button>
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm df2-btn-ghost"
-            onClick={() => setMapDialogOpen(true)}
-            title="Open full mapping table in a dialog"
-          >
-            <DtIcon name="expand" size={14} />
-            <span className="df2-map-btn-label">Expand</span>
-          </button>
+          <MappingToolbar
+            remapEnabled={Boolean(remapControls)}
+            canUndo={studio.canUndo}
+            canRedo={studio.canRedo}
+            canAutoMap={Boolean(catalog && catalog.columns.length > 0)}
+            panelOpen={panelOpen}
+            panelId={panelId}
+            openSources={openSources}
+            reviewCount={mapAttention}
+            onReview={reviewIssues}
+            onAutoMap={() => void runAutoMap("all")}
+            onMapRemaining={() => void runAutoMap("remaining")}
+            onClearAll={studio.clearAll}
+            onUndo={studio.undo}
+            onRedo={studio.redo}
+            onTogglePanel={() => setPanelOpen((v) => !v)}
+            moreItems={moreItems}
+          />
+          {/* Opened by More → Import…; labelled, and out of the tab order. */}
+          <HiddenFileInput
+            id={importId}
+            tabIndex={-1}
+            accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml"
+            onChange={(e) => {
+              void importFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+          <label htmlFor={importId} className="df2-ms-file-label df2-sr-only">Import a mapping document</label>
         </div>
       </div>
 
@@ -428,42 +809,6 @@ export function TransferMapStep({
             </div>
           </details>
         )}
-        {blockerSummary.blockers.length > 0 && (
-          <div className="df2-map-blocker-bar" role="status">
-            <div className="df2-map-blocker-bar-head">
-              <DtIcon name="alert" size={16} />
-              <strong>{blockerSummary.headline}</strong>
-              {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema && (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={destSchemaLoading}
-                  onClick={() => void onReloadDestSchema()}
-                >
-                  {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
-                </Button>
-              )}
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-ghost"
-                aria-expanded={blockerDetailOpen}
-                onClick={() => setBlockerDetailOpen((v) => !v)}
-              >
-                {blockerDetailOpen ? "Hide detail" : `Why (${blockerSummary.groups.length})`}
-              </button>
-            </div>
-            {blockerDetailOpen && (
-              <ul className="df2-map-blocker-list">
-                {blockerSummary.groups.map((g) => (
-                  <li key={g.code}>
-                    <strong>{g.title}</strong>
-                    <span> — {g.action}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
@@ -488,6 +833,62 @@ export function TransferMapStep({
             </div>
           </div>
         )}
+        {/* Toolbar and split scroll inside the Map body: the classic view is a fixed-height card. */}
+        <div className="df2-ms-scroll">
+        {/* The issue list scrolls with the grid, so a phone keeps rows in view. */}
+        {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema ? (
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={destSchemaLoading}
+                onClick={() => void onReloadDestSchema()}
+              >
+                {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <MapIssueList
+            issues={mapIssues}
+            summary={issueSummary}
+            testId={targetIssues.length > 0 ? "map-target-issues" : "map-issues"}
+            primaryAction={
+              targetIssues.length > 0 && remapControls
+                ? { label: "Show", onClick: showTargetIssues, title: "Show these columns in the destination panel" }
+                : mapAttention > 0
+                  ? { label: "Show", onClick: reviewIssues, title: "Show the rows that need a decision" }
+                  : undefined
+            }
+          />
+        )}
+        {(codeStatus || (pendingComputed.length > 0 && onAddComputedSteps)) && (
+          <p className="df2-ms-code-status" role="status" data-testid="map-code-status">
+            {codeStatus}
+            {pendingComputed.length > 0 && onAddComputedSteps ? (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => {
+                  onAddComputedSteps(pendingComputed);
+                  setPendingComputed([]);
+                }}
+              >
+                Add {pendingComputed.length} computed column{pendingComputed.length === 1 ? "" : "s"} to Transform
+              </button>
+            ) : null}
+          </p>
+        )}
+        {studio.dnd.mode === "dragging" && (studio.dnd.via === "keyboard" || touch.touching) && (
+          <p className="df2-ms-drag-status" aria-hidden="true">
+            Moving <strong>{studio.dnd.source}</strong> → <strong>{studio.dragOver ?? "…"}</strong>.
+            {touch.touching ? "Lift your finger on a destination column to drop it there." : "Arrow keys choose, Enter drops, Escape cancels."}
+          </p>
+        )}
+        <div className={`df2-ms-split${remapControls && panelOpen ? " has-panel" : ""}`}>
         <div className="df2-map-step-workspace is-full-editor">
           <div className="df2-map-editor-pane">
             <div className="df2-map-editor-scroll-host">
@@ -496,7 +897,8 @@ export function TransferMapStep({
                 rowCount={rowCount}
                 sampleRows={sampleRows}
                 confidenceThreshold={confidenceThreshold}
-                onChange={onChangeMappings}
+                onChange={studio.change}
+                remap={remapControls}
                 destinationFields={destColumns}
                 destinationLabel={destRouteLabel}
                 destType={destDisplayType}
@@ -517,22 +919,43 @@ export function TransferMapStep({
             </div>
           </div>
         </div>
+          {remapControls && panelOpen && (
+            <DestinationColumnsPanel
+              id={panelId}
+              tableLabel={targetDatabase && targetCollection ? `${targetDatabase}.${targetCollection}` : targetCollection || destRouteLabel}
+              catalog={catalog}
+              states={studio.states}
+              summary={studio.summary}
+              loading={catalogState.loading || destSchemaLoading}
+              error={catalogState.error}
+              onReload={() => {
+                catalogState.reload();
+                if (onReloadDestSchema) void onReloadDestSchema();
+              }}
+              onUnmap={studio.unmapDestination}
+              onFocusSource={focusSourceRow}
+              dragOver={studio.dragOver}
+              followDrag={studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard"}
+              dragging={studio.dnd.mode === "dragging"}
+              onPointerDrop={studio.pointerDrop}
+              onPointerOver={studio.pointerOver}
+              onVisibleChange={setVisibleTargets}
+              filterRequest={panelFilterRequest}
+            />
+          )}
+        </div>
+        </div>
+        <span id={gripHelpId} className="df2-sr-only">
+          Press Space or Enter to pick up, arrow keys to move over destination columns, Enter to drop, Escape to cancel.
+        </span>
+        <div className="df2-sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="map-live-region">
+          {studio.announcement}
+        </div>
       </div>
 
       {!hideFooter && <div className="df2-card-footer df2-wizard-footer df2-map-footer">
         <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
-          <ProgressRing
-            value={approvedPct}
-            size={36}
-            tone={!canContinueToValidate ? "warn" : "ok"}
-            className="df2-map-footer-ring"
-          >
-            <strong>{approvedPct}</strong>
-          </ProgressRing>
-          <span className={!canContinueToValidate ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
-            <strong>Mapping</strong> {mappingFooterLabel}
-          </span>
           <span
             className={requiresPrimaryKey && !primaryKeyField ? "is-warn" : undefined}
             title={
@@ -677,7 +1100,8 @@ export function TransferMapStep({
           mappings={columnMappings}
           rowCount={rowCount}
           confidenceThreshold={confidenceThreshold}
-          onChange={onChangeMappings}
+          onChange={studio.change}
+          remap={remapControls}
           destinationFields={destColumns}
           destinationLabel={destRouteLabel}
           destType={destDisplayType}
@@ -695,6 +1119,40 @@ export function TransferMapStep({
           onFocusHandled={() => setFocusSource(null)}
         />
       </Dialog>
+
+      <ComputedColumnDialog
+        open={computedOpen}
+        catalog={catalog}
+        sourceColumns={columnMappings.map((m) => m.source)}
+        onClose={() => setComputedOpen(false)}
+        onAdd={(step) => {
+          setComputedOpen(false);
+          onAddComputedSteps?.([step]);
+        }}
+      />
+      <TemplatesDialog
+        open={templatesOpen}
+        onClose={() => setTemplatesOpen(false)}
+        onSave={async (name, description) => {
+          await createMappingTemplate({ ...documentBody(), name, description });
+        }}
+        onApply={(t) => void applyTemplate(t)}
+      />
+      <AutoMapDialog
+        open={autoMap.open}
+        mode={autoMap.mode}
+        templateName={autoMap.templateName}
+        notes={autoMap.notes}
+        loading={autoMap.loading}
+        error={autoMap.error}
+        suggestions={autoMap.suggestions}
+        currentTarget={currentTargetOf}
+        onApply={(picked) => {
+          studio.applySuggestions(picked);
+          setAutoMap((a) => ({ ...a, open: false }));
+        }}
+        onClose={() => setAutoMap((a) => ({ ...a, open: false }))}
+      />
 
       <MappingProofDrawer
         open={proofOpen}

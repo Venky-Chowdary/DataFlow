@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 
@@ -19,7 +20,8 @@ PG_SOURCE = {
     "connection_string": "",
     "ssl": False,
 }
-PGVECTOR_PORT = 5434
+# Compose lab: df-pgvector on 5434; CI: DATAFLOW_TEST_PGVECTOR_PORT=5432.
+PGVECTOR_PORT = int(os.environ.get("DATAFLOW_TEST_PGVECTOR_PORT", "5434"))
 QDRANT_PORT = 6335
 
 
@@ -237,7 +239,7 @@ def _metrics_in(value, name: str) -> list[int]:
             PGVECTOR_PORT,
             marks=pytest.mark.skipif(
                 not _ready(PGVECTOR_PORT),
-                reason="pgvector not reachable on localhost:5434",
+                reason=f"pgvector not reachable on localhost:{PGVECTOR_PORT}",
             ),
         ),
         pytest.param(
@@ -534,7 +536,7 @@ def test_postgres_logical_cdc_to_vector_is_idempotent_and_converges(
             PGVECTOR_PORT,
             marks=pytest.mark.skipif(
                 not _ready(PGVECTOR_PORT),
-                reason="pgvector not reachable on localhost:5434",
+                reason=f"pgvector not reachable on localhost:{PGVECTOR_PORT}",
             ),
         ),
         pytest.param(

@@ -46,6 +46,13 @@ spec:
     name: {{ include "dataflow.fullname" . }}-worker
   minReplicas: {{ .Values.horizontalPodAutoscaler.worker.minReplicas }}
   maxReplicas: {{ .Values.horizontalPodAutoscaler.worker.maxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.horizontalPodAutoscaler.worker.scaleDownStabilizationSeconds }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: {{ .Values.horizontalPodAutoscaler.worker.scaleDownPeriodSeconds }}
   metrics:
     - type: Resource
       resource:

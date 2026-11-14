@@ -294,6 +294,11 @@ def write_mapped_rows(
         fmt = "csv"
     filename = _EMAIL_FILENAMES[fmt]
     try:
+        from services.csv_safety import formula_protection_mode
+
+        # G7: an attachment lands in a person's inbox and opens in a
+        # spreadsheet — a human download, guarded unless the destination opts out.
+        protection = formula_protection_mode(extra.get("formula_protection"), default="prefix")
         mat = materialize_object_store_export(
             key=filename,
             headers=headers,
@@ -307,6 +312,7 @@ def write_mapped_rows(
             dialect_label="Email",
             spill_max_size=resolve_spill_max(extra),
             batch_size=resolve_materialize_batch(extra),
+            formula_protection=protection,
             **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:

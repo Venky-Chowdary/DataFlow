@@ -181,7 +181,8 @@ def test_inactive_slot_warns_without_inventing_seconds():
 
     fields = _cdc_lag_fields(_Fake())
     assert fields["cdc_slot_active"] is False
-    assert fields["cdc_lag_seconds"] == 0.0  # catch-up bytes
+    # 4096 unapplied bytes are inside the jitter band, not zero lag (audit M2).
+    assert fields["cdc_lag_seconds"] is None
     assert fields.get("cdc_freshness_severity") == "warn"
 
 

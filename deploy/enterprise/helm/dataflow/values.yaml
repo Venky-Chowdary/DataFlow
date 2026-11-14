@@ -24,12 +24,24 @@ api:
     limits:
       cpu: "2"
       memory: 2Gi
+  # The port uvicorn binds inside the pod (PORT). The Service port may differ.
+  containerPort: 8000
   service:
     type: ClusterIP
     port: 8000
   health:
     livenessPath: /health
     readinessPath: /health/ready
+  # Time between SIGTERM and SIGKILL. The API stops its background loops in
+  # the lifespan teardown; preStop keeps the pod serving while the load
+  # balancer deregisters it. After SIGTERM uvicorn waits at most
+  # gracefulShutdownSeconds for open connections (job streams end at once)
+  # before the teardown runs. The chart refuses a grace period shorter than
+  # preStopSleepSeconds + gracefulShutdownSeconds + the teardown's 25 s drain
+  # + 5.
+  preStopSleepSeconds: 5
+  gracefulShutdownSeconds: 10
+  terminationGracePeriodSeconds: 45
   nodeSelector:
     workload: api
   tolerations: []
@@ -49,6 +61,10 @@ web:
     limits:
       cpu: "1"
       memory: 512Mi
+  # nginx listens here. Above 1024 so it binds without root; the chart mounts
+  # its own server block (templates/web-configmap.yaml) with this port and the
+  # API Service as upstream.
+  containerPort: 8080
   service:
     type: ClusterIP
     port: 3000
@@ -65,6 +81,12 @@ worker:
     pullPolicy: IfNotPresent
   replicas: 2
   mode: batch
+  # DATAFLOW_WORKER_DRAIN_SECONDS: after SIGTERM the worker claims nothing new
+  # and lets in-flight transfers reach a batch boundary for this long, then
+  # hands them back to the queue. terminationGracePeriodSeconds must exceed it
+  # by at least 10s (the template refuses a smaller value).
+  drainSeconds: 25
+  terminationGracePeriodSeconds: 45
   resources:
     requests:
       cpu: 500m
@@ -84,6 +106,7 @@ worker:
 scheduler:
   enabled: true
   replicas: 1
+  terminationGracePeriodSeconds: 30
   image:
     repository: ghcr.io/venky-chowdary/dataflow-api
     tag: latest
@@ -109,6 +132,8 @@ cdcWorker:
   enabled: true
   replicas: 1
   mode: cdc
+  drainSeconds: 25
+  terminationGracePeriodSeconds: 45
   image:
     repository: ghcr.io/venky-chowdary/dataflow-api
     tag: latest
@@ -143,6 +168,16 @@ data:
     port: 27017
     database: dataflow
     username: dataflow
+    # "documentdb" for Amazon DocumentDB (values-production.yaml sets it): it is
+    # provisioned with TLS on and does not support retryable writes, so the
+    # connection uses tls=true&retryWrites=false. Mount the Amazon RDS CA bundle
+    # (extraVolumes below) and name it in tlsCAFile when the image's trust
+    # store does not carry it. Empty: a self-hosted MongoDB replica set, TLS
+    # as set in `tls` (off by default, as before this setting existed).
+    engine: ""
+    tls: false
+    tlsCAFile: ""
+    replicaSet: rs0
 
 objectStore:
   s3:
@@ -154,6 +189,21 @@ auth:
   enableDocs: "0"
   training: "off"
   seedDemo: "0"
+
+# Where pods read passwords and keys from. Every pod always references one
+# Secret, so a missing value stops the pod with a clear event instead of a
+# literal "$(REDIS_PASSWORD)" in a connection string.
+#   externalSecrets.enabled=true  -> the Secret External Secrets Operator writes
+#   otherwise                     -> secrets.existingSecret (create it yourself),
+#                                    or secrets.create=true to let the chart
+#                                    write one from secrets.stringData.
+# Required keys: REDIS_PASSWORD, POSTGRES_PASSWORD, MONGODB_PASSWORD,
+# DATAFLOW_AUTH_SECRET, DATAFLOW_SECRETS_KEY, DATAFLOW_ADMIN_EMAIL,
+# DATAFLOW_ADMIN_PASSWORD. Optional: the metrics.apiKeySecretKey below.
+secrets:
+  existingSecret: dataflow-secrets
+  create: false
+  stringData: {}
 
 externalSecrets:
   enabled: false
@@ -168,7 +218,7 @@ ingress:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
   tls:
     enabled: true
     certificateArn: ""
@@ -182,6 +232,8 @@ networkPolicy:
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+  # Batch workers: at most this many down at once during a node drain.
+  workerMaxUnavailable: 1
 
 horizontalPodAutoscaler:
   enabled: true
@@ -195,9 +247,60 @@ horizontalPodAutoscaler:
     maxReplicas: 20
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
+    # A worker that goes quiet between batches is not idle: remove at most one
+    # pod per period, and only after the load has stayed low this long.
+    scaleDownStabilizationSeconds: 600
+    scaleDownPeriodSeconds: 120
 
+# Prometheus Operator PodMonitor. /metrics is not public: it needs an API key
+# whose role holds workspace.manage, sent as a bearer token. The
+# deployment-wide series (per-route HTTP traffic, job gauges) are every
+# tenant's, so they are only served to a platform administrator's key (one a
+# platform admin mints outside any workspace); a workspace key gets the
+# process counters only. Store the key in the pods' Secret under
+# metrics.apiKeySecretKey. The job gauges come from one process, the
+# scheduler.
 serviceMonitor:
   enabled: false
+
+metrics:
+  # Workers and the scheduler serve /health and /metrics on this port
+  # (DATAFLOW_METRICS_PORT), behind the same authentication as the API.
+  port: 9464
+  apiKeySecretKey: METRICS_SCRAPE_API_KEY
+
+# Control-plane stores (tenant settings, BYOK keys, resource ACLs, ...) live in
+# the metadata database so every replica agrees. Two stores, transfer_plans
+# and pilot_results, have no shared backend in this build and are files on the
+# data volume. With several API replicas on per-pod volumes (the emptyDir
+# default) a plan saved on one pod is "not found" on the next, so the chart
+# refuses to render that unless you choose one of:
+#   - persistence.data.existingClaim (ReadWriteMany) and
+#     persistence.data.sharedAcrossPods: true: one copy for every pod;
+#   - podLocalStoresAck: "transfer_plans,pilot_results": you accept per-pod
+#     plans and pilot results (multi-step plan flows can break across pods).
+# One API replica with the HPA off needs neither.
+controlPlane:
+  storeBackend: mongo
+  podLocalStoresAck: ""
+
+# The root filesystem is read-only. These are the writable paths the app uses.
+# data: connectors' local state, uploads, vector store, spill files. An
+# emptyDir by default (lost with the pod); set existingClaim to keep it.
+persistence:
+  data:
+    existingClaim: ""
+    # true only when existingClaim is ReadWriteMany and every pod mounts the
+    # same volume (see controlPlane above).
+    sharedAcrossPods: false
+    sizeLimit: 10Gi
+  tmp:
+    sizeLimit: 2Gi
+
+# Extra volumes / mounts for the API, worker and scheduler pods (for example a
+# ConfigMap holding the Amazon RDS CA bundle for DocumentDB TLS).
+extraVolumes: []
+extraVolumeMounts: []
 
 podSecurityContext:
   runAsNonRoot: true

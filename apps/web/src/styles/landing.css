@@ -10324,7 +10324,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cust-industry {
   background: #ecfdf5;
-  color: var(--df-teal-600);
+  color: var(--df-brand-deep); /* AA on the mint chip */
 }
 
 .lp-cust-metric-chip {

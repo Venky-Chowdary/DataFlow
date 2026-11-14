@@ -52,6 +52,7 @@ from services.cdc_catchup import stamp_capture_identity
 from services.ops_events import emit_event
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
+from services.multi_stream_targets import bind_endpoint_to_stream
 from services.tombstone import (
     detect_tombstone_column as _detect_tombstone_column,
     is_tombstone_set as _is_tombstone_set,
@@ -696,6 +697,8 @@ class CdcState:
     quarantine_index: dict[str, dict[tuple[str, ...], set[str]]] = field(default_factory=dict)
     #: Per destination table — keys from orders and users must not mix.
     census_accs: dict[str, Any] = field(default_factory=dict)
+    #: C2 — every batch's parked (unkeyed) deletes, folded for the run.
+    parked_deletes: Any = None
     #: Dest COUNT(*) before the first write to each table this run.
     dest_before: DestBeforeCensus = field(default_factory=DestBeforeCensus)
 
@@ -708,6 +711,15 @@ class CdcState:
             acc = KeyCensusAccumulator()
             self.census_accs[key] = acc
         return acc
+
+
+def _parked_tally(state: CdcState) -> Any:
+    """The run's fold of parked (unkeyed) deletes, created on first use (C2)."""
+    if state.parked_deletes is None:
+        from services.cdc_unkeyed_delete import ParkedDeleteTally
+
+        state.parked_deletes = ParkedDeleteTally()
+    return state.parked_deletes
 
 
 def _applied_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[str, ...]]:
@@ -1367,6 +1379,7 @@ def _gate_cdc_sink(
 def _refuse_cdc_advance_on_abort(
     dest_summary: dict[str, Any] | None,
     validation_mode: str,
+    rows_committed: int = 0,
 ) -> None:
     """Raise when CDC must not advance watermark/ack after abort-class rejects.
 
@@ -1381,17 +1394,30 @@ def _refuse_cdc_advance_on_abort(
     if not isinstance(dest_summary, dict):
         return
     if dest_summary.get("ok") is False:
-        raise ValueError(
-            str(
-                dest_summary.get("error")
-                or "CDC destination write blocked — refuse watermark advance"
-            )
+        abort = str(
+            dest_summary.get("error")
+            or "CDC destination write blocked — refuse watermark advance"
         )
-    abort = reject_on_strict_policy(
-        transform_error_policy_for_validation_mode(validation_mode),
-        dest_summary.get("rejected_details") or [],
-        "CDC",
-    )
+    else:
+        abort = reject_on_strict_policy(
+            transform_error_policy_for_validation_mode(validation_mode),
+            dest_summary.get("rejected_details") or [],
+            "CDC",
+        )
+    if abort and rows_committed > 0:
+        # DATA-4: the batch was applied before this verdict, so "blocks partial
+        # write" with records=0 hid the rows the destination now holds.
+        from .adapters import WriteBatchBlocked
+
+        raise WriteBatchBlocked(
+            abort.replace("strict error policy blocks partial write", "strict error policy stopped the run")
+            + f" This CDC run had already written {int(rows_committed):,} row(s); they stay on "
+            "the destination. The CDC position did not move, so the next run applies these "
+            "changes again once the refused value is fixed.",
+            rejected_details=list(dest_summary.get("rejected_details") or []),
+            rows_written=int(rows_committed),
+            dest_summary=dest_summary,
+        )
     if abort:
         raise ValueError(abort)
 
@@ -1625,6 +1651,137 @@ def _without_open_quarantine(
     return [r for r in rows if _ladder_key(r, key_cols) not in open_keys]
 
 
+def _repairable_image(
+    rows: list[dict[str, Any]], key_cols: list[str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Source rows the image repair may upsert; and how many it may not.
+
+    The repair re-reads the source to find rows the destination lacks. A row
+    whose declared key is NULL is always "missing": the writer held it out
+    (and the run counted it rejected), since no key can address it, so it is
+    left out here (its rejection already stands). The scan's cells arrive
+    marked as reader wire (``cdc_value_digest._as_dicts``), so a NULL in another
+    column stays NULL; marking again is a no-op kept for callers that pass
+    their own rows.
+    """
+    from services.cdc_snapshot_window import _pk_value
+
+    kept: list[dict[str, Any]] = []
+    held = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        # Reader rows by contract: mark first, so a NULL is the reader's NULL
+        # and a literal key (escaped on the wire) stays a key (review F1).
+        marked = {k: _reader_wire_cell(v) for k, v in row.items()}
+        if key_cols and _pk_value(marked, key_cols) is None:
+            held += 1
+            continue
+        kept.append(marked)
+    return kept, held
+
+
+def _apply_source_truncate(
+    dest_type: str, dest_cfg: dict[str, Any], dest_table: str, change: ChangeBatch
+) -> int:
+    """Empty the destination for a source TRUNCATE before the batch's changes (DATA-1)."""
+    if not getattr(change, "truncated", False):
+        return 0
+    from connectors.table_manager import _missing_table_error
+    from services.cdc_truncate_apply import empty_destination_for_source_truncate
+
+    try:
+        return empty_destination_for_source_truncate(
+            dest_type, dest_cfg, dest_table, dest_cfg.get("schema")
+        )
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return 0
+        raise
+
+
+def _stamp_truncate(summary: Any, change: ChangeBatch, rows: int) -> None:
+    if isinstance(summary, dict) and getattr(change, "truncated", False):
+        summary["source_truncated"] = True
+        summary["source_truncate_deleted_rows"] = int(rows)
+
+
+def _refuse_cdc_without_deletes(dest_type: str, destination: Any, dest_cfg: dict[str, Any], table: str) -> None:
+    """Refuse CDC before the snapshot when the destination can't apply deletes (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.cdc_exactly_once import dest_allow_append_only
+
+    if cdc_deletes_supported(dest_type):
+        return
+    if dest_allow_append_only(destination) or _truthy_cfg(
+        dest_cfg, "allow_append_only", "cdc_allow_append_only"
+    ):
+        return
+    from services.data_errors import CdcDeletesUnsupported
+
+    raise CdcDeletesUnsupported(unsupported_cdc_deletes_message(dest_type, table))
+
+
+def _apply_cdc_deletes(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    change: ChangeBatch,
+    pk_target_cols: list[str],
+) -> int:
+    """LSN-guarded deletes; a failure names the keys this batch already applied (CLM-2)."""
+    from services.cdc_destination_support import (
+        cdc_deletes_supported,
+        unsupported_cdc_deletes_message,
+    )
+    from services.data_errors import (
+        CdcBatchPartiallyApplied,
+        CdcDeletesUnsupported,
+        key_list_text,
+    )
+
+    applied = sorted(
+        "|".join(k) for k in _applied_change_keys(
+            ChangeBatch(inserts=change.inserts, updates=change.updates), pk_target_cols
+        )
+    )
+    if not cdc_deletes_supported(dest_type):
+        raise CdcDeletesUnsupported(
+            unsupported_cdc_deletes_message(dest_type, dest_table),
+            details={"applied_keys": applied[:50], "applied_key_count": len(applied)},
+        )
+    try:
+        return delete_by_primary_keys(
+            db_type=dest_type,
+            cfg=dest_cfg,
+            table_name=dest_table,
+            primary_key_column=pk_target_cols,
+            keys=change.deletes,
+            schema=dest_cfg.get("schema"),
+            incoming_lsn=extract_cdc_lsn(change.resume_token),
+            lsn_column=DF_LSN_COL,
+        )
+    except Exception as exc:
+        if not applied:
+            raise
+        raise CdcBatchPartiallyApplied(
+            f"CDC couldn't apply {len(change.deletes)} source delete(s) to {dest_table}: "
+            f"{exc}. This change batch had already written key(s) {key_list_text(applied)}; "
+            "those rows are on the destination at their new values, and the deleted "
+            "rows are still there. The stream position did not move, so the next run "
+            "replays this batch. Fix the cause, then run again.",
+            details={
+                "applied_keys": applied[:50],
+                "applied_key_count": len(applied),
+                "pending_delete_keys": [str(k) for k in change.deletes[:50]],
+                "pending_delete_count": len(change.deletes),
+            },
+        ) from exc
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1679,8 +1836,34 @@ def _apply_change_batch(
             ack_barrier=change.ack_barrier,
             rejected=rejected_details,
             lookup_columns=change.lookup_columns,
+            unkeyed_deletes=list(change.unkeyed_deletes or []),
+            truncated=bool(getattr(change, "truncated", False)),
         )
+    # C2: deletes with no key are recorded (DLQ + audit) before anything moves;
+    # a failed record raises, so the position never passes them. A delete whose
+    # key is NULL joins them (callers that count deletes park it first).
+    from services.cdc_unkeyed_delete import (
+        park_null_key_deletes,
+        park_unkeyed_deletes,
+        stamp_parked,
+    )
 
+    delete_key_cols = list(pk_source_cols or [])
+    if not delete_key_cols and pk_target_col:
+        delete_key_cols = _pk_columns(pk_target_col)
+    park_null_key_deletes(
+        change, delete_key_cols, table=str(stream_name or change.table or "")
+    )
+
+    parked_evidence = park_unkeyed_deletes(
+        change.unkeyed_deletes,
+        job_id=job_id,
+        pipeline_key=cursor_key,
+        dest_table=str(dest_table or ""),
+        connector=str(dest_type or ""),
+    )
+
+    truncated_rows = _apply_source_truncate(dest_type, dest_cfg, dest_table, change)
     inherit_note = ""
     if mappings_inherited:
         mappings, headers, pk_target_col, inherit_note = _align_inherited_batch(
@@ -1727,10 +1910,11 @@ def _apply_change_batch(
         # Gate-8 refused every SQL Server change-tracking run as "no
         # reconcile_sample" although the destination equalled the source (D173).
         _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
-        return rows, checksum, _note_inherited_map(
+        _stamp_truncate(dest_summary, change, truncated_rows)
+        return rows, checksum, stamp_parked(_note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
-        ), deleted
+        ), parked_evidence), deleted + truncated_rows
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -1750,6 +1934,8 @@ def _apply_change_batch(
         from services.row_conservation import census_change_batch, observe_change_batch
 
         if census_acc is not None:
+            if truncated_rows:
+                census_acc.add_source_truncate(truncated_rows)
             observe_change_batch(
                 census_acc,
                 inserts=change.inserts,
@@ -1775,6 +1961,10 @@ def _apply_change_batch(
                 table_name=dest_table,
                 mappings=mappings,
             )
+        if census is not None and truncated_rows and census_acc is None:
+            import dataclasses
+
+            census = dataclasses.replace(census, tombstones=census.tombstones + truncated_rows)
         if census is not None:
             census_payload = census.to_dict()
 
@@ -1856,56 +2046,7 @@ def _apply_change_batch(
     if change.deletes:
         if not pk_target_cols:
             raise ValueError("CDC deletes require a primary key on the destination")
-        deleted = delete_by_primary_keys(
-            db_type=dest_type,
-            cfg=dest_cfg,
-            table_name=dest_table,
-            primary_key_column=pk_target_cols,
-            keys=change.deletes,
-            schema=dest_cfg.get("schema"),
-            incoming_lsn=extract_cdc_lsn(change.resume_token),
-            lsn_column=DF_LSN_COL,
-        )
-        # Fail closed: unsupported destinations used to silently no-op deletes.
-        if deleted == 0 and change.deletes:
-            from connectors.table_manager import UnsupportedCdcDeleteError
-
-            # Re-check: 0 can mean keys already absent (idempotent). Probe support.
-            # Keep in sync with connectors.table_manager.delete_by_primary_keys.
-            supported = (dest_type or "").lower() in {
-                "postgresql",
-                "redshift",
-                "mysql",
-                "sqlite",
-                "generic_sql",
-                "mongodb",
-                "mongo",
-                "sqlserver",
-                "mssql",
-                "oracle",
-                "oracle_db",
-                "oracle_autonomous_warehouse",
-                "snowflake",
-                "bigquery",
-                "duckdb",
-                "databricks",
-                "synapse_analytics",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-                "iceberg",
-                "apache_iceberg",
-                "pgvector",
-                "qdrant",
-                "weaviate",
-                "pinecone",
-            }
-            if not supported:
-                raise UnsupportedCdcDeleteError(
-                    f"CDC deletes are not supported for destination type '{dest_type}'"
-                )
+        deleted = _apply_cdc_deletes(dest_type, dest_cfg, dest_table, change, pk_target_cols)
 
     # Stash a bounded source sample so Gate-8 reconciliation can compare the
     # rows we just wrote against a read-back of the destination.
@@ -1945,7 +2086,8 @@ def _apply_change_batch(
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
     dest_summary["rows_skipped"] = rows_skipped
-    return rows_written, last_checksum, dest_summary, deleted
+    _stamp_truncate(dest_summary, change, truncated_rows)
+    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted + truncated_rows
 
 
 def _stamp_cdc_poll(
@@ -2338,6 +2480,7 @@ def _run_cdc_shared_multi_table(
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, "")
     delivery_guarantee = apply_require_exactly_once(
         delivery_guarantee,
         required=dest_require_exactly_once(destination, dest_cfg),
@@ -2370,11 +2513,21 @@ def _run_cdc_shared_multi_table(
         name = (contract.name or "").strip()
         if not name:
             continue
-        raw = next((c for c in stream_contracts if c.get("name") == name), {}) or {}
+        from services.multi_stream_plan import selected_stream_contract
+
+        # The selected contract only: the one the approval bound (security B1).
+        raw = selected_stream_contract(stream_contracts, name)
         stream_maps = raw.get("mappings")
         declared = isinstance(stream_maps, list) and bool(stream_maps)
         use_maps = stream_maps if declared else mappings
+        # G11: this stream's targets against its own destination object.
+        from services.target_name_legacy import prepare_stream_targets
+
+        use_maps, stream_ack = prepare_stream_targets(
+            destination, use_maps, "cdc", stream_name=name
+        )
         stream_cfg[name] = {
+            "legacy_field_ack": stream_ack,
             "primary_key": _cdc_pk_str(
                 contract.primary_key or primary_keys.get(name), name
             ),
@@ -2618,6 +2771,9 @@ def _run_cdc_shared_multi_table(
 
     total_rows = 0
     cycle_counts = {"upserts": 0, "deletes": 0, "delete_events": 0}
+    from services.cdc_unkeyed_delete import ParkedDeleteTally
+
+    parked_tally = ParkedDeleteTally()
     if progress is not None:
         progress["counts"] = cycle_counts
     stream_health: dict[str, dict[str, Any]] = {
@@ -2713,6 +2869,10 @@ def _run_cdc_shared_multi_table(
         from services.cdc_snapshot_window import _pk_columns
 
         pk_source = _pk_columns(cfg["primary_key"])
+        # A NULL-key delete is parked before the EOS bundle or the counters see it.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source), table=stream)
         if cfg.get("mappings_inherited"):
             use_maps, headers, pk_joined, inherit_note = _align_inherited_batch(
                 use_maps,
@@ -2742,11 +2902,16 @@ def _run_cdc_shared_multi_table(
             if new_here:
                 ddl_log.append(propagation_note(new_here, table=stream, dest_table=stream))
         if original_dest_table is not None or original_dest_collection is not None:
-            if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                destination.collection = stream
-            else:
-                destination.table = stream
+            bind_endpoint_to_stream(
+                destination,
+                stream,
+                table=original_dest_table,
+                collection=original_dest_collection,
+            )
         dest_table = resolve_dest_table(dest_type, destination)
+        from services.target_name_legacy import set_run_ack
+
+        set_run_ack(destination, cfg.get("legacy_field_ack") or [])  # this stream's only
         shared_accum.dest_before.capture(
             destination,
             table_name=str(dest_table or stream or ""),
@@ -2765,7 +2930,13 @@ def _run_cdc_shared_multi_table(
         dest_summary: dict[str, Any] = {}
         if eos_active:
             from services.cdc_exactly_once import EosBundleStream, batch_lsn
+            from services.cdc_unkeyed_delete import park_unkeyed_deletes, stamp_parked
 
+            # C2: the bundle never sees deletes without a key; record them first.
+            parked_tally.add(stamp_parked({}, park_unkeyed_deletes(
+                change.unkeyed_deletes, job_id=str(job_id or ""), pipeline_key=shared_key,
+                dest_table=str(dest_table or stream), connector=str(dest_type or ""),
+            )))
             if change.total_changes:
                 pending_eos_bundle.append(
                     EosBundleStream(
@@ -2839,6 +3010,7 @@ def _run_cdc_shared_multi_table(
         cycle_counts["upserts"] += int(rows_written or 0)
         cycle_counts["deletes"] += int(deleted or 0)
         cycle_counts["delete_events"] += len(change.deletes or [])
+        parked_tally.add(dest_summary)
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
@@ -2863,7 +3035,7 @@ def _run_cdc_shared_multi_table(
                 change=change,
                 key_cols=list(pk_source or []),
             )
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(total_rows or 0))
 
         skip_ack = False
         if change.resume_token is not None:
@@ -3084,6 +3256,7 @@ def _run_cdc_shared_multi_table(
         "quarantine_tombstones": True,
         **lag_fields,
     }
+    parked_tally.stamp(last_summary, cdc_meta=last_summary["cdc"])
     if eos_active:
         last_summary["cdc_delivery"] = "exactly_once"
         last_summary["delivery_semantics"] = "exactly_once_dest_owned_watermark_txn"
@@ -3165,15 +3338,16 @@ def _run_cdc_multi_stream_sequential(
             for contract in selected:
                 stream_name = (contract.name or "").strip() or "stream"
                 # Bind source/dest object to this stream (table/collection name).
-                if getattr(source, "format", "") == "mongodb" or original_collection:
-                    source.collection = stream_name
-                else:
-                    source.table = stream_name
+                bind_endpoint_to_stream(
+                    source, stream_name, table=original_table, collection=original_collection
+                )
                 if original_dest_table is not None or original_dest_collection is not None:
-                    if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                        destination.collection = stream_name
-                    else:
-                        destination.table = stream_name
+                    bind_endpoint_to_stream(
+                        destination,
+                        stream_name,
+                        table=original_dest_table,
+                        collection=original_dest_collection,
+                    )
 
                 single_contracts = [
                     {
@@ -3397,6 +3571,7 @@ def _run_cdc_single_stream(
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
     dest_table = resolve_dest_table(dest_type, destination, table_name)
+    _refuse_cdc_without_deletes(dest_type, destination, dest_cfg, dest_table)
 
     contract = resolve_sync_contract(stream_contracts)
     primary_key = contract.primary_key if contract else ""
@@ -4048,6 +4223,11 @@ def _run_cdc_single_stream(
         # Dual-writer fence: renew lease before sink apply. Zombie after steal
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
+        # A delete whose key is NULL is parked, never a delete by the sentinel
+        # text, and never counted as an applied delete.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source_cols or []), table=str(table_name or ""))
         if not mappings_inherited and (change.inserts or change.updates):
             _adopt_added_columns(change)
 
@@ -4103,6 +4283,7 @@ def _run_cdc_single_stream(
         state.updates += len(change.updates)
         state.deletes += deleted
         state.delete_events += len(change.deletes or [])
+        _parked_tally(state).add(dest_summary)
         state.last_checksum = last_checksum or state.last_checksum
         _record_quarantined_key_deletes(
             state, change, list(pk_source_cols or []), str(job_id or ""), destination
@@ -4128,7 +4309,7 @@ def _run_cdc_single_stream(
         if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
             eos_active = False
 
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(state.rows_written or 0))
 
         # Never overwrite a durable log resume with incremental/side-channel tokens
         # (binlog gaps / wrong PG slots under load). Never ack those tokens either.
@@ -4474,9 +4655,18 @@ def _run_cdc_single_stream(
                     except CdcValueScanIncomplete as exc:
                         logger.warning("CDC key image repair skipped: %s", exc)
                         missing_image = None
-            missing_image = _without_open_quarantine(
-                state, list(missing_image or []), list(pk_source_cols or [])
+            missing_image, null_key_held = _repairable_image(
+                _without_open_quarantine(
+                    state, list(missing_image or []), list(pk_source_cols or [])
+                ),
+                list(pk_source_cols or []),
             )
+            if null_key_held:
+                # Held out by the writer (no key addresses them), not drift.
+                ddl_log.append(
+                    f"CDC image repair left {null_key_held} source row(s) with a NULL "
+                    "key alone: they cannot be written by key and stay held out"
+                )
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
                 if eos_active:
@@ -4632,9 +4822,12 @@ def _run_cdc_single_stream(
                     }
                     still_drifting = []
                     if rescan_complete:
-                        for row in _without_open_quarantine(
-                            state, list(rescanned_image or []), list(pk_source_cols or [])
-                        ):
+                        for row in _repairable_image(
+                            _without_open_quarantine(
+                                state, list(rescanned_image or []), list(pk_source_cols or [])
+                            ),
+                            list(pk_source_cols or []),
+                        )[0]:
                             row_evidence = _build_drift_evidence(
                                 cursor_key=cursor_key,
                                 source_table=str(table_name or ""),
@@ -4762,6 +4955,7 @@ def _run_cdc_single_stream(
         }
         if getattr(state, "image_repair", None):
             summary["cdc"]["image_repair"] = state.image_repair
+        _parked_tally(state).stamp(summary, cdc_meta=summary["cdc"])
         summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
         summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
         summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")

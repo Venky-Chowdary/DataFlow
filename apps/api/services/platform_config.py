@@ -128,15 +128,19 @@ def persistent_storage_warnings() -> list[str]:
     ]
 
 
-def upload_dir() -> Path:
+def upload_dir_path() -> Path:
+    """Where uploads are kept, without creating it (path checks)."""
     vol = _railway_volume_root()
     raw = getenv_brand("UPLOAD_DIR", "").strip()
     if raw:
-        path = Path(raw)
-    elif vol:
-        path = vol / "uploads"
-    else:
-        path = _API_ROOT / "uploads"
+        return Path(raw)
+    if vol:
+        return vol / "uploads"
+    return _API_ROOT / "uploads"
+
+
+def upload_dir() -> Path:
+    path = upload_dir_path()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -170,8 +174,17 @@ def mongodb_uri() -> str:
 
 
 def cors_origins() -> list[str]:
+    """Origins allowed with credentials.
+
+    The localhost development origins are the default only for a local
+    install with sign-in off. With sign-in required (SEC-16) every origin
+    is explicit: ``CORS_ORIGINS``, the web domain, the Railway domain.
+    """
     default = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
-    raw = os.getenv("CORS_ORIGINS", default if not is_railway() else "")
+    require_auth = (getenv_brand("REQUIRE_AUTH", "1" if is_production() else "0") or "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    raw = os.getenv("CORS_ORIGINS", default if not (is_railway() or require_auth) else "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     if is_railway():
         # Exact origins only: the hosted app's own public web origins.
@@ -207,7 +220,9 @@ def cors_origins() -> list[str]:
         if o not in seen:
             seen.add(o)
             unique.append(o)
-    return unique or ["http://localhost:5173"]
+    if unique or is_railway() or require_auth:
+        return unique
+    return ["http://localhost:5173"]
 
 
 def cors_origin_regex() -> str | None:

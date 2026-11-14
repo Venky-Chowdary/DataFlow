@@ -2768,9 +2768,17 @@ def apply_transform(
                 pass
             elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
+            elif transform_l == "decimal" and low in _NONFINITE_TOKENS:
+                pass  # DATA-8: handled below as a value
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
+    if transform == "decimal" and text.lower() in _NONFINITE_TOKENS:
+        # DATA-8: IEEE NaN / ±Infinity are values a double, real or PostgreSQL
+        # numeric holds; a carrier that can't is refused by the writer, never
+        # turned into NULL or a "null sentinel" error.
+        low = text.lower()
+        return Decimal("NaN" if low == "nan" else ("-Infinity" if low.startswith("-") else "Infinity")), None
     if transform == "decimal":
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:

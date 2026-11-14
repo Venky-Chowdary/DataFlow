@@ -30,6 +30,7 @@ from services.parity_classifier import (
     classify_value,
     concurrent_source_update,
 )
+from services.fingerprint_rules import FINGERPRINT_VERSION, stored_fingerprint_version
 from services.parity_evidence import (
     MAX_KEYS_SAMPLE,
     Observation,
@@ -827,6 +828,18 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
             "signed_verdict": sealed_report.get("verdict"),
             "drift_since_signing": (content_sha256(report) != attested) if attested else None,
         }
+        # The pack names the rules it was signed under (absent = version 1).
+        sealed_rules = stored_fingerprint_version(signed.get("pack"))
+        if sealed_rules != FINGERPRINT_VERSION:
+            # Signed under other fingerprint rules: a different reading of the
+            # same stored cells is a rule change, not data that moved. The
+            # sealed pack still verifies as signed; drift is not asserted.
+            drift["drift_since_signing"] = None
+            drift["drift_not_comparable"] = {
+                "reason": "fingerprint_version",
+                "signed_under": sealed_rules,
+                "current": FINGERPRINT_VERSION,
+            }
     else:
         approvals, invalidated = valid_approvals(state, content_sha256(report))
     blocked_reason = None
@@ -914,6 +927,12 @@ def build_parity_report(
         differences += diffs
         tables.append(_table(ev, diffs))
     confidence = _confidence(tables)
+    # DATA-25: a binary column a text-valued store holds as base64 is labelled.
+    from services.binary_text_carrier import representation_notes
+
+    carried = [note for ev in tables_ev for note in representation_notes(ev.source_types, engine)]
+    if carried:
+        confidence["statement"] = f"{confidence['statement']} Representation: {'; '.join(carried)}."
     verdict, reason = _verdict(job, tables, confidence)
     parity = _parity_block(tables)
     report: dict[str, Any] = {
@@ -929,6 +948,7 @@ def build_parity_report(
         "explanation": state.get("explanation"),
         "rounds": list(state.get("rounds") or []),
         "evidence": _evidence_block(job, tables_ev),
+        "_representation_notes": carried,
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),
         "_cache": cache,
