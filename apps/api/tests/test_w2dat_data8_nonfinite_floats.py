@@ -40,3 +40,18 @@ def test_pg_double_and_real_nonfinite_values_copy_exactly(mode):
         assert got == want
     finally:
         live.drop_pg(src, dst)
+
+
+def test_pg_unbounded_numeric_nan_copies():
+    live.need_pg()
+    u = live.uid()
+    src, dst = f"w2dat_d8n_{u}", f"w2dat_d8nd_{u}"
+    try:
+        live.pg(f'CREATE TABLE public."{src}" (id int primary key, n numeric)')
+        live.pg(f"INSERT INTO public.\"{src}\" VALUES (1, 'NaN'), (2, 1.5), (3, -2), (4, NULL)")
+        res = live.run(live.ep_pg(src), live.ep_pg(dst), "full_refresh_overwrite", key="id", cols=["id", "n"])
+        assert res.success, res.error
+        assert live.pg(f'SELECT id, n::text FROM public."{dst}" ORDER BY id') == live.pg(
+            f'SELECT id, n::text FROM public."{src}" ORDER BY id')
+    finally:
+        live.drop_pg(src, dst)
