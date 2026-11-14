@@ -446,7 +446,8 @@
 }
 
 .df2-close-btn:focus-visible {
-  outline: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
   border-color: var(--df-brand);
   box-shadow: 0 0 0 3px var(--df-focus, rgba(15, 118, 110, 0.18));
 }

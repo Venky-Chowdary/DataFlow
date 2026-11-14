@@ -5629,7 +5629,8 @@
 
 .lp-ct5-input:focus-visible,
 .lp-ct5-textarea:focus-visible {
-  outline: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
   border-color: var(--df-teal-500);
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
 }
@@ -6140,7 +6141,8 @@
 
 .lp-ct6-input:focus-visible,
 .lp-ct6-textarea:focus-visible {
-  outline: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
   border-color: var(--df-teal-500);
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
 }

@@ -7499,7 +7499,7 @@ export function TransferPage({
       </header>
 
       <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
-      <main className="df2-transfer-main-panel" key={step}>
+      <section className="df2-transfer-main-panel" key={step} aria-label="Transfer step">
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
@@ -9762,7 +9762,7 @@ export function TransferPage({
           </div>
         </div>
       )}
-      </main>
+      </section>
       </div>
 
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}

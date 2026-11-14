@@ -1543,3 +1543,46 @@ html:has(.df2-app) #root {
 .df2-page-transfer-studio.is-studio-next .react-flow svg {
   z-index: auto !important;
 }
+
+/* ── Accessibility layer (UX-13/UX-14, WCAG 2.4.1 / 2.4.7 / 2.4.11) ── */
+
+/* Skip link: off-screen until it receives keyboard focus. */
+.df2-skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: var(--df-z-toast, 1000);
+  padding: 10px 16px;
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: var(--df-shadow-md, 0 4px 12px rgba(15, 23, 42, 0.16));
+  transform: translateY(-200%);
+}
+
+.df2-skip-link:focus,
+.df2-skip-link:focus-visible {
+  transform: none;
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The content landmark takes focus from the skip link; it is not a control. */
+.df2-app main.df2-content:focus {
+  outline: none;
+}
+
+.df2-app main.df2-content:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: -2px;
+}
+
+/* One visible ring for every keyboard-focusable control that has no ring of
+   its own. Rules that deliberately move the ring to a wrapper (search boxes
+   use :focus-within) keep doing so. */
+.df2-app :is(a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"]), [role="tab"], [role="option"], [role="button"], [role="menuitem"]):focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}

@@ -4051,7 +4051,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-toolbar-search:focus-within {
   border-color: var(--df-brand) !important;
   background: var(--df-surface) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  /* UX-14: a 14% tint was not a visible focus indicator (WCAG 2.4.7/2.4.11). */
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar-search input {
@@ -4195,8 +4197,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-toolbar .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar .df2-btn:focus-visible,
@@ -4716,9 +4718,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   outline-offset: 2px;
 }
 
+/* UX-14: an outline, so the later segmented-control rule that clears
+   box-shadow (".df2-app .df2-filter-tabs .df2-tab") cannot erase the ring. */
 .df2-app .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28);
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* Modals / dialogs — consistent radius + field focus */
@@ -4750,8 +4754,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .dt-modal-actions .df2-btn:focus-visible,
 .dt-modal-actions .df2-btn:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* ═══════════════════════════════════════════════════════════

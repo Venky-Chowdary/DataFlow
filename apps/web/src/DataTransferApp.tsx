@@ -101,6 +101,13 @@ const PLATFORM_NAV = NAV.filter((item) => item.group === "platform");
 const OPS_NAV = NAV.filter((item) => item.group === "ops");
 const SYSTEM_NAV = NAV.filter((item) => item.group === "system");
 const DEVELOPER_NAV = SYSTEM_NAV;
+/** Move focus to the page content (skip link, WCAG 2.4.1). */
+function focusMainContent() {
+  const main = document.getElementById("datawrap-main-content");
+  if (!main) return;
+  main.focus();
+}
+
 function readStoredUser() {
   return readSession()?.email ?? "";
 }
@@ -585,6 +592,18 @@ function AppShell({
         showCopilotEdge ? "df2-app-with-edge" : ""
       } ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}
     >
+      {/* UX-13 (WCAG 2.4.1): the first tab stop skips the chrome. A hash link
+          would be read as a route, so it moves focus itself. */}
+      <a
+        className="df2-skip-link"
+        href="#datawrap-main-content"
+        onClick={(e) => {
+          e.preventDefault();
+          focusMainContent();
+        }}
+      >
+        Skip to main content
+      </a>
       {mobileNavOpen && (
         <div className="df2-overlay" onClick={() => setMobileNavOpen(false)} role="presentation" />
       )}
@@ -797,7 +816,7 @@ function AppShell({
 
         <FirstRunWorkspace />
 
-        <div className={`df2-content ${contentModeClass}`}>
+        <main id="datawrap-main-content" className={`df2-content ${contentModeClass}`} tabIndex={-1} aria-label={currentNav?.label ?? "Workspace"}>
         {bootLoading && (
           <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
             <div className="df2-boot-progress-fill" />
@@ -1005,7 +1024,7 @@ function AppShell({
             </LazyScreen>
           </div>
         </div>
-        </div>
+        </main>
       </div>
 
       {showCopilotRail && (
