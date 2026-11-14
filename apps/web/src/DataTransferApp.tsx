@@ -68,6 +68,24 @@ const SettingsPage = lazyNamed(() => import("./pages/SettingsPage"), "SettingsPa
 const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
 const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
 
+/** Each lazy screen by the screen id that opens it, so its code can be fetched early (UX-43). */
+const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void }>> = {
+  pilot: PilotPage,
+  transfer: TransferPage,
+  connectors: ConnectorsPage,
+  schedules: SchedulesPage,
+  transforms: TransformsPage,
+  "transform-library": TransformLibraryPage,
+  jobs: JobsPage,
+  contracts: ContractsPage,
+  exit: ExitReadinessPage,
+  mcp: McpPage,
+  query: QueryPage,
+  settings: SettingsPage,
+  docs: DocsPage,
+  benchmarks: BenchmarksPage,
+};
+
 function LazyScreen({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Suspense
@@ -1274,6 +1292,12 @@ function DataTransferAppInner() {
         ? metaForLogin()
         : metaForScreen(entryScreen);
   usePageMeta(publicMeta);
+
+  // UX-43: fetch the screen sign-in will open while the form is on screen, not
+  // after the login answers; the content area then paints with the shell.
+  useEffect(() => {
+    if (stage === "login") SCREEN_CHUNKS[entryScreen]?.preload();
+  }, [stage, entryScreen]);
 
   useEffect(() => {
     if (stage === "app") {

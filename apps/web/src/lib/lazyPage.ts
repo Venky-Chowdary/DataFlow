@@ -104,12 +104,31 @@ export function lazyPage<T extends ComponentType<any>>(
   });
 }
 
+/** A lazy screen whose code can be fetched before it first renders (UX-43). */
+export type PreloadableLazy<T extends ComponentType<any>> = LazyExoticComponent<T> & { preload: () => void };
+
 export function lazyNamed<T extends ComponentType<any>, K extends string>(
   importer: () => Promise<Record<K, T>>,
   exportName: K,
-): LazyExoticComponent<T> {
-  return lazyPage(async () => {
-    const mod = await importer();
+): PreloadableLazy<T> {
+  // One import shared by preload() and the first render; a failure is forgotten
+  // so the render (or a later preload) tries again.
+  let pending: Promise<Record<K, T>> | null = null;
+  const load = () => {
+    pending ??= importer().catch((error) => {
+      pending = null;
+      throw error;
+    });
+    return pending;
+  };
+  const Screen = lazyPage(async () => {
+    const mod = await load();
     return { default: mod[exportName] };
-  });
+  }) as PreloadableLazy<T>;
+  Screen.preload = () => {
+    load().catch(() => {
+      /* the render reports it */
+    });
+  };
+  return Screen;
 }
