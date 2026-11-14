@@ -10,6 +10,7 @@ from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
+from services.transfer_plan_store import public_plan_dict
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
 from typing import Any, Optional
@@ -858,7 +859,7 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
             resource=f"plan/{plan.id}",
             details={"name": plan.name, "source_columns": len(plan.source_columns)},
         )
-        return {"plan": plan.public_dict()}
+        return {"plan": public_plan_dict(plan)}
 
     # A plan write can wait on the store lock: off the loop, on the plan-write pool.
     return await run_plan_write(_create)
@@ -871,7 +872,7 @@ async def get_transfer_plan(plan_id: str):
     plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    return {"plan": plan.public_dict()}
+    return {"plan": public_plan_dict(plan)}
 
 
 @router.patch("/plans/{plan_id}")
@@ -880,7 +881,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
 
     try:
         plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
-        return {"plan": plan.public_dict()}
+        return {"plan": public_plan_dict(plan)}
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -954,7 +955,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         plan = await run_plan_write(
             sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
         )
-        return {"plan": plan.public_dict()}
+        return {"plan": public_plan_dict(plan)}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A newer mapping revision exists than the one this edit was based on. "
@@ -1111,7 +1112,7 @@ async def approve_transfer_plan(
 
     try:
         plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
-        return {"plan": plan.public_dict()}
+        return {"plan": public_plan_dict(plan)}
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "A different mapping revision is active than the one Validate checked. Review "
