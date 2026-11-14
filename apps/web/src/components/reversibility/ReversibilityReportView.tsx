@@ -20,6 +20,7 @@ import {
   columnReasonLabel,
   lossyColumnBadge,
   lossyColumnName,
+  pluralizeText,
   columnPillPresentation,
   columnsForReview,
   countsText,
@@ -75,13 +76,13 @@ function ColumnRow({ col }: { col: ColumnInvertibility }) {
         <span className="df2-rev-code">{columnReasonLabel(col)}</span>
       </td>
       <td className="df2-rev-col-why" data-label="Why">
-        <span>{col.reason}</span>
+        <span>{pluralizeText(col.reason)}</span>
         {col.transforms.length > 0 && (
           <span className="df2-parity-muted">
             Transforms: <span className="df2-mono">{col.transforms.join(" → ")}</span>
           </span>
         )}
-        {check && <span className="df2-parity-muted">{check}</span>}
+        {check && <span className="df2-parity-muted">{pluralizeText(check)}</span>}
       </td>
     </tr>
   );
@@ -194,7 +195,7 @@ export function ReversibilityReportView({
       >
         <DtIcon name={gate.tone === "danger" ? "lock" : gate.tone === "ok" ? "check" : "gate"} size={14} />
         <span>
-          <b>Gate G24R · {gate.label}.</b> {gate.detail}
+          <b>Gate G24R · {gate.label}.</b> {pluralizeText(gate.detail)}
         </span>
       </p>
 
@@ -215,7 +216,7 @@ export function ReversibilityReportView({
       )}
 
       <div className="df2-rev-summary">
-        <p className="df2-parity-confidence">{report.verdict_reason}</p>
+        {/* The verdict chip and the tiles say what verdict_reason's counts sentence said (W6 round 2). */}
         <StatTileRow label="Columns by invertibility" className="is-3 df2-rev-counts">
           <StatTile
             label="Lossy"
@@ -227,7 +228,9 @@ export function ReversibilityReportView({
             label="Conditional"
             value={report.counts.conditional.toLocaleString("en-US")}
             tone={report.counts.conditional > 0 ? "warn" : "neutral"}
-            caption="reversible when values fit"
+            caption={(report.counts.enforced ?? 0) > 0
+              ? `${(report.counts.enforced ?? 0).toLocaleString("en-US")} enforced on every row`
+              : "reversible when values fit"}
           />
           <StatTile
             label="Invertible"
@@ -236,7 +239,7 @@ export function ReversibilityReportView({
             caption="round-trip exactly"
           />
         </StatTileRow>
-        <p className="df2-parity-muted">{dataCheckedText(report.data_checked)}</p>
+        <p className="df2-parity-muted">{pluralizeText(dataCheckedText(report.data_checked))}</p>
       </div>
 
       <div className="df2-parity-scroll">
@@ -264,11 +267,11 @@ export function ReversibilityReportView({
                       <span className={badgeClass(v.tone)}>{v.short}</span>
                     </td>
                     <td className="df2-rev-why" data-label="Why">
-                      <span>{table.reason}</span>
+                      <span>{pluralizeText(table.reason)}</span>
                       <span className="df2-parity-muted">{countsText(tableColumnCounts(table))}</span>
                     </td>
                     <td data-label="Rollback">
-                      <span className="df2-rev-rollback" title={table.rollback_note}>{rollbackLabel(table.rollback)}</span>
+                      <span className="df2-rev-rollback" title={pluralizeText(table.rollback_note)}>{rollbackLabel(table.rollback)}</span>
                     </td>
                     <td className="df2-rev-expand">
                       <Button
@@ -287,7 +290,7 @@ export function ReversibilityReportView({
                     <tr className="df2-rev-detail-row">
                       <td colSpan={5} id={panelId}>
                         <TableColumns table={table} />
-                        <p className="df2-parity-muted">{table.rollback_note}</p>
+                        <p className="df2-parity-muted">{pluralizeText(table.rollback_note)}</p>
                       </td>
                     </tr>
                   )}
@@ -316,7 +319,7 @@ export function ReversibilityReportView({
                     <span className={badgeClass("danger")}>{lossyColumnBadge(c, report)}</span>
                     <span className="df2-mono df2-rev-lossy-name">{lossyColumnName(c)}</span>
                   </span>
-                  <span className="df2-rev-lossy-reason">{c.reason}</span>
+                  <span className="df2-rev-lossy-reason">{pluralizeText(c.reason)}</span>
                 </li>
               ))}
             </ul>
@@ -324,7 +327,7 @@ export function ReversibilityReportView({
         </section>
         <section className="df2-parity-card df2-rev-rollback-card" aria-label="Rollback plan">
           <h4 className="df2-parity-h4">Rollback plan for this cutover</h4>
-          <p className="df2-parity-confidence">{report.rollback_note}</p>
+          <p className="df2-parity-confidence">{pluralizeText(report.rollback_note)}</p>
           <p className="df2-parity-muted">
             This is evidence for a runbook: Datawrap does not undo committed rows. Where a table cannot be reversed,
             keep the source as the fallback until sign-off.
