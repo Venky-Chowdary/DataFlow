@@ -1474,13 +1474,14 @@ test.describe("transfer wizard stepper", () => {
           });
           expect(report.steps, where).toBe(6);
           expect(report.lines, where).toBe(report.steps - 1);
-          // Idle classic chrome: the stepper row (54px below 1440, 58px from 1440,
-          // where the full names and the larger marker sit) plus the 8px the empty
-          // toast dock holds as a row of the chrome grid (D-BP-20; the screenshot
-          // baselines are taken with that row). At 1280 and below the route bar
-          // stacks under the stepper (D-BP-23): 86px plus the dock row. Flags-on
-          // chrome is the 44px studio shell and must not grow.
-          expect(report.chrome, where).toBe(canvas ? 44 : width <= 1280 ? 94 : width >= 1440 ? 66 : 62);
+          // Idle classic chrome (W9): the steps own line 1 (32px below 1440,
+          // 36px from 1440, where the full names and the larger marker sit) and
+          // the route is one 20px line under them, at every width from 768. The
+          // card was 62/66px with the route beside the steps and 94px with the
+          // route stacked as a pill at 1280 and below; the budget for the second
+          // line was +8px at 1440. Flags-on chrome is the 44px studio shell and
+          // must not grow.
+          expect(report.chrome, where).toBe(canvas ? 44 : width >= 1440 ? 72 : 68);
           for (const pair of report.pairs) {
             expect(pair.iconHitsLabel, `${where} ${pair.text}`).toBe(false);
             expect(pair.position, `${where} ${pair.text}`).toBe("static");
