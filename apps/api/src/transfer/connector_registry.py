@@ -426,7 +426,7 @@ def humanize_connection_error(
     if _already_operator_copy(raw_s):
         # Datawrap's own copy (e.g. the replica-set member report, D358).
         return raw_s
-    if text.startswith("refused connector host"):
+    if text.startswith("refused connector host") and engine not in _BESPOKE_COPY_DRIVERS:
         # The egress policy's own refusal names the host the user typed; only
         # a name that did not resolve is reworded (ERR-18).
         refused = classify(raw_s, side=side, phase=phase, fallback=False)
@@ -757,6 +757,8 @@ def humanize_connection_error(
     # driver sentence (ERR-7) — never the raw text.
     unknown = classify(raw, side=side, phase=phase, engine=engine or driver)
     assert unknown is not None
+    if unknown.code in PRODUCT_COPY_CODES:
+        return OperatorCopy(" ".join(raw_s.split()))
     return OperatorCopy(unknown.text)
 
 

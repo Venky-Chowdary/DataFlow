@@ -904,7 +904,7 @@ def humanize_transfer_failure(
         classified = classify(
             error, side=side, phase=phase, engine=engine, object=object, fallback=False
         )
-        if classified is not None:
+        if classified is not None and classified.matched_by in {"typed", "structured"}:
             return _taxonomy_failure(classified, raw)
     matched: dict[str, str] | None = None
     for needles, payload in _OPERATOR_FAILURE_RULES:
