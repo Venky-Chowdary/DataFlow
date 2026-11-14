@@ -4387,7 +4387,17 @@ export async function sendWorkspaceInvite(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, role, name }),
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Failed to send invitation"));
+  if (!res.ok) {
+    let code = "";
+    try {
+      code = String((await res.clone().json())?.error?.code ?? "");
+    } catch {
+      /* not JSON */
+    }
+    const err = new Error(await parseApiError(res, "Failed to send invitation")) as Error & { code?: string };
+    err.code = code;
+    throw err;
+  }
   return (await res.json()).invite as WorkspaceInvite;
 }
 

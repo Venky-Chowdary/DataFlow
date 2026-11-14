@@ -237,9 +237,17 @@ export function TeamSettings() {
         });
         await refreshMembers(activeWorkspace);
       } catch (err) {
+        const quota = (err as { code?: string } | null)?.code === "email_quota_exceeded";
+        if (quota) {
+          // UX-21: the email allowance is used up. Keep what was typed and
+          // switch to Add directly, which needs no email.
+          setInviteMode("direct");
+        }
         toast({
-          title: "Invitation not sent",
-          message: err instanceof Error ? err.message : "Could not send the invitation.",
+          title: quota ? "Invitation email not sent: email limit reached" : "Invitation not sent",
+          message: `${err instanceof Error ? err.message : "Could not send the invitation."}${
+            quota ? " Add directly is selected below with the same details; press Add to give access now." : ""
+          }`,
           tone: "error",
         });
       } finally {
