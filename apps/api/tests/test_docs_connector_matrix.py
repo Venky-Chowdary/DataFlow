@@ -1,7 +1,8 @@
 """docs/reference/connectors.md is generated from the code and cannot drift.
 
 ``docs/tools/gen_connector_matrix.py`` reads the driver tables, the single
-capability function, the privilege probe and the CI workflow files. This test
+capability function, the privilege probe and the committed CI evidence
+(``apps/api/data/connector_ci_evidence.json``, the source of every public claim). This test
 regenerates the matrix and compares it with the committed page.
 """
 
@@ -68,16 +69,55 @@ def test_cdc_column_is_the_gate_list(gen) -> None:
     assert rows["email"]["upsert"] == "no"
 
 
-def test_ci_evidence_follows_the_workflow_files(gen, monkeypatch) -> None:
-    """Removing an engine from CI must change its row, not leave a stale claim."""
+def test_ci_column_and_tier_follow_the_ci_evidence(gen, tmp_path, monkeypatch) -> None:
+    """The page states proof only from the CI evidence (W5), never from workflow config."""
+    import json
+
+    from services import connector_proof
+
     gen._bootstrap()
-    caps = {"read": True, "write": True}
-    assert gen.ci_evidence("mysql", caps, False).startswith("live container")
-    assert gen.ci_evidence("airtable", {"evidence": "synthetic-fixture"}, False).startswith("fixture only")
-    assert gen.ci_evidence("csv", caps, True).startswith("no service needed")
-    monkeypatch.setattr(gen, "_read", lambda _rel: "")
-    assert gen.ci_evidence("mysql", caps, False) == "not started by any workflow"
-    assert gen.ci_evidence("snowflake", caps, False) == "not started by any workflow"
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"engines": {}}), encoding="utf-8")
+    green = tmp_path / "green.json"
+    green.write_text(
+        json.dumps({"engines": {"mysql": {"status": "ci_green", "live_verified": True, "emulated": False}}}),
+        encoding="utf-8",
+    )
+    try:
+        monkeypatch.setenv(connector_proof.EVIDENCE_ENV, str(empty))
+        connector_proof.reset_cache()
+        with gen._declared_view():
+            rows = {r["id"]: r for r in gen.collect_rows()}
+        assert not any(r["ci"].startswith("proven") for r in rows.values())
+        assert not any(r["tier"].startswith("Certified") for r in rows.values())
+        assert rows["mysql"]["tier"].startswith("Implemented")
+
+        monkeypatch.setenv(connector_proof.EVIDENCE_ENV, str(green))
+        connector_proof.reset_cache()
+        with gen._declared_view():
+            rows = {r["id"]: r for r in gen.collect_rows()}
+        assert rows["mysql"]["ci"] == "proven"
+        assert rows["mysql"]["tier"] == "Certified"
+        assert rows["postgresql"]["ci"].startswith("not proven")
+        # A planned driver stays planned whatever the evidence says.
+        assert rows["redshift"]["tier"].startswith("Planned")
+    finally:
+        monkeypatch.delenv(connector_proof.EVIDENCE_ENV, raising=False)
+        connector_proof.reset_cache()
+
+
+def test_proven_rows_match_the_public_claims(gen) -> None:
+    """The page and the generated web claims name the same proven drivers."""
+    import re
+
+    gen._bootstrap()
+    claims = (REPO_ROOT / "apps" / "web" / "src" / "lib" / "connectorClaims.generated.ts").read_text(encoding="utf-8")
+    block = claims[claims.index('"proven_drivers": [') + len('"proven_drivers": [') :]
+    proven_claims = set(re.findall(r'"([a-z0-9_]+)"', block[: block.index("]")]))
+    with gen._declared_view():
+        rows = {r["id"]: r for r in gen.collect_rows()}
+    proven_page = {rid for rid, r in rows.items() if r["ci"].startswith("proven")}
+    assert proven_page == proven_claims
 
 
 def test_page_keeps_its_hand_written_sections() -> None:

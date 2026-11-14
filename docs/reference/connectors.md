@@ -1,7 +1,8 @@
 # Connector capability matrix
 
-This page says what each connector can do. The matrix is generated from the
-code and from the CI configuration, so it cannot drift:
+This page says what each connector can do and which connectors CI has proven.
+The matrix is generated from the code and from the committed CI evidence, so
+it cannot drift:
 `apps/api/tests/test_docs_connector_matrix.py` fails when the page and the code
 disagree.
 
@@ -19,10 +20,17 @@ python docs/tools/gen_connector_matrix.py
 - **The matrix shows declared capabilities**: what a server reports when every
   driver package is installed. A server that is missing a package reports
   less. `GET /api/v1/catalog/connectors` shows the live view for your server.
-- **"Engine in CI" says whether CI starts that engine**, not which tests pass.
-  An emulator is not the real service. "Fixture only" means the connector has
-  only been exercised against canned responses.
-- One function answers for all of this: `get_connector_capability` in
+- **Certified means proven in CI.** A connector is Certified only when a CI
+  job that proves its engine ran green with none of that engine's tests
+  skipped. A connector that works but has no such run is "Implemented, not yet
+  proven". What the CI workflows are configured to start never counts. An
+  emulator run is marked as such; it is not the real cloud service.
+- The CI evidence is the same file the product's public claims are generated
+  from: `apps/api/data/connector_ci_evidence.json`. It names the CI run it came
+  from (see the Counts table). A newer run changes this page only after that
+  file is regenerated.
+- One function answers for capabilities (CDC, upsert, merge):
+  `get_connector_capability` in
   `apps/api/services/connector_capability_registry.py`.
 
 ## How to read the columns
@@ -36,8 +44,8 @@ python docs/tools/gen_connector_matrix.py
 | Upsert | The destination supports keyed upsert. | capability record |
 | Merge strategy | The SQL statement family used for a keyed write. `-` means the dialect has no entry (non-SQL stores use their own keyed write). | `connectors/merge_registry.py` |
 | Create-privilege probe | Validate measures whether the connector's account may write and create the destination object, from metadata, without writing a row. `no` means the check falls back to connectivity. | `_SUPPORTED` in `services/destination_privilege_probe.py` |
-| Declared status | The product's own label for the driver. `not certified` means read and write exist but the driver is not offered as transfer-ready. | `capability_label`, `effective_status` |
-| Engine in CI | What the CI workflows start for this engine. | `.github/workflows/`, `apps/api/requirements.txt` |
+| Tier | The tier the driver's own catalog tile gets: Certified, Implemented (not yet proven), Source only, Connection test only, or Planned. `beta, tested against fixtures` means a source exercised only against canned responses. `not offered as transfer-ready` means read and write code exists but the driver is held back. | `certification_tier` and `enrich_catalog_entry` in `src/transfer/connector_capabilities.py` |
+| CI evidence | Whether a CI job that proves the engine ran green. When the evidence is recorded under another engine (pgvector under `postgresql`, file formats under `files`), that engine is named. | `proof_for` in `services/connector_proof.py`, reading `data/connector_ci_evidence.json` |
 
 "Needs cursor" is the gate's rule, not proof that every such source filters by
 the cursor on the server. The code has no per-connector list for that.
@@ -53,100 +61,101 @@ These numbers count different things. Quote the first one as "connectors that ca
 | Count | Value | What it counts |
 |---|---|---|
 | Transfer-live drivers | 46 | Unique driver and file-format types that can run a transfer on this server right now (two-way, destination-only, file and first-class source-only), excluding fixture-only SDK sources. The public count. |
+| CI-proven drivers | 2 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (bigquery, snowflake). The other 44 are implemented but not yet proven. Evidence: CI run 43541342717, recorded 2026-11-14. |
 | Transfer-ready catalog drivers | 35 | Unique drivers behind those tiles. Smaller than transfer_live_drivers because several tiles share one driver and file formats are not tiles here. |
-| Transfer-ready catalog ids | 89 | Catalog ids marked transfer-ready, hosted twins included. |
+| Transfer-ready catalog ids | 82 | Catalog ids marked transfer-ready, hosted twins included. |
 | CDC source engines | 5 | Registry entries the Validate gate accepts as a CDC source. (mongodb, mysql, oracle, postgresql, sqlserver) |
-| Catalog tiles | 647 | All tiles in the connector catalog. By status: beta: 30, live: 124, planned: 493. |
-| Catalog tiles by tier | - | certified: 121, planned: 493, source_only: 33. Tiles whose own record says transfer-ready: 121 (a per-tile answer; the frozen id list above is the shorter one). |
+| Catalog tiles | 647 | All tiles in the connector catalog. By status: beta: 30, live: 111, planned: 506. |
+| Catalog tiles by tier | - | certified: 12, implemented: 96, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
 
 ### Drivers
 
-| Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy | Create-privilege probe | Declared status | Engine in CI |
+| Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy | Create-privilege probe | Tier | CI evidence |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `adls` | yes | yes | re-read, no cursor | no | no | no | - | yes | Full transfer (live) | emulator container, PR workflow |
-| `airtable` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `asana` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `bigcommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Full transfer (live) | emulator container, PR workflow |
-| `brevo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `calendly` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `clickup` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `close` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `confluence` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `couchbase` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only (live) | not started by any workflow |
-| `dynamodb` | yes | yes | needs cursor | no | no | yes | - | yes | Full transfer (live) | in-process emulator (moto) |
-| `elasticsearch` | yes | yes | needs cursor | no | no | yes | - | yes | Full transfer (live) | not started by any workflow |
-| `email` | no | yes | n/a | no | no | no | - | no | Roadmap (planned) | not started by any workflow |
-| `freshdesk` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `freshservice` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `gcs` | yes | yes | re-read, no cursor | no | no | no | - | yes | Full transfer (live) | emulator container, PR workflow |
-| `generic_sql` | yes | yes | needs cursor | no | no | yes | - | yes | Full transfer (live) | not started by any workflow |
-| `github` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `gitlab` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `hubspot` | yes | yes | needs cursor | no | no | yes | - | no | Full transfer (live) | not started by any workflow |
-| `iceberg` | yes | yes | needs cursor | no | no | yes | - | yes | Full transfer (live) | not started by any workflow |
-| `influxdb` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only (live) | not started by any workflow |
-| `intercom` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `jira` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `kafka` | yes | yes | needs cursor | no | yes | no | - | yes | Full transfer (live) | live container, nightly workflow only |
-| `klaviyo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `linear` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `mailchimp` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `mailjet` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `milvus` | no | yes | n/a | no | no | yes | - | yes | Destination only (live) | not started by any workflow |
-| `monday` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `mongodb` | yes | yes | needs cursor | yes | yes | yes | - | yes | Full transfer (live) | live container, PR workflow |
-| `mysql` | yes | yes | needs cursor | yes | yes | yes | insert_on_duplicate_key | yes | Full transfer (live) | live container, PR workflow |
-| `neo4j` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only (live) | not started by any workflow |
-| `notion` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `oracle` | yes | yes | needs cursor | yes | yes | yes | merge | yes | Full transfer (live) | opt-in job, skipped unless ENABLE_ORACLE_CDC is set, PR workflow |
-| `pgvector` | yes | yes | needs cursor | no | yes | yes | - | yes | Full transfer (live) | live container (PostgreSQL image with pgvector), PR workflow |
-| `pinecone` | no | yes | n/a | no | no | yes | - | yes | Destination only (live) | not started by any workflow |
-| `pipedrive` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `postgresql` | yes | yes | needs cursor | yes | yes | yes | insert_on_conflict | yes | Full transfer (live) | live container, PR workflow |
-| `posthog` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `qdrant` | yes | yes | needs cursor | no | yes | yes | - | yes | Full transfer (live) | not started by any workflow |
-| `redis` | yes | yes | needs cursor | no | no | yes | - | yes | Full transfer (live) | live container, PR workflow |
-| `redshift` | yes | yes | needs cursor | no | no | yes | delete_insert_stage | yes | Roadmap (planned); not certified | not started by any workflow |
-| `rest_api` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only (live) | not started by any workflow |
-| `s3` | yes | yes | re-read, no cursor | no | no | no | - | yes | Full transfer (live) | in-process emulator (moto) |
-| `salesforce` | yes | yes | needs cursor | no | no | yes | - | no | Full transfer (live) | not started by any workflow |
-| `sendgrid` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `servicenow` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `sftp` | yes | yes | re-read, no cursor | no | no | yes | - | yes | Full transfer (live) | not started by any workflow |
-| `shopify` | yes | yes | needs cursor | no | no | no | - | no | Roadmap (planned); not certified | not started by any workflow |
-| `singer_tap` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only (live) | not started by any workflow |
-| `slack` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Full transfer (live) | in-process emulator (fakesnow) |
-| `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Full transfer (live) | no service needed (file engine) |
-| `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Full transfer (live) | live container, PR workflow |
-| `stripe` | yes | yes | needs cursor | no | no | no | - | no | Source certified (live); destination not certified | not started by any workflow |
-| `todoist` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `typeform` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `weaviate` | no | yes | n/a | no | no | yes | - | yes | Destination only (live) | not started by any workflow |
-| `woocommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `zendesk` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
-| `zoho_crm` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only (beta) | fixture only (`synthetic-fixture`) |
+| `adls` | yes | yes | re-read, no cursor | no | no | no | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `airtable` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `asana` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `bigcommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `brevo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `calendly` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `clickup` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `close` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `confluence` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `couchbase` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
+| `dynamodb` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `elasticsearch` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `email` | no | yes | n/a | no | no | no | - | no | Planned | not proven: no CI job proves it |
+| `freshdesk` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `freshservice` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `gcs` | yes | yes | re-read, no cursor | no | no | no | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `generic_sql` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `github` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `gitlab` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `hubspot` | yes | yes | needs cursor | no | no | yes | - | no | Implemented, not yet proven | not proven: no CI job proves it |
+| `iceberg` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `influxdb` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
+| `intercom` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `jira` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `kafka` | yes | yes | needs cursor | no | yes | no | - | yes | Implemented, not yet proven | not proven: no result recorded for the proving job |
+| `klaviyo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `linear` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `mailchimp` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `mailjet` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `milvus` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `monday` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `mongodb` | yes | yes | needs cursor | yes | yes | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `mysql` | yes | yes | needs cursor | yes | yes | yes | insert_on_duplicate_key | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `neo4j` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
+| `notion` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `oracle` | yes | yes | needs cursor | yes | yes | yes | merge | yes | Implemented, not yet proven | not proven: the proving job did not run (opt-in) |
+| `pgvector` | yes | yes | needs cursor | no | yes | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green; engine `postgresql` |
+| `pinecone` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `pipedrive` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `postgresql` | yes | yes | needs cursor | yes | yes | yes | insert_on_conflict | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `posthog` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `qdrant` | yes | yes | needs cursor | no | yes | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `redis` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `redshift` | yes | yes | needs cursor | no | no | yes | delete_insert_stage | yes | Planned; not offered as transfer-ready | not proven: no CI job proves it |
+| `rest_api` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
+| `s3` | yes | yes | re-read, no cursor | no | no | no | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `salesforce` | yes | yes | needs cursor | no | no | yes | - | no | Implemented, not yet proven | not proven: no CI job proves it |
+| `sendgrid` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `servicenow` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `sftp` | yes | yes | re-read, no cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `shopify` | yes | yes | needs cursor | no | no | no | - | no | Planned; not offered as transfer-ready | not proven: no CI job proves it |
+| `singer_tap` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
+| `slack` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `stripe` | yes | yes | needs cursor | no | no | no | - | no | Implemented, not yet proven; destination role not offered as transfer-ready | not proven: no CI job proves it |
+| `todoist` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `typeform` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `weaviate` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
+| `woocommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `zendesk` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
+| `zoho_crm` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 
 ### File formats
 
-| Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy | Create-privilege probe | Declared status | Engine in CI |
+| Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy | Create-privilege probe | Tier | CI evidence |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `avro` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `csv` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `docx` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | File transfer (live) | no service needed (file fixtures) |
-| `excel` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `fixed_width` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `html` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | File transfer (live) | no service needed (file fixtures) |
-| `json` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `jsonl` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `ndjson` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `orc` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `parquet` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `pdf` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | File transfer (live) | no service needed (file fixtures) |
-| `tsv` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `xml` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
-| `yaml` | yes | yes | re-read, no cursor | no | no | no | - | no | File transfer (live) | no service needed (file fixtures) |
+| `avro` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `csv` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `docx` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
+| `excel` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `fixed_width` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `html` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
+| `json` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `jsonl` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `ndjson` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `orc` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `parquet` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `pdf` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
+| `tsv` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `xml` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `yaml` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
 
 <!-- END GENERATED: connector-matrix -->
 
@@ -171,10 +180,17 @@ These numbers count different things. Quote the first one as "connectors that ca
   rule is applied to both sides and only removes digits the destination cannot
   hold. Where the destination's precision is not known, the value is compared
   unrounded and any difference fails verification.
-- **Email** is a send-only destination labelled Roadmap. It is not offered as
+- **Email** is a send-only destination and is Planned. It is not offered as
   transfer-ready.
-- **Redshift and Shopify** have read and write code but are marked not
-  certified, so they are not offered as transfer-ready.
+- **Redshift and Shopify** have read and write code but are Planned: they are
+  not offered as transfer-ready.
+- **Wire-compatible products are not proven by the engine they imitate.**
+  MariaDB, DocumentDB, Azure Cosmos DB, the hosted Redis services, Oracle
+  Autonomous Warehouse, SingleStore, CockroachDB, TiDB and similar tiles are
+  Planned until CI evidence is recorded under their own id.
+- **OpenSearch, Amazon OpenSearch Service and Redis Cluster** are Planned: the
+  Elasticsearch 8 client refuses an OpenSearch server, and the Redis driver
+  does not follow cluster redirects.
 - **SDK SaaS sources** (Airtable, Asana, GitHub, Jira, Notion, Slack, Zendesk
   and others) are read-only, declare no incremental read, and carry the
   evidence label `synthetic-fixture`.
@@ -192,8 +208,8 @@ These numbers count different things. Quote the first one as "connectors that ca
 
 ## Not covered
 
-- Which tests pass for each connector. This page reads CI configuration, not
-  CI results.
+- Results newer than the committed CI evidence. The page shows the run named
+  in the Counts table, not the latest CI run.
 - Performance, volume limits and rate limits per connector.
 - Live certification against real cloud accounts. No evidence for it is in the
   repository at this commit.
@@ -211,6 +227,6 @@ These numbers count different things. Quote the first one as "connectors that ca
 - `apps/api/services/policy_gate_notes.py`, `apps/api/services/copy_redis_redis.py` (Redis TTL)
 - `apps/api/services/carrier_instant.py` (timestamp rounding)
 - `apps/api/data/connector_catalog.json`
-- `.github/workflows/ci.yml`, `.github/workflows/full-suite.yml`,
-  `.github/actions/ci-services/action.yml`, `.github/scripts/start_ci_databases.sh`
+- `apps/api/data/connector_ci_evidence.json`, `apps/api/services/connector_proof.py`,
+  `apps/api/services/connector_ci_evidence.py`, `apps/api/scripts/connector_claims_report.py`
 - `apps/api/tests/test_connector_capability_single_source.py`

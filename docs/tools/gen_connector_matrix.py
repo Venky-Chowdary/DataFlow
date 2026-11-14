@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the capability matrix in ``docs/reference/connectors.md``.
 
-Every cell is read from code or from the CI configuration, so the page cannot
-drift from what the product does:
+Every cell is read from code or from the CI evidence snapshot, so the page
+cannot drift from what the product does or claims:
 
 * read / write / status   ``src.transfer.connector_capabilities`` (declared
                           driver and file tables)
@@ -11,8 +11,12 @@ drift from what the product does:
 * create-privilege probe  ``services.destination_privilege_probe._SUPPORTED``
 * incremental rule        ``services.preflight_cursor_gate`` plus the driver's
                           own ``incremental`` declaration
-* CI evidence             the workflow files under ``.github/`` and
-                          ``apps/api/requirements.txt``
+* tier                    ``connector_capabilities.certification_tier`` (through
+                          ``enrich_catalog_entry``): "certified" needs CI proof
+* CI evidence             ``services.connector_proof`` over the committed
+                          snapshot ``apps/api/data/connector_ci_evidence.json``,
+                          the same data the public claims are generated from
+                          (``apps/api/scripts/connector_claims_report.py``)
 
 Usage (from the repository root, with the API's Python environment)::
 
@@ -44,39 +48,24 @@ TARGET = REPO_ROOT / "docs" / "reference" / "connectors.md"
 BEGIN = "<!-- BEGIN GENERATED: connector-matrix (docs/tools/gen_connector_matrix.py) -->"
 END = "<!-- END GENERATED: connector-matrix -->"
 
-PR_CI_FILES = (
-    ".github/workflows/ci.yml",
-    ".github/actions/ci-services/action.yml",
-)
-NIGHTLY_FILES = (".github/workflows/full-suite.yml",)
-REQUIREMENTS = "apps/api/requirements.txt"
-
-# driver -> (what CI runs, pattern that proves it is still wired). The pattern
-# is matched against the PR workflow, then the nightly workflow, then the
-# Python requirements, so removing a service from CI changes this page.
-_START = r"start_ci_databases\.sh[^\n]*\b{}\b"
-CI_MARKERS: dict[str, tuple[str, str, str]] = {
-    "postgresql": ("live container", _START.format("postgres(?:-cdc)?"), "workflow"),
-    "pgvector": ("live container (PostgreSQL image with pgvector)", _START.format("postgres-cdc"), "workflow"),
-    "mysql": ("live container", _START.format("mysql"), "workflow"),
-    "mongodb": ("live container", _START.format("mongo"), "workflow"),
-    "redis": ("live container", _START.format("redis"), "workflow"),
-    "sqlserver": ("live container", r"mssql/server|dataflow-sqlserver", "workflow"),
-    "oracle": ("opt-in job, skipped unless ENABLE_ORACLE_CDC is set", r"ENABLE_ORACLE_CDC", "workflow"),
-    "kafka": ("live container", r"apache/kafka|redpanda", "workflow"),
-    "elasticsearch": ("live container", r"image:[^\n]*elasticsearch|docker run[^\n]*elasticsearch", "workflow"),
-    "qdrant": ("live container", r"image:[^\n]*qdrant|docker run[^\n]*qdrant", "workflow"),
-    "weaviate": ("live container", r"image:[^\n]*weaviate|docker run[^\n]*weaviate", "workflow"),
-    "milvus": ("live container", r"image:[^\n]*milvus|docker run[^\n]*milvus", "workflow"),
-    "iceberg": ("live container", r"image:[^\n]*iceberg|docker run[^\n]*iceberg", "workflow"),
-    "bigquery": ("emulator container", _START.format("bigquery"), "workflow"),
-    "gcs": ("emulator container", _START.format("gcs"), "workflow"),
-    "adls": ("emulator container", _START.format("adls"), "workflow"),
-    "snowflake": ("in-process emulator (fakesnow)", r"^fakesnow\b", "requirements"),
-    "s3": ("in-process emulator (moto)", r"^moto\b", "requirements"),
-    "dynamodb": ("in-process emulator (moto)", r"^moto\b", "requirements"),
+# Wording for the tier a driver's own catalog tile gets
+# (``connector_capabilities.certification_tier``). "Certified" needs CI proof.
+TIER_TEXT = {
+    "certified": "Certified",
+    "implemented": "Implemented, not yet proven",
+    "source_only": "Source only",
+    "connect_only": "Connection test only",
+    "planned": "Planned",
 }
-NO_SERVICE_NEEDED = {"sqlite"}
+
+# Wording for an engine's CI status (``services.connector_ci_evidence``).
+CI_STATUS_TEXT = {
+    "ci_green": "proven",
+    "ci_red": "not proven: a proving job did not run green",
+    "not_run": "not proven: the proving job did not run (opt-in)",
+    "no_ci_result": "not proven: no result recorded for the proving job",
+    "no_ci_job": "not proven: no CI job proves it",
+}
 
 
 def _bootstrap() -> None:
@@ -107,30 +96,21 @@ def _declared_view() -> Iterator[None]:
         cc.driver_available = original  # type: ignore[assignment]
 
 
-def _read(rel: str) -> str:
-    path = REPO_ROOT / rel
-    return path.read_text(encoding="utf-8") if path.is_file() else ""
+def ci_evidence(driver: str) -> str:
+    """CI proof for a driver, from the committed evidence snapshot (W5).
 
+    Only a green run of a job that proves the engine, with none of the
+    engine's tests skipped, counts. What the workflows configure never does.
+    """
+    from services.connector_proof import proof_for
 
-def ci_evidence(driver: str, caps: dict[str, Any], is_file_format: bool) -> str:
-    if is_file_format:
-        return "no service needed (file fixtures)"
-    if driver in NO_SERVICE_NEEDED:
-        return "no service needed (file engine)"
-    if caps.get("evidence"):
-        return f"fixture only (`{caps['evidence']}`)"
-    marker = CI_MARKERS.get(driver)
-    if marker is None:
-        return "not started by any workflow"
-    label, pattern, where = marker
-    regex = re.compile(pattern, re.MULTILINE)
-    if where == "requirements":
-        return label if regex.search(_read(REQUIREMENTS)) else "not started by any workflow"
-    if any(regex.search(_read(f)) for f in PR_CI_FILES):
-        return f"{label}, PR workflow"
-    if any(regex.search(_read(f)) for f in NIGHTLY_FILES):
-        return f"{label}, nightly workflow only"
-    return "not started by any workflow"
+    proof = proof_for(driver, driver)
+    text = CI_STATUS_TEXT.get(proof["status"], f"not proven: {proof['status'] or 'no CI job proves it'}")
+    if proof["proven"] and proof["emulated"]:
+        text += " (against an emulator)"
+    if proof["engine"] and proof["engine"] != driver:
+        text += f"; engine `{proof['engine']}`"
+    return text
 
 
 def _yes(value: Any) -> str:
@@ -147,18 +127,20 @@ def _incremental(driver: str, caps: dict[str, Any], is_file_format: bool, file_s
     return "needs cursor"
 
 
-def _status(caps: dict[str, Any]) -> str:
-    from src.transfer.connector_capabilities import capability_label, effective_status
+def _tier(driver: str, caps: dict[str, Any]) -> str:
+    """The tier the driver's own catalog tile gets, with the product's notes."""
+    from src.transfer.connector_capabilities import effective_status, enrich_catalog_entry
 
-    label = capability_label(caps)
-    status = effective_status(caps)
+    tier = str(enrich_catalog_entry({"id": driver}).get("certification_tier") or "planned")
+    text = TIER_TEXT.get(tier, tier)
     notes = []
+    if effective_status(caps) == "beta":
+        notes.append("beta, tested against fixtures")
     if caps.get("certified") is False:
-        notes.append("not certified")
+        notes.append("not offered as transfer-ready")
     if caps.get("certified_dest") is False:
-        notes.append("destination not certified")
-    text = f"{label} ({status})"
-    return text + ("; " + ", ".join(notes) if notes else "")
+        notes.append("destination role not offered as transfer-ready")
+    return text + ("; " + "; ".join(notes) if notes else "")
 
 
 def collect_rows() -> list[dict[str, str]]:
@@ -191,8 +173,8 @@ def collect_rows() -> list[dict[str, str]]:
                 "upsert": _yes(record.get("supports_upsert")) if writable else "n/a",
                 "merge": str(record.get("merge_strategy") or "") or "-",
                 "probe": probe_cell,
-                "status": _status(caps),
-                "ci": ci_evidence(driver, caps, is_file),
+                "tier": _tier(driver, caps),
+                "ci": ci_evidence(driver),
             }
         )
     return rows
@@ -215,11 +197,15 @@ def catalog_summary() -> dict[str, Any]:
 def render() -> str:
     _bootstrap()
     from services.connector_capability_registry import capability_counts
+    from services.connector_proof import evidence_snapshot, proven_and_pending
 
     with _declared_view():
         rows = collect_rows()
         counts = capability_counts()
         catalog = catalog_summary()
+        split = proven_and_pending(counts["transfer_live_driver_types"])
+    snap = evidence_snapshot()
+    run = str(snap.get("source_run") or "").rstrip("/").rsplit("/", 1)[-1] or "none"
 
     lines: list[str] = []
     lines.append("### Counts")
@@ -230,6 +216,12 @@ def render() -> str:
     lines.append("|---|---|---|")
     defs = counts["definitions"]
     lines.append(f"| Transfer-live drivers | {counts['transfer_live_drivers']} | {defs['transfer_live_drivers']} |")
+    lines.append(
+        f"| CI-proven drivers | {len(split['proven'])} | Transfer-live drivers whose proving CI job ran green "
+        f"with none of their tests skipped ({', '.join(split['proven']) or 'none'}). The other "
+        f"{len(split['pending'])} are implemented but not yet proven. Evidence: CI run {run}, "
+        f"recorded {str(snap.get('generated_at') or 'never')[:10]}. |"
+    )
     lines.append(
         f"| Transfer-ready catalog drivers | {counts['transfer_ready_catalog_drivers']} "
         f"| {defs['transfer_ready_catalog_drivers']} |"
@@ -256,7 +248,7 @@ def render() -> str:
         lines.append("")
         lines.append(
             "| Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy "
-            "| Create-privilege probe | Declared status | Engine in CI |"
+            "| Create-privilege probe | Tier | CI evidence |"
         )
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in rows:
@@ -264,7 +256,7 @@ def render() -> str:
                 continue
             lines.append(
                 f"| `{r['id']}` | {r['read']} | {r['write']} | {r['incremental']} | {r['cdc']} "
-                f"| {r['cdc_sink']} | {r['upsert']} | {r['merge']} | {r['probe']} | {r['status']} | {r['ci']} |"
+                f"| {r['cdc_sink']} | {r['upsert']} | {r['merge']} | {r['probe']} | {r['tier']} | {r['ci']} |"
             )
         lines.append("")
 
