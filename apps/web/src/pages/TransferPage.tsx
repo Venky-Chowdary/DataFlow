@@ -8995,7 +8995,8 @@ export function TransferPage({
             )}
           </div>
 
-          {transferPlan && (
+          {/* UX-39: no "Route ready" before a destination is chosen. */}
+          {transferPlan && (destKindMode !== "database" || Boolean(connectorId)) && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
               <p className="df2-plan-callout-title">
                 {transferPlan.supported ? "Route ready" : "Route needs attention"} · {transferPlan.operation}

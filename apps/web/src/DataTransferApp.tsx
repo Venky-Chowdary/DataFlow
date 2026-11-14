@@ -904,7 +904,8 @@ function AppShell({
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
-                      toast({ title: "Transfer complete", message: "Gate-8 proof stays on Job Theater.", tone: "success" });
+                      // UX-34: say where the proof is, in the product's own words.
+                      toast({ title: "Transfer complete", message: "The Trust Report and post-write proof are on the job in Jobs.", tone: "success" });
                     }}
                   />
                 </PageErrorBoundary>
