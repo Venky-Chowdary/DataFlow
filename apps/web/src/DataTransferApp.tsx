@@ -42,6 +42,7 @@ import {
   writePublicHash,
 } from "./lib/publicNavigation"; // help article routes
 import { apiOfflineMessage } from "./lib/runtimeEnv";
+import { staleDataLabel, useConnectivity } from "./lib/connectivity";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import type { JobsStudioIntent } from "./pages/JobsPage";
@@ -583,6 +584,15 @@ function AppShell({
   const showCopilotEdge = screen !== "pilot" && !copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
   const offlineCopy = apiOfflineMessage();
+  const net = useConnectivity();
+  const retryConnection = async () => {
+    const up = await probeApiHealth();
+    if (up) {
+      noteApiSuccess();
+      setApiOnline(true);
+      await Promise.allSettled([loadConnectors(false), loadJobs(false), loadSchedules()]);
+    }
+  };
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
   const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
@@ -804,19 +814,38 @@ function AppShell({
           </div>
         </header>
 
-        {!apiOnline && (
-          <div className="df2-api-offline-banner df2-alert df2-alert-error" role="alert">
+        {(!apiOnline || !net.online) && (
+          // UX-17: say the connection is gone, say how old the screen is, and
+          // offer the retry — the lists below keep their last data, labelled.
+          <div className="df2-api-offline-banner df2-alert df2-alert-error" role="alert" data-testid="offline-banner">
             <DtIcon name="alert" size={18} />
             <div>
-              <strong>{offlineCopy.title}</strong>
-              <p>{offlineCopy.body}</p>
+              <strong>
+                {net.reason === "browser-offline"
+                  ? "You're offline"
+                  : net.reason === "api-unreachable"
+                    ? "Can't reach Datawrap"
+                    : offlineCopy.title}
+              </strong>
+              <p>
+                {net.online && apiOnline ? offlineCopy.body : `${staleDataLabel(net.lastSyncedAt)} Changes can't be saved until the connection is back.`}
+              </p>
             </div>
+            <Button size="sm" variant="secondary" onClick={() => void retryConnection()}>
+              Retry now
+            </Button>
           </div>
         )}
 
         <FirstRunWorkspace />
 
-        <main id="datawrap-main-content" className={`df2-content ${contentModeClass}`} tabIndex={-1} aria-label={currentNav?.label ?? "Workspace"}>
+        <main
+          id="datawrap-main-content"
+          className={`df2-content ${contentModeClass}`}
+          tabIndex={-1}
+          aria-label={currentNav?.label ?? "Workspace"}
+          data-stale={!net.online || !apiOnline ? "true" : undefined}
+        >
         {bootLoading && (
           <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
             <div className="df2-boot-progress-fill" />

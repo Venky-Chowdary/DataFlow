@@ -19,7 +19,7 @@ export type SignInFailure = "api" | "config" | "auth";
 export function classifySignInFailure(err: unknown): SignInFailure {
   const message = err instanceof Error ? err.message : "";
   const status = err instanceof ApiError ? err.status : 0;
-  if (status === 0 && /Failed to fetch|NetworkError|timed out|fetch/i.test(message)) {
+  if (status === 0 && /Failed to fetch|NetworkError|network|timed out|fetch/i.test(message)) {
     return "api";
   }
   if (status === 503) return "config";

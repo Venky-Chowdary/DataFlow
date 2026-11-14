@@ -14,6 +14,7 @@ import {
 } from "../../lib/topologyUtils";
 import { Button } from "./Button";
 import { connectorEndpointLabel } from "../../lib/connectorEndpoint";
+import { useConnectivity } from "../../lib/connectivity";
 
 interface ConnectorCardProps {
   connector: Connector;
@@ -58,8 +59,13 @@ export function ConnectorCard({
   const healthy = connectorLooksHealthy(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
   // The green check means a probe passed; never-tested is neutral, not healthy.
-  const probePassed = connectorTestHealth(c) === "passed";
-  const testLabel = connectorTestLabel(c);
+  const { online } = useConnectivity();
+  // UX-17: offline, the last probe result is history, not current health.
+  const probePassed = online && connectorTestHealth(c) === "passed";
+  const health = connectorTestHealth(c);
+  const testLabel = online || health === "never_tested"
+    ? connectorTestLabel(c)
+    : `Last known: ${health === "passed" ? "passed" : "failed"}`;
   const endpoint = connectorEndpointLabel(c);
   const roleClass =
     displayRole === "destination"
@@ -81,9 +87,9 @@ export function ConnectorCard({
         aria-current={selected || undefined}
       >
         <span
-          className={`df2-health-dot ${healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : healthy ? "Healthy" : "Connection error"}
         />
         <span className="df2-connector-row-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={16} />
@@ -158,9 +164,9 @@ export function ConnectorCard({
     >
       <div className="df2-connector-row-top">
         <span
-          className={`df2-health-dot ${healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : healthy ? "Healthy" : "Connection error"}
         />
         <div className="df2-connector-card-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={20} />

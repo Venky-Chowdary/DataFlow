@@ -1,4 +1,5 @@
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
+import { ApiUnreachableError, noteApiReachable, noteApiUnreachable } from "./connectivity";
 import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
 import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
@@ -306,6 +307,8 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
   try {
     releaseSlot = await acquireApiSlot(controller.signal);
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
+    // UX-17: any answer, even a refusal, proves the server is reachable.
+    noteApiReachable();
     if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
     } else if (res.ok) {
@@ -314,6 +317,12 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     return res;
   } catch (error) {
     if (controller.signal.aborted) throw new Error("Request timed out");
+    if (error instanceof TypeError) {
+      // No answer at all (refused, DNS, offline): say so in words, never
+      // the browser's "Failed to fetch", and let the shell show the banner.
+      noteApiUnreachable();
+      throw new ApiUnreachableError();
+    }
     throw error;
   } finally {
     window.clearTimeout(timeout);
@@ -1280,7 +1289,7 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   if (lower.includes("429") || lower.includes("too many pilot messages")) {
     return "You’re sending messages faster than Pilot accepts. Wait a few seconds, then try again.";
   }
-  if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
+  if (lower.includes("failed to fetch") || lower.includes("network") || lower.includes("load failed")) {
     return "Couldn’t reach Datawrap Pilot right now. Check that the app is online, then try again.";
   }
   if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
