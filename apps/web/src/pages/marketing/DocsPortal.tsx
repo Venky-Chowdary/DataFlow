@@ -12,7 +12,7 @@ import {
 } from "../../lib/helpDocs";
 import {
   EVIDENCE_AS_OF,
-  EVIDENCE_SOURCE_RUN,
+  EVIDENCE_RUN_ID,
   MARKETING_STACK,
   PROVEN_EVIDENCE,
   catalogHonestyLead,
@@ -336,7 +336,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <h2>Proven in CI{EVIDENCE_AS_OF ? ` (${EVIDENCE_AS_OF})` : ""}</h2>
         <p className="docs-space-evidence-lead">
           Each line is an engine whose proving CI jobs ran green with no skipped test.{" "}
-          {EVIDENCE_SOURCE_RUN ? <a href={EVIDENCE_SOURCE_RUN}>Open the CI run.</a> : null}
+          {EVIDENCE_RUN_ID ? `Recorded from CI run ${EVIDENCE_RUN_ID}.` : null}
         </p>
         <ul className="docs-space-evidence-list">
           {PROVEN_EVIDENCE.map((row) => (

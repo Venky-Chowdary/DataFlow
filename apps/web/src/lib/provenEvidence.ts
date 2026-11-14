@@ -52,8 +52,8 @@ function monthYear(iso: string): string {
 /** Month the CI evidence was recorded (empty when no run is recorded). */
 export const EVIDENCE_AS_OF = monthYear(CONNECTOR_CLAIMS.evidence_generated_at);
 
-/** The CI run the evidence came from. */
-export const EVIDENCE_SOURCE_RUN: string = CONNECTOR_CLAIMS.evidence_source_run;
+/** The CI run the evidence came from (its GitHub Actions run id). */
+export const EVIDENCE_RUN_ID: string = CONNECTOR_CLAIMS.evidence_run_id;
 
 /** One row per engine a CI run proved: green, nothing skipped. */
 export const PROVEN_EVIDENCE: EvidenceRow[] = CONNECTOR_CLAIMS.proof_rows.map((row) => ({

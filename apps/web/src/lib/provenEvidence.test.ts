@@ -37,7 +37,7 @@ test("every evidence row is an engine a CI run proved (CLM-5)", () => {
     assert.equal(row.result, "green");
   }
   if (PROVEN_EVIDENCE.length) {
-    assert.match(CONNECTOR_CLAIMS.evidence_source_run, /^https:\/\/github\.com\/.+\/actions\/runs\/\d+/);
+    assert.match(CONNECTOR_CLAIMS.evidence_run_id, /^\d+$/);
   }
 });
 

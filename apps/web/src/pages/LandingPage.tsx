@@ -14,7 +14,7 @@ import { ObservabilityInAction } from "../components/landing/ObservabilityInActi
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import {
   EVIDENCE_AS_OF,
-  EVIDENCE_SOURCE_RUN,
+  EVIDENCE_RUN_ID,
   PENDING_DRIVERS,
   PROVEN_CDC_SOURCES,
   PROVEN_DRIVERS,
@@ -569,7 +569,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p>
               A driver counts as proven when the CI jobs that prove its engine ran green with no
               skipped test.{" "}
-              {EVIDENCE_SOURCE_RUN ? <a href={EVIDENCE_SOURCE_RUN}>See the run.</a> : null}
+              {EVIDENCE_RUN_ID ? `Recorded from CI run ${EVIDENCE_RUN_ID}.` : null}
             </p>
           </Reveal>
           <dl className="lp-home-measured-grid">

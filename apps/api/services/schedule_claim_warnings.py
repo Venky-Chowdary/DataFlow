@@ -16,21 +16,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _saved_connector(connector_id: str) -> object | None:
+    """The saved connector, or None when it cannot be read (a warning never fails a save)."""
+    from services.connector_store import get_connector
+
+    try:
+        return get_connector(str(connector_id))
+    except Exception:  # noqa: BLE001 - the save already validated the connector
+        logger.debug("schedule warning: connector %s unreadable", connector_id, exc_info=True)
+        return None
+
+
 def schedule_claim_warnings(source_connector_id: str, dest_connector_id: str) -> list[str]:
     from connectors.salesforce_auth import session_token_schedule_warning
     from services.catalog_service import get_connector_by_id
-    from services.connector_store import get_connector
     from src.transfer.connector_capabilities import resolve_driver_type
 
     out: list[str] = []
     for role, connector_id in (("Source", source_connector_id), ("Destination", dest_connector_id)):
-        if not connector_id:
-            continue
-        try:
-            conn = get_connector(str(connector_id))
-        except Exception:  # noqa: BLE001 - a warning must never fail the save
-            logger.debug("schedule warning: connector %s unreadable", connector_id, exc_info=True)
-            continue
+        conn = _saved_connector(connector_id) if connector_id else None
         if conn is None:
             continue
         ctype = str(getattr(conn, "type", "") or "").lower()

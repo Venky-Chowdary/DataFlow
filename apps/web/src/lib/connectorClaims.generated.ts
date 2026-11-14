@@ -5,7 +5,7 @@
  */
 export interface ConnectorClaims {
   about: string;
-  evidence_source_run: string;
+  evidence_run_id: string;
   evidence_generated_at: string;
   engine_status: Record<string, string>;
   proven_drivers: string[];
@@ -62,7 +62,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "sqlserver": "ci_red"
   },
   "evidence_generated_at": "2026-11-14T02:39:02.518434+00:00",
-  "evidence_source_run": "https://github.com/Venky-Chowdary/DataFlow/actions/runs/43541342717",
+  "evidence_run_id": "43541342717",
   "families": [
     {
       "family": "Databases",
