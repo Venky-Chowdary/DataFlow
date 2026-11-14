@@ -159,6 +159,7 @@ import { theaterReturnToValidate } from "../lib/theaterReturn";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
+  setDestinationSyncModes,
   DATE_LOCALES,
   NUMBER_LOCALES,
   DEFAULT_SCHEMA_POLICY,
@@ -1083,6 +1084,7 @@ export function TransferPage({
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
         const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+        setDestinationSyncModes(caps.destination_sync_modes);
         // Reinforce catalog SSOT (app boot also loads; Transfer page refreshes lists).
         setTransferLiveDrivers(drivers.length ? drivers : [...sources, ...dbs]);
         if (sources.length || drivers.length) {
@@ -8865,7 +8867,6 @@ export function TransferPage({
             <p className="df2-label-hint df2-field-note">
               OpenShift hosts PostgreSQL (CloudNativePG / Crunchy) — it is not a destination store.
               Host is the Service DNS (<code>svc.cluster.local</code>), a Route, or a port-forward.
-              DynamoDB snapshot uses consistent Scan. Streams CDC is at-least-once upsert, not exactly-once.
             </p>
           )}
           {destDriverType === "bigquery" && (

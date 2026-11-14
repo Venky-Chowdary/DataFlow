@@ -398,7 +398,11 @@ def _duckdb_is_local(endpoint: Any) -> bool:
 
 
 def _iceberg_is_local(endpoint: Any) -> bool:
-    from connectors.iceberg_catalog import _infer_catalog_type, is_remote_location
+    from connectors.iceberg_catalog import (
+        IcebergCatalogNotChosen,
+        _infer_catalog_type,
+        is_remote_location,
+    )
 
     raw_extra = _field(endpoint, "extra")
     extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else {}
@@ -408,7 +412,12 @@ def _iceberg_is_local(endpoint: Any) -> bool:
             extra[key] = _text(endpoint, key)
     cs = _text(endpoint, "connection_string")
     warehouse = _text(endpoint, "warehouse") or _text(endpoint, "database")
-    catalog = _infer_catalog_type(cs, _text(endpoint, "region"), warehouse, extra)
+    try:
+        catalog = _infer_catalog_type(cs, _text(endpoint, "region"), warehouse, extra)
+    except IcebergCatalogNotChosen:
+        # An object-store warehouse with no catalog is refused when it is
+        # used (CLM-12); it is not on this server's disk either way.
+        return False
     local_warehouse = bool(warehouse) and not is_remote_location(warehouse)
     if catalog in {"filesystem", "hadoop", "sqlite"}:
         return True

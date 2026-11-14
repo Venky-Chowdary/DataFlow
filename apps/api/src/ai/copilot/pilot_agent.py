@@ -3885,9 +3885,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"• Only in B: {', '.join(o['only_in_b'][:6]) or 'none'}"
                 )
             elif tr.name == "get_transfer_capabilities" and tr.success:
-                combos = tr.output.get("live_combinations", [])
+                # The summary output omits the matrix and carries its count; reading
+                # len(live_combinations) said "0 live routes" (CLM-9).
+                out = tr.output or {}
+                route_count = out.get("live_combination_count")
+                if route_count is None:
+                    route_count = len(out.get("live_combinations") or [])
                 parts.append(
-                    f"Universal transfer supports **{len(combos)} live routes** — "
+                    f"Universal transfer supports **{route_count:,} live routes** — "
                     "any file (CSV/JSON/JSONL/TSV) to MongoDB, PostgreSQL, Snowflake; "
                     "DB-to-DB migrations; and file exports. Tables and collections are auto-created."
                 )

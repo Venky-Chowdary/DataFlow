@@ -30,7 +30,9 @@ from services.connector_ci_evidence import (  # noqa: E402
 
 # Committed evidence a docs page may cite (written from a green CI run's
 # connector-ci-evidence artifact). Absent: no page may claim live-verified.
-EVIDENCE_SNAPSHOT = REPO / "docs" / "reference" / "connector_ci_evidence.json"
+# It ships inside the API (the image copies apps/api only), and the catalog
+# tiers read it (services/connector_proof.py).
+EVIDENCE_SNAPSHOT = ROOT / "data" / "connector_ci_evidence.json"
 
 
 def _result(job: str, status: str, executed: int = 120) -> dict:
@@ -137,6 +139,10 @@ def test_every_proving_job_starts_its_engine_in_the_workflow(manifest) -> None:
         "oracle": r"DATAFLOW_ORACLE_HOST",
         "bigquery": r"start_ci_databases\.sh[^\n]*\bbigquery\b",
         "snowflake": r"fakesnow",
+        # In-process engines (manifest ``in_process_engines_about``): the job's
+        # own pytest run is the engine.
+        "sqlite": r"python -m pytest",
+        "files": r"python -m pytest",
     }
     shared = (REPO / ".github" / "actions" / "ci-services" / "action.yml").read_text(encoding="utf-8")
     for name, spec in manifest["jobs"].items():

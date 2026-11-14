@@ -54,6 +54,11 @@ def resolve_provider(model: str, extra: Mapping) -> object:
         from services.vectorization import _get_embedder
 
         return LocalProvider(name, _get_embedder(name), "hash")
+    if name.startswith("tfidf/"):
+        # The explicit non-semantic choice (CLM-11); never a silent fallback.
+        from services.vectorization import _get_embedder
+
+        return LocalProvider(name, _get_embedder(name), "tfidf_fallback")
     if name.startswith("sentence-transformers/"):
         from services.vectorization import _get_embedder
 

@@ -30,8 +30,11 @@
     "bigquery": ["BigQuery", "Google BigQuery", "BQ"],
     "snowflake": ["Snowflake"],
     "gcs": ["GCS", "Google Cloud Storage"],
-    "adls": ["ADLS", "ADLS Gen2", "Azure Data Lake Storage", "Azure Blob Storage"]
+    "adls": ["ADLS", "ADLS Gen2", "Azure Data Lake Storage", "Azure Blob Storage"],
+    "sqlite": ["SQLite"],
+    "files": ["CSV", "Parquet", "Excel"]
   },
+  "in_process_engines_about": "sqlite and files (the tabular file formats) run inside the test process, so no service is started; api-tests proves them by running green across all six shards, and a skip naming SQLite or a file-format package (pyarrow, openpyxl, fastavro) counts against them.",
   "engine_tokens": {
     "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq", "pg-wire", "df-pg"],
     "mysql": ["mysql", "pymysql", "mariadb"],
@@ -48,6 +51,8 @@
     "iceberg": ["iceberg"],
     "elasticsearch": ["elasticsearch"],
     "vector_stores": ["qdrant", "weaviate", "milvus", "pinecone"],
+    "sqlite": ["sqlite", "sqlite3"],
+    "files": ["pyarrow", "openpyxl", "fastavro"],
     "other_sql": ["redshift", "redshift_emulator", "clickhouse", "trino", "presto", "cockroachdb", "tidb", "timescaledb", "citus", "materialize", "risingwave", "questdb", "db2", "teradata", "hana"]
   },
   "jobs": {
@@ -123,10 +128,10 @@
       "expected_skips": []
     },
     "api-tests": {
-      "proves": ["postgresql", "mysql", "mongodb", "redis"],
+      "proves": ["postgresql", "mysql", "mongodb", "redis", "sqlite", "files"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "engine_scoped",
-      "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls"],
+      "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls", "sqlite", "files"],
       "report_engines": ["bigquery", "gcs", "adls"],
       "report_engines_why": "The universal-matrix cells with a BigQuery / GCS / ADLS emulator *source* (8 each) skip as 'not reachable' with the emulators running; not yet investigated. Counted and published, never live-verified, not failing the shard.",
       "required_labels": {"shard": ["1", "2", "3", "4", "5", "6"]},

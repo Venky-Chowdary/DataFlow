@@ -166,8 +166,57 @@ export const CDC_CAPABLE_SOURCES = new Set([
 ]);
 
 /**
+ * Per destination driver, the sync modes Validate's destination gates allow,
+ * from ``GET /transfer/capabilities`` ``destination_sync_modes`` (CLM-8).
+ * ``notes`` are honest captions for a mode that runs, but not as its name
+ * suggests (an "overwrite" into HubSpot updates records by key).
+ */
+export type DestinationSyncModeTable = Record<
+  string,
+  { sync_modes: string[]; notes?: Record<string, string> }
+>;
+
+let _destinationSyncModes: DestinationSyncModeTable | null = null;
+
+/** Install the capabilities table (Studio boot / Transfer page refresh). */
+export function setDestinationSyncModes(table: unknown): void {
+  if (!table || typeof table !== "object") return;
+  const out: DestinationSyncModeTable = {};
+  for (const [dest, row] of Object.entries(table as Record<string, unknown>)) {
+    const modes = (row as { sync_modes?: unknown })?.sync_modes;
+    if (!Array.isArray(modes)) continue;
+    const notes = (row as { notes?: unknown })?.notes;
+    out[dest.toLowerCase()] = {
+      sync_modes: modes.map((m) => String(m)),
+      notes: notes && typeof notes === "object" ? (notes as Record<string, string>) : {},
+    };
+  }
+  _destinationSyncModes = Object.keys(out).length ? out : null;
+}
+
+export function getDestinationSyncModes(): DestinationSyncModeTable | null {
+  return _destinationSyncModes;
+}
+
+/**
+ * Offline fallback when capabilities are unreachable: the destination rules
+ * that do not need the server. Kafka is append only; CDC needs a destination
+ * that can apply a DELETE (services/cdc_destination_support.py).
+ */
+const APPEND_ONLY_DESTS = new Set(["kafka", "apache_kafka"]);
+const CDC_DELETE_DESTS = new Set([
+  "postgresql", "redshift", "mysql", "sqlite", "generic_sql", "mongodb", "oracle", "sqlserver",
+  "mssql", "snowflake", "bigquery", "duckdb", "databricks", "iceberg", "apache_iceberg",
+  "pgvector", "qdrant", "weaviate", "pinecone",
+]);
+const APPEND_MODES = new Set<SyncModeId>(["full_refresh_append", "incremental_append"]);
+
+/**
  * Sync modes the operator may pick for this route — hide engine-unsupported
  * combinations so client deploy cannot select a mode that fails at Execute.
+ * The destination side intersects with ``destination_sync_modes`` from
+ * ``/transfer/capabilities``; a parity test (tests/test_clm8_destination_sync_modes_parity.py)
+ * holds that table to Validate's gates.
  */
 export function availableSyncModes(opts: {
   destDriver: string;
@@ -176,13 +225,23 @@ export function availableSyncModes(opts: {
   isMultiStream: boolean;
   sourceReadMode?: string;
   destWriteMode?: string;
+  /** Override the installed capabilities table (tests, previews). */
+  destinationSyncModes?: DestinationSyncModeTable | null;
 }): { id: SyncModeId; label: string; detail: string }[] {
   const dest = (opts.destDriver || "").toLowerCase();
   const src = (opts.sourceDriver || "").toLowerCase();
   const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
   const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query"
     || opts.destWriteMode === "procedure" || opts.destWriteMode === "query";
+  const table = opts.destinationSyncModes === undefined ? _destinationSyncModes : opts.destinationSyncModes;
+  const row = dest && table ? table[dest] : undefined;
+  const allowed = row ? new Set(row.sync_modes) : null;
   return SYNC_MODES.filter((mode) => {
+    if (allowed && !allowed.has(mode.id)) return false;
+    if (!allowed && dest) {
+      if (APPEND_ONLY_DESTS.has(dest) && !APPEND_MODES.has(mode.id)) return false;
+      if (mode.id === "cdc" && !CDC_DELETE_DESTS.has(dest)) return false;
+    }
     if (mode.id === "scd2" || mode.id === "mirror") {
       if (callable) return false;
       if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
@@ -192,6 +251,9 @@ export function availableSyncModes(opts: {
       if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
     }
     return true;
+  }).map((mode) => {
+    const note = row?.notes?.[mode.id];
+    return note ? { ...mode, detail: `${mode.detail} ${note}` } : mode;
   });
 }
 

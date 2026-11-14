@@ -229,7 +229,7 @@ export function LatticeArt({ readyCount }: { readyCount?: number }) {
 
       <ArtFilament x1={64} x2={962} y={536} width={1.5} />
       <ArtText x={64} y={578} size={16} tone="teal">
-        {readyCount ? `${readyCount} drivers marked TRANSFER_READY` : "typed routes across every family"}
+        {readyCount ? `${readyCount} drivers proven in CI` : "typed routes across every family"}
       </ArtText>
       <ArtText x={962} y={578} anchor="end" size={15} tone="muted">
         unproven routes stay labelled unproven

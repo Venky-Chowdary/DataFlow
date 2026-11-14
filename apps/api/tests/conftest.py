@@ -1,5 +1,6 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
+import json
 import logging
 import os
 import socket
@@ -1053,3 +1054,36 @@ def _isolated_console_outbox():
     if sender is not None:
         sender.ConsoleEmailSender.OUTBOX.clear()
     yield
+
+
+@pytest.fixture()
+def ci_evidence(tmp_path, monkeypatch):
+    """Point catalog certification at an evidence document naming green engines.
+
+    Certified comes from CI evidence (services/connector_proof.py, CLM-7). A
+    test of tier logic states which engines its scenario treats as proven:
+    ``ci_evidence("postgresql", "mysql")``. ``ci_evidence()`` proves nothing.
+    """
+    from services import catalog_service, connector_proof
+
+    def _use(*green: str) -> None:
+        path = tmp_path / "ci_evidence.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_run": "https://github.com/test/test/actions/runs/1",
+                    "engines": {e: {"status": "ci_green", "live_verified": True} for e in green},
+                    "live_verified": sorted(green),
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(connector_proof.EVIDENCE_ENV, str(path))
+        connector_proof.reset_cache()
+        catalog_service._enriched_connectors.cache_clear()
+
+    yield _use
+    monkeypatch.delenv(connector_proof.EVIDENCE_ENV, raising=False)
+    connector_proof.reset_cache()
+    catalog_service._enriched_connectors.cache_clear()

@@ -1,7 +1,7 @@
 import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 import { MarketingSectionFooter } from "../marketing/MarketingSectionFooter";
 import type { PublicRoute } from "../../lib/publicNavigation";
-import { EVIDENCE_AS_OF, MARKETING_PROOF_HIGHLIGHTS } from "../../lib/provenEvidence";
+import { MARKETING_PROOF_HIGHLIGHTS } from "../../lib/provenEvidence";
 
 /** Landing proof section — product outcomes, never invented testimonials. */
 export function ProofEvidenceSection({ onNavigate }: { onNavigate?: (route: PublicRoute) => void }) {
@@ -12,9 +12,8 @@ export function ProofEvidenceSection({ onNavigate }: { onNavigate?: (route: Publ
         <p className="lp-section-kicker">Fidelity</p>
         <h2>Proof you can show finance</h2>
         <p>
-          Every load maps, validates, quarantines bad rows, and is verified against the
-          destination. The outcomes below were measured on live engines as of {EVIDENCE_AS_OF},
-          with the destination read back after every write.
+          Every load maps, validates, quarantines bad rows, and ends with a verification report
+          that reads the destination back wherever its engine allows.
         </p>
       </div>
       <div className="lp-testimonial-stack">
@@ -23,8 +22,8 @@ export function ProofEvidenceSection({ onNavigate }: { onNavigate?: (route: Publ
             <span className="lp-cust-industry">{row.stat}</span>
             <p><strong>{row.title}.</strong> {row.body}</p>
             <footer>
-              <strong>Destination re-read</strong>
-              <span>PostgreSQL · MySQL · SQL Server · Oracle</span>
+              <strong>Verification report</strong>
+              <span>On every run</span>
             </footer>
           </article>
         ))}

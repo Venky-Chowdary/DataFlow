@@ -12,6 +12,7 @@ import {
 } from "../../lib/helpDocs";
 import {
   EVIDENCE_AS_OF,
+  EVIDENCE_RUN_ID,
   MARKETING_STACK,
   PROVEN_EVIDENCE,
   catalogHonestyLead,
@@ -331,18 +332,18 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         </ol>
       </section>
 
-      <section className="docs-space-algorithm" aria-label="Measured evidence">
-        <h2>Measured on live engines ({EVIDENCE_AS_OF})</h2>
+      <section className="docs-space-algorithm" aria-label="CI evidence">
+        <h2>Proven in CI{EVIDENCE_AS_OF ? ` (${EVIDENCE_AS_OF})` : ""}</h2>
         <p className="docs-space-evidence-lead">
-          Each line is a live matrix run through the product path against a real engine, with the
-          destination read back afterwards.
+          Each line is an engine whose proving CI jobs ran green with no skipped test.{" "}
+          {EVIDENCE_RUN_ID ? `Recorded from CI run ${EVIDENCE_RUN_ID}.` : null}
         </p>
         <ul className="docs-space-evidence-list">
           {PROVEN_EVIDENCE.map((row) => (
-            <li key={row.artifact}>
-              <strong>{row.claim}</strong>
+            <li key={row.engines}>
+              <strong>{row.engines}</strong>
               <span>
-                {row.engines} · {row.cases} cases · {row.result}
+                {row.claim} · {row.cases} tests · {row.artifact}
               </span>
             </li>
           ))}
@@ -356,7 +357,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           {MARKETING_STACK.map((row) => (
             <li key={row.family}>
               <strong>{row.family} · {row.badge}</strong>
-              <span>{row.items} — {row.note}</span>
+              <span>{row.items} — {row.note}{row.proven && row.badge !== "Proven in CI" ? ` Proven in CI: ${row.proven}.` : ""}</span>
             </li>
           ))}
         </ul>

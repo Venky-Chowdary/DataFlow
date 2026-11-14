@@ -658,7 +658,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Click New connection — Choose a connector dialog",
             pin: "Top-right → New connection",
-            body: "Click **New connection** (top-right). A modal dialog opens: **Choose a connector**.\n\nUse category chips (**Databases**, **Data Warehouses**, **Files & Formats**, …), search, and status filters (**Certified**, **Source only**, **Test only**, **Planned**). Transfer-ready cards show badges such as **Full Transfer**.\n\nPick a driver — for example **PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV / TSV**, or a SQLAlchemy generic. **Planned** catalog entries must not be scheduled in production Pipelines.",
+            body: "Click **New connection** (top-right). A modal dialog opens: **Choose a connector**.\n\nUse category chips (**Databases**, **Data Warehouses**, **Files & Formats**, …), search, and status filters (**Certified**, **Not yet proven**, **Transfer-ready**, **Source only**, **Test only**, **Planned**). Transfer-ready cards show badges such as **Full Transfer**.\n\nPick a driver — for example **PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV / TSV**, or a SQLAlchemy generic. **Planned** catalog entries must not be scheduled in production Pipelines.",
             figure: {
               src: "/docs/screenshots/app-connectors-wizard.png",
               alt: "Choose a connector modal with catalog grid",
@@ -706,7 +706,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Honest transfer-ready labels",
         body: "Catalog tiles are not the same as production drivers. Each connector shows one of these readiness states. Only routes with transfer-ready evidence get the production badge — everything else stays labelled honestly.",
         steps: [
-          "**Certified** — governed transfer path proven (`transfer_ready`); safe for production schedules after Test passed.",
+          "**Certified** — the CI jobs that prove this engine ran green with no skipped test; safe for production schedules after Test passed.",
+          "**Implemented — not yet proven** — the driver runs transfers, but no green CI run proves its engine yet; not offered for production schedules.",
           "**Source only** — readable; no transfer-ready write path.",
           "**Test only** — auth works; write path is not transfer-ready.",
           "**Planned** — catalog presence only; do not schedule yet.",
@@ -715,7 +716,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "native",
         title: "Native drivers & SQLAlchemy",
-        body: "**PostgreSQL**, **MySQL**, and **MongoDB** are certified full transfer. **Snowflake**, **BigQuery**, **S3**, **CSV**, and **JSON** are TRANSFER_READY when their packages are installed. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. **Run unique-engine matrix** is the live src×dst cartesian (Postgres, MySQL, Mongo, SQL Server, Oracle, object stores, warehouses on emulators). Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
+        body: "A connector is **Certified** only when the CI jobs that prove its engine ran green with no skipped test; an engine that runs but has no such run yet is labelled **Implemented — not yet proven** and is not offered for production schedules. The connector catalog shows each tile's tier. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. **Run unique-engine matrix** is the live src×dst cartesian (Postgres, MySQL, Mongo, SQL Server, Oracle, object stores, warehouses on emulators). Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
       },
     ],
   },

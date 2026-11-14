@@ -10,6 +10,8 @@ TOPOLOGY_ROLES = frozenset({"source", "destination", "both", "src", "dest", "any
 _PATH_BASED = frozenset({"sqlite", "duckdb"})
 _NO_PORT = frozenset({
     "bigquery", "snowflake", "s3", "dynamodb", "gcs", "adls", "elasticsearch",
+    # OAuth client credentials (Consumer Key / Secret) over the instance URL.
+    "salesforce",
 })
 _NO_USERPASS = frozenset({
     "sqlite", "duckdb", "bigquery", "s3", "dynamodb", "gcs", "adls",

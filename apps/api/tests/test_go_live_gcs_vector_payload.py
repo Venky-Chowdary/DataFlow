@@ -78,7 +78,7 @@ def test_stream_job_warning_survives_a_cached_tfidf_embedder(monkeypatch):
     first = vectorize_records(
         [{"id": "1", "content": "postgres row about orders", "price": Decimal("2.36")}],
         content_column="content",
-        model="sentence-transformers/all-MiniLM-L6-v2",
+        model="tfidf/local",
         skip_chunking=True,
     )
     assert first[0]["metadata"].get("_df_embedding_backend") == "tfidf_fallback"
@@ -88,7 +88,7 @@ def test_stream_job_warning_survives_a_cached_tfidf_embedder(monkeypatch):
     second = vectorize_records(
         [{"id": "2", "content": "another postgres row about orders"}],
         content_column="content",
-        model="sentence-transformers/all-MiniLM-L6-v2",
+        model="tfidf/local",
         skip_chunking=True,
     )
     assert second[0]["metadata"].get("_df_embedding_backend") == "tfidf_fallback"
@@ -102,7 +102,8 @@ def test_stream_job_warning_survives_a_cached_tfidf_embedder(monkeypatch):
 
     summary = _writer_diagnostics(_Result())
     text = " ".join(summary["warnings"])
-    assert "tfidf_fallback" in text or "fallback" in text
-    assert "MiniLM" in text
+    # CLM-11: TF-IDF is an explicit choice, and the job says it is not semantic.
+    assert "TF-IDF" in text
+    assert "not semantic" in text
     _get_embedder.cache_clear()
     take_embedding_fallback_notice()

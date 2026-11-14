@@ -1,28 +1,32 @@
 /**
- * Measured evidence for public-facing pages.
+ * Public connector claims, generated from CI evidence.
  *
- * Every row here comes from a live matrix run recorded in
- * `docs/CLIENT_READINESS_REPORT.md` — a real transfer through the product path
- * against a real engine, with the destination re-read afterwards. Marketing
- * copy renders these rows instead of writing its own numbers, so a claim on the
- * site cannot outrun the artifact that backs it.
+ * Every number and badge here derives from `CONNECTOR_CLAIMS`
+ * (`connectorClaims.generated.ts`), which
+ * `apps/api/scripts/connector_claims_report.py` writes from
+ * `apps/api/data/connector_ci_evidence.json`: the per-engine result of the CI
+ * jobs that prove an engine (`services/connector_ci_evidence.py`). An engine
+ * counts as proven only when its proving jobs ran green with none of its tests
+ * skipped. A test fails when the generated file drifts from the evidence.
  *
- * Rules for editing:
- * - A row may only be added once its artifact exists and the run is recorded.
- * - `cases` is the number of scenarios actually executed, never a target.
- * - Anything not measured belongs in `NOT_PROVEN`, phrased as the reason.
+ * The hand-written evidence rows this file used to carry named artifacts that
+ * no longer ship and could not be re-run (CLM-5); they are gone. Nothing here
+ * is typed in by hand.
  */
+import { CONNECTOR_CLAIMS } from "./connectorClaims.generated";
+
+export { CONNECTOR_CLAIMS };
 
 export interface EvidenceRow {
   /** What was proven, in operator language. */
   claim: string;
-  /** Engines the matrix actually ran against. */
+  /** Engine the CI jobs proved. */
   engines: string;
-  /** Scenarios executed. */
+  /** Tests the proving jobs executed (passed + failed; zero failed and skipped). */
   cases: number;
-  /** Outcome exactly as the artifact records it. */
+  /** Outcome as the evidence records it. */
   result: string;
-  /** Artifact filename in the readiness report. */
+  /** CI jobs that proved it. */
   artifact: string;
 }
 
@@ -34,127 +38,68 @@ export interface UnprovenRow {
   reason: string;
 }
 
-/** Date the numbers below were last measured. */
-export const EVIDENCE_AS_OF = "August 2026";
-
-export const PROVEN_EVIDENCE: EvidenceRow[] = [
-  {
-    claim: "Schema drift — widen, narrow-refuse, NOT NULL, defaults, concurrency, resume, case variants",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 48,
-    result: "48 recorded, 0 violations",
-    artifact: "drift_live_results.json, drift_live_multi_results.json",
-  },
-  {
-    claim: "Identity / sequence generator carried on create-new, re-read from the destination catalog and proven by a post-cutover insert without a key",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 16,
-    result: "14 carried, 2 flagged by name before the load",
-    artifact: "identity_live_results.json",
-  },
-  {
-    claim: "Foreign keys carried with dependency-ordered multi-table create, each proven by the destination rejecting an orphan row",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 11,
-    result: "11 ok",
-    artifact: "foreign_key_live_results.json, fk_single_table_live_results.json",
-  },
-  {
-    claim: "CHECK constraint carry, proven by the destination rejecting a violating row",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 16,
-    result: "16 ok",
-    artifact: "check_carry_live_results.json",
-  },
-  {
-    claim: "Secondary index carry",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 16,
-    result: "16 ok",
-    artifact: "secondary_index_live_results.json",
-  },
-  {
-    claim: "Physical placement — partitioning, tablespace, filegroup — carried or explicitly refused, never invented",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 10,
-    result: "10 ok",
-    artifact: "physical_placement_live_results.json",
-  },
-  {
-    claim: "Validate→Execute DDL identity: append, incremental delta, duplicate re-run refusal, narrowed-DDL refusal",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle, SQLite",
-    cases: 5,
-    result: "5 engines, all ok — refusals write zero rows",
-    artifact: "ddl_identity_matrix_results.json",
-  },
-  {
-    claim: "30-source-column into a 20-column destination: unmapped columns block pre-write unless declared",
-    engines: "PostgreSQL, MySQL, Oracle",
-    cases: 36,
-    result: "12 scenarios × 3 engines",
-    artifact: "migration_scenario_matrix_results.json",
-  },
-  {
-    claim: "Retry safety: retry-from-start is refused when the failed attempt committed rows under a non-convergent mode, and for a cancelled run",
-    engines: "PostgreSQL (live scheduler)",
-    cases: 14,
-    result: "14/14 recorded",
-    artifact: "schedule_live_results.json",
-  },
-  {
-    claim: "Destination privilege probe before write",
-    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
-    cases: 7,
-    result: "7 ok",
-    artifact: "grants_live_results.json",
-  },
-  {
-    claim: "Incremental transforms load by column name, refusing unmatched columns",
-    engines: "PostgreSQL, MySQL, SQL Server",
-    cases: 33,
-    result: "33 ok",
-    artifact: "transform_live_results.json",
-  },
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
 ];
 
-/** Backend suite as last measured — see the readiness report for the shard log. */
-export const BACKEND_SUITE = {
-  passed: 13244,
-  failed: 0,
-  skipped: 1515,
-} as const;
-
-/**
- * Unique duplex/source drivers from `transfer_live_driver_types()` after the
- * honesty filter (preflight required except file_source; email stays demoted
- * as write-only with no read-back, SFTP earned its place in
- * test_sftp_live_transfer.py against a real server).
- * This is the count **when optional packages are present**. A given host may
- * report fewer via `GET /capabilities` `unique_transfer_drivers`. Catalog tiles
- * are a larger number and are never presented as live capability.
- * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
- */
-export const TRANSFER_READY_DRIVERS = 46;
-
-/**
- * Catalog slots the desktop lab can bind and exercise as source + dest.
- * This is an operator option, not 80 unique engines and not catalog tile count.
- */
-export const DESKTOP_LAB_CATALOG_SLOTS = 80;
-
-/**
- * Public catalog lead: the measured transfer-ready driver count, stated as
- * what it is. Catalog tile count is never presented as a live-driver count.
- */
-export function catalogHonestyLead(readyCount: number = TRANSFER_READY_DRIVERS): string {
-  return (
-    `${readyCount} drivers are transfer-ready: each one maps, runs preflight, quarantines bad rows, ` +
-    `and verifies the load through the same engine.`
-  );
+function monthYear(iso: string): string {
+  const match = /^(\d{4})-(\d{2})/.exec(iso || "");
+  if (!match) return "";
+  return `${MONTHS[Number(match[2]) - 1]} ${match[1]}`;
 }
 
-/** Public family badge. Only transfer-ready drivers are named in MARKETING_STACK. */
-export type CatalogFamilyBadge = "Transfer-ready";
+/** Month the CI evidence was recorded (empty when no run is recorded). */
+export const EVIDENCE_AS_OF = monthYear(CONNECTOR_CLAIMS.evidence_generated_at);
+
+/** The CI run the evidence came from (its GitHub Actions run id). */
+export const EVIDENCE_RUN_ID: string = CONNECTOR_CLAIMS.evidence_run_id;
+
+/** One row per engine a CI run proved: green, nothing skipped. */
+export const PROVEN_EVIDENCE: EvidenceRow[] = CONNECTOR_CLAIMS.proof_rows.map((row) => ({
+  claim: row.emulated
+    ? "Proving CI jobs ran green against the engine's emulator, with no skipped test"
+    : "Proving CI jobs ran green against the live engine, with no skipped test",
+  engines: row.name,
+  cases: row.executed,
+  result: "green",
+  artifact: row.jobs.join(", "),
+}));
+
+/** Transfer drivers a green CI run proves. */
+export const PROVEN_DRIVERS: number = CONNECTOR_CLAIMS.proven_count;
+
+/** Transfer drivers that are implemented and still running their CI proof. */
+export const PENDING_DRIVERS: number = CONNECTOR_CLAIMS.pending_count;
+
+/** CDC sources whose engine a green CI run proves. */
+export const PROVEN_CDC_SOURCES: string[] = CONNECTOR_CLAIMS.cdc_sources
+  .filter((s) => s.proven)
+  .map((s) => s.name);
+
+/** "N drivers proven in CI" — the one public driver count. */
+export function provenDriversPhrase(count: number = PROVEN_DRIVERS): string {
+  return `${count} ${count === 1 ? "driver" : "drivers"} proven in CI`;
+}
+
+/**
+ * Public catalog lead: proven vs implemented, both derived from evidence
+ * (CLM-6). Catalog tile count is never presented as a driver count.
+ */
+export function catalogHonestyLead(
+  provenCount: number = PROVEN_DRIVERS,
+  pendingCount: number = PENDING_DRIVERS,
+): string {
+  // Not "each verifies the load": file exports and several destinations have no
+  // independent read-back (CLM-6). The claim is the CI run, and only that.
+  const proven = `${provenDriversPhrase(provenCount)}: each one's CI jobs ran green with no skipped test.`;
+  return pendingCount > 0
+    ? `${proven} ${pendingCount} more are implemented and running their CI proof.`
+    : proven;
+}
+
+/** Public family badge, derived from which members CI proves. */
+export type CatalogFamilyBadge = "Proven in CI" | "Partly proven in CI" | "Implemented";
 
 /**
  * Internal operator ledger — not rendered on marketing pages.
@@ -220,82 +165,70 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
 ];
 
+const FAMILY_NOTES: Record<string, string> = {
+  Databases:
+    "Identity, foreign keys, CHECK constraints, and indexes carry on create-new, and CDC reads the database log where the engine offers one.",
+  "Warehouses & lakehouse":
+    "Create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg connects to a REST catalog or a filesystem warehouse.",
+  "Object storage":
+    "S3-compatible endpoints, s3:// URLs and prefixes, with decimals landing exact and every row accounted for.",
+  Files: "Typed reads and exports for the common file formats, through the same map and gates.",
+  "Cache & search": "Key-value and document stores, written through the same map, gates, and read-back.",
+  Streaming:
+    "Read topics as a source with one exact type per field across the run; write topics append-only.",
+  "Vector databases":
+    "Embeddings from the provider you choose for the destination, with source columns kept typed beside them.",
+  "Applications & APIs":
+    "Reverse-ETL into Salesforce and HubSpot, incremental Stripe reads on the created cursor, and REST sources with the same map, gates, and verification.",
+};
+
+function familyBadge(proven: number, total: number): CatalogFamilyBadge {
+  if (total > 0 && proven === total) return "Proven in CI";
+  if (proven > 0) return "Partly proven in CI";
+  return "Implemented";
+}
+
 /**
- * Public catalog families. Every name listed here is in
- * `transfer_live_driver_types()` on the current base (46 drivers). Catalog
- * entries whose status is `planned` (Redshift, Databricks, ClickHouse,
- * MariaDB, CockroachDB, Shopify) are not named — see
- * docs/MARKETING_AUDIT_2026-10.md, "Not claimed on purpose".
+ * Public catalog families. Members, the proven subset, and the badge all come
+ * from `CONNECTOR_CLAIMS`; only the family note is prose.
  */
 export const MARKETING_STACK: ReadonlyArray<{
   family: string;
   items: string;
+  proven: string;
   badge: CatalogFamilyBadge;
   note: string;
-}> = [
-  {
-    family: "Warehouses & lakehouse",
-    items: "Snowflake, BigQuery, Apache Iceberg",
-    badge: "Transfer-ready",
-    note:
-      "Load and read Snowflake and BigQuery with create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg works with SQL and REST catalogs.",
-  },
-  {
-    family: "Object storage",
-    items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
-    badge: "Transfer-ready",
-    note:
-      "S3-compatible endpoints, s3:// URLs and prefixes. CSV, JSON, Parquet, Avro, and ORC — decimals land exact and every row is accounted for.",
-  },
-  {
-    family: "Databases",
-    items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB, SQLite",
-    badge: "Transfer-ready",
-    note:
-      "Identity, foreign keys, CHECK constraints, and indexes carry on create-new. Native change data capture on SQL Server, PostgreSQL, MySQL, and Oracle.",
-  },
-  {
-    family: "Streaming",
-    items: "Apache Kafka",
-    badge: "Transfer-ready",
-    note:
-      "Read topics as a source. Every field gets one exact type across the whole run, and JSON numbers keep the spelling the message gave them.",
-  },
-  {
-    family: "Vector databases",
-    items: "pgvector, Pinecone, Qdrant, Weaviate, Milvus",
-    badge: "Transfer-ready",
-    note:
-      "New pgvector tables are typed by default: every source column with its real type plus an embedding column, verified like PostgreSQL.",
-  },
-  {
-    family: "Applications & APIs",
-    items: "Salesforce, HubSpot, Stripe, REST APIs",
-    badge: "Transfer-ready",
-    note:
-      "Reverse-ETL into Salesforce and HubSpot, incremental Stripe reads on the created cursor, and REST sources with the same map, gates, and verification.",
-  },
-];
+}> = CONNECTOR_CLAIMS.families.map((f) => {
+  const provenNames = f.items.filter((i) => i.proven).map((i) => i.name);
+  return {
+    family: f.family,
+    items: f.items.map((i) => i.name).join(", "),
+    proven: provenNames.join(", "),
+    badge: familyBadge(provenNames.length, f.items.length),
+    note: FAMILY_NOTES[f.family] ?? "",
+  };
+});
 
+/** What every load does — product behaviour, no unrecorded figures (CLM-5). */
 export const MARKETING_PROOF_HIGHLIGHTS = [
   {
     title: "Schema changes stay under control",
-    body: "Widen safely, refuse unsafe narrows, and carry nullability and defaults — measured on PostgreSQL, MySQL, SQL Server, and Oracle.",
-    stat: "48 live cases",
+    body: "Widen safely, refuse unsafe narrows, and carry nullability and defaults — Validate decides before anything is written.",
+    stat: "Validate gate",
   },
   {
     title: "Identity and keys survive cutover",
-    body: "Sequences, foreign keys, and CHECK constraints carry to the destination — each one proven on the destination itself after cutover.",
-    stat: "43 live cases",
+    body: "Sequences, foreign keys, and CHECK constraints carry to the destination on create-new and are read back from its catalog.",
+    stat: "Create-new",
   },
   {
     title: "Retries keep a load correct",
     body: "Before any retry, Datawrap checks what the failed attempt already committed and restarts only on a path that converges.",
-    stat: "14 scheduler cases",
+    stat: "Retry check",
   },
   {
     title: "Transforms load by column name",
-    body: "Incremental transforms match every column by name on PostgreSQL, MySQL, and SQL Server.",
-    stat: "33 live cases",
+    body: "Incremental transforms match every column by name and refuse columns that do not match.",
+    stat: "By name",
   },
 ] as const;

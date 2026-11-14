@@ -3,7 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
 import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
-import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
+import { catalogHonestyLead } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
 const SOURCES = [
@@ -57,7 +57,7 @@ const FAQS = [
   },
   {
     q: "How many connectors are live?",
-    a: `${TRANSFER_READY_DRIVERS} drivers are transfer-ready today across databases, warehouses, object storage, files, Kafka, vector databases, and apps — each with the same map, gates, and verification.`,
+    a: catalogHonestyLead(),
   },
   {
     q: "Which change data capture engines do you support?",
