@@ -1379,6 +1379,7 @@ def _gate_cdc_sink(
 def _refuse_cdc_advance_on_abort(
     dest_summary: dict[str, Any] | None,
     validation_mode: str,
+    rows_committed: int = 0,
 ) -> None:
     """Raise when CDC must not advance watermark/ack after abort-class rejects.
 
@@ -1393,17 +1394,30 @@ def _refuse_cdc_advance_on_abort(
     if not isinstance(dest_summary, dict):
         return
     if dest_summary.get("ok") is False:
-        raise ValueError(
-            str(
-                dest_summary.get("error")
-                or "CDC destination write blocked — refuse watermark advance"
-            )
+        abort = str(
+            dest_summary.get("error")
+            or "CDC destination write blocked — refuse watermark advance"
         )
-    abort = reject_on_strict_policy(
-        transform_error_policy_for_validation_mode(validation_mode),
-        dest_summary.get("rejected_details") or [],
-        "CDC",
-    )
+    else:
+        abort = reject_on_strict_policy(
+            transform_error_policy_for_validation_mode(validation_mode),
+            dest_summary.get("rejected_details") or [],
+            "CDC",
+        )
+    if abort and rows_committed > 0:
+        # DATA-4: the batch was applied before this verdict, so "blocks partial
+        # write" with records=0 hid the rows the destination now holds.
+        from .adapters import WriteBatchBlocked
+
+        raise WriteBatchBlocked(
+            abort.replace("strict error policy blocks partial write", "strict error policy stopped the run")
+            + f" This CDC run had already written {int(rows_committed):,} row(s); they stay on "
+            "the destination. The CDC position did not move, so the next run applies these "
+            "changes again once the refused value is fixed.",
+            rejected_details=list(dest_summary.get("rejected_details") or []),
+            rows_written=int(rows_committed),
+            dest_summary=dest_summary,
+        )
     if abort:
         raise ValueError(abort)
 
@@ -3021,7 +3035,7 @@ def _run_cdc_shared_multi_table(
                 change=change,
                 key_cols=list(pk_source or []),
             )
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(total_rows or 0))
 
         skip_ack = False
         if change.resume_token is not None:
@@ -4295,7 +4309,7 @@ def _run_cdc_single_stream(
         if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
             eos_active = False
 
-        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode, int(state.rows_written or 0))
 
         # Never overwrite a durable log resume with incremental/side-channel tokens
         # (binlog gaps / wrong PG slots under load). Never ack those tokens either.
