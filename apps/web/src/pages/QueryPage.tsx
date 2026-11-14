@@ -50,6 +50,7 @@ import {
   playgroundQueryBody,
   pushHistory,
   querySchemaErrorCopy,
+  schemaNotConnectedReason,
   retitleTab,
   saveHistory,
   saveLayout,
@@ -216,6 +217,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         setSchemaObjects(data.objects.map(toSchemaObject));
         setSchemaTruncated(data.objects_truncated === true);
         setSchemaConnected(data.connected);
+        setSchemaError(schemaNotConnectedReason(data));
         setSchemaTypeSource(data.type_source ?? "");
         setSchemaWarnings(data.warnings ?? []);
       } catch (e) {

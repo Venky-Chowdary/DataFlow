@@ -888,6 +888,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"^platform driver missing:|^sqlalchemy dialect/driver for |^no module named |"
         r"^can't load plugin: sqlalchemy\.dialects|connector driver is not installed", re.I)),
     ("network.egress_blocked", re.compile(r"^refused connector host \S+: (?!dns did not resolve)", re.I)),
+    # SEC-9's own refusal (services.local_file_policy), when a probe passes it on as text.
+    ("access.path_not_allowed", re.compile(r"(?:file is|names a key file) outside the folders connectors may open", re.I)),
     ("network.dns_not_found", re.compile(
         r"^refused connector host \S+: dns did not resolve|could not translate host name|"
         r"name or service not known|nodename nor servname provided|temporary failure in name resolution|"
