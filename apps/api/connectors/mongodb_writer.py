@@ -1620,6 +1620,8 @@ def write_mapped_rows(
                 mapped_rows,
                 target_cols,
                 dest_db_type="mongodb",
+                # DATA-11: a document column's JSON null is stored as null.
+                dest_types={c: t for c, t in (dest_types or {}).items() if _is_document_type(t)},
             ),
             chunks_completed=chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
@@ -1662,3 +1664,9 @@ def write_mapped_rows(
             rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
             warnings=transform_errors if "transform_errors" in locals() else [],
         )
+
+
+def _is_document_type(type_text: Any) -> bool:
+    """A column the writer stores as a document value (JSON / object / array)."""
+    text = str(type_text or "").strip().lower()
+    return "json" in text or text in {"object", "document", "array", "struct", "map"}

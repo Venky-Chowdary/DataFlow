@@ -3360,6 +3360,15 @@ def fingerprint_for_reconcile(
         # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
         wire = None
         value = None
+    _doc_col = str(ddl_type or "").strip().lower()
+    _doc_col = "json" in _doc_col or _doc_col in {"object", "document", "array", "struct", "map"}
+    if str(engine or "").lower() in _DOCUMENT_ENGINES and (
+        type(value).__name__ == "JsonNullToken"
+        or _document_json_null(str(engine or "").lower(), value, None, "json" if _doc_col else transform)
+    ):
+        # DATA-11: a document stores JSON null as its null; the read-back is None.
+        wire = None
+        value = None
     if isinstance(wire, str):
         # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
         # literal ``x`` (one layer — the recursive escape stays provable), so
@@ -4351,6 +4360,23 @@ def _align_history_versions(
     return aligned
 
 
+_DOCUMENT_ENGINES = frozenset({"mongodb", "mongo", "documentdb", "cosmosdb"})
+
+
+def _document_json_null(engine: str, raw_src: Any, raw_tgt: Any, transform: Any) -> bool:
+    """DATA-11: a JSON ``null`` lands in a document store as BSON null.
+
+    The document carries the JSON value itself, and JSON ``null`` *is* null
+    there, so the read-back ``None`` is the same value (the false red was
+    source='null' dest='null').
+    """
+    if engine not in _DOCUMENT_ENGINES or raw_tgt is not None:
+        return False
+    if str(transform or "").strip().lower() != "json":
+        return False
+    return isinstance(raw_src, str) and raw_src.strip() == "null"
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -4927,6 +4953,7 @@ def sample_compare_rows(
                     key=key if keyed else "",
                     inserted_keys=inserted_keys,
                 )
+                and not _document_json_null(eng, raw_src, raw_tgt, transform)
             ):
                 mismatches.append(
                     {
