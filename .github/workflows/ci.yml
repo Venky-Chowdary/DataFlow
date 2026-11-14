@@ -1226,12 +1226,13 @@ jobs:
         uses: actions/checkout@v4
 
       # The a11y project (UX-16) is the axe-core WCAG 2.2 A/AA gate over the
-      # main screens: any critical or serious violation fails this job.
+      # main screens: any critical or serious violation fails this job. The
+      # phone project (UX-5) taps every Destination card at 390 px.
       - name: Wizard, accessibility gate and production smoke
         uses: ./.github/actions/studio-surface
         with:
           playwright_project: wizard
-          extra_playwright_projects: a11y
+          extra_playwright_projects: a11y phone
           production_smoke: "true"
           artifact_name: studio-ui-wizard
 

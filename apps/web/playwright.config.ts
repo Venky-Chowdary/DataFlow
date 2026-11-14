@@ -72,6 +72,15 @@ export default defineConfig({
       },
     },
     {
+      // UX-5: Destination step on a phone (touch, 390 px).
+      name: "phone",
+      testMatch: /phone-.*\.spec\.ts/,
+      use: {
+        ...devices["Pixel 5"],
+        viewport: { width: 390, height: 844 },
+      },
+    },
+    {
       name: "prod-smoke",
       testMatch: /prod-smoke\.spec\.ts/,
       use: {
