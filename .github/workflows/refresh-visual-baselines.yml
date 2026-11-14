@@ -1,0 +1,53 @@
+name: Refresh visual baselines
+
+# Opt-in, per push: only a push to a release/** branch whose head commit
+# message contains [refresh-visual-baselines] runs it. It renders the wizard
+# and studio-next screens on the same runner image the PR Workflow uses,
+# rewrites only the baselines that differ (--update-snapshots=changed) and
+# commits them back to the branch for review. The commit carries the run id.
+# A push made with GITHUB_TOKEN starts no other workflow, so the PR Workflow
+# runs again only on the next human push.
+on:
+  push:
+    branches: ["release/**"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-visual-baselines-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    if: contains(github.event.head_commit.message, '[refresh-visual-baselines]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Render and rewrite the baselines that differ
+        uses: ./.github/actions/studio-surface
+        with:
+          playwright_project: wizard
+          extra_playwright_projects: studio-next
+          production_smoke: "false"
+          artifact_name: refresh-visual-baselines
+          update_snapshots: "true"
+
+      - name: Commit the refreshed baselines
+        if: always()
+        shell: bash
+        run: |
+          git add -- 'apps/web/e2e/*-snapshots/*.png'
+          if git diff --cached --quiet; then
+            echo "No baseline changed."
+            exit 0
+          fi
+          git diff --cached --stat
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "test(e2e): refresh visual baselines from run ${{ github.run_id }}" \
+                   -m "Rendered on the PR Workflow's runner image by refresh-visual-baselines (--update-snapshots=changed)."
+          git push origin "HEAD:${GITHUB_REF#refs/heads/}"

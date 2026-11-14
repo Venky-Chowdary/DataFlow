@@ -14,6 +14,10 @@ inputs:
     description: More Playwright projects to run against the same dev server, space-separated (e.g. a11y)
     required: false
     default: ""
+  update_snapshots:
+    description: "\"true\" rewrites the visual baselines that differ (refresh-visual-baselines workflow only)"
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -87,15 +91,12 @@ runs:
         CI: "1"
         PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
         EXTRA_PROJECTS: ${{ inputs.extra_playwright_projects }}
+        UPDATE_SNAPSHOTS: ${{ inputs.update_snapshots }}
       run: |
         projects=(--project="${{ inputs.playwright_project }}")
         for extra in $EXTRA_PROJECTS; do projects+=(--project="$extra"); done
+        if [ "$UPDATE_SNAPSHOTS" = "true" ]; then projects+=(--update-snapshots=changed); fi
         npx playwright test "${projects[@]}"
-
-    - name: Print failed visual comparisons (for a baseline refresh)
-      if: failure()
-      shell: bash
-      run: bash .github/scripts/print_snapshot_actuals.sh apps/web/test-results
 
     - name: Production build
       if: success() && inputs.production_smoke == 'true'
