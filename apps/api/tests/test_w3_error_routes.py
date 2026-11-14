@@ -467,3 +467,14 @@ def test_err43_playground_refusal_names_the_function():
 
     message = sql_refusal_message("select pg_sleep(5)", playground=True)
     assert "pg_sleep" in message, message
+
+
+def test_ux7_tls_copy_carries_a_tls_code_for_the_page():
+    """The Test page shows its SSL hint on the code, not by matching "ssl|tls" in text."""
+    from services.safe_errors import failure_fields
+    from src.transfer.connector_registry import humanize_connection_error
+
+    copy = humanize_connection_error("postgresql", "server does not support SSL, but SSL was required")
+    fields = failure_fields(copy, engine="postgresql")
+    assert fields["error"]["code"] == "network.tls_required", fields
+    assert fields["reference"]

@@ -863,7 +863,10 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("auth.user_unknown", re.compile(r'^role "[^"]+" does not exist', re.I)),
     ("auth.mongo_auth_source", re.compile(r"^authentication failed\.?$|'codename': 'authenticationfailed'", re.I)),
     ("object.database_not_found", re.compile(r'database "[^"]+" does not exist|unknown database \'', re.I)),
-    ("network.tls_untrusted", re.compile(r"certificate verify failed|self[- ]signed certificate", re.I)),
+    ("network.tls_untrusted", re.compile(
+        r"certificate verify failed|self[- ]signed certificate|^tls certificate could not be verified|"
+        r"certificate isn't trusted", re.I)),
+    ("network.tls_required", re.compile(r"^tls mismatch\b|^the server refused the tls handshake", re.I)),
     ("network.tls_required", re.compile(
         r"server does not support ssl, but ssl was required|insecure transport are prohibited|"
         r"no pg_hba\.conf entry for host .*(?:no encryption|ssl off)|ssl connection is required", re.I)),
