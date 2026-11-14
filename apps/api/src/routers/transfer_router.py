@@ -483,8 +483,12 @@ def transfer_capabilities():
     from ..transfer.connector_capabilities import manifest_summary
     from ..transfer.registry import get_capabilities
 
+    from services.destination_sync_modes import capabilities_destination_sync_modes
+
     caps = get_capabilities()
     caps["platform"] = manifest_summary()
+    # CLM-8: per destination, the sync modes Validate's destination gates allow.
+    caps["destination_sync_modes"] = capabilities_destination_sync_modes()
     caps["format_conversion"] = __import__(
         "services.format_converter", fromlist=["conversion_matrix"]
     ).conversion_matrix()

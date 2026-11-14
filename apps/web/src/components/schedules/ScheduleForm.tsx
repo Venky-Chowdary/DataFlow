@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { introspectTransferEndpoints } from "../../lib/api";
+import { resolveDriverType } from "../../lib/connectorTypes";
 import { ObjectNameCombobox } from "../transfer/ObjectNameCombobox";
 import { sourceTableMissingFromCatalog } from "../../lib/sourceObjectPick";
 import { DtIcon } from "../DtIcon";
@@ -184,7 +185,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
   const syncModes = useMemo(() => {
     const offered = availableSyncModes({
-      destDriver: destConnector?.type || "",
+      // The capabilities sync-mode table is keyed by driver type (CLM-8).
+      destDriver: resolveDriverType(destConnector?.type || "") || destConnector?.type || "",
       sourceDriver: sourceConnector?.type || "",
       sourceKind: "database",
       isMultiStream: false,

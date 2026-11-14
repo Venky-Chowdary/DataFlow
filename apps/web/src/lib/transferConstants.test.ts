@@ -229,3 +229,47 @@ describe("schemaPolicyHonestyLine", () => {
     assert.match(line, /cannot be accepted away/i);
   });
 });
+
+describe("availableSyncModes intersects with /capabilities destination_sync_modes (CLM-8)", () => {
+  const table = {
+    kafka: { sync_modes: ["full_refresh_append", "incremental_append"], notes: {} },
+    redis: {
+      sync_modes: ["full_refresh_overwrite", "full_refresh_append", "incremental_append", "incremental_deduped"],
+      notes: {},
+    },
+    hubspot: {
+      sync_modes: ["full_refresh_overwrite", "full_refresh_append", "incremental_append", "incremental_deduped"],
+      notes: { full_refresh_overwrite: "overwrite updates records by key, and records the source no longer has are left in place." },
+    },
+  };
+  const ids = (destDriver: string, t: typeof table | null = table) =>
+    availableSyncModes({
+      destDriver,
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      destinationSyncModes: t,
+    }).map((m) => m.id);
+
+  it("offers Kafka only the append modes", () => {
+    assert.deepEqual(ids("kafka"), ["full_refresh_append", "incremental_append"]);
+  });
+  it("does not offer CDC into Redis", () => {
+    assert.ok(!ids("redis").includes("cdc"));
+  });
+  it("keeps the offline fallback honest when capabilities are unreachable", () => {
+    assert.deepEqual(ids("kafka", null), ["full_refresh_append", "incremental_append"]);
+    assert.ok(!ids("redis", null).includes("cdc"));
+    assert.ok(ids("postgresql", null).includes("cdc"));
+  });
+  it("says what overwrite does on a destination with no table", () => {
+    const overwrite = availableSyncModes({
+      destDriver: "hubspot",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      destinationSyncModes: table,
+    }).find((m) => m.id === "full_refresh_overwrite");
+    assert.match(overwrite?.detail ?? "", /updates records by key/);
+  });
+});

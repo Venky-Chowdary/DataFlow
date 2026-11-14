@@ -158,6 +158,7 @@ import { theaterReturnToValidate } from "../lib/theaterReturn";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
+  setDestinationSyncModes,
   DATE_LOCALES,
   NUMBER_LOCALES,
   DEFAULT_SCHEMA_POLICY,
@@ -1082,6 +1083,7 @@ export function TransferPage({
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
         const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+        setDestinationSyncModes(caps.destination_sync_modes);
         // Reinforce catalog SSOT (app boot also loads; Transfer page refreshes lists).
         setTransferLiveDrivers(drivers.length ? drivers : [...sources, ...dbs]);
         if (sources.length || drivers.length) {
