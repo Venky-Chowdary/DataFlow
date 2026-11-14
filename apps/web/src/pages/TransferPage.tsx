@@ -510,6 +510,8 @@ export function TransferPage({
   const [executedRouteKey, setExecutedRouteKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  /** Continue on Destination was pressed while the destination was being re-read. */
+  const [destContinuePending, setDestContinuePending] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [mappingError, setMappingError] = useState<string | null>(null);
@@ -6877,17 +6879,19 @@ export function TransferPage({
     destProcedureCall,
     destQuerySql,
   });
-  const canRunPreflight =
+  /** Destination fields are complete; a re-read of the catalog may still be running. */
+  const destFieldsReady =
     canConfigureDest &&
     (destKindMode === "file_export" ||
       (isCallableDestMode(destWriteMode)
         ? Boolean(
             destType
             && destSqlReady
-            && (connectorId || targetDb.trim() || destDriverType === "iceberg")
-            && !destSchemaLoading,
+            && (connectorId || targetDb.trim() || destDriverType === "iceberg"),
           )
-        : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+        : Boolean(destType && targetDb && targetCollection)));
+  const canRunPreflight =
+    destFieldsReady && (destKindMode === "file_export" || !destSchemaLoading);
 
   const destContinueBlocker = destinationContinueBlocker({
     sourceReady: canConfigureDest,
@@ -7458,13 +7462,37 @@ export function TransferPage({
     setActiveData(null);
   }, [onFreshTransfer, setActiveData]);
 
-  const continueFromDestination = () => {
+  const advanceFromDestination = () => {
     if (studioFlags.canvas) {
       void goToMapping();
       return;
     }
     setStep(STEP_SHAPE);
   };
+
+  // Editing the destination re-reads it 350 ms later. Continue must not be
+  // disabled by that read: a press that began before it and ended during it was
+  // dropped by the browser, and Studio stayed on Destination. A press during the
+  // read waits for it (the read is bounded by DEST_PROBE_TIMEOUT_MS), then
+  // continues.
+  const continueFromDestination = () => {
+    if (destKindMode === "database" && destSchemaLoading) {
+      setDestContinuePending(true);
+      return;
+    }
+    advanceFromDestination();
+  };
+
+  useEffect(() => {
+    if (!destContinuePending) return;
+    if (step !== STEP_DESTINATION || !destFieldsReady) {
+      setDestContinuePending(false);
+      return;
+    }
+    if (destSchemaLoading) return;
+    setDestContinuePending(false);
+    advanceFromDestination();
+  }, [destContinuePending, destSchemaLoading, step, destFieldsReady]);
 
   return (
     <PageShell
@@ -9050,12 +9078,14 @@ export function TransferPage({
           </button>
           <button
             type="button"
+            aria-busy={analyzing || destContinuePending || undefined}
+            aria-label={analyzing ? "Preparing mappings…" : undefined}
             className="df2-btn df2-btn-primary"
             onClick={continueFromDestination}
-            disabled={!canRunPreflight || analyzing}
+            disabled={!destFieldsReady || analyzing}
           >
             {analyzing ? <ButtonLoader label="Preparing mappings…" /> : (
-              <><DtIcon name="layers" size={18} /> {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
+              <>{destContinuePending ? <ButtonLoader /> : <DtIcon name="layers" size={18} />} {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
             )}
           </button>
           </div>
