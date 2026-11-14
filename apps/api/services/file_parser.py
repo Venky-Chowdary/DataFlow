@@ -2028,6 +2028,11 @@ class FileParser:
         return cell_to_string(value)
 
     @staticmethod
+    def is_json_result(result: Any) -> bool:
+        """True for a parsed JSON / JSONL file: its values carry JSON types (DATA-20)."""
+        return str(getattr(result, "file_type", "") or "") in {"json", "jsonl"}
+
+    @staticmethod
     def infer_schema(
         records: list[dict], *, invalid_calendar_votes: bool = False, json_kinds: bool = False
     ) -> dict[str, str]:
