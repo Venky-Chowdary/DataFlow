@@ -813,3 +813,563 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
     display: none;
   }
 }
+
+/* ==========================================================================
+   Map step, enterprise layout (W6)
+   One header (route, one status line, a compact toolbar), one issue list,
+   and a triage grid: source, one destination picker, transform, one status
+   chip; the why and the type details open per row. Tokens only.
+   ========================================================================== */
+
+.df2-map-step-panel .df2-card-head.df2-map-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.df2-map-step-head .df2-map-step-head-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.df2-map-step-head .df2-card-title {
+  margin: 0;
+}
+
+.df2-map-route {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 0;
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  color: var(--df-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-map-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-text-tertiary);
+  flex: none;
+}
+
+.df2-map-status.is-warn::before { background: var(--df-warning); }
+.df2-map-status.is-ok::before { background: var(--df-success); }
+
+.df2-map-step-head .df2-map-step-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.df2-map-step-head .df2-ms-toolbar {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.df2-ms-toolbar .df2-btn {
+  white-space: nowrap;
+}
+
+.df2-ms-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning-bg);
+  color: var(--df-text-primary);
+  border: 1px solid var(--df-warning-border);
+  font-size: var(--df-fs-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-ms-toolbar-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+}
+
+.df2-ms-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+
+.df2-ms-icon-btn:hover:not(:disabled) {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-icon-btn.is-on {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong, var(--df-brand));
+}
+
+.df2-ms-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.df2-ms-icon-btn:focus-visible,
+.df2-column-expand:focus-visible,
+.df2-map-issue-action:focus-visible,
+.df2-ms-more:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-ms-more {
+  gap: 6px;
+}
+
+/* ---- issue triage ------------------------------------------------------- */
+
+.df2-map-issues {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface);
+}
+
+.df2-map-issues-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  color: var(--df-text-primary);
+}
+
+.df2-map-issues.is-block .df2-map-issues-summary svg { color: var(--df-danger); }
+.df2-map-issues.is-warn .df2-map-issues-summary svg { color: var(--df-warning); }
+
+.df2-map-issues-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-map-issue {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 4px;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-map-issue-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning);
+}
+
+.df2-map-issue.is-block .df2-map-issue-dot { background: var(--df-danger); }
+
+.df2-map-issue-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.df2-map-issue-title {
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issue-detail {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issues-more {
+  justify-self: start;
+  font-size: var(--df-fs-sm);
+}
+
+/* ---- triage grid -------------------------------------------------------- */
+
+.df2-column-review.is-triage .df2-column-review-table {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-column-review.is-triage .df2-column-th-expand { width: 36px; }
+.df2-column-review.is-triage .df2-column-th-source { width: 27%; }
+.df2-column-review.is-triage .df2-column-th-arrow { width: 22px; }
+.df2-column-review.is-triage .df2-column-th-destination { width: 30%; }
+.df2-column-review.is-triage .df2-column-th-transform { width: 17%; }
+.df2-column-review.is-triage .df2-column-th-status { width: 216px; }
+
+.df2-column-review.is-triage .df2-column-row > td {
+  vertical-align: top;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.df2-column-review.is-triage .df2-column-row.is-expanded > td {
+  border-bottom-color: transparent;
+}
+
+.df2-column-expand-cell {
+  padding-inline: 4px;
+}
+
+.df2-column-expand {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+
+.df2-column-expand:hover,
+.df2-column-expand[aria-expanded="true"] {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-column-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 2px;
+  padding-left: 26px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-source-type {
+  flex: none;
+  font-family: var(--df-font-mono);
+  text-transform: uppercase;
+}
+
+.df2-column-source-meta .df2-column-sample-value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-family: var(--df-font-mono);
+  color: var(--df-text-secondary);
+}
+
+.df2-column-dest-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-dest-type-text {
+  font-family: var(--df-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-destination-cell .df2-column-cell-content,
+.df2-column-review.is-triage .df2-column-source-cell .df2-column-cell-content {
+  min-width: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status {
+  text-align: left;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
+.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.df2-column-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--dt-radius-full);
+  background: var(--df-surface);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  color: var(--df-text-secondary);
+  white-space: nowrap;
+}
+
+.df2-column-status-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-text-tertiary);
+}
+
+.df2-column-status-chip.is-warn::before { background: var(--df-warning); }
+.df2-column-status-chip.is-block::before { background: var(--df-danger); }
+.df2-column-status-chip.is-info::before { background: var(--df-info); }
+
+.df2-column-detail-row > td {
+  padding: 0 12px 12px 48px;
+  background: var(--df-surface-muted);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-column-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding-top: 10px;
+}
+
+.df2-column-detail section {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.df2-column-detail-h {
+  margin: 0;
+  font-size: var(--df-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-detail-text {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  line-height: 1.5;
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-detail-text.is-type {
+  color: var(--df-text-secondary);
+}
+
+.df2-column-detail-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 2px 0 0;
+}
+
+.df2-column-detail-facts > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.df2-column-detail-facts dt {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-column-detail-facts dd {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-column-detail-chips:empty {
+  display: none;
+}
+
+.df2-column-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-column-detail-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.df2-column-detail-controls > select,
+.df2-column-detail-field {
+  max-width: 100%;
+}
+
+.df2-column-detail-field {
+  display: grid;
+  gap: 3px;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+/* 1366 x 768 (UX-23): the grid keeps every column readable beside the panel. */
+@media (max-width: 1439.98px) {
+  .df2-column-review.is-triage .df2-column-th-status { width: 200px; }
+}
+
+@media (max-width: 900px) {
+  .df2-column-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-column-detail-row > td {
+    padding-left: 12px;
+  }
+}
+
+@media (max-width: 639.98px) {
+  .df2-map-step-head .df2-ms-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .df2-map-step-head .df2-map-step-head-actions {
+    justify-content: flex-start;
+  }
+
+  /* Phone: each row is a card; the cells stack instead of squeezing. */
+  .df2-column-review.is-triage .df2-column-review-table,
+  .df2-column-review.is-triage .df2-column-review-table tbody,
+  .df2-column-review.is-triage .df2-column-review-table tr,
+  .df2-column-review.is-triage .df2-column-review-table td {
+    display: block;
+    width: auto;
+  }
+
+  .df2-column-review.is-triage .df2-column-review-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .df2-column-review.is-triage .df2-column-row {
+    position: relative;
+    padding: 8px 8px 8px 36px;
+    border-bottom: 1px solid var(--df-border);
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td {
+    padding: 2px 0;
+    border: 0;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
+    position: absolute;
+    left: 4px;
+    top: 8px;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
+    display: none;
+  }
+
+  .df2-column-detail-row > td {
+    padding: 8px 12px 12px;
+  }
+}
+
+/* The laptop "reclaim height" rules hide every other step's card head (the
+   wizard names the step). The Map head carries the route, the status line and
+   the toolbar, so it stays; its title is the only part those rules drop. */
+.df2-page-transfer-studio .df2-transfer-step-viewport.df2-map-step-panel > .df2-card-head.df2-map-step-head {
+  padding: 8px 12px;
+}
+
+/* Triage rows sit on a neutral surface: the status chip carries the state,
+   not a tinted row (the tinted rows read as a wall of warnings). */
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.warn > td,
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.block > td,
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.ok > td {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.df2-column-row:hover > td {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-column-review.is-triage .df2-column-review-table tr.df2-column-detail-row > td {
+  background: var(--df-surface-muted);
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
+.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
+  display: inline-flex;
+  margin: 0 0 0 6px;
+  vertical-align: middle;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-btn {
+  padding-block: 2px;
+  min-height: 26px;
+}
+
+.df2-column-review.is-triage .df2-column-transform,
+.df2-column-review.is-triage .df2-column-transform-cell select {
+  min-width: 0;
+  width: 100%;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-status-chip + .df2-column-risk-actions {
+  margin-top: 4px;
+  margin-left: 0;
+  display: flex;
+}

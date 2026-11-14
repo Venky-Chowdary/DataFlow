@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useShellLayoutClass } from "../lib/useShellLayoutClass";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -3180,16 +3181,8 @@ export function TransferPage({
     });
   }, [seedStudioIntent, toast, connectors, connectorsLoading]);
 
-  useEffect(() => {
-    const content = document.querySelector(".df2-content");
-    const inner = document.querySelector(".df2-content-inner");
-    content?.classList.add("is-transfer-studio-view");
-    inner?.classList.add("is-transfer-studio-view");
-    return () => {
-      content?.classList.remove("is-transfer-studio-view");
-      inner?.classList.remove("is-transfer-studio-view");
-    };
-  }, []);
+  // Only while Transfer is the visible screen: it stays mounted behind others.
+  useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
 
   const loadTransferPlan = async () => {
     if (!currentSourceColumns.length && !(sourceKind === "file" && file)) {

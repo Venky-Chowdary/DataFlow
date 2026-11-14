@@ -1456,7 +1456,7 @@
 .df2-qw-sticky {
   position: sticky;
   top: var(--df2-qw-sticky-top, 0px);
-  z-index: var(--df-z-sticky, 20);
+  z-index: var(--df-z-sticky);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1485,7 +1485,7 @@
 .df2-qw-grid-bar {
   position: sticky;
   top: var(--df2-qw-sticky-h, 0px);
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 /* The schema panel scrolls on its own; its filter box stays pinned at its top. */
@@ -1542,18 +1542,4 @@
     font-size: var(--df-fs-xs, 11px);
     margin-bottom: 2px;
   }
-}
-
-/*
- * Transfer Studio stays mounted while another screen shows, and its layout
- * classes (is-transfer-studio-view / is-map-step-view) stay on the shell. Their
- * overflow: hidden made the shell's inner box the sticky scroll container, so
- * the pinned Query header scrolled away after a visit to Transfer. While Query
- * is the visible screen the shell is a plain document again.
- */
-.df2-content-inner.is-transfer-studio-view:has(.df2-screen-keep:not([hidden]) .df2-qw),
-.df2-content-inner.is-map-step-view:has(.df2-screen-keep:not([hidden]) .df2-qw) {
-  height: auto !important;
-  max-height: none !important;
-  overflow: visible !important;
 }

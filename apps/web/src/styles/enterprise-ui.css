@@ -12303,7 +12303,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     gap: 2px;
   }
 
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+  .df2-page-transfer-studio .df2-transfer-step-viewport:not(.df2-map-step-panel) > .df2-card-head {
     display: none !important; /* wizard already names the step */
   }
 
@@ -12532,7 +12532,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     padding: 10px !important;
   }
 
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+  .df2-page-transfer-studio .df2-transfer-step-viewport:not(.df2-map-step-panel) > .df2-card-head {
     display: none !important;
   }
 

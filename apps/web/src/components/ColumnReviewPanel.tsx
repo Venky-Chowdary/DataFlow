@@ -2,9 +2,9 @@ import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ReasonDisclosure } from "./transfer/ReasonDisclosure";
 import { StructurePreview } from "./ui/StructurePreview";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DestColumnCombobox } from "./mapping/DestColumnCombobox";
-import { TypeCompatBadge } from "./mapping/TypeCompatBadge";
+import { TypeCompatBadge, compatSentence } from "./mapping/TypeCompatBadge";
 import type { DestColumnCatalog } from "../lib/destColumnCatalog";
 import type { TypeGrade } from "../lib/mappingStudioApi";
 import {
@@ -30,6 +30,8 @@ import {
   mappingHealthSummary,
   mappingReviewKindMeta,
   EXECUTION_POLICY_OPTIONS,
+  executionPolicyLabel,
+  recommendedExecutionPolicy,
   flagExistingEnumBooleanConflict,
   isArrayLogicalType,
   isEnumToBooleanConflict,
@@ -158,6 +160,14 @@ function enumSignalled(m: EditableMapping): boolean {
   );
 }
 
+/** The Map step's triage filter: one segmented control, three states (plus Rules when a workbook is loaded). */
+const TRIAGE_TABS: { id: ColumnFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "review", label: "Needs attention" },
+  { id: "ready", label: "Ready" },
+  { id: "rules", label: "Rules" },
+];
+
 const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "review", label: "Review" },
@@ -205,6 +215,12 @@ export function ColumnReviewPanel({
   const [previewPageSize, setPreviewPageSize] = useState(12);
   const [safeBandExpanded, setSafeBandExpanded] = useState(false);
   const [readyBandExpanded, setReadyBandExpanded] = useState(false);
+  /** Map triage rows whose details (why, types, options) are open. */
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const toggleRow = (source: string) =>
+    setExpandedRows((prev) => ({ ...prev, [source]: !prev[source] }));
+  // The inline Map grid is the triage layout; the full-table dialog keeps every column.
+  const triage = compact && presentation !== "dialog";
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
   const destInputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
 
@@ -235,7 +251,8 @@ export function ColumnReviewPanel({
   );
 
   // Safe-band accordion only on unfiltered "all" — Issues filter stays flat.
-  const useSafeBands = filter === "all" && !search.trim();
+  // Not in triage: there the segmented filter already puts the open rows first.
+  const useSafeBands = filter === "all" && !search.trim() && !triage;
   const mapBands = useMemo(() => partitionMapBands(filtered), [filtered]);
   const collapseSafe = useSafeBands && shouldCollapseSafeBand(mapBands) && !safeBandExpanded;
   const collapseReady = useSafeBands && shouldCollapseReadyBand(mapBands) && !readyBandExpanded;
@@ -350,7 +367,8 @@ export function ColumnReviewPanel({
     }
     // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
     if (mappingRequiresRiskAck(m)) {
-      const chosen = policyBySource[m.source];
+      // The recommended policy is preselected (UX-4); an explicit pick wins.
+      const chosen = policyBySource[m.source] || recommendedExecutionPolicy(m);
       if (!chosen) {
         // Fail closed: refuse to invent CAST_AND_CONTINUE.
         updateMapping(index, {
@@ -494,18 +512,20 @@ export function ColumnReviewPanel({
   const createNewCount = mappings.filter((m) => m.createNew && !isIntentionalOmit(m)).length;
   const showPreview = !isDialog && !compact && Boolean(sampleRows && sampleRows.length > 0);
 
-  const filterTabItems = FILTER_TABS
+  const filterTabItems = (triage ? TRIAGE_TABS : FILTER_TABS)
     .filter((tab) => tab.id !== "rules" || filterCounts.rules > 0 || filter === "rules")
     .map((tab) => ({
       ...tab,
-      count: compact && !isDialog ? undefined : filterCounts[tab.id],
+      count: triage && tab.id === "all" ? undefined : filterCounts[tab.id],
     }));
+  const columnCount = triage ? (showTransforms ? 6 : 5) : (showTransforms ? 9 : 8);
 
   return (
     <div
       className={[
         "df2-column-review",
         compact ? "is-compact is-editor" : "",
+        triage ? "is-triage" : "",
         isDialog ? "is-dialog" : "",
       ].filter(Boolean).join(" ")}
     >
@@ -599,7 +619,7 @@ export function ColumnReviewPanel({
       )}
 
       <div className="df2-column-review-editor">
-      {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
+      {!isDialog && !triage && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
         <div className="df2-column-review-notices">
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
@@ -615,7 +635,7 @@ export function ColumnReviewPanel({
           </div>
         </div>
       )}
-      {!isDialog && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
+      {!isDialog && !triage && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
         <div className="df2-column-review-notices">
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="check" size={16} />
@@ -724,7 +744,7 @@ export function ColumnReviewPanel({
             )}
           </div>
           <div className="df2-column-workbench-actions">
-            {tableControls}
+            {triage ? null : tableControls}
             {filterCounts.review > 0 && !compact && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={focusIssues}>
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
@@ -733,9 +753,10 @@ export function ColumnReviewPanel({
             {eligibleApproveCount > 0 && (
               <button
                 type="button"
-                className="df2-btn df2-btn-primary df2-btn-sm"
+                className={`df2-btn df2-btn-sm${triage ? "" : " df2-btn-primary"}`}
                 onClick={approveAll}
-                title="Approves eligible rows only — specialty / flatten / existing DDL conflicts stay for review"
+                aria-keyshortcuts="A"
+                title="Approves eligible rows only (shortcut A) — specialty / flatten / existing DDL conflicts stay for review"
               >
                 <DtIcon name="check" size={14} /> Approve eligible ({eligibleApproveCount})
               </button>
@@ -743,7 +764,7 @@ export function ColumnReviewPanel({
           </div>
         </div>
 
-        {health.falseFriendCount > 0 && (
+        {health.falseFriendCount > 0 && !triage && (
           <div className="df2-column-review-alert" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -820,6 +841,16 @@ export function ColumnReviewPanel({
       <div className="df2-column-review-table-wrap df2-column-review-scroll">
         <table className="df2-column-review-table df2-column-review-table-sticky">
           <thead>
+            {triage ? (
+            <tr>
+              <th className="df2-column-th-expand"><span className="df2-sr-only">Details</span></th>
+              <th className="df2-column-th-source">Source</th>
+              <th className="df2-column-th-arrow" aria-hidden>→</th>
+              <th className="df2-column-th-destination">Destination</th>
+              {showTransforms && <th className="df2-column-th-transform">Transform</th>}
+              <th className="df2-column-th-status">Status</th>
+            </tr>
+            ) : (
             <tr>
               <th className="df2-column-th-source" style={{ width: "14%" }}>Source</th>
               <th className="df2-column-th-sample" style={{ width: showTransforms ? "11%" : "12%" }}>Sample</th>
@@ -831,6 +862,7 @@ export function ColumnReviewPanel({
               <th className="df2-column-th-confidence" style={{ width: showTransforms ? "8%" : "10%" }}>Confidence</th>
               <th className="df2-column-th-status" style={{ width: showTransforms ? "9%" : "11%" }}>Status</th>
             </tr>
+            )}
           </thead>
           <tbody>
             {pageItems.map(({ mapping: m, index }) => {
@@ -841,46 +873,12 @@ export function ColumnReviewPanel({
               const riskOpen = mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted;
               const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved, riskOpen);
               const ready = isMappingReady(m, confidenceThreshold);
-              return (
-                <tr
-                  key={`${m.source}-${index}`}
-                  className={`df2-column-row ${tier}${omitted ? " is-omitted" : ""}`}
-                  ref={(el) => {
-                    if (el) rowRefs.current.set(m.source, el);
-                    else rowRefs.current.delete(m.source);
-                  }}
-                  data-source={m.source}
-                >
-                  <td className="df2-column-source-cell">
-                    <div className="df2-column-cell-content">
-                      {remap && !omitted ? remap.renderGrip(m) : null}
-                      <span className="df2-column-source">{m.source}</span>
-                      {m.businessRule && (
-                        <span
-                          className={`df2-badge df2-badge-xs df2-rule-chip ${
-                            m.businessRule.status === "executable"
-                              ? "is-applied"
-                              : m.businessRule.status === "conflict"
-                                ? "is-conflict"
-                                : "is-review"
-                          }`}
-                          title={
-                            `${m.businessRule.kindLabel}: ${m.businessRule.text || "direct"}`
-                            + (m.businessRule.row
-                              ? ` · ${m.businessRule.sheet || "sheet"} row ${m.businessRule.row}`
-                              : "")
-                            + (m.businessRule.issues?.length ? ` — ${m.businessRule.issues[0]}` : "")
-                          }
-                        >
-                          {m.businessRule.kindLabel}
-                        </span>
-                      )}
-                      {omitted && (
-                        <span className="df2-badge df2-badge-muted df2-badge-xs" title="Excluded from write — intentional Map policy">
-                          omit
-                        </span>
-                      )}
-                      {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
+              const recommendedPolicy = recommendedExecutionPolicy(m);
+              const chosenPolicy = policyBySource[m.source] || recommendedPolicy;
+              const detailId = `df2-col-detail-${index}`;
+              const expanded = triage && Boolean(expandedRows[m.source]);
+              const riskChips = (
+                <>
                       {(() => {
                         const engineRisk = engineStampedRiskChip(m);
                         if (!engineRisk || omitted) return null;
@@ -934,9 +932,9 @@ export function ColumnReviewPanel({
                           string enum
                         </span>
                       )}
-                    </div>
-                  </td>
-                  <td className="df2-column-sample">
+                </>
+              );
+              const sampleBlock = (
                     <div className="df2-column-sample-stack">
                       <span
                         className="df2-column-sample-value"
@@ -958,119 +956,9 @@ export function ColumnReviewPanel({
                         );
                       })()}
                     </div>
-                  </td>
-                  <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
-                    <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
-                  </td>
-                  <td className="df2-column-arrow" aria-hidden>→</td>
-                  <td className="df2-column-destination-cell">
-                    <div className="df2-column-cell-content">
-                      {omitted ? (
-                        <div className="df2-column-omit-block">
-                          <span className="df2-column-omit-target" title="Not written to destination">
-                            — not transferred —
-                          </span>
-                          <select
-                            className="df2-input df2-select df2-column-omit-reason"
-                            value={m.omitReason ?? ""}
-                            onChange={(e) => updateMapping(index, applyReductionReason(m, e.target.value))}
-                            aria-label={`Reduction reason for ${m.source}`}
-                            title={
-                              reductionReasonMeta(m.omitReason)?.detail
-                              || "Why this field is not carried — recorded in the Field Reduction Ledger"
-                            }
-                          >
-                            <option value="">— why is it dropped? —</option>
-                            {REDUCTION_REASONS.map((r) => (
-                              <option key={r.id} value={r.id}>{r.label}</option>
-                            ))}
-                          </select>
-                          {m.omitReason && (
-                            <input
-                              className="df2-input df2-column-omit-note"
-                              value={m.omitReasonText ?? ""}
-                              placeholder={
-                                reductionReasonMeta(m.omitReason)?.kind === "observed"
-                                  ? "Note (optional)"
-                                  : "Why — required"
-                              }
-                              onChange={(e) => updateMapping(index, { ...m, omitReasonText: e.target.value })}
-                              aria-label={`Reduction note for ${m.source}`}
-                            />
-                          )}
-                          {m.omitReason === "archive_only" && (
-                            <>
-                              <input
-                                className="df2-input df2-column-omit-archive"
-                                value={m.archiveReference ?? ""}
-                                placeholder="Archive that holds it — required"
-                                onChange={(e) => updateMapping(index, { ...m, archiveReference: e.target.value })}
-                                aria-label={`Archive reference for ${m.source}`}
-                              />
-                              <input
-                                className="df2-input df2-column-omit-retention"
-                                value={m.retentionUntil ?? ""}
-                                placeholder="Retained until (optional)"
-                                onChange={(e) => updateMapping(index, { ...m, retentionUntil: e.target.value })}
-                                aria-label={`Retention horizon for ${m.source}`}
-                              />
-                            </>
-                          )}
-                          {m.omitReason && (
-                            <input
-                              className="df2-input df2-column-omit-approver"
-                              value={m.omitApprovedBy ?? ""}
-                              placeholder="Accepted by (name, optional)"
-                              onChange={(e) => updateMapping(index, { ...m, omitApprovedBy: e.target.value })}
-                              aria-label={`Who accepted dropping ${m.source}`}
-                              title="Recorded in the ledger as stated — Datawrap does not authenticate this identity"
-                            />
-                          )}
-                          {(() => {
-                            const gap = reductionEvidenceGap(m);
-                            if (!gap) return null;
-                            return (
-                              <span className="df2-column-omit-gap" title="Validate (G16) reports this reduction as unevidenced">
-                                {gap}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                      ) : (
-                        <>
-                      {remap ? (
-                        <DestColumnCombobox
-                          sourceName={m.source}
-                          value={m.target}
-                          catalog={remap.catalog}
-                          claimedBy={remap.claimedBy}
-                          onCommit={(target) => remap.onRemap(m.source, target)}
-                          inputRef={(el) => {
-                            if (el) destInputRefs.current.set(m.source, el);
-                            else destInputRefs.current.delete(m.source);
-                          }}
-                        />
-                      ) : (
-                      <input
-                        className="df2-input df2-column-target-input"
-                        value={m.target}
-                        ref={(el) => {
-                          if (el) destInputRefs.current.set(m.source, el);
-                          else destInputRefs.current.delete(m.source);
-                        }}
-                        onChange={(e) => updateMapping(index, applyOperatorRemapDest(m, e.target.value))}
-                        aria-label={`Destination name for ${m.source}`}
-                      />
-                      )}
-                      {remap && m.target && (remap.conflicts.get(m.target.toLowerCase())?.length ?? 0) > 1 ? (
-                        <span className="df2-ms-tag is-conflict" role="status">
-                          Conflict: {m.target} is also written by{" "}
-                          {(remap.conflicts.get(m.target.toLowerCase()) ?? []).filter((x) => x !== m.source).join(", ")}
-                        </span>
-                      ) : null}
-                      {remap && !m.target ? (
-                        <span className="df2-ms-tag is-unassigned">No destination: pick one or omit</span>
-                      ) : null}
+              );
+              const destTypeControls = (
+                <>
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
                         value={
@@ -1105,9 +993,17 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
+                </>
+              );
+              const compatBadge = (
+                <>
                       {remap ? (
                         <TypeCompatBadge grade={remap.gradeFor(m)} pending={remap.gradesPending && Boolean(m.destType)} />
                       ) : null}
+                </>
+              );
+              const crosswalk = (
+                <>
                       {!omitted && isCodeCrosswalkCandidate(m) && !enumSignalled(m) && !isCodeCrosswalkDeclared(m) && !crosswalkOpen[m.source] && (
                         <button
                           type="button"
@@ -1136,8 +1032,10 @@ export function ColumnReviewPanel({
                           />
                         </label>
                       )}
-                        </>
-                      )}
+                </>
+              );
+              const destAdvanced = (
+                <>
                       {!omitted && isControlTotalCandidate(m) && (
                         <label
                           className="df2-column-control-total"
@@ -1325,6 +1223,246 @@ export function ColumnReviewPanel({
                           Widen → VARCHAR
                         </button>
                       )}
+                </>
+              );
+              const policySelect = (
+                <>
+                        {mappingRequiresRiskAck(m) && (
+                          <select
+                            className="df2-input df2-select df2-select-xs"
+                            value={chosenPolicy}
+                            onChange={(e) => {
+                              const v = e.target.value as ExecutionPolicy | "";
+                              setPolicyBySource((prev) => ({ ...prev, [m.source]: v }));
+                            }}
+                            aria-label={`Execution policy for ${m.source}`}
+                            title="What happens to a value that does not convert. The recommended policy is preselected."
+                          >
+                            {EXECUTION_POLICY_OPTIONS.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.continueUnlock
+                                  ? `${p.label}${p.id === recommendedPolicy ? " (recommended)" : ""}`
+                                  : `${p.label} (keeps Validate blocked)`}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                </>
+              );
+              const grade = remap?.gradeFor(m);
+              const statusChip: { label: string; tone: "warn" | "block" | "info" } = isDestSchemaPending(m)
+                ? { label: "Type not loaded", tone: "block" }
+                : isFalseFriendReview(m) && !m.falseFriendConfirmed
+                  ? { label: "Confirm match", tone: "warn" }
+                  : mappingRequiresRiskAck(m) && !m.riskAcknowledged
+                    ? (mappingAckTier(m) === "accept_risk" ? { label: "Lossy", tone: "block" } : { label: "Review", tone: "warn" })
+                    : !m.target
+                      ? { label: "No destination", tone: "block" }
+                      : needsMappingReview(m, confidenceThreshold)
+                        ? { label: "Needs review", tone: "warn" }
+                        : { label: "To approve", tone: "info" };
+              const destTypeText = isDestSchemaPending(m) && !m.destType
+                ? "type not loaded"
+                : (m.destType || m.inferredType || "");
+              const destMeta = (
+                <span className="df2-column-dest-meta">
+                  {destTypeText ? <span className="df2-column-dest-type-text">{destTypeText}</span> : null}
+                  {compatBadge}
+                </span>
+              );
+              return (
+                <Fragment key={`${m.source}-${index}`}>
+                <tr
+                  className={`df2-column-row ${tier}${omitted ? " is-omitted" : ""}${expanded ? " is-expanded" : ""}`}
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(m.source, el);
+                    else rowRefs.current.delete(m.source);
+                  }}
+                  data-source={m.source}
+                >
+                  {triage && (
+                    <td className="df2-column-expand-cell">
+                      <button
+                        type="button"
+                        className="df2-column-expand"
+                        aria-expanded={expanded}
+                        aria-controls={detailId}
+                        aria-label={`${expanded ? "Hide" : "Show"} details for ${m.source}`}
+                        title={expanded ? "Hide details" : "Why this mapping, types and options"}
+                        onClick={() => toggleRow(m.source)}
+                      >
+                        <DtIcon name={expanded ? "chevron-down" : "chevron-right"} size={14} />
+                      </button>
+                    </td>
+                  )}
+                  <td className="df2-column-source-cell">
+                    <div className="df2-column-cell-content">
+                      {remap && !omitted ? remap.renderGrip(m) : null}
+                      <span className="df2-column-source">{m.source}</span>
+                      {m.businessRule && (
+                        <span
+                          className={`df2-badge df2-badge-xs df2-rule-chip ${
+                            m.businessRule.status === "executable"
+                              ? "is-applied"
+                              : m.businessRule.status === "conflict"
+                                ? "is-conflict"
+                                : "is-review"
+                          }`}
+                          title={
+                            `${m.businessRule.kindLabel}: ${m.businessRule.text || "direct"}`
+                            + (m.businessRule.row
+                              ? ` · ${m.businessRule.sheet || "sheet"} row ${m.businessRule.row}`
+                              : "")
+                            + (m.businessRule.issues?.length ? ` — ${m.businessRule.issues[0]}` : "")
+                          }
+                        >
+                          {m.businessRule.kindLabel}
+                        </span>
+                      )}
+                      {omitted && (
+                        <span className="df2-badge df2-badge-muted df2-badge-xs" title="Excluded from write — intentional Map policy">
+                          omit
+                        </span>
+                      )}
+                      {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
+                      {triage ? null : riskChips}
+                    </div>
+                    {triage && (
+                      <div className="df2-column-source-meta">
+                        <span className="df2-column-source-type">{m.inferredType ?? "string"}</span>
+                        <span
+                          className="df2-column-sample-value"
+                          title={m.sample}
+                          aria-label={m.sample ? `Sample value for ${m.source}: ${m.sample}` : undefined}
+                        >
+                          {m.sample || "—"}
+                        </span>
+                      </div>
+                    )}
+                  </td>
+                  {!triage && (
+                    <td className="df2-column-sample">
+                      {sampleBlock}
+                    </td>
+                  )}
+                  {!triage && (
+                    <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
+                      <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
+                    </td>
+                  )}
+                  <td className="df2-column-arrow" aria-hidden>→</td>
+                  <td className="df2-column-destination-cell">
+                    <div className="df2-column-cell-content">
+                      {omitted ? (
+                        <div className="df2-column-omit-block">
+                          <span className="df2-column-omit-target" title="Not written to destination">
+                            — not transferred —
+                          </span>
+                          <select
+                            className="df2-input df2-select df2-column-omit-reason"
+                            value={m.omitReason ?? ""}
+                            onChange={(e) => updateMapping(index, applyReductionReason(m, e.target.value))}
+                            aria-label={`Reduction reason for ${m.source}`}
+                            title={
+                              reductionReasonMeta(m.omitReason)?.detail
+                              || "Why this field is not carried — recorded in the Field Reduction Ledger"
+                            }
+                          >
+                            <option value="">— why is it dropped? —</option>
+                            {REDUCTION_REASONS.map((r) => (
+                              <option key={r.id} value={r.id}>{r.label}</option>
+                            ))}
+                          </select>
+                          {m.omitReason && (
+                            <input
+                              className="df2-input df2-column-omit-note"
+                              value={m.omitReasonText ?? ""}
+                              placeholder={
+                                reductionReasonMeta(m.omitReason)?.kind === "observed"
+                                  ? "Note (optional)"
+                                  : "Why — required"
+                              }
+                              onChange={(e) => updateMapping(index, { ...m, omitReasonText: e.target.value })}
+                              aria-label={`Reduction note for ${m.source}`}
+                            />
+                          )}
+                          {m.omitReason === "archive_only" && (
+                            <>
+                              <input
+                                className="df2-input df2-column-omit-archive"
+                                value={m.archiveReference ?? ""}
+                                placeholder="Archive that holds it — required"
+                                onChange={(e) => updateMapping(index, { ...m, archiveReference: e.target.value })}
+                                aria-label={`Archive reference for ${m.source}`}
+                              />
+                              <input
+                                className="df2-input df2-column-omit-retention"
+                                value={m.retentionUntil ?? ""}
+                                placeholder="Retained until (optional)"
+                                onChange={(e) => updateMapping(index, { ...m, retentionUntil: e.target.value })}
+                                aria-label={`Retention horizon for ${m.source}`}
+                              />
+                            </>
+                          )}
+                          {m.omitReason && (
+                            <input
+                              className="df2-input df2-column-omit-approver"
+                              value={m.omitApprovedBy ?? ""}
+                              placeholder="Accepted by (name, optional)"
+                              onChange={(e) => updateMapping(index, { ...m, omitApprovedBy: e.target.value })}
+                              aria-label={`Who accepted dropping ${m.source}`}
+                              title="Recorded in the ledger as stated — Datawrap does not authenticate this identity"
+                            />
+                          )}
+                          {(() => {
+                            const gap = reductionEvidenceGap(m);
+                            if (!gap) return null;
+                            return (
+                              <span className="df2-column-omit-gap" title="Validate (G16) reports this reduction as unevidenced">
+                                {gap}
+                              </span>
+                            );
+                          })()}
+                        </div>
+                      ) : (
+                        <>
+                      {remap ? (
+                        <DestColumnCombobox
+                          sourceName={m.source}
+                          value={m.target}
+                          catalog={remap.catalog}
+                          claimedBy={remap.claimedBy}
+                          onCommit={(target) => remap.onRemap(m.source, target)}
+                          inputRef={(el) => {
+                            if (el) destInputRefs.current.set(m.source, el);
+                            else destInputRefs.current.delete(m.source);
+                          }}
+                        />
+                      ) : (
+                      <input
+                        className="df2-input df2-column-target-input"
+                        value={m.target}
+                        ref={(el) => {
+                          if (el) destInputRefs.current.set(m.source, el);
+                          else destInputRefs.current.delete(m.source);
+                        }}
+                        onChange={(e) => updateMapping(index, applyOperatorRemapDest(m, e.target.value))}
+                        aria-label={`Destination name for ${m.source}`}
+                      />
+                      )}
+                      {remap && m.target && (remap.conflicts.get(m.target.toLowerCase())?.length ?? 0) > 1 ? (
+                        <span className="df2-ms-tag is-conflict" role="status">
+                          Conflict: {m.target} is also written by{" "}
+                          {(remap.conflicts.get(m.target.toLowerCase()) ?? []).filter((x) => x !== m.source).join(", ")}
+                        </span>
+                      ) : null}
+                      {remap && !m.target ? (
+                        <span className="df2-ms-tag is-unassigned">No destination: pick one or omit</span>
+                      ) : null}
+                      {triage ? destMeta : <>{destTypeControls}{compatBadge}{crosswalk}</>}
+                        </>
+                      )}
+                      {triage ? null : destAdvanced}
                     </div>
                   </td>
                   {showTransforms && (
@@ -1372,6 +1510,8 @@ export function ColumnReviewPanel({
                       </div>
                     </td>
                   )}
+                  {!triage && (
+                    <>
                   <td className="df2-column-reason">
                     <ReasonDisclosure
                       label={m.target || m.source}
@@ -1398,7 +1538,14 @@ export function ColumnReviewPanel({
                   <td className="df2-column-confidence">
                     <span className={`df2-column-conf ${tier}`}>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</span>
                   </td>
+                    </>
+                  )}
                   <td className="df2-column-status">
+                    {/* One chip, only for a state that needs more than Approve; a row
+                        that just waits for Approve shows the button alone. */}
+                    {triage && !omitted && !ready && statusChip.tone !== "info" && (
+                      <span className={`df2-column-status-chip is-${statusChip.tone}`}>{statusChip.label}</span>
+                    )}
                     {omitted ? (
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
@@ -1442,25 +1589,7 @@ export function ColumnReviewPanel({
                       </div>
                     ) : (
                       <div className="df2-column-risk-actions">
-                        {mappingRequiresRiskAck(m) && (
-                          <select
-                            className="df2-input df2-select df2-select-xs"
-                            value={policyBySource[m.source] || ""}
-                            onChange={(e) => {
-                              const v = e.target.value as ExecutionPolicy | "";
-                              setPolicyBySource((prev) => ({ ...prev, [m.source]: v }));
-                            }}
-                            aria-label={`Execution policy for ${m.source}`}
-                            title="Required — no hidden default"
-                          >
-                            <option value="">Policy…</option>
-                            {EXECUTION_POLICY_OPTIONS.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.continueUnlock ? p.label : `${p.label} — keeps Validate blocked`}
-                              </option>
-                            ))}
-                          </select>
-                        )}
+                        {triage ? null : policySelect}
                         <button
                           type="button"
                           className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
@@ -1472,19 +1601,18 @@ export function ColumnReviewPanel({
                           }
                           aria-describedby={heldBusinessRule ? `df2-held-rule-${index}` : undefined}
                           disabled={
-                            mappingRequiresRiskAck(m) && !policyBySource[m.source]
+                            mappingRequiresRiskAck(m) && !chosenPolicy
                           }
                           title={
                             isFalseFriendReview(m)
                               ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").detail
                               : mappingRequiresRiskAck(m)
-                              ? (!policyBySource[m.source]
-                                ? "Choose an execution policy first — no hidden defaults"
-                                : createNewRiskDetail(m)
+                              ? (`If a value does not convert: ${executionPolicyLabel(chosenPolicy)}. `
+                                + (createNewRiskDetail(m)
                                   || m.fidelityReason
                                   || (mappingAckTier(m) === "review"
                                     ? "Review this conversion before Execute"
-                                    : "Sign Migration Risk Contract for this column"))
+                                    : "Sign Migration Risk Contract for this column")))
                               : undefined
                           }
                         >
@@ -1505,11 +1633,64 @@ export function ColumnReviewPanel({
                     )}
                   </td>
                 </tr>
+                {expanded && (
+                  <tr className="df2-column-detail-row" data-detail-for={m.source}>
+                    <td id={detailId} colSpan={columnCount}>
+                      <div className="df2-column-detail">
+                        <section className="df2-column-detail-why" aria-label={`Why ${m.source} maps this way`}>
+                          <h4 className="df2-column-detail-h">Why</h4>
+                          {m.businessRule ? (
+                            <p className="df2-column-detail-text">
+                              <strong>{m.businessRule.kindLabel}</strong>
+                              {" — "}
+                              {m.businessRule.text || m.reason || "Direct"}
+                              {m.businessRule.row != null
+                                ? ` (${m.businessRule.sheet ? `${m.businessRule.sheet}, ` : ""}row ${m.businessRule.row})`
+                                : ""}
+                            </p>
+                          ) : (
+                            <p className="df2-column-detail-text">{m.reason || "Semantic match"}</p>
+                          )}
+                          {grade && grade.verdict !== "safe" ? (
+                            <p className="df2-column-detail-text is-type">{compatSentence(grade)}</p>
+                          ) : null}
+                          {(() => {
+                            const risk = engineStampedRiskChip(m);
+                            return risk && !omitted ? <p className="df2-column-detail-text is-type">{risk.detail}</p> : null;
+                          })()}
+                          <dl className="df2-column-detail-facts">
+                            <div><dt>Confidence</dt><dd>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</dd></div>
+                            <div><dt>Source type</dt><dd className="df2-mono">{m.inferredType ?? "string"}</dd></div>
+                            {sampleBlock ? <div><dt>Sample</dt><dd>{sampleBlock}</dd></div> : null}
+                          </dl>
+                          <div className="df2-column-detail-chips">{riskChips}</div>
+                        </section>
+                        {!omitted && (
+                          <section className="df2-column-detail-options" aria-label={`Options for ${m.source}`}>
+                            <h4 className="df2-column-detail-h">Destination type and options</h4>
+                            <div className="df2-column-detail-controls">
+                              {destTypeControls}
+                              {mappingRequiresRiskAck(m) && !ready && !isDestSchemaPending(m) ? (
+                                <label className="df2-column-detail-field">
+                                  <span>If a value does not convert</span>
+                                  {policySelect}
+                                </label>
+                              ) : null}
+                              {crosswalk}
+                              {destAdvanced}
+                            </div>
+                          </section>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
             {pageItems.length === 0 && (
               <tr>
-                <td colSpan={showTransforms ? 9 : 8} className="df2-column-review-empty-row">
+                <td colSpan={columnCount} className="df2-column-review-empty-row">
                   {foldedCount > 0 ? (
                     <div className="df2-column-review-folded">
                       <p>
@@ -1539,7 +1720,7 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(pages > 1 || (compact && (displayItems.length > 0 || foldedCount === 0))) && (
+      {(pages > 1 || (compact && !triage && (displayItems.length > 0 || foldedCount === 0))) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
