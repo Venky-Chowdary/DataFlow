@@ -269,7 +269,7 @@ class _BigQuery:
                 return False
             raise
 
-    def _copy(self, client: Any, src_id: str, dst_id: str, call: dict[str, Any]) -> None:
+    def _copy(self, client: Any, src_id: str, dst_id: str, call: dict[str, Any], *, by_query: bool = False) -> None:
         """Copy ``src_id`` to ``dst_id``, which does not exist yet.
 
         A copy job keeps schema, partitioning and clustering; ``CREATE TABLE AS
@@ -277,6 +277,8 @@ class _BigQuery:
         atomic, so a ``dst_id`` present after a failed call is a finished copy.
         """
         try:
+            if by_query:
+                raise RuntimeError("rows in the streaming buffer: copying with a query")
             from google.cloud.bigquery import CopyJobConfig
 
             job = client.copy_table(
@@ -304,6 +306,21 @@ class _BigQuery:
         )
         job.result()
 
+    @staticmethod
+    def _buffered(client: Any, table_id: str, call: dict[str, Any]) -> bool:
+        """True when the table has rows in the streaming buffer.
+
+        A copy job leaves those rows out (legacy streaming rows reach copy jobs
+        up to 90 minutes late), and the BigQuery writer streams; deleting the
+        live table after such a copy lost them (review of 53351cf30). A query
+        reads the buffer, so a buffered table is copied with one.
+        """
+        try:
+            table = client.get_table(table_id, **call)
+        except Exception:  # noqa: BLE001 - unknown: let the copy decide as before
+            return False
+        return getattr(table, "streaming_buffer", None) is not None
+
     def retire(self, cfg: dict[str, Any], table_name: str, schema: str | None) -> str | None:
         client, project, dataset, call = self._open(cfg, schema)
         try:
@@ -316,7 +333,7 @@ class _BigQuery:
                 raise _refuse_ambiguous(table_name, backup)
             if not live:
                 return backup if stale else None
-            self._copy(client, live_id, bak_id, call)
+            self._copy(client, live_id, bak_id, call, by_query=self._buffered(client, live_id, call))
             client.delete_table(live_id, not_found_ok=True, **call)
             return backup
         finally:

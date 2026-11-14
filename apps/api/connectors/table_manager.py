@@ -501,13 +501,14 @@ def retire_generic_sql_overwrite(
                 _rollback_quietly(conn)
                 if _missing_table_error(exc):
                     return "absent", None
-                logger.warning(
-                    "Overwrite of %s cannot keep a recoverable copy (%s); "
-                    "emptying without one",
-                    live_ref,
-                    exc,
-                )
-                return _empty_generic_sql(gcfg, table_name, schema), None
+                # Review of the overwrite set-aside (53351cf30): emptying with no
+                # copy broke its own rule — a load that then failed left the
+                # destination empty or partial with nothing to restore. Refuse,
+                # as ClickHouse and the set-aside engines do; the rows stay.
+                raise TableDropError(
+                    table_name,
+                    f"could not keep a copy of the live rows before replacing them: {exc}",
+                ) from exc
             try:
                 # DELETE, not TRUNCATE: it is transactional everywhere and a
                 # referencing foreign key does not refuse it.
