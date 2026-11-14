@@ -12600,6 +12600,9 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 }
 
 /* -- Stepper: the steps on one line, the route on a slim line under them -- */
+/* The steps span the whole card on every step: the toast dock sits at the end
+   of the route line, so a toast arriving or leaving never narrows the steps
+   (it did, by 300-560 px, so the bar jumped between Destination and Map). */
 /* Long production names (a 60-character file, a connection name plus a table)
    took the steps' row and pushed Validate and Run onto a second line. The
    six steps now always own row 1; the route is row 2: icon, name, arrow,
@@ -12616,8 +12619,8 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "steps dock"
-      "route route";
+      "steps steps"
+      "route dock";
     align-items: center;
     column-gap: 10px;
     row-gap: 2px;
