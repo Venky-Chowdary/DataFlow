@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from connectors.sql_identifiers import drop_table_if_exists_sql, rename_table_sql
 from connectors.table_manager import TableDropError
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ def discard_set_aside(
 
 def _snowflake_connection(cfg: dict[str, Any], schema: str | None) -> Any:
     from connectors.snowflake_conn import get_connection, normalize_account
-    from connectors.sql_identifiers import quote_sql_identifier
+    from connectors.sql_identifiers import use_warehouse_sql
 
     conn = get_connection(
         account=normalize_account(cfg.get("host", "")),
@@ -159,7 +160,7 @@ def _snowflake_connection(cfg: dict[str, Any], schema: str | None) -> Any:
     if cfg.get("warehouse"):
         try:
             with conn.cursor() as cur:
-                cur.execute(f"USE WAREHOUSE {quote_sql_identifier(cfg['warehouse'], chr(34))}")
+                cur.execute(use_warehouse_sql(cfg["warehouse"]))
         except Exception as exc:  # noqa: BLE001 - same as the drop path
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return conn
@@ -171,12 +172,6 @@ class _Snowflake:
         from connectors.snowflake_conn import resolve_snowflake_table_name
 
         return resolve_snowflake_table_name(cur, schema, name)
-
-    @staticmethod
-    def _q(name: str) -> str:
-        from connectors.sql_identifiers import quote_sql_identifier
-
-        return quote_sql_identifier(name, '"')
 
     def retire(self, cfg: dict[str, Any], table_name: str, schema: str | None) -> str | None:
         sch = schema or cfg.get("schema", "PUBLIC")
@@ -192,7 +187,7 @@ class _Snowflake:
                     # A backup with no live table is the only copy of the
                     # pre-run rows: it is this run's backup.
                     return stale
-                cur.execute(f"ALTER TABLE {self._q(live)} RENAME TO {self._q(backup)}")
+                cur.execute(rename_table_sql(live, backup))
             return backup
         finally:
             _close_quietly(conn)
@@ -209,8 +204,8 @@ class _Snowflake:
                 original = _live_name_from_backup(backup, table_name)
                 replacement = self._resolve(cur, sch, original)
                 if replacement and replacement != backup:
-                    cur.execute(f"DROP TABLE IF EXISTS {self._q(replacement)}")
-                cur.execute(f"ALTER TABLE {self._q(backup)} RENAME TO {self._q(original)}")
+                    cur.execute(drop_table_if_exists_sql(replacement))
+                cur.execute(rename_table_sql(backup, original))
         finally:
             _close_quietly(conn)
 
@@ -220,7 +215,7 @@ class _Snowflake:
         conn = _snowflake_connection(cfg, schema)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"DROP TABLE IF EXISTS {self._q(backup)}")
+                cur.execute(drop_table_if_exists_sql(backup))
         finally:
             _close_quietly(conn)
 

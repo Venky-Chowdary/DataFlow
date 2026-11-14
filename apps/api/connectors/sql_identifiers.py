@@ -257,6 +257,21 @@ def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     return f"{quote_char}{escaped}{quote_char}"
 
 
+def rename_table_sql(old: str, new: str, quote_char: str = '"') -> str:
+    """``ALTER TABLE <old> RENAME TO <new>`` with both names quoted and escaped."""
+    return f"ALTER TABLE {quote_sql_identifier(old, quote_char)} RENAME TO {quote_sql_identifier(new, quote_char)}"
+
+
+def drop_table_if_exists_sql(name: str, quote_char: str = '"') -> str:
+    """``DROP TABLE IF EXISTS <name>`` with the name quoted and escaped."""
+    return f"DROP TABLE IF EXISTS {quote_sql_identifier(name, quote_char)}"
+
+
+def use_warehouse_sql(name: str) -> str:
+    """Snowflake ``USE WAREHOUSE <name>`` with the name quoted and escaped."""
+    return f"USE WAREHOUSE {quote_sql_identifier(name, chr(34))}"
+
+
 def quote_column_list(columns: list[str] | None, *, quote_char: str = '"') -> str:
     if not columns:
         return "*"
