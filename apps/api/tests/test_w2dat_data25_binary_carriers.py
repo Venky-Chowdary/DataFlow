@@ -4,7 +4,8 @@ Before the fix a MongoDB BinData field that the sampled documents carried
 sparsely was typed from its stringified sample ('AP8B') and PostgreSQL got
 the base64 text in a TEXT column. Redis stores each row as a JSON text
 value, so bytes land base64-encoded there; that is now labelled "stored as
-base64 text" on the Map mapping and in the Trust Report (no raw-bytes mode).
+base64 text" on the Map mapping and in the Trust Report's confidence statement (no raw-bytes
+mode).
 """
 
 from __future__ import annotations
@@ -61,10 +62,11 @@ def test_redis_base64_is_labelled_in_the_trust_report():
                          {"source": "blob", "target": "blob", "source_type": "BYTEA"}],
         },
     }
-    report = public_report(build_parity_report(job, reread=False))
-    assert report["representation_notes"] == [
+    report = build_parity_report(job, reread=False)
+    assert report["_representation_notes"] == [
         "blob: stored as base64 text (Redis values are text, so the bytes are base64-encoded)"]
-    assert "blob: stored as base64 text" in report["confidence"]["statement"]
+    # The Trust Report tab renders the confidence statement ("How sure is this?").
+    assert "blob: stored as base64 text" in public_report(report)["confidence"]["statement"]
 
 
 def test_map_labels_the_redis_mapping():

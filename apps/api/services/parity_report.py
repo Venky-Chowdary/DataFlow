@@ -948,7 +948,7 @@ def build_parity_report(
         "explanation": state.get("explanation"),
         "rounds": list(state.get("rounds") or []),
         "evidence": _evidence_block(job, tables_ev),
-        "representation_notes": carried,
+        "_representation_notes": carried,
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),
         "_cache": cache,
