@@ -329,13 +329,8 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           saveHistory(next, workspaceId);
           return next;
         });
-        if (scope !== "all" && isCurrent()) {
-          toast({
-            title: `Ran ${scope}`,
-            message: `${data.row_count.toLocaleString()} rows in ${formatDuration(data.duration_ms)}`,
-            tone: "success",
-          });
-        }
+        // No toast for a plain successful run: the run bar and the results
+        // header already say "500 rows · 42 ms", and a toast covered the grid.
       } catch (e) {
         const message = (e as Error).message || "Query failed";
         setHistory((prev) => {

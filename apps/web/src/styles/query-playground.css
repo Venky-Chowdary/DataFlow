@@ -1543,3 +1543,17 @@
     margin-bottom: 2px;
   }
 }
+
+/* A dialect the connector fixes: a quiet read-only label, not a full-width select. */
+.df2-query-editor-lang-fixed {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm);
+  background: var(--df-surface-muted);
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+  white-space: nowrap;
+}

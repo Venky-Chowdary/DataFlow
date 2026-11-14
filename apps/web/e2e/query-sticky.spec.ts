@@ -50,6 +50,12 @@ async function openQueryWithResults(page: Page): Promise<void> {
   await page.getByLabel("Query editor").fill("SELECT * FROM orders");
   await page.getByRole("button", { name: "Run all" }).click();
   await expect(page.locator(".df2-qw-grid-count")).toContainText("500 rows");
+  // W6 round 2: a plain successful run does not toast over the grid; the run bar says it.
+  await page.waitForTimeout(600);
+  await expect(page.locator(".dt-toast", { hasText: /^Ran |500 rows in/ })).toHaveCount(0);
+  // The connector fixes the dialect: a read-only label, not a select.
+  await expect(page.getByRole("combobox", { name: "Query language" })).toHaveCount(0);
+  await expect(page.locator(".df2-query-editor-lang-fixed")).toHaveText("PostgreSQL");
 }
 
 for (const view of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) {
