@@ -462,8 +462,16 @@ def _proof_mongo_source_batches(
     from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     absent = {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL} if absent_as_null else set()
+    # A destination's mapped targets are field paths (Document Modeler PR1):
+    # ``address.city`` is read inside the ``address`` sub-document. The
+    # reader's own flattening names nested leaves ``address_city``.
+    dotted = [c for c in read_cols if "." in str(c)] if absent_as_null else []
 
     def _page(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if dotted:
+            from connectors.mongo_field_paths import path_view
+
+            docs = [{**doc, **path_view(doc, dotted)} for doc in docs]
         rows = _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
         if not absent:
             return rows
@@ -1261,8 +1269,11 @@ def _transform_applied_proof_impl(
     )
     scope_pk: list[str] = []
     if scd2_opts:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
@@ -1881,7 +1892,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc0 = physical_select_list(sel_cols0, dq0)
+            qc0 = physical_select_list(sel_cols0, dq0, dest_db_type)
 
             def _scoped_gen(batches):
                 nonlocal actual_rows
@@ -2351,7 +2362,7 @@ def _transform_applied_proof_impl(
             )
             from .writer_column_spelling import physical_select_list
 
-            qc = physical_select_list(sel_cols, dq)
+            qc = physical_select_list(sel_cols, dq, dest_db_type)
             stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
             if scd2_opts:
                 from services.scd2_engine import scd2_is_current_predicate
@@ -2625,8 +2636,11 @@ def _compute_source_checksum_from_spool(
     from services.fingerprint_accumulator import FingerprintAccumulator
 
     if target_cols is None:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
     acc = FingerprintAccumulator()
     policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -2690,8 +2704,11 @@ def _compute_source_checksum(
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
     _, data_rows = records_to_matrix(records, columns)
     if target_cols is None:
+        from connectors.destination_naming import target_identifier
+
         target_cols, _ = resolve_target_columns(
-            mappings, source_schema or {}, preserve_case=True
+            mappings, source_schema or {}, preserve_case=True,
+            identifier=target_identifier(dest_db_type),
         )
     mapped_rows, _rejected = map_rows_for_fingerprint(
         headers=columns,

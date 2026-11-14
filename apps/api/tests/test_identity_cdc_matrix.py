@@ -248,11 +248,25 @@ def _source(table: str, source: str = "postgresql") -> list[tuple]:
 
 
 def _drop_slots(table: str) -> None:
+    """Drop this test's slots, active ones included.
+
+    ``WHERE NOT active`` skipped a slot still held by the run's replication
+    connection at teardown, and the inactive slot then pinned WAL (1.76 GB,
+    ``df_dataflow_cdcord_*``) until the disk filled. The holder is ended
+    first; a failure is reported, not swallowed. ``tests/pg_slot_guard``
+    drops anything left at session end, SIGTERM included.
+    """
+    like = f"%{table[-8:]}%"
     try:
-        _pg([f"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots "  # nosec B608
-             f"WHERE NOT active AND slot_name LIKE '%{table[-8:]}%'"])
-    except Exception:  # noqa: BLE001,S110 — best-effort slot cleanup
-        pass
+        _pg([f"SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots "  # nosec B608
+             f"WHERE active AND slot_name LIKE '{like}'",
+             "SELECT pg_sleep(0.2)",
+             f"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots "  # nosec B608
+             f"WHERE NOT active AND slot_name LIKE '{like}'"])
+    except Exception as exc:  # noqa: BLE001 — cleanup must not mask the test result
+        import warnings
+
+        warnings.warn(f"CDC slot cleanup for {table} failed: {exc}", stacklevel=2)
 
 
 @pytest.fixture

@@ -18,6 +18,8 @@ Live: logical PG (``R11_PG_LOGICAL_*``), the real app on MongoDB
 
 from __future__ import annotations
 
+from tests.pg_slot_guard import track_created_slot
+
 import uuid
 
 import pytest
@@ -76,6 +78,7 @@ def test_r3_5_a_multi_table_underivable_schedule_blocks_unregistered_drops(world
         slot = f"df_dataflow_mt_{digest}_{uuid.uuid4().hex[:8]}"
         pub = f"df_pub_dataflow_mt_{digest}"
         _sql("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (slot,))
+        track_created_slot(slot)  # dropped at session end if a failure skips teardown
         _sql(f'CREATE PUBLICATION "{pub}" FOR TABLE "{world.table}", "{other}"')
         out = world.cleanup(world.ent.admin, world.x, slot_names=[slot], publication_names=[pub],
                             include_unregistered=True)
@@ -95,6 +98,7 @@ def test_r3_5_a_schedule_whose_source_connector_is_gone_blocks_unregistered_drop
     assert [u["schedule_id"] for u in _underivable()] == [sched], _underivable()
     slot = f"df_dataflow_{world.table}_{uuid.uuid4().hex[:8]}"
     _sql("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (slot,))
+    track_created_slot(slot)  # dropped at session end if a failure skips teardown
     out = world.cleanup(world.ent.admin, world.x, slot_names=[slot], include_unregistered=True)
     assert out["dropped"] == [], out
     assert slot in _slots()

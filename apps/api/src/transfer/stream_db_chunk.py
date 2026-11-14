@@ -77,7 +77,12 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
             # D349: a field flattened out of a protected parent inherits it.
             protect_discovered_children(cfg, batch, new_headers)
             cfg.backfill_new_fields = True
-            cfg.target_cols, _ = resolve_target_columns(cfg.mappings, cfg.column_types, preserve_case=True)
+            from connectors.destination_naming import target_identifier
+
+            cfg.target_cols, _ = resolve_target_columns(
+                cfg.mappings, cfg.column_types, preserve_case=True,
+                identifier=target_identifier(cfg.dest_type),
+            )
 
 
 def _absent_field_is_null_in_relational_dest(cfg, batch) -> None:

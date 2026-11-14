@@ -293,6 +293,13 @@ class PlanRevision:
     document_model: dict[str, Any] = field(default_factory=dict)
     document_model_hash: str = ""
 
+    def __post_init__(self) -> None:
+        # map_target is Execute's own adoption record: a stored plan never
+        # carries one (written or read back; security re-check F1a).
+        from services.target_name_legacy import strip_client_map_targets
+
+        self.mappings = strip_client_map_targets(list(self.mappings or []))
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -353,6 +360,16 @@ class TransferPlanRecord:
     workspace_id: str = ""
     #: Bumped by every write of this plan (PS-1); 0 = stored before it existed.
     doc_version: int = 0
+
+    def __post_init__(self) -> None:
+        # The plan's stream contracts never carry map_target either (written
+        # or read back; security re-check F1a, defence in depth).
+        from services.target_name_legacy import strip_contract_map_targets
+
+        contracts = (self.policies or {}).get("stream_contracts")
+        if isinstance(contracts, list):
+            self.policies = {**self.policies,
+                             "stream_contracts": strip_contract_map_targets(contracts)}
 
     def to_dict(self) -> dict[str, Any]:
         return {

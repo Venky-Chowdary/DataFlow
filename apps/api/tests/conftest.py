@@ -164,6 +164,14 @@ os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
 # var, like DATAFLOW_DATA_DIR above, so a test setting either name wins.
 # Tests that need training call run_full_training directly or set it "on".
 os.environ.setdefault("DATAFLOW_TRAINING", "off")
+# The app's pipeline cadence loop is off under pytest: tests fire scheduler
+# beats themselves, and the TestClient lifespan's loop raced them (CI PR 426,
+# test_d119: the test's beat was skipped as "already in progress"). A test
+# that needs the real loop requests ``schedule_loop_on``; a value the
+# operator set is kept.
+SCHEDULE_LOOP_DEFAULT = "0"
+if not (os.environ.get("DATAFLOW_SCHEDULE_LOOP") or os.environ.get("DATAWRAP_SCHEDULE_LOOP")):
+    os.environ["DATAFLOW_SCHEDULE_LOOP"] = SCHEDULE_LOOP_DEFAULT
 
 # Hermetic env: Railway markers exported by `railway run`, a linked dev
 # shell or CI agents with the CLI installed must not flip the suite into
@@ -176,6 +184,9 @@ os.environ["DATAFLOW_ENV"] = "test"
 
 
 def pytest_configure(config):
+    # No CDC slot outlives this session (an inactive slot pins WAL forever).
+    if not config.pluginmanager.has_plugin("tests.pg_slot_guard"):
+        config.pluginmanager.import_plugin("tests.pg_slot_guard")
     config.addinivalue_line(
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
@@ -703,45 +714,18 @@ def pg_test_cfg(port: int | None = None) -> dict:
     }
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _drop_leaked_pg_replication_slots():
-    """CDC tests create logical replication slots on the local PG and do not
-    always drop them — 20 leaked ``df_dataflow_mt_*``/``s_probe`` slots once
-    filled ``max_replication_slots`` and failed unrelated CDC tests with
-    ``replication_slot_quota: all replication slots are in use``. Best-effort
-    session teardown: drop inactive slots matching the test prefixes.
-    """
-    yield
-    try:
-        import psycopg2
+@pytest.fixture
+def schedule_loop_on(monkeypatch):
+    """Opt in to the app's cadence loop (off for the session: SCHEDULE_LOOP_DEFAULT)."""
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "1")
 
-        cfg = pg_test_cfg()
-        conn = psycopg2.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            dbname=cfg["database"],
-            user=cfg["username"],
-            password=cfg["password"],
-            connect_timeout=3,
-        )
-        try:
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT slot_name FROM pg_replication_slots "
-                    "WHERE NOT active AND ("
-                    "slot_name LIKE 'df_dataflow_mt_%' "
-                    "OR slot_name LIKE 's_probe%' "
-                    "OR slot_name LIKE 'x29_%' "
-                    "OR slot_name LIKE 'df_test_%')"
-                )
-                for (slot_name,) in cur.fetchall():
-                    cur.execute("SELECT pg_drop_replication_slot(%s)", (slot_name,))
-        finally:
-            conn.close()
-    except Exception:
-        # PG absent / creds differ — cleanup is best-effort hygiene.
-        pass
+
+# Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)
+# drops, at session end, only the slots this session provably created. The
+# prefix sweep that stood here dropped every inactive ``df_dataflow_mt_%`` slot
+# on the shared server, including a concurrent session's slot between its
+# polls (test_d344: "replication slot ... does not exist" -> CdcSlotGapError).
 
 
 def _is_mongo_reachable() -> bool:
@@ -1061,4 +1045,3 @@ def _isolated_console_outbox():
     if sender is not None:
         sender.ConsoleEmailSender.OUTBOX.clear()
     yield
-

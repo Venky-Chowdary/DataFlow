@@ -158,11 +158,14 @@ def _checksum_without_fingerprints(
 def _resolve_file_stream_target_columns(
     dest_type: str, mappings: list[dict[str, Any]], column_types: dict[str, str]
 ) -> tuple[list[str], list[str]]:
+    from connectors.destination_naming import writer_identifier
+
     return resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         table_exists=False if dest_type in ("s3", "gcs", "adls") else None,
+        identifier=writer_identifier(dest_type, preserve_case=True),
     )
 
 

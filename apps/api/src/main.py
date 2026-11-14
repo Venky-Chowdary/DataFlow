@@ -322,6 +322,11 @@ async def lifespan(app: FastAPI):
         from services.export_migration import migrate_flat_exports_at_startup, start_in_background
 
         app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # G11 naming history: its job-store indexes are built here, bounded and
+        # off the critical path, never on the first request that reads history.
+        from services.naming_history import ensure_naming_history_indexes
+
+        app.state.naming_history_indexes = start_in_background(ensure_naming_history_indexes)
         # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
         # workspace. The partition time is recorded before any request is served
         # (connectors saved after it prove no ownership); owned flat files then

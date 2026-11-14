@@ -2436,11 +2436,21 @@ def _run_cdc_shared_multi_table(
         name = (contract.name or "").strip()
         if not name:
             continue
-        raw = next((c for c in stream_contracts if c.get("name") == name), {}) or {}
+        from services.multi_stream_plan import selected_stream_contract
+
+        # The selected contract only: the one the approval bound (security B1).
+        raw = selected_stream_contract(stream_contracts, name)
         stream_maps = raw.get("mappings")
         declared = isinstance(stream_maps, list) and bool(stream_maps)
         use_maps = stream_maps if declared else mappings
+        # G11: this stream's targets against its own destination object.
+        from services.target_name_legacy import prepare_stream_targets
+
+        use_maps, stream_ack = prepare_stream_targets(
+            destination, use_maps, "cdc", stream_name=name
+        )
         stream_cfg[name] = {
+            "legacy_field_ack": stream_ack,
             "primary_key": _cdc_pk_str(
                 contract.primary_key or primary_keys.get(name), name
             ),
@@ -2822,6 +2832,9 @@ def _run_cdc_shared_multi_table(
                 collection=original_dest_collection,
             )
         dest_table = resolve_dest_table(dest_type, destination)
+        from services.target_name_legacy import set_run_ack
+
+        set_run_ack(destination, cfg.get("legacy_field_ack") or [])  # this stream's only
         shared_accum.dest_before.capture(
             destination,
             table_name=str(dest_table or stream or ""),

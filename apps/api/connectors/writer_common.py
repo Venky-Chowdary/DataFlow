@@ -44,6 +44,7 @@ from connectors.array_wire import (  # noqa: F401 — re-export canonical helper
     _pg_array_element,
     parse_array_wire_elements,
 )
+from connectors.destination_naming import column_key, writer_identifier
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -630,16 +631,14 @@ def desired_types_honoring_map_stamps(
     candidates = candidate_by_col or {}
     by_tgt: dict[str, dict[str, Any]] = {}
     for mapping in write_mappings(list(mappings or [])):
-        tgt = sanitize_identifier(
-            str(mapping.get("target") or ""), preserve_case=preserve_case
-        )
+        tgt = column_key(str(mapping.get("target") or ""))  # G11: the writer's own spelling
         if tgt and tgt not in by_tgt:
             by_tgt[tgt] = mapping
 
     desired: list[str] = []
     refusals: list[dict[str, Any]] = []
     for col, cur_type in zip(target_cols, current_target_types):
-        mapping = by_tgt.get(col) or {}
+        mapping = by_tgt.get(column_key(col)) or {}
         candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
         ceiling = str(cur_type or "").strip() or candidate
         if explicit_columns is not None:
@@ -2207,7 +2206,8 @@ def build_mapped_rows_with_details(
     source_indices = {h: i for i, h in enumerate(headers)}
     # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
     source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
-    sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
+    _name = writer_identifier(dest_kind, preserve_case=preserve_case)  # G11: per-destination names
+    sanitized_target_cols = [_name(c) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
     rejected_details: list[dict[str, Any]] = []
@@ -2220,7 +2220,7 @@ def build_mapped_rows_with_details(
             continue
         dest_nullability[key] = bool(v)
         dest_nullability[key.lower()] = bool(v)
-        dest_nullability[sanitize_identifier(key, preserve_case=preserve_case)] = bool(v)
+        dest_nullability[_name(key)] = bool(v)
 
     mapping_infos = []
     for m in mappings:
@@ -2234,15 +2234,13 @@ def build_mapped_rows_with_details(
                 # it is present in the resolved target set, create-new was
                 # confirmed (``table_exists is False``) and the value must flow —
                 # otherwise every row lands NULL (the direct-write create-new gap).
-                _pending_tgt = sanitize_identifier(
-                    str(m.get("target") or ""), preserve_case=preserve_case
-                )
+                _pending_tgt = _name(str(m.get("target") or ""))
                 if _pending_tgt not in target_index:
                     continue
         except Exception:
             pass
         src = m["source"]
-        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        tgt = _name(m["target"])
         # Never pass source ``column_types`` as dest_types — that invents a
         # "live" VARCHAR dest and suppresses Map ``target_type`` coercion
         # (INTEGER/BOOLEAN/DECIMAL stamps become trim_id/none). Empty dest
@@ -3187,8 +3185,13 @@ def resolve_target_columns(
     sample_values_by_source: dict[str, list[str]] | None = None,
     table_exists: bool | None = None,
     dest_db: str = "",
+    identifier: Callable[[Any], str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
+
+    ``identifier`` names each target; by default the ``dest_db`` writer's own
+    rule (``destination_naming.writer_identifier``: Mongo keeps field paths,
+    SQL engines cut only at their real limit); no ``dest_db``: SQL sanitizing.
 
     Prefers live ``dest_types`` on existing tables (table_exists is not False),
     then explicit Map ``target_type``, then source logical type, then ``VARCHAR``.
@@ -3207,6 +3210,7 @@ def resolve_target_columns(
     target_types: list[str] = []
     samples = sample_values_by_source or {}
     live = dest_types or {}
+    name_of = identifier or writer_identifier(dest_db, preserve_case=preserve_case)
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit
@@ -3228,7 +3232,7 @@ def resolve_target_columns(
         except Exception:
             if not m.get("target"):
                 continue
-        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        tgt = name_of(m["target"])
         if tgt not in target_cols:
             target_cols.append(tgt)
             explicit_target = bool(m.get("target_type"))

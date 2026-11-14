@@ -1700,6 +1700,11 @@ async def run_universal_transfer(
         "kind": dest_kind, "format": dest_format, "table": dest_table or dest_collection,
         "file_format": dest_extra.get("file_format", ""), "extra": dest_extra,
     })
+    from services.target_name_legacy import legacy_field_policy_refusal
+
+    _policy_err = legacy_field_policy_refusal(dest_extra)
+    if _policy_err:  # G11: a typo must not silently read as "no acknowledgement"
+        raise HTTPException(status_code=422, detail=_policy_err)
 
     _refuse_unavailable_destination(
         {

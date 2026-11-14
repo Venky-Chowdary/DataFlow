@@ -1716,14 +1716,15 @@ def write_mapped_rows(
 
             stamp_ceiling_by_col: dict[str, str] = {}
             by_tgt: dict[str, dict] = {}
+            from connectors.destination_naming import column_key
+
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(
-                    str(mapping.get("target") or ""), preserve_case=True
-                )
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in by_tgt:
                     by_tgt[tgt] = mapping
             for col in target_cols:
-                stamp = str((by_tgt.get(col) or {}).get("target_type") or "").strip()
+                stamp = str((by_tgt.get(column_key(col)) or {}).get("target_type") or "").strip()
                 if stamp:
                     # Map≡ALTER ceiling is the approved stamp — never live overlay.
                     stamp_ceiling_by_col[col] = sf_type(stamp)

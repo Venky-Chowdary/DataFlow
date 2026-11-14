@@ -81,7 +81,12 @@ def write_destination_file(
 
         headers = columns
         data_rows = [matrix_row_from_record(rec, headers) for rec in records]
-        target_cols, _ = resolve_target_columns(mappings, types)
+        from connectors.destination_naming import writer_identifier
+
+        # G11: a file export keeps the mapped header's case (was lowercased).
+        target_cols, _ = resolve_target_columns(
+            mappings, types, identifier=writer_identifier(fmt)
+        )
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,

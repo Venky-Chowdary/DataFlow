@@ -18,6 +18,7 @@ from services.decision_kernel import materialize_dest_ddl
 from services.reversibility_enforce import scan_pass
 from services.value_serializer import json_default
 
+from connectors.destination_naming import column_key, writer_identifier
 from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
@@ -1549,6 +1550,11 @@ def write_mapped_rows(
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
         dest_db="postgresql",
+        # G11: Redshift shares this writer but names columns by its own limit.
+        identifier=writer_identifier(
+            str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql"),
+            preserve_case=True,
+        ),
     )
     if not target_cols:
         return WriteResult(
@@ -2169,13 +2175,14 @@ def write_mapped_rows(
 
             active_by_tgt: dict[str, dict] = {}
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
             source_type_by_col: dict[str, str] = {}
             for col in target_cols:
-                mapping = active_by_tgt.get(col) or {}
+                mapping = active_by_tgt.get(column_key(col)) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
                 # Declared source DDL wins over sample inference: inferring from
