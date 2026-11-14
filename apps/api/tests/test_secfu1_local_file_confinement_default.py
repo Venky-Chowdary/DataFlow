@@ -7,7 +7,8 @@ workspace). In production the confinement is now the default: a connector opens
 only files in the platform's data area (with PR 403's per-workspace partition),
 its upload area (an upload owned by the caller's workspace) and its export area
 (the caller's own export folder), plus any directory the operator lists in
-``DATAFLOW_SOURCE_PATH_ROOTS``. Development and tests keep today's behaviour.
+``DATAFLOW_SOURCE_PATH_ROOTS``. Since SEC-9 SQLite and DuckDB are confined
+in development and tests too; Iceberg's local root stays production-only.
 An explicit ``DATAFLOW_CONFINE_LOCAL_FILES=0`` is honoured, warned about at
 startup and recorded in the security-settings snapshot.
 """
@@ -196,19 +197,24 @@ def test_production_default_confines_local_iceberg_warehouses(prod):
     assert iceberg_local_root() == (data_dir() / "iceberg").resolve()
 
 
-# --- development default unchanged ------------------------------------------
+# --- development: SQLite/DuckDB confined too (SEC-9) -----------------------
 
 
 @pytest.mark.parametrize("env", ["development", "test"])
-def test_development_default_is_unchanged(prod, monkeypatch, env):
+def test_development_default_confines_sqlite_and_duckdb_too(prod, monkeypatch, env):
     monkeypatch.setenv("DATAFLOW_ENV", env)
     outside = str(prod / "elsewhere" / "x.db")
-    assert sqlite_file_path(outside, "", "") == outside
-    assert sqlite_file_path("/etc/hosts", "", "") == "/etc/hosts"
-    assert sqlite_file_path("local.db", "", "") == "local.db"
-    assert duckdb_file_path(outside.replace(".db", ".duckdb"), "") == outside.replace(".db", ".duckdb")
+    with pytest.raises(ValueError):
+        sqlite_file_path(outside, "", "")
+    with pytest.raises(ValueError):
+        sqlite_file_path("/etc/hosts", "", "")
+    with pytest.raises(ValueError):
+        duckdb_file_path(outside.replace(".db", ".duckdb"), "")
     from connectors.iceberg_catalog import iceberg_local_root
+    from services.platform_config import data_dir
 
+    assert sqlite_file_path("local.db", "", "").startswith(str(data_dir().resolve() / "sqlite"))
+    # Iceberg's local warehouse root stays a production default.
     assert iceberg_local_root() is None
 
 
@@ -244,11 +250,13 @@ def test_no_startup_warning_and_snapshot_values_without_opt_out(prod, monkeypatc
     with caplog.at_level(logging.WARNING, logger=logger.name):
         warn_if_local_file_confinement_off(logger)
         monkeypatch.setenv("DATAFLOW_ENV", "development")
-        monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
-        warn_if_local_file_confinement_off(logger)  # an opt-out outside production changes nothing
+        warn_if_local_file_confinement_off(logger)
     assert not [r for r in caplog.records if r.name == logger.name]
-    assert local_file_settings() == {"local_file_confinement": "off"}
-    monkeypatch.setenv("DATAFLOW_ENV", "production")
-    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES")
     assert local_file_settings() == {"local_file_confinement": "enforced"}
+    # SEC-9: an opt-out is an opt-out in every environment, and is said so.
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        warn_if_local_file_confinement_off(logger)
+    assert [r for r in caplog.records if r.name == logger.name]
+    assert local_file_settings() == {"local_file_confinement": "opted_out"}
 
