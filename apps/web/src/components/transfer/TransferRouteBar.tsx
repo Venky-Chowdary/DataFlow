@@ -29,7 +29,13 @@ export function TransferRouteBar({
   const countLabel = rowCount != null && rowCount > 0 ? formatRouteRowCount(rowCount) : null;
 
   return (
-    <div className={`df2-route-bar ${live ? "df2-route-bar-live" : ""}`} aria-label="Current route">
+    // One slim line under the steps (W9): names ellipsize, so the whole route is
+    // the group's accessible name and each name is in its own title.
+    <div
+      className={`df2-route-bar ${live ? "df2-route-bar-live" : ""}`}
+      role="group"
+      aria-label={`Current route: ${sourceLabel} → ${hasDest ? destLabel : "Choose destination"}${countLabel ? ` · ${countLabel.full}` : ""}`}
+    >
       <div className={`df2-route-bar-endpoint${hasSource ? "" : " is-pending"}`}>
         <ConnectorIcon id={sourceType || "file"} size={18} />
         <span className="df2-route-bar-label" title={sourceLabel}>{sourceLabel}</span>
