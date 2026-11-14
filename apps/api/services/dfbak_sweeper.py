@@ -21,7 +21,6 @@ Safety rules, in order:
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from typing import Any, Callable
@@ -45,7 +44,9 @@ def parse_backup_comment(text: Any) -> tuple[str, int] | None:
 
 def retention_seconds() -> float:
     try:
-        hours = float(os.environ.get("DATAFLOW_DFBAK_RETENTION_HOURS", "168"))
+        from services.brand_env import getenv_brand_str
+
+        hours = float(getenv_brand_str("DFBAK_RETENTION_HOURS", "168") or "168")
     except ValueError:
         hours = 168.0
     return max(hours, 1.0) * 3600.0
