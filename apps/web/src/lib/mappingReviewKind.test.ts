@@ -101,6 +101,14 @@ describe("Map review kind — false-friend operator surface", () => {
     assert.equal(classifyMappingReview(editable[1]), "entity_identity");
   });
 
+  it("health headline says one pair in the singular and never '(s)' (W9)", () => {
+    const one = mappingHealthSummary([userCustomer()], 0.85);
+    assert.equal(one.headline, "1 user≠customer pair needs confirming");
+    const two = mappingHealthSummary([qtyAmt(), userCustomer()], 0.85);
+    assert.match(two.headline, /need confirming$/);
+    assert.doesNotMatch(two.headline, /\(s\)/);
+  });
+
   it("health headline names the kind — not generic need review", () => {
     const health = mappingHealthSummary([qtyAmt(), userCustomer()], 0.85);
     assert.equal(health.falseFriendCount, 2);

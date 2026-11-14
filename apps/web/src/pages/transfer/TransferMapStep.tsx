@@ -17,7 +17,7 @@ import {
 } from "../../components/mapping/useMappingStudio";
 import { mapTargetIssues, normalizeColumnName } from "../../lib/destColumnCatalog";
 import { liveCarrierIsDoomedOnThisRun } from "../../lib/destSchemaRecreate";
-import { isIntentionalOmit, type EditableMapping as MapRow } from "../../lib/mapping";
+import { isFalseFriendReview, isIntentionalOmit, type EditableMapping as MapRow } from "../../lib/mapping";
 import {
   applyMappingTemplate,
   createMappingTemplate,
@@ -44,7 +44,7 @@ import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
-import { MapIssueList, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
+import { MapIssueList, mapIssueSummary, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -601,14 +601,14 @@ export function TransferMapStep({
         : { label: g.columns.length > 1 ? `Review ${g.columns.length} rows` : "Review row", onClick: () => showRows(g.columns) },
     })),
   ];
-  const issueSummary = [
-    targetIssues.length
-      ? `${targetIssues.length} destination column issue${targetIssues.length === 1 ? "" : "s"} block Validate`
-      : "",
-    stepCounts.attention
-      ? `${stepCounts.attention} column${stepCounts.attention === 1 ? " needs" : "s need"} your review`
-      : "",
-  ].filter(Boolean).join(" · ");
+  // One sentence for the one banner (W9): false-friend pairs are named apart
+  // from the other rows that need a decision, never as a second banner.
+  const falseFriendCount = columnMappings.filter((m) => isFalseFriendReview(m) && !m.falseFriendConfirmed).length;
+  const issueSummary = mapIssueSummary({
+    destinationIssues: targetIssues.length,
+    falseFriends: falseFriendCount,
+    review: Math.max(0, stepCounts.attention - falseFriendCount),
+  });
 
   const moreItems: JobsMenuItem[] = [
     ...(onAddComputedSteps

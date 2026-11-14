@@ -1664,3 +1664,60 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
     flex: 1 0 100%;
   }
 }
+
+/* ==========================================================================
+   Map step bound to the viewport (W9)
+   From 1024 px the step never scrolls: the banner keeps its line and the
+   split takes the rest, so the grid scrolls inside its card and the panel's
+   list inside the panel. Each scroller keeps its gutter, so a scrollbar
+   never paints over a row's chips.
+   ========================================================================== */
+
+@media (min-width: 1024px) {
+  .df2-map-step-panel .df2-ms-split,
+  .df2-map-step-panel .df2-ms-split.has-panel {
+    flex: 1 1 0;
+    min-height: 240px;
+  }
+
+  .df2-map-step-panel .df2-ms-split > .df2-map-step-workspace,
+  .df2-map-step-panel .df2-ms-split > .df2-ms-panel {
+    min-height: 0;
+    max-height: 100%;
+  }
+}
+
+.df2-map-step-panel .df2-ms-panel-list,
+.df2-map-step-panel .df2-column-review-scroll {
+  scrollbar-gutter: stable;
+}
+
+/* Visually-hidden text (every destination row's explanation for screen
+   readers, the grid's sample values) is absolutely positioned. With no
+   positioned box between it and the step, it escaped the panel list and the
+   grid, and the step itself had 300-460 px of overflow: the second
+   scrollbar. Each row, and the grid's scroller, now contain their own. */
+.df2-map-step-panel .df2-ms-dest-row,
+.df2-map-step-panel .df2-column-review-scroll {
+  position: relative;
+}
+
+/* The keyboard / touch drag hint floats over the bottom of the step instead
+   of being inserted above the grid. Inserted, it pushed every destination row
+   45 px down the moment a finger picked a source up, so the finger then ended
+   on the row above the one it was aimed at; the step no longer scrolls, so
+   scroll anchoring cannot hide that jump any more. */
+.df2-map-step-panel .df2-ms-scroll {
+  position: relative;
+}
+
+.df2-map-step-panel .df2-ms-scroll > .df2-ms-drag-status {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  z-index: var(--df-z-raised);
+  margin: 0;
+  pointer-events: none;
+  box-shadow: var(--df-shadow-xs);
+}

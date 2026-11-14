@@ -31,6 +31,30 @@ export function mapStatusLine(counts: MapStepCounts): string {
   return parts.join(" · ");
 }
 
+/**
+ * The banner's one sentence for everything still open, in plain counts with
+ * real plurals: destination issues, false-friend pairs (which Approve
+ * eligible never clears) and the other rows that need a decision.
+ */
+export function mapIssueSummary(input: { destinationIssues: number; falseFriends: number; review: number }): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  const parts: string[] = [];
+  if (input.destinationIssues > 0) {
+    parts.push(input.destinationIssues === 1
+      ? "1 destination column issue blocks Validate"
+      : `${n(input.destinationIssues)} destination column issues block Validate`);
+  }
+  if (input.falseFriends > 0) {
+    parts.push(input.falseFriends === 1
+      ? "1 false-friend pair needs confirming"
+      : `${n(input.falseFriends)} false-friend pairs need confirming`);
+  }
+  if (input.review > 0) {
+    parts.push(input.review === 1 ? "1 column needs review" : `${n(input.review)} columns need review`);
+  }
+  return parts.join(" · ");
+}
+
 /** Names shown on the banner's one line before it says "+N more". */
 const SUBJECTS_SHOWN = 3;
 
