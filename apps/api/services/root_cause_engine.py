@@ -1935,18 +1935,19 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         from services.error_taxonomy import sync_mode_words
 
         sync_mode = sync_mode_words(str(details.get("sync_mode") or "append"))
+        sync_mode = f"{'an' if sync_mode[:1] in 'aeiou' else 'a'} {sync_mode}"
         enforced = bool(details.get("key_enforced", True))
         if enforced:
             summary = (
                 f"{stored or 'Some'} key value(s) in this batch are already at rest "
                 f"in the destination on {key}, which enforces uniqueness — "
-                f"a {sync_mode} insert aborts on the first one"
+                f"{sync_mode} insert aborts on the first one"
             )
         else:
             summary = (
                 f"{stored or 'Some'} key value(s) in this batch are already at rest "
                 f"in the destination on {key}. That table does not enforce the key, "
-                f"so a {sync_mode} insert would store a second copy"
+                f"so {sync_mode} insert would store a second copy"
             )
         # D104: another enabled pipeline owns this destination — name it as
         # the cause instead of leaving "the table already has the keys".
