@@ -255,8 +255,12 @@ def test_sqlite(tmp_path, monkeypatch):
     sqlite3.connect(str(path)).close()
     missing = _raise(lambda: _run(get_sqlalchemy_engine({"type": "sqlite", "database": str(path)}), "select * from records"))
     _check("sqlite_missing_table", missing, "sqlite", "object.table_not_found", monkeypatch)
-    bad = _raise(lambda: _run(get_sqlalchemy_engine({"type": "sqlite", "database": "/nonexistent/w3err/a.db"}), "select 1"))
+    bad = _raise(lambda: _run(get_sqlalchemy_engine({"type": "sqlite", "database": str(tmp_path / "nonexistent" / "a.db")}), "select 1"))
     _check("sqlite_bad_path", bad, "sqlite", "object.file_not_found", monkeypatch)
+    # SEC-9 confines local files by default: a file outside every connector
+    # folder is refused in Datawrap's own words, never "cause not identified".
+    outside = _raise(lambda: _run(get_sqlalchemy_engine({"type": "sqlite", "database": "/nonexistent/w3err/a.db"}), "select 1"))
+    _check("sqlite_outside_roots", outside, "sqlite", "access.path_not_allowed", monkeypatch)
 
 
 def test_classifier_order_typed_then_structured_then_pattern():

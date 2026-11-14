@@ -98,9 +98,17 @@ def connector_file_areas() -> list[Path]:
     return areas
 
 
+class PathNotAllowedError(ValueError):
+    """A local file outside every confined area (SEC-9); the text names the fixes."""
+
+    #: Read by ``services.error_taxonomy`` (typed match): the refusal's own
+    #: words reach the user instead of "cause not identified".
+    error_code = "access.path_not_allowed"
+
+
 def confinement_refusal(label: str, env_name: str) -> ValueError:
     """The refusal for a file outside every confined area; names the fixes, never a host path."""
-    return ValueError(
+    return PathNotAllowedError(
         f"{label} file is outside the folders connectors may open on this server (the "
         f"persistent data volume's {label} area, uploads and this workspace's exports). "
         f"Move the file into the {label} data folder or upload it; or ask the operator to add "

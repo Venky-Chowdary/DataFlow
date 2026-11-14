@@ -246,6 +246,12 @@ TEMPLATES: dict[str, Template] = {
         "Upload the file again in Transfer Studio and start a new run.",
         "open_studio",
     ),
+    "access.path_not_allowed": Template(
+        "File location not allowed",
+        "This server only opens local files inside its connector folders, and this file is outside them.",
+        "Move the file into the connector data folder or upload it, or ask the operator to allow its folder.",
+        "open_connection",
+    ),
     "object.file_not_found": Template(
         "File not found",
         "File{f} wasn't found.",
@@ -762,7 +768,7 @@ def _q(name: str) -> str:
 #: Codes whose source text is Datawrap's own refusal and already names the
 #: object and the fix (the egress policy names the refused host the user
 #: typed). Humanisers keep that text; the code still rides on the envelope.
-PRODUCT_COPY_CODES = frozenset({"network.egress_blocked"})
+PRODUCT_COPY_CODES = frozenset({"network.egress_blocked", "access.path_not_allowed"})
 
 _SIDE_NOUN = {"source": "source", "destination": "destination", "query": "database",
               "connection": "database", "platform": "Datawrap server"}
