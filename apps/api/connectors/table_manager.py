@@ -2577,9 +2577,25 @@ def create_pg_table_backup(
             if not cur.fetchone():
                 return None
             _pg_refuse_unrestorable_triggers(cur, schema, table)
+            from services.dfbak_sweeper import (
+                backup_comment,
+                parse_backup_comment,
+                sweep_pg_backups,
+            )
+
+            # DATA-13: obsolete backups killed runs left in this schema.
+            sweep_pg_backups(cur, schema, keep_job=str(job_id or ""))
+            cur.execute("SELECT obj_description(to_regclass(%s), 'pg_class')", (bak_ref,))
+            prior = parse_backup_comment((cur.fetchone() or [None])[0])
+            if prior is not None and prior[0] == str(job_id or ""):
+                # An earlier attempt of this job was killed before it settled:
+                # its backup is the true pre-run image, and the live table may
+                # be half-written. Keep it; never recopy over it.
+                return {"table": table, "backup": backup, "schema": schema}
             cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
             cur.execute(f"CREATE TABLE {bak_ref} (LIKE {live_ref} INCLUDING ALL)")
             cur.execute(f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")
+            cur.execute(f"COMMENT ON TABLE {bak_ref} IS %s", (backup_comment(str(job_id or "")),))
     except PgBackupRestoreRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - a missing backup must not abort the write
