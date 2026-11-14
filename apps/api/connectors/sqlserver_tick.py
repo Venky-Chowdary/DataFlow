@@ -195,3 +195,31 @@ def full_precision_select_list(cur: Any, table_ref: str, columns: list[str] | No
         else _bracket(n)
         for n in names
     )
+
+
+def seven_digit_projection(cols: list[Any], engine: Any) -> list[Any]:
+    """Read DATETIME2(7) as text when the driver can't keep the seventh digit.
+
+    pymssql has no output converter: it builds a six-digit ``datetime``, so a
+    ``.1234567`` cell read back as ``.123456``. The Validate sampler then saw
+    no seventh digit and passed DATETIME2(7) into a microsecond carrier, and the
+    copy silently truncated every value (CI C3 pymssql leg). SQL Server's own
+    style-121 text keeps all seven digits, and every consumer of a text
+    timestamp reads the seventh digit from it (``tick_from_text``). pyodbc
+    keeps its column objects: its output converter already carries the digit.
+    """
+    dialect = getattr(engine, "dialect", None)
+    if getattr(dialect, "name", "") != "mssql" or getattr(dialect, "driver", "") != "pymssql":
+        return list(cols)
+    import sqlalchemy as sa
+
+    out: list[Any] = []
+    for col in cols:
+        col_type = getattr(col, "type", None)
+        precision = getattr(col_type, "precision", None)
+        is_datetime2 = type(col_type).__name__.upper() == "DATETIME2"
+        if is_datetime2 and (precision is None or int(precision) > 6):
+            out.append(sa.func.convert(sa.literal_column("varchar(27)"), col, sa.literal_column("121")).label(col.name))
+        else:
+            out.append(col)
+    return out

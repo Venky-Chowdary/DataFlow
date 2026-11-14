@@ -7527,10 +7527,9 @@ def value_fractional_second_digits(value: Any) -> int:
         from datetime import date, datetime, time
 
         if isinstance(value, datetime):
-            us = value.microsecond
-            if us == 0:
-                return 0
-            return len(f"{us:06d}".rstrip("0"))
+            from connectors.sqlserver_tick import tick_of  # DATETIME2(7) 100 ns digit
+
+            return len((f"{value.microsecond:06d}" + str(tick_of(value) or "")).rstrip("0"))
         if isinstance(value, time):
             us = value.microsecond
             if us == 0:
