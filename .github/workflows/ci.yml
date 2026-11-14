@@ -1000,6 +1000,14 @@ jobs:
           path: ${{ runner.temp }}/connector-ci-evidence/connector_ci_evidence.json
           if-no-files-found: error
 
+      # Last step on purpose: these lines sit at the end of the job log, so the
+      # snapshot can be refreshed from them without downloading the artifact.
+      - name: Print the per-job live-engine results
+        run: |
+          for f in "$RUNNER_TEMP"/live-engine/*.json; do
+            python3 -c 'import json,sys; print("DW-LIVE-RESULT", json.dumps(json.load(open(sys.argv[1])), separators=(",", ":"), sort_keys=True))' "$f"
+          done
+
   security:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
