@@ -2801,6 +2801,31 @@ def undo_pg_route_run(
     return restored
 
 
+def _split_backups(backups: dict[str, dict[str, str]]) -> tuple[dict, dict]:
+    mysql = {k: v for k, v in (backups or {}).items() if (v or {}).get("engine") == "mysql"}
+    return mysql, {k: v for k, v in (backups or {}).items() if k not in mysql}
+
+
+def restore_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str, str]]) -> list[str]:
+    """Restore PostgreSQL and MySQL (DATA-5) strict-run backups alike."""
+    from connectors.mysql_route_backup import restore_mysql_route_backups
+
+    mysql, pg = _split_backups(backups)
+    return (restore_pg_route_backups(cfg, pg) if pg else []) + (
+        restore_mysql_route_backups(cfg, mysql) if mysql else []
+    )
+
+
+def discard_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str, str]]) -> None:
+    from connectors.mysql_route_backup import discard_mysql_route_backups
+
+    mysql, pg = _split_backups(backups)
+    if pg:
+        discard_pg_route_backups(cfg, pg)
+    if mysql:
+        discard_mysql_route_backups(cfg, mysql)
+
+
 def discard_pg_route_backups(
     cfg: dict[str, Any],
     backups: dict[str, dict[str, str]],

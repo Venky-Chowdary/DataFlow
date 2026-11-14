@@ -756,7 +756,7 @@ def _stream_database_transfer_impl(
     if (
         run.cfg.write_mode == "upsert"
         and run.cfg.pk_target_cols
-        and run.cfg.dest_type == "postgresql"
+        and run.cfg.dest_type in {"postgresql", "mysql"}  # DATA-5: MySQL row-copy backup too
         and not pending_shape
         and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(pre_write_rows_before or 0) > 0
@@ -1840,7 +1840,7 @@ def _stream_database_transfer_impl(
     # "left in place" report.
     if (
         keyed_upsert_scope
-        and run.cfg.dest_type == "postgresql"
+        and run.cfg.dest_type in {"postgresql", "mysql"}  # DATA-5
         and not resumed_pass
         and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(run.tally.dest_summary.get(PRECOUNT_KEY) or 0) > 0

@@ -112,12 +112,17 @@ def _arm_strict_keyed_backup(
         # table it writes, not only the first one.
         return backups
     try:
-        pair = create_pg_table_backup(
-            dest_cfg,
-            schema=schema_from_cfg(dest_type, dest_cfg),
-            table=dest_table,
-            job_id=job_id,
-        )
+        if dest_type == "mysql":
+            from connectors.mysql_route_backup import create_mysql_table_backup
+
+            pair = create_mysql_table_backup(dest_cfg, table=dest_table, job_id=job_id)
+        else:
+            pair = create_pg_table_backup(
+                dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table=dest_table,
+                job_id=job_id,
+            )
     except PgBackupRestoreRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - never abort a write for the safety net

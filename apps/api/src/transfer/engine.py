@@ -3081,7 +3081,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -4297,7 +4297,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -5141,7 +5141,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),

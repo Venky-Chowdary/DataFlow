@@ -142,11 +142,11 @@ def _restore_own_backup(destination: Any, table: str) -> bool | None:
         from src.transfer.engine_finish import settle_parked_overwrite_backups
 
         return settle_parked_overwrite_backups(destination, restore=True, only_table=table)
-    from connectors.table_manager import restore_pg_route_backups
+    from connectors.table_manager import restore_route_backups
     from src.transfer.adapters import resolve_connector_config
 
     try:
-        restored = restore_pg_route_backups(resolve_connector_config(destination), {key: backups[key]})
+        restored = restore_route_backups(resolve_connector_config(destination), {key: backups[key]})
         ok = bool(restored)
     except Exception as exc:  # noqa: BLE001 — reported per table, never hides the failure
         logger.error("Multi-table undo: restoring %s from its backup failed: %s", table, exc)

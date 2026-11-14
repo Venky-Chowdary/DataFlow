@@ -521,6 +521,13 @@ def _records_after_failure(prior: Any, incoming: Any) -> int:
     return max(_n(prior), _n(incoming))
 
 
+#: A failed write whose pre-run backup was restored (DATA-5).
+DESTINATION_RESTORED_NOTE = (
+    "The destination was restored to its pre-run content from the backup taken before "
+    "this run, so no row this run wrote remains."
+)
+
+
 def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, str]:
     """Row count and message for a write that stopped after a committed prefix.
 
@@ -538,8 +545,14 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
             "Blocked-write row count could not read job %s: %s", job_id, exc
         )
         prior = None
-    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    if getattr(blocked, "destination_restored", False):
+        # DATA-5: the pre-run backup was put back, so nothing this run wrote
+        # remains. "N rows committed" / "N rows were already written" next to
+        # a restored table contradicted itself.
+        message = re.sub(r"^partial write \(the failing batch reported [\d,]+ row\(s\) committed\): ", "", message)
+        return 0, f"{message.rstrip()} {DESTINATION_RESTORED_NOTE}"
+    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     if getattr(blocked, "multi_stream_undo", None):
         # C4: the other tables of a failed multi-table run were undone too.
         note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
