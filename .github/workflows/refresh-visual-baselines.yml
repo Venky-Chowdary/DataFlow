@@ -37,8 +37,10 @@ jobs:
           artifact_name: refresh-visual-baselines
           update_snapshots: "true"
 
+      # Not always(): a cancelled run renders only part of the screens, and
+      # its half-set of baselines must never reach the branch.
       - name: Commit the refreshed baselines
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           git add -- 'apps/web/e2e/*-snapshots/*.png'
