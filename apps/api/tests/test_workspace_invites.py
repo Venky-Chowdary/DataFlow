@@ -428,3 +428,23 @@ def test_restored_link_keeps_its_own_expiry_not_the_failed_resends(world, reques
     row = store.get(invite["id"])
     assert row["token_hash"] == store.hash_token(mailed)
     assert row["expires_at"] == mailed_doc["expires_at"]
+
+
+def test_ux21_email_quota_refusal_names_the_cause_and_the_way_round(env, monkeypatch):
+    """UX-21: the daily email allowance refused an invite with an opaque "try again later"."""
+    client, admin, ws, _ = env
+    from services.email_sender import EmailQuotaExceeded
+
+    def exhausted():
+        raise EmailQuotaExceeded("daily allowance used", retry_after_sec=301)
+
+    monkeypatch.setattr("services.email_quota.consume_send_slot", exhausted)
+    refused = _invite(client, admin, ws, "quota@example.com", expect=503)
+    error = refused["error"]
+    assert error["code"] == "email_quota_exceeded"
+    assert error["retry_after_sec"] == 301
+    assert "email sending limit" in error["message"]
+    assert "Try again in 6 min" in error["message"]
+    assert "Add directly" in error["message"]
+    assert "try again later" not in error["message"].lower()
+    assert invite_store.pending_count(ws) == 0, "nothing is left behind that nobody was told about"

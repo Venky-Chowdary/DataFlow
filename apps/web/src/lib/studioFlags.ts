@@ -76,3 +76,21 @@ export function writeLocalStudioFlag(
   if (enabled) storage.setItem(key, "1");
   else storage.removeItem(key);
 }
+
+/**
+ * UX-25: the recipe canvas is a preview. Settings labels it so and asks before
+ * a workspace turns it on; it is not a production surface.
+ */
+export const CANVAS_PREVIEW_LABEL = "Preview — not for production";
+
+export const CANVAS_PREVIEW_HINT =
+  "Preview. Turning this on shows the ordered transform canvas to everyone in this workspace who also opts in; off keeps the step list. Not supported for production transfers yet.";
+
+export const CANVAS_PREVIEW_CONFIRM = {
+  title: "Turn on the preview recipe canvas?",
+  message:
+    "The recipe canvas is a preview and is not supported for production transfers. Everyone in this workspace who opts in will see it in Transfer Studio. You can turn it off again here.",
+  confirmLabel: "Turn on preview",
+  cancelLabel: "Keep it off",
+  tone: "warning" as const,
+};

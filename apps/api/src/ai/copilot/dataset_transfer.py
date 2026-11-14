@@ -70,10 +70,9 @@ def _column_dicts(parsed_columns: list[Any], sample_rows: list[dict[str, Any]]) 
 
 
 def _blocked(preflight: dict[str, Any]) -> str:
+    from .transfer_answer import refusal_sentence
+
     blockers = preflight.get("blockers") or []
-    listed = "; ".join(
-        f"{b.get('id')}: {b.get('message')}" for b in blockers[:4] if isinstance(b, dict) and b.get("message")
-    )
     fixes = "; ".join(
         fix
         for fix in (
@@ -83,9 +82,8 @@ def _blocked(preflight: dict[str, Any]) -> str:
         )
         if fix
     )
-    err = "Preflight blocked this transfer, so I won't start it"
-    if listed:
-        err += f" — {listed}"
+    # UX-19: blockers by their Studio names, never raw gate or root ids.
+    err = refusal_sentence({}, preflight)
     detail_lines: list[str] = []
     for blocker in blockers[:4]:
         if not isinstance(blocker, dict):

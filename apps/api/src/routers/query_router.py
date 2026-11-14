@@ -858,6 +858,11 @@ class QuerySchemaRequest(BaseModel):
     database: str = Field("", description="Database/namespace override")
     schema_name: str = Field("", description="Schema override")
     object_name: str = Field("", description="Optional single table/collection to expand")
+    search: str = Field(
+        "",
+        max_length=200,
+        description="List only objects whose name contains this text (case-insensitive)",
+    )
 
 
 class QuerySchemaColumn(BaseModel):
@@ -883,6 +888,9 @@ class QuerySchemaResult(BaseModel):
     message: str = ""
     warnings: list[str] = Field(default_factory=list)
     objects_truncated: bool = False
+    # How many objects (matching ``search``) the engine counted; ``objects``
+    # may be a page of them. None when the engine does not count (UX-9).
+    objects_total: int | None = None
     # Whatever the connector's own introspection reported. Deliberately not
     # called "ddl": catalog-backed engines return declared types, while
     # dynamically typed sources (SQLite, Mongo, CSV) return value-inferred
@@ -1353,6 +1361,9 @@ async def query_schema(
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
+    if body.search.strip() and not body.object_name:
+        # UX-9: search the whole schema, not the first page of it.
+        endpoint.extra["object_name_filter"] = body.search.strip()
     from src.ai.copilot.tool_deadline import run_off_event_loop
 
     def _timed_out(message: str) -> Any:
@@ -1446,6 +1457,7 @@ async def query_schema(
         # enforce PKs) must reach the console, not die at the adapter edge.
         warnings=[str(w) for w in (info.get("warnings") or []) if w],
         objects_truncated=bool(info.get("objects_truncated")),
+        objects_total=_objects_total(info.get("objects_total"), len(objects)),
     )
 
 
@@ -1538,6 +1550,15 @@ def _schemas_probe(workspace_id: str, connector_id: str) -> tuple[bool, str]:
                     _SCHEMAS_PROBE_OK.clear()
             _SCHEMAS_PROBE_OK[key] = (now, str(message or ""))
     return bool(ok), str(message or "")
+
+
+def _objects_total(reported: Any, listed: int) -> int | None:
+    """Every matching object the engine counted, for "N of M" (UX-9); None if it did not count."""
+    try:
+        total = int(reported)
+    except (TypeError, ValueError):
+        return None
+    return max(total, listed)
 
 
 def _in_connector_scope(connector_id: str, fn: Any, *args: Any) -> Any:

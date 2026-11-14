@@ -54,6 +54,10 @@
       "licence": "MPL-2.0",
       "why": "Test tool only (requirements-dev.txt). Not in the production image, so not distributed."
     },
+    "npm:axe-core": {
+      "licence": "MPL-2.0",
+      "why": "Test tool only (apps/web devDependency): the Playwright accessibility gate (UX-16) injects it into the test browser. Used unmodified; never bundled into the web app or any image, so not distributed."
+    },
     "npm:@fontsource/ibm-plex-mono": {
       "licence": "OFL-1.1",
       "why": "Font, OFL-1.1: may be bundled, not sold on its own. Its copyright and licence must accompany it.",

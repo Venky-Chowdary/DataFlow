@@ -71,6 +71,24 @@ export default defineConfig({
       },
     },
     {
+      // UX-16: axe-core WCAG 2.2 A/AA gate over the main screens.
+      name: "a11y",
+      testMatch: /a11y\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1366, height: 768 },
+      },
+    },
+    {
+      // UX-5: Destination step on a phone (touch, 390 px).
+      name: "phone",
+      testMatch: /phone-.*\.spec\.ts/,
+      use: {
+        ...devices["Pixel 5"],
+        viewport: { width: 390, height: 844 },
+      },
+    },
+    {
       name: "prod-smoke",
       testMatch: /prod-smoke\.spec\.ts/,
       use: {

@@ -1,9 +1,12 @@
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
+import { ApiUnreachableError, noteApiReachable, noteApiUnreachable } from "./connectivity";
 import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
 import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
-import { exportDownloadError, type JobExportDownload } from "./jobExportDownload";
+import { exportDownloadError, exportUrlNeedsSession, type JobExportDownload } from "./jobExportDownload";
+import { downloadBlob } from "./downloadBlob";
+import { workspaceRefusalCopy } from "./firstRunWorkspace";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
@@ -180,6 +183,9 @@ async function readApiRefusal(
   } catch {
     /* keep the fallback */
   }
+  // UX-1: the header-level workspace refusals name an HTTP header, not a next step.
+  const workspaceCopy = workspaceRefusalCopy(detail);
+  if (workspaceCopy) detail = workspaceCopy;
   if (res.status === 502 || res.status === 504) {
     if (detail === fallback || /<html/i.test(detail)) {
       // ERR-36: name the operation the caller was running, not always Validate.
@@ -327,6 +333,8 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
   try {
     releaseSlot = await acquireApiSlot(controller.signal);
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
+    // UX-17: any answer, even a refusal, proves the server is reachable.
+    noteApiReachable();
     if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
     } else if (res.ok) {
@@ -335,6 +343,12 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     return res;
   } catch (error) {
     if (controller.signal.aborted) throw new Error("Request timed out");
+    if (error instanceof TypeError) {
+      // No answer at all (refused, DNS, offline): say so in words, never
+      // the browser's "Failed to fetch", and let the shell show the banner.
+      noteApiUnreachable();
+      throw new ApiUnreachableError();
+    }
     throw error;
   } finally {
     window.clearTimeout(timeout);
@@ -1301,7 +1315,7 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   if (lower.includes("429") || lower.includes("too many pilot messages")) {
     return "You’re sending messages faster than Pilot accepts. Wait a few seconds, then try again.";
   }
-  if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
+  if (lower.includes("failed to fetch") || lower.includes("network") || lower.includes("load failed")) {
     return "Couldn’t reach Datawrap Pilot right now. Check that the app is online, then try again.";
   }
   if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
@@ -4479,7 +4493,17 @@ export async function sendWorkspaceInvite(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, role, name }),
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Failed to send invitation"));
+  if (!res.ok) {
+    let code = "";
+    try {
+      code = String((await res.clone().json())?.error?.code ?? "");
+    } catch {
+      /* not JSON */
+    }
+    const err = new Error(await parseApiError(res, "Failed to send invitation")) as Error & { code?: string };
+    err.code = code;
+    throw err;
+  }
   return (await res.json()).invite as WorkspaceInvite;
 }
 
@@ -4675,6 +4699,8 @@ export interface QuerySchemaResult {
   warnings?: string[];
   type_source?: string;
   objects_truncated?: boolean;
+  /** Every matching object the engine counted; ``objects`` may be a page of them. */
+  objects_total?: number | null;
 }
 
 export interface QueryCatalogNodeInfo {
@@ -4776,6 +4802,8 @@ export async function fetchQuerySchema(payload: {
   database?: string;
   schema_name?: string;
   object_name?: string;
+  /** Only objects whose name contains this text (case-insensitive), across the whole schema. */
+  search?: string;
 }): Promise<QuerySchemaResult> {
   const res = await apiFetch(`${API_BASE}/query/schema`, {
     method: "POST",
@@ -4917,6 +4945,31 @@ export async function downloadJobExport(jobId: string): Promise<JobExportDownloa
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(href), 0);
   return info;
+}
+
+/**
+ * Save a file the API serves behind sign-in (UX-2). A plain ``<a href>`` to
+ * ``/api/v1/transfer/download/...`` carries no bearer token and answered 401;
+ * this fetches with the session and saves the Blob. A presigned bucket URL
+ * (another origin, credentials in its query) is opened as a link instead.
+ */
+export async function downloadExportFile(url: string, filename: string): Promise<void> {
+  if (!url) throw new Error("This export has no file to download.");
+  if (!exportUrlNeedsSession(url, API_BASE)) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.rel = "noopener";
+    anchor.download = filename || "";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return;
+  }
+  const res = await apiFetch(resolveApiAssetUrl(url), { timeoutMs: 0 });
+  if (!res.ok) {
+    throw exportDownloadError(res.status, await parseApiError(res, "Could not download the export"));
+  }
+  downloadBlob(filename || "export", await res.blob());
 }
 
 /** Resolve API-relative download paths (e.g. /api/v1/transfer/download/x.csv) to an absolute URL. */

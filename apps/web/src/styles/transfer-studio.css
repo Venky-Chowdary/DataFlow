@@ -6639,7 +6639,8 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-brand-muted);
   border: 1px solid var(--df-border-brand);
   font-size: 12px;
-  color: var(--df-brand);
+  /* UX-16: --df-brand on the brand tint was 3.6:1 at 12px. */
+  color: var(--df-brand-strong);
   margin-top: auto;
 }
 
@@ -12522,4 +12523,28 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   background-repeat: no-repeat;
   background-size: 48px 100%, 48px 100%, 16px 100%, 16px 100%;
   background-position: 0 0, 100% 0, 0 0, 100% 0;
+}
+
+/* UX-5: below 720px the Destination step is one static column. The desktop
+   lock gives the picker and its connector list flex-basis 0 so they scroll
+   inside a fixed-height column; stacked in one grid column that basis
+   collapsed the picker to nothing and the sync summary painted over the
+   connector cards, so none could be tapped. Here they take their content
+   height and the step body scrolls as one page. */
+@media (max-width: 719px) {
+  .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-step-left,
+  .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-picker,
+  .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-connector-list,
+  .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-picker.is-new-connection .df2-dest-engine-panel {
+    flex: 0 0 auto !important;
+  }
+
+  /* Rows take their content height (the columns clip, so their automatic
+     minimum is 0 and the fixed-height grid squeezed them), and the step body
+     is the one scroll container. */
+  .df2-app .df2-page-transfer-studio .df2-dest-step .df2-dest-step-layout {
+    grid-template-rows: none;
+    grid-auto-rows: max-content;
+    overflow-y: auto !important;
+  }
 }

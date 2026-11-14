@@ -2,13 +2,14 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
+import { clearAuthAttemptToasts } from "../lib/authToasts";
 import {
   acceptInvite,
   type AcceptedInvite,
   type InviteDetails,
   inspectInvite,
-  fetchFormToken,
   fetchSignupConfig,
+  FormTokenGate,
   forgotPassword,
   inspectResetToken,
   resendCode,
@@ -19,7 +20,7 @@ import {
   verifiedSignupSession,
   verifyEmail,
 } from "../lib/signupApi";
-import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
+import { changeEmailRequestError, codeEntryError, mailSendError, signupRefusal, type SignupRefusal } from "../lib/authFlowCopy";
 import { focusFirstInvalid, PasswordToggle, ResendRow, SpamFolderHint } from "../components/AuthFlow";
 import { AuthButton } from "../components/AuthButton";
 import { TurnstileWidget } from "../components/TurnstileWidget";
@@ -133,7 +134,7 @@ function CodeStep({
 }
 
 export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "", initialChallengeId = "" }: AuthFlowProps & { initialEmail?: string; initialChallengeId?: string }) {
-  const { toast } = useToast();
+  const { toast, dismissMatching } = useToast();
   const [step, setStep] = useState<"details" | "verify">(initialChallengeId ? "verify" : "details");
   const [email, setEmail] = useState(initialEmail);
   const [name, setName] = useState("");
@@ -143,7 +144,9 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [errorIsField, setErrorIsField] = useState(false);
-  const [formToken, setFormToken] = useState("");
+  // UX-28: one form token per send, held until the API's fill floor has passed.
+  const [tokenGate] = useState(() => new FormTokenGate("signup"));
+  const [refusal, setRefusal] = useState<SignupRefusal | null>(null);
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [challenge, setChallenge] = useState({ id: initialChallengeId, resendAfterSec: 60 });
@@ -151,18 +154,18 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    fetchFormToken("signup").then((t) => setFormToken(t ?? ""));
+    tokenGate.prefetch();
     fetchSignupConfig().then((c) => setTurnstileSiteKey(c.turnstileSiteKey));
-  }, []);
+  }, [tokenGate]);
 
   const emailOk = isValidEmail(email);
   const passwordOk = password.length >= 12;
   const nameOk = name.trim().length >= 2;
   const ready = useMemo(() => emailOk && passwordOk && nameOk, [emailOk, passwordOk, nameOk]);
 
-  const emailError = submitted && !emailOk ? "Enter a valid work email." : "";
+  const emailError = submitted && !emailOk ? "Enter a valid work email." : refusal?.field === "email" ? refusal.text : "";
   const nameError = submitted && !nameOk ? "Your name is required." : "";
-  const passwordError = submitted && !passwordOk ? "Use at least 12 characters." : "";
+  const passwordError = submitted && !passwordOk ? "Use at least 12 characters." : refusal?.field === "password" ? refusal.text : "";
 
   useEffect(() => {
     if (!emailOk) { setSsoHint(null); return; }
@@ -176,26 +179,33 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setSubmitted(true);
     setError("");
+    setRefusal(null);
     if (!ready) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
+      // A fast submit is held here ("Sending code…"), never sent early and dropped.
+      const formToken = await tokenGate.take();
       const r = await signupRequest({
         email: email.trim(),
         name: name.trim(),
         password,
-        formToken: formToken || undefined,
+        formToken,
         turnstileToken: turnstileToken || undefined,
       });
       setChallenge({ id: r.challengeId, resendAfterSec: r.resendAfterSec });
       setStep("verify");
     } catch (err) {
-      setError(mailSendError(
-        err instanceof SignupApiError ? err : {},
-        err instanceof Error ? err.message : "Signup failed. Try again.",
-      ));
-      toast({ title: "Couldn't start signup", message: "Check the fields and try again.", tone: "error" });
+      const refused = signupRefusal(err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" });
+      if (refused.field) {
+        setRefusal(refused);
+        window.setTimeout(() => focusFirstInvalid(cardRef.current), 0);
+      } else {
+        setError(refused.text);
+        toast({ title: "Couldn't start signup", message: "Check the fields and try again.", tone: "error" });
+      }
     } finally {
       setBusy(false);
     }
@@ -208,6 +218,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
     try {
       const result = await verifyEmail({ challengeId: challenge.id, code });
       writeSession(verifiedSignupSession(result), true);
+      clearAuthAttemptToasts(dismissMatching);
       toast({ title: "Email verified", message: "Your workspace is ready.", tone: "success" });
       onAuthenticated(result.user.email);
     } catch (err) {
@@ -287,7 +298,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
           <div className={`lp-field ${emailError ? "is-error" : emailOk ? "is-ok" : ""}`}>
             <div className="lp-label-row">
               <label className="lp-label" htmlFor="signup-email">Work email</label>
-              {emailOk && <span className="lp-field-status lp-field-status--ok">Valid</span>}
+              {emailOk && !emailError && !error && <span className="lp-field-status lp-field-status--ok">Valid</span>}
             </div>
             <input
               id="signup-email"
@@ -295,7 +306,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
               type="email"
               inputMode="email"
               value={email}
-              onChange={(e) => { setEmail(e.target.value); setError(""); }}
+              onChange={(e) => { setEmail(e.target.value); setError(""); if (refusal?.field === "email") setRefusal(null); }}
               autoComplete="username"
               autoCapitalize="none"
               autoCorrect="off"
@@ -315,7 +326,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
                 className="lp-input"
                 type={showPassword ? "text" : "password"}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => { setPassword(e.target.value); if (refusal?.field === "password") setRefusal(null); }}
                 autoComplete="new-password"
                 placeholder="At least 12 characters"
                 aria-invalid={Boolean(passwordError)}
@@ -350,7 +361,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
   const [busy, setBusy] = useState(false);
   const [resending, setResending] = useState(false);
   const [error, setError] = useState("");
-  const [formToken, setFormToken] = useState("");
+  const [tokenGate] = useState(() => new FormTokenGate("reset"));
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [cooldown, setCooldown] = useState(0);
@@ -359,9 +370,9 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    fetchFormToken("reset").then((t) => setFormToken(t ?? ""));
+    tokenGate.prefetch();
     fetchSignupConfig().then((c) => setTurnstileSiteKey(c.turnstileSiteKey));
-  }, []);
+  }, [tokenGate]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -379,13 +390,15 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
     if (!emailOk) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
-      const r = await forgotPassword(email.trim(), formToken || undefined, turnstileToken || undefined);
+      const r = await forgotPassword(email.trim(), await tokenGate.take(), turnstileToken || undefined);
       setCooldown(r.resendAfterSec || 60);
       setStep("sent");
       setNotice("");
     } catch (err) {
       if (err instanceof SignupApiError && err.code === "email_quota_exceeded") {
         setError(mailSendError(err, "Couldn't send the link. Try again."));
+      } else if (err instanceof SignupApiError && err.code === "form_token_unavailable") {
+        setError(err.message);
       } else {
         setStep("sent"); // uniform 202 semantics: never reveal existence
         setCooldown(60);
@@ -399,7 +412,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
     setResending(true);
     setError("");
     try {
-      const r = await forgotPassword(email.trim(), formToken || undefined, turnstileToken || undefined);
+      const r = await forgotPassword(email.trim(), await tokenGate.take(), turnstileToken || undefined);
       setCooldown(r.resendAfterSec || 60);
       setNotice("New link sent — the earlier one stopped working.");
       toast({ title: "New link sent", message: "The earlier reset link was invalidated.", tone: "info" });

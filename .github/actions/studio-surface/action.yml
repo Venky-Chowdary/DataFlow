@@ -10,6 +10,10 @@ inputs:
   artifact_name:
     description: Artifact name uploaded when the surface fails
     required: true
+  extra_playwright_projects:
+    description: More Playwright projects to run against the same dev server, space-separated (e.g. a11y)
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -78,7 +82,11 @@ runs:
       env:
         CI: "1"
         PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
-      run: npx playwright test --project=${{ inputs.playwright_project }}
+        EXTRA_PROJECTS: ${{ inputs.extra_playwright_projects }}
+      run: |
+        projects=(--project="${{ inputs.playwright_project }}")
+        for extra in $EXTRA_PROJECTS; do projects+=(--project="$extra"); done
+        npx playwright test "${projects[@]}"
 
     - name: Production build
       if: success() && inputs.production_smoke == 'true'

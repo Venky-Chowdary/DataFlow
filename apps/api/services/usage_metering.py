@@ -86,6 +86,35 @@ def record_transfer_usage(
     return event_id
 
 
+def record_job_usage(request: Any, result: Any) -> str:
+    """Meter one finished transfer (UX-12). Called once, where every run ends.
+
+    The meter used to sit in one success branch of the engine with failures
+    logged at debug, so runs that finished another way wrote nothing and
+    "Rows written today" read 0 after 15,000 rows. A failed run writes no rows
+    and is not metered; a metering failure is logged as a warning and never
+    fails the transfer.
+    """
+    if not getattr(result, "success", False):
+        return ""
+    job_id = str(getattr(result, "job_id", "") or "")
+    if not job_id:
+        return ""
+    source = getattr(request, "source", None)
+    dest = getattr(request, "destination", None)
+    try:
+        return record_transfer_usage(
+            job_id=job_id,
+            workspace_id=str(getattr(request, "workspace_id", "") or ""),
+            rows_written=int(getattr(result, "records_transferred", 0) or 0),
+            source_type=str(getattr(source, "format", "") or ""),
+            dest_type=str(getattr(dest, "format", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - metering must never fail a transfer
+        _logger.warning("Usage metering failed for job %s: %s", job_id, type(exc).__name__)
+        return ""
+
+
 def _load_events(
     workspace_id: str = "", workspace_filter: WorkspaceFilter | None = None
 ) -> list[dict[str, Any]]:

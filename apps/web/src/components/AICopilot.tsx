@@ -13,6 +13,7 @@ import {
   CopilotPendingAction,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
+import { usePilotProgress } from "../lib/pilotProgress";
 import {
   applyPilotSafeActions,
   buildPilotDataContext,
@@ -60,6 +61,9 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  // UX-42: what Pilot is doing, from the first moment, for the question in flight.
+  const [asking, setAsking] = useState("");
+  const progress = usePilotProgress(loading, asking);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const restored = useRef(loadRailChat());
@@ -136,6 +140,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     setInput("");
     setMessages((m) => [...m, { role: "user", text: q }]);
     setLoading(true);
+    setAsking(q);
 
     try {
       const pilotContext = buildPilotDataContext(activeData, {
@@ -275,9 +280,9 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           </div>
         ))}
         {loading && (
-          <div className="df2-copilot-msg assistant df2-copilot-thinking">
-            <span className="df2-loader-bars" aria-label="Datawrap Pilot is working"><i /><i /><i /></span>
-            <span>Looking that up…</span>
+          <div className="df2-copilot-msg assistant df2-copilot-thinking" role="status" aria-live="polite">
+            <span className="df2-loader-bars" aria-hidden><i /><i /><i /></span>
+            <span>{progress}</span>
           </div>
         )}
         <div ref={messagesEndRef} />

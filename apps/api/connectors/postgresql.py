@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from connectors.base import ConnectResult
+from connectors.base import ConnectResult, name_filter_pattern
 
 #: Objects returned by a connection probe. A probe is a reachability check, not
 #: a catalog dump, so the page stays bounded and truncation is reported instead.
@@ -19,7 +19,15 @@ def test_postgresql(
     schema: str,
     connection_string: str,
     ssl: bool,
+    name_filter: str = "",
 ) -> ConnectResult:
+    """Reachability probe plus one bounded page of the schema's objects.
+
+    ``name_filter`` narrows the page to names containing it (case-insensitive),
+    so a browser can search a 9,000-table schema instead of reading only the
+    first page (UX-9).
+    """
+    pattern = name_filter_pattern(name_filter)
     try:
         from connectors.postgresql_conn import get_connection
 
@@ -43,10 +51,11 @@ def test_postgresql(
                 SELECT table_name, table_type
                 FROM information_schema.tables
                 WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
+                  AND (%s = '' OR table_name ILIKE %s ESCAPE '\\')
                 ORDER BY table_name
                 LIMIT %s
                 """,
-                (schema_name, _TABLE_PAGE + 1),
+                (schema_name, pattern, pattern, _TABLE_PAGE + 1),
             )
             fetched_rows = cur.fetchall()
             truncated = len(fetched_rows) > _TABLE_PAGE
@@ -65,8 +74,9 @@ def test_postgresql(
                     SELECT count(*)
                     FROM information_schema.tables
                     WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
+                      AND (%s = '' OR table_name ILIKE %s ESCAPE '\\')
                     """,
-                    (schema_name,),
+                    (schema_name, pattern, pattern),
                 )
                 total = int((cur.fetchone() or [len(tables)])[0])
             schema_missing = False
@@ -101,6 +111,7 @@ def test_postgresql(
             driver="psycopg2",
             tables_truncated=truncated,
             table_types=table_types,
+            tables_total=total,
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="psycopg2")

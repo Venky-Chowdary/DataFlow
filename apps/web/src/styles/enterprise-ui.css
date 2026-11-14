@@ -91,19 +91,20 @@
   font-size: 11px;
   font-weight: 600;
   background: var(--df-success-bg);
-  color: var(--df-success);
+  /* UX-16: --df-success on its tint was 3.5:1 at 11px. */
+  color: var(--df-success-text);
   border: 1px solid rgba(5, 150, 105, 0.2);
 }
 
 .df2-pilot-status-pill.is-offline {
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: #b91c1c;
   border-color: rgba(220, 38, 38, 0.2);
 }
 
 .df2-pilot-status-pill.is-local {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text);
   border-color: rgba(217, 119, 6, 0.22);
 }
 
@@ -4061,7 +4062,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-toolbar-search:focus-within {
   border-color: var(--df-brand) !important;
   background: var(--df-surface) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  /* UX-14: a 14% tint was not a visible focus indicator (WCAG 2.4.7/2.4.11). */
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar-search input {
@@ -4205,8 +4208,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-toolbar .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 .df2-toolbar .df2-btn:focus-visible,
@@ -4726,9 +4729,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   outline-offset: 2px;
 }
 
+/* UX-14: an outline, so the later segmented-control rule that clears
+   box-shadow (".df2-app .df2-filter-tabs .df2-tab") cannot erase the ring. */
 .df2-app .df2-tab:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28);
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* Modals / dialogs — consistent radius + field focus */
@@ -4760,8 +4765,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .dt-modal-actions .df2-btn:focus-visible,
 .dt-modal-actions .df2-btn:focus-visible {
-  outline: none !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
+  outline-offset: 2px;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -11202,7 +11207,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-success,
 .df2-app .df2-badge-ok {
   background: var(--df-success-bg);
-  color: var(--df-success);
+  color: var(--df-success-text); /* UX-16: AA at 11px on its tint */
   border: 1px solid var(--df-success-border, rgba(5, 150, 105, 0.22));
 }
 
@@ -11217,7 +11222,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-warn,
 .df2-app .df2-badge-warning {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text); /* AA at badge size on its tint */
   border: 1px solid var(--df-warning-border, rgba(217, 119, 6, 0.22));
 }
 
@@ -15762,7 +15767,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
 .df2-app .df2-connectors-list .df2-badge-live {
   background: var(--df-success-bg);
-  color: var(--df-success);
+  color: var(--df-success-text);
 }
 
 .df2-app .df2-connectors-list .df2-badge-error {

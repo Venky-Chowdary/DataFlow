@@ -12,6 +12,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.warning_text import warning_text
 from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.mapping_constraints import write_mappings
@@ -2820,7 +2821,11 @@ def run_integrity_audit(
     all_warnings: list[str] = []
     for c in checks:
         for w in c.get("warnings") or []:
-            all_warnings.append(str(w))
+            # UX-34: a structured warning ({"id", "message", ...}) used to reach
+            # the screen as its Python repr; render it as a sentence.
+            text = warning_text(w)
+            if text:
+                all_warnings.append(text)
 
     return {
         "passed": not blocks,

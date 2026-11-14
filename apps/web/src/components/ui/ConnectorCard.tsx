@@ -14,6 +14,8 @@ import {
 } from "../../lib/topologyUtils";
 import { Button } from "./Button";
 import { connectorEndpointLabel } from "../../lib/connectorEndpoint";
+import { connectorDisplayName } from "../../lib/connectorTypes";
+import { useConnectivity } from "../../lib/connectivity";
 
 interface ConnectorCardProps {
   connector: Connector;
@@ -57,8 +59,17 @@ export function ConnectorCard({
   const usage = resolveConnectorUsage(c, jobs, schedules);
   const healthy = connectorLooksHealthy(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
-  const testLabel = connectorTestLabel(c);
+  // The green check means a probe passed; never-tested is neutral, not healthy.
+  const { online } = useConnectivity();
+  // UX-17: offline, the last probe result is history, not current health.
+  const probePassed = online && connectorTestHealth(c) === "passed";
+  const health = connectorTestHealth(c);
+  const testLabel = online || health === "never_tested"
+    ? connectorTestLabel(c)
+    : `Last known: ${health === "passed" ? "passed" : "failed"}`;
   const endpoint = connectorEndpointLabel(c);
+  // UX-30: the engine's own name ("PostgreSQL"), never CSS-capitalized ids.
+  const engineName = connectorDisplayName(c.type);
   const roleClass =
     displayRole === "destination"
       ? "df2-role-dest"
@@ -71,21 +82,17 @@ export function ConnectorCard({
       <div
         id={`connector-card-${c.id}`}
         className={`df2-connector-row df2-card-interactive ${selected ? "selected" : ""} ${highlighted ? "highlighted" : ""} ${healthy ? "" : "error"}`}
+        // UX-16: a list item, not a button that contains buttons (nested
+        // interactive). The row click is a mouse shortcut; keyboard and
+        // screen-reader users open details with the row's own Open button.
         onClick={onSelect}
-        onKeyDown={(e) => {
-          if (onSelect && (e.key === "Enter" || e.key === " ")) {
-            e.preventDefault();
-            onSelect();
-          }
-        }}
-        role={onSelect ? "button" : undefined}
-        tabIndex={onSelect ? 0 : undefined}
+        role="listitem"
         aria-current={selected || undefined}
       >
         <span
-          className={`df2-health-dot ${healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online || neverTested ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : neverTested ? "Never tested" : healthy ? "Healthy" : "Connection error"}
         />
         <span className="df2-connector-row-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={16} />
@@ -94,9 +101,9 @@ export function ConnectorCard({
           <span className="df2-connector-row-name" title={c.name}>{c.name}</span>
           <span
             className="df2-connector-row-meta"
-            title={[c.type.replace(/_/g, " "), c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
+            title={[engineName, c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}
+            {engineName}
             {endpoint ? ` · ${endpoint}` : ""}
             {c.database ? ` · ${c.database}` : ""}
             {usage.hint ? ` · ${usage.hint}` : ""}
@@ -114,8 +121,8 @@ export function ConnectorCard({
         >
           {roleLabel}
         </span>
-        <span className={`df2-connector-row-signal ${healthy ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
-          <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
+        <span className={`df2-connector-row-signal ${probePassed ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
+          <DtIcon name={probePassed ? "check" : neverTested ? "activity" : "x"} size={12} />
           <span className="df2-connector-row-signal-text">{testLabel}</span>
         </span>
         <span className="df2-connector-row-used" title="Last transfer that used this connection">
@@ -160,9 +167,9 @@ export function ConnectorCard({
     >
       <div className="df2-connector-row-top">
         <span
-          className={`df2-health-dot ${healthy ? "ok" : "err"}`}
+          className={`df2-health-dot ${!online || neverTested ? "" : healthy ? "ok" : "err"}`}
           aria-hidden
-          title={healthy ? "Healthy" : "Connection error"}
+          title={!online ? "Health unknown while offline" : neverTested ? "Never tested" : healthy ? "Healthy" : "Connection error"}
         />
         <div className="df2-connector-card-icon" aria-hidden>
           <ConnectorIcon id={c.type} size={20} />
@@ -171,9 +178,9 @@ export function ConnectorCard({
           <h3 className="df2-connector-card-title" title={c.name}>{c.name}</h3>
           <p
             className="df2-connector-card-meta"
-            title={[c.type.replace(/_/g, " "), c.database, endpoint].filter(Boolean).join(" · ")}
+            title={[engineName, c.database, endpoint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}
+            {engineName}
             {c.database ? ` · ${c.database}` : ""}
           </p>
         </div>
@@ -183,8 +190,8 @@ export function ConnectorCard({
       </div>
 
       <div className="df2-connector-row-signals">
-        <span className={`df2-connector-signal ${healthy ? "ok" : neverTested ? "" : "err"}`}>
-          <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
+        <span className={`df2-connector-signal ${probePassed ? "ok" : neverTested ? "" : "err"}`}>
+          <DtIcon name={probePassed ? "check" : neverTested ? "activity" : "x"} size={12} />
           {neverTested ? "Never tested" : healthy ? "Last test passed" : "Last test failed"}
         </span>
         <span className="df2-connector-signal">

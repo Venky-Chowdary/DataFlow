@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useShellLayoutClass } from "../lib/useShellLayoutClass";
+import { routeMessageText, routeOperationLabel, routePlanItemText } from "../lib/routeLabels";
+import { searchCatalogNames } from "../lib/schemaBrowse";
+import { StudioScheduleDialog } from "../components/transfer/StudioScheduleDialog";
+import { defaultStudioScheduleDraft, studioScheduleCreatedToast, type StudioScheduleDraft } from "../lib/studioScheduleDraft";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -129,7 +133,7 @@ import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import { connectorDisplayName, defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import { icebergDestExtra, inferIcebergCatalogKind, type IcebergCatalogKind } from "../lib/icebergDestCatalog";
 import {
   bindNamesFromSql,
@@ -405,6 +409,8 @@ export function TransferPage({
 }: TransferPageProps) {
   const { toast, dismissMatching } = useToast();
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
+  /** UX-22: a viewer cannot plan (map/validate); say so before they build a route. */
+  const jobPlan = useWriteGate(PERMISSIONS.jobPlan, "map, validate or run a transfer");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
@@ -3244,7 +3250,7 @@ export function TransferPage({
       }));
       toast({
         title: plan.supported ? "Route ready" : "Route needs attention",
-        message: plan.message || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
+        message: routeMessageText(plan.message) || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
         tone: plan.supported ? "success" : "warning",
       });
     } catch (e) {
@@ -4264,6 +4270,11 @@ export function TransferPage({
 
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
+    if (!jobPlan.allowed) {
+      // UX-22: refuse at the first step that writes a plan, not after Validate.
+      toast({ title: "View only", message: jobPlan.reason, tone: "warning" });
+      return;
+    }
     setStep(STEP_MAP);
     setMappingError(null);
     mapConflictRef.current = false;
@@ -6661,6 +6672,42 @@ export function TransferPage({
 
   const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
 
+  /** UX-9: the source picker searches the connector's whole catalog, not one page. */
+  const sourceCatalogSearch = useCallback(
+    async (query: string) =>
+      sourceConnectorId
+        ? (await searchCatalogNames(sourceConnectorId, query, String(sourceConnector?.schema || ""))).names
+        : [],
+    [sourceConnectorId, sourceConnector?.schema],
+  );
+
+  /** UX-3: the schedule form Studio opens instead of creating one in a click. */
+  const [scheduleDraft, setScheduleDraft] = useState<{
+    payload: Parameters<typeof createSchedule>[0] extends infer P ? Omit<P & object, "name"> : never;
+    initial: StudioScheduleDraft;
+    route: { source: string; destination: string };
+  } | null>(null);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const createScheduleFromDraft = async (draft: StudioScheduleDraft) => {
+    if (!scheduleDraft) return;
+    setScheduleSaving(true);
+    try {
+      await createSchedule({ ...scheduleDraft.payload, name: draft.name, interval: draft.interval, enabled: draft.enabled });
+      setScheduleDraft(null);
+      const copy = studioScheduleCreatedToast(draft);
+      toast({ title: copy.title, message: copy.message, tone: "success" });
+      onOpenSchedules?.();
+    } catch (e) {
+      toast({
+        title: "Could not create the schedule",
+        message: e instanceof Error ? e.message : "The schedule was not saved. Try again.",
+        tone: "error",
+      });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
   /**
    * Persist the Validate-approved mapping contract onto a schedule.
    *
@@ -6722,8 +6769,8 @@ export function TransferPage({
         source_table: sourceTableName,
         dest_connector_id: connectorId,
         dest_table: targetCollection,
-        // A replayed schedule keeps the cadence the operator chose.
-        ...(replayId ? {} : { interval: "daily", enabled: true }),
+        // A replayed schedule keeps the cadence the operator chose; a new one
+        // takes cadence and on/off from the schedule form (UX-3).
         sync_mode: syncMode,
         cursor_column: cursorField,
         primary_key: primaryKeyField,
@@ -6780,15 +6827,14 @@ export function TransferPage({
           tone: "success",
         });
       } else {
-        await createSchedule({
-          ...payload,
-          name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+        // UX-3: never create (let alone start) a schedule in one click. Open
+        // the prefilled form; it starts paused and warns on cursorless append.
+        setScheduleDraft({
+          payload,
+          initial: defaultStudioScheduleDraft(sourceConnector?.name ?? "Source", targetCollection),
+          route: { source: `${sourceConnector?.name ?? "Source"} · ${sourceTableName}`, destination: `${selectedDestConnector?.name ?? "Destination"} · ${targetCollection}` },
         });
-        toast({
-          title: "Pipeline created",
-          message: "Daily sync enabled. Manage cadence in Schedules.",
-          tone: "success",
-        });
+        return false;
       }
       onOpenSchedules?.();
       return true;
@@ -7091,7 +7137,7 @@ export function TransferPage({
     : sourceKind === "cloud"
       ? `Cloud object${cloudPath ? ` · ${cloudPath}` : ""}`
       : sourceConnector
-        ? `${sourceConnector.type}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
+        ? `${connectorDisplayName(sourceConnector.type)}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
           isMultiStreamSource
             ? ` · ${multiStreamNames.length} streams`
             : primarySourceStream
@@ -7430,9 +7476,9 @@ export function TransferPage({
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}${studioFlags.canvas && step < STEP_SHAPE ? " is-flow-connect" : ""}${studioFlags.canvas && transformOpen && step <= STEP_SHAPE ? " is-flow-transform" : ""}${studioFlags.canvas && (step === STEP_MAP || step === STEP_VALIDATE) ? " is-flow-review" : ""}`} showHonesty>
       <PermissionNotice
-        allowed={jobRun.allowed}
-        reason={jobRun.reason}
-        what="You can plan a transfer but not run one."
+        allowed={jobPlan.allowed && jobRun.allowed}
+        reason={jobPlan.allowed ? jobRun.reason : jobPlan.reason}
+        what={jobPlan.allowed ? "You can plan a transfer but not run one." : "View only: you can look at sources and destinations here."}
       />
       <PlanConflictDialog
         conflict={planConflict.conflict}
@@ -7496,7 +7542,7 @@ export function TransferPage({
       </header>
 
       <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
-      <main className="df2-transfer-main-panel" key={step}>
+      <section className="df2-transfer-main-panel" key={step} aria-label="Transfer step">
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
@@ -7737,12 +7783,11 @@ export function TransferPage({
                 className="df2-policy-toggle df2-source-ocr-toggle"
                 style={{ marginBottom: 8 }}
                 onClick={(e) => e.stopPropagation()}
+                // UX-41: product words for end users; install steps are the admin's (Help).
                 title={
                   ocrStatus?.available === false
-                    ? `OCR not ready: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}`
-                    : ocrStatus?.available
-                      ? "Tesseract is available — OCR scanned PDFs when no text layer exists"
-                      : "OCR scanned PDFs when no text layer exists (requires Tesseract on the API host)"
+                    ? "Reading scanned PDFs is not set up on this Datawrap deployment. Ask your administrator to enable OCR."
+                    : "Read scanned PDFs (no text layer) with text recognition."
                 }
               >
                 <input
@@ -7756,10 +7801,10 @@ export function TransferPage({
                   <strong>OCR scanned PDFs</strong>
                   <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Unavailable — the API host needs Tesseract installed."
+                      ? "Not set up on this deployment — ask your administrator to enable OCR."
                       : ocrStatus?.available
-                        ? "Tesseract ready — used when a PDF has no text layer."
-                        : "Optional · runs Tesseract when a PDF has no text layer."}
+                        ? "Ready — used when a PDF has no text layer."
+                        : "Optional · used when a PDF has no text layer."}
                   </small>
                 </span>
               </label>
@@ -8047,6 +8092,7 @@ export function TransferPage({
                     options={sourceObjectNames}
                     loading={sourceIntrospecting && sourceObjectNames.length === 0}
                     allowCreate={false}
+                    searchCatalog={sourceCatalogSearch}
                     objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
                     placeholder={
                       sourceConnector?.type === "mongodb"
@@ -8237,7 +8283,7 @@ export function TransferPage({
           const connectorReady =
             isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
           if (!fileReady && !connectorReady) return null;
-          const hint = fileReady
+          const baseHint = fileReady
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
@@ -8253,8 +8299,16 @@ export function TransferPage({
                     : streamPreviews.some((s) => s.status === "error")
                       ? `${streamPreviews.filter((s) => s.status === "ok").length} of ${multiStreamNames.length} streams ready — continue to pick a destination`
                       : `${multiStreamNames.length} streams selected — continue to pick a destination`)
-                  : "Select connector and table/collection to continue";
+                  : "";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
+          // UX-9: the hint must agree with the button — never "select a table"
+          // beside an enabled Continue.
+          const hint = baseHint
+            || (sourceIntrospecting
+              ? "Reading the source schema…"
+              : disabled
+                ? "Select connector and table/collection to continue"
+                : "Source selected — continue to pick a destination.");
           return (
             <div className="df2-card-footer df2-wizard-footer">
               <span className="df2-label-hint">{hint}</span>
@@ -8899,12 +8953,19 @@ export function TransferPage({
               <p className="df2-label-hint">
                 {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
               </p>
-              <p className="df2-label-hint">
-                {schemaPolicyHonestyLine(schemaPolicy)}
-              </p>
-              <p className="df2-label-hint">
-                Change overwrite, CDC, schema drift, and identity in Advanced.
-              </p>
+              {/* UX-39: table-schema rules (ADD COLUMN, CDC, drift) say nothing about a file export. */}
+              {destKindMode === "database" ? (
+                <>
+                  <p className="df2-label-hint">
+                    {schemaPolicyHonestyLine(schemaPolicy)}
+                  </p>
+                  <p className="df2-label-hint">
+                    Change overwrite, CDC, schema drift, and identity in Advanced.
+                  </p>
+                </>
+              ) : (
+                <p className="df2-label-hint">Change the file name and format options in Advanced.</p>
+              )}
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
@@ -8938,10 +8999,11 @@ export function TransferPage({
             )}
           </div>
 
-          {transferPlan && (
+          {/* UX-39: no "Route ready" before a destination is chosen. */}
+          {transferPlan && (destKindMode !== "database" || Boolean(connectorId)) && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
               <p className="df2-plan-callout-title">
-                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {transferPlan.operation}
+                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {routeOperationLabel(transferPlan.operation)}
                 {!transferPlan.supported && (
                   <span className="df2-badge df2-badge-run">{transferPlan.message}</span>
                 )}
@@ -8949,7 +9011,7 @@ export function TransferPage({
               {transferPlan.auto_create.length > 0 && (
                 <ul className="df2-plan-callout-list">
                   {transferPlan.auto_create.slice(0, 3).map((item, i) => (
-                    <li key={`${item}-${i}`}>{item}</li>
+                    <li key={`${item}-${i}`}>{routePlanItemText(item)}</li>
                   ))}
                   {transferPlan.auto_create.length > 3 && (
                     <li className="df2-plan-callout-more">+{transferPlan.auto_create.length - 3} more steps</li>
@@ -9759,8 +9821,21 @@ export function TransferPage({
           </div>
         </div>
       )}
-      </main>
+      </section>
       </div>
+
+      {scheduleDraft && (
+        <StudioScheduleDialog
+          open
+          initial={scheduleDraft.initial}
+          route={scheduleDraft.route}
+          syncMode={syncMode}
+          cursorColumn={cursorField}
+          saving={scheduleSaving}
+          onCancel={() => setScheduleDraft(null)}
+          onCreate={(draft) => void createScheduleFromDraft(draft)}
+        />
+      )}
 
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer

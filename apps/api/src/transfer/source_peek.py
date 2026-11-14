@@ -38,11 +38,12 @@ def source_wait_message(src_type: str, src_cfg: Mapping[str, Any] | None, step: 
     its phase line ("Analyzing source table…", "Validating mapping and
     schema…") with no heartbeat, which reads as a queue nobody can see (D326).
     """
-    from src.ai.copilot.tool_deadline import describe_target
+    from services.engine_names import engine_display_name
 
+    # UX-34: the event log names the engine and database, never host:port.
     cfg = dict(src_cfg or {})
-    where = describe_target(cfg) or str(cfg.get("database") or "")
-    label = " ".join(p for p in (str(src_type or ""), where) if p) or "source"
+    where = str(cfg.get("database") or "")
+    label = " · ".join(p for p in (engine_display_name(str(src_type or "")), where) if p) or "source"
     return (
         f"{step}: waiting for the source ({label}) to answer this read; the "
         "source database has not returned it yet (a lock or load there, or "

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { connectorDisplayName } from "../../lib/connectorTypes";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { ErrorReferenceChip } from "../ErrorReferenceChip";
@@ -412,7 +413,7 @@ export function SourceStepAside({
               <ConnectorIcon id={sourceConnector.type} size={28} />
               <div>
                 <strong>{sourceConnector.name}</strong>
-                <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
+                <span>{connectorDisplayName(sourceConnector.type)}{sourceConnector.host ? ` · ${sourceConnector.host}` : ""}</span>
                 <span>{sourceConnector.database || "default database"}</span>
               </div>
               <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
@@ -432,7 +433,7 @@ export function SourceStepAside({
                 <ConnectorIcon id={c.type} size={18} />
                 <div>
                   <strong>{c.name}</strong>
-                  <span>{c.type} · {c.database || c.host}</span>
+                  <span>{connectorDisplayName(c.type)} · {c.database || c.host}</span>
                 </div>
               </div>
             ))}
@@ -480,7 +481,7 @@ export function SourceStepAside({
           <ConnectorIcon id={sourceConnector.type} size={28} />
           <div>
             <strong>{sourceConnector.name}</strong>
-            <span>{sourceConnector.type}</span>
+            <span>{connectorDisplayName(sourceConnector.type)}</span>
             {cloudPath.trim() && <code className="df2-source-aside-path">{cloudPath.trim()}</code>}
           </div>
         </article>
@@ -491,7 +492,7 @@ export function SourceStepAside({
               <ConnectorIcon id={c.type} size={18} />
               <div>
                 <strong>{c.name}</strong>
-                <span>{c.type}</span>
+                <span>{connectorDisplayName(c.type)}</span>
               </div>
             </div>
           ))}

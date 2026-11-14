@@ -8,6 +8,7 @@ import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import {
   executeQuery,
+  downloadExportFile,
   exportQuery,
   fetchQuerySchema,
   type QueryExportResult,
@@ -107,6 +108,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [result, setResult] = useState<QueryResult | null>(null);
   const [lastRunText, setLastRunText] = useState("");
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
   // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
@@ -374,6 +376,22 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
     void runText(`${explainPrefix(dialect)}${q}`, "all");
   }, [active?.query, dialect, runText, selected?.type, toast]);
 
+  const downloadExport = async () => {
+    if (!exportResult?.download_url) return;
+    setDownloading(true);
+    try {
+      await downloadExportFile(exportResult.download_url, exportResult.filename || `query-export.${exportResult.format || "csv"}`);
+    } catch (err) {
+      toast({
+        title: "Download failed",
+        message: err instanceof Error ? err.message : "Could not download the export.",
+        tone: "error",
+      });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const runExport = async () => {
     const text = (lastRunText || active?.query || "").trim();
     if (!active?.connectorId || !text) {
@@ -519,14 +537,14 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           data-testid="query-sticky-header"
         >
           {/* ---------------------------------------------------- tab strip --- */}
-          <div className="df2-qw-tabs" role="tablist" aria-label="Query tabs">
+          {/* UX-16: editor tabs with their own close buttons are a labelled group
+              of buttons, not an ARIA tablist (which may hold only tabs). */}
+          <div className="df2-qw-tabs" role="group" aria-label="Query tabs">
             {tabs.map((t) => (
               <div
                 key={t.id}
                 className="df2-qw-tab"
                 data-active={t.id === activeId}
-                role="tab"
-                aria-selected={t.id === activeId}
               >
                 {renamingId === t.id ? (
                   <input
@@ -544,6 +562,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                   <button
                     type="button"
                     className="df2-qw-tab-btn"
+                    aria-current={t.id === activeId ? "true" : undefined}
                     onClick={() => {
                       setActiveId(t.id);
                       setResult(null);
@@ -564,7 +583,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 </button>
               </div>
             ))}
-            <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab">
+            <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab" aria-label="New query tab">
               <DtIcon name="plus" size={13} />
             </button>
             <div className="df2-qw-tabs-right">
@@ -603,8 +622,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
               />
             </div>
             <div className="df2-field df2-field-md">
-              <label className="df2-label">{isMongo ? "Database" : "Database / Schema"}</label>
+              <label className="df2-label" htmlFor="query-database">{isMongo ? "Database" : "Database / Schema"}</label>
               <input
+                id="query-database"
                 className="df2-input"
                 value={active?.database ?? ""}
                 onChange={(e) => patchActive({ database: e.target.value })}
@@ -612,8 +632,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
               />
             </div>
             <div className="df2-field df2-field-md">
-              <label className="df2-label">{isMongo ? "Collection" : "Table (optional)"}</label>
+              <label className="df2-label" htmlFor="query-collection">{isMongo ? "Collection" : "Table (optional)"}</label>
               <input
+                id="query-collection"
                 className="df2-input"
                 value={active?.collection ?? ""}
                 onChange={(e) => patchActive({ collection: e.target.value })}
@@ -621,8 +642,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
               />
             </div>
             <div className="df2-field df2-field-sm">
-              <label className="df2-label">Row limit</label>
+              <label className="df2-label" htmlFor="query-row-limit">Row limit</label>
               <select
+                id="query-row-limit"
                 className="df2-input"
                 value={active?.limit ?? 1000}
                 onChange={(e) => patchActive({ limit: Number(e.target.value) })}
@@ -845,13 +867,18 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         .
                       </p>
                       {exportResult.download_url && (
-                        <a
-                          className="df2-btn df2-btn-primary df2-btn-sm"
-                          href={exportResult.download_url}
-                          download={exportResult.filename}
+                        // UX-2: fetched with the session, never a bare link (401).
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          loading={downloading}
+                          loadingLabel="Downloading…"
+                          onClick={() => void downloadExport()}
+                          leadingIcon={<DtIcon name="download" size={14} />}
+                          data-testid="query-export-download"
                         >
-                          <DtIcon name="download" size={14} /> Download {exportResult.filename}
-                        </a>
+                          Download {exportResult.filename}
+                        </Button>
                       )}
                     </div>
                   </div>

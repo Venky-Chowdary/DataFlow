@@ -412,7 +412,7 @@ def recommended_action_for_failure(
     if fc is FailureClass.FRACTIONAL_PRECISION_LOSS:
         tgt = suggested_target_type or "DOUBLE"
         return (
-            f"Open Map → widen {col}to {tgt} (preserve numeric semantics) → re-Validate. "
+            f"Open Map → widen {col} to {tgt} (preserve numeric semantics) → re-Validate. "
             f"LONGTEXT preserves digits but destroys numeric meaning — prefer last."
         )
     if fc is FailureClass.EMPTY_VALUE_NOT_NULLABLE:

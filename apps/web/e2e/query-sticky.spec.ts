@@ -82,7 +82,7 @@ for (const view of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) 
     // Still on screen, directly under the app top bar, not under it.
     expect(box!.y).toBeGreaterThanOrEqual((topBar?.y ?? 0) + (topBar?.height ?? 0) - 1);
     expect(box!.y).toBeLessThan(view.height / 3);
-    await expect(header.getByRole("tablist", { name: "Query tabs" })).toBeInViewport();
+    await expect(header.getByRole("group", { name: "Query tabs" })).toBeInViewport();
     await expect(page.locator("#query-connector")).toBeInViewport();
     await expect(header.getByRole("button", { name: /History/ })).toBeInViewport();
 

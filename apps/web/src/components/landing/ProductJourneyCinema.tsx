@@ -67,7 +67,7 @@ export function ProductJourneyCinema({ compact = false, autoPlay = true }: Produ
     <div className={`lp-journey${compact ? " is-compact" : ""}`}>
       <ol className="lp-journey-tabs" role="tablist" aria-label="Transfer journey">
         {STEPS.map((s, i) => (
-          <li key={s.id}>
+          <li key={s.id} role="presentation">
             <button
               type="button"
               role="tab"

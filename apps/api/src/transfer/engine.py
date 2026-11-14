@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.usage_metering import record_job_usage
 from services.brand_env import getenv_brand
 import sys
 import time
@@ -1449,6 +1450,7 @@ class UniversalTransferEngine:
                         result.destination_summary["trace_id"] = trace_id
                     if correlation:
                         result.destination_summary["correlation_id"] = correlation
+                record_job_usage(request, result)  # UX-12: one meter for every finished run
                 self._notify_job_status(request, result)
                 return result
         finally:
@@ -2974,18 +2976,6 @@ class UniversalTransferEngine:
                 schema_policy=request.schema_policy,
                 validation_mode=request.validation_mode,
             )
-            try:
-                from services.usage_metering import record_transfer_usage
-
-                record_transfer_usage(
-                    job_id=job_id,
-                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
-                    rows_written=rows_written,
-                    source_type=request.source.format,
-                    dest_type=request.destination.format,
-                )
-            except Exception as exc:
-                logger.debug("usage metering suppressed: %s", exc, exc_info=exc)
             if getenv_brand("POST_TRANSFER_TRAINING", "").lower() in {
                 "1",
                 "true",

@@ -3,6 +3,7 @@
  * Prefers API `mapping_proof` when present; otherwise builds a transparent
  * client summary from EditableMapping (no invented 99% confidence).
  */
+import { connectorDisplayName } from "../lib/connectorTypes";
 import { useMemo, useState } from "react";
 import { Drawer } from "./ui/Drawer";
 import { Dialog } from "./ui/Dialog";
@@ -711,7 +712,7 @@ export function MappingProofDrawer({
           <DtIcon name="transfer" size={12} />
           <strong>{destLabel || "Destination"}</strong>
           {proof.destination_db_type ? (
-            <span className="df2-map-proof-route-meta">· {proof.destination_db_type}</span>
+            <span className="df2-map-proof-route-meta">· {connectorDisplayName(String(proof.destination_db_type || ""))}</span>
           ) : null}
         </p>
       )}

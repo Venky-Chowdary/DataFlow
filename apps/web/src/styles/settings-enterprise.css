@@ -900,6 +900,23 @@
   gap: 12px;
 }
 
+/* UX-44: a header's status chip ("Live · Just now", "0 logins") keeps one line
+   instead of wrapping into a narrow column beside the heading. */
+.df2-settings-section-head > .df2-badge,
+.df2-team-block-head > .df2-cell-meta {
+  flex: none;
+  white-space: nowrap;
+}
+
+.df2-settings-section-head > .df2-badge {
+  text-transform: none;
+}
+
+/* A sentence is not code: the invite note reads in the body face. */
+.df2-team-invite-footer > .df2-cell-meta {
+  font-family: inherit;
+}
+
 .df2-team-block-head h3 {
   margin: 0 0 4px;
   font-size: 15px;

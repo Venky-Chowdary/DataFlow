@@ -1515,8 +1515,12 @@ def plan_transfer(
                 "type": dst_info.get("db_type"),
                 "schema": str(dst_conn.get("schema") or ""),
                 "table": dst_table,
+                "database": str(dst_conn.get("database") or ""),
                 "column_count": len(dst_rows),
                 "table_exists": dest_exists,
+                # UX-19: why the destination could not be read, so the answer names it.
+                **({"read_error": str(dst_info.get("error") or "")[:400]}
+                   if dest_exists is None and not dst_info.get("ok") and dst_info.get("error") else {}),
                 **({"vector_layout": contract["layout"]} if contract else {}),
                 **({"foreign_keys_mode": fk_policy} if fk_policy != "carry" else {}),
             },
@@ -2817,24 +2821,32 @@ def start_transfer(
     if not _is_execute_cleared(preflight):
         decision = _transfer_decision(preflight) or ("blocked" if not preflight.get("passed") else "review")
         blockers = preflight.get("blockers") or []
-        listed = "; ".join(
-            f"{b.get('id')}: {b.get('message')}" for b in blockers[:4] if b.get("message")
-        )
         if not preflight.get("passed"):
             # A refusal without the exit is the dead end operators write in about:
             # the engine already resolved the fix per root cause, so it travels
             # with the refusal instead of staying in a payload nobody reads.
+            # UX-19: named by the same reconciled blockers the plan shows, and a
+            # "remap" fix is not offered for types that were never read.
+            from .transfer_answer import refusal_sentence, unread_conversions
+
+            unread = bool(unread_conversions(plan))
             fixes = "; ".join(
                 fix
                 for fix in (
                     str((b.get("details") or {}).get("recommended_fix") or "").strip()
                     for b in blockers[:4]
+                    if not (unread and "fidelity" in str(b.get("id") or ""))
                 )
                 if fix
             )
+            if unread:
+                fixes = "; ".join(filter(None, [
+                    "check the destination table name and the connection's grants so its columns can be read, "
+                    "then re-run Validate",
+                    fixes,
+                ]))
             err = (
-                "Preflight blocked this transfer, so I won't start it"
-                + (f" — {listed}" if listed else "")
+                refusal_sentence(plan, preflight)
                 + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
                 + (f" To proceed: {fixes}" if fixes else "")
             )
