@@ -1680,6 +1680,10 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
+                        from services.null_marker_guard import refuse_unbound_marker
+
+                        # A NULL marker is never bound (or LOAD DATA-ed) as text.
+                        refuse_unbound_marker(batch, target_cols, table=table_name)
                         write_batch = batch
                         if (
                             write_mode == "upsert"

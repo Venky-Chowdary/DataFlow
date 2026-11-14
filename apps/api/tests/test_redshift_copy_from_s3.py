@@ -89,8 +89,8 @@ def test_copy_sql_refuses_unsafe_uri_and_role():
 
 def test_copy_text_matches_postgres_copy_ssot():
     rows = [
-        (1, None, "a\tb"),
-        (2, {"path": "C:\\temp"}, b"hello"),
+        (1, None, "a b"),
+        (2, {"path": "C:/temp"}, "plain"),
     ]
     body = render_redshift_copy_text(rows)
     expected = (
@@ -101,6 +101,16 @@ def test_copy_text_matches_postgres_copy_ssot():
     ).encode("utf-8")
     assert body == expected
     assert b"\\N" in body
+
+
+def test_copy_text_refuses_cells_redshift_would_load_with_a_literal_backslash():
+    """Redshift COPY (no ESCAPE) takes the PostgreSQL text escapes literally: those
+    batches take the INSERT path (re-review), the stage never ships them."""
+    import pytest
+
+    for row in [(1, None, "a\tb"), (2, {"path": "C:\\temp"}, "x"), (3, b"hello", "x"), (4, "\\N", "x")]:
+        with pytest.raises(ValueError, match="INSERT path"):
+            render_redshift_copy_text([row])
 
 
 def test_stage_and_copy_execute_order():

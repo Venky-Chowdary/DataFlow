@@ -26,7 +26,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from services.rbac import require_admin_for_endpoints
 from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.transfer_policy_values import (
@@ -307,20 +307,28 @@ class EndpointDTO(BaseModel):
             "Writer options. file_export CSV/TSV: formula_protection = \"off\" (default: "
             "the file is data, byte-exact) | \"prefix\" (text cells starting with = + - @ "
             "tab or CR get a leading ' so a spreadsheet never runs them; numbers are "
-            "untouched). Also accepted as a top-level destination key."
+            "untouched). file_export and object-store (S3/GCS/ADLS/SFTP) TSV: tsv_null = "
+            "\"empty\" (default: SQL NULL is an empty cell) | \"\\\\N\" (the MySQL/PostgreSQL "
+            "text convention: NULL is \\N, an empty string an empty cell, a literal \\N text "
+            "quoted; Gate-8 and the TSV readers read it back the same way; refused for "
+            "non-TSV files). Both are also accepted as top-level destination keys."
         ),
     )
 
-    @model_validator(mode="after")
-    def _formula_protection_vocabulary(self) -> "EndpointDTO":
-        """G7: an unknown formula_protection is a 422, never silently ignored."""
-        from services.csv_safety import formula_protection_mode
+    def writer_options_payload(self) -> dict[str, Any]:
+        """This endpoint as the shared writer-option validator reads a destination."""
+        return {
+            **dict(self.model_extra or {}), "kind": self.kind, "format": self.format,
+            "table": self.table or self.collection, "extra": self.extra,
+        }
 
-        nested = self.extra.get("formula_protection") if isinstance(self.extra, dict) else None
-        for value in ((self.model_extra or {}).get("formula_protection"), nested):
-            if value is not None:
-                formula_protection_mode(value)
-        return self
+
+def _checked_destination_dto(value: "EndpointDTO") -> "EndpointDTO":
+    """G7: a destination's unknown formula_protection / tsv_null is a 422 (never a source's)."""
+    from services.dest_writer_options import validate_dest_writer_options
+
+    validate_dest_writer_options(value.writer_options_payload())
+    return value
 
 
 class AnalyzeRequest(BaseModel):
@@ -328,6 +336,11 @@ class AnalyzeRequest(BaseModel):
     destination: EndpointDTO
     source_columns: list[str] = Field(default_factory=list)
     source_schema: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 class ExecuteTransferRequest(PolicyFieldsModel):
@@ -423,6 +436,11 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     transform_recipe_params: dict = Field(default_factory=dict)
     # Set-graph identity. Empty matches a recipe with no set nodes.
     approved_set_hash: str = ""
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 class MapColumnsRequest(PolicyFieldsModel):
@@ -723,6 +741,14 @@ class CreatePlanRequest(BaseModel):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
 
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
@@ -756,6 +782,14 @@ class UpdatePlanRequest(BaseModel):
         if not isinstance(value, dict):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
+
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 class SyncMappingsRequest(BaseModel):
@@ -1658,6 +1692,14 @@ async def run_universal_transfer(
                 dest_extra = parsed
         except Exception:
             dest_extra = {}
+    from services.dest_writer_options import refuse_invalid_dest_writer_options
+
+    # An unknown formula_protection / tsv_null (or \\N on a non-TSV file) is the
+    # request's fault: 422 now, not at run time.
+    refuse_invalid_dest_writer_options({
+        "kind": dest_kind, "format": dest_format, "table": dest_table or dest_collection,
+        "file_format": dest_extra.get("file_format", ""), "extra": dest_extra,
+    })
 
     _refuse_unavailable_destination(
         {
@@ -2621,6 +2663,11 @@ async def download_export(filename: str, request: Request):
 class ContinuityRebaselineBody(BaseModel):
     destination: EndpointDTO
     reason: str = Field("", max_length=2000)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 @router.post("/continuity/rebaseline")

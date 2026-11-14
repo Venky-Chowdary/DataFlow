@@ -58,11 +58,21 @@ def _row_get(row: dict[str, Any], col: str) -> Any:
 
 
 def _pk_value(row: dict[str, Any], primary_key: str | Sequence[str]) -> str | None:
+    """The row's key, or ``None`` when any key column is NULL.
+
+    NULL is what the reader encoded as NULL (``None``, ``Missing``, a marked wire
+    cell holding the marker), never a string's spelling: a plain ``str`` key
+    that reads ``__DF_SQL_NULL__`` is that key and its delete is applied
+    (review F1). A wire NULL from a reader is marked, so a NULL-key delete is
+    still unkeyed (parked, C2) rather than ``DELETE ... WHERE sku = marker``.
+    """
+    from services.value_serializer import is_encoded_null
+
     cols = _pk_columns(primary_key)
     parts: list[str] = []
     for col in cols:
         val = _row_get(row, col)
-        if val is None:
+        if is_encoded_null(val):
             return None
         parts.append(str(val))
     return _PK_SEP.join(parts) if len(parts) > 1 else parts[0]
@@ -102,6 +112,8 @@ class SnapshotWindow:
     primary_key: str | list[str] = ""  # required — refuse inventing default "id"
     open: bool = False
     buffer: dict[str, WindowRow] = field(default_factory=dict)
+    #: Rows with a NULL key: no key to merge on, emitted for the writer to hold out.
+    null_key_rows: list[dict[str, Any]] = field(default_factory=list)
     stream_overrides: int = 0
     snapshot_rows: int = 0
 
@@ -112,6 +124,7 @@ class SnapshotWindow:
     def open_window(self) -> None:
         self.open = True
         self.buffer.clear()
+        self.null_key_rows = []
         self.stream_overrides = 0
         self.snapshot_rows = 0
 
@@ -119,10 +132,15 @@ class SnapshotWindow:
         """Return buffered rows (stream-wins applied) and close the window."""
         rows = [wr.row for wr in self.buffer.values() if wr.op != "d"]
         deletes = [wr.pk for wr in self.buffer.values() if wr.op == "d"]
+        # A row with a NULL key has no key to merge on: it goes to the writer as
+        # read, whose key check holds it out with a finding (review F6), so the
+        # rejected count matches what did not land — never a silent skip.
+        null_key_rows = list(self.null_key_rows)
         self.open = False
         self.buffer.clear()
+        self.null_key_rows = []
         # Encode deletes as tombstone rows with __deleted for callers that need them
-        out = list(rows)
+        out = list(rows) + null_key_rows
         for pk in deletes:
             tomb = _pk_row_dict(self.primary_key, pk)
             tomb["__deleted"] = True
@@ -136,6 +154,8 @@ class SnapshotWindow:
         for row in rows:
             pk = _pk_value(row, self.primary_key)
             if pk is None:
+                self.null_key_rows.append(dict(row))
+                self.snapshot_rows += 1
                 continue
             # Do not overwrite a stream event already seen in this window.
             existing = self.buffer.get(pk)
@@ -156,6 +176,9 @@ class SnapshotWindow:
             return
         key = pk if pk is not None else _pk_value(row or {}, self.primary_key)
         if key is None:
+            if (op or "u").lower() not in {"d", "delete"} and row:
+                # Same as a NULL-key snapshot row: to the writer, never dropped.
+                self.null_key_rows.append(dict(row))
             return
         existing = self.buffer.get(key)
         if existing and existing.source == "snapshot":

@@ -47,6 +47,14 @@ export default defineConfig({
       },
     },
     {
+      name: "map-step",
+      testMatch: /map-step\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+      },
+    },
+    {
       name: "plan-conflict",
       testMatch: /plan-conflict\.spec\.ts/,
       use: {

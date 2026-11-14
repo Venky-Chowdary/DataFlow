@@ -697,6 +697,8 @@ class CdcState:
     quarantine_index: dict[str, dict[tuple[str, ...], set[str]]] = field(default_factory=dict)
     #: Per destination table — keys from orders and users must not mix.
     census_accs: dict[str, Any] = field(default_factory=dict)
+    #: C2 — every batch's parked (unkeyed) deletes, folded for the run.
+    parked_deletes: Any = None
     #: Dest COUNT(*) before the first write to each table this run.
     dest_before: DestBeforeCensus = field(default_factory=DestBeforeCensus)
 
@@ -709,6 +711,15 @@ class CdcState:
             acc = KeyCensusAccumulator()
             self.census_accs[key] = acc
         return acc
+
+
+def _parked_tally(state: CdcState) -> Any:
+    """The run's fold of parked (unkeyed) deletes, created on first use (C2)."""
+    if state.parked_deletes is None:
+        from services.cdc_unkeyed_delete import ParkedDeleteTally
+
+        state.parked_deletes = ParkedDeleteTally()
+    return state.parked_deletes
 
 
 def _applied_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[str, ...]]:
@@ -1626,6 +1637,36 @@ def _without_open_quarantine(
     return [r for r in rows if _ladder_key(r, key_cols) not in open_keys]
 
 
+def _repairable_image(
+    rows: list[dict[str, Any]], key_cols: list[str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Source rows the image repair may upsert; and how many it may not.
+
+    The repair re-reads the source to find rows the destination lacks. A row
+    whose declared key is NULL is always "missing": the writer held it out
+    (and the run counted it rejected), since no key can address it, so it is
+    left out here (its rejection already stands). The scan's cells arrive
+    marked as reader wire (``cdc_value_digest._as_dicts``), so a NULL in another
+    column stays NULL; marking again is a no-op kept for callers that pass
+    their own rows.
+    """
+    from services.cdc_snapshot_window import _pk_value
+
+    kept: list[dict[str, Any]] = []
+    held = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        # Reader rows by contract: mark first, so a NULL is the reader's NULL
+        # and a literal key (escaped on the wire) stays a key (review F1).
+        marked = {k: _reader_wire_cell(v) for k, v in row.items()}
+        if key_cols and _pk_value(marked, key_cols) is None:
+            held += 1
+            continue
+        kept.append(marked)
+    return kept, held
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1680,7 +1721,31 @@ def _apply_change_batch(
             ack_barrier=change.ack_barrier,
             rejected=rejected_details,
             lookup_columns=change.lookup_columns,
+            unkeyed_deletes=list(change.unkeyed_deletes or []),
         )
+    # C2: deletes with no key are recorded (DLQ + audit) before anything moves;
+    # a failed record raises, so the position never passes them. A delete whose
+    # key is NULL joins them (callers that count deletes park it first).
+    from services.cdc_unkeyed_delete import (
+        park_null_key_deletes,
+        park_unkeyed_deletes,
+        stamp_parked,
+    )
+
+    delete_key_cols = list(pk_source_cols or [])
+    if not delete_key_cols and pk_target_col:
+        delete_key_cols = _pk_columns(pk_target_col)
+    park_null_key_deletes(
+        change, delete_key_cols, table=str(stream_name or change.table or "")
+    )
+
+    parked_evidence = park_unkeyed_deletes(
+        change.unkeyed_deletes,
+        job_id=job_id,
+        pipeline_key=cursor_key,
+        dest_table=str(dest_table or ""),
+        connector=str(dest_type or ""),
+    )
 
     inherit_note = ""
     if mappings_inherited:
@@ -1728,10 +1793,10 @@ def _apply_change_batch(
         # Gate-8 refused every SQL Server change-tracking run as "no
         # reconcile_sample" although the destination equalled the source (D173).
         _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
-        return rows, checksum, _note_inherited_map(
+        return rows, checksum, stamp_parked(_note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
-        ), deleted
+        ), parked_evidence), deleted
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -1946,7 +2011,7 @@ def _apply_change_batch(
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
     dest_summary["rows_skipped"] = rows_skipped
-    return rows_written, last_checksum, dest_summary, deleted
+    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted
 
 
 def _stamp_cdc_poll(
@@ -2619,6 +2684,9 @@ def _run_cdc_shared_multi_table(
 
     total_rows = 0
     cycle_counts = {"upserts": 0, "deletes": 0, "delete_events": 0}
+    from services.cdc_unkeyed_delete import ParkedDeleteTally
+
+    parked_tally = ParkedDeleteTally()
     if progress is not None:
         progress["counts"] = cycle_counts
     stream_health: dict[str, dict[str, Any]] = {
@@ -2714,6 +2782,10 @@ def _run_cdc_shared_multi_table(
         from services.cdc_snapshot_window import _pk_columns
 
         pk_source = _pk_columns(cfg["primary_key"])
+        # A NULL-key delete is parked before the EOS bundle or the counters see it.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source), table=stream)
         if cfg.get("mappings_inherited"):
             use_maps, headers, pk_joined, inherit_note = _align_inherited_batch(
                 use_maps,
@@ -2768,7 +2840,13 @@ def _run_cdc_shared_multi_table(
         dest_summary: dict[str, Any] = {}
         if eos_active:
             from services.cdc_exactly_once import EosBundleStream, batch_lsn
+            from services.cdc_unkeyed_delete import park_unkeyed_deletes, stamp_parked
 
+            # C2: the bundle never sees deletes without a key; record them first.
+            parked_tally.add(stamp_parked({}, park_unkeyed_deletes(
+                change.unkeyed_deletes, job_id=str(job_id or ""), pipeline_key=shared_key,
+                dest_table=str(dest_table or stream), connector=str(dest_type or ""),
+            )))
             if change.total_changes:
                 pending_eos_bundle.append(
                     EosBundleStream(
@@ -2842,6 +2920,7 @@ def _run_cdc_shared_multi_table(
         cycle_counts["upserts"] += int(rows_written or 0)
         cycle_counts["deletes"] += int(deleted or 0)
         cycle_counts["delete_events"] += len(change.deletes or [])
+        parked_tally.add(dest_summary)
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
@@ -3087,6 +3166,7 @@ def _run_cdc_shared_multi_table(
         "quarantine_tombstones": True,
         **lag_fields,
     }
+    parked_tally.stamp(last_summary, cdc_meta=last_summary["cdc"])
     if eos_active:
         last_summary["cdc_delivery"] = "exactly_once"
         last_summary["delivery_semantics"] = "exactly_once_dest_owned_watermark_txn"
@@ -4052,6 +4132,11 @@ def _run_cdc_single_stream(
         # Dual-writer fence: renew lease before sink apply. Zombie after steal
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
+        # A delete whose key is NULL is parked, never a delete by the sentinel
+        # text, and never counted as an applied delete.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source_cols or []), table=str(table_name or ""))
         if not mappings_inherited and (change.inserts or change.updates):
             _adopt_added_columns(change)
 
@@ -4107,6 +4192,7 @@ def _run_cdc_single_stream(
         state.updates += len(change.updates)
         state.deletes += deleted
         state.delete_events += len(change.deletes or [])
+        _parked_tally(state).add(dest_summary)
         state.last_checksum = last_checksum or state.last_checksum
         _record_quarantined_key_deletes(
             state, change, list(pk_source_cols or []), str(job_id or ""), destination
@@ -4478,9 +4564,18 @@ def _run_cdc_single_stream(
                     except CdcValueScanIncomplete as exc:
                         logger.warning("CDC key image repair skipped: %s", exc)
                         missing_image = None
-            missing_image = _without_open_quarantine(
-                state, list(missing_image or []), list(pk_source_cols or [])
+            missing_image, null_key_held = _repairable_image(
+                _without_open_quarantine(
+                    state, list(missing_image or []), list(pk_source_cols or [])
+                ),
+                list(pk_source_cols or []),
             )
+            if null_key_held:
+                # Held out by the writer (no key addresses them), not drift.
+                ddl_log.append(
+                    f"CDC image repair left {null_key_held} source row(s) with a NULL "
+                    "key alone: they cannot be written by key and stay held out"
+                )
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
                 if eos_active:
@@ -4636,9 +4731,12 @@ def _run_cdc_single_stream(
                     }
                     still_drifting = []
                     if rescan_complete:
-                        for row in _without_open_quarantine(
-                            state, list(rescanned_image or []), list(pk_source_cols or [])
-                        ):
+                        for row in _repairable_image(
+                            _without_open_quarantine(
+                                state, list(rescanned_image or []), list(pk_source_cols or [])
+                            ),
+                            list(pk_source_cols or []),
+                        )[0]:
                             row_evidence = _build_drift_evidence(
                                 cursor_key=cursor_key,
                                 source_table=str(table_name or ""),
@@ -4766,6 +4864,7 @@ def _run_cdc_single_stream(
         }
         if getattr(state, "image_repair", None):
             summary["cdc"]["image_repair"] = state.image_repair
+        _parked_tally(state).stamp(summary, cdc_meta=summary["cdc"])
         summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
         summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
         summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")

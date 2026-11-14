@@ -1832,7 +1832,7 @@ def _to_sa_value(
     db_type: str = "",
 ) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
-    from services.value_serializer import absent_sql_bind
+    from services.value_serializer import absent_sql_bind, unescape_wire_text
 
     # Reader-null is SQL NULL. Missing stays Missing (sparse omit, never wipe).
     handled, bound = absent_sql_bind(value)
@@ -2167,8 +2167,8 @@ def _to_sa_value(
         # logical stamp collapsed NVARCHAR(MAX) to "string"/"TEXT" (false
         # varchar quarantine) or stamped NVARCHAR over a live VARCHAR (the
         # driver then substitutes '?').
-        return bind_unicode_text(
-            value,
+        return bind_unicode_text(  # one wire-escape layer off: the text, not its escape (F2)
+            unescape_wire_text(value),
             engine=str(db_type or dialect_name or ""),
             dest_type=_encoding_dest_type(
                 str(logical or ""),
@@ -6106,6 +6106,8 @@ def write_mapped_rows(
                             else:
                                 chunk_written = len(batch)
                         elif not keyed_chunk:
+                            from services.null_marker_guard import refuse_unbound_marker
+                            refuse_unbound_marker(batch, table=table_name)  # no NULL marker as text
                             result = conn.execute(table_obj.insert(), batch)
                             chunk_written = _insert_rows_written(
                                 result, len(batch), dialect_name

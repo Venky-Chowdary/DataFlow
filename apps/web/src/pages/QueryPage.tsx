@@ -13,6 +13,11 @@ import {
   type QueryExportResult,
   type QueryResult,
 } from "../lib/api";
+import { formulaGuardApplies } from "../lib/csvSafety";
+import { QUERY_EXPORT_FORMULA_PROTECTION_HELP } from "../lib/fileExportDestination";
+import { useQueryExportOptions } from "../lib/exportOptions";
+import { FormulaProtectionToggle } from "../components/export/FormulaProtectionToggle";
+import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
 import {
   firstExpanded,
   mergeExpandedObject,
@@ -103,6 +108,10 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
+  // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
+  // G7-F2 / G7-F3: "Protect against spreadsheet formulas" (on by default; it also
+  // governs Copy as CSV) and the TSV NULL marker.
+  const exportOptions = useQueryExportOptions();
   const [outputPath, setOutputPath] = useState("");
   const [destConnectorId, setDestConnectorId] = useState("");
   const [destTarget, setDestTarget] = useState("");
@@ -394,6 +403,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         // A connector write still uses that limit and the API says so.
         full_population: !destConnectorId,
         format: exportFormat,
+        ...exportOptions.payload(exportFormat),
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,
         destination: destTarget || undefined,
@@ -787,6 +797,24 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         onChange={(e) => setOutputPath(e.target.value)}
                         placeholder="File name in exports/ (optional)"
                       />
+                      {formulaGuardApplies(exportFormat) && (
+                        <FormulaProtectionToggle
+                          id="query-export-formula"
+                          className="df2-qw-export-formula"
+                          checked={exportOptions.formulaProtection}
+                          onChange={exportOptions.setFormulaProtection}
+                          help={QUERY_EXPORT_FORMULA_PROTECTION_HELP}
+                        />
+                      )}
+                      {exportFormat === "tsv" && (
+                        <TsvNullMarkerField
+                          id="query-export-tsv-null"
+                          value={exportOptions.tsvNull}
+                          onChange={exportOptions.setTsvNull}
+                          className="df2-field df2-qw-export-tsv-null"
+                          compact
+                        />
+                      )}
                     </>
                   )}
                   <Button
@@ -840,6 +868,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 truncated={result.truncated}
                 durationMs={result.duration_ms}
                 onCopied={(what) => toast({ title: "Copied", message: what, tone: "success" })}
+                formulaProtection={exportOptions.formulaProtection}
               />
             ) : (
               <div className="df2-qw-placeholder">

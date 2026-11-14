@@ -12,6 +12,7 @@ import { planWriteResponse, type PlanView } from "./planConcurrency";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import { neutralizeFormulaCell } from "./csvSafety";
 import type { RuleCompileReport } from "./businessRules";
 import type {
   ShapeCatalog,
@@ -202,7 +203,7 @@ export async function apiErrorFrom(res: Response, fallback: string): Promise<Api
   return new ApiError(detail, res.status, permission, role);
 }
 
-async function parseApiError(res: Response, fallback: string): Promise<string> {
+export async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 
@@ -4639,6 +4640,13 @@ export async function exportQuery(
     conflict_columns?: string[];
     /** File export streams every row. The preview ``limit`` is not applied. */
     full_population?: boolean;
+    /**
+     * CSV/TSV file export (G7): "prefix" (the API default) defuses text cells and
+     * header names a spreadsheet would run as a formula; "off" writes exact values.
+     */
+    formula_protection?: "prefix" | "off";
+    /** TSV file export NULL marker (G7-F3): "empty" (default) or "\\N". Refused for other formats. */
+    tsv_null?: "empty" | "\\N";
   },
 ): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {
@@ -4829,7 +4837,10 @@ export async function downloadJobQuarantineCsv(
   jobId: string,
   fallbackRows?: QuarantineInfo["quarantine"],
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
-  const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  // Every cell quoted (the report's layout) and, as the server's quarantine CSV does
+  // (csv_safety.neutralize_formula_cell), formula-looking cells defused — Excel
+  // evaluates a quoted "=..." too (G7-F2).
+  const escape = (v: unknown) => `"${neutralizeFormulaCell(v).replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
     const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {

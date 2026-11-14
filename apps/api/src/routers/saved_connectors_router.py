@@ -99,6 +99,10 @@ class ConnectorSaveDTO(BaseModel):
         )
         if err:
             raise ValueError(err)
+        from services.dest_writer_options import validate_dest_writer_options
+
+        # A saved destination's writer options (formula_protection, tsv_null).
+        validate_dest_writer_options({"format": self.type, "extra": self.extra})
         return self
 
 
@@ -142,6 +146,13 @@ class ConnectorPatchDTO(BaseModel):
     group_id: str | None = None
     # Connector-specific fields (SaaS/SDK extras) — replaces the stored set.
     extra: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _dest_writer_options(self) -> "ConnectorPatchDTO":
+        from services.dest_writer_options import validate_dest_writer_options
+
+        validate_dest_writer_options(self.extra)
+        return self
 
 
 def _actor_email(request: Request) -> str:

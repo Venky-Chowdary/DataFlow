@@ -33,7 +33,29 @@ def restarts_from_start(sync_mode: str | None) -> bool:
     return is_overwrite_sync(sync_mode)
 
 
+#: Attribute on the checkpoint a resumed run starts from (C5): a sequential
+#: multi-table pass skips only the tables a pass of *this* resume chain finished.
+RESUMED_PASS_ATTR = "resumed_pass"
+
+
 def resolve_resume_checkpoint(
+    *,
+    job_id: str,
+    mongo: Any,
+    checkpoint_service: Any,
+    has_progress: Any,
+    sync_mode: str | None,
+) -> Checkpoint:
+    """The checkpoint a resumed run starts from (marked resumed), or refuse to start."""
+    checkpoint = _resolve_resume_checkpoint(
+        job_id=job_id, mongo=mongo, checkpoint_service=checkpoint_service,
+        has_progress=has_progress, sync_mode=sync_mode,
+    )
+    setattr(checkpoint, RESUMED_PASS_ATTR, True)
+    return checkpoint
+
+
+def _resolve_resume_checkpoint(
     *,
     job_id: str,
     mongo: Any,

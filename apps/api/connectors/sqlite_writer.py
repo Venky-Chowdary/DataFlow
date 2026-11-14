@@ -1767,6 +1767,9 @@ def write_mapped_rows(
                                 written += chunk_written
                                 rows_skipped += chunk_skipped
                             else:
+                                from services.null_marker_guard import refuse_unbound_marker
+
+                                refuse_unbound_marker(batch, table=table_name)  # no NULL marker as text
                                 try:
                                     cur.executemany(insert, batch)
                                 except sqlite3.IntegrityError as exc:

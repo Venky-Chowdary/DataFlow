@@ -661,6 +661,9 @@ def _stream_database_transfer_impl(
         # C16: a cancel is measured against this from the job record, per stream object.
         from services.multi_stream_cancel import pin_rows_before
         pin_rows_before(run.cfg, _source_name(run.cfg.source), int(pre_write_rows_before))
+    if not (checkpoint and (getattr(checkpoint, "rows_processed", 0) or getattr(checkpoint, "offset", 0))):
+        from services.multi_stream_undo import pin_stream_existence  # C4: each table's own undo facts
+        pin_stream_existence(run.cfg, _source_name(run.cfg.source), pre_write_rows_before)
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.
@@ -773,6 +776,8 @@ def _stream_database_transfer_impl(
     _progress_mark = progress_mark()
     fast = None
     try:
+        from services.export_dialect import tsv_null_from
+
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
@@ -788,6 +793,8 @@ def _stream_database_transfer_impl(
                 or bool(risk_contract_columns)
                 or keyless_merge_target
                 or copy_declined_for_replay(run.cfg)
+                # G7-F3: engine COPY routes write the default TSV codec only.
+                or tsv_null_from(run.cfg.dest_cfg) != "empty"
             ) else _try_copy_fast_path(
                 source=run.cfg.source,
                 destination=run.cfg.destination,

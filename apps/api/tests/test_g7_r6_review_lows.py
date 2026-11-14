@@ -47,12 +47,16 @@ def test_endpoint_dto_accepts_the_vocabulary(value):
 
 @pytest.mark.parametrize("value", ["strip", "on", 1, "prefix,off"])
 def test_endpoint_dto_rejects_others(value):
+    """A destination's unknown value is a 422 (sources are not checked for writer options)."""
     from pydantic import ValidationError
 
-    from src.routers.transfer_router import EndpointDTO
+    from src.routers.transfer_router import AnalyzeRequest
 
     with pytest.raises(ValidationError):
-        EndpointDTO(kind="file_export", format="csv", formula_protection=value)
+        AnalyzeRequest(
+            source={"kind": "file", "format": "csv"},
+            destination={"kind": "file_export", "format": "csv", "formula_protection": value},
+        )
 
 
 def _query_client(monkeypatch, tmp_path):

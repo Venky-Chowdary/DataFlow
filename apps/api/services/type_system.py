@@ -3959,6 +3959,11 @@ def parse_vector_length(value: Any) -> int | None:
     return None
 
 
+#: Engines whose bare ``TIMESTAMP`` is read with the engine's own meaning when
+#: the source is the same engine (MySQL/MariaDB: an instant).
+_SAME_ENGINE_TIMESTAMP_POLARITY = frozenset({"mysql", "mariadb"})
+
+
 def is_timezone_polarity_loss(
     source_type: str,
     target_type: str,
@@ -3990,7 +3995,15 @@ def is_timezone_polarity_loss(
     document_instant = _bound_document_instant(source_type)
     if document_instant:
         src_token = instant_date_carrier(active_source_engine(), source_type)
-    src = datetime_timezone_polarity(src_token)
+    # Same engine on both sides: the source token means what that engine means
+    # by it. A MySQL TIMESTAMP is an instant on the source as on the sink, so
+    # TIMESTAMP → TIMESTAMP into the table Datawrap created is no polarity change.
+    same_engine = (
+        not document_instant
+        and dest_db in _SAME_ENGINE_TIMESTAMP_POLARITY
+        and _normalize_dest_db(active_source_engine() or "") == dest_db
+    )
+    src = datetime_timezone_polarity(src_token, dest_db=dest_db if same_engine else "")
     tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
         if document_instant:

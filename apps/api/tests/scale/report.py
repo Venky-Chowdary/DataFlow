@@ -16,8 +16,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-_API_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS = _API_ROOT / "exports" / "scale" / "file_matrix.jsonl"
+from services.export_paths import exports_dir
+
+# The file the matrix writes: DATAFLOW_EXPORTS_DIR when set, else apps/api/exports.
+DEFAULT_RESULTS = exports_dir(create=False) / "scale" / "file_matrix.jsonl"
 
 
 def load(path: Path) -> list[dict[str, Any]]:

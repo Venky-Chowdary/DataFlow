@@ -540,6 +540,11 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
         prior = None
     kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    if getattr(blocked, "multi_stream_undo", None):
+        # C4: the other tables of a failed multi-table run were undone too.
+        note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
+        if note and note not in message:
+            message = f"{message.rstrip()} {note}"
     measured = getattr(blocked, "rows_committed_measured", None)
     if isinstance(measured, int) and measured >= 0:
         # The destination was re-counted after the failure (audit H3): that is
@@ -636,6 +641,14 @@ def _fail_runtime_job(
         lease_extras.pop("operator_error", None) or error_details.get("message") or exc
     )
     display = str(exc) if cancelled else operator_msg
+    multi_undo = getattr(exc, "multi_stream_undo", None)
+    if isinstance(multi_undo, list) and multi_undo:
+        # C4: what the undo did to each table of a failed multi-table run is
+        # part of the job's record, not only of the API response.
+        undo_note = str(getattr(exc, "failed_batch_undo_note", "") or "")
+        if undo_note and undo_note not in display:
+            display = f"{display} {undo_note}"
+        error_details = {**(error_details or {}), "multi_stream_undo": list(multi_undo)}
     status_kwargs: dict[str, Any] = {
         "error": display,
         "phase": status,

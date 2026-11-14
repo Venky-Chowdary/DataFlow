@@ -110,7 +110,9 @@ def test_sqlite_s3_csv_wire():
     """Operator CSV writes NULL as an empty field and booleans as true/false.
 
     A file that already contains the PostgreSQL COPY token ``\\N`` still
-    reads as NULL. A caller that passes that token as a cell keeps it.
+    reads as NULL. A cell handed to the formatter is *text* (NULL arrives as
+    the codec's sentinel, from s3_csv_cell), so a text ``\\N`` is quoted — the
+    reader takes a bare ``\\N`` as NULL (G7-F3 review H1).
     """
     assert s3_csv_cell(None) != "\\N"
     assert s3_csv_cell("") == ""
@@ -125,7 +127,24 @@ def test_sqlite_s3_csv_wire():
     assert s3_format_delimited_row(["id", s3_csv_cell(True), s3_csv_cell(False)], ",") == "id,true,false"
     assert s3_parse_delimited_cell("\\N") is None
     assert s3_parse_delimited_cell("") == ""
-    assert s3_format_delimited_row(["id", "\\N", ""], ",") == 'id,\\N,""'
+    assert s3_format_delimited_row(["id", "\\N", ""], ",") == 'id,"\\N",""'
+
+
+def test_sqlite_s3_csv_wire_round_trips_null_and_text_backslash_n(tmp_path):
+    """NULL stays a bare-empty NULL, a text \\N comes back as text, through the
+    S3 writer and the reader the S3 -> target COPY row path uses."""
+    from services.copy_s3_common import s3_iter_delimited_rows, s3_write_delimited
+
+    for delim, name in ((",", "w.csv"), ("\t", "w.tsv")):
+        path = tmp_path / name
+        s3_write_delimited(str(path), ["id", "note"], [(1, None), (2, "\\N"), (3, ""), (4, "x")], delim)
+        body = path.read_text(encoding="utf-8")
+        assert '"\\N"' in body and body.count("\\N") == 1, body
+        rows = list(s3_iter_delimited_rows(str(path), delim))
+        # The default TSV codec writes '' and NULL as the same empty cell (the
+        # opt-in tsv_null "\\N" keeps them apart); CSV quotes '' as "".
+        empty = "" if delim == "," else None
+        assert rows == [["1", None], ["2", "\\N"], ["3", empty], ["4", "x"]], (delim, rows)
 
 
 def test_sqlite_s3_copy_safe_types():

@@ -44,6 +44,8 @@
 @import "./transfer-studio.css";
 /* Searchable studio listbox (Transform step builder). */
 @import "./studio-picker.css";
+/* Map-step remapping — sole authority for the .df2-ms namespace. */
+@import "./mapping-studio.css";
 /* Transform (pre-load) step — sole authority for the .df2-xform namespace. */
 @import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */

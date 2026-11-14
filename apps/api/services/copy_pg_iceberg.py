@@ -79,7 +79,13 @@ def iceberg_csv_cell(value: Any) -> str:
         return format(value, "f")
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("binary cell is not Iceberg COPY-safe")
-    return str(value)
+    text = str(value)
+    if text == "\\N":
+        # The writers emit this cell through csv.writer (minimal quoting), so a
+        # text ``\\N`` would be the bare NULL marker Arrow reads as NULL. The
+        # row path keeps the text.
+        raise FastPathUnavailable("a text cell spelled \\N would load as NULL; the row path keeps it")
+    return text
 
 
 def iceberg_copy_endpoint(

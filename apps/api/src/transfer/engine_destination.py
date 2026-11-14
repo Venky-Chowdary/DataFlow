@@ -378,6 +378,42 @@ def _failed_batch_undo_note_impl(
         base = message or "Reconciliation failed"
         return base if note in base else f"{base} {note}"
     destination = getattr(request, "destination", None)
+    if dest_summary.get("multi_stream") and destination is not None:
+        from services.batch_undo import keep_failed_validation_for_inspection
+
+        # QA round 12 comes first: a full-refresh overwrite whose complete rows
+        # failed validation (a G22 orphan finding, say) keeps what it landed
+        # for inspection. That is a verdict about the rows, not a broken write,
+        # so the multi-table undo below must not erase the evidence.
+        kept = keep_failed_validation_for_inspection(
+            destination=destination,
+            dest_summary=dest_summary,
+            sync_mode=str(getattr(request, "sync_mode", "") or ""),
+        )
+        if kept:
+            base = message or "Reconciliation failed"
+            return base if kept in base else f"{base} {kept}"
+        # C4: verification of a multi-table run failed. Undo every table it
+        # reached with that table's own pre-run facts — the last stream's
+        # summary describes one object, not the run.
+        from services.multi_stream_undo import (
+            UNDO_KEY,
+            forget_undone_progress,
+            undo_multi_stream_run,
+        )
+
+        note, entries = undo_multi_stream_run(
+            destination,
+            sync_mode=str(getattr(request, "sync_mode", "") or ""),
+            job_id=str(dest_summary.get("job_id") or ""),
+        )
+        forget_undone_progress(str(dest_summary.get("job_id") or ""), entries)
+        if entries:
+            dest_summary[UNDO_KEY] = entries
+            dest_summary["partial_batch_undo"] = "multi_stream"
+            dest_summary["partial_batch_undo_note"] = note
+            base = message or "Reconciliation failed"
+            return base if note in base else f"{base} {note}"
     extra = dict(getattr(destination, "extra", None) or {})
     backup_engine = str(extra.get("overwrite_backup_engine") or "")
     from src.transfer.engine_finish import RESTORABLE_BACKUP_ENGINES

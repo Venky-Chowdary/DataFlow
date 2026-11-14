@@ -561,6 +561,18 @@
       "scope": "workspace",
       "resource": "recipe"
     },
+    "DELETE /api/v1/transfer/mapping/templates/{template_id}": {
+      "scope": "workspace",
+      "resource": "mapping_template"
+    },
+    "GET /api/v1/transfer/mapping/templates/{template_id}": {
+      "scope": "workspace",
+      "resource": "mapping_template"
+    },
+    "POST /api/v1/transfer/mapping/templates/{template_id}/apply": {
+      "scope": "workspace",
+      "resource": "mapping_template"
+    },
     "DELETE /api/v1/transforms/{project_id}": {
       "scope": "workspace",
       "resource": "transform_project"
@@ -954,6 +966,20 @@
         200,
         400,
         422
+      ]
+    },
+    "POST /api/v1/transfer/mapping/memory": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Records confirmed Map pairs for a destination named in the body: the connector is authorized against its workspace and its catalog is read before anything is remembered (review M4).",
+      "owner_status": [
+        200,
+        422,
+        502,
+        504
       ]
     },
     "POST /api/v1/transfer/plans": {
