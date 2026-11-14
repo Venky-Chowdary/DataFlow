@@ -1439,3 +1439,121 @@
   font-variant-numeric: tabular-nums;
   color: var(--df-text-tertiary);
 }
+
+/* ==========================================================================
+   Query workspace: pinned header (tabs + connection bar)
+   The page scroll container is .df2-content, under the app top bar, so top: 0
+   pins the header directly beneath the top bar. The header publishes its
+   height as --df2-qw-sticky-h; the results bar and the schema panel pin just
+   under it instead of under a guessed offset.
+   ========================================================================== */
+
+.df2-qw-sticky-sentinel {
+  height: 0;
+  margin: 0;
+}
+
+.df2-qw-sticky {
+  position: sticky;
+  top: var(--df2-qw-sticky-top, 0px);
+  z-index: var(--df-z-sticky, 20);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Bleeds over the page gutter so scrolled content never shows at its edges. */
+  margin: 0 calc(-1 * var(--df-space-2, 8px));
+  padding: 6px var(--df-space-2, 8px) 10px;
+  background: var(--df-bg-canvas);
+  border-bottom: 1px solid transparent;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.df2-qw-sticky[data-stuck="true"] {
+  border-bottom-color: var(--df-border);
+  box-shadow: 0 6px 12px -10px color-mix(in srgb, var(--df-text-primary) 35%, transparent);
+}
+
+.df2-qw-sticky .df2-qw-tabs {
+  padding-bottom: 0;
+}
+
+/* Results: the count / Filter / Copy / Export bar stays reachable over long result sets. */
+.df2-qw-grid {
+  overflow: clip;
+}
+
+.df2-qw-grid-bar {
+  position: sticky;
+  top: var(--df2-qw-sticky-h, 0px);
+  z-index: 2;
+}
+
+/* The schema panel scrolls on its own; its filter box stays pinned at its top. */
+@media (min-width: 1181px) {
+  .df2-qw-schema,
+  .df2-qw-history {
+    position: sticky;
+    top: calc(var(--df2-qw-sticky-h, 0px) + 8px);
+    max-height: calc(100dvh - var(--df-header-height, 60px) - var(--df2-qw-sticky-h, 0px) - 32px);
+    min-height: 12rem;
+  }
+}
+
+.df2-qw-schema-filter {
+  flex: none;
+}
+
+/* Phones: one compact, sideways-scrolling row for the connection bar. */
+@media (max-width: 720px) {
+  .df2-qw-sticky {
+    gap: 6px;
+    padding-top: 4px;
+    padding-bottom: 6px;
+  }
+
+  .df2-qw-sticky .df2-qw-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .df2-qw-sticky .df2-qw-tabs > * {
+    flex: 0 0 auto;
+  }
+
+  .df2-qw-sticky .df2-qw-tab-btn {
+    max-width: 9rem;
+  }
+
+  .df2-qw-sticky .df2-qw-meta {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 8px;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+
+  .df2-qw-sticky .df2-qw-meta > * {
+    flex: 0 0 auto;
+    min-width: 9.5rem;
+  }
+
+  .df2-qw-sticky .df2-qw-meta .df2-label {
+    font-size: var(--df-fs-xs, 11px);
+    margin-bottom: 2px;
+  }
+}
+
+/*
+ * Transfer Studio stays mounted while another screen shows, and its layout
+ * classes (is-transfer-studio-view / is-map-step-view) stay on the shell. Their
+ * overflow: hidden made the shell's inner box the sticky scroll container, so
+ * the pinned Query header scrolled away after a visit to Transfer. While Query
+ * is the visible screen the shell is a plain document again.
+ */
+.df2-content-inner.is-transfer-studio-view:has(.df2-screen-keep:not([hidden]) .df2-qw),
+.df2-content-inner.is-map-step-view:has(.df2-screen-keep:not([hidden]) .df2-qw) {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}

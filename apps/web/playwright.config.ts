@@ -63,6 +63,14 @@ export default defineConfig({
       },
     },
     {
+      name: "query-sticky",
+      testMatch: /query-sticky\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1366, height: 768 },
+      },
+    },
+    {
       name: "prod-smoke",
       testMatch: /prod-smoke\.spec\.ts/,
       use: {
