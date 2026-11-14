@@ -45,6 +45,9 @@ GATE_LABELS: dict[str, str] = {
     "g21_control_totals": "Control totals",
     "g23_stream_procedures": "Stream procedures",
     "g22_dest_referential_integrity": "Destination referential integrity",
+    "g_create_dest_ddl": "Create destination table",
+    "g_upsert_dest_key": "Upsert key on destination",
+    "g12_staging_policy": "Staging policy",
     "g23_destination_name": "Destination name",
     "g9_sync_contract": "Sync contract",
 }

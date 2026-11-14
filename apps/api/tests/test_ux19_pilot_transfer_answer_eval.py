@@ -132,6 +132,8 @@ def test_gate_labels_match_the_studio_catalog() -> None:
     catalog = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "preflightGates.ts"
     text = catalog.read_text(encoding="utf-8")
     block = text[text.index("GATE_CATALOG"):text.index("];", text.index("GATE_CATALOG"))]
+    # Entries may carry a // note between id and code (W6's UX-6 G23N note).
+    block = re.sub(r"^\s*//.*$\n?", "", block, flags=re.M)
     pairs = dict(re.findall(r'id:\s*"([a-z0-9_]+)",\s*(?:code:\s*"[^"]*",\s*)?label:\s*"([^"]+)"', block))
     assert len(pairs) >= 20
     assert pairs == {k: v for k, v in transfer_answer.GATE_LABELS.items() if k in pairs}
