@@ -1649,7 +1649,12 @@ def coerce_float_wire(
     A finite value outside the destination carrier raises so that one row is
     quarantined. SQL Server otherwise aborts the whole batch on ``5e-324``.
     """
-    def _within_carrier(num: float) -> float:
+    def _within_carrier(num: float) -> Any:
+        if num == 0.0 and str(value).strip().startswith("-") and str(engine or "").lower() in {"postgresql", "postgres"}:
+            # DATA-19: psycopg2 renders -0.0 as the numeric literal -0.0, which
+            # PostgreSQL negates as numeric 0 before the float8 cast. Text keeps
+            # the sign ('-0'::float8 is -0).
+            return "-0"
         if num != num or num in {float("inf"), float("-inf")} or num == 0.0:
             return num
         bounds = _float_magnitude_bounds(ddl_type, engine)

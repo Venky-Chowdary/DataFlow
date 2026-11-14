@@ -8,6 +8,7 @@ import json
 import logging
 from services.brand_env import getenv_brand
 from services.connector_auth import resolve_api_key
+import math
 import re
 import uuid
 import sys
@@ -3513,6 +3514,20 @@ def _reject_json_constant(token: str) -> Any:
     raise ValueError(token)
 
 
+_NEG_ZERO_RE = re.compile(r"^-0*\.?0*(?:e[+-]?\d+)?$", re.IGNORECASE)
+
+
+def _negative_zero(value: Any) -> bool:
+    if isinstance(value, float):
+        return value == 0.0 and math.copysign(1.0, value) < 0
+    return isinstance(value, str) and bool(_NEG_ZERO_RE.match(value.strip())) and "0" in value
+
+
+def _float_ddl(ddl_type: str) -> bool:
+    text = str(ddl_type or "").upper()
+    return any(tok in text for tok in ("DOUBLE", "FLOAT", "REAL"))
+
+
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     """Canonical cell text for Gate-8 checksums.
 
@@ -3532,6 +3547,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
+    if _negative_zero(value) and _float_ddl(ddl_type):
+        # DATA-19: IEEE -0.0 is a distinct value a float column keeps; folding
+        # it into 0 let a write that dropped the sign verify (full_checksum).
+        return "-0"
     if (
         isinstance(value, str)
         and not isinstance(value, WireLiteral)
