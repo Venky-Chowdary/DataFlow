@@ -1020,6 +1020,24 @@ def quarantine_retry_fix(job_id: str) -> str:
     )
 
 
+#: ERR-33: what a person does in the product. The MCP / REST form of the same
+#: action is ``quarantine_retry_fix`` and travels as the action's ``api`` form.
+QUARANTINE_RETRY_UI = (
+    "Retry with quarantine: open the job, choose Retry and turn on "
+    "\"Hold out rows that fail\", so the failing rows are held out for review and the "
+    "valid rows load"
+)
+
+
+def quarantine_retry_action(job_id: str) -> dict[str, str]:
+    """The one next action for a cast-failure refusal, in UI and API form."""
+    return {
+        "label": QUARANTINE_RETRY_UI,
+        "ui": "retry_with_quarantine",
+        "api": quarantine_retry_fix(job_id),
+    }
+
+
 def _confidence_floor_by_mode() -> str:
     """Which validation modes move G4's floor — none of the writing ones below 0.75."""
     from services.validation_mode_contract import confidence_floor_for_mode
@@ -1914,7 +1932,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             stored = int(details.get("collision_count") or 0)
         else:
             stored = len(details.get("sample_collisions") or [])
-        sync_mode = str(details.get("sync_mode") or "append")
+        from services.error_taxonomy import sync_mode_words
+
+        sync_mode = sync_mode_words(str(details.get("sync_mode") or "append"))
         enforced = bool(details.get("key_enforced", True))
         if enforced:
             summary = (

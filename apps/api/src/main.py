@@ -22,7 +22,7 @@ from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable
 from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
-from services.safe_errors import public_error
+from services.safe_errors import EnvelopeHTTPException, public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
 from services.data_residency import ResidencyRefused
@@ -987,6 +987,16 @@ async def api_info():
 @app.exception_handler(ApiError)
 async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
+
+
+@app.exception_handler(EnvelopeHTTPException)
+async def error_envelope_handler(request: Request, exc: EnvelopeHTTPException):
+    """``{error: {code, message, action, object, retriable, reference}, detail}``."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.envelope,
+        headers=dict(exc.headers or {}),
+    )
 
 
 @app.exception_handler(DuplicateTransferSubmission)

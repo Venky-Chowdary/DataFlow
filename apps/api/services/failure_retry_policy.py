@@ -158,6 +158,9 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
 # source table in hand. ``role "x" does not exist`` is a login failure and is
 # classified with the credential refusals above.
 _MISSING_RELATION_RES: tuple[re.Pattern[str], ...] = (
+    # services.error_taxonomy copy for object.table_not_found / table_not_visible.
+    re.compile(r'\btable "([^"]+)" (?:doesn\'t exist|isn\'t visible)', re.I),
+    re.compile(r'\bcollection "([^"]+)" doesn\'t exist', re.I),
     re.compile(r'relation "([^"]+)" does not exist', re.I),
     re.compile(r"table '([^']+)' doesn't exist", re.I),
     re.compile(r"no such table: ([^\s,;]+)", re.I),
@@ -277,6 +280,13 @@ def classify_failure(
             ),
         )
 
+    if missing_relation_name(text) is not None:
+        # ERR-42: the cause is known (a missing table); it is retried once only
+        # because a table can be mid-swap.
+        return RetryClassification(
+            kind=UNKNOWN,
+            reason="A table the run reads or writes is missing — retried once in case it is being replaced.",
+        )
     return RetryClassification(
         kind=UNKNOWN,
         reason="Cause not recognised — retried once rather than assumed fatal.",

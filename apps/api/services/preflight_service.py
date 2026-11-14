@@ -498,21 +498,14 @@ def run_file_preflight(
             # contract the remediation for a grant the role does not have.
             from services.preflight_sample import source_read_is_privilege_denial
 
-            if source_read_is_privilege_denial(sample_unavailable_reason):
-                source_error = (
-                    "SELECT was denied on this table. Columns visible in the catalog "
-                    "are not a readable source. Grant SELECT to the connector role, "
-                    f"then re-validate. ({sample_unavailable_reason})"
-                )
-            elif engine_sample.read_failed:
+            if engine_sample.read_failed or source_read_is_privilege_denial(sample_unavailable_reason):
                 # QA MX3-22: G1 said "Source readable — N columns" beside a
-                # reader that had just raised. Catalog metadata is not a
-                # readable source; the probe failure is the G1 finding.
-                source_error = (
-                    "The source catalog lists this table but Execute's reader "
-                    "could not read rows from it. Fix the source read (connection, "
-                    f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
-                )
+                # reader that had just raised. The classified read failure is
+                # the G1 finding (ERR-32: it no longer claims the catalog lists
+                # the table); dependent gates wait on it instead of repeating
+                # it (ERR-31).
+                source_error = sample_unavailable_reason
+                sample_unavailable_reason = "not run: waiting on Source (G1)"
     # A measured COUNT(*) of 0 is the population. Requiring a sample row
     # blocked an empty table whose catalog count was already 0 (R8-005).
     # A failed read still blocks — a count of 0 does not excuse a grant error.

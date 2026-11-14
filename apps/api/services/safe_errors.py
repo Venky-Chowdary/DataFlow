@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import uuid
 from typing import Any
 
@@ -47,6 +46,40 @@ def public_error(
     return detail, cid
 
 
+class EnvelopeHTTPException(HTTPException):
+    """An HTTP error that renders the error envelope.
+
+    ``{"error": {code, message, action{label, ui, api}, object, retriable,
+    reference}, "detail": "<message> Reference: <cid>"}``. ``detail`` stays a
+    string for every client written against ``{detail}``; the app-level
+    handler in ``src.main`` adds ``error``. Without that handler (a bare
+    FastAPI app in a test) it renders as a plain ``HTTPException``.
+    """
+
+    def __init__(self, status_code: int, envelope: dict[str, Any], headers: dict[str, str] | None = None) -> None:
+        super().__init__(status_code=status_code, detail=envelope.get("detail"), headers=headers)
+        self.envelope = envelope
+
+
+def _platform_envelope(public_message: str, cid: str, detail: str, status_code: int) -> dict[str, Any]:
+    from services.error_taxonomy import TEMPLATES
+
+    code = "platform.gateway_timeout" if status_code == 504 else "platform.internal"
+    tpl = TEMPLATES[code]
+    return {
+        "error": {
+            "code": code,
+            "title": tpl.title,
+            "message": public_message,
+            "action": {"label": tpl.action, "ui": tpl.ui, "api": tpl.api},
+            "object": {},
+            "retriable": tpl.retriable,
+            "reference": cid,
+        },
+        "detail": detail,
+    }
+
+
 def safe_http_exception(
     exc: BaseException,
     *,
@@ -64,26 +97,32 @@ def safe_http_exception(
         logger=logger,
         **safe_fields,
     )
-    return HTTPException(
-        status_code=status_code,
-        detail=detail,
+    return EnvelopeHTTPException(
+        status_code,
+        _platform_envelope(public_message, cid, detail, status_code),
         headers={"X-Correlation-ID": cid},
     )
 
 
-def user_query_error(
+def classified_http_exception(
     exc: BaseException,
     *,
-    public_message: str,
+    side: str,
+    phase: str,
+    engine: str = "",
+    object: dict[str, Any] | None = None,  # noqa: A002 — the envelope's field name
     status_code: int = 400,
-    event: str = "query.user_query.failed",
+    event: str,
     logger: logging.Logger | None = None,
+    unclassified_prefix: str = "",
 ) -> HTTPException:
-    """Expose errors from the caller's own query text after canonical redaction.
+    """A driver failure as the taxonomy's message, one action and a reference.
 
-    Use only when the caller already has query permission on the connector.
-    Never use this for connection or configuration errors.
+    Driver text reaches the user only as ``driver_sentence`` inside the
+    ``unclassified`` copy. The raw exception goes to the log event.
     """
+    from services.error_taxonomy import classify, driver_sentence
+
     cid = tracing.get_correlation_id() or uuid.uuid4().hex
     emit_event(
         logger or _LOG,
@@ -94,16 +133,109 @@ def user_query_error(
         correlation_id=cid,
         http_status=status_code,
     )
-    # SQLAlchemy appends the statement, the caret, and a documentation link.
-    # The operator needs the driver's sentence (QA: raw errors echo the SQL).
-    sentence = re.split(
-        r"(?:\n\s*)?(?:LINE \d+:|\[SQL:|\(Background on this error)",
-        str(exc),
-        maxsplit=1,
-    )[0]
-    detail = f"{public_message}: {redact_log_text(sentence)[:500]} Reference: {cid}"
-    return HTTPException(
+    classified = classify(exc, side=side, phase=phase, engine=engine, object=object)
+    assert classified is not None
+    envelope = classified.envelope(cid)
+    if classified.code == "unclassified" and unclassified_prefix:
+        sentence = driver_sentence(exc, limit=100_000)[:500]
+        envelope["detail"] = f"{unclassified_prefix}: {sentence} Reference: {cid}"
+    return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})
+
+
+def user_query_error(
+    exc: BaseException,
+    *,
+    public_message: str,
+    status_code: int = 400,
+    event: str = "query.user_query.failed",
+    logger: logging.Logger | None = None,
+    engine: str = "",
+) -> HTTPException:
+    """A Query-page failure, classified like every other surface.
+
+    A connection failure (a rejected password, a refused port, an unknown
+    database) reads exactly as it does on Test (ERR-11, ERR-20); a query error
+    names its cause and the next action. Only a failure the taxonomy cannot
+    name shows the driver's own sentence — never SQL, a caret line, a driver
+    class or a sqlalche.me link (UX-37).
+    """
+    return classified_http_exception(
+        exc,
+        side="query",
+        phase="query",
+        engine=engine,
         status_code=status_code,
-        detail=detail,
-        headers={"X-Correlation-ID": cid},
+        event=event,
+        logger=logger,
+        unclassified_prefix=public_message,
     )
+
+
+def coded_http_exception(
+    code: str,
+    *,
+    status_code: int = 400,
+    object: dict[str, Any] | None = None,  # noqa: A002 — the envelope's field name
+    side: str = "",
+) -> HTTPException:
+    """A refusal Datawrap itself decides, worded by the taxonomy's template table."""
+    from services.error_taxonomy import DatawrapError, classify
+
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    classified = classify(DatawrapError(code, object=object), side=side)
+    assert classified is not None
+    return EnvelopeHTTPException(status_code, classified.envelope(cid), headers={"X-Correlation-ID": cid})
+
+
+def connection_http_exception(
+    driver: str,
+    exc: BaseException,
+    *,
+    status_code: int = 400,
+    side: str = "connection",
+    phase: str = "connect",
+    auth_mode: str = "",
+    event: str = "connector.connection.failed",
+    prefix: str = "",
+) -> HTTPException:
+    """A connection failure in Test's words (``humanize_connection_error``), with a reference.
+
+    ERR-11 / ERR-21: the Query page and the schema browser no longer show a
+    driver's install hint or raw text for a failed connect.
+    """
+    from services.error_taxonomy import classify
+    from src.transfer.connector_registry import humanize_connection_error
+
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    emit_event(_LOG, event, outcome="failed", level=logging.WARNING, error=exc,
+               correlation_id=cid, http_status=status_code)
+    message = humanize_connection_error(driver, exc, auth_mode=auth_mode, side=side, phase=phase)
+    classified = classify(exc, side=side, phase=phase, engine=driver)
+    assert classified is not None
+    envelope = classified.envelope(cid)
+    text = f"{prefix}{message}" if prefix else str(message)
+    envelope["detail"] = f"{text} Reference: {cid}"
+    if str(message) != classified.text:
+        envelope["error"]["message"] = str(message)
+        envelope["error"]["action"] = {"label": "", "ui": "open_connection", "api": ""}
+    return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})
+
+
+def failure_fields(message: Any, *, engine: str = "", side: str = "connection", phase: str = "connect") -> dict[str, Any]:
+    """``{error: envelope, reference}`` for a ``success: false`` body (ERR-40, UX-7).
+
+    ``message`` is the copy already shown (Test's ``humanize_connection_error``);
+    the envelope adds its code, one action and the support reference, so the
+    page can show the reference as its own chip.
+    """
+    from services.error_taxonomy import classify
+
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    code = str(getattr(message, "code", "") or "")
+    classified = classify(str(message or ""), side=side, phase=phase, engine=engine, fallback=False)
+    envelope = classified.envelope(cid)["error"] if classified is not None else {
+        "code": code or "unclassified", "message": str(message or ""), "action": None,
+        "object": {}, "retriable": False, "reference": cid,
+    }
+    envelope["message"] = str(message or envelope.get("message") or "")
+    return {"error": envelope, "reference": cid}

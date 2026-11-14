@@ -349,18 +349,27 @@ _OPERATOR_COPY_PREFIXES = (
 )
 
 
-def _already_operator_copy(raw: str) -> bool:
-    text = (raw or "").strip().lower()
-    if not text:
+# A server reply dumped after a matching prefix is driver text, not our copy
+# (ERR-12: Mongo's "Authentication failed., full error: {...$clusterTime...}").
+_DRIVER_DUMP = re.compile(r"full error:|\{'|\[SQL:|\(Background on this error|Traceback \(most recent", re.I)
+
+
+def _already_operator_copy(raw: Any) -> bool:
+    from services.error_taxonomy import OperatorCopy
+
+    if isinstance(raw, OperatorCopy):
+        return True
+    text = str(raw or "").strip().lower()
+    if not text or _DRIVER_DUMP.search(text):
         return False
     return any(text.startswith(prefix) for prefix in _OPERATOR_COPY_PREFIXES)
 
 
 def _driver_snippet(raw: str) -> str:
-    snippet = " ".join(str(raw or "").strip().split())
-    if len(snippet) > 120:
-        return snippet[:117] + "..."
-    return snippet
+    """The driver's sentence, sanitised and cut on a word (ERR-13)."""
+    from services.error_taxonomy import driver_sentence
+
+    return driver_sentence(raw, limit=160)
 
 
 def _with_cause(message: str, raw: str) -> str:
@@ -373,17 +382,54 @@ def _with_cause(message: str, raw: str) -> str:
     return f"{message} Driver: {snippet}"
 
 
-def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str:
+#: Whole words of a refused login (ERR-14): never "auth" inside a database,
+#: file or table name such as ``auth``, ``/srv/auth/app.db`` or ``authors``.
+_AUTH_WORDS = (
+    r"\bauthentication\b|\bauth(?:entication)? (?:failed|error)|\blogin failed|\bcredentials?\b|"
+    r"\bpassword\b|\bincorrect (?:username|user|password|credentials)|access denied|not authorized|"
+    r"\bunauthori[sz]ed\b|no such user|permission denied|\binvalid (?:token|api key|key)\b"
+)
+
+#: Drivers whose failures keep their own copy (account forms, scopes, paths).
+_BESPOKE_COPY_DRIVERS = frozenset({
+    "snowflake", "sftp", "email", "salesforce", "hubspot", "stripe", "rest_api", "bigquery",
+    "s3", "gcs", "adls", "dynamodb", "redis", "elasticsearch", "kafka",
+})
+#: TLS copy below names which end requires TLS; the taxonomy's does not.
+_BESPOKE_COPY_CODES = frozenset({"network.tls_required", "network.tls_untrusted"})
+
+
+def humanize_connection_error(
+    driver: str, raw: Any, auth_mode: str = "", *, side: str = "connection", phase: str = "connect"
+) -> str:
     """Convert low-level driver/connection errors into user-friendly messages.
+
+    The shared taxonomy (``services.error_taxonomy.classify``) decides first:
+    the same cause reads the same on Test, Query, introspect, Validate, a job
+    and Pilot. Driver-specific copy below covers account forms and services the
+    taxonomy does not name.
 
     ``auth_mode`` is the credential actually attempted (pat/user_pass/key_pair)
     so re-classification of raw driver text can name the right credential —
     a refused PAT is not a key-pair failure."""
+    from services.error_taxonomy import OperatorCopy, classify
+
+    if isinstance(raw, OperatorCopy):
+        return raw
     raw_s = redact_log_text(str(raw)).strip()
-    if _already_operator_copy(raw_s):
-        return raw_s
     text = raw_s.lower()
     driver = (driver or "").lower()
+    engine = resolve_driver_type(driver) if driver else ""
+    if ".railway.internal" not in text and engine not in _BESPOKE_COPY_DRIVERS and driver not in _BESPOKE_COPY_DRIVERS:
+        classified = classify(raw, side=side, phase=phase, engine=engine or driver, fallback=False)
+        if classified is not None and classified.code not in _BESPOKE_COPY_CODES:
+            copy = OperatorCopy(classified.text)
+            # Kept off the copy; a Test-only refinement (D353) may cite it.
+            copy.sentence = classified.sentence  # type: ignore[attr-defined]
+            copy.code = classified.code  # type: ignore[attr-defined]
+            return copy
+    if _already_operator_copy(raw_s):
+        return raw_s
 
     # Railway private DNS — guidance depends on whether THIS API is on Railway.
     if ".railway.internal" in text:
@@ -521,7 +567,7 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
         return _with_cause(network_failure_copy(text, raw_s), raw_s)
 
     # Auth / credentials — first because it is the most common and sensitive.
-    if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
+    if re.search(_AUTH_WORDS, text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):
             return _with_cause(
                 "API authentication failed. Check the host/URL, API token/key, required scopes, and that the token is active.",
@@ -673,7 +719,7 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
 
     # Redshift, RDS, cloud Postgres/MySQL share the same auth/host families as their base drivers.
     if driver in ("redshift", "mariadb"):
-        if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
+        if re.search(_AUTH_WORDS, text):
             return "Authentication failed. Check username, password, database, and that the user can log in from this host."
 
     # Azure Blob / ADLS
@@ -694,8 +740,11 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
     if driver == "sftp" and re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found|no such", text):
         return "SFTP path not found. Check the remote directory and file path."
 
-    # Fallback: keep the raw message but prefix it clearly.
-    return f"Connection failed: {_driver_snippet(raw_s)}"
+    # Fallback: the taxonomy's "cause not identified" copy with the sanitised
+    # driver sentence (ERR-7) — never the raw text.
+    unknown = classify(raw, side=side, phase=phase, engine=engine or driver)
+    assert unknown is not None
+    return OperatorCopy(unknown.text)
 
 
 def locate_connector_file(
@@ -802,7 +851,7 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
                         result = _name_silent_endpoint(db_type, cfg, result, waited)
         except EgressRefused as exc:
             op.failed(category="probe_failed")
-            return False, str(exc)
+            return False, humanize_connection_error((db_type or "").lower(), exc)
         except Exception as exc:
             op.errored(exc)
             return False, humanize_connection_error((db_type or "").lower(), exc, auth_mode=str(cfg.get("auth_mode") or "").strip().lower())
@@ -886,6 +935,7 @@ def _name_silent_endpoint(
     if not copy:
         return result
     _, _, cause = result[1].partition(" Driver: ")
+    cause = cause or str(getattr(result[1], "sentence", "") or "")
     return False, (f"{copy} Driver: {cause}" if cause else copy)
 
 
@@ -932,7 +982,7 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         aws_endpoint=aws_sdk_endpoint(cfg, guard_type),
     )
     if refusal:
-        return False, refusal
+        return False, humanize_connection_error(guard_type, refusal)
 
     db_type = (db_type or "").lower()
     catalog_id = db_type

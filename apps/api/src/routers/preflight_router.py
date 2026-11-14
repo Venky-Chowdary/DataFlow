@@ -33,6 +33,7 @@ from ..services.preflight_service import (
     run_transfer_policy_gates,
 )
 from ..transfer.connector_registry import run_probe
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/preflight", tags=["Preflight"])
 
@@ -283,6 +284,15 @@ def _validate_reversibility(body: Any, source_types: dict[str, str], dest_types:
     return [preflight_gate(report)]
 
 
+def _with_reference(result: Any) -> Any:
+    """A blocked Validate carries a support reference (ERR-40)."""
+    if isinstance(result, dict) and result.get("blockers") and not result.get("reference"):
+        from services.error_taxonomy import new_reference
+
+        result["reference"] = new_reference()
+    return result
+
+
 @router.post("/run")
 async def run_preflight(body: PreflightRequest, http_request: Request):
     """
@@ -316,7 +326,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
         )
 
         with deadline_scope(seconds, progress), collect_budget_findings() as found:
-            return attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+            return _with_reference(attach_budget_findings(_run_preflight_blocking(body, http_request), found))
 
     work = asyncio.ensure_future(run_in_threadpool(_bounded))
     try:
@@ -944,7 +954,7 @@ def explain_preflight(body: ExplainRequest):
             use_llm=body.use_llm,
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.explain_preflight.failed", public_message="Couldn't explain the validation result.", status_code=500)
 
 
 class SchemaDriftRequest(PolicyFieldsModel):
@@ -967,7 +977,7 @@ async def classify_schema_drift(body: SchemaDriftRequest):
             schema_policy=body.schema_policy or "manual_review",
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.classify_schema_drift.failed", public_message="Couldn't classify the schema change.", status_code=500)
 
 
 class CellPreviewRequest(BaseModel):
@@ -1064,4 +1074,4 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="preflight.preview_quarantine_cells.failed", public_message="Couldn't preview quarantined cells.", status_code=500)

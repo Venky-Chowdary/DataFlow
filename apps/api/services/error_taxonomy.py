@@ -40,6 +40,11 @@ SIDES = ("source", "destination", "connection", "query", "platform", "")
 PHASES = ("connect", "read", "write", "ddl", "introspect", "probe", "query", "export", "validate", "")
 
 
+class OperatorCopy(str):
+    """Text Datawrap wrote for a user. Humanisers pass it through unchanged;
+    driver text that merely starts with the same words is not this type."""
+
+
 class DatawrapError(Exception):
     """A failure Datawrap itself raises, already classified.
 
@@ -136,27 +141,33 @@ TEMPLATES: dict[str, Template] = {
     # -- network ------------------------------------------------------------
     "network.dns_not_found": Template(
         "Host not found",
-        "The connection's host name didn't resolve (DNS): no such host is known.",
+        "Host not found: the connection's host name didn't resolve (DNS).",
         "Check the spelling of the host name on the connection.",
         "open_connection", _EDIT_API,
     ),
     "network.refused": Template(
         "Connection refused",
-        "The host answered, but nothing accepts connections on the connection's port.",
+        "Connection refused: the host answered, but nothing accepts connections on the connection's port.",
         "Check the port number on the connection and that the database is running.",
         "open_connection", _EDIT_API, retriable=True,
     ),
     "network.unreachable": Template(
         "Network unreachable",
-        "There's no network route from Datawrap to the connection's host.",
+        "Network unreachable: there's no route from Datawrap to the connection's host.",
         "Check the host address and the VPN, VPC peering or firewall routes to it.",
         "open_connection", _EDIT_API, retriable=True,
     ),
     "network.connect_timeout": Template(
         "Connection timed out",
-        "The connection's host didn't answer before the time limit.",
+        "Connection timed out: the connection's host didn't answer before the time limit.",
         "Check the host and port, and that a firewall or security group lets Datawrap connect.",
         "open_connection", _TEST_API, retriable=True,
+    ),
+    "network.handshake_timeout": Template(
+        "Handshake timed out",
+        "Handshake timed out: the connection's port accepted the connection, but the server never completed the database handshake.",
+        "Check the port: it may belong to another service, or sit behind a proxy that doesn't forward the database protocol.",
+        "open_connection", _EDIT_API, retriable=True,
     ),
     "network.tls_required": Template(
         "TLS setting mismatch",
@@ -206,6 +217,12 @@ TEMPLATES: dict[str, Template] = {
             "query": ("Check the table name in the query.", "edit_query"),
         },
     ),
+    "object.table_not_visible": Template(
+        "Table not visible",
+        "Table{t} isn't visible to this connection: it doesn't exist, or the connection's role has no privilege on it.",
+        "Check the table name, or grant the connection's role SELECT on it.",
+        "open_connection",
+    ),
     "object.column_not_found": Template(
         "Column not found",
         "Column{c} doesn't exist{in_t}{side_on}.",
@@ -222,6 +239,12 @@ TEMPLATES: dict[str, Template] = {
         "Collection{t} doesn't exist in this MongoDB database.",
         "Check the collection name.",
         "open_connection",
+    ),
+    "object.upload_expired": Template(
+        "Upload no longer available",
+        "This job's uploaded file is no longer on the server, so it can't run again from here.",
+        "Upload the file again in Transfer Studio and start a new run.",
+        "open_studio",
     ),
     "object.file_not_found": Template(
         "File not found",
@@ -435,7 +458,8 @@ def driver_code(exc: Any) -> tuple[str, str]:
     """``(engine, code)`` the driver attached, or ``("", "")``."""
     root = _root(exc)
     if not isinstance(root, BaseException):
-        return "", ""
+        wrapped = _WRAPPED_MYSQL.match(str(root or ""))
+        return ("mysql", wrapped.group(1)) if wrapped else ("", "")
     engine = _infer_engine(root)
     module = (type(root).__module__ or "").lower()
     args = getattr(root, "args", ())
@@ -473,7 +497,10 @@ _INNER_ENVELOPE = re.compile(
 _SQL_BLOCK = re.compile(r"\[SQL:.*?\](?=\s*(?:\[parameters:|\(Background|$))", re.S)
 _PARAMS_BLOCK = re.compile(r"\[parameters:.*?\](?=\s*(?:\(Background|$))", re.S)
 _BACKGROUND = re.compile(r"\(Background on this error at:[^)]*\)", re.S)
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"https?://(?:www\.)?sqlalche\.me\S*")
+#: A connection URI names host, port and user; the user already knows which connection it is.
+_DSN = re.compile(r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|mssql|sqlserver|oracle|redis|snowflake|jdbc:[a-z]+)"
+                  r"(?:\+\w+)?://\S+", re.I)
 _PG_SERVER = re.compile(r'connection to server (?:at|on) "[^"]*"(?:\s*\([^)]*\))?,\s*port \d+ failed:\s*', re.I)
 _PG_SOCKET = re.compile(r'connection to server on socket "[^"]*" failed:\s*', re.I)
 _MYSQL_USER_HOST = re.compile(r"'([^'@]*)'@'[^']*'")
@@ -559,6 +586,7 @@ def driver_sentence(exc: Any, *, limit: int = _SENTENCE_MAX) -> str:
         lines.append(line)
     text = " ".join(lines)
     text = _INNER_ENVELOPE.sub("", text)
+    text = _DSN.sub("the connection string", text)
     text = _MYSQL_USER_HOST.sub(r"'\1'", text)
     text = _ON_HOST.sub("server", text)
     text = _IPV6.sub("the host", text)
@@ -786,7 +814,7 @@ _MYSQL_CODES: dict[str, str] = {
     "3819": "value.check_violation", "1062": "value.duplicate_key", "1452": "value.fk_violation",
     "1451": "value.fk_violation", "3024": "timeout.statement", "1205": "timeout.lock",
     "1213": "timeout.deadlock", "1114": "capacity.table_full", "1040": "capacity.connection_limit",
-    "1203": "capacity.connection_limit", "2003": "network.refused", "2005": "network.dns_not_found",
+    "1203": "capacity.connection_limit", "2005": "network.dns_not_found",
     "2006": "network.connection_lost", "2013": "network.connection_lost",
 }
 _MONGO_CODES: dict[str, str] = {
@@ -846,6 +874,10 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"lock wait timeout exceeded|canceling statement due to lock timeout|^database is locked|"
         r"lock request time out period exceeded", re.I)),
     ("timeout.deadlock", re.compile(r"deadlock detected|deadlock found when trying to get lock", re.I)),
+    ("network.handshake_timeout", re.compile(
+        r"lost connection to (?:mysql )?server (?:during query|at '?reading initial communication packet|"
+        r"at '?handshake)[^)]*\(timed out\)|reading initial communication packet|"
+        r"accepted the tcp connection but did not answer", re.I)),
     ("network.refused", re.compile(r"connection refused|\[errno 111\]|econnrefused|actively refused", re.I)),
     ("network.unreachable", re.compile(r"network is unreachable|no route to host|host is unreachable|\[errno 11[03]\]", re.I)),
     ("network.connect_timeout", re.compile(
@@ -962,6 +994,10 @@ def classify(
         matched_by = "pattern"
     if code == "access":
         code = _access_code(side, phase, raw)
+    if code == "network.connection_lost" and phase in {"connect", "probe", "introspect"}:
+        # MySQL 2013 at connect is a handshake that never finished, not a drop.
+        if _anchored(raw) == "network.handshake_timeout":
+            code = "network.handshake_timeout"
     if not code:
         if not fallback:
             return None
@@ -1056,3 +1092,27 @@ def failure_side(side: str, phase: str) -> Callable[[Callable[..., Any]], Callab
         return wrapper
 
     return deco
+
+
+#: Plain words for internal sync-mode and drift ids in user copy (ERR-35).
+_SYNC_MODE_WORDS = {
+    "full_refresh_append": "append", "full_refresh_overwrite": "overwrite",
+    "incremental_append": "incremental append", "incremental_deduped": "upsert",
+    "incremental_dedup": "upsert", "append": "append", "upsert": "upsert", "overwrite": "overwrite",
+    "mirror": "mirror", "scd2": "history (SCD2)", "cdc": "change capture (CDC)",
+}
+_DRIFT_KIND_WORDS = {
+    "type_change": "a column's type changed", "column_removed": "a column was removed",
+    "column_added": "a column was added", "column_renamed": "a column was renamed",
+    "nullability_change": "a column's nullability changed", "pk_change": "the primary key changed",
+}
+
+
+def sync_mode_words(mode: str) -> str:
+    key = str(mode or "").strip().lower()
+    return _SYNC_MODE_WORDS.get(key, key.replace("_", " "))
+
+
+def drift_kind_words(kind: str) -> str:
+    key = str(kind or "").strip().lower()
+    return _DRIFT_KIND_WORDS.get(key, key.replace("_", " "))

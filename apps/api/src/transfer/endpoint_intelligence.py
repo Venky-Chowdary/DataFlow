@@ -74,7 +74,9 @@ def _list_sqlalchemy_tables(
 
         return False, [], humanize_connection_error(fmt, exc), {}
     if not isinstance(info, dict) or not info.get("ok"):
-        return False, [], str((info or {}).get("error") or "object list failed"), {}
+        from .connector_registry import humanize_connection_error
+
+        return False, [], humanize_connection_error(fmt, str((info or {}).get("error") or "object list failed"), phase="introspect"), {}
     names: list[str] = []
     seen: set[str] = set()
     for raw in info.get("tables") or []:
@@ -369,6 +371,7 @@ def introspect_endpoint(
     ) as op:
         out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
         _hide_internal_objects(out)
+        _classify_failure_message(out, str(endpoint.format or endpoint.kind or ""))
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),
@@ -379,6 +382,37 @@ def introspect_endpoint(
         else:
             op.failed(category="not_connected")
         return out
+
+
+def _classify_failure_message(out: dict, fmt: str) -> None:
+    """A failed introspect speaks the shared taxonomy, never raw driver text (ERR-10).
+
+    Studio, the Query schema browser and Pilot show ``message``/``error`` as-is,
+    so a driver reply is classified here once. Datawrap's own wording (an
+    ``OperatorCopy`` or text the taxonomy does not recognise) is left alone.
+    """
+    if not isinstance(out, dict):
+        return
+    from services.error_taxonomy import OperatorCopy, classify
+
+    from .connector_registry import _DRIVER_DUMP, humanize_connection_error
+
+    for key in ("message", "error"):
+        text = out.get(key)
+        if not isinstance(text, str) or not text or isinstance(text, OperatorCopy):
+            continue
+        if out.get("connected") and key == "message" and not _DRIVER_DUMP.search(text):
+            continue
+        classified = classify(text, side="connection", phase="introspect", engine=fmt, fallback=False)
+        if classified is not None:
+            out[key] = OperatorCopy(classified.text)
+            out.setdefault("error_code", classified.code)
+            if not out.get("connected"):
+                from services.error_taxonomy import new_reference
+
+                out.setdefault("reference", new_reference())  # ERR-40
+        elif _DRIVER_DUMP.search(text):
+            out[key] = humanize_connection_error(fmt, text, side="connection", phase="introspect")
 
 
 def _hide_internal_objects(out: dict) -> None:
@@ -909,7 +943,9 @@ def _introspect_endpoint_impl(
                 if not probe.ok and probe.error:
                     out["message"] = probe.error
             except Exception as exc:
-                out["message"] = f"SQLite object list failed: {exc}"
+                from .connector_registry import humanize_connection_error
+
+                out["message"] = humanize_connection_error("sqlite", exc, phase="introspect")
             return out
         # No table typed — list the catalog. _attach_db_sample returns immediately
         # without a table name, which left SQL Server (and the other engines on
@@ -1050,7 +1086,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 cursor = coll.find().max_time_ms(5000).limit(sample_limit)
                 records = list(cursor)
             except PyMongoError as exc:
-                out["message"] = f"Collection sample failed: {exc}"
+                from .connector_registry import humanize_connection_error
+
+                out["message"] = humanize_connection_error("mongodb", exc, phase="introspect")
                 return
             # Read the BSON carriers before the docs are stringified/expanded —
             # once ``10.01`` is text the stored ``double`` is unrecoverable.

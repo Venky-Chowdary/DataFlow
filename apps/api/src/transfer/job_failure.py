@@ -166,12 +166,17 @@ def _job_failure_fields(exc: Exception, request: Any = None) -> tuple[dict[str, 
     if isinstance(stamped, dict):
         details.update(stamped)
     # Prefer operator-facing message for job.error / SSE while keeping raw in details.
+    operator_error = human.get("message")
+    if human.get("action"):
+        # A taxonomy failure reads the same on the job, in the schedule
+        # notification, the email and Pilot: its message and its one action.
+        operator_error = f"{human.get('message')} {human.get('fix')}".strip()
     extras: dict[str, Any] = {
         "error_code": human.get("code"),
         "error_title": human.get("title"),
         "error_fix": human.get("fix"),
         "error_confidence": human.get("confidence"),
-        "operator_error": human.get("message"),
+        "operator_error": operator_error,
     }
     dropped = str(getattr(exc, "destination_table_dropped", "") or "")
     if dropped:
@@ -993,7 +998,7 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
-    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_fix
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_action
 
     if any(
         isinstance(b, dict)
@@ -1004,9 +1009,14 @@ def _fail_job_preflight(
         # D170: the run was refused whole; say how to load the valid rows.
         # QA r12 D2: the job is failing, so the way out is a retry — name the
         # tool and REST field that accept the acceptance for a failed job.
-        fix = quarantine_retry_fix(job_id)
+        # ERR-33: the job's words are the UI action; the MCP / REST form is
+        # the action's ``api`` and ``remediation_api``.
+        action = quarantine_retry_action(job_id)
+        fix = action["label"]
         error_message = f"{error_message.rstrip('. ')}. {fix}."
         error_details["remediation"] = fix
+        error_details["remediation_api"] = action["api"]
+        error_details["action"] = action
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

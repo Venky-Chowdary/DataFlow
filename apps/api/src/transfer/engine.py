@@ -1467,10 +1467,10 @@ class UniversalTransferEngine:
     def _notify_job_status(
         self, request: TransferRequest, result: TransferResult
     ) -> None:
-        """Fire workspace notifications for failed or partially-quarantined jobs."""
+        """Notify failed or quarantined jobs; a schedule's runner notifies its own runs (ERR-41)."""
         rejected = result.destination_summary.get("rejected_rows", 0) or 0
         coerced = result.destination_summary.get("coerced_null_rows", 0) or 0
-        if result.success and not rejected and not coerced:
+        if (result.success and not rejected and not coerced) or (request.source.extra or {}).get("schedule_id"):
             return
         try:
             from services.notification_service import (
@@ -1490,8 +1490,8 @@ class UniversalTransferEngine:
             payload = build_job_payload(
                 job_id=result.job_id,
                 status=status,
-                source=request.source.kind or "unknown",
-                destination=request.destination.kind or "unknown",
+                source=request.source.table or request.source.collection or request.source.kind or "unknown",
+                destination=request.destination.table or request.destination.collection or request.destination.kind or "unknown",
                 records_transferred=result.records_transferred or 0,
                 rejected_rows=int(rejected),
                 error=result.error or "",
@@ -5374,8 +5374,8 @@ class UniversalTransferEngine:
                 p = confine_source_path(request.source_path)
                 if p.is_file():
                     content = p.read_bytes()
-            if not content:
-                raise ValueError("File content required for file source")
+            if not content:  # ERR-30: a missing file is named as one (object.file_not_found)
+                raise FileNotFoundError(2, "No such file or directory", request.source_path or request.source_filename or "")
             enable_ocr = bool((request.source.extra or {}).get("enable_ocr"))
             return parse_file_content(
                 content,
