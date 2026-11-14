@@ -14,6 +14,7 @@ import {
 } from "../../lib/topologyUtils";
 import { Button } from "./Button";
 import { connectorEndpointLabel } from "../../lib/connectorEndpoint";
+import { connectorDisplayName } from "../../lib/connectorTypes";
 import { useConnectivity } from "../../lib/connectivity";
 
 interface ConnectorCardProps {
@@ -67,6 +68,8 @@ export function ConnectorCard({
     ? connectorTestLabel(c)
     : `Last known: ${health === "passed" ? "passed" : "failed"}`;
   const endpoint = connectorEndpointLabel(c);
+  // UX-30: the engine's own name ("PostgreSQL"), never CSS-capitalized ids.
+  const engineName = connectorDisplayName(c.type);
   const roleClass =
     displayRole === "destination"
       ? "df2-role-dest"
@@ -98,9 +101,9 @@ export function ConnectorCard({
           <span className="df2-connector-row-name" title={c.name}>{c.name}</span>
           <span
             className="df2-connector-row-meta"
-            title={[c.type.replace(/_/g, " "), c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
+            title={[engineName, c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}
+            {engineName}
             {endpoint ? ` · ${endpoint}` : ""}
             {c.database ? ` · ${c.database}` : ""}
             {usage.hint ? ` · ${usage.hint}` : ""}
@@ -175,9 +178,9 @@ export function ConnectorCard({
           <h3 className="df2-connector-card-title" title={c.name}>{c.name}</h3>
           <p
             className="df2-connector-card-meta"
-            title={[c.type.replace(/_/g, " "), c.database, endpoint].filter(Boolean).join(" · ")}
+            title={[engineName, c.database, endpoint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}
+            {engineName}
             {c.database ? ` · ${c.database}` : ""}
           </p>
         </div>
