@@ -11212,7 +11212,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-warn,
 .df2-app .df2-badge-warning {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text); /* AA at badge size on its tint */
   border: 1px solid var(--df-warning-border, rgba(217, 119, 6, 0.22));
 }
 

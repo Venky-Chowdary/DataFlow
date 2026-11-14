@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { STUDIO_CANVAS_KEY, STUDIO_SCHEMA_BROWSER_KEY, writeLocalStudioFlag } from "../lib/studioFlags";
+import { CANVAS_PREVIEW_CONFIRM, CANVAS_PREVIEW_HINT, CANVAS_PREVIEW_LABEL, STUDIO_CANVAS_KEY, STUDIO_SCHEMA_BROWSER_KEY, writeLocalStudioFlag } from "../lib/studioFlags";
 import { DtIcon } from "../components/DtIcon";
 import { ChangeEmailCard } from "../components/ChangeEmailCard";
 import { TwoFactorCard } from "../components/TwoFactorCard";
@@ -34,7 +34,7 @@ import { KEY_IDS_MASKED_HINT, auditKeyIdHint, maskKeyIdsForDisplay } from "../li
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
-import { purgeConfirmCopy, retentionHint } from "../lib/jobRetention";
+import { autoPurgeHint, purgeConfirmCopy, retentionHint } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
 import { useOverlayFocus } from "../lib/restoreFocus";
 import { TENANT_SAVED_EVENT, concreteWorkspaceId, useActiveWorkspaceId } from "../lib/workspace";
@@ -917,9 +917,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             setRetentionAutoPurge(e.target.checked);
                           }}
                         />
-                        <p className="df2-label-hint">
-                          Off by default. On: finished jobs older than the retention window are deleted daily in every workspace.
-                        </p>
+                        <p className="df2-label-hint" data-testid="retention-auto-purge-hint">{autoPurgeHint(retentionAutoPurge)}</p>
                       </div>
                       <div className="df2-settings-field">
                         <label htmlFor="studio-schema-browser">Schema browser</label>
@@ -939,21 +937,33 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         </p>
                       </div>
                       <div className="df2-settings-field">
-                        <label htmlFor="studio-canvas">Recipe canvas</label>
+                        <label htmlFor="studio-canvas">
+                          Recipe canvas <span className="df2-badge df2-badge-warning" data-testid="studio-canvas-preview">{CANVAS_PREVIEW_LABEL}</span>
+                        </label>
                         <input
                           id="studio-canvas"
                           type="checkbox"
                           checked={studioCanvas}
                           disabled={!generalEditable}
                           title={generalTitle}
+                          aria-describedby="studio-canvas-hint"
                           onChange={(e) => {
-                            generalDirtyRef.current = true;
-                            setStudioCanvas(e.target.checked);
+                            const next = e.target.checked;
+                            // UX-25: a preview surface is never two clicks from
+                            // production for every editor in the workspace.
+                            if (!next) {
+                              generalDirtyRef.current = true;
+                              setStudioCanvas(false);
+                              return;
+                            }
+                            void confirm(CANVAS_PREVIEW_CONFIRM).then((ok) => {
+                              if (!ok) return;
+                              generalDirtyRef.current = true;
+                              setStudioCanvas(true);
+                            });
                           }}
                         />
-                        <p className="df2-label-hint">
-                          Workspace gate for the ordered transform canvas. Off keeps the step list. The logo and the rest of the wizard stay as they are.
-                        </p>
+                        <p className="df2-label-hint" id="studio-canvas-hint">{CANVAS_PREVIEW_HINT}</p>
                       </div>
                       <div className="df2-settings-field">
                         <label>Default destination</label>
