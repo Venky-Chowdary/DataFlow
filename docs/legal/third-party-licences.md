@@ -389,3 +389,11 @@ python scripts/licence_scan.py --notice NOTICE
 ```
 
 Run it with the API's Python environment, from the repository root.
+
+## Verified against
+
+- `scripts/licence_scan.py`, `licence-policy.json`, `NOTICE`
+- `scripts/fetch_lgpl_sources.py`, `scripts/bundled_libraries.py`
+- `apps/api/connectors/vendor_drivers.py`
+- `apps/api/requirements.txt`
+- `.github/workflows/ci.yml`
