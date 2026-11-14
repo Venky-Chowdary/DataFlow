@@ -246,7 +246,7 @@ export function TeamSettings() {
         toast({
           title: quota ? "Invitation email not sent: email limit reached" : "Invitation not sent",
           message: `${err instanceof Error ? err.message : "Could not send the invitation."}${
-            quota ? " Add directly is selected below with the same details; press Add to give access now." : ""
+            quota ? " Add directly is now selected in the form, with the same details; press Add to give access now." : ""
           }`,
           tone: "error",
         });
@@ -268,7 +268,7 @@ export function TeamSettings() {
         setIssuedPassword({ email: result.membership.email, password: result.temporaryPassword });
         toast({
           title: "Member added with a login",
-          message: `Reveal the one-time password below and give it to ${result.membership.email}.`,
+          message: `The one-time password is at the top of Team: copy or reveal it and give it to ${result.membership.email}.`,
           tone: "success",
         });
       } else {
