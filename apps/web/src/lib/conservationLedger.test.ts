@@ -751,3 +751,14 @@ describe("write refused after a counted read", () => {
     assert.match(ledgerEquation(ledger), /3 blank cell\(s\) as NULL/);
   });
 });
+
+describe("the unmeasured destination chip reads in words (W6 round 2, item 3)", () => {
+  it("says the destination rows were not counted, with a tooltip that says why it matters", () => {
+    const h = destHeadline({ status: "completed", records_processed: 10_000 });
+    assert.equal(destMetricCompact(h), "Rows not counted");
+    // Fits the drawer header chip (max-width: 16ch) without an ellipsis.
+    assert.ok(destMetricCompact(h).length <= 16);
+    assert.doesNotMatch(destMetricCompact(h), /unmeasured|—/);
+    assert.match(h.title ?? "", /did not count the destination's rows/);
+  });
+});

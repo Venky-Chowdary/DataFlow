@@ -11,12 +11,10 @@ import { useId } from "react";
 import { ProgressRing } from "../ui/ProgressRing";
 import { useElementWidth } from "./useElementWidth";
 import {
-  areaPath,
   linearScale,
   linePath,
-  minMaxTicks,
   ordinalPositions,
-  percentDomain,
+  parityAxis,
   percentFraction,
   splitWidths,
 } from "../../lib/chartScale";
@@ -235,14 +233,19 @@ export function trendSummary(runs: ParitySummaryRun[]): string {
   return `Parity over the last ${runs.length} runs: ${range}; latest ${formatParityPct(latest.proven_equal_pct)}. ${flaggedText}${driftText}${sampledText}`;
 }
 
-/** Line + area of rows proven equal per run, oldest to newest, on a labelled min/max scale. */
+/**
+ * Rows proven equal per run, oldest to newest: a line and its points on a
+ * round axis that ends at 100% (lib/chartScale parityAxis), three labelled
+ * gridlines, no filled band. Every point carries its run in a tooltip.
+ */
 export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRun[]; height?: number }) {
   const [ref, width] = useElementWidth<HTMLDivElement>(360);
   const values = runs.map((r) => r.proven_equal_pct);
-  const domain = percentDomain(values);
+  const axis = parityAxis(values);
+  const domain = axis?.domain ?? null;
   const summary = trendSummary(runs);
 
-  if (!domain) {
+  if (!domain || !axis) {
     return (
       <div ref={ref} className="df2-parity-trend is-empty" role="img" aria-label={summary}>
         <p className="df2-parity-muted">{summary}</p>
@@ -254,8 +257,7 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
   const y = linearScale(domain, [innerBottom, TREND_PAD.t]);
   const xs = ordinalPositions(runs.length, [TREND_PAD.l, Math.max(TREND_PAD.l + 1, width - TREND_PAD.r)]);
   const points = runs.map((r, i) => ({ x: xs[i], y: r.proven_equal_pct == null ? null : y(r.proven_equal_pct) }));
-  const ticks = minMaxTicks(domain, values);
-  const mid = (domain[0] + domain[1]) / 2;
+  const ticks = axis.ticks;
   let lastIndex = -1;
   for (let i = runs.length - 1; i >= 0; i -= 1) {
     if (points[i].y != null) {
@@ -268,7 +270,7 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
     <div ref={ref} className="df2-parity-trend">
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
         <title>{summary}</title>
-        {[...ticks.map((t) => t.value), mid].map((v, i) => (
+        {ticks.map((t) => t.value).map((v, i) => (
           <line
             key={`grid-${i}`}
             className="df2-parity-grid"
@@ -283,7 +285,6 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
             {t.label}
           </text>
         ))}
-        <path className="df2-parity-trend-area" d={areaPath(points, innerBottom)} />
         <path className="df2-parity-trend-line" d={linePath(points)} />
         {runs.map((run, i) =>
           isSampledOnly(run) ? (
@@ -400,7 +401,9 @@ function HeatGlyph({ cell, cx, cy }: { cell: string; cx: number; cy: number }) {
         />
       );
     default:
-      return <line className={cls} x1={cx - 3} y1={cy + 3} x2={cx + 3} y2={cy - 3} aria-hidden />;
+      // Not run / not checked: an empty cell. A slash in every gap was noise;
+      // the blank (and the legend) say it, and every checked state has a mark.
+      return null;
   }
 }
 
@@ -452,8 +455,8 @@ export function TableRunHeatmap({ heatmap, runs = [] }: TableRunHeatmapProps) {
   const rows = heatmap.tables.length;
   const summary = heatmapSummary(heatmap);
   const names = new Map(runs.map((r) => [r.job_id, r.name || r.job_id]));
-  // Cells stay at least 14px wide; below that the card scrolls sideways.
-  const cellW = cols ? Math.max(14, (width - HEAT_LABEL_W - HEAT_GAP * cols) / cols) : 14;
+  // Cells are 14–28px wide: square-ish marks, not stretched bars; below 14px the card scrolls sideways.
+  const cellW = cols ? Math.min(28, Math.max(14, (width - HEAT_LABEL_W - HEAT_GAP * cols) / cols)) : 14;
   const svgW = HEAT_LABEL_W + cols * (cellW + HEAT_GAP);
   const svgH = rows * (HEAT_ROW_H + HEAT_GAP);
   const tableId = useId();

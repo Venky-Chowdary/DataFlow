@@ -1212,7 +1212,9 @@ export function ValidateDashboard({
     gateByKey.set(metaForGate(gate.id).key, gate);
   }
   const blockingGateSummaries = buildBlockingGateSummaries(preflight);
-  const blockedCount = countsFromGates ? gateCounts.blocked : blockingGateSummaries.length;
+  // One list behind every blocked count on this screen (UX-6): the chip, the
+  // summary line and the footer all read buildBlockingGateSummaries.
+  const blockedCount = preflight?.passed ? 0 : blockingGateSummaries.length;
   const skippedCount = countsFromGates
     ? gateCounts.skipped
     : (preflight?.gates ?? []).filter((g) => g.status === "skip").length;

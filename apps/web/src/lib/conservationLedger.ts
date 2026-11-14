@@ -482,7 +482,9 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
   return {
     value: "—",
     label: "Dest unmeasured",
-    title: "Independent dest COUNT(*) was not captured. Writer acknowledgement is not destination proof.",
+    title:
+      "Datawrap did not count the destination's rows after this run, so the row total shown is the writer's "
+      + "own report, not a check of the destination. Open the Trust Report to compare source and destination.",
     measured: false,
     tone: "muted",
   };
@@ -512,6 +514,10 @@ export function writerHeadline(source: LedgerCarrier | null | undefined): RowMet
 
 /** Compact Jobs list / Overview / search caption. Never falls dest back to writer ack. */
 export function destMetricCompact(metric: RowMetric): string {
+  // In words, not "— dest unmeasured" (W6 round 2): the chip's title says why.
+  // The header chip is 16ch wide; the title names the destination and says why.
+  if (!metric.measured && metric.label === "Dest unmeasured") return "Rows not counted";
+  if (!metric.measured && metric.label === "Dest COUNT") return "Count pending";
   if (!metric.measured) return `${metric.value} ${metric.label.toLowerCase()}`;
   if (metric.label.toLowerCase().includes("per-stream")) return "per-stream dest";
   if (metric.label.toLowerCase().includes("active")) return `${metric.value} active`;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   destColumnFacts,
+  destPanelSummaryLine,
   filterDestColumns,
   type DestColumnCatalog,
   type DestColumnState,
@@ -129,9 +130,8 @@ export function DestinationColumnsPanel({
         ) : null}
       </div>
 
-      <p className="df2-ms-panel-counts" role="status">
-        <strong>{summary.mapped}</strong> mapped · <strong>{summary.unmapped}</strong> unmapped
-        {blocking ? <> · <strong className="is-block">{blocking}</strong> blocking</> : null}
+      <p className="df2-ms-panel-counts" role="status" data-testid="dest-panel-summary">
+        {destPanelSummaryLine(summary, catalog)}
       </p>
 
       {error ? (

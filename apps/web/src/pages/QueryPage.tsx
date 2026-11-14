@@ -27,6 +27,7 @@ import { Connector } from "../lib/types";
 import { QueryEditor, type QueryEditorHandle } from "../components/query/QueryEditor";
 import { ResultGrid } from "../components/query/ResultGrid";
 import { SchemaBrowser } from "../components/query/SchemaBrowser";
+import { useStickyHeader } from "../components/query/useStickyHeader";
 import {
   dialectForConnector,
   explainPrefix,
@@ -118,6 +119,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [destSyncMode, setDestSyncMode] = useState("append");
 
   const skipTabPersist = useRef(true);
+  const sticky = useStickyHeader<HTMLDivElement>();
 
   // Hydrate tabs/history per workspace. Do not persist the previous workspace's
   // tabs into the next workspace's storage key on the same tick.
@@ -327,13 +329,8 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           saveHistory(next, workspaceId);
           return next;
         });
-        if (scope !== "all" && isCurrent()) {
-          toast({
-            title: `Ran ${scope}`,
-            message: `${data.row_count.toLocaleString()} rows in ${formatDuration(data.duration_ms)}`,
-            tone: "success",
-          });
-        }
+        // No toast for a plain successful run: the run bar and the results
+        // header already say "500 rows · 42 ms", and a toast covered the grid.
       } catch (e) {
         const message = (e as Error).message || "Query failed";
         setHistory((prev) => {
@@ -518,75 +515,130 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       description="Unified read-only console across every connector family — schema-aware, type-honest, multi-tab."
     >
       <PageFrame className="df2-query-page df2-qw">
-        {/* ---------------------------------------------------- tab strip --- */}
-        <div className="df2-qw-tabs" role="tablist" aria-label="Query tabs">
-          {tabs.map((t) => (
-            <div
-              key={t.id}
-              className="df2-qw-tab"
-              data-active={t.id === activeId}
-              role="tab"
-              aria-selected={t.id === activeId}
-            >
-              {renamingId === t.id ? (
-                <input
-                  className="df2-qw-tab-rename"
-                  defaultValue={t.title}
-                  autoFocus
-                  aria-label="Tab name"
-                  onBlur={(e) => commitRename(t.id, e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitRename(t.id, e.currentTarget.value);
-                    if (e.key === "Escape") setRenamingId("");
-                  }}
-                />
-              ) : (
+        <div ref={sticky.sentinelRef} className="df2-qw-sticky-sentinel" aria-hidden="true" />
+        {/* Tabs and the connection bar stay pinned while the editor and results scroll. */}
+        <div
+          ref={sticky.headerRef}
+          className="df2-qw-sticky"
+          data-stuck={sticky.stuck}
+          data-testid="query-sticky-header"
+        >
+          {/* ---------------------------------------------------- tab strip --- */}
+          <div className="df2-qw-tabs" role="tablist" aria-label="Query tabs">
+            {tabs.map((t) => (
+              <div
+                key={t.id}
+                className="df2-qw-tab"
+                data-active={t.id === activeId}
+                role="tab"
+                aria-selected={t.id === activeId}
+              >
+                {renamingId === t.id ? (
+                  <input
+                    className="df2-qw-tab-rename"
+                    defaultValue={t.title}
+                    autoFocus
+                    aria-label="Tab name"
+                    onBlur={(e) => commitRename(t.id, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename(t.id, e.currentTarget.value);
+                      if (e.key === "Escape") setRenamingId("");
+                    }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="df2-qw-tab-btn"
+                    onClick={() => {
+                      setActiveId(t.id);
+                      setResult(null);
+                    }}
+                    onDoubleClick={() => setRenamingId(t.id)}
+                    title={t.query.slice(0, 200) || "Empty query"}
+                  >
+                    {t.title}
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="df2-qw-tab-btn"
-                  onClick={() => {
-                    setActiveId(t.id);
-                    setResult(null);
-                  }}
-                  onDoubleClick={() => setRenamingId(t.id)}
-                  title={t.query.slice(0, 200) || "Empty query"}
+                  className="df2-qw-tab-close"
+                  onClick={() => closeTab(t.id)}
+                  aria-label={`Close ${t.title}`}
                 >
-                  {t.title}
+                  <DtIcon name="x" size={11} />
                 </button>
-              )}
+              </div>
+            ))}
+            <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab">
+              <DtIcon name="plus" size={13} />
+            </button>
+            <div className="df2-qw-tabs-right">
+              <button type="button" className="df2-qw-chip" onClick={duplicate} title="Duplicate tab">
+                Duplicate
+              </button>
               <button
                 type="button"
-                className="df2-qw-tab-close"
-                onClick={() => closeTab(t.id)}
-                aria-label={`Close ${t.title}`}
+                className="df2-qw-chip"
+                data-active={layout.schemaOpen}
+                onClick={() => setLayout((l) => ({ ...l, schemaOpen: !l.schemaOpen }))}
               >
-                <DtIcon name="x" size={11} />
+                <DtIcon name="panel-left" size={11} /> Schema
+              </button>
+              <button
+                type="button"
+                className="df2-qw-chip"
+                data-active={layout.historyOpen}
+                onClick={() => setLayout((l) => ({ ...l, historyOpen: !l.historyOpen }))}
+              >
+                <DtIcon name="clock" size={11} /> History
               </button>
             </div>
-          ))}
-          <button type="button" className="df2-qw-tab-add" onClick={addTab} title="New tab">
-            <DtIcon name="plus" size={13} />
-          </button>
-          <div className="df2-qw-tabs-right">
-            <button type="button" className="df2-qw-chip" onClick={duplicate} title="Duplicate tab">
-              Duplicate
-            </button>
-            <button
-              type="button"
-              className="df2-qw-chip"
-              data-active={layout.schemaOpen}
-              onClick={() => setLayout((l) => ({ ...l, schemaOpen: !l.schemaOpen }))}
-            >
-              <DtIcon name="panel-left" size={11} /> Schema
-            </button>
-            <button
-              type="button"
-              className="df2-qw-chip"
-              data-active={layout.historyOpen}
-              onClick={() => setLayout((l) => ({ ...l, historyOpen: !l.historyOpen }))}
-            >
-              <DtIcon name="clock" size={11} /> History
-            </button>
+          </div>
+
+          {/* ------------------------------------------------ connector --- */}
+          <div className="df2-qw-meta">
+            <div className="df2-field-flex">
+              <ConnectorSelect
+                id="query-connector"
+                label="Connector"
+                value={active?.connectorId ?? ""}
+                onChange={(id) => patchActive({ connectorId: id })}
+                connectors={connectors}
+                placeholder="Select a saved connector…"
+              />
+            </div>
+            <div className="df2-field df2-field-md">
+              <label className="df2-label">{isMongo ? "Database" : "Database / Schema"}</label>
+              <input
+                className="df2-input"
+                value={active?.database ?? ""}
+                onChange={(e) => patchActive({ database: e.target.value })}
+                placeholder={isMongo ? "mydb" : "public"}
+              />
+            </div>
+            <div className="df2-field df2-field-md">
+              <label className="df2-label">{isMongo ? "Collection" : "Table (optional)"}</label>
+              <input
+                className="df2-input"
+                value={active?.collection ?? ""}
+                onChange={(e) => patchActive({ collection: e.target.value })}
+                placeholder="users"
+              />
+            </div>
+            <div className="df2-field df2-field-sm">
+              <label className="df2-label">Row limit</label>
+              <select
+                className="df2-input"
+                value={active?.limit ?? 1000}
+                onChange={(e) => patchActive({ limit: Number(e.target.value) })}
+              >
+                {LIMITS.map((l) => (
+                  <option key={l} value={l}>
+                    {l.toLocaleString()}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -611,52 +663,6 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           )}
 
           <div className="df2-qw-main">
-            {/* ------------------------------------------------ connector --- */}
-            <div className="df2-qw-meta">
-              <div className="df2-field-flex">
-                <ConnectorSelect
-                  id="query-connector"
-                  label="Connector"
-                  value={active?.connectorId ?? ""}
-                  onChange={(id) => patchActive({ connectorId: id })}
-                  connectors={connectors}
-                  placeholder="Select a saved connector…"
-                />
-              </div>
-              <div className="df2-field df2-field-md">
-                <label className="df2-label">{isMongo ? "Database" : "Database / Schema"}</label>
-                <input
-                  className="df2-input"
-                  value={active?.database ?? ""}
-                  onChange={(e) => patchActive({ database: e.target.value })}
-                  placeholder={isMongo ? "mydb" : "public"}
-                />
-              </div>
-              <div className="df2-field df2-field-md">
-                <label className="df2-label">{isMongo ? "Collection" : "Table (optional)"}</label>
-                <input
-                  className="df2-input"
-                  value={active?.collection ?? ""}
-                  onChange={(e) => patchActive({ collection: e.target.value })}
-                  placeholder="users"
-                />
-              </div>
-              <div className="df2-field df2-field-sm">
-                <label className="df2-label">Row limit</label>
-                <select
-                  className="df2-input"
-                  value={active?.limit ?? 1000}
-                  onChange={(e) => patchActive({ limit: Number(e.target.value) })}
-                >
-                  {LIMITS.map((l) => (
-                    <option key={l} value={l}>
-                      {l.toLocaleString()}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
             {/* --------------------------------------------------- editor --- */}
             <QueryEditor
               ref={editorRef}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useShellLayoutClass } from "../../lib/useShellLayoutClass";
 import { ColumnReviewPanel, type ColumnRemapControls } from "../../components/ColumnReviewPanel";
 import { AutoMapDialog } from "../../components/mapping/AutoMapDialog";
 import { ComputedColumnDialog } from "../../components/mapping/ComputedColumnDialog";
@@ -33,17 +34,17 @@ import {
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
-import { ProgressRing } from "../../components/ui/ProgressRing";
+import type { JobsMenuItem } from "../../components/jobs/JobsMenu";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
-import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
+import { mapRowState, mapStepCounts } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
 import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
-import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
+import { MapIssueList, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -158,7 +159,7 @@ export function TransferMapStep({
   sourceType: _sourceType,
   destRouteLabel,
   destRouteSubtitle: _destRouteSubtitle,
-  mappingReviewCount,
+  mappingReviewCount: _mappingReviewCount,
   confidenceThreshold,
   rowCount,
   sampleRows,
@@ -204,13 +205,10 @@ export function TransferMapStep({
   onAddComputedSteps,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ColumnFilter>("review");
+  const [filter, setFilter] = useState<ColumnFilter>("attention");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
-  // Collapsed by default: the headline plus one primary control is the whole
-  // decision. Ten expanded reasons buried the mapping grid below the fold.
-  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
@@ -219,13 +217,12 @@ export function TransferMapStep({
   const remapEnabled = destKindMode === "database";
   const panelId = useId();
   const gripHelpId = useId();
-  // Beside the grid on a desktop; on a narrow screen it would halve the grid, so
-  // it starts closed there and opens on demand (or when a drag starts).
+  // Beside the grid on a wide desktop; below 1440 px it would squeeze the grid
+  // (UX-23), so it starts closed there and opens on demand (or when a drag starts).
   const [panelOpen, setPanelOpen] = useState(
     () => typeof window === "undefined" || typeof window.matchMedia !== "function"
-      || window.matchMedia("(min-width: 1024px)").matches,
+      || window.matchMedia("(min-width: 1440px)").matches,
   );
-  const [issuesOpen, setIssuesOpen] = useState(false);
   const emptyTypes = useMemo(() => ({}), []);
   const catalogState = useDestinationCatalog({
     endpoint: destEndpoint,
@@ -475,20 +472,11 @@ export function TransferMapStep({
   useEffect(() => {
     // Skip while an identity/focus dialog is open so we don't fight setFilter("all").
     if (userPickedFilter || focusSource || operatorEdited.current) return;
-    const needs = columnMappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
-    setFilter(needs > 0 ? "review" : "all");
+    // Same selector as the header, Review and the tabs.
+    setFilter(mapStepCounts(columnMappings).attention > 0 ? "attention" : "all");
   }, [columnMappings, confidenceThreshold, userPickedFilter, focusSource]);
 
-  useEffect(() => {
-    const content = document.querySelector(".df2-content");
-    const inner = document.querySelector(".df2-content-inner");
-    content?.classList.add(MAP_STEP_SCROLL_CLASS);
-    inner?.classList.add(MAP_STEP_SCROLL_CLASS);
-    return () => {
-      content?.classList.remove(MAP_STEP_SCROLL_CLASS);
-      inner?.classList.remove(MAP_STEP_SCROLL_CLASS);
-    };
-  }, []);
+  useShellLayoutClass(MAP_STEP_SCROLL_CLASS, ".df2-page-transfer-studio");
 
   useEffect(() => {
     if (!initialFocusSource) return;
@@ -502,17 +490,8 @@ export function TransferMapStep({
 
   const destDisplayType = destType || (destKindMode === "database" ? "" : "file");
 
-  const filterCounts = useMemo(
-    () => countByFilter(columnMappings, confidenceThreshold),
-    [columnMappings, confidenceThreshold],
-  );
 
-  const approvedCount = filterCounts.ready;
 
-  const health = useMemo(
-    () => mappingHealthSummary(columnMappings, confidenceThreshold),
-    [columnMappings, confidenceThreshold],
-  );
 
   // Same predicate as the Continue gate — the reason shown is the reason enforced.
   const blockerSummary = useMemo(
@@ -539,16 +518,6 @@ export function TransferMapStep({
   const approvalPendingCount = mapApprovalPendingCount(columnMappings);
   const canContinueToValidate =
     mapCanContinueToValidate(columnMappings, confidenceThreshold) && targetIssues.length === 0;
-  const mappingFooterLabel = health.falseFriendCount > 0
-    ? health.headline
-    : mappingReviewCount > 0
-      ? `${mappingReviewCount} need review`
-      : approvalPendingCount > 0
-        ? `${approvalPendingCount} need approval`
-      : `${approvedCount} ready`;
-  const approvedPct = columnMappings.length
-    ? Math.round((approvedCount / columnMappings.length) * 100)
-    : 0;
   const showPkSuggest = Boolean(
     requiresPrimaryKey
     && !primaryKeyField
@@ -562,6 +531,90 @@ export function TransferMapStep({
     const census = ruleCensus(ruleReport);
     return `${ruleMixSummary(ruleReport)} · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
   }, [ruleReport]);
+
+  // ---- Header status and issue triage ------------------------------------
+  const mappedCount = columnMappings.filter((m) => !isIntentionalOmit(m) && m.target.trim()).length;
+  // One selector behind every count on this step (W6 round 2): the status
+  // line, Review, the segmented filter and Approve all read stepCounts.
+  const stepCounts = mapStepCounts(columnMappings, targetIssues.length);
+  const mapAttention = stepCounts.attention;
+  const statusLine = mapStatusLine(stepCounts);
+  const destTable = targetDatabase && targetCollection ? `${targetDatabase}.${targetCollection}` : targetCollection;
+  const routeSummary = [
+    `${sourceLabel || "Source"} → ${destRouteLabel || "Destination"}`,
+    destTable && !String(destRouteLabel).includes(destTable) ? destTable : "",
+    destTableExists === true
+      ? `existing table${destColumns.length ? ` (${destColumns.length} columns)` : ""}`
+      : destTableExists === false ? "new table" : "",
+    syncModeLabel,
+    streamNames.length > 1 ? `${streamNames.length} streams` : "",
+  ].filter(Boolean).join(" · ");
+
+  // Review: the rows that need a decision; when only destination columns are
+  // open (nothing maps to a NOT NULL column), the panel where they are fixed.
+  const reviewIssues = () => {
+    const first = columnMappings.find((m) => mapRowState(m) === "attention")?.source;
+    if (!first && targetIssues.length > 0 && remapControls) {
+      setPanelOpen(true);
+      return;
+    }
+    setUserPickedFilter(true);
+    setFilter("attention");
+    setSearch("");
+    if (first) setFocusSource(first);
+  };
+  const showRows = (columns: string[]) => {
+    setUserPickedFilter(true);
+    setSearch("");
+    setFilter("attention");
+    if (columns[0]) setFocusSource(columns[0]);
+  };
+  const mapIssues: MapIssue[] = [
+    ...targetIssues.map((t, i) => ({
+      id: `target:${t.code}:${i}`,
+      tone: "block" as const,
+      title: t.title,
+      detail: t.action,
+      action: remapControls && !panelOpen
+        ? { label: "Open panel", onClick: () => setPanelOpen(true) }
+        : undefined,
+    })),
+    // Rows that only wait for Approve are the Approve button's job, not an issue.
+    ...blockerSummary.groups.filter((g) => g.code !== "approval_required").map((g) => ({
+      id: `rows:${g.code}`,
+      tone: (g.clearableFromMap ? "warn" : "block") as MapIssue["tone"],
+      title: g.title,
+      detail: g.action,
+      action: g.code === "dest_schema_unloaded" && onReloadDestSchema
+        ? { label: "Reload schema", onClick: () => void onReloadDestSchema(), disabled: destSchemaLoading }
+        : { label: g.columns.length > 1 ? `Review ${g.columns.length} rows` : "Review row", onClick: () => showRows(g.columns) },
+    })),
+  ];
+  const issueSummary = [
+    targetIssues.length
+      ? `${targetIssues.length} destination column issue${targetIssues.length === 1 ? "" : "s"} block Validate`
+      : "",
+    stepCounts.attention
+      ? `${stepCounts.attention} column${stepCounts.attention === 1 ? " needs" : "s need"} your review`
+      : "",
+  ].filter(Boolean).join(" · ");
+
+  const moreItems: JobsMenuItem[] = [
+    ...(onAddComputedSteps
+      ? [{ id: "computed", label: "Computed column…", onSelect: () => setComputedOpen(true), section: "Build" }]
+      : []),
+    { id: "templates", label: "Templates…", onSelect: () => setTemplatesOpen(true), section: "Build" },
+    { id: "export-yaml", label: "Export YAML", onSelect: () => void exportAs("yaml"), section: "Mapping as code" },
+    { id: "export-json", label: "Export JSON", onSelect: () => void exportAs("json"), section: "Mapping as code" },
+    {
+      id: "import",
+      label: "Import…",
+      onSelect: () => document.getElementById(importId)?.click(),
+      section: "Mapping as code",
+    },
+    { id: "proof", label: "How this map was built", onSelect: () => setProofOpen(true), section: "View" },
+    { id: "expand", label: "Open full table", onSelect: () => setMapDialogOpen(true), section: "View" },
+  ];
 
   const continueToValidate = (
     <button
@@ -592,18 +645,15 @@ export function TransferMapStep({
           </button>
         </div>
       )}
-      <div
-        className="df2-card-head df2-map-step-head"
-        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : approvalPendingCount > 0 ? ` · ${approvalPendingCount} need approval` : ""}`}
-      >
+      <div className="df2-card-head df2-map-step-head">
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
-          <p className="df2-card-sub">
-            Align source fields to destination types
-            {destDisplayType ? ` · ${destDisplayType}` : ""}
-            {llmUsed ? " · semantic engine" : ""}
-            {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
-            {targetDatabase && targetCollection ? ` · ${targetDatabase}.${targetCollection}` : ""}
+          <p className="df2-map-route" title={routeSummary}>{routeSummary}</p>
+          <p
+            className={`df2-map-status${mapAttention > 0 || stepCounts.destinationIssues > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
+            data-testid="map-status-line"
+          >
+            {statusLine}
           </p>
         </div>
         <div className="df2-map-step-head-actions">
@@ -612,24 +662,35 @@ export function TransferMapStep({
               CDC
             </span>
           )}
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            onClick={() => setProofOpen(true)}
-            title="Inspect how this map works — confidence evidence, transforms, fidelity risks"
-          >
-            <DtIcon name="sparkle" size={14} />
-            <span className="df2-map-btn-label">Proof</span>
-          </button>
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm df2-btn-ghost"
-            onClick={() => setMapDialogOpen(true)}
-            title="Open full mapping table in a dialog"
-          >
-            <DtIcon name="expand" size={14} />
-            <span className="df2-map-btn-label">Expand</span>
-          </button>
+          <MappingToolbar
+            remapEnabled={Boolean(remapControls)}
+            canUndo={studio.canUndo}
+            canRedo={studio.canRedo}
+            canAutoMap={Boolean(catalog && catalog.columns.length > 0)}
+            panelOpen={panelOpen}
+            panelId={panelId}
+            openSources={openSources}
+            reviewCount={mapAttention}
+            onReview={reviewIssues}
+            onAutoMap={() => void runAutoMap("all")}
+            onMapRemaining={() => void runAutoMap("remaining")}
+            onClearAll={studio.clearAll}
+            onUndo={studio.undo}
+            onRedo={studio.redo}
+            onTogglePanel={() => setPanelOpen((v) => !v)}
+            moreItems={moreItems}
+          />
+          {/* Opened by More → Import…; labelled, and out of the tab order. */}
+          <HiddenFileInput
+            id={importId}
+            tabIndex={-1}
+            accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml"
+            onChange={(e) => {
+              void importFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+          <label htmlFor={importId} className="df2-ms-file-label df2-sr-only">Import a mapping document</label>
         </div>
       </div>
 
@@ -737,70 +798,6 @@ export function TransferMapStep({
             </div>
           </details>
         )}
-        {blockerSummary.blockers.length > 0 && (
-          <div className="df2-map-blocker-bar" role="status">
-            <div className="df2-map-blocker-bar-head">
-              <DtIcon name="alert" size={16} />
-              <strong>{blockerSummary.headline}</strong>
-              {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema && (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={destSchemaLoading}
-                  onClick={() => void onReloadDestSchema()}
-                >
-                  {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
-                </Button>
-              )}
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-ghost"
-                aria-expanded={blockerDetailOpen}
-                onClick={() => setBlockerDetailOpen((v) => !v)}
-              >
-                {blockerDetailOpen ? "Hide detail" : `Why (${blockerSummary.groups.length})`}
-              </button>
-            </div>
-            {blockerDetailOpen && (
-              <ul className="df2-map-blocker-list">
-                {blockerSummary.groups.map((g) => (
-                  <li key={g.code}>
-                    <strong>{g.title}</strong>
-                    <span> — {g.action}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-        {targetIssues.length > 0 && (
-          <div className="df2-map-blocker-bar df2-ms-target-issues" role="status" data-testid="map-target-issues">
-            <div className="df2-map-blocker-bar-head">
-              <DtIcon name="alert" size={16} />
-              <strong>
-                {targetIssues.length} destination column issue{targetIssues.length === 1 ? "" : "s"} block Validate
-              </strong>
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-ghost"
-                aria-expanded={issuesOpen}
-                onClick={() => setIssuesOpen((v) => !v)}
-              >
-                {issuesOpen ? "Hide detail" : `Why (${targetIssues.length})`}
-              </button>
-            </div>
-            <span className="df2-sr-only">{targetIssues.map((t) => t.title).join(". ")}.</span>
-            {issuesOpen && <ul className="df2-map-blocker-list">
-              {targetIssues.slice(0, 8).map((t) => (
-                <li key={`${t.code}:${t.title}`}>
-                  <strong>{t.title}</strong>
-                  <span> — {t.action}</span>
-                </li>
-              ))}
-              {targetIssues.length > 8 ? <li>…and {targetIssues.length - 8} more.</li> : null}
-            </ul>}
-          </div>
-        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
@@ -827,49 +824,27 @@ export function TransferMapStep({
         )}
         {/* Toolbar and split scroll inside the Map body: the classic view is a fixed-height card. */}
         <div className="df2-ms-scroll">
-        {remapControls && (
-          <MappingToolbar
-            canUndo={studio.canUndo}
-            canRedo={studio.canRedo}
-            canAutoMap={Boolean(catalog && catalog.columns.length > 0)}
-            panelOpen={panelOpen}
-            panelId={panelId}
-            openSources={openSources}
-            onAutoMap={() => void runAutoMap("all")}
-            onMapRemaining={() => void runAutoMap("remaining")}
-            onClearAll={studio.clearAll}
-            onUndo={studio.undo}
-            onRedo={studio.redo}
-            onTogglePanel={() => setPanelOpen((v) => !v)}
-            extra={
-              <>
-                {onAddComputedSteps && (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setComputedOpen(true)}>
-                    Computed column…
-                  </button>
-                )}
-                <button type="button" className="df2-btn df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
-                  Templates…
-                </button>
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void exportAs("yaml")}>
-                  Export YAML
-                </button>
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void exportAs("json")}>
-                  Export JSON
-                </button>
-                <HiddenFileInput
-                  id={importId}
-                  accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml"
-                  onChange={(e) => {
-                    void importFile(e.target.files?.[0]);
-                    e.target.value = "";
-                  }}
-                />
-                <label htmlFor={importId} className="df2-btn df2-btn-sm df2-btn-ghost df2-ms-file-label">
-                  Import…
-                </label>
-              </>
-            }
+        {/* The issue list scrolls with the grid, so a phone keeps rows in view. */}
+        {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema ? (
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={destSchemaLoading}
+                onClick={() => void onReloadDestSchema()}
+              >
+                {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <MapIssueList
+            issues={mapIssues}
+            summary={issueSummary}
+            testId={targetIssues.length > 0 ? "map-target-issues" : "map-issues"}
           />
         )}
         {(codeStatus || (pendingComputed.length > 0 && onAddComputedSteps)) && (
@@ -962,17 +937,6 @@ export function TransferMapStep({
       {!hideFooter && <div className="df2-card-footer df2-wizard-footer df2-map-footer">
         <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
-          <ProgressRing
-            value={approvedPct}
-            size={36}
-            tone={!canContinueToValidate ? "warn" : "ok"}
-            className="df2-map-footer-ring"
-          >
-            <strong>{approvedPct}</strong>
-          </ProgressRing>
-          <span className={!canContinueToValidate ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
-            <strong>Mapping</strong> {mappingFooterLabel}
-          </span>
           <span
             className={requiresPrimaryKey && !primaryKeyField ? "is-warn" : undefined}
             title={

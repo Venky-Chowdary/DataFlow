@@ -184,6 +184,14 @@ function button(text: string | RegExp): HTMLButtonElement {
   return b;
 }
 
+/** Map's secondary actions live in the toolbar's More menu (W6). */
+async function moreItem(text: string): Promise<HTMLButtonElement> {
+  await act(async () => button("More").click());
+  const item = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((x) => x.textContent === text);
+  assert.ok(item, `no menu item ${text}`);
+  return item;
+}
+
 async function type(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   await act(async () => {
     const proto = el instanceof dom.window.HTMLTextAreaElement ? dom.window.HTMLTextAreaElement.prototype : dom.window.HTMLInputElement.prototype;
@@ -218,7 +226,7 @@ afterEach(async () => {
 describe("Map step P2: computed columns, templates, mapping-as-code", () => {
   it("export sends the rows and the Transform's computed steps as a document", async () => {
     await render(ROWS());
-    await act(async () => button("Export YAML").click());
+    { const item = await moreItem("Export YAML"); await act(async () => item.click()); }
     await settle(20);
     const call = calls.find((c) => c.url.endsWith("/transfer/mapping/export"));
     assert.ok(call);
@@ -258,7 +266,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
 
   it("a computed column is checked by the engine's compiler and added to Transform", async () => {
     await render(ROWS());
-    await act(async () => button("Computed column…").click());
+    { const item = await moreItem("Computed column…"); await act(async () => item.click()); }
     const target = document.querySelector<HTMLInputElement>('.df2-ms-computed input[placeholder="full_name"]')!;
     await type(target, "full_name");
     const expr = document.querySelector<HTMLTextAreaElement>(".df2-ms-computed textarea")!;
@@ -277,7 +285,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
 
   it("run start time adds one run-scoped value to Transform, only for a zone-aware column", async () => {
     await render(ROWS());
-    await act(async () => button("Computed column…").click());
+    { const item = await moreItem("Computed column…"); await act(async () => item.click()); }
     await act(async () => document.querySelector<HTMLInputElement>('input[aria-label="Run start time (fixed once per run)"]')!.click());
     const target = document.querySelector<HTMLInputElement>('.df2-ms-computed input[placeholder="full_name"]')!;
     await type(target, "loaded_at");
@@ -297,7 +305,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
       computed: [],
     };
     await render(ROWS());
-    await act(async () => button("Templates…").click());
+    { const item = await moreItem("Templates…"); await act(async () => item.click()); }
     await settle(20);
     const name = document.querySelector<HTMLInputElement>('.df2-ms-templates input[placeholder="Orders onto customers"]')!;
     await type(name, "Orders v2");
@@ -319,7 +327,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
 
   it("deleting a template asks in the page first and keeps focus in the dialog", async () => {
     await render(ROWS());
-    await act(async () => button("Templates…").click());
+    { const item = await moreItem("Templates…"); await act(async () => item.click()); }
     await settle(20);
     const del = document.querySelector<HTMLButtonElement>('button[aria-label="Delete Orders onto customers"]')!;
     await act(async () => del.click());
@@ -342,5 +350,8 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
     const label = input.nextElementSibling;
     assert.ok(label?.matches("label.df2-ms-file-label"), "the label follows the input so :focus-visible + label can style it");
     assert.equal(label?.getAttribute("for"), input.id);
+    // More → Import… opens the picker; the input itself is not a hidden tab stop.
+    assert.equal(input.tabIndex, -1);
+    assert.match(label?.textContent ?? "", /Import/);
   });
 });

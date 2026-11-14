@@ -480,3 +480,124 @@
   background: var(--df-brand-ring, rgba(15, 118, 110, 0.22));
   color: var(--df-text-primary);
 }
+
+/* ==========================================================================
+   One stat tile (W6): label, value, caption or sparkline on the neutral card
+   surface. Status is a small dot by the label, never a coloured block. Used by
+   Overview → Migration health, Reversibility, Trust Report and the Jobs
+   drawer summaries. Tokens only; same light/dark behaviour as cards.
+   ========================================================================== */
+
+.df2-stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--df-space-3);
+  margin: 0;
+}
+
+.df2-stat-tiles.is-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.df2-stat-tile {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--df-space-3) var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.df2-stat-tile-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-secondary);
+}
+
+.df2-stat-tile-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-text-tertiary);
+}
+
+.df2-stat-tile[data-tone="ok"] .df2-stat-tile-dot { background: var(--df-success); }
+.df2-stat-tile[data-tone="warn"] .df2-stat-tile-dot { background: var(--df-warning); }
+.df2-stat-tile[data-tone="danger"] .df2-stat-tile-dot { background: var(--df-danger); }
+
+.df2-stat-tile-value {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: var(--df-fs-xl);
+  font-weight: var(--df-fw-bold);
+  line-height: 1.25;
+  color: var(--df-text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.df2-stat-tile-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-2);
+  min-height: 20px;
+  margin: 0;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-stat-tile-caption {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-spark {
+  flex: none;
+  display: block;
+}
+
+.df2-spark-line {
+  fill: none;
+  stroke: var(--df-brand);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.df2-spark-dot {
+  fill: var(--df-brand);
+}
+
+.df2-spark-bar {
+  fill: var(--df-warning);
+}
+
+.df2-spark-base {
+  stroke: var(--df-border);
+  stroke-width: 1;
+}
+
+@media (max-width: 900px) {
+  .df2-stat-tiles,
+  .df2-stat-tiles.is-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 420px) {
+  .df2-stat-tiles {
+    gap: var(--df-space-2);
+  }
+
+  .df2-stat-tile {
+    padding: var(--df-space-2) var(--df-space-3);
+  }
+}

@@ -19,6 +19,7 @@ built from (timezone polarity, precision/scale, width), so the tooltip can say
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 SAFE = "safe"
@@ -32,6 +33,27 @@ MAX_PAIRS = 2000
 
 def _reason(kind: str, message: str) -> dict[str, str]:
     return {"kind": kind, "message": message}
+
+
+_GENERATOR_ATTR = re.compile(r"\b(?:AUTO_INCREMENT|IDENTITY|GENERATED\s+(?:ALWAYS|BY\s+DEFAULT))\b", re.I)
+
+
+def _storage_type(spelling: str) -> str:
+    """The storage type with generator attributes off (UX-26).
+
+    A destination catalog spells identity onto the type (MySQL
+    ``BIGINT AUTO_INCREMENT``, ``BIGINT GENERATED ALWAYS AS IDENTITY``). That
+    says who fills the column, not how a value is stored, so ``INT4 → BIGINT
+    AUTO_INCREMENT`` grades as ``INT4 → BIGINT``. Only a type that carries a
+    generator is touched: COLLATE / CHARACTER SET on a text type stay, since
+    the charset verdict reads them.
+    """
+    from services.type_system import strip_identity_qualifier
+
+    if not _GENERATOR_ATTR.search(spelling):
+        return spelling
+    without_null = re.sub(r"\s+NOT\s+NULL\b", "", spelling, flags=re.I)
+    return strip_identity_qualifier(without_null) or spelling
 
 
 def _lossy_reasons(src: str, tgt: str, dest_db: str) -> list[dict[str, str]]:
@@ -99,13 +121,15 @@ def grade_type_pair(
     from services.conversion_contract import ConversionClass, classify_conversion
     from services.mapping_proof import mapping_fidelity
 
-    src = str(source_type or "").strip()
-    tgt = str(target_type or "").strip()
+    shown_src = str(source_type or "").strip()
+    shown_tgt = str(target_type or "").strip()
+    src = _storage_type(shown_src)
+    tgt = _storage_type(shown_tgt)
     db = str(dest_db or "").strip().lower()
     if not src or not tgt:
         return {
-            "source_type": src,
-            "target_type": tgt,
+            "source_type": shown_src,
+            "target_type": shown_tgt,
             "verdict": UNKNOWN,
             "conversion_class": ConversionClass.NEEDS_MANUAL_MAPPING.value,
             "reasons": [_reason(
@@ -117,8 +141,8 @@ def grade_type_pair(
     conv = classify_conversion(src, tgt, dest_db=db, transform=transform)
     if conv["conversion_class"] == ConversionClass.UNSUPPORTED.value:
         return {
-            "source_type": src,
-            "target_type": tgt,
+            "source_type": shown_src,
+            "target_type": shown_tgt,
             "verdict": INCOMPATIBLE,
             "conversion_class": conv["conversion_class"],
             "reasons": [_reason("incompatible", str(conv.get("reason") or ""))],
@@ -138,8 +162,8 @@ def grade_type_pair(
     )
     if not lossy:
         return {
-            "source_type": src,
-            "target_type": tgt,
+            "source_type": shown_src,
+            "target_type": shown_tgt,
             "verdict": SAFE,
             "conversion_class": conv["conversion_class"],
             "reasons": [_reason("safe", str(fid.get("reason") or conv.get("reason") or ""))],

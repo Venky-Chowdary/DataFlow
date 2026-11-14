@@ -365,7 +365,10 @@ describe("Map step: remap onto existing destination columns", () => {
 
   it("clear all empties every destination and Validate is held until each row is mapped or omitted", async () => {
     await render([m("order_id", "legacy_ref", "BIGINT"), m("first_name", "given_name", "VARCHAR(40)")]);
-    const clear = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "Clear all")!;
+    // Clear all sits in the toolbar's More menu (W6).
+    const moreBtn = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "More")!;
+    await act(async () => moreBtn.click());
+    const clear = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) => b.textContent === "Clear all mappings")!;
     await act(async () => clear.click());
     assert.deepEqual(latest.map((r) => r.target), ["", ""]);
     assert.equal(continueButton().disabled, true);
@@ -564,5 +567,108 @@ describe("Map step: remap onto existing destination columns", () => {
     await settle(10);
     assert.equal(continued, 2);
     assert.equal(posts().length, 1, "the same confirmations are not posted twice");
+  });
+});
+
+describe("Map step layout (W6): one header, a compact toolbar, triage filter, expandable rows", () => {
+  const buttons = () => Array.from(host!.querySelectorAll<HTMLButtonElement>("button"));
+
+  it("the toolbar shows Auto-map and Review; everything else is in one More menu", async () => {
+    await render([m("order_id", "legacy_ref", "BIGINT"), m("first_name", "given_name", "VARCHAR(40)")]);
+    const toolbar = q('[role="toolbar"][aria-label="Mapping actions"]');
+    const visible = Array.from(toolbar.querySelectorAll<HTMLButtonElement>("button")).map(
+      // jsdom has no matchMedia, so the panel starts open here: one toggle either way.
+      (b) => (b.getAttribute("aria-label") || (b.textContent ?? "").trim()).replace(/^Hide destination/, "Show destination"),
+    );
+    assert.deepEqual(visible, ["Auto-map…", "Review", "Undo", "Redo", "Show destination columns", "More mapping actions"]);
+    for (const gone of ["Map remaining", "Clear all", "Computed column…", "Templates…", "Export YAML", "Export JSON", "Import…", "Proof", "Expand"]) {
+      assert.ok(!buttons().some((b) => (b.textContent ?? "").trim().startsWith(gone)), `${gone} must live in the More menu`);
+    }
+    // Undo/Redo are icon buttons with their shortcuts.
+    const undo = q<HTMLButtonElement>('button[aria-label="Undo"]', toolbar);
+    assert.match(undo.getAttribute("aria-keyshortcuts") ?? "", /Z$/);
+    const trigger = q<HTMLButtonElement>('button[aria-label="More mapping actions"]', toolbar);
+    assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
+    await act(async () => trigger.click());
+    const items = Array.from(document.querySelectorAll('[role="menuitem"]')).map((x) => x.textContent);
+    for (const want of ["Map remaining", "Clear all mappings", "Templates…", "Export YAML", "Export JSON", "Import…", "How this map was built", "Open full table"]) {
+      assert.ok(items.some((t) => t?.startsWith(want)), `More menu lists ${want}: ${items.join(", ")}`);
+    }
+    await key(document.activeElement ?? document.body, "Escape");
+  });
+
+  it("the header carries the route and one status line", async () => {
+    await render([
+      m("order_id", "legacy_ref", "BIGINT", { approved: false }),
+      m("first_name", "", "VARCHAR(40)", { approved: false }),
+    ]);
+    assert.match(q(".df2-map-route").textContent ?? "", /mysql\.orders → warehouse\.orders_dest/);
+    assert.match(
+      q('[data-testid="map-status-line"]').textContent ?? "",
+      /^1 of 2 mapped · 1 needs your review( · \d+ destination column issues?)?$/,
+    );
+  });
+
+  it("the column filter is one segmented control: All, Needs attention, Ready", async () => {
+    await render([m("order_id", "legacy_ref", "BIGINT")]);
+    const tabs = Array.from(q('[role="tablist"][aria-label="Filter columns"]').querySelectorAll('[role="tab"]')).map(
+      (t) => (t.textContent ?? "").replace(/\s*\(\d+\)$/, ""),
+    );
+    assert.deepEqual(tabs, ["All", "Needs attention", "Ready"]);
+    assert.equal(host!.querySelector('select[aria-label="Sort columns"]'), null, "no sort select on the Map grid");
+    assert.equal(host!.querySelector('select[aria-label="Rows per page"]'), null, "no page-size select on the Map grid");
+  });
+
+  it("a row opens its details: the full why, the type and the options, never a clamped cell", async () => {
+    const reason = "Name and type match the existing destination column; the sampled values all fit, so the write is lossless for every row the sample read.";
+    await render([m("order_id", "legacy_ref", "BIGINT", { reason, approved: false })]);
+    const row = q('tr[data-source="order_id"]');
+    assert.equal(row.querySelector(".df2-column-reason"), null, "no truncated Why column in the grid");
+    assert.equal(row.querySelector('select[aria-label="Destination type for order_id"]'), null, "the type select is in the details");
+    const toggle = q<HTMLButtonElement>('button[aria-label="Show details for order_id"]', row);
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    await act(async () => toggle.click());
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    const detail = q(`#${toggle.getAttribute("aria-controls")}`);
+    assert.ok((detail.textContent ?? "").includes(reason), "the whole reason is shown");
+    assert.ok(detail.querySelector('select[aria-label="Destination type for order_id"]'));
+    await act(async () => toggle.click());
+    assert.equal(host!.querySelector(`#${toggle.getAttribute("aria-controls")}`), null);
+  });
+
+  it("a lossy row has its recommended policy preselected, in plain words", async () => {
+    await render([m("signup_ts", "signup_ts", "TIMESTAMPTZ", { destType: "DATETIME(6)", fidelity: "lossy_cast", approved: false })]);
+    const row = q('tr[data-source="signup_ts"]');
+    assert.match(row.textContent ?? "", /Lossy/);
+    const sign = Array.from(row.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "Sign Risk Contract");
+    assert.ok(sign);
+    assert.equal(sign!.disabled, false, "the recommended policy is preselected, so the row can be signed in one step");
+    await act(async () => q<HTMLButtonElement>('button[aria-label="Show details for signup_ts"]').click());
+    const policy = q<HTMLSelectElement>('select[aria-label="Execution policy for signup_ts"]');
+    assert.equal(policy.value, "QUARANTINE_ROW");
+    assert.doesNotMatch(Array.from(policy.options).map((o) => o.text).join(" | "), /FAIL_JOB|QUARANTINE_ROW|CAST_FAIL/);
+    assert.match(policy.selectedOptions[0].text, /recommended/);
+  });
+});
+
+describe("Map step counts on screen come from one selector (W6 round 2)", () => {
+  it("header, Review, the tabs and Approve agree on the screenshot's rows", async () => {
+    await render(ORDERS().map((r) => ({ ...r, approved: false })));
+    const tabs = Array.from(q('[role="tablist"][aria-label="Filter columns"]').querySelectorAll('[role="tab"]'))
+      .map((t) => t.textContent ?? "");
+    assert.deepEqual(tabs, ["All (4)", "Needs attention (0)", "Ready (4)"]);
+    const approve = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => /Approve eligible/.test(b.textContent ?? ""));
+    assert.match(approve?.textContent ?? "", /Approve eligible \(4\)/);
+    const review = q<HTMLButtonElement>('[role="toolbar"][aria-label="Mapping actions"] button[aria-keyshortcuts="R"]');
+    assert.equal(review.disabled, true, "nothing needs attention, so Review has nothing to show");
+    assert.equal(review.textContent, "Review");
+    const status = q('[data-testid="map-status-line"]').textContent ?? "";
+    assert.match(status, /^4 of 4 mapped/);
+    assert.match(status, /4 ready to approve$/);
+    assert.doesNotMatch(status, /need your review|needs your review/);
+    // The destination panel counts the new columns too, in words the header agrees with.
+    const panelLine = q('[data-testid="dest-panel-summary"]').textContent ?? "";
+    assert.match(panelLine, /existing columns · 0 receive a source · 4 new columns will be added/);
+    assert.doesNotMatch(panelLine, /unmapped/);
   });
 });

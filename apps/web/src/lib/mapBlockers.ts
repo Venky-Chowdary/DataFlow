@@ -22,8 +22,11 @@ import {
   isDestSchemaPending,
   isFalseFriendReview,
   isIntentionalOmit,
+  executionPolicyLabel,
+  mappingAckLabel,
   mappingRequiresRiskAck,
   mappingReviewKindMeta,
+  recommendedExecutionPolicy,
   type EditableMapping,
   type ExecutionPolicy,
 } from "./mapping";
@@ -50,10 +53,11 @@ export interface MapBlocker {
   clearableFromMap: boolean;
 }
 
+// Plain words, never wire codes: "Quarantine failing rows (replayable)", …
 const CONTINUE_POLICY_NAMES = EXECUTION_POLICY_OPTIONS
   .filter((p) => p.continueUnlock)
-  .map((p) => p.id)
-  .join(" / ");
+  .map((p) => p.label.replace(/\s*\(.*\)$/, "").toLowerCase())
+  .join("; ");
 
 /**
  * Source → destination types as measured.
@@ -159,7 +163,7 @@ export function mappingBlocker(
     return {
       code: "fail_closed_contract",
       source: m.source,
-      title: `${m.source} contract is signed with ${policy}, which stops the write by design`,
+      title: `${m.source} contract is signed with “${executionPolicyLabel(policy)}”, which stops the write by design`,
       action: `Re-sign with a continue policy (${CONTINUE_POLICY_NAMES}) to run with the loss recorded, or fix the type path.`,
       clearableFromMap: true,
     };
@@ -181,7 +185,8 @@ export function mappingBlocker(
       code: "risk_ack_required",
       source: m.source,
       title: `${m.source} loses fidelity (${typePath(m)})${m.fidelityReason ? ` — ${m.fidelityReason}` : ""}`,
-      action: "Choose an execution policy on the row, then Sign Risk Contract.",
+      // Name the button the row really shows (UX-4); the recommended policy is preselected.
+      action: `On the row, keep the recommended execution policy (“${executionPolicyLabel(recommendedExecutionPolicy(m))}”) or pick another, then press “${mappingAckLabel(m)}”.`,
       clearableFromMap: true,
     };
   }
@@ -250,7 +255,7 @@ const GROUP_TITLES: Partial<Record<MapBlockerCode, string>> = {
   dest_schema_unloaded: "destination column type not read yet",
   assume_timezone_zone_missing: "source zone declared but not named",
   no_destination: "no destination column",
-  risk_ack_required: "lossy type path needs a signed Risk Contract",
+  risk_ack_required: "lossy conversion needs your sign-off",
   approval_required: "not approved yet",
   existing_dest_type_override: "changes an existing destination column type",
   existing_enum_boolean: "existing destination domain conflict",
