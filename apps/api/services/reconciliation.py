@@ -1267,24 +1267,31 @@ def reconcile(
             if checksum_match
             else " One or more source-row fingerprints are missing on the destination."
         )
+        # DATA-1: rows the source no longer has (a missed TRUNCATE or delete)
+        # are a divergence, not a pass; the image is not proven.
+        dest_extra = target_rows > expected_rows
+        extra_note = (
+            f" The destination holds {target_rows - expected_rows:,} row(s) the source "
+            "no longer has, so it is not proven to match."
+            if dest_extra else ""
+        )
         return ReconciliationReport(
-            passed=(not dest_short) and checksum_match,
+            passed=(not dest_short) and checksum_match and not dest_extra,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
                 f"CDC catch-up dest COUNT={target_rows:,} vs source image "
-                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
-                "Dest extras are not a failure. At-least-once upsert. "
-                "Not platform exactly-once."
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note}{extra_note} "
+                "At-least-once upsert. Not platform exactly-once."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
             checksum_match=checksum_match and not dest_short,
-            population_proof=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short and not dest_extra,
             assurance_level=CDC_SOURCE_IMAGE_VALUES,
             checksum_scope=CDC_SOURCE_IMAGE_VALUES,
             target_rows_before=target_rows_before,

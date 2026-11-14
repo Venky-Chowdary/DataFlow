@@ -24,7 +24,7 @@ class RelationMeta:
 
 @dataclass
 class DecodedChange:
-    op: str  # begin | commit | insert | update | delete
+    op: str  # begin | commit | insert | update | delete | truncate
     namespace: str = ""
     relation: str = ""
     old_tuple: dict[str, str] | None = None
@@ -50,8 +50,17 @@ class PgOutputDecoder:
             return []
         try:
             return self._decode_message(raw)
-        except Exception:
-            return []
+        except Exception as exc:
+            # A change that can't be decoded must stop the stream: returning
+            # nothing here dropped it silently and the position moved past it
+            # (data audit DATA-1).
+            from services.data_errors import CdcDecodeFailed
+
+            raise CdcDecodeFailed(
+                "CDC couldn't decode a change from the PostgreSQL replication stream "
+                f"(message type {chr(raw[0])!r}): {exc}. The stream position did not "
+                "move. Check the source server version and publication, then run again."
+            ) from exc
 
     def _decode_message(self, data: bytes) -> list[DecodedChange]:
         if not data:
@@ -81,8 +90,28 @@ class PgOutputDecoder:
         if msg_type == "D":
             change = self._decode_delete(buf)
             return [change] if change else []
-        # T/Y/O/M ignored for DML apply
+        if msg_type == "T":
+            return self._decode_truncate(buf)
+        # Y (type), O (origin) and M (logical message) carry no row changes.
         return []
+
+    def _decode_truncate(self, buf: "_ByteReader") -> list[DecodedChange]:
+        """Truncate: nrelations(4) + options(1) + relation oids (4 each).
+
+        One ``truncate`` change per relation. A truncated relation this decoder
+        has no Relation message for can't be named, so it stops the stream
+        rather than being skipped (DATA-1).
+        """
+        count = buf.read_int32()
+        buf.read_int8()  # option bits: 1 CASCADE, 2 RESTART IDENTITY
+        out: list[DecodedChange] = []
+        for _ in range(count):
+            oid = buf.read_int32()
+            rel = self.relations.get(oid)
+            if rel is None:
+                raise ValueError(f"TRUNCATE names relation oid {oid} with no Relation message")
+            out.append(DecodedChange("truncate", rel.namespace, rel.relation))
+        return out
 
     def _decode_relation(self, buf: "_ByteReader") -> None:
         oid = buf.read_int32()

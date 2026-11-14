@@ -3339,6 +3339,18 @@ class KeyCensusAccumulator:
         self._pending_added = added
         self._pending_open = True
 
+    def add_source_truncate(self, rows_removed: int) -> None:
+        """A source TRUNCATE emptied the destination: each row it held is a delete.
+
+        Keys this run already wrote are gone too, so a later re-insert counts as
+        an insert again (data audit DATA-1).
+        """
+        removed = max(int(rows_removed or 0), 0)
+        self._tombstones += removed
+        self._unique_tombstone_fallback += removed
+        self._absent.update(self._seen)
+        self._tomb_seen.clear()
+
     def add_tombstones(
         self,
         dest_hits: int | None,

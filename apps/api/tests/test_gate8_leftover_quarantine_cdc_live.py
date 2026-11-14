@@ -400,7 +400,10 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
 
         scope = recon.get("checksum_scope")
         if scope == CDC_SOURCE_IMAGE_VALUES:
-            assert recon.get("passed") is True, recon
+            # DATA-1: the pre-existing row 99 the source never had is a
+            # destination extra, so the image is not proven.
+            assert recon.get("passed") is False, recon
+            assert "the source no longer has" in str(recon.get("message") or "")
         else:
             assert scope == CDC_SOURCE_IMAGE_COUNT
             assert recon.get("passed") is False, recon

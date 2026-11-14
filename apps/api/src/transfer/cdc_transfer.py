@@ -1667,6 +1667,31 @@ def _repairable_image(
     return kept, held
 
 
+def _apply_source_truncate(
+    dest_type: str, dest_cfg: dict[str, Any], dest_table: str, change: ChangeBatch
+) -> int:
+    """Empty the destination for a source TRUNCATE before the batch's changes (DATA-1)."""
+    if not getattr(change, "truncated", False):
+        return 0
+    from connectors.table_manager import _missing_table_error
+    from services.cdc_truncate_apply import empty_destination_for_source_truncate
+
+    try:
+        return empty_destination_for_source_truncate(
+            dest_type, dest_cfg, dest_table, dest_cfg.get("schema")
+        )
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return 0
+        raise
+
+
+def _stamp_truncate(summary: Any, change: ChangeBatch, rows: int) -> None:
+    if isinstance(summary, dict) and getattr(change, "truncated", False):
+        summary["source_truncated"] = True
+        summary["source_truncate_deleted_rows"] = int(rows)
+
+
 def _refuse_cdc_without_deletes(dest_type: str, destination: Any, dest_cfg: dict[str, Any], table: str) -> None:
     """Refuse CDC before the snapshot when the destination can't apply deletes (CLM-2)."""
     from services.cdc_destination_support import (
@@ -1798,6 +1823,7 @@ def _apply_change_batch(
             rejected=rejected_details,
             lookup_columns=change.lookup_columns,
             unkeyed_deletes=list(change.unkeyed_deletes or []),
+            truncated=bool(getattr(change, "truncated", False)),
         )
     # C2: deletes with no key are recorded (DLQ + audit) before anything moves;
     # a failed record raises, so the position never passes them. A delete whose
@@ -1823,6 +1849,7 @@ def _apply_change_batch(
         connector=str(dest_type or ""),
     )
 
+    truncated_rows = _apply_source_truncate(dest_type, dest_cfg, dest_table, change)
     inherit_note = ""
     if mappings_inherited:
         mappings, headers, pk_target_col, inherit_note = _align_inherited_batch(
@@ -1869,10 +1896,11 @@ def _apply_change_batch(
         # Gate-8 refused every SQL Server change-tracking run as "no
         # reconcile_sample" although the destination equalled the source (D173).
         _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
+        _stamp_truncate(dest_summary, change, truncated_rows)
         return rows, checksum, stamp_parked(_note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
-        ), parked_evidence), deleted
+        ), parked_evidence), deleted + truncated_rows
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -1892,6 +1920,8 @@ def _apply_change_batch(
         from services.row_conservation import census_change_batch, observe_change_batch
 
         if census_acc is not None:
+            if truncated_rows:
+                census_acc.add_source_truncate(truncated_rows)
             observe_change_batch(
                 census_acc,
                 inserts=change.inserts,
@@ -1917,6 +1947,10 @@ def _apply_change_batch(
                 table_name=dest_table,
                 mappings=mappings,
             )
+        if census is not None and truncated_rows and census_acc is None:
+            import dataclasses
+
+            census = dataclasses.replace(census, tombstones=census.tombstones + truncated_rows)
         if census is not None:
             census_payload = census.to_dict()
 
@@ -2038,7 +2072,8 @@ def _apply_change_batch(
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
     dest_summary["rows_skipped"] = rows_skipped
-    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted
+    _stamp_truncate(dest_summary, change, truncated_rows)
+    return rows_written, last_checksum, stamp_parked(dest_summary, parked_evidence), deleted + truncated_rows
 
 
 def _stamp_cdc_poll(
