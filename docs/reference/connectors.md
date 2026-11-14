@@ -61,12 +61,12 @@ These numbers count different things. Quote the first one as "connectors that ca
 | Count | Value | What it counts |
 |---|---|---|
 | Transfer-live drivers | 46 | Unique driver and file-format types that can run a transfer on this server right now (two-way, destination-only, file and first-class source-only), excluding fixture-only SDK sources. The public count. |
-| CI-proven drivers | 2 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (bigquery, snowflake). The other 44 are implemented but not yet proven. Evidence: CI run 43541342717, recorded 2026-11-14. |
+| CI-proven drivers | 21 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (avro, bigquery, csv, excel, fixed_width, json, jsonl, mongodb, mysql, ndjson, orc, parquet, pgvector, postgresql, redis, snowflake, sqlite, sqlserver, tsv, xml, yaml). The other 25 are implemented but not yet proven. Evidence: CI run 43623907668, recorded 2026-11-14. |
 | Transfer-ready catalog drivers | 35 | Unique drivers behind those tiles. Smaller than transfer_live_drivers because several tiles share one driver and file formats are not tiles here. |
 | Transfer-ready catalog ids | 82 | Catalog ids marked transfer-ready, hosted twins included. |
 | CDC source engines | 5 | Registry entries the Validate gate accepts as a CDC source. (mongodb, mysql, oracle, postgresql, sqlserver) |
 | Catalog tiles | 647 | All tiles in the connector catalog. By status: beta: 30, live: 111, planned: 506. |
-| Catalog tiles by tier | - | certified: 12, implemented: 96, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
+| Catalog tiles by tier | - | certified: 67, implemented: 41, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
 
 ### Drivers
 
@@ -104,18 +104,18 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `mailjet` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `milvus` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
 | `monday` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `mongodb` | yes | yes | needs cursor | yes | yes | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green |
-| `mysql` | yes | yes | needs cursor | yes | yes | yes | insert_on_duplicate_key | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `mongodb` | yes | yes | needs cursor | yes | yes | yes | - | yes | Certified | proven |
+| `mysql` | yes | yes | needs cursor | yes | yes | yes | insert_on_duplicate_key | yes | Certified | proven |
 | `neo4j` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `notion` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `oracle` | yes | yes | needs cursor | yes | yes | yes | merge | yes | Implemented, not yet proven | not proven: the proving job did not run (opt-in) |
-| `pgvector` | yes | yes | needs cursor | no | yes | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green; engine `postgresql` |
+| `pgvector` | yes | yes | needs cursor | no | yes | yes | - | yes | Certified | proven; engine `postgresql` |
 | `pinecone` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
 | `pipedrive` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `postgresql` | yes | yes | needs cursor | yes | yes | yes | insert_on_conflict | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `postgresql` | yes | yes | needs cursor | yes | yes | yes | insert_on_conflict | yes | Certified | proven |
 | `posthog` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `qdrant` | yes | yes | needs cursor | no | yes | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
-| `redis` | yes | yes | needs cursor | no | no | yes | - | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `redis` | yes | yes | needs cursor | no | no | yes | - | yes | Certified | proven |
 | `redshift` | yes | yes | needs cursor | no | no | yes | delete_insert_stage | yes | Planned; not offered as transfer-ready | not proven: no CI job proves it |
 | `rest_api` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `s3` | yes | yes | re-read, no cursor | no | no | no | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
@@ -127,8 +127,8 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `singer_tap` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `slack` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
-| `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Implemented, not yet proven | not proven: a proving job did not run green |
-| `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Implemented, not yet proven | not proven: a proving job did not run green |
+| `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Certified | proven |
+| `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Certified | proven |
 | `stripe` | yes | yes | needs cursor | no | no | no | - | no | Implemented, not yet proven; destination role not offered as transfer-ready | not proven: no CI job proves it |
 | `todoist` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `typeform` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
@@ -141,21 +141,21 @@ These numbers count different things. Quote the first one as "connectors that ca
 
 | Connector | Read | Write | Incremental | CDC source | CDC sink | Upsert | Merge strategy | Create-privilege probe | Tier | CI evidence |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `avro` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `csv` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `avro` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `csv` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
 | `docx` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
-| `excel` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `fixed_width` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `excel` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `fixed_width` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
 | `html` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
-| `json` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `jsonl` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `ndjson` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `orc` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `parquet` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `json` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `jsonl` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `ndjson` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `orc` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `parquet` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
 | `pdf` | yes | no | re-read, no cursor | no | no | n/a | - | n/a | Implemented, not yet proven | not proven: no CI job proves it |
-| `tsv` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `xml` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
-| `yaml` | yes | yes | re-read, no cursor | no | no | no | - | no | Implemented, not yet proven | not proven: a proving job did not run green; engine `files` |
+| `tsv` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `xml` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
+| `yaml` | yes | yes | re-read, no cursor | no | no | no | - | no | Certified | proven; engine `files` |
 
 <!-- END GENERATED: connector-matrix -->
 

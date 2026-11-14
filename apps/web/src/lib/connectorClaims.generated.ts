@@ -23,22 +23,22 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "driver": "postgresql",
       "name": "PostgreSQL",
-      "proven": false
+      "proven": true
     },
     {
       "driver": "mysql",
       "name": "MySQL",
-      "proven": false
+      "proven": true
     },
     {
       "driver": "mongodb",
       "name": "MongoDB",
-      "proven": false
+      "proven": true
     },
     {
       "driver": "sqlserver",
       "name": "SQL Server",
-      "proven": false
+      "proven": true
     },
     {
       "driver": "oracle",
@@ -49,20 +49,20 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
   "engine_status": {
     "adls": "no_ci_job",
     "bigquery": "ci_green",
-    "files": "ci_red",
+    "files": "ci_green",
     "gcs": "no_ci_job",
     "kafka": "no_ci_result",
-    "mongodb": "ci_red",
-    "mysql": "ci_red",
+    "mongodb": "ci_green",
+    "mysql": "ci_green",
     "oracle": "not_run",
-    "postgresql": "ci_red",
-    "redis": "ci_red",
+    "postgresql": "ci_green",
+    "redis": "ci_green",
     "snowflake": "ci_green",
-    "sqlite": "ci_red",
-    "sqlserver": "ci_red"
+    "sqlite": "ci_green",
+    "sqlserver": "ci_green"
   },
-  "evidence_generated_at": "2026-11-14T02:39:02.518434+00:00",
-  "evidence_run_id": "43541342717",
+  "evidence_generated_at": "2026-11-14T20:25:16.792820+00:00",
+  "evidence_run_id": "43623907668",
   "families": [
     {
       "family": "Databases",
@@ -71,31 +71,31 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "postgresql",
           "emulated": false,
           "name": "PostgreSQL",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "mysql",
           "emulated": false,
           "name": "MySQL",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "mongodb",
           "emulated": false,
           "name": "MongoDB",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "sqlite",
           "emulated": false,
           "name": "SQLite",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "sqlserver",
           "emulated": false,
           "name": "SQL Server",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "oracle",
@@ -158,37 +158,37 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "csv",
           "emulated": false,
           "name": "CSV",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "json",
           "emulated": false,
           "name": "JSON",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "parquet",
           "emulated": false,
           "name": "Parquet",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "excel",
           "emulated": false,
           "name": "Excel",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "avro",
           "emulated": false,
           "name": "Avro",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "orc",
           "emulated": false,
           "name": "ORC",
-          "proven": false
+          "proven": true
         }
       ]
     },
@@ -199,7 +199,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "redis",
           "emulated": false,
           "name": "Redis",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "elasticsearch",
@@ -233,7 +233,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "pgvector",
           "emulated": false,
           "name": "pgvector",
-          "proven": false
+          "proven": true
         },
         {
           "driver": "pinecone",
@@ -291,52 +291,33 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       ]
     }
   ],
-  "pending_count": 44,
+  "pending_count": 25,
   "pending_drivers": [
     "adls",
-    "avro",
     "couchbase",
-    "csv",
     "docx",
     "dynamodb",
     "elasticsearch",
-    "excel",
-    "fixed_width",
     "gcs",
     "generic_sql",
     "html",
     "hubspot",
     "iceberg",
     "influxdb",
-    "json",
-    "jsonl",
     "kafka",
     "milvus",
-    "mongodb",
-    "mysql",
-    "ndjson",
     "neo4j",
     "oracle",
-    "orc",
-    "parquet",
     "pdf",
-    "pgvector",
     "pinecone",
-    "postgresql",
     "qdrant",
-    "redis",
     "rest_api",
     "s3",
     "salesforce",
     "sftp",
     "singer_tap",
-    "sqlite",
-    "sqlserver",
     "stripe",
-    "tsv",
-    "weaviate",
-    "xml",
-    "yaml"
+    "weaviate"
   ],
   "proof_rows": [
     {
@@ -349,6 +330,58 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       "name": "BigQuery"
     },
     {
+      "emulated": false,
+      "engine": "files",
+      "executed": 44578,
+      "jobs": [
+        "api-tests"
+      ],
+      "name": "File formats"
+    },
+    {
+      "emulated": false,
+      "engine": "mongodb",
+      "executed": 44863,
+      "jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "no-config-transfer"
+      ],
+      "name": "MongoDB"
+    },
+    {
+      "emulated": false,
+      "engine": "mysql",
+      "executed": 44863,
+      "jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "no-config-transfer"
+      ],
+      "name": "MySQL"
+    },
+    {
+      "emulated": false,
+      "engine": "postgresql",
+      "executed": 44863,
+      "jobs": [
+        "api-tests",
+        "cdc-matrix",
+        "no-config-transfer"
+      ],
+      "name": "PostgreSQL"
+    },
+    {
+      "emulated": false,
+      "engine": "redis",
+      "executed": 44840,
+      "jobs": [
+        "api-tests",
+        "cdc-matrix"
+      ],
+      "name": "Redis"
+    },
+    {
       "emulated": true,
       "engine": "snowflake",
       "executed": 14,
@@ -356,11 +389,48 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
         "warehouse-sku"
       ],
       "name": "Snowflake"
+    },
+    {
+      "emulated": false,
+      "engine": "sqlite",
+      "executed": 44578,
+      "jobs": [
+        "api-tests"
+      ],
+      "name": "SQLite"
+    },
+    {
+      "emulated": false,
+      "engine": "sqlserver",
+      "executed": 227,
+      "jobs": [
+        "cdc-sqlserver"
+      ],
+      "name": "SQL Server"
     }
   ],
-  "proven_count": 2,
+  "proven_count": 21,
   "proven_drivers": [
+    "avro",
     "bigquery",
-    "snowflake"
+    "csv",
+    "excel",
+    "fixed_width",
+    "json",
+    "jsonl",
+    "mongodb",
+    "mysql",
+    "ndjson",
+    "orc",
+    "parquet",
+    "pgvector",
+    "postgresql",
+    "redis",
+    "snowflake",
+    "sqlite",
+    "sqlserver",
+    "tsv",
+    "xml",
+    "yaml"
   ]
 };
