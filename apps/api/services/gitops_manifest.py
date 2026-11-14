@@ -642,7 +642,12 @@ def apply_manifest(
                 "kind": kind or "Unknown",
                 "action": "error",
                 "ok": False,
-                "error": str(exc)[:400],
+                # SEC-13: a missing field is named, never a bare KeyError text.
+                "error": (
+                    f"The {kind or 'resource'} is missing the field {exc.args[0]}."
+                    if isinstance(exc, KeyError) and exc.args
+                    else str(exc)[:400]
+                ),
             }
             if isinstance(exc, WorkspaceScopeError):
                 result["error_code"] = "cross_workspace"
