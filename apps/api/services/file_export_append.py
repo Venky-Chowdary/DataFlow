@@ -50,6 +50,55 @@ def export_append_refusal(fmt: str, path: str) -> str:
     )
 
 
+def _write_failure(name: str, exc: OSError) -> ValueError:
+    """REL-3: a plain refusal for a failed export write (no ``[Errno 27]``)."""
+    import errno
+
+    if exc.errno in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG):
+        why = "the server's disk is full or the file is over the size this server allows"
+    else:
+        why = "the server could not write the file"
+    return ValueError(f"The export {name} was not written: {why}. No partial file was kept.")
+
+
+def _write_atomically(path: str, data: bytes, *, name: str) -> None:
+    """Write ``path`` whole or not at all (REL-3): a temp file, then a rename.
+
+    A full disk used to leave a truncated export at the predictable name.
+    """
+    folder = os.path.dirname(path) or "."
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.part")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise _write_failure(name, exc) from exc
+
+
+def _append_or_restore(path: str, payload: bytes, *, name: str) -> None:
+    """Append ``payload``; on a failed write cut the file back to what it was (REL-3)."""
+    size = os.path.getsize(path)
+    try:
+        with open(path, "ab") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        try:
+            with open(path, "r+b") as fh:
+                fh.truncate(size)
+        except OSError:
+            pass
+        raise _write_failure(name, exc) from exc
+
+
 def land_export_bytes(
     destination: Any,
     export_bytes: bytes,
@@ -119,20 +168,23 @@ def land_export_bytes(
                     f"{target.name} is the sealed extract of an exit rehearsal and is never overwritten. "
                     "Start a new rehearsal instead."
                 ) from exc
+            except OSError as exc:
+                try:
+                    os.unlink(export_path)
+                except OSError:
+                    pass
+                raise _write_failure(target.name, exc) from exc
         elif appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
             rows_before = existing_record_count(fmt or "csv", export_path)
-            with open(export_path, "ab") as fh:
-                fh.write(payload)
+            _append_or_restore(export_path, payload, name=target.name)
         else:
-            with open(export_path, "wb") as fh:
-                fh.write(export_bytes)
+            _write_atomically(export_path, export_bytes, name=target.name)
         name = target.name
     else:
         name = f"export_{job_id}.{ext}"
         export_path = str(generated_export_path(name, workspace_id=workspace_id))
-        with open(export_path, "wb") as fh:
-            fh.write(export_bytes)
+        _write_atomically(export_path, export_bytes, name=name)
     from pathlib import Path
 
     from services.transfer_journal import _sha256_file
