@@ -56,5 +56,6 @@ def test_38_digit_decimal_into_mongo_is_refused_at_validate_not_by_the_driver():
             assert "34" in err or "digit" in err.lower(), err
     finally:
         client["dataflow"].drop_collection(coll)
+        client["dataflow"].drop_collection(f"{coll}_df_quarantine")
         client.close()
         live.drop_pg(src)
