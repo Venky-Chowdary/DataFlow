@@ -661,6 +661,7 @@ describe("Map step counts on screen come from one selector (W6 round 2)", () => 
     assert.match(approve?.textContent ?? "", /Approve eligible \(4\)/);
     const review = q<HTMLButtonElement>('[role="toolbar"][aria-label="Mapping actions"] button[aria-keyshortcuts="R"]');
     assert.equal(review.disabled, true, "nothing needs attention, so Review has nothing to show");
+    assert.equal(review.hidden, true, "and an idle Review is not drawn greyed out (W7)");
     assert.equal(review.textContent, "Review");
     const status = q('[data-testid="map-status-line"]').textContent ?? "";
     assert.match(status, /^4 of 4 mapped/);

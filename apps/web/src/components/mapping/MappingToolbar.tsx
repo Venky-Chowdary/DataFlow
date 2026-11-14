@@ -27,10 +27,11 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(naviga
 const MOD = IS_MAC ? "⌘" : "Ctrl";
 
 /**
- * The Map step's compact toolbar: two primary actions (Auto-map, Review),
- * Undo/Redo as icon buttons with their shortcuts, the destination panel
- * toggle, and one "More" menu for every other action. Every bulk action is a
- * single undo step.
+ * The Map step's compact toolbar. Leading: Auto-map, and Review only while a
+ * row needs a decision. Trailing, as one secondary cluster: Undo/Redo with
+ * their shortcuts, the destination panel toggle and the "More" menu for every
+ * other action. Continue to Validate (footer) is the step's one primary
+ * action. Every bulk action is a single undo step.
  */
 export function MappingToolbar({
   remapEnabled,
@@ -73,16 +74,19 @@ export function MappingToolbar({
           <DtIcon name="sparkle" size={14} />Auto-map…
         </button>
       )}
+      {/* Present only when a row needs a decision: an idle, greyed Review read as broken (W7). */}
       <button
         type="button"
         className="df2-btn df2-btn-sm"
         onClick={onReview}
         disabled={reviewCount === 0}
+        hidden={reviewCount === 0}
         aria-keyshortcuts="R"
         title={reviewCount ? `Show the ${reviewCount} row(s) that need a decision (R)` : "Nothing needs review"}
       >
         Review{reviewCount ? <span className="df2-ms-count">{reviewCount}</span> : null}
       </button>
+      <span className="df2-ms-toolbar-secondary">
       {remapEnabled && (
         <span className="df2-ms-toolbar-icons">
           <button
@@ -129,6 +133,7 @@ export function MappingToolbar({
           triggerClassName="df2-btn df2-btn-sm df2-btn-ghost df2-ms-more"
         />
       )}
+      </span>
     </div>
   );
 }

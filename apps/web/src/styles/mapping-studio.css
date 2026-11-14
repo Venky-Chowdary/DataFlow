@@ -1370,6 +1370,92 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   padding-top: 4px;
 }
 
+/* -- toolbar -------------------------------------------------------------- */
+
+.df2-ms-toolbar .df2-btn[hidden] {
+  display: none;
+}
+
+.df2-ms-toolbar-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+
+/* -- the one blocker line ------------------------------------------------- */
+
+.df2-map-issues {
+  padding: 6px 8px 6px 12px;
+}
+
+.df2-map-issues-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-height: 32px;
+}
+
+.df2-map-issues.is-block .df2-map-issues-bar > svg { color: var(--df2-ms-danger-ink); flex: none; }
+.df2-map-issues.is-warn .df2-map-issues-bar > svg { color: var(--df-warning); flex: none; }
+
+.df2-map-issues-bar .df2-map-issues-summary {
+  display: flex;
+  /* On a phone the actions drop under the sentence instead of squeezing it. */
+  flex: 1 1 220px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  min-width: 0;
+}
+
+.df2-map-issues-subjects {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  font-weight: 500;
+  color: var(--df-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.df2-map-issues-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-map-issues-list[hidden] {
+  display: none;
+}
+
+.df2-map-issues.is-open .df2-map-issues-list {
+  margin-top: 4px;
+}
+
+/* -- destination panel ---------------------------------------------------- */
+
+.df2-ms-panel-help {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-help > summary {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  cursor: pointer;
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-help > .df2-ms-panel-note {
+  margin: 4px 0 0;
+}
+
+.df2-ms-panel-help:not([open]) > .df2-ms-panel-note {
+  display: none;
+}
+
 /* -- grid: one first line per row ----------------------------------------- */
 
 .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
