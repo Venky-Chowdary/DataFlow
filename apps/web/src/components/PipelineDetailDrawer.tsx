@@ -444,12 +444,16 @@ export function PipelineDetailDrawer({
                 size="sm"
                 variant="secondary"
                 disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-                title="Sync the signed contract. One confirm."
+                title={runRefusal || "Sync the signed contract. One confirm."}
                 onClick={onSync}
               >
                 Sync now
               </Button>
             )}
+            {runRefusal ? (
+              // UX-22: the reason is on the page, not only in a tooltip.
+              <p className="df2-permission-inline" data-testid="pipeline-run-refusal">{runRefusal}</p>
+            ) : null}
           </div>
           <div className="df2-drawer-actions-extra">
             {secondaryActions()}

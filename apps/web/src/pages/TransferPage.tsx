@@ -406,6 +406,8 @@ export function TransferPage({
 }: TransferPageProps) {
   const { toast, dismissMatching } = useToast();
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
+  /** UX-22: a viewer cannot plan (map/validate); say so before they build a route. */
+  const jobPlan = useWriteGate(PERMISSIONS.jobPlan, "map, validate or run a transfer");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
@@ -4270,6 +4272,11 @@ export function TransferPage({
 
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
+    if (!jobPlan.allowed) {
+      // UX-22: refuse at the first step that writes a plan, not after Validate.
+      toast({ title: "View only", message: jobPlan.reason, tone: "warning" });
+      return;
+    }
     setStep(STEP_MAP);
     setMappingError(null);
     mapConflictRef.current = false;
@@ -7471,9 +7478,9 @@ export function TransferPage({
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}${studioFlags.canvas && step < STEP_SHAPE ? " is-flow-connect" : ""}${studioFlags.canvas && transformOpen && step <= STEP_SHAPE ? " is-flow-transform" : ""}${studioFlags.canvas && (step === STEP_MAP || step === STEP_VALIDATE) ? " is-flow-review" : ""}`} showHonesty>
       <PermissionNotice
-        allowed={jobRun.allowed}
-        reason={jobRun.reason}
-        what="You can plan a transfer but not run one."
+        allowed={jobPlan.allowed && jobRun.allowed}
+        reason={jobPlan.allowed ? jobRun.reason : jobPlan.reason}
+        what={jobPlan.allowed ? "You can plan a transfer but not run one." : "View only: you can look at sources and destinations here."}
       />
       <PlanConflictDialog
         conflict={planConflict.conflict}

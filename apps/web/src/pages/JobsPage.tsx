@@ -1,4 +1,5 @@
 import { formatRowsProcessed } from "../lib/jobRows";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { BookOpen, ClipboardList, Code2, FileText, Gauge, GitCompareArrows, History, Network, PanelRightOpen, ScrollText, Shield, type LucideIcon } from "lucide-react";
@@ -918,6 +919,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     setExplicitPick(true);
     setMobileListOpen(false);
   }, []);
+  const jobRunGate = useWriteGate(PERMISSIONS.jobRun);
   const pickJob = useCallback((jobId: string) => {
     setSelectedId(jobId);
     setExplicitPick(true);
@@ -2055,8 +2057,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               type="button"
                               className="df2-btn df2-btn-primary"
                               onClick={() => void handleSync("sync")}
-                              disabled={retrying}
-                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                              disabled={retrying || !jobRunGate.allowed}
+                              title={jobRunGate.reason || "Reuses the signed contract. One confirm. A second click does not start another run."}
                             >
                               <DtIcon name="activity" size={16} /> Sync now
                             </button>
@@ -2064,11 +2066,15 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               type="button"
                               className="df2-btn"
                               onClick={() => void handleSync("full")}
-                              disabled={retrying}
+                              disabled={retrying || !jobRunGate.allowed}
                               title="Re-reads from the start on the signed contract. Upserts when a key exists."
                             >
                               Re-sync (full)
                             </button>
+                            {!jobRunGate.allowed && (
+                              // UX-22: say why on the page, not only in a tooltip.
+                              <p className="df2-permission-inline" data-testid="jobs-sync-refusal">{jobRunGate.reason}</p>
+                            )}
                           </div>
                         )}
                         {detailTab === "detail" && selected.status === "failed" && (

@@ -910,7 +910,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                 freshnessLagSeconds={freshnessLag[sched.id]?.lag ?? null}
                 freshnessSeverity={freshnessLag[sched.id]?.severity ?? null}
                 onSelect={() => openDrawer(sched.id)}
-                onSync={() => void handleScheduleSync(sched.id, "sync")}
+                // UX-22: no Sync now a viewer can press only to be refused.
+                onSync={jobRun.allowed ? () => void handleScheduleSync(sched.id, "sync") : undefined}
               />
             ))}
           </div>
