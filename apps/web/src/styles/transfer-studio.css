@@ -12598,3 +12598,94 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   font-size: var(--df-fs-xs);
   line-height: 1.4;
 }
+
+/* -- Stepper: the steps on one line, the route on a slim line under them -- */
+/* Long production names (a 60-character file, a connection name plus a table)
+   took the steps' row and pushed Validate and Run onto a second line. The
+   six steps now always own row 1; the route is row 2: icon, name, arrow,
+   icon, name, rows, one 20 px line with no pill. Each name ellipsizes and
+   keeps its full value in its title; the group's accessible name is the
+   whole route. Specificity (0,4,0) matches the D-BP-25 rules above and
+   beats the (0,3,0) ones in enterprise-ui.css. */
+@media (min-width: 768px) {
+  .df2-app .df2-page-transfer-studio .df2-transfer-studio-chrome {
+    padding-block: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "steps dock"
+      "route route";
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 2px;
+    padding: 0;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-wizard-studio {
+    grid-area: steps;
+    order: 0;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-toast-dock {
+    grid-area: dock;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+    grid-area: route;
+    order: 0;
+    justify-self: stretch;
+    width: 100%;
+  }
+}
+
+@media (min-width: 1281px) {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-wizard-studio .df2-wizard-track {
+    flex-wrap: nowrap;
+  }
+}
+
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 20px;
+  min-height: 0;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  font-size: var(--df-fs-xs);
+}
+
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-endpoint {
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 4px;
+}
+
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-label {
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Icons, the arrow and the row count keep their size; only the names give way. */
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-endpoint > :not(.df2-route-bar-label),
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-arrow,
+.df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-meta {
+  flex: none;
+}
