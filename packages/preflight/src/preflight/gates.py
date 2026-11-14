@@ -2530,6 +2530,43 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        kv_collision = getattr(ctx, "destination_collision", None)
+        if (
+            kv_collision is not None
+            and getattr(kv_collision, "findings", None)
+            and getattr(kv_collision, "key_enforced", False)
+            and not getattr(kv_collision, "idempotent_apply", False)
+            and str(getattr(ctx.plan, "duplicate_policy", "") or "").strip().lower()
+            not in {"dedupe_skip", "skip_duplicates", "upsert", "merge"}
+        ):
+            # CLM-16: a key-addressed store (Redis, DynamoDB) refuses an append
+            # onto a stored key at run time, after the rows before it landed.
+            found = list(kv_collision.findings)
+            key = getattr(kv_collision, "key_column", "") or "identity key"
+            return _block(
+                GateId.G6_TARGET_DDL,
+                (
+                    f"Destination already stores {len(found)} key(s) of this batch on {key} "
+                    f"(e.g. {found[0].get('value')}): an append never overwrites a stored key, "
+                    "so the run would stop part-way. Use upsert to update them, or set the "
+                    "duplicate policy to dedupe_skip to keep them and load only new keys."
+                ),
+                start,
+                _scope(
+                    {
+                        "sample_collisions": found[:5],
+                        "collision_count": len(found),
+                        "key_enforced": True,
+                        "primary_key": {"target": key},
+                        "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                        "rule_id": "g6_target_ddl.append_key_collision",
+                        "remediation_kind": "change_sync_mode",
+                        "error_code": "APPEND_KEY_ALREADY_STORED",
+                    },
+                    coverage="sample",
+                    note="Destination key collision probe on append batch",
+                ),
+            )
         return _pass(
             GateId.G6_TARGET_DDL,
             "Schemaless destination — no DDL contract (identity key checked)",
