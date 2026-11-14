@@ -155,6 +155,14 @@ os.environ.setdefault(
 )
 # Engine fixtures stage file sources under pytest's tmp_path.
 os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
+# The live MySQL TLS tests pass the server's CA file (DATAFLOW_TEST_MYSQL_CA), which CI
+# writes under $RUNNER_TEMP. Connectors may open TLS files only inside connector areas
+# (connectors/tls_file_options.py), so list that folder the way an operator would.
+if os.environ.get("DATAFLOW_TEST_MYSQL_CA"):
+    _ca_dir = os.path.dirname(os.path.abspath(os.environ["DATAFLOW_TEST_MYSQL_CA"]))
+    _roots = [r for r in os.environ["DATAFLOW_SOURCE_PATH_ROOTS"].split(os.pathsep) if r]
+    if _ca_dir not in _roots:
+        os.environ["DATAFLOW_SOURCE_PATH_ROOTS"] = os.pathsep.join([*_roots, _ca_dir])
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
