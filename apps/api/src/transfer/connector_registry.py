@@ -296,9 +296,6 @@ _OPERATOR_COPY_PREFIXES = (
     "that account host is a form placeholder",
     "that is a snowflake account host",
     "that salesforce host is a form placeholder",
-    "connector driver is not installed",
-    # generic_sql._dialect_unavailable: a missing driver, not a bad password (D310).
-    "sqlalchemy dialect/driver for",
     # connector_capabilities.planned_driver_message (D345).
     "not available on this server:",
     "host not found",
@@ -360,9 +357,13 @@ def _already_operator_copy(raw: Any) -> bool:
     if isinstance(raw, OperatorCopy):
         return True
     text = str(raw or "").strip().lower()
-    if not text or _DRIVER_DUMP.search(text):
+    if not text or _DRIVER_DUMP.search(text) or _BARE_DRIVER_SENTENCE.match(text):
         return False
     return any(text.startswith(prefix) for prefix in _OPERATOR_COPY_PREFIXES)
+
+
+#: A driver's whole reply that happens to start like our copy (Mongo code 18).
+_BARE_DRIVER_SENTENCE = re.compile(r"^authentication failed\.?$")
 
 
 def _driver_snippet(raw: str) -> str:
@@ -414,22 +415,34 @@ def humanize_connection_error(
     a refused PAT is not a key-pair failure."""
     from services.error_taxonomy import OperatorCopy, classify
 
+    from services.error_taxonomy import PRODUCT_COPY_CODES
+
     if isinstance(raw, OperatorCopy):
         return raw
     raw_s = redact_log_text(str(raw)).strip()
     text = raw_s.lower()
     driver = (driver or "").lower()
     engine = resolve_driver_type(driver) if driver else ""
+    if _already_operator_copy(raw_s):
+        # Datawrap's own copy (e.g. the replica-set member report, D358).
+        return raw_s
+    if text.startswith("refused connector host"):
+        # The egress policy's own refusal names the host the user typed; only
+        # a name that did not resolve is reworded (ERR-18).
+        refused = classify(raw_s, side=side, phase=phase, fallback=False)
+        if refused is not None and refused.code == "network.dns_not_found":
+            return OperatorCopy(refused.text)
+        return OperatorCopy(" ".join(raw_s.split()))
     if ".railway.internal" not in text and engine not in _BESPOKE_COPY_DRIVERS and driver not in _BESPOKE_COPY_DRIVERS:
         classified = classify(raw, side=side, phase=phase, engine=engine or driver, fallback=False)
+        if classified is not None and classified.code in PRODUCT_COPY_CODES:
+            return OperatorCopy(" ".join(raw_s.split()))
         if classified is not None and classified.code not in _BESPOKE_COPY_CODES:
             copy = OperatorCopy(classified.text)
             # Kept off the copy; a Test-only refinement (D353) may cite it.
             copy.sentence = classified.sentence  # type: ignore[attr-defined]
             copy.code = classified.code  # type: ignore[attr-defined]
             return copy
-    if _already_operator_copy(raw_s):
-        return raw_s
 
     # Railway private DNS — guidance depends on whether THIS API is on Railway.
     if ".railway.internal" in text:

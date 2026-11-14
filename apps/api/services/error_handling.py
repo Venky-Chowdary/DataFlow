@@ -986,6 +986,23 @@ def humanize_transfer_failure(
             "confidence": "high",
         }
 
+    if _is_product_refusal(error):
+        # Datawrap's own exception: its text already names the cause and the
+        # step (e.g. CdcAddedColumnRefused). Kept whole, sanitised, never
+        # reworded as "cause not identified".
+        from services.error_taxonomy import driver_sentence
+
+        return {
+            "code": "run_refused",
+            "category": "contract",
+            "title": "Transfer stopped",
+            "message": driver_sentence(error, limit=4000),
+            "fix": "",
+            "raw": raw,
+            "retriable": bool(classify_error(error).get("retriable")),
+            "confidence": "high",
+        }
+
     # Unknown — never invent a specific root cause or fake remediation path (ERR-7).
     unknown = classify(error, side=side, phase=phase, engine=engine, object=object)
     assert unknown is not None
@@ -995,6 +1012,15 @@ def humanize_transfer_failure(
 
 
 _CONFIDENCE = {"typed": "high", "structured": "high", "pattern": "medium", "fallback": "low"}
+_PRODUCT_MODULES = ("services.", "src.", "connectors.", "dataflow.")
+
+
+def _is_product_refusal(error: Any) -> bool:
+    """An exception class Datawrap defines (not a driver's, not a builtin)."""
+    if not isinstance(error, BaseException):
+        return False
+    module = type(error).__module__ or ""
+    return module.startswith(_PRODUCT_MODULES) and getattr(error, "orig", None) is None
 
 
 def _driver_sentence(error: Any) -> str:

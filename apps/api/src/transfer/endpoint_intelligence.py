@@ -393,7 +393,7 @@ def _classify_failure_message(out: dict, fmt: str) -> None:
     """
     if not isinstance(out, dict):
         return
-    from services.error_taxonomy import OperatorCopy, classify
+    from services.error_taxonomy import PRODUCT_COPY_CODES, OperatorCopy, classify
 
     from .connector_registry import _DRIVER_DUMP, humanize_connection_error
 
@@ -404,6 +404,9 @@ def _classify_failure_message(out: dict, fmt: str) -> None:
         if out.get("connected") and key == "message" and not _DRIVER_DUMP.search(text):
             continue
         classified = classify(text, side="connection", phase="introspect", engine=fmt, fallback=False)
+        if classified is not None and classified.code in PRODUCT_COPY_CODES:
+            out.setdefault("error_code", classified.code)
+            continue
         if classified is not None:
             out[key] = OperatorCopy(classified.text)
             out.setdefault("error_code", classified.code)

@@ -735,6 +735,11 @@ def _q(name: str) -> str:
     return f' "{name}"' if name else ""
 
 
+#: Codes whose source text is Datawrap's own refusal and already names the
+#: object and the fix (the egress policy names the refused host the user
+#: typed). Humanisers keep that text; the code still rides on the envelope.
+PRODUCT_COPY_CODES = frozenset({"network.egress_blocked"})
+
 _SIDE_NOUN = {"source": "source", "destination": "destination", "query": "database",
               "connection": "database", "platform": "Datawrap server"}
 
