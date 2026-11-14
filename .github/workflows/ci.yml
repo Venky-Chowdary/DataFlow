@@ -28,9 +28,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A push that changes only the web app reuses the backend checks of the
+  # newest ancestor whose backend jobs all passed (.github/scripts/ci_backend_reuse.py).
+  # Any change outside apps/web, packages/design-system, the npm manifests or
+  # Markdown runs everything. The gate below accepts a skipped backend job only
+  # when this job said reuse=true.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      from: ${{ steps.decide.outputs.from }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reuse the backend checks of a green ancestor?
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_backend_reuse.py
+
   # Lean evidence pack — no databases. Regenerates claim→metric catalog and
   # fails when marketing floors exceed measured fixture proofs.
   mapping-evidence:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -94,6 +121,8 @@ jobs:
   # AI ITEM 1 — full Map/LLM suite with no network and no API keys.
   # Proves offline claim: LLM cannot change mapping decisions / checksums.
   ai-offline-correctness:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -135,6 +164,8 @@ jobs:
   # the stores say — plus outage honesty, abstention, workspace isolation,
   # error masking and AI egress. All of it runs offline.
   pilot-answer-quality:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -199,6 +230,8 @@ jobs:
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
   # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
   no-config-transfer:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     # No `services:` — a public.ecr.aws/docker.io rate-limit on a service
     # container aborts the job before checkout with no retry. Postgres starts
@@ -265,6 +298,8 @@ jobs:
 
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -307,6 +342,8 @@ jobs:
   # 6-hour job limit. A file's shard is a stable hash of its path
   # (tests/conftest.py::_select_ci_shard), so each file runs exactly once.
   api-tests:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -380,7 +417,7 @@ jobs:
   api-and-web:
     runs-on: ubuntu-latest
     # Gates on the API shards, and still runs (and fails) when one of them failed.
-    needs: api-tests
+    needs: [changes, api-tests]
     if: ${{ !cancelled() }}
     # No service containers. Redis used to be one; a Docker Hub
     # "toomanyrequests" pull failed Initialize containers, skipped Checkout,
@@ -405,18 +442,20 @@ jobs:
         run: npm ci
 
       - name: Start CI services + install Python deps
+        if: ${{ needs.changes.outputs.reuse != 'true' }}
         uses: ./.github/actions/ci-services
 
       # The API suite runs in the api-tests shards above; preflight stays here.
       - name: Preflight package tests
+        if: ${{ needs.changes.outputs.reuse != 'true' }}
         id: preflight_tests
         run: npm run test:preflight
 
       # Phase B9 — proof steps MUST run even when a test step fails (audit §3.2).
       # Never silently omit CDC / warehouse evidence from the CI record.
       - name: CDC matrix report
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: cdc_matrix
-        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run test:cdc
         env:
           CDC_MATRIX_JUNIT: ${{ runner.temp }}/live-junit/cdc-matrix.xml
@@ -436,15 +475,15 @@ jobs:
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
       - name: CDC matrix live-engine skips
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: cdc_skips
-        if: ${{ !cancelled() && (success() || failure()) }}
         working-directory: apps/api
         run: |
           python scripts/check_live_skips.py --job cdc-matrix --junit "$RUNNER_TEMP/live-junit/cdc-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-matrix.json"
 
       - name: Warehouse SKU proof report
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: warehouse_sku
-        if: ${{ !cancelled() && (success() || failure()) }}
         # Always-on Snowflake (fakesnow) + BigQuery (goccy emulator) proof.
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
@@ -484,14 +523,14 @@ jobs:
           DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
 
       - name: Warehouse SKU live-engine skips
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: warehouse_skips
-        if: ${{ !cancelled() && (success() || failure()) }}
         working-directory: apps/api
         run: |
           python scripts/check_live_skips.py --job warehouse-sku --junit "$RUNNER_TEMP/live-junit/warehouse-sku.xml" --out "$RUNNER_TEMP/live-engine/warehouse-sku.json"
 
       - name: Upload live-engine results (CDC matrix, warehouse SKU)
-        if: ${{ always() }}
+        if: ${{ (always()) && needs.changes.outputs.reuse != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: live-engine-api-and-web
@@ -499,8 +538,8 @@ jobs:
           if-no-files-found: warn
 
       - name: TRANSFER_READY certification matrix
+        if: ${{ (!cancelled() && (success() || failure())) && needs.changes.outputs.reuse != 'true' }}
         id: transfer_ready_matrix
-        if: ${{ !cancelled() && (success() || failure()) }}
         # Phase E2 — publish PRODUCTION_SKU × unique_drivers honesty artifact.
         working-directory: apps/api
         run: |
@@ -517,7 +556,7 @@ jobs:
           PY
 
       - name: Upload migration proof artifacts
-        if: ${{ always() }}
+        if: ${{ (always()) && needs.changes.outputs.reuse != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: migration-proof-ci
@@ -566,6 +605,9 @@ jobs:
         if: ${{ always() && !cancelled() }}
         run: |
           api="${{ needs.api-tests.result }}"
+          if [ "$api" = "skipped" ] && [ "${{ needs.changes.outputs.reuse }}" = "true" ]; then
+            api="success"  # reused from ${{ needs.changes.outputs.from }} (web-only change)
+          fi
           pre="${{ steps.preflight_tests.outcome }}"
           cdc="${{ steps.cdc_matrix.outcome }}"
           cdcskip="${{ steps.cdc_skips.outcome }}"
@@ -587,7 +629,12 @@ jobs:
           for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "cdc_live_skips:$cdcskip" "warehouse_sku:$wh" "warehouse_live_skips:$whskip" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
-            # skipped only acceptable when job cancelled mid-flight; otherwise require success
+            # skipped only acceptable when job cancelled mid-flight; otherwise require success.
+            # A web-only change reuses the backend proofs (changes job), so those steps skip.
+            if [ "$out" = "skipped" ] && [ "${{ needs.changes.outputs.reuse }}" = "true" ] \
+              && [[ " preflight_tests cdc_matrix cdc_live_skips warehouse_sku warehouse_live_skips transfer_ready_matrix " == *" $name "* ]]; then
+              continue
+            fi
             if [ "$out" != "success" ]; then
               fail=1
             fi
@@ -630,6 +677,8 @@ jobs:
   # Microsoft driver registered) and asserts the product picked pymssql. The
   # pyodbc leg proves the ODBC Driver 18 path operators can opt into.
   cdc-sqlserver:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     name: cdc-sqlserver (${{ matrix.driver }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -918,8 +967,8 @@ jobs:
     name: Connector CI evidence
     # api-tests proves PostgreSQL / MySQL / Mongo / Redis and the in-process
     # engines; without it in needs, its results could be missing here.
-    needs: [no-config-transfer, api-tests, cdc-sqlserver, cdc-oracle, api-and-web]
-    if: ${{ always() && !cancelled() }}
+    needs: [changes, no-config-transfer, api-tests, cdc-sqlserver, cdc-oracle, api-and-web]
+    if: ${{ always() && !cancelled() && needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -952,6 +1001,8 @@ jobs:
           if-no-files-found: error
 
   security:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -1080,6 +1131,8 @@ jobs:
           -q
 
   api-image:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
     # Builds Dockerfile.api's three targets without a layer cache (so the
     # source steps really run):
     # - the deployable default target (what Railway builds), first and on its
@@ -1269,6 +1322,7 @@ jobs:
     name: Required PR gate
     if: ${{ always() && !cancelled() }}
     needs:
+      - changes
       - mapping-evidence
       - ai-offline-correctness
       - pilot-answer-quality
@@ -1300,8 +1354,17 @@ jobs:
           API_IMAGE: ${{ needs.api-image.result }}
           STUDIO_UI: ${{ needs.studio-ui.result }}
           PLAN_CONFLICT_E2E: ${{ needs.plan-conflict-e2e.result }}
+          CHANGES: ${{ needs.changes.result }}
+          REUSE: ${{ needs.changes.outputs.reuse }}
+          REUSED_FROM: ${{ needs.changes.outputs.from }}
+          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests cdc-sqlserver security api-image "
         run: |
           failed=0
+          if [ "$CHANGES" != "success" ]; then
+            echo "changes: $CHANGES"
+            failed=1
+          fi
+          [ "$REUSE" = "true" ] && echo "Backend checks reused from $REUSED_FROM (web-only change)."
           for check in \
             "mapping-evidence:$MAPPING_EVIDENCE" \
             "ai-offline-correctness:$AI_OFFLINE" \
@@ -1321,6 +1384,9 @@ jobs:
             echo "$name: $result"
             if [ "$name" = "cdc-oracle" ] && [ "$result" = "skipped" ] && [ "$ENABLE_ORACLE_CDC" != "true" ]; then
               # Opt-in and off: skipped (grey), recorded not_run, never green.
+              continue
+            fi
+            if [ "$result" = "skipped" ] && [ "$REUSE" = "true" ] && [[ "$REUSABLE" == *" $name "* ]]; then
               continue
             fi
             if [ "$result" != "success" ]; then
