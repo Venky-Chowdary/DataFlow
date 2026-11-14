@@ -92,6 +92,11 @@ runs:
         for extra in $EXTRA_PROJECTS; do projects+=(--project="$extra"); done
         npx playwright test "${projects[@]}"
 
+    - name: Print failed visual comparisons (for a baseline refresh)
+      if: failure()
+      shell: bash
+      run: bash .github/scripts/print_snapshot_actuals.sh apps/web/test-results
+
     - name: Production build
       if: success() && inputs.production_smoke == 'true'
       shell: bash
