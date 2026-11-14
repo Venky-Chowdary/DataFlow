@@ -30,6 +30,8 @@ import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connector
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
 import { AcceptInvitePage, ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
+import { fetchSignupConfig } from "./lib/signupApi";
+import { getStartedStage } from "./lib/getStarted";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
@@ -1217,6 +1219,17 @@ function DataTransferAppInner() {
     setStage(userEmail ? "app" : "login");
   };
 
+  const getStarted = async () => {
+    setEntryScreen("transfer");
+    const stageNext = getStartedStage(Boolean(userEmail), userEmail ? false : (await fetchSignupConfig()).enabled);
+    if (stageNext === "app") {
+      requestApp("transfer");
+      return;
+    }
+    setSignupSeed(null);
+    setStage(stageNext);
+  };
+
   const navigatePublic = (route: PublicRoute) => {
     setPublicRoute(route);
     setStage("landing");
@@ -1275,7 +1288,7 @@ function DataTransferAppInner() {
           route={publicRoute}
           onNavigate={navigatePublic}
           onLogin={() => requestApp("dashboard")}
-          onGetStarted={() => requestApp("transfer")}
+          onGetStarted={() => void getStarted()}
         />
       )}
 
