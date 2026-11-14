@@ -304,8 +304,8 @@ function AppShell({
         setApiOnline(false);
         if (notifyOnError) {
           toast({
-            title: "Control plane offline",
-            message: "Check the API URL (VITE_API_BASE / DATAWRAP_API_BASE) and deployment health.",
+            title: "Can't reach Datawrap's server",
+            message: "Check your network connection, then try again. If it persists, contact your administrator.",
             tone: "error",
           });
         }

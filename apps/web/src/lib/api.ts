@@ -11,6 +11,7 @@ import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionAct
 import { planWriteResponse, type PlanView } from "./planConcurrency";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+import { readErrorEnvelope } from "./errorCopy";
 import { readOptionsPayload } from "./readOptions";
 import { neutralizeFormulaCell } from "./csvSafety";
 import type { RuleCompileReport } from "./businessRules";
@@ -148,14 +149,18 @@ export function isForbidden(err: unknown): boolean {
 async function readApiRefusal(
   res: Response,
   fallback: string,
-): Promise<{ detail: string; permission: string; role: string }> {
+  operation = "",
+): Promise<{ detail: string; permission: string; role: string; code: string }> {
   let detail = fallback;
   let permission = "";
   let role = "";
+  let code = "";
   try {
     const data = await res.clone().json();
     permission = typeof data?.required_permission === "string" ? data.required_permission : "";
     role = typeof data?.effective_role === "string" ? data.effective_role : "";
+    // The taxonomy envelope (services/error_taxonomy.py): pages decide on the code.
+    code = readErrorEnvelope(data)?.code ?? "";
     const raw = data?.detail ?? data?.error ?? data?.message;
     if (typeof raw === "string" && raw.trim()) detail = raw;
     else if (Array.isArray(raw) && raw.length) {
@@ -177,10 +182,8 @@ async function readApiRefusal(
   }
   if (res.status === 502 || res.status === 504) {
     if (detail === fallback || /<html/i.test(detail)) {
-      detail = (
-        `Control plane timed out (HTTP ${res.status}) while Validate was running. `
-        + `Re-run Validate. Execute stays locked.`
-      );
+      // ERR-36: name the operation the caller was running, not always Validate.
+      detail = gatewayTimeoutCopy(res.status, operation || operationName(fallback));
     }
   }
   if (res.status === 403) {
@@ -194,17 +197,40 @@ async function readApiRefusal(
       permission = named;
     }
   }
-  return { detail, permission, role };
+  return { detail, permission, role, code };
+}
+
+/** The operation a caller's fallback names ("Query failed" → "Query"). */
+export function operationName(fallback: string): string {
+  return String(fallback || "")
+    .replace(/^(could not|couldn['’]t|failed to)\s+/i, "")
+    .replace(/\s+(failed|could not.*|unavailable|error)\.?$/i, "")
+    .trim();
+}
+
+/** The 502/504 copy when no API reason came back (the gateway answered). */
+export function gatewayTimeoutCopy(status: number, operation: string): string {
+  const op = String(operation || "").trim();
+  if (/^(validate|preflight)/i.test(op)) {
+    return (
+      `Control plane timed out (HTTP ${status}) while Validate was running. `
+      + `Re-run Validate. Execute stays locked.`
+    );
+  }
+  return (
+    `Datawrap's server didn't answer in time (HTTP ${status})${op ? ` — ${op}` : ""}. `
+    + "Try again. If it repeats, contact support."
+  );
 }
 
 /** Build the typed refusal for a non-OK response, preserving the API's reason. */
-export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
-  const { detail, permission, role } = await readApiRefusal(res, fallback);
-  return new ApiError(detail, res.status, permission, role);
+export async function apiErrorFrom(res: Response, fallback: string, operation = ""): Promise<ApiError> {
+  const { detail, permission, role, code } = await readApiRefusal(res, fallback, operation);
+  return new ApiError(detail, res.status, permission, role, code);
 }
 
-export async function parseApiError(res: Response, fallback: string): Promise<string> {
-  return (await readApiRefusal(res, fallback)).detail;
+export async function parseApiError(res: Response, fallback: string, operation = ""): Promise<string> {
+  return (await readApiRefusal(res, fallback, operation)).detail;
 }
 
 /**
@@ -565,7 +591,7 @@ export async function runPreflight(payload: {
     body: JSON.stringify(payload),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Preflight failed"));
+  if (!res.ok) throw new Error(await parseApiError(res, "Preflight failed", "Validate"));
   return res.json();
 }
 
@@ -1570,11 +1596,21 @@ export async function fetchJobs(query: Partial<JobHistoryQuery> = {}): Promise<J
     filtered_total?: number;
     status_counts?: Record<string, number>;
     attention_count?: number;
+    degraded?: boolean;
+    detail?: string;
   }>(
     [`${API_BASE}/connectors/jobs${suffix}`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
+  if (data?.degraded) {
+    // ERR-28: an unreachable job store is an error with a reference, not an
+    // empty history.
+    throw new ApiError(
+      String(data.detail || "Datawrap can't reach its job history right now."),
+      503, "", "", readErrorEnvelope(data)?.code ?? "platform.job_store_unavailable",
+    );
+  }
   return jobHistoryFromResponse(data);
 }
 
@@ -1735,7 +1771,10 @@ export async function retryJob(
         );
       }
       if (!res.ok) {
-        throw new Error(typeof data.detail === "string" ? data.detail : "Retry failed");
+        throw new ApiError(
+          typeof data.detail === "string" ? data.detail : "Retry failed",
+          res.status, "", "", readErrorEnvelope(data)?.code ?? "",
+        );
       }
       return data as { job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean };
     } catch (error) {
@@ -1805,7 +1844,10 @@ export async function resumeJob(jobId: string): Promise<{
       const res = await apiFetch(url, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
+        throw new ApiError(
+          typeof data.detail === "string" ? data.detail : "Resume failed",
+          res.status, "", "", readErrorEnvelope(data)?.code ?? "",
+        );
       }
       return data as {
         job_id: string;
@@ -2209,12 +2251,41 @@ export async function deleteConnector(id: string): Promise<void> {
   throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 
+/**
+ * A connection test waits longer than an ordinary request: the API bounds its
+ * own probe (connect + handshake) below this, so its reason always arrives
+ * before the browser gives up (UX-8: the 15 s client timeout fired first and
+ * hid the API's answer behind a bare "Connection test failed").
+ */
+export const CONNECTION_TEST_TIMEOUT_MS = 60_000;
+
+export const connectionTestTimeoutCopy =
+  "The connection test didn't finish within 60 seconds. The host may be unreachable or "
+  + "slow to answer: check the host and port, then test again.";
+
+function withReference(message: string, reference: unknown): string {
+  const ref = typeof reference === "string" ? reference.trim() : "";
+  return ref && !message.includes(ref) ? `${message} Reference: ${ref}` : message;
+}
+
 export async function testSavedConnector(id: string): Promise<{
   success: boolean;
   message: string;
   last_test_ok: boolean;
+  code?: string;
 }> {
-  const res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, { method: "POST" });
+  let res: Response;
+  try {
+    res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, {
+      method: "POST",
+      timeoutMs: CONNECTION_TEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (error instanceof Error && /timed out/i.test(error.message)) {
+      return { success: false, message: connectionTestTimeoutCopy, last_test_ok: false, code: "network.connect_timeout" };
+    }
+    throw error;
+  }
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Connection test failed"));
   }
@@ -2225,8 +2296,9 @@ export async function testSavedConnector(id: string): Promise<{
   const lastTestOk = coerceLastTestOk(data?.last_test_ok);
   return {
     success,
-    message: String(data?.message || (success ? "Connected" : "Connection failed")),
+    message: withReference(String(data?.message || (success ? "Connected" : "Connection failed")), data?.reference),
     last_test_ok: lastTestOk === undefined ? success : lastTestOk,
+    code: readErrorEnvelope(data)?.code,
   };
 }
 
@@ -2569,12 +2641,22 @@ export async function testConnection(payload: {
   trust_server_certificate?: boolean;
   /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
   extra?: Record<string, unknown>;
-}): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
-  const res = await apiFetch(`${API_BASE}/connectors/test`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+}): Promise<{ success: boolean; message: string; code?: string; source_ha?: Record<string, unknown> }> {
+  let res: Response;
+  try {
+    res = await apiFetch(`${API_BASE}/connectors/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: CONNECTION_TEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    // UX-8: a browser-side timeout keeps its reason instead of a bare failure.
+    if (error instanceof Error && /timed out/i.test(error.message)) {
+      return { success: false, message: connectionTestTimeoutCopy, code: "network.connect_timeout" };
+    }
+    throw error;
+  }
   // Probe failures return HTTP 200 with success:false + a humanized message.
   // Auth / router errors return non-2xx — surface those instead of an empty badge.
   if (!res.ok) {
@@ -2586,7 +2668,9 @@ export async function testConnection(payload: {
   const data = await res.json();
   return {
     success: Boolean(data?.success),
-    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+    // The support reference rides at the end; the page renders it as a chip.
+    message: withReference(String(data?.message || (data?.success ? "Connected" : "Connection failed")), data?.reference),
+    code: readErrorEnvelope(data)?.code,
     source_ha: data?.source_ha && typeof data.source_ha === "object" ? data.source_ha : undefined,
   };
 }

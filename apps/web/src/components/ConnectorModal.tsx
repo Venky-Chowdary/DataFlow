@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "./ConnectorCatalogPanel";
 import { ButtonLoader } from "./LoadingState";
 import { DtIcon } from "./DtIcon";
+import { ErrorReferenceChip } from "./ErrorReferenceChip";
+import { splitReference } from "../lib/errorCopy";
 import { useToast } from "./Toast";
 import { HiddenFileInput } from "./ui/HiddenFileInput";
 import type { CatalogConnector } from "../lib/api";
@@ -314,6 +316,7 @@ export function ConnectorModal({
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
+    code?: string;
     source_ha?: Record<string, unknown>;
   } | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
@@ -483,14 +486,14 @@ export function ConnectorModal({
         const authMatch = result.message.match(/authSource=([^\s)]+)/);
         if (authMatch && !authSource) setAuthSource(authMatch[1]);
       }
-      toast({
-        title: result.success ? "Connection successful" : "Connection failed",
-        message: result.message,
-        tone: result.success ? "success" : "error",
-      });
-    } catch {
-      setTestResult({ success: false, message: "Connection test failed" });
-      toast({ title: "Connection test failed", tone: "error" });
+      // UX-7: a failure shows once, inline beside the form, with its reference chip.
+      if (result.success) {
+        toast({ title: "Connection successful", message: result.message, tone: "success" });
+      }
+    } catch (error) {
+      // UX-8: keep the reason (the API's words, or the browser's timeout) — never a bare failure.
+      const message = error instanceof Error && error.message ? error.message : "Connection test failed";
+      setTestResult({ success: false, message });
     }
     setTesting(false);
   };
@@ -942,8 +945,9 @@ export function ConnectorModal({
                         </span>
                       )}
                     </div>
-                    <p className="df2-conn-probe-msg">{testResult.message}</p>
-                    {!testResult.success && /ssl|tls|certificate/i.test(testResult.message) && (
+                    <p className="df2-conn-probe-msg">{splitReference(testResult.message).text}</p>
+                    <ErrorReferenceChip reference={splitReference(testResult.message).reference} />
+                    {!testResult.success && (testResult.code === "network.tls_required" || testResult.code === "network.tls_untrusted") && (
                       <p className="df2-conn-probe-hint">
                         Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
                         emulators and plaintext Docker ports usually need it off.
