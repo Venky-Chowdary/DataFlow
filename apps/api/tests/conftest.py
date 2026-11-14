@@ -158,6 +158,10 @@ os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
+# Login lockouts stay per process: CI shards (and other suites) share one
+# Redis, and one test's failed sign-ins must not slow another's. The Redis
+# store has its own test (test_w1sec_login_lockout.py).
+os.environ.setdefault("DATAFLOW_AUTH_LOCKOUT_BACKEND", "memory")
 # No background Training Agent under a TestClient: the lifespan defaults it on
 # outside production, and a CPU-bound run (60 s / 120 s after startup) would
 # outlive the test, hold the GIL and slow every later test. The fallback brand
