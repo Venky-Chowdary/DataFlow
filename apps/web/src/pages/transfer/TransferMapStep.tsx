@@ -542,14 +542,22 @@ export function TransferMapStep({
   const mapAttention = stepCounts.attention;
   const statusLine = mapStatusLine(stepCounts);
   const destTable = targetDatabase && targetCollection ? `${targetDatabase}.${targetCollection}` : targetCollection;
-  const routeSummary = [
-    `${sourceLabel || "Source"} → ${destRouteLabel || "Destination"}`,
-    destTable && !String(destRouteLabel).includes(destTable) ? destTable : "",
-    destTableExists === true
-      ? `existing table${destColumns.length ? ` (${destColumns.length} columns)` : ""}`
-      : destTableExists === false ? "new table" : "",
+  // The stepper's route line already names the source and the destination
+  // (W9): the header says only what that line does not, in one line. The full
+  // route stays in the title for a reader who wants it here.
+  const tableFacts = [
+    destTableExists === true ? "existing table" : destTableExists === false ? "new table" : "",
+    destTableExists === true && destColumns.length
+      ? `${destColumns.length.toLocaleString("en-US")} ${destColumns.length === 1 ? "column" : "columns"}`
+      : "",
     syncModeLabel,
     streamNames.length > 1 ? `${streamNames.length} streams` : "",
+  ].filter(Boolean);
+  const routeSummary = tableFacts.join(" · ");
+  const routeTitle = [
+    `${sourceLabel || "Source"} → ${destRouteLabel || "Destination"}`,
+    destTable && !String(destRouteLabel).includes(destTable) ? destTable : "",
+    ...tableFacts,
   ].filter(Boolean).join(" · ");
 
   // Review: the rows that need a decision; when only destination columns are
@@ -659,7 +667,7 @@ export function TransferMapStep({
       <div className="df2-card-head df2-map-step-head">
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
-          <p className="df2-map-route" title={routeSummary}>{routeSummary}</p>
+          {routeSummary ? <p className="df2-map-route" title={routeTitle}>{routeSummary}</p> : null}
           <p
             className={`df2-map-status${mapAttention > 0 || stepCounts.destinationIssues > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
             data-testid="map-status-line"

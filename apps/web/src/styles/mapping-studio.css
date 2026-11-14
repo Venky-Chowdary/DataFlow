@@ -1721,3 +1721,41 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   pointer-events: none;
   box-shadow: var(--df-shadow-xs);
 }
+
+/* -- Map header and destination panel with long names (W9) ---------------- */
+/* The stepper's route line names source and destination; the header keeps
+   one line of table facts, so from 1024 px the toolbar stays on the title
+   row whatever the names are. */
+@media (min-width: 1024px) {
+  .df2-map-step-panel .df2-card-head.df2-map-step-head {
+    flex-wrap: nowrap;
+  }
+
+  .df2-map-step-panel .df2-card-head.df2-map-step-head .df2-map-step-head-copy {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .df2-map-step-panel .df2-card-head.df2-map-step-head .df2-map-step-head-actions {
+    flex: none;
+  }
+
+  .df2-map-step-panel .df2-map-step-head .df2-map-route {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* The table name in the panel head: one line, the full name in its title. */
+.df2-ms-panel-head > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-ms-panel-head .df2-ms-panel-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
