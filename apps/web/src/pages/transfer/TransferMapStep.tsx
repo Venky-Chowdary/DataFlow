@@ -7,7 +7,7 @@ import { TemplatesDialog } from "../../components/mapping/TemplatesDialog";
 import { HiddenFileInput } from "../../components/ui/HiddenFileInput";
 import { applyImportedMappings, documentRows, templateUnboundNote } from "../../lib/mappingCode";
 import type { ShapeStepWire } from "../../lib/shape";
-import { DestinationColumnsPanel, DND_MIME } from "../../components/mapping/DestinationColumnsPanel";
+import { DestinationColumnsPanel, DND_MIME, type PanelFilter } from "../../components/mapping/DestinationColumnsPanel";
 import { MappingToolbar } from "../../components/mapping/MappingToolbar";
 import { useTouchDrag } from "../../components/mapping/useTouchDrag";
 import {
@@ -246,6 +246,8 @@ export function TransferMapStep({
     [onChangeMappings],
   );
   const [visibleTargets, setVisibleTargets] = useState<string[] | null>(null);
+  // The issue banner's Show: open the panel on the columns that block Validate.
+  const [panelFilterRequest, setPanelFilterRequest] = useState<{ filter: PanelFilter; seq: number } | null>(null);
   const studio = useMappingStudio({
     mappings: columnMappings,
     onChange: onOperatorEdit,
@@ -569,12 +571,20 @@ export function TransferMapStep({
     setFilter("attention");
     if (columns[0]) setFocusSource(columns[0]);
   };
+  const showTargetIssues = () => {
+    const filter: PanelFilter = targetIssues.some((t) => t.code === "required_unmapped")
+      ? "required"
+      : targetIssues.some((t) => t.code === "target_conflict") ? "conflicts" : "all";
+    setPanelOpen(true);
+    setPanelFilterRequest((prev) => ({ filter, seq: (prev?.seq ?? 0) + 1 }));
+  };
   const mapIssues: MapIssue[] = [
     ...targetIssues.map((t, i) => ({
       id: `target:${t.code}:${i}`,
       tone: "block" as const,
       title: t.title,
       detail: t.action,
+      subjects: t.columns,
       action: remapControls && !panelOpen
         ? { label: "Open panel", onClick: () => setPanelOpen(true) }
         : undefined,
@@ -585,6 +595,7 @@ export function TransferMapStep({
       tone: (g.clearableFromMap ? "warn" : "block") as MapIssue["tone"],
       title: g.title,
       detail: g.action,
+      subjects: g.columns,
       action: g.code === "dest_schema_unloaded" && onReloadDestSchema
         ? { label: "Reload schema", onClick: () => void onReloadDestSchema(), disabled: destSchemaLoading }
         : { label: g.columns.length > 1 ? `Review ${g.columns.length} rows` : "Review row", onClick: () => showRows(g.columns) },
@@ -845,6 +856,13 @@ export function TransferMapStep({
             issues={mapIssues}
             summary={issueSummary}
             testId={targetIssues.length > 0 ? "map-target-issues" : "map-issues"}
+            primaryAction={
+              targetIssues.length > 0 && remapControls
+                ? { label: "Show", onClick: showTargetIssues, title: "Show these columns in the destination panel" }
+                : mapAttention > 0
+                  ? { label: "Show", onClick: reviewIssues, title: "Show the rows that need a decision" }
+                  : undefined
+            }
           />
         )}
         {(codeStatus || (pendingComputed.length > 0 && onAddComputedSteps)) && (
@@ -922,6 +940,7 @@ export function TransferMapStep({
               onPointerDrop={studio.pointerDrop}
               onPointerOver={studio.pointerOver}
               onVisibleChange={setVisibleTargets}
+              filterRequest={panelFilterRequest}
             />
           )}
         </div>

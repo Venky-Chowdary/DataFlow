@@ -3092,7 +3092,8 @@ th.df2-type-string .df2-type-badge {
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn-ghost,
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger) {
   background: var(--df-surface);
-  border-color: #e2e8f0;
+  /* Token, as on every other secondary button: #e2e8f0 drew white outlines in dark. */
+  border-color: var(--df-border);
   color: var(--df-text-secondary);
 }
 
@@ -3113,7 +3114,8 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
   font-size: 12px;
   line-height: 1.2;
-  color: #64748b;
+  /* A token, so dark mode re-maps it (#64748b was 3.5:1 on the dark footer). */
+  color: var(--df-text-secondary);
 }
 
 .df2-page-transfer-studio .df2-map-footer-status > span,
@@ -5494,7 +5496,7 @@ th.df2-type-string .df2-type-badge {
   align-items: center;
   gap: 6px 12px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-secondary);
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -9417,7 +9419,7 @@ button.df2-vd-assist-toggle:focus-visible {
   align-items: center;
   gap: 6px 12px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-secondary);
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -10589,7 +10591,9 @@ button.df2-vd-assist-toggle:focus-visible {
   padding-bottom: 2px !important;
 }
 
-.df2-map-editor-scroll-host .df2-column-transform-cell .df2-select {
+/* The full-table layout only: the Map grid (is-triage) sizes the Transform
+   column to the select, and a 150 px floor ran it into Approve (W7). */
+.df2-map-editor-scroll-host .df2-column-review:not(.is-triage) .df2-column-transform-cell .df2-select {
   min-width: 150px !important;
   max-width: 100%;
   width: 100%;
@@ -11316,6 +11320,15 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
     min-height: 32px;
     padding: 4px 8px;
   }
+}
+
+/* The current step's name in the compact (phone) stepper. The step button is
+   disabled, and a disabled button paints its text GrayText at 30 %, so "Map"
+   read like the upcoming Gate and Run. Full brand ink, as the desktop label
+   (>= 768 px sets the same token with !important and hides this label). */
+.df2-transfer-studio-chrome .df2-wizard-step.active .df2-wizard-label-short {
+  color: var(--df-brand-strong);
+  font-weight: var(--df-fw-bold);
 }
 
 /* Rank 19: never clip Studio primary actions on laptop/mobile heights */

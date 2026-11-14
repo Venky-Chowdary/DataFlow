@@ -3,7 +3,7 @@ import { FilterTabs } from "./ui/FilterTabs";
 import { ReasonDisclosure } from "./transfer/ReasonDisclosure";
 import { StructurePreview } from "./ui/StructurePreview";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { DestColumnCombobox } from "./mapping/DestColumnCombobox";
+import { DestColumnCombobox, DestTargetTag, destTargetTag } from "./mapping/DestColumnCombobox";
 import { TypeCompatBadge, compatSentence } from "./mapping/TypeCompatBadge";
 import type { DestColumnCatalog } from "../lib/destColumnCatalog";
 import type { TypeGrade } from "../lib/mappingStudioApi";
@@ -1267,9 +1267,11 @@ export function ColumnReviewPanel({
               const destTypeText = isDestSchemaPending(m) && !m.destType
                 ? "type not loaded"
                 : (m.destType || m.inferredType || "");
+              // W7: type, "new column" and the type grade share one small line under the picker.
               const destMeta = (
                 <span className="df2-column-dest-meta">
-                  {destTypeText ? <span className="df2-column-dest-type-text">{destTypeText}</span> : null}
+                  {destTypeText ? <span className="df2-column-dest-type-text" title={destTypeText}>{destTypeText}</span> : null}
+                  {remap && !omitted ? <DestTargetTag kind={destTargetTag(remap.catalog, m.target)} /> : null}
                   {compatBadge}
                 </span>
               );
@@ -1301,7 +1303,12 @@ export function ColumnReviewPanel({
                   <td className="df2-column-source-cell">
                     <div className="df2-column-cell-content">
                       {remap && !omitted ? remap.renderGrip(m) : null}
-                      <span className="df2-column-source">{m.source}</span>
+                      <span
+                        className="df2-column-source"
+                        title={[m.source, m.inferredType, m.sample ? `sample ${m.sample}` : ""].filter(Boolean).join(" · ")}
+                      >
+                        {m.source}
+                      </span>
                       {m.businessRule && (
                         <span
                           className={`df2-badge df2-badge-xs df2-rule-chip ${
@@ -1331,15 +1338,11 @@ export function ColumnReviewPanel({
                       {triage ? null : riskChips}
                     </div>
                     {triage && (
+                      // W7: the type only, so the row keeps one meta line; the sample is in
+                      // the name's tooltip and in the row's details.
                       <div className="df2-column-source-meta">
                         <span className="df2-column-source-type">{m.inferredType ?? "string"}</span>
-                        <span
-                          className="df2-column-sample-value"
-                          title={m.sample}
-                          aria-label={m.sample ? `Sample value for ${m.source}: ${m.sample}` : undefined}
-                        >
-                          {m.sample || "—"}
-                        </span>
+                        {m.sample ? <span className="df2-sr-only">Sample value for {m.source}: {m.sample}</span> : null}
                       </div>
                     )}
                   </td>
@@ -1436,6 +1439,7 @@ export function ColumnReviewPanel({
                           catalog={remap.catalog}
                           claimedBy={remap.claimedBy}
                           onCommit={(target) => remap.onRemap(m.source, target)}
+                          showTargetTag={!triage}
                           inputRef={(el) => {
                             if (el) destInputRefs.current.set(m.source, el);
                             else destInputRefs.current.delete(m.source);
@@ -1544,11 +1548,6 @@ export function ColumnReviewPanel({
                     </>
                   )}
                   <td className="df2-column-status">
-                    {/* One chip, only for a state that needs more than Approve; a row
-                        that just waits for Approve shows the button alone. */}
-                    {triage && !omitted && !ready && statusChip.tone !== "info" && (
-                      <span className={`df2-column-status-chip is-${statusChip.tone}`}>{statusChip.label}</span>
-                    )}
                     {omitted ? (
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
@@ -1633,6 +1632,12 @@ export function ColumnReviewPanel({
                           </span>
                         )}
                       </div>
+                    )}
+                    {/* One chip, only for a state that needs more than Approve; a row
+                        that just waits for Approve shows the button alone. The action
+                        holds the row's first line; the chip reads under it (W7). */}
+                    {triage && !omitted && !ready && statusChip.tone !== "info" && (
+                      <span className={`df2-column-status-chip is-${statusChip.tone}`}>{statusChip.label}</span>
                     )}
                   </td>
                 </tr>

@@ -245,19 +245,34 @@ describe("destination panel summary says what is true (W6 round 2, item 2)", () 
     existsInDestination: false, createNew: true,
   }));
 
-  it("counts existing columns, the ones that receive a source, the new columns and the required gaps", () => {
+  it("counts existing columns, the ones that receive a source and the new columns", () => {
     const summary = summarizeMapTargets(catalog, rows);
+    assert.equal(summary.requiredUnmapped.length, 2, "the fixture still has two required gaps");
+    // W7: the gaps are the issue banner's to name; the panel line is the inventory.
     assert.equal(
       destPanelSummaryLine(summary, catalog),
-      "8 existing columns · 0 receive a source · 5 new columns will be added · 2 required columns have no source",
+      "8 existing columns · 0 receive a source · 5 new columns will be added",
     );
   });
 
   it("uses singulars and drops the parts that are zero", () => {
     const one = summarizeMapTargets(catalog, [{ ...rows[0], target: "legacy_ref", existsInDestination: true, createNew: false }]);
-    assert.equal(
-      destPanelSummaryLine(one, catalog),
-      "8 existing columns · 1 receives a source · 1 required column has no source",
-    );
+    assert.equal(destPanelSummaryLine(one, catalog), "8 existing columns · 1 receives a source");
+  });
+
+  it("never restates a blocker: required gaps, conflicts and refused names stay on the banner (W7)", () => {
+    const clash = [
+      { ...rows[0], target: "email_address", existsInDestination: true, createNew: false },
+      { ...rows[1], target: "email_address", existsInDestination: true, createNew: false },
+    ];
+    const line = destPanelSummaryLine(summarizeMapTargets(catalog, clash), catalog);
+    assert.doesNotMatch(line, /required|no source|twice|cannot/i);
+  });
+
+  it("a table that does not exist yet reads as a new table, not as zero counts (W7)", () => {
+    const fresh = { ...catalog, tableExists: false, columns: [] };
+    const line = destPanelSummaryLine(summarizeMapTargets(fresh, rows), fresh);
+    assert.equal(line, "New table · created from the mapped columns on the first write");
+    assert.doesNotMatch(line, /0 existing/);
   });
 });
