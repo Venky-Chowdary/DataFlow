@@ -12561,3 +12561,40 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
     overflow-y: auto !important;
   }
 }
+
+/* ==========================================================================
+   Studio chrome with production data (W9)
+   ========================================================================== */
+
+/* -- Destination mode tabs ------------------------------------------------ */
+/* Fixed short labels that never shrink below their text; on a narrow card
+   Advanced wraps under the tabs instead of squeezing them. A tab this host
+   refuses looks disabled and does nothing; the reason is the one-line hint
+   under the control (and the tab's title and description). */
+.df2-dest-toolbar .df2-dest-mode-row {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.df2-app .df2-dest-mode-row .df2-dest-mode-toggle {
+  flex: 1 1 auto;
+  min-width: fit-content;
+}
+
+.df2-app .df2-dest-mode-toggle .df2-dest-mode-btn {
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+
+.df2-app .df2-dest-mode-toggle .df2-dest-mode-btn.is-unavailable,
+.df2-app .df2-dest-mode-toggle .df2-dest-mode-btn.is-unavailable:hover {
+  background: transparent;
+  color: var(--df-text-tertiary);
+  cursor: not-allowed;
+}
+
+.df2-dest-mode-field .df2-dest-mode-hint {
+  margin: 4px 0 0;
+  font-size: var(--df-fs-xs);
+  line-height: 1.4;
+}
