@@ -982,6 +982,15 @@ def read_mysql_rows(
     table_ref = quote_table_ref(table, dialect="mysql")
     try:
         with conn.cursor() as cur:
+            # DATA-10: the transfer reader's own projection (BIT as MSB-first
+            # digits, JSON/TIME as engine text) so both ladder sides carry the
+            # wire the copy wrote; a raw BIT read was base64 of driver bytes.
+            from connectors.mysql_reader import _mysql_column_types, _mysql_select_list
+
+            projected = _mysql_select_list(
+                columns or None, _mysql_column_types(cur, str(table).rsplit(".", 1)[-1].strip("`"))
+            )
+            col_sql = projected or col_sql
             cur.execute(f"SELECT {col_sql} FROM {table_ref}")  # nosec B608
             rows: list[dict[str, Any]] = []
             names: list[str] = []
