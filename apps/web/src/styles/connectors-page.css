@@ -126,6 +126,11 @@
   text-overflow: ellipsis;
 }
 
+/* The drawer's health badge is a sentence ("Never tested"), not a title. */
+.df2-connector-health-badge {
+  text-transform: none;
+}
+
 .df2-connector-row-meta {
   font-size: var(--df-list-row-meta);
   line-height: 1.25;

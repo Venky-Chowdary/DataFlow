@@ -77,7 +77,7 @@ export function ConnectorDetailDrawer({
       title={c.name}
       subtitle={`${connectorDisplayName(c.type)} · ${endpoint}`}
       headerExtra={
-        <span className={`df2-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
+        <span className={`df2-badge df2-connector-health-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
           <span className={`df2-health-dot ${healthy ? "ok" : neverTested ? "" : "err"}`} aria-hidden />
           {healthBadge}
         </span>

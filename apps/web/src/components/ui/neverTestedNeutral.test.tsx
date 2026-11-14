@@ -72,8 +72,14 @@ describe("never-tested connections look neutral", () => {
     assert.match(html, /Never tested/);
     assert.doesNotMatch(html, /df2-badge-live|df2-health-dot ok|df2-fact-ok/);
     assert.match(html, /df2-badge-muted/);
+    assert.match(html, /df2-connector-health-badge/);
     const ok = await drawerHtml(passed);
     assert.match(ok, /df2-badge-live/);
+  });
+
+  it("the health badge keeps sentence case ('Never tested', not 'Never Tested')", () => {
+    const css = read("styles/connectors-page.css");
+    assert.match(css, /\.df2-connector-health-badge \{\s*text-transform: none;/);
   });
 
   it("the Healthy filter and its count use a passed probe, not 'looks healthy'", () => {
