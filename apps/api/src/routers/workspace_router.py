@@ -242,6 +242,56 @@ def _require_region_admin(request: Request, before: str, after: str | None) -> N
         )
 
 
+def _widened_egress_ranges(before: list[str], after: list[str] | None) -> list[str]:
+    """Ranges in ``after`` that no range in ``before`` already covers."""
+    import ipaddress
+
+    if not after:
+        return []
+    held = []
+    for entry in before or []:
+        try:
+            held.append(ipaddress.ip_network(str(entry).strip(), strict=False))
+        except ValueError:
+            continue
+    added: list[str] = []
+    for entry in after:
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            added.append(text)  # the validator refuses it; never treat it as covered
+            continue
+        if not any(net.version == h.version and net.subnet_of(h) for h in held):
+            added.append(text)
+    return added
+
+
+def _require_egress_admin(request: Request, before: list[str], after: list[str] | None) -> None:
+    """Widening the connector egress allowlist is platform-admin only (SEC-16).
+
+    Every dial refuses private, loopback and CGNAT targets unless the
+    workspace lists the range. On a hosted, multi-tenant deployment those
+    ranges are the operator's own network, so a workspace admin who could add
+    ``10.0.0.0/8`` could reach this server's neighbours. Narrowing or clearing
+    the list only refuses more, so a workspace admin may still do that.
+    """
+    added = _widened_egress_ranges(before, after)
+    if not added or _is_platform_admin(request):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Only a platform administrator can allow {', '.join(added)} for connectors: "
+            "private network ranges on this server reach this deployment's own services. "
+            "Ask your platform administrator to add the range, or give the database an "
+            "address connectors can reach."
+        ),
+    )
+
+
 def _require_tenant_admin(request: Request, workspace_id: str) -> None:
     """Fail closed: a workspace-bound tenant needs that workspace's admin, an
     unbound one (legacy ``workspace_id: ""``) needs a platform admin."""
@@ -1268,6 +1318,7 @@ def post_tenant(body: TenantCreateBody, request: Request):
             detail="workspace_id does not match X-Workspace-Id",
         )
     _require_region_admin(request, "", body.data_region)
+    _require_egress_admin(request, [], body.egress_allowlist)
     if body.mfa_required:
         from services.mfa_enforcement import assert_may_require_mfa
 
@@ -1323,6 +1374,7 @@ def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
     actor = _actor(request)
     _require_tenant_admin(request, tenant.workspace_id)
     _require_region_admin(request, tenant.data_region, body.data_region)
+    _require_egress_admin(request, list(tenant.egress_allowlist or []), body.egress_allowlist)
     if body.mfa_required and not tenant.mfa_required:
         from services.mfa_enforcement import assert_may_require_mfa
 
