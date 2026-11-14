@@ -64,7 +64,15 @@ class EnvelopeHTTPException(HTTPException):
 def _platform_envelope(public_message: str, cid: str, detail: str, status_code: int) -> dict[str, Any]:
     from services.error_taxonomy import TEMPLATES
 
-    code = "platform.gateway_timeout" if status_code == 504 else "platform.internal"
+    # A refusal the caller can act on is not "Something went wrong, try again".
+    if status_code == 404:
+        code = "platform.not_found"
+    elif 400 <= status_code < 500:
+        code = "platform.request_refused"
+    elif status_code == 504:
+        code = "platform.gateway_timeout"
+    else:
+        code = "platform.internal"
     tpl = TEMPLATES[code]
     return {
         "error": {

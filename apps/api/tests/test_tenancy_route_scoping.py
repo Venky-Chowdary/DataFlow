@@ -698,8 +698,9 @@ def _call(client, route: str, params: dict[str, str]):
 
 
 def _without_reference(text: str) -> str:
-    """Drop the per-response support reference ``safe_http_exception`` appends."""
-    return re.sub(r" Reference: [0-9a-f-]{36}", "", text)
+    """Drop the per-response support reference ``safe_http_exception`` appends
+    (in the detail text, and as the error envelope's ``reference`` field)."""
+    return re.sub(r'( Reference: |"reference":")[0-9a-f-]{36}', r"\1", text)
 
 
 def _answer(response) -> tuple[int, str]:

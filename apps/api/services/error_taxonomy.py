@@ -402,6 +402,18 @@ TEMPLATES: dict[str, Template] = {
         "Try again. If it persists, contact support with the reference.",
         "retry", retriable=True,
     ),
+    "platform.not_found": Template(
+        "Not found",
+        "That item isn't in this workspace, or it was deleted.",
+        "Check the link or reload the list, and switch workspace if it belongs to another one.",
+        "reload",
+    ),
+    "platform.request_refused": Template(
+        "Request not accepted",
+        "Datawrap couldn't accept this request as sent.",
+        "Check the values on the form, then try again.",
+        "edit",
+    ),
     "platform.internal": Template(
         "Something went wrong",
         "Something went wrong on Datawrap's side.",
