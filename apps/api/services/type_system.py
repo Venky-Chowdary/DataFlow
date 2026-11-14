@@ -1506,6 +1506,9 @@ def decimal_params_would_narrow(
         return False
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
+    if sp is None and re.match(r"^\s*BIGINT\s+UNSIGNED\b", str(source_type or ""), re.I):
+        # DATA-15: BIGINT UNSIGNED is exactly 20 integer digits (0..2^64-1).
+        sp, ss = 20, 0
     single_capacity = dest_decimal_single_capacity_digits(dest_db=dest_db)
     if single_capacity is not None:
         # These carriers have one capacity at any in-range scale and no per-field
