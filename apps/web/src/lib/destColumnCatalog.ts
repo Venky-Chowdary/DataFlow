@@ -270,6 +270,39 @@ export function summarizeMapTargets(
 }
 
 /**
+ * The destination panel's one summary line, consistent with the Map header:
+ * how many columns the table has, how many receive a source, how many new
+ * columns the run adds, and the required columns with no source. "0 mapped ·
+ * 8 unmapped" read as "nothing is mapped" while every source wrote a new column.
+ */
+export function destPanelSummaryLine(
+  summary: MapTargetSummary,
+  catalog: DestColumnCatalog | null | undefined,
+): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  const existing = catalog?.columns.length ?? 0;
+  const added = summary.newTargets.length - summary.refusedNewTargets.length;
+  const required = summary.requiredUnmapped.length;
+  const parts = [
+    `${n(existing)} existing ${existing === 1 ? "column" : "columns"}`,
+    `${n(summary.mapped)} ${summary.mapped === 1 ? "receives" : "receive"} a source`,
+  ];
+  if (added > 0) parts.push(`${n(added)} new ${added === 1 ? "column" : "columns"} will be added`);
+  if (summary.refusedNewTargets.length > 0) {
+    const r = summary.refusedNewTargets.length;
+    parts.push(`${n(r)} new ${r === 1 ? "name" : "names"} cannot be added`);
+  }
+  if (required > 0) {
+    parts.push(`${n(required)} required ${required === 1 ? "column has" : "columns have"} no source`);
+  }
+  if (summary.conflicts.size > 0) {
+    const c = summary.conflicts.size;
+    parts.push(`${n(c)} ${c === 1 ? "column is" : "columns are"} written twice`);
+  }
+  return parts.join(" · ");
+}
+
+/**
  * Point a mapping row at ``target``. An existing column binds to its physical
  * type; a name the table lacks becomes a create-new column. Stale engine
  * fidelity never survives a target change: the carrier check runs again and
@@ -280,6 +313,18 @@ export function remapToDestination(
   target: string,
   catalog: DestColumnCatalog | null | undefined,
 ): EditableMapping {
+  // Pointing a row at the column it already writes is not an edit: Auto-map's
+  // "id → id" must not drop the row's approval or re-grade it (UX-26).
+  const same = String(target || "").trim();
+  if (
+    same
+    && same.toLowerCase() === String(m.target || "").trim().toLowerCase()
+    && m.existsInDestination === true
+    && m.assignmentStrategy !== "pending_dest_schema"
+    && Boolean(m.destType)
+  ) {
+    return m;
+  }
   const base = applyOperatorRemapDest(m, target);
   if (!base.target) return base;
   const col = findDestColumn(catalog, base.target);

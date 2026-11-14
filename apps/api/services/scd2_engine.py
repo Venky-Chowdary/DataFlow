@@ -827,8 +827,16 @@ def close_versions_missing_from_snapshot(
     timestamp: datetime | None = None,
     dialect: str = "",
     cols: dict[str, Any] | None = None,
+    keep_keys: set[str] | None = None,
+    key_types: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Expire current versions whose key is absent from a complete source snapshot.
+
+    ``keep_keys`` are keys of source rows quarantine held out of the snapshot
+    (see :func:`held_out_keys`): absent from it, but not deleted at the
+    source. Their current versions stay current and are returned as
+    ``kept_current_keys``; ``key_types`` binds them in the key columns'
+    carriers (:func:`key_column_types`).
 
     Kimball hard-delete close-out (dbt snapshot ``invalidate_hard_deletes``):
     a key that no longer exists at the source keeps its history but stops
@@ -856,13 +864,41 @@ def close_versions_missing_from_snapshot(
         f"{current_pred} AND NOT EXISTS "
         f"(SELECT 1 FROM {snapshot_qualified} WHERE {join_pred})"
     )
+    stamp = timestamp or _now_utc()
+    if keep_keys:
+        from services.reconciliation_api import iter_select_row_dicts
+
+        pk_quoted = ", ".join(quote_stored_identifier(dialect, c) for c in pk_columns)
+        absent = [
+            _compose_key(row, pk_columns)
+            for batch in iter_select_row_dicts(
+                conn,
+                sa.text(
+                    f"SELECT {pk_quoted} FROM {target_qualified} "  # nosec B608
+                    f"WHERE {missing_pred}"
+                ),
+                pk_columns,
+                itersize=1_000,
+            )
+            for row in batch
+        ]
+        kept = sorted({k for k in absent if k in keep_keys})
+        deleted = {k for k in absent if k not in keep_keys}
+        _expire_rows(
+            conn, target_qualified, pk_columns, deleted, stamp, dialect,
+            column_types=key_types, cols=cols,
+        )
+        return {
+            "closed_missing_rows": len(deleted),
+            "kept_current_keys": kept,
+            "run_stamp": stamp.isoformat(),
+        }
     closed = conn.execute(
         sa.text(
             f"SELECT COUNT(*) FROM {target_qualified} WHERE {missing_pred}"  # nosec B608
         )
     ).scalar()
     closed_n = int(closed or 0)
-    stamp = timestamp or _now_utc()
     if closed_n:
         ts_param: Any = stamp
         ts_sql = ":ts"
@@ -1173,6 +1209,7 @@ def prepare_scd2_mapped_rows(
     rejected_details: list[dict[str, Any]] = []
     transform_errors: list[str] = []
     pk_ok_rows: list[dict[str, Any]] = []
+    accepted_rows = 0
     try:
         for pk_ok, details, errors in iter_scd2_prepared_bundles(
             columns=columns,
@@ -1182,6 +1219,7 @@ def prepare_scd2_mapped_rows(
         ):
             rejected_details.extend(details)
             transform_errors.extend(errors)
+            accepted_rows += len(pk_ok)
             if retain_mapped:
                 pk_ok_rows.extend(pk_ok)
             del pk_ok
@@ -1206,6 +1244,9 @@ def prepare_scd2_mapped_rows(
     return {
         "ok": True,
         "mapped_rows": pk_ok_rows,
+        # Rows that reach the history merge; 0 with findings means every row
+        # was held out (see :func:`all_rows_quarantined_error`).
+        "accepted_rows": accepted_rows,
         "primary_key_columns": pk_columns,
         "target_columns": target_cols,
         "rejected_details": list(rejected_details),
@@ -1213,6 +1254,84 @@ def prepare_scd2_mapped_rows(
         "transform_errors": list(transform_errors)[:20],
         "error_policy": error_policy,
     }
+
+
+def held_out_keys(
+    endpoint: Any,
+    rejected_details: list[dict[str, Any]],
+    mappings: list[dict[str, Any]] | None,
+    schema: dict[str, str] | None,
+    pk_columns: list[str],
+) -> set[str]:
+    """Target-space keys of the source rows quarantine held out of this run.
+
+    A held-out row is still in the source, so its key is not a delete: a
+    complete snapshot must not close its current version (SCD2-F2). Each
+    finding names its row's key in source space (``pk_value``, else the
+    row's own ``source_values``); the key is mapped through the key columns'
+    own Map, so it composes exactly like a merged row's key. A finding that
+    names no key, or a key that does not map (the reason it was held out),
+    cannot match a stored version and is skipped.
+    """
+    from services.mapping_constraints import write_mappings
+    from src.transfer.writer_column_spelling import physical_column
+
+    key_map = [
+        m for m in write_mappings(list(mappings or []))
+        if m.get("source") and physical_column(str(m.get("target") or "")) in pk_columns
+    ]
+    if not rejected_details or len(key_map) != len(pk_columns):
+        return set()
+    sources = [str(m["source"]) for m in key_map]
+    records: dict[tuple[str, ...], dict[str, Any]] = {}
+    for detail in rejected_details:
+        if not isinstance(detail, dict):
+            continue
+        named = detail.get("pk_value")
+        if not isinstance(named, dict):
+            named = detail.get("source_values") or detail.get("values")
+        if not isinstance(named, dict) or any(named.get(s) is None for s in sources):
+            continue
+        record = {s: named[s] for s in sources}
+        records.setdefault(tuple(str(v) for v in record.values()), record)
+    if not records:
+        return set()
+    ctx = _scd2_map_context(
+        endpoint, sources, schema, key_map, pk_columns, validation_mode="balanced"
+    )
+    keys: set[str] = set()
+    for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
+        columns=sources, ctx=ctx, records=list(records.values())
+    ):
+        keys.update(_compose_key(row, pk_columns) for row in pk_ok)
+    return keys
+
+
+def all_rows_quarantined_error(
+    rejected_details: list[dict[str, Any]], rows: int | None = None
+) -> str:
+    """The refusal for a run whose every row was held out to quarantine.
+
+    Worded like the streaming writer's, so the operator gets the same
+    ``all_rows_quarantined`` explanation (D258) whichever write path ran. An
+    SCD2 run that merged nothing still reported success with a green Gate-8
+    while the target stayed empty (SCD2-F1); on an existing history table the
+    empty snapshot closed every current version as deleted at the source.
+    """
+    if rows is None:
+        rows = len({str(d.get("row")) for d in rejected_details if isinstance(d, dict)})
+    reasons: list[str] = []
+    for detail in rejected_details[:200]:
+        reason = str((detail or {}).get("reason") or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        if len(reasons) >= 3:
+            break
+    return (
+        f"All {max(int(rows or 0), 1)} row(s) were quarantined, so nothing was "
+        "written to the destination"
+        + (f" — {'; '.join(reasons)}" if reasons else "")
+    )
 
 
 def _type1_update_rows(
@@ -1453,8 +1572,25 @@ def apply_scd2(
     scd2_opts: dict[str, Any] | None = None,
     source_endpoint: Any = None,
     add_new_columns: bool = False,
+    catalog_mappings: list[dict[str, Any]] | None = None,
+    refuse_all_quarantined: bool = True,
+    connection: Any = None,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``connection`` is a caller-owned connection with an open transaction. The
+    merge then runs on it and does not commit, so a caller that splits one run
+    across several calls commits or rolls back the whole run at once (DATA-2).
+
+    ``refuse_all_quarantined`` (default) refuses, before anything is created
+    or closed, a call whose every row was held out. A caller that splits one
+    run across several calls (the staged merge) makes that decision for the
+    whole population itself and passes False.
+
+    ``catalog_mappings`` is the run's source-space Map when ``records`` are
+    already in target space (the staged merge maps each column to itself).
+    The CREATE's source catalog is read through it, so a renamed column keeps
+    its source collation and nullability.
 
     ``add_new_columns`` (the run's ``backfill_new_fields``) adds mapped columns
     an existing history table lacks before the merge (D347).
@@ -1541,6 +1677,20 @@ def apply_scd2(
                 rejected_details,
                 transform_errors,
             )
+        if refuse_all_quarantined and rejected_details and not scan.get("accepted_rows"):
+            return _blocked(
+                all_rows_quarantined_error(rejected_details),
+                rejected_details,
+                transform_errors,
+            )
+        # Keys of rows held out of a complete snapshot: still in the source.
+        held_keys = (
+            held_out_keys(
+                endpoint, rejected_details, ctx["effective_mappings"], schema, pk_columns
+            )
+            if complete_snapshot
+            else set()
+        )
 
         db_type = resolve_driver_type(endpoint.format)
         cfg = resolve_connector_config(endpoint)
@@ -1558,17 +1708,30 @@ def apply_scd2(
         }
 
         source_schema_catalog = None
+        catalog_map = mappings if catalog_mappings is None else catalog_mappings
         if source_endpoint is not None:
             from src.transfer.adapters_introspect import source_schema_catalog_for_endpoint
 
+            catalog_columns, catalog_types = list(columns or []), dict(schema or {})
+            if catalog_mappings is not None:
+                from src.transfer.writer_column_spelling import physical_column
+
+                catalog_types = {
+                    str(m["source"]): column_types.get(
+                        physical_column(str(m.get("target") or "")), "string"
+                    )
+                    for m in catalog_mappings
+                    if m.get("source")
+                }
+                catalog_columns = list(catalog_types)
             source_schema_catalog = source_schema_catalog_for_endpoint(
-                source_endpoint, list(columns or []), fallback_types=dict(schema or {})
+                source_endpoint, catalog_columns, fallback_types=catalog_types
             )
         try:
             table_obj = _build_scd_table(
                 engine, table, schema_name, target_cols, column_types,
                 db_type, cols,
-                mappings=mappings,
+                mappings=catalog_map,
                 source_schema_catalog=source_schema_catalog,
                 add_new_columns=add_new_columns,
             )
@@ -1589,7 +1752,7 @@ def apply_scd2(
             # scope (the writer ack covers the whole current set, which
             # includes retained rows). Accumulate it in the same pass.
             source_fp_acc: Any = None
-            if complete_snapshot and not cols.get("close_missing", True):
+            if complete_snapshot and (not cols.get("close_missing", True) or held_keys):
                 from services.fingerprint_accumulator import (
                     FingerprintAccumulator,
                 )
@@ -1604,7 +1767,9 @@ def apply_scd2(
                     _attr_cols,
                 )
 
-            with engine.begin() as conn:
+            from contextlib import nullcontext
+
+            with (nullcontext(connection) if connection is not None else engine.begin()) as conn:
                 for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
                     columns=columns,
                     ctx=ctx,
@@ -1644,7 +1809,8 @@ def apply_scd2(
                         type1_total += type1_updated
                     del pk_ok
 
-                retained_missing = 0
+                retained_keys: set[str] = set()
+                held_kept = 0
                 scoped_rows = 0
                 scoped_checksum = ""
                 if complete_snapshot and cols.get("close_missing", True):
@@ -1652,7 +1818,7 @@ def apply_scd2(
                         conn,
                         qualified,
                         pk_columns,
-                        source_keys,
+                        source_keys | held_keys,
                         timestamp,
                         dialect_name,
                         batch_size=batch_size,
@@ -1660,6 +1826,18 @@ def apply_scd2(
                         cols=cols,
                     )
                     expired_total += closed_missing
+                    if held_keys - source_keys:
+                        # A held-out key keeps its current version: retained,
+                        # not written by this run (Gate-8: current = merged
+                        # + retained).
+                        retained_keys = {
+                            k
+                            for k in _iter_current_keys(
+                                conn, qualified, pk_columns, dialect_name, batch_size, cols
+                            )
+                            if k in held_keys and k not in source_keys
+                        }
+                        held_kept = len(retained_keys)
                 elif complete_snapshot:
                     # close_missing=False: keys absent from this snapshot stay
                     # current — retained, not written. Count them so Gate-8's
@@ -1677,21 +1855,22 @@ def apply_scd2(
                         )
                         if k and k not in source_keys
                     }
-                    retained_missing = len(retained_keys)
-                    if retained_missing:
-                        # Source-scoped digest: only the current rows this
-                        # run's keys own are comparable to the source digest.
-                        scoped_rows, scoped_checksum = _active_checksum(
-                            conn,
-                            qualified,
-                            target_cols,
-                            batch_size,
-                            dialect_name,
-                            dest_types=ctx["dest_types"],
-                            cols=cols,
-                            pk_columns=pk_columns,
-                            exclude_keys=retained_keys,
-                        )
+                    held_kept = len(retained_keys & held_keys)
+                retained_missing = len(retained_keys)
+                if retained_missing:
+                    # Source-scoped digest: only the current rows this
+                    # run's keys own are comparable to the source digest.
+                    scoped_rows, scoped_checksum = _active_checksum(
+                        conn,
+                        qualified,
+                        target_cols,
+                        batch_size,
+                        dialect_name,
+                        dest_types=ctx["dest_types"],
+                        cols=cols,
+                        pk_columns=pk_columns,
+                        exclude_keys=retained_keys,
+                    )
 
                 active_rows, active_checksum = _active_checksum(
                     conn,
@@ -1717,6 +1896,8 @@ def apply_scd2(
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "retained_missing_rows": retained_missing,
+        # Of those, keys whose source row was quarantined this run.
+        "quarantined_keys_kept_current": held_kept,
         "source_scoped_rows": scoped_rows,
         "source_scoped_checksum": scoped_checksum,
         "source_snapshot_checksum": (

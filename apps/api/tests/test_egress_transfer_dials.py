@@ -3,8 +3,8 @@
 The probe path was the only place the policy ran. These tests pin the same
 refusal on every other dial a user-controlled connector config can steer.
 
-These run with ``DATAFLOW_EGRESS_ENFORCE_NEW=1``: the newer sites are
-audit-only by default (``test_egress_audit_only_new_points.py``).
+These run with ``DATAFLOW_EGRESS_ENFORCE_NEW=1``, the default since SEC-2
+(the audit-only opt-out is ``test_egress_audit_only_new_points.py``).
 """
 
 from __future__ import annotations

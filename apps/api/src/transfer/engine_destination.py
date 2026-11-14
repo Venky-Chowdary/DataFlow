@@ -16,7 +16,13 @@ DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS = 60.0
 
 
 class DestinationConnectTimeout(TimeoutError):
-    """The destination did not answer its first contact inside the deadline (D19)."""
+    """The destination did not answer its first contact inside the deadline (D19).
+
+    Its text names the destination and the deadline, so it is kept whole
+    (``timeout.connect_deadline`` is a product-copy code in the taxonomy).
+    """
+
+    error_code = "timeout.connect_deadline"
 
 
 def _destination_connect_deadline() -> float:
@@ -583,6 +589,58 @@ def _failed_batch_undo_note_impl(
     return base
 
 
+def refuse_all_quarantined_write(rows_written: int, summary: Any) -> None:
+    """Refuse a buffered write whose every row was held out to quarantine.
+
+    The streaming writer and SCD2 already refuse this run; the buffered path
+    reported it as a success — and an overwrite had already replaced the
+    destination with nothing. Raising :class:`WriteBatchBlocked` takes the
+    engine's blocked-write path: the quarantine is persisted and an overwrite's
+    backup is put back. The writers keep the live table themselves where the
+    clear is deferred (SQLite stage publish, PostgreSQL held TRUNCATE).
+    """
+    data = summary if isinstance(summary, dict) else {}
+    details = list(data.get("rejected_details") or [])
+    rejected = int(data.get("rejected_rows") or 0) or len(details)
+    if rows_written or not rejected or data.get("skipped_identity_keys"):
+        return
+    from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+    spill = data.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+    if spill is not None:
+        spill.close()
+    population = int(data.get("source_row_count") or 0) or None
+    raise all_rows_quarantined_blocked(details, rejected, data, rows=population)
+
+
+def all_rows_quarantined_blocked(
+    details: list[dict[str, Any]],
+    rejected_rows: int,
+    summary: dict[str, Any] | None,
+    *,
+    rows: int | None = None,
+) -> Exception:
+    """The blocked-write refusal for a run that held every row out.
+
+    It carries the quarantine (persisted by the engine's blocked-write path)
+    and a measured commit of 0: no row of this run is in the destination, so
+    the job must not report a progress tally as "already written".
+    """
+    from services.scd2_engine import all_rows_quarantined_error
+
+    from .adapters import WriteBatchBlocked
+
+    exc = WriteBatchBlocked(
+        all_rows_quarantined_error(details, rows=rows),
+        rejected_details=details,
+        rejected_rows=rejected_rows,
+        rows_written=0,
+        dest_summary=summary,
+    )
+    setattr(exc, "rows_committed_measured", 0)
+    return exc
+
+
 def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
     if not kept:
         return
@@ -779,6 +837,26 @@ def _clear_destination_table(
             logger.error("full_refresh empty failed for %s: %s", table_name, exc)
             raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
         return True
+    from connectors.overwrite_set_aside import retire_set_aside, set_aside_engine
+
+    aside = set_aside_engine(db_type)
+    if aside:
+        # Snowflake, BigQuery and Elasticsearch replace the object, and S3
+        # replaces the export's objects. Dropping first left nothing to put
+        # back when every row was then quarantined: keep the previous
+        # generation aside and let _settle_overwrite_backup restore or drop it.
+        try:
+            backup = retire_set_aside(aside, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh set-aside failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = aside
+            destination.extra = extra
+        # S3 removes nothing here: its writer replaces the objects.
+        return aside != "s3"
     if db_type in ("postgresql", "redshift"):
         try:
             from connectors.table_manager import postgres_columns_to_keep

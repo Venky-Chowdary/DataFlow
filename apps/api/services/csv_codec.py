@@ -5,8 +5,9 @@ The rule (owner spec):
 - an **unquoted empty** field is SQL NULL;
 - a **quoted** ``""`` field is the empty string ``''``;
 - on write, NULL is an **empty unquoted** cell and ``''`` is quoted ``""``;
-- the legacy ``\\N`` spelling still *reads* as NULL for files written by older
-  builds (and for PostgreSQL COPY payloads, which carry their own NULL marker).
+- a ``\\N`` cell is NULL only when the reader is told so (``null_marker``:
+  the source's declared NULL spelling, or a file this product wrote that
+  way); otherwise it is the two-character text (DATA-21).
 
 Python's ``csv.reader`` deliberately erases the quoting distinction, so this
 module reads each record's raw text alongside the reader and aligns the parsed
@@ -32,17 +33,20 @@ LEGACY_CSV_NULL = "\\N"
 _CSV_NULL = "\x00"
 
 
-def decode_cell(value: str, was_quoted: bool | None, empty_cell: str = "null") -> str | None:
+def decode_cell(
+    value: str, was_quoted: bool | None, empty_cell: str = "null", null_marker: str = ""
+) -> str | None:
     """One parsed CSV field → its database value.
 
     ``was_quoted=None`` means the mask could not be determined — the cell is
     treated as unquoted, matching the historical reader's behaviour of
     landing an empty field as absent data.
     """
-    if value == LEGACY_CSV_NULL and was_quoted is not True:
-        # A *quoted* "\\N" is the two-character text (PostgreSQL CSV rule: a
-        # quoted NULL string is not NULL); the G7-F3 TSV ``\\N`` convention
-        # writes a literal ``\\N`` value that way.
+    if null_marker and value == null_marker and was_quoted is not True:
+        # A *quoted* marker is the text (PostgreSQL CSV rule: a quoted NULL
+        # string is not NULL); the G7-F3 TSV ``\\N`` convention writes a
+        # literal ``\\N`` value that way. Without a declared marker a ``\\N``
+        # cell is text: silently landing NULL lost it (DATA-21).
         return None
     if value != "":
         return value
@@ -94,6 +98,7 @@ def iter_csv_records(
     *,
     empty_cell: str = "null",
     nulled: list[int] | None = None,
+    null_marker: str = "",
 ) -> Iterator[list[str | None]]:
     """Yield decoded rows: unquoted empty → ``None``, quoted ``""`` → ``''``.
 
@@ -116,7 +121,7 @@ def iter_csv_records(
         parts.clear()
         masks = _quote_masks(raw, row, delimiter)
         out = [
-            decode_cell(v, q, empty_cell=empty_cell)
+            decode_cell(v, q, empty_cell=empty_cell, null_marker=null_marker)
             for v, q in zip(row, masks, strict=False)
         ]
         if nulled is not None:

@@ -216,6 +216,10 @@ def _warehouse_location(path_str: str) -> str:
     return _warehouse_root(path_str).as_uri()
 
 
+class IcebergCatalogNotChosen(ValueError):
+    """An Iceberg endpoint whose catalog would have to be guessed (CLM-12)."""
+
+
 def _infer_catalog_type(
     connection_string: str,
     region: str,
@@ -236,8 +240,17 @@ def _infer_catalog_type(
         return "sql"
 
     wh = (warehouse or "").strip().lower()
-    if wh.startswith(("s3://", "gs://", "gcs://")) or region or wh.startswith("arn:"):
-        return "glue"
+    if wh.startswith(("s3://", "gs://", "gcs://", "arn:")) or (region and not wh and not cs):
+        # An object-store warehouse names no catalog. It used to be routed to
+        # AWS Glue (Planned, untested) without a word; now it is refused (CLM-12).
+        raise IcebergCatalogNotChosen(
+            f"This Iceberg endpoint names an object-store warehouse or a region "
+            f"({warehouse or region}) but no "
+            "catalog, and Datawrap does not guess one. Set catalog_type to rest (the "
+            "connection string is the REST catalog URL) or sql (the connection string is "
+            "a SQL catalog URI). AWS Glue is Planned: it is used only when catalog_type "
+            "is glue."
+        )
 
     def _is_local_fs_path(raw: str) -> bool:
         """True for POSIX/Windows paths — never host:port without a scheme.

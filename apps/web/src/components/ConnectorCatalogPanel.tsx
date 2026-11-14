@@ -8,24 +8,14 @@ import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
 import { collapseHostedAliasTiles } from "../lib/catalogAliases";
 import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
-
-const CATEGORY_LABELS: Record<string, string> = {
-  database: "Databases",
-  warehouse: "Data Warehouses",
-  file: "Files & Formats",
-  cloud_storage: "Cloud Storage",
-  saas: "SaaS Applications",
-  api: "APIs & Webhooks",
-  finance: "Finance",
-  healthcare: "Healthcare",
-  marketing: "Marketing",
-  logistics: "Logistics",
-};
+import { CATEGORY_LABELS, catalogCategoryLabel } from "../lib/catalogCategories";
 
 const STATIC_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const STATUS_FILTERS = [
-  { id: "live", label: "Certified" },
+  { id: "certified", label: "Certified" },
+  { id: "implemented", label: "Not yet proven" },
+  { id: "live", label: "Transfer-ready" },
   { id: "source_only", label: "Source only" },
   { id: "connect_only", label: "Test only" },
   { id: "", label: "All catalog" },
@@ -51,7 +41,11 @@ function highlightMatch(text: string, query: string) {
 
 function statusBadge(item: CatalogConnector) {
   const tier = item.certification_tier || "";
-  // Green = this-host transfer-ready only. Certified + missing package is a warning.
+  // Green = CI-proven and transfer-ready on this host. Implemented without CI
+  // proof is never green (CLM-7).
+  if (tier === "implemented") {
+    return { cls: "df2-badge-run", label: item.capability_label || "Implemented — not yet proven" };
+  }
   if (item.transfer_ready) {
     return { cls: "df2-badge-live", label: item.capability_label || "Certified" };
   }
@@ -111,6 +105,7 @@ export function ConnectorCatalogPanel({
   const [filtered, setFiltered] = useState(0);
   const [total, setTotal] = useState(0);
   const [transferLive, setTransferLive] = useState(0);
+  const [pendingProof, setPendingProof] = useState(0);
   const [sourceOnlyCount, setSourceOnlyCount] = useState(0);
   const [roleBetaCount, setRoleBetaCount] = useState(0);
   const [plannedCount, setPlannedCount] = useState(0);
@@ -151,6 +146,7 @@ export function ConnectorCatalogPanel({
           : role === "destination" ? (data.dest_beta ?? 0)
             : 0,
       );
+      setPendingProof(Number((data as { pending_proof_count?: number }).pending_proof_count ?? 0));
       setSourceOnlyCount(data.source_only ?? 0);
       setPlannedCount(data.planned_count ?? data.roadmap ?? 0);
     } catch {
@@ -168,7 +164,7 @@ export function ConnectorCatalogPanel({
     const items = [{ id: "", label: "All categories" }];
     const source = categories.length > 0 ? categories : STATIC_CATEGORIES;
     for (const c of source) {
-      items.push({ id: c, label: CATEGORY_LABELS[c] || c.replace(/_/g, " ") });
+      items.push({ id: c, label: catalogCategoryLabel(c) });
     }
     return items;
   }, [categories]);
@@ -243,7 +239,7 @@ export function ConnectorCatalogPanel({
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
             {transferLive > 0 && (
               role === "all"
-                ? ` · ${transferLive.toLocaleString()} TRANSFER_READY drivers — tiles are not transfer-live`
+                ? ` · ${transferLive.toLocaleString()} drivers proven in CI${pendingProof > 0 ? `, ${pendingProof.toLocaleString()} implemented and not yet proven` : ""} — tiles are not drivers`
                 : ` · ${transferLive.toLocaleString()} live as ${role}`
             )}
             {roleBetaCount > 0 && ` · ${roleBetaCount.toLocaleString()} beta`}

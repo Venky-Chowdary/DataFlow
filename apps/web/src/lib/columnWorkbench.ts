@@ -2,6 +2,8 @@ import {
   assumeTimezoneAwaitingZone,
   hasCreateNewTypeRisk,
   isDestSchemaPending,
+  isIntentionalOmit,
+  mappingRequiresManualApproval,
   mappingRequiresRiskAck,
   type EditableMapping,
 } from "./mapping";
@@ -14,7 +16,11 @@ export type ColumnFilter =
   | "pii"
   | "new"
   | "ready"
-  | "rules";
+  | "rules"
+  /** Map triage: rows that need an individual decision (mapRowState "attention"). */
+  | "attention"
+  /** Map triage: every other row — approvable in bulk, or already approved. */
+  | "clear";
 
 export type ColumnSort = "confidence-asc" | "confidence-desc" | "name-asc" | "name-desc";
 
@@ -86,6 +92,61 @@ export function needsMappingReview(m: EditableMapping, _threshold: number): bool
   return !m.approved;
 }
 
+/**
+ * Where one Map row stands. The single classifier behind every count on the
+ * Map step (header status line, Review, the segmented filter, Approve):
+ * - approved: ready for Validate;
+ * - attention: needs an individual decision (a Risk Contract, a false-friend
+ *   confirmation, a destination type to load, a zone, a destination column);
+ * - approvable: the bulk Approve clears it.
+ * attention + approvable + approved = every row, so the counts reconcile.
+ */
+export type MapRowState = "attention" | "approvable" | "approved";
+
+export function mapRowState(m: EditableMapping): MapRowState {
+  if (isMappingReady(m, 0)) return "approved";
+  if (mappingRequiresManualApproval(m)) return "attention";
+  if (assumeTimezoneAwaitingZone(m)) return "attention";
+  if (!isIntentionalOmit(m) && !String(m.target || "").trim()) return "attention";
+  return "approvable";
+}
+
+export interface MapStepCounts {
+  total: number;
+  /** Rows that write a destination column (omitted rows are not mapped). */
+  mapped: number;
+  attention: number;
+  approvable: number;
+  approved: number;
+  /** approvable + approved: the "Ready" filter. */
+  ready: number;
+  /** Destination-side issues (required columns with no source, conflicts). */
+  destinationIssues: number;
+}
+
+export function mapStepCounts(mappings: EditableMapping[], destinationIssues = 0): MapStepCounts {
+  let attention = 0;
+  let approvable = 0;
+  let approved = 0;
+  let mapped = 0;
+  for (const m of mappings) {
+    const state = mapRowState(m);
+    if (state === "attention") attention += 1;
+    else if (state === "approvable") approvable += 1;
+    else approved += 1;
+    if (!isIntentionalOmit(m) && String(m.target || "").trim()) mapped += 1;
+  }
+  return {
+    total: mappings.length,
+    mapped,
+    attention,
+    approvable,
+    approved,
+    ready: approvable + approved,
+    destinationIssues,
+  };
+}
+
 export function countByFilter(
   mappings: EditableMapping[],
   threshold: number,
@@ -99,6 +160,8 @@ export function countByFilter(
     new: 0,
     ready: 0,
     rules: 0,
+    attention: 0,
+    clear: 0,
   };
 
   for (const m of mappings) {
@@ -110,6 +173,8 @@ export function countByFilter(
     if (isCreateNewColumn(m)) counts.new += 1;
     if (isMappingReady(m, threshold)) counts.ready += 1;
     if (m.businessRule) counts.rules += 1;
+    if (mapRowState(m) === "attention") counts.attention += 1;
+    else counts.clear += 1;
   }
 
   return counts;
@@ -142,6 +207,8 @@ function matchesFilter(
   if (filter === "new") return isCreateNewColumn(m);
   if (filter === "ready") return isMappingReady(m, threshold);
   if (filter === "rules") return Boolean(m.businessRule);
+  if (filter === "attention") return mapRowState(m) === "attention";
+  if (filter === "clear") return mapRowState(m) !== "attention";
   return true;
 }
 

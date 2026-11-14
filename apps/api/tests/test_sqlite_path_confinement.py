@@ -29,6 +29,9 @@ def dev_env(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "development")
+    # Confinement is on by default everywhere since SEC-9; these tests pin the
+    # checks that hold even under the explicit opt-out.
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     state = tmp_path / "service_state"
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(state))
     return tmp_path
@@ -66,7 +69,7 @@ def test_traversal_and_symlink_into_data_dir_refused(dev_env):
             sqlite_file_path(str(link), "", "")
 
 
-def test_dev_without_root_keeps_local_files(dev_env):
+def test_opted_out_without_root_keeps_local_files(dev_env):
     db = dev_env / "local.db"
     assert sqlite_file_path(str(db), "", "") == str(db)
     assert sqlite_file_path(":memory:", "", "") == ":memory:"
@@ -156,8 +159,8 @@ def test_embedded_raw_connectors_are_confined(dev_env, monkeypatch):
 
 
 def test_duckdb_ignores_the_sqlite_root_unless_confinement_is_on(dev_env, monkeypatch):
-    """Production never confined DuckDB; SQLITE_ROOT must not start doing so by itself."""
-    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES", raising=False)
+    """Opted out, DuckDB is not confined; SQLITE_ROOT must not start doing so by itself."""
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     root = dev_env / "sqlite_only"
     root.mkdir()
     monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))

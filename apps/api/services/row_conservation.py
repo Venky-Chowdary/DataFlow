@@ -1084,6 +1084,7 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "reactivated": data.get("reactivated"),
             "physical_rows": data.get("physical_rows"),
             "rows_scanned": data.get("rows_scanned"),
+            "retained_missing_rows": data.get("retained_missing_rows"),
             "mode": "mirror",
         }
     return {}
@@ -1473,8 +1474,11 @@ def _account_mirror(
             writer_ack_delta=None,
         )
 
-    unaccounted = read - (int(active) + quarantined + skipped + removed)
-    ack_delta = (int(active) - ack) if ack is not None else None
+    # Keys whose source row was quarantined keep their active row: retained,
+    # not written by this run (read + retained == active + held out).
+    retained = _as_optional_int(payload.get("retained_missing_rows")) or 0
+    unaccounted = read + retained - (int(active) + quarantined + skipped + removed)
+    ack_delta = (int(active) - retained - ack) if ack is not None else None
     leftover = None
     if physical is not None:
         leftover = max(int(physical) - int(active), 0)
@@ -1498,6 +1502,11 @@ def _account_mirror(
             note += f" This run inferred {inferred} delete(s)."
         if reactivated:
             note += f" Reactivated {reactivated} previously deleted key(s)."
+        if retained:
+            note += (
+                f" {retained} key(s) whose source row was quarantined kept their "
+                "active row (not a delete)."
+            )
     elif unaccounted > 0:
         note = (
             f"{unaccounted} source row(s) are not in dest-engine active "
@@ -2087,7 +2096,12 @@ def _close_population(
     # identities do not apply to a replaced file. An append onto an existing
     # line-delimited export (``services.file_export_append``) records the
     # file's record count before it wrote: only the delta proves that run.
-    if dest_count_source == DEST_ARTIFACT_READBACK and not (kind == KIND_APPEND_DELTA and dest_count_before):
+    # A key-merged export (CLM-1) records the file's count before and its key
+    # census: new keys grow the file, stored keys are replaced in it.
+    keyed_export = kind == KIND_KEYED and census is not None and dest_count_before is not None
+    if dest_count_source == DEST_ARTIFACT_READBACK and not (
+        (kind == KIND_APPEND_DELTA and dest_count_before) or keyed_export
+    ):
         kind = KIND_OVERWRITE
     # Chunked vector loads are identity conservation regardless of the
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
@@ -3329,6 +3343,18 @@ class KeyCensusAccumulator:
         self._pending_new = list(unseen)
         self._pending_added = added
         self._pending_open = True
+
+    def add_source_truncate(self, rows_removed: int) -> None:
+        """A source TRUNCATE emptied the destination: each row it held is a delete.
+
+        Keys this run already wrote are gone too, so a later re-insert counts as
+        an insert again (data audit DATA-1).
+        """
+        removed = max(int(rows_removed or 0), 0)
+        self._tombstones += removed
+        self._unique_tombstone_fallback += removed
+        self._absent.update(self._seen)
+        self._tomb_seen.clear()
 
     def add_tombstones(
         self,

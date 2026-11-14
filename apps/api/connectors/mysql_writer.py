@@ -13,6 +13,7 @@ from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
 from services.reversibility_enforce import scan_pass
 
+from connectors.destination_naming import column_key
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
@@ -556,6 +557,15 @@ def _mysql_scan_finished_bundles(**kwargs: Any) -> Any:
         target_types = finished.target_types
         del finished
     acc.stop_writing()
+    if not target_types and kwargs.get("target_cols"):
+        # DATA-6: no bundle (an empty source) left the carriers unresolved and
+        # the CREATE rendered ``()`` — MySQL 1064 on an emptied-source mirror.
+        target_types = _mysql_resolve_carriers(
+            target_cols=list(kwargs["target_cols"]),
+            dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+            logical_types=list(kwargs.get("logical_types") or []),
+            allow_logical_fallback=bool(kwargs.get("allow_logical_fallback", True)),
+        )
     return acc, source_row_count, target_types
 
 
@@ -1251,13 +1261,14 @@ def write_mapped_rows(
 
             active_by_tgt: dict[str, dict] = {}
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
             source_type_by_col: dict[str, str] = {}
             for col in target_cols:
-                mapping = active_by_tgt.get(col) or {}
+                mapping = active_by_tgt.get(column_key(col)) or {}
                 source = mapping.get("source") or ""
                 source_type = (
                     column_types.get(source)
@@ -1522,6 +1533,27 @@ def write_mapped_rows(
                         checksum="",
                         chunks_completed=0,
                         error=key_refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+
+            if not table_existed and create_table:
+                # DATA-17: Validate asks the same rule; a run that skipped it
+                # still never reaches CREATE only to die on 1117 / 1118.
+                from services.mysql_row_limits import mysql_create_limit_refusal
+
+                row_limit = mysql_create_limit_refusal(
+                    target_cols, target_types, key_cols=conflict_columns or (), table=table_name
+                )
+                if row_limit:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        error=str(row_limit["message"]),
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )

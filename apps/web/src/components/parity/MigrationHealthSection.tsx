@@ -10,6 +10,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
 import { DtIcon } from "../DtIcon";
 import { ParityTrendChart, TableRunHeatmap } from "../charts/ParityCharts";
+import { Sparkline, StatTile, StatTileRow } from "../ui/StatTile";
+import { parityAxis } from "../../lib/chartScale";
 import { fetchParitySummary } from "../../lib/api";
 import { formatParityPct, parityErrorMessage, type ParitySummary } from "../../lib/parity";
 import { WORKSPACE_CHANGED_EVENT } from "../../lib/workspace";
@@ -24,11 +26,29 @@ export interface MigrationHealthViewProps {
   onStartTransfer?: () => void;
 }
 
+function runsWord(n: number): string {
+  return `${n.toLocaleString("en-US")} ${n === 1 ? "run" : "runs"}`;
+}
+
 /** The section body for each state; the data fetch lives in MigrationHealthSection. */
 export function MigrationHealthView({ state, summary, error, limit, onRetry, onOpenJob, onStartTransfer }: MigrationHealthViewProps) {
   const runs = summary?.runs ?? [];
   const latest = runs[runs.length - 1];
   const empty = state === "ready" && runs.length === 0;
+  // The most-drifting table's row in the heatmap: how often, and its latest drifting run.
+  const driftRow = summary?.kpis.most_drifting_table
+    ? summary.heatmap.tables.indexOf(summary.kpis.most_drifting_table)
+    : -1;
+  const driftCells = driftRow >= 0 ? summary!.heatmap.cells[driftRow] ?? [] : [];
+  const isDrift = (c: string) => c === "unexplained_small" || c === "unexplained_large";
+  const driftRuns = driftCells.filter(isDrift).length;
+  let driftJob = "";
+  for (let i = driftCells.length - 1; i >= 0; i -= 1) {
+    if (isDrift(driftCells[i])) {
+      driftJob = summary!.heatmap.job_ids[i] ?? "";
+      break;
+    }
+  }
 
   return (
     <section className="df2-overview-v3-card df2-parity-health" aria-labelledby="parity-health-title">
@@ -74,30 +94,52 @@ export function MigrationHealthView({ state, summary, error, limit, onRetry, onO
 
         {state === "ready" && summary && runs.length > 0 && (
           <>
-            <dl className="df2-parity-kpis">
-              <div className="df2-parity-kpi">
-                <dt>runs fully proven</dt>
-                <dd>{formatParityPct(summary.kpis.fully_proven_pct)}</dd>
-              </div>
-              <div className="df2-parity-kpi">
-                <dt>runs with unexplained differences</dt>
-                <dd>{summary.kpis.runs_with_unexplained.toLocaleString("en-US")}</dd>
-              </div>
-              <div className="df2-parity-kpi">
-                <dt>runs that failed verification</dt>
-                <dd>{summary.kpis.runs_failed_verification.toLocaleString("en-US")}</dd>
-              </div>
-              <div className="df2-parity-kpi">
-                <dt>sign-offs</dt>
-                <dd>{summary.kpis.signoffs.toLocaleString("en-US")}</dd>
-              </div>
-              <div className="df2-parity-kpi">
-                <dt>most-drifting table</dt>
-                <dd className={summary.kpis.most_drifting_table ? "df2-mono" : undefined}>
-                  {summary.kpis.most_drifting_table ?? "None"}
-                </dd>
-              </div>
-            </dl>
+            <StatTileRow label="Migration health over the last runs" className="df2-parity-health-kpis">
+              <StatTile
+                label="Runs fully proven"
+                value={formatParityPct(summary.kpis.fully_proven_pct)}
+                tone={(summary.kpis.fully_proven_pct ?? 0) >= 100 ? "ok" : "neutral"}
+                spark={<Sparkline values={runs.map((r) => r.proven_equal_pct)} domain={parityAxis(runs.map((r) => r.proven_equal_pct))?.domain} />}
+                caption={`latest ${formatParityPct(latest?.proven_equal_pct ?? null)}`}
+              />
+              <StatTile
+                label="Unexplained differences"
+                value={summary.kpis.runs_with_unexplained.toLocaleString("en-US")}
+                tone={summary.kpis.runs_with_unexplained > 0 ? "warn" : "ok"}
+                spark={<Sparkline kind="bars" values={runs.map((r) => r.unexplained)} />}
+                caption={`${runsWord(summary.kpis.runs_with_unexplained)} of ${runs.length}`}
+              />
+              <StatTile
+                label="Failed verification"
+                value={summary.kpis.runs_failed_verification.toLocaleString("en-US")}
+                tone={summary.kpis.runs_failed_verification > 0 ? "danger" : "ok"}
+                caption={`${runsWord(summary.kpis.runs_failed_verification)} of ${runs.length}`}
+              />
+              <StatTile
+                label="Sign-offs"
+                value={summary.kpis.signoffs.toLocaleString("en-US")}
+                caption={`across ${runs.length.toLocaleString("en-US")} ${runs.length === 1 ? "run" : "runs"}`}
+              />
+            </StatTileRow>
+            {summary.kpis.most_drifting_table ? (
+              <p className="df2-parity-drift-callout">
+                <span className="df2-parity-drift-dot" aria-hidden="true" />
+                <span>
+                  Most-drifting table: <b className="df2-mono">{summary.kpis.most_drifting_table}</b>
+                  {driftRuns > 0 ? ` · unexplained differences in ${runsWord(driftRuns)}` : ""}
+                </span>
+                {driftJob && onOpenJob ? (
+                  <button type="button" className="df2-overview-v3-link" onClick={() => onOpenJob(driftJob)}>
+                    Open its latest drifting run →
+                  </button>
+                ) : null}
+              </p>
+            ) : (
+              <p className="df2-parity-drift-callout is-calm">
+                <span className="df2-parity-drift-dot" aria-hidden="true" />
+                <span>No table drifted in these runs.</span>
+              </p>
+            )}
             <div className="df2-parity-grid2">
               <div className="df2-parity-card">
                 <h3 className="df2-parity-h3">Parity trend</h3>
@@ -109,7 +151,7 @@ export function MigrationHealthView({ state, summary, error, limit, onRetry, onO
                 )}
               </div>
               <div className="df2-parity-card">
-                <h3 className="df2-parity-h3">Tables × runs</h3>
+                <h3 className="df2-parity-h3">Tables × runs <span className="df2-parity-muted">oldest → newest</span></h3>
                 {summary.heatmap.tables.length ? (
                   <TableRunHeatmap heatmap={summary.heatmap} runs={runs} />
                 ) : (

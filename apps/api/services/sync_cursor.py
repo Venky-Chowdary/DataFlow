@@ -1037,6 +1037,11 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
 
     if declared_type_is_zone_bearing((metadata or {}).get("cursor_type")):
         watermark = canonical_cursor_bookmark(watermark)
+    # SEC-1: the owning workspace travels with the bookmark, so the ops
+    # routes can scope it without guessing from the key.
+    from services.cdc_ops_scope import stamp_owner
+
+    metadata = stamp_owner(dict(metadata or {})) or None
     job_id = str((metadata or {}).get("job_id") or "").strip()
     if job_id:
         _stamp_job_watermark(job_id, cursor_key, watermark, str((metadata or {}).get("cursor_column") or ""))
@@ -1126,6 +1131,25 @@ def cursor_keys_for_job(job_id: str, *, strict: bool = False) -> list[str]:
         if strict:
             raise
     return found
+
+
+def list_cursor_records() -> list[tuple[str, dict[str, Any]]]:
+    """Every persisted cursor key with its metadata (for tenant scoping)."""
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            return [
+                (str(d.get("key")), dict(d.get("metadata") or {}) if isinstance(d.get("metadata"), dict) else {})
+                for d in coll.find({}, {"key": 1, "metadata": 1})
+                if d.get("key")
+            ]
+        except Exception:
+            _logger.exception("Mongo list_cursor_records failed")
+    return [
+        (str(e.get("key")), dict(e.get("metadata") or {}) if isinstance(e.get("metadata"), dict) else {})
+        for e in _load().get("cursors", [])
+        if e.get("key")
+    ]
 
 
 def list_cursor_keys() -> list[str]:

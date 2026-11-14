@@ -1,0 +1,87 @@
+{
+  "about": "Licence policy for scripts/licence_scan.py --check (F3). The project itself is proprietary (LICENSE); `first_party` lists its own packages, which must declare one of `first_party_licences`; a name counts as first-party only where the repository's own packages are (package-lock.json paths outside node_modules, packages/*/pyproject.toml), so a dependency that shares the name is scanned like any other. `allowed`: SPDX ids a dependency may carry without review. `exceptions`: packages whose copyleft, proprietary or unknown licence was reviewed. Each records the licence it was reviewed under (a change fails the check) and why it is acceptable; `notice` is the text NOTICE carries for it; `owner_decision: true` marks an exception that is in place only so CI stays green and still needs the owner's sign-off; `decision` records one the owner made (status, by, date, terms). An approved GPL-family exception must carry, in `notice`, the licence-text URL and \"source shipped in image at /usr/share/doc/datawrap/third-party-source\" (Dockerfile.api ships the corresponding source), as binary distribution requires. A new copyleft or unknown dependency fails CI until it is reviewed here.",
+  "first_party": {
+    "npm": ["dataflow", "@dataflow/web", "@dataflow/design-system"],
+    "pypi": ["dataflow-preflight"]
+  },
+  "first_party_licences": ["UNLICENSED", "Proprietary"],
+  "allowed": [
+    "MIT", "MIT-0", "MIT-CMU", "Apache-2.0", "BSD", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "ISC",
+    "PSF-2.0", "Python-2.0", "CNRI-Python", "Unlicense", "Zlib", "HPND", "CC0-1.0", "BlueOak-1.0.0",
+    "CC-BY-4.0", "OFL-1.1", "Public-Domain", "UPL-1.0"
+  ],
+  "apt_packages_about": "Debian packages Dockerfile.api's final stage installs on top of the base image (scripts/fetch_debian_sources.py --verify-dockerfile checks the list; a change fails CI until it is reviewed here). Whatever the list, the Debian source of EVERY installed package whose /usr/share/doc/<pkg>/copyright names a copyleft licence (base image packages and dependencies included) goes into the companion source bundle <image>:<tag>-sources (owner decision 2026-11-13: large sources are not in the runtime image; release.yml publishes the companion with each image, same registry, tag + -sources), listed in its DEBIAN_SOURCES.json; the build fails on a package whose licence it cannot tell. A copyleft entry's source must read \"companion bundle <tag>-sources\".",
+  "apt_packages": {
+    "unixodbc": {"licence": "LGPL-2.1", "why": "unixODBC driver manager (odbcinst / isql and the driver registry) for pyodbc, used unmodified.", "source": "companion bundle <tag>-sources"},
+    "libodbc2": {"licence": "LGPL-2.1", "why": "unixODBC's libodbc.so.2, which pyodbc's wheel links; used unmodified as a shared library.", "source": "companion bundle <tag>-sources"},
+    "curl": {"licence": "curl (MIT-style); its libraries' licences are read from their copyright files at build time", "why": "HEALTHCHECK probe.", "source": "companion bundle <tag>-sources when its copyright file names a copyleft licence (build-time scan)"}
+  },
+  "exceptions": {
+    "pypi:certifi": {
+      "licence": "MPL-2.0",
+      "why": "Weak, file-level copyleft. Used unmodified as a library (CA bundle for requests/httpx/snowflake). Obligation: keep its notices and say where its source is.",
+      "notice": "MPL-2.0, used unmodified. Source: https://github.com/certifi/python-certifi"
+    },
+    "pypi:orjson": {
+      "licence": "MPL-2.0 AND (Apache-2.0 OR MIT)",
+      "why": "Pulled in by trino. Weak, file-level copyleft (MPL-2.0 parts). Used unmodified as a library.",
+      "notice": "MPL-2.0 AND (Apache-2.0 OR MIT), used unmodified. Source: https://github.com/ijl/orjson"
+    },
+    "pypi:paramiko": {
+      "licence": "LGPL-2.1",
+      "why": "SFTP connector. LGPL library used unmodified and loaded as a separate, user-replaceable Python package. Redistributing it in the API image needs its licence text and source location.",
+      "notice": "LGPL-2.1, used unmodified as a separately replaceable library (you may replace it with a modified version). Licence text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (also in the package's dist-info). Corresponding source shipped in image at /usr/share/doc/datawrap/third-party-source/ (paramiko-<installed version>.tar.gz, SHA256SUMS). Upstream: https://github.com/paramiko/paramiko",
+      "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "accepted with attribution; used unmodified"}
+    },
+    "pypi:psycopg2-binary": {
+      "licence": "LGPL",
+      "why": "PostgreSQL connector. LGPL-3.0 with exceptions. Used unmodified as a separate library. The binary wheel bundles libpq (PostgreSQL Licence) and OpenSSL.",
+      "notice": "LGPL-3.0 with the psycopg2 exceptions, used unmodified as a separately replaceable library (you may replace it with a modified version); the wheel bundles libpq (PostgreSQL Licence) and OpenSSL (Apache-2.0). Licence text: https://www.gnu.org/licenses/lgpl-3.0.html (also in the package's dist-info). Corresponding source shipped in image at /usr/share/doc/datawrap/third-party-source/ (psycopg2-<installed version>.tar.gz, SHA256SUMS). Upstream: https://github.com/psycopg/psycopg2",
+      "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "accepted with attribution; used unmodified"}
+    },
+    "pypi:pymssql": {
+      "licence": "LGPL",
+      "why": "SQL Server fallback driver. LGPL-2.1. Used unmodified as a separate library. The wheel bundles FreeTDS (LGPL).",
+      "notice": "LGPL-2.1, used unmodified as a separately replaceable library (you may replace it with a modified version); the wheel links FreeTDS (LGPL-2.0) statically. Licence text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (also in the package's dist-info). Corresponding source shipped in image at /usr/share/doc/datawrap/third-party-source/ (pymssql-<installed version>.tar.gz and freetds-<linked version>.tar.bz2, SHA256SUMS). Upstream: https://github.com/pymssql/pymssql and https://www.freetds.org",
+      "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "accepted with attribution; used unmodified"}
+    },
+    "pypi:pypdfium2": {
+      "licence": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "why": "PDF rendering. The bindings are BSD-3-Clause / Apache-2.0. The bundled PDFium binary carries the licences of its own dependencies (FreeType, libjpeg-turbo, OpenJPEG, LittleCMS, zlib, ICU, abseil, ...), which ship in the wheel's licence folder. All are permissive.",
+      "notice": "BSD-3-Clause / Apache-2.0; the bundled PDFium binary's third-party licences ship in the wheel (pypdfium2 *.dist-info/licenses). Source: https://github.com/pypdfium2-team/pypdfium2"
+    },
+    "pypi:hypothesis": {
+      "licence": "MPL-2.0",
+      "why": "Test tool only (requirements-dev.txt). Not in the production image, so not distributed."
+    },
+    "npm:axe-core": {
+      "licence": "MPL-2.0",
+      "why": "Test tool only (apps/web devDependency): the Playwright accessibility gate (UX-16) injects it into the test browser. Used unmodified; never bundled into the web app or any image, so not distributed."
+    },
+    "npm:@fontsource/ibm-plex-mono": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1: may be bundled, not sold on its own. Its copyright and licence must accompany it.",
+      "notice": "SIL Open Font License 1.1. Copyright IBM Corp. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/ibm-plex-sans": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright IBM Corp. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/inter": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The Inter Project Authors. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/jetbrains-mono": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The JetBrains Mono Project Authors. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/plus-jakarta-sans": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The Plus Jakarta Sans Project Authors. Licence text: https://openfontlicense.org"
+    }
+  }
+}

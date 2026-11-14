@@ -319,12 +319,16 @@ def _apply_empty_source_overwrite_gate(
     ``empty_source_overwrite_acknowledged``.
     """
     from services.db_type_utils import overwrite_replaces_rows
-    from services.sync_cursor import is_overwrite_sync
+    from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
 
+    # DATA-3 / DATA-6: an SCD2 run closes every current version and a mirror
+    # deletes every row when the source is empty — the same decision.
+    mode = normalize_sync_mode(sync_mode, default=str(sync_mode or ""))
+    history = mode in {"scd2", "mirror", "full_refresh_mirror"}
     if (
         not source_measured_empty
         or destination_table_exists is not True
-        or not is_overwrite_sync(sync_mode)
+        or not (is_overwrite_sync(sync_mode) or history)
         or not overwrite_replaces_rows(dest_kind)
         or not destination_config
         or not destination_table
@@ -350,9 +354,14 @@ def _apply_empty_source_overwrite_gate(
         "destination_rows": dest_rows,
         "source_rows": 0,
     }
+    effect = {
+        "scd2": "SCD2 run would close every current version",
+        "mirror": "mirror would delete every row",
+        "full_refresh_mirror": "mirror would delete every row",
+    }.get(mode, "overwrite would replace them all with nothing")
     message = (
         f"The source holds 0 rows and '{destination_table}' holds {held}: this "
-        "overwrite would replace them all with nothing"
+        f"{effect}"
     )
     if acknowledged:
         out.setdefault("warnings", []).append(
@@ -367,8 +376,8 @@ def _apply_empty_source_overwrite_gate(
         "overwrite_empty_source",
         message
         + ". Check the source (an emptied or wrong table looks exactly like "
-        "this), or rerun with empty_source_overwrite_acknowledged=true to "
-        "empty the destination on purpose.",
+        "this), or acknowledge the empty source (empty_source_overwrite_acknowledged=true) "
+        "to apply it on purpose.",
         details,
         dest_kind=dest_kind,
         validation_mode=validation_mode,
@@ -497,7 +506,7 @@ def scan_existing_table_population_fit(
                 source_table,
                 walk_exc,
             )
-            population_walk_error = str(walk_exc)[:400]
+            population_walk_error = _walk_error_copy(walk_exc, source_table)
             table_rows = None
         if table_rows is not None:
             table_rows = iter(table_rows)
@@ -512,7 +521,7 @@ def scan_existing_table_population_fit(
                     source_table,
                     walk_exc,
                 )
-                population_walk_error = str(walk_exc)[:400]
+                population_walk_error = _walk_error_copy(walk_exc, source_table)
             else:
                 def chained():
                     yield first
@@ -651,3 +660,11 @@ def scan_existing_table_population_fit(
         if widen is not None:
             fit_report = widen.report
     return fit_report, population_walk_error, population_rows, rows_are_population, resolved_filter
+
+
+def _walk_error_copy(exc: BaseException, table: Any) -> str:
+    """ERR-9: a failed population walk is named by the taxonomy, never by its SQL."""
+    from services.error_taxonomy import classify
+
+    named = classify(exc, side="source", phase="read", object={"table": str(table or "")})
+    return named.text if named is not None else "the source read failed"

@@ -35,6 +35,7 @@ from services.tenant_store import (
     tenants_for_workspaces,
     update_tenant,
 )
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/workspace", tags=["Workspace"])
 
@@ -805,7 +806,10 @@ async def rotate_pii_hash_key(request: Request):
     try:
         status = rotate_workspace_key(workspace_id, actor=_actor(request))
     except PiiHashKeyUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc, event="workspace.pii_hash_key.unavailable",
+            public_message="The PII hashing key service is unavailable.", status_code=503,
+        ) from exc
     append_audit_event(
         action="workspace.pii_hash_key.rotate",
         resource="/workspace/pii-hash-key",
@@ -854,7 +858,10 @@ async def set_pii_hash_key(request: Request):
     except PiiHashKeyRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PiiHashKeyUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc, event="workspace.pii_hash_key.unavailable",
+            public_message="The PII hashing key service is unavailable.", status_code=503,
+        ) from exc
     append_audit_event(
         action="workspace.pii_hash_key.set",
         resource="/workspace/pii-hash-key",

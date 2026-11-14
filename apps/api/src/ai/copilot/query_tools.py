@@ -48,6 +48,22 @@ def _object_names_from_list(listed: Any) -> list[str]:
     return names
 
 
+def _listing_failure(listed: Any) -> str:
+    """The classified reason a catalog listing failed, or ``""``."""
+    output = getattr(listed, "output", None)
+    if getattr(listed, "success", True) or not isinstance(output, dict):
+        return ""
+    if output.get("connected") is not False:
+        return ""
+    return str(output.get("message") or getattr(listed, "error", "") or "")
+
+
+def _relations_not_listed(hints: list[str], listed: list[str]) -> list[str]:
+    """FROM/JOIN relations absent from the role's own catalog listing."""
+    known = {n.lower() for n in listed} | {n.lower().split(".")[-1] for n in listed}
+    return [h for h in hints if h and h.lower() not in known and h.lower().split(".")[-1] not in known]
+
+
 def _is_relational_connector(conn: dict[str, Any]) -> bool:
     """True for SQL connectors, where a dot separates schema from table.
 
@@ -761,6 +777,11 @@ def run_connector_query(
                     from .schema_tools import introspect_connector_table
 
                     listed = list_connector_objects(connector_id=cid, connector_name="")
+                    failed_listing = _listing_failure(listed)
+                    if failed_listing:
+                        # ERR-22: a refused login is reported as the login, not
+                        # as "Schema allow-list unavailable".
+                        return _tool_result(tool, success=False, error=failed_listing)
                     table_names = _object_names_from_list(listed)
                     columns: list[Any] = []
                     # Introspect every FROM/JOIN relation, not just the first:
@@ -798,7 +819,27 @@ def run_connector_query(
                                 exc,
                             )
                     allowed = schema_allowlist(columns, table_names)
-                    assert_identifiers_allowed(sql, allowed=allowed, dialect=ctype)
+                    try:
+                        assert_identifiers_allowed(sql, allowed=allowed, dialect=ctype)
+                    except ValueError as refused:
+                        quoted = re.findall(r'\b(?:from|join)\s+[`"\[]([^`"\]]+)[`"\]]', sql, re.I)
+                        # With nothing listed at all (a role that can read no
+                        # table) every relation the SQL names is unseen.
+                        unseen = [
+                            t for t in _relations_not_listed(table_hints + quoted, table_names)
+                            if not allowed or t.lower().split(".")[-1] in str(refused).lower()
+                        ]
+                        if not unseen:
+                            raise
+                        # ERR-22: a table the role cannot see is named as such,
+                        # not as "identifiers not in introspected schema".
+                        from services.error_taxonomy import DatawrapError, classify
+
+                        named = classify(
+                            DatawrapError("object.table_not_visible", object={"table": unseen[0]}),
+                            side="query", engine=ctype,
+                        )
+                        return _tool_result(tool, success=False, error=named.text if named else str(refused))
                 except ValueError as exc:
                     return _tool_result(tool, success=False, error=str(exc))
             body = QueryExecuteRequest(connector_id=cid, query=sql, limit=limit)
@@ -841,6 +882,9 @@ def run_connector_query(
         detail = str(exc)
         if hasattr(exc, "detail"):
             detail = str(getattr(exc, "detail"))
+        if getattr(exc, "envelope", None):
+            # Classified (services.error_taxonomy): the same words as the Query page.
+            return _tool_result(tool, success=False, error=detail)
         return _tool_result(tool, success=False, error=f"Query failed: {detail}")
 
 

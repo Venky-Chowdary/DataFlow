@@ -4,8 +4,9 @@ Datawrap — Dedicated Training Agent API
 Separate from Copilot chat — manages continuous model training on universal data.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+from services.safe_errors import safe_http_exception
 
 router = APIRouter(prefix="/training-agent", tags=["Training Agent"])
 
@@ -34,12 +35,24 @@ async def training_agent_status():
     return status
 
 
+def _platform_admin_only(request: Request) -> None:
+    """SEC-10: a training run is platform-wide."""
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        request, tenant_scope(request), "ai.training.run",
+        "Training runs for every workspace: platform administrators only.",
+    )
+
+
 @router.post("/run", response_model=TrainResponse)
 async def run_training(request: TrainRequest, http_request: Request):
     """Trigger a full training run from universal data.
 
     Runs on the app's training runtime thread; API shutdown stops it.
+    Platform-wide, so platform administrators only (SEC-10).
     """
+    _platform_admin_only(http_request)
     from ..ai.training.training_runtime import app_training_runtime
     from ..ai.training.training_scheduler import start_admin_training
 
@@ -56,7 +69,9 @@ async def run_training_sync(request: TrainRequest, http_request: Request):
     """Run training and wait for it (for admin/debug).
 
     The run is on the training runtime's thread, never the event loop.
+    Platform-wide, so platform administrators only (SEC-10).
     """
+    _platform_admin_only(http_request)
     try:
         from ..ai.training.training_runtime import app_training_runtime
         from ..ai.training.training_scheduler import run_admin_training
@@ -68,7 +83,9 @@ async def run_training_sync(request: TrainRequest, http_request: Request):
         )
         return TrainResponse(run_id=run.id, status=run.status, metrics=run.metrics, errors=run.errors)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(
+            e, event="training.run_training_sync.failed", public_message="Training run failed.", status_code=500
+        ) from e
 
 
 @router.get("/datasets")

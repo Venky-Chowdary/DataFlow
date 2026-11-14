@@ -359,6 +359,24 @@ def _seed_cdc_signal(world) -> Seeded:
     return Seeded({"signal_id": signal.id}, intact)
 
 
+def _seed_cdc_cursor(world) -> Seeded:
+    """A watermark and a held CDC lease on one of workspace A's routes (SEC-1)."""
+    from services import cdc_lease, sync_cursor
+
+    n = _next(world)
+    key = f"postgresql:{SENTINEL}_db:public.t{n}→postgresql:wh:t{n}:stream|id:{SENTINEL}-{n}"
+    sync_cursor.set_watermark(key, f"2026-11-0{1 + n % 8}", metadata={"workspace_id": world.workspace_a})
+    cdc_lease.acquire_lease(
+        key, resource=f"pg:{SENTINEL}-{n}.internal:5432/db", holder_id=cdc_lease.new_holder_id(f"job{n}"),
+        ttl_sec=600, meta={"workspace_id": world.workspace_a},
+    )
+
+    def intact() -> bool:
+        return sync_cursor.get_watermark(key) is not None and cdc_lease.get_lease(key) is not None
+
+    return Seeded({"cursor_key": key}, intact)
+
+
 def _seed_mapping_review(world) -> Seeded:
     from services import cdc_mapping_review
 
@@ -590,6 +608,7 @@ SEEDERS: dict[str, Callable[[Any], Seeded]] = {
     "benchmark_run": _seed_benchmark_run,
     "acl_grant": _seed_acl_grant,
     "cdc_signal": _seed_cdc_signal,
+    "cdc_cursor": _seed_cdc_cursor,
     "mapping_review": _seed_mapping_review,
     "recipe": _seed_recipe,
     "mapping_template": _seed_mapping_template,
@@ -679,8 +698,9 @@ def _call(client, route: str, params: dict[str, str]):
 
 
 def _without_reference(text: str) -> str:
-    """Drop the per-response support reference ``safe_http_exception`` appends."""
-    return re.sub(r" Reference: [0-9a-f-]{36}", "", text)
+    """Drop the per-response support reference ``safe_http_exception`` appends
+    (in the detail text, and as the error envelope's ``reference`` field)."""
+    return re.sub(r'( Reference: |"reference":")[0-9a-f-]{36}', r"\1", text)
 
 
 def _answer(response) -> tuple[int, str]:
@@ -896,6 +916,15 @@ def _connector_bodies(*shapes: str) -> Callable[[Any, Seeded], list[dict[str, An
     return bodies
 
 
+def _pipeline_resource(world, source: str, dest: str) -> dict[str, Any]:
+    """A GitOps PipelineSchedule naming ``source`` and ``dest`` (SEC-5)."""
+    name = f"gitops-{_next(world)}"
+    return {"apiVersion": "datawrap.io/v1", "kind": "PipelineSchedule", "metadata": {"name": name},
+            "spec": {"name": name, "interval": "daily", "enabled": False, "source_connector_id": source,
+                     "source_table": "t", "dest_connector_id": dest, "dest_table": "t",
+                     "mappings": [{"source": "id", "target": "id", "confidence": 1.0, "user_override": True}]}}
+
+
 #: Body templates: A's connector id where the route reads it.
 _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "query": lambda w, c: {"connector_id": c, "query": "select 1", "language": "sql"},
@@ -924,6 +953,12 @@ _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "schedules.destination": lambda w, c: {"name": f"s{_next(w)}", "interval": "daily",
                                            "source_connector_id": _b_connector(w), "source_table": "t",
                                            "dest_connector_id": c, "dest_table": "t", "mappings": _MAP},
+    "import.source": lambda w, c: _pipeline_resource(w, c, _b_connector(w)),
+    "import.destination": lambda w, c: _pipeline_resource(w, _b_connector(w), c),
+    "gitops.source": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                   "resources": [_pipeline_resource(w, c, _b_connector(w))]},
+    "gitops.destination": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                        "resources": [_pipeline_resource(w, _b_connector(w), c)]},
     "transforms": lambda w, c: {"name": f"z{_next(w)}", "destination_connector_id": c,
                                 "models": [{"name": "m", "sql": "select 1"}]},
 }
@@ -985,6 +1020,10 @@ _BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/contracts/test": lambda w, s: _contract_bodies(w, s)[:1],
     "POST /api/v1/fidelity/check": lambda w, s: _schedule_bodies(w, s)[:1],
     "POST /api/v1/ops/cdc-captures/cleanup": _connector_bodies("cdc.cleanup"),
+    "POST /api/v1/ops/cdc-cursors/clear": lambda w, s: [{"cursor_key": s.params["cursor_key"], "reason": "probe"}],
+    "POST /api/v1/ops/cdc-leases/force-release": lambda w, s: [
+        {"cursor_key": s.params["cursor_key"], "reason": "probe"}
+    ],
     "POST /api/v1/preflight/explain": _preflight_explain_bodies,
     "POST /api/v1/preflight/run": _connector_bodies("preflight.run"),
     "POST /api/v1/query/execute": _connector_bodies("query"),
@@ -996,6 +1035,8 @@ _BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/resource-acls": _job_bodies("acl"),
     "POST /api/v1/schedules/": _connector_bodies("schedules.source", "schedules.destination"),
     "POST /api/v1/schedules/admin/orphans/reconcile": lambda w, s: [{"schedule_ids": [s.params["schedule_id"]]}],
+    "POST /api/v1/schedules/import": _connector_bodies("import.source", "import.destination"),
+    "POST /api/v1/schedules/gitops/apply": _connector_bodies("gitops.source", "gitops.destination"),
     "POST /api/v1/transfer/execute": _connector_bodies("execute.source", "execute.destination"),
     "POST /api/v1/transfer/execute#contract_id": lambda w, s: _contract_bodies(w, s)[1:],
     "POST /api/v1/transfer/execute#plan_id": _plan_bodies,
@@ -1042,6 +1083,50 @@ def test_every_body_id_route_refuses_other_tenants_and_serves_its_owner(world):
                 own = world.admin_a.request(method, path, json=_as_caller(body, a_own))
                 if own.status_code not in owner_ok or own.status_code in (403, 404):
                     problems.append(f"{route} owner control {body}: {own.status_code} {own.text[:160]}")
+    assert not problems, "\n".join(problems)
+
+
+def _query_declarations() -> dict[str, dict[str, Any]]:
+    return json.loads((FIXTURES / "route_tenancy_scoping.json").read_text(encoding="utf-8")).get("query_routes", {})
+
+
+def test_every_cdc_ops_route_is_declared():
+    """SEC-1: the CDC cursor and lease routes carry their key in the query or the
+    body, so the path-parameter inventory never saw them. Each must be declared."""
+    inventory = json.loads((FIXTURES / "rbac_route_permissions.json").read_text(encoding="utf-8"))
+    declared = set(_body_declarations()) | set(_query_declarations())
+    ops = sorted(r for r in inventory if r.split(" ", 1)[1].startswith(("/api/v1/ops/cdc-cursors", "/api/v1/ops/cdc-leases")))
+    assert len(ops) == 6 and not set(ops) - declared, sorted(set(ops) - declared)
+    for route, entry in _query_declarations().items():
+        assert route in inventory and entry["resource"] in SEEDERS and entry.get("reason"), route
+
+
+def test_every_query_id_route_answers_other_tenants_like_a_missing_id(world):
+    """SEC-1: B's administrator and API key get, for A's id, exactly the answer an
+    id that does not exist gets (a list never names A's resource); A's own
+    administrator is served."""
+    problems: list[str] = []
+    for route, entry in sorted(_query_declarations().items()):
+        method, path = route.split(" ", 1)
+        seeded = SEEDERS[entry["resource"]](world)
+        ids = entry["query_ids"]
+        params = {k: seeded.params[k] for k in ids}
+        missing = {k: f"{seeded.params[k]}-missing" for k in ids}
+        for who, client in (("B's administrator", world.admin_b), ("B's API key", world.key_b)):
+            r = client.request(method, path, params=params)
+            if ids:
+                m = client.request(method, path, params=missing)
+                same = (r.status_code, r.text.replace(params[ids[0]], "")) == (
+                    m.status_code, m.text.replace(missing[ids[0]], ""))
+                if not same:
+                    problems.append(f"{route} {who}: {r.status_code} {r.text[:160]}")
+            elif _leaks(r) or r.status_code != 200:
+                problems.append(f"{route} {who}: {r.status_code} {r.text[:160]}")
+        own = world.admin_a.request(method, path, params=params)
+        if own.status_code != 200 or not _leaks(own):
+            problems.append(f"{route} owner control: {own.status_code} {own.text[:160]}")
+        if not seeded.intact():
+            problems.append(f"{route}: A's resource changed")
     assert not problems, "\n".join(problems)
 
 

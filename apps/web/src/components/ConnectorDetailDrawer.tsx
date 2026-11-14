@@ -1,7 +1,8 @@
 import { ConnectorIcon } from "../app/brand-icons";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import {
   connectorHealthBadgeLabel,
-  connectorLooksHealthy,
+  connectorPassedProbe,
   connectorTestHealth,
 } from "../lib/connectorHealth";
 import { DtIcon } from "./DtIcon";
@@ -55,7 +56,8 @@ export function ConnectorDetailDrawer({
 }: ConnectorDetailDrawerProps) {
   if (!c) return null;
 
-  const healthy = connectorLooksHealthy(c);
+  // A green signal means a probe passed; never tested is neutral grey.
+  const healthy = connectorPassedProbe(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
   const healthBadge = connectorHealthBadgeLabel(c);
   const endpoint = connectorEndpointLabel(c) || "Managed endpoint";
@@ -73,9 +75,9 @@ export function ConnectorDetailDrawer({
       ariaLabel={`${c.name} connection details`}
       icon={<ConnectorIcon id={c.type} size={22} />}
       title={c.name}
-      subtitle={`${c.type.replace(/_/g, " ")} · ${endpoint}`}
+      subtitle={`${connectorDisplayName(c.type)} · ${endpoint}`}
       headerExtra={
-        <span className={`df2-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
+        <span className={`df2-badge df2-connector-health-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
           <span className={`df2-health-dot ${healthy ? "ok" : neverTested ? "" : "err"}`} aria-hidden />
           {healthBadge}
         </span>
@@ -121,7 +123,7 @@ export function ConnectorDetailDrawer({
       <div className="df2-drawer-facts" aria-label="Connection details">
         <div className="df2-drawer-fact">
           <span>Type</span>
-          <strong>{c.type.replace(/_/g, " ")}</strong>
+          <strong>{connectorDisplayName(c.type)}</strong>
         </div>
         <div className="df2-drawer-fact">
           <span>Capability</span>
@@ -196,13 +198,26 @@ export function ConnectorDetailDrawer({
                 key={job._id}
                 className={`df2-drawer-related-row${onOpenJob ? " is-clickable" : ""}`}
                 onClick={onOpenJob ? () => onOpenJob(job._id) : undefined}
-                role={onOpenJob ? "button" : undefined}
-                tabIndex={onOpenJob ? 0 : undefined}
-                onKeyDown={onOpenJob ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenJob(job._id); } } : undefined}
               >
                 <span className="df2-drawer-related-main">
-                  <strong title={job.source_name}>{job.source_name || "Transfer job"}</strong>
-                  <small>{job.source_type} → {job.destination_type} · {formatRelativeTime(job.created_at)}</small>
+                  <strong title={job.source_name}>
+                    {onOpenJob ? (
+                      // UX-16: a list item keeps its role; the keyboard target is a real button.
+                      <button
+                        type="button"
+                        className="df2-drawer-related-open"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenJob(job._id);
+                        }}
+                      >
+                        {job.source_name || "Transfer job"}
+                      </button>
+                    ) : (
+                      job.source_name || "Transfer job"
+                    )}
+                  </strong>
+                  <small>{connectorDisplayName(job.source_type || "")} → {connectorDisplayName(job.destination_type || "")} · {formatRelativeTime(job.created_at)}</small>
                 </span>
                 <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
               </li>

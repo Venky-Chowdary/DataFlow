@@ -12,6 +12,8 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from services.brand_env import getenv_brand
@@ -22,7 +24,7 @@ from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable
 from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
-from services.safe_errors import public_error
+from services.safe_errors import EnvelopeHTTPException, public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
 from services.data_residency import ResidencyRefused
@@ -322,6 +324,11 @@ async def lifespan(app: FastAPI):
         from services.export_migration import migrate_flat_exports_at_startup, start_in_background
 
         app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # G11 naming history: its job-store indexes are built here, bounded and
+        # off the critical path, never on the first request that reads history.
+        from services.naming_history import ensure_naming_history_indexes
+
+        app.state.naming_history_indexes = start_in_background(ensure_naming_history_indexes)
         # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
         # workspace. The partition time is recorded before any request is served
         # (connectors saved after it prove no ownership); owned flat files then
@@ -469,7 +476,19 @@ _redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
     title="Datawrap API",
-    description="Universal Data Transfer Platform API",
+    description=(
+        "Universal Data Transfer Platform API\n\n"
+        "**Errors.** A failure carries `{error: {code, message, action: {label, ui, api}, "
+        "object, retriable, reference}, detail}`; `detail` stays a string. Failed jobs "
+        "carry the same `code` as `error_code` and `error_details.code`.\n\n"
+        "**Deprecated: `legacy_code`.** For one release, `error.legacy_code`, "
+        "`error_details.legacy_code` and the job's `error_legacy_code` repeat the "
+        "pre-taxonomy code a taxonomy code replaced: `destination_permission_denied` "
+        "(now `access.*`), `destination_column_missing` (`object.column_not_found`), "
+        "`table_not_found` (`object.table_not_found`), `destination_lock_timeout` "
+        "(`timeout.lock`), `transfer_failed` (`unclassified`), and the "
+        "`destination_*` capacity / CHECK codes. Key on `code`; `legacy_code` will be removed."
+    ),
     version="1.0.0",
     docs_url=_docs,
     redoc_url=_redoc,
@@ -821,6 +840,10 @@ async def _add_timing_header_response(request: Request, call_next):
 # A redirect to the API's own host (redirect_slashes' 307) goes out relative,
 # never naming the internal host or its plain-http scheme (D339).
 app.add_middleware(OwnHostRedirectMiddleware)
+# SEC-8: a non-upload body over its limit is a 413 before anything parses it.
+from src.middleware.body_size_limit import BodySizeLimitMiddleware  # noqa: E402
+
+app.add_middleware(BodySizeLimitMiddleware)
 # Outermost: client address and scheme from the trusted proxy chain
 # (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
 app.add_middleware(ProxyFixMiddleware)
@@ -984,6 +1007,16 @@ async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
 
 
+@app.exception_handler(EnvelopeHTTPException)
+async def error_envelope_handler(request: Request, exc: EnvelopeHTTPException):
+    """``{error: {code, message, action, object, retriable, reference}, detail}``."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.envelope,
+        headers=dict(exc.headers or {}),
+    )
+
+
 @app.exception_handler(DuplicateTransferSubmission)
 async def duplicate_transfer_handler(
     request: Request, exc: DuplicateTransferSubmission
@@ -1125,6 +1158,16 @@ async def shared_doc_conflict_handler(request: Request, exc: SharedDocConflict):
         },
         headers={"Retry-After": "1"},
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    """422 without the submitted values (SEC-8): no password, no 10 MB echo."""
+    errors = [
+        {key: value for key, value in dict(err).items() if key not in ("input", "ctx", "url")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 @app.exception_handler(PayloadTooLarge)

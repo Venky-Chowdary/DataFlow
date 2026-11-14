@@ -211,9 +211,9 @@ def test_aurora_postgresql_tile_negotiates_tls_like_the_postgresql_tile(client):
           "username": "r12", "password": "wrong"}
     for tile in ("postgresql", "amazon_aurora_postgresql"):
         ok, msg, _ = _saved_test(client, _saved(tile, ep))
-        assert not ok and msg.startswith("Authentication failed"), (tile, msg)
+        assert not ok and "rejected the sign-in" in msg, (tile, msg)
         ok, msg, _ = _form_test(client, tile, ep)
-        assert not ok and msg.startswith("Authentication failed"), (tile, msg)
+        assert not ok and "rejected the sign-in" in msg, (tile, msg)
         # The operator turned SSL on: the mismatch names which side lacks TLS.
         ok, msg, _ = _saved_test(client, _saved(tile, ep, ssl=True))
         assert not ok and msg.startswith("TLS mismatch"), (tile, msg)
@@ -232,8 +232,8 @@ def test_humaniser_names_the_real_failure_for_both_aurora_tiles(client):
         assert "Cannot reach" not in msg, msg
         ok, msg = run_probe(driver, {**ep, "password": "definitely-wrong", "type": tile,
                                      "ssl": False})
-        assert not ok and msg.startswith("Authentication failed"), (tile, msg)
-        assert "Driver:" in msg, msg
+        # W3 error taxonomy: one sign-in copy on every surface, no driver echo.
+        assert not ok and "rejected the sign-in" in msg, (tile, msg)
         ok, msg = run_probe(driver, {**ep, "host": "no-such-host.invalid", "type": tile,
                                      "ssl": False})
         assert not ok and "DNS" in msg, (tile, msg)
@@ -263,7 +263,7 @@ def test_humaniser_classifies_real_driver_exceptions():
         "mysql": {
             "Connection refused": lambda: pymysql.connect(
                 host="127.0.0.1", port=closed, user="u", password="p", connect_timeout=2),
-            "DNS lookup failed": lambda: pymysql.connect(
+            "Host not found": lambda: pymysql.connect(
                 host="no-such-host.invalid", port=3306, user="u", password="p", connect_timeout=2),
             "Handshake timed out": lambda: pymysql.connect(
                 host="127.0.0.1", port=silent, user="u", password="p",
@@ -273,7 +273,7 @@ def test_humaniser_classifies_real_driver_exceptions():
             "Connection refused": lambda: psycopg2.connect(
                 host="127.0.0.1", port=closed, user="u", password="p", dbname="d",
                 connect_timeout=2),
-            "DNS lookup failed": lambda: psycopg2.connect(
+            "Host not found": lambda: psycopg2.connect(
                 host="no-such-host.invalid", port=5432, user="u", password="p", dbname="d",
                 connect_timeout=2),
             "Connection timed out": lambda: psycopg2.connect(
@@ -287,13 +287,14 @@ def test_humaniser_classifies_real_driver_exceptions():
             for tile in (driver, "amazon_aurora" if driver == "mysql" else "amazon_aurora_postgresql"):
                 msg = humanize_connection_error(tile, exc)
                 assert msg.startswith(prefix), (tile, prefix, str(exc), msg)
-                assert "Driver:" in msg, msg
+                # W3 error taxonomy: no host or port in the copy.
+                assert "127.0.0.1" not in msg and "no-such-host" not in msg, msg
                 assert "Cannot reach the host" not in msg, msg
 
 
 @pytest.mark.parametrize("raw, prefix", [
     ('could not translate host name "db.example" to address: Temporary failure in name resolution',
-     "DNS lookup failed"),
+     "Host not found"),
     ("(2003, \"Can't connect to MySQL server on '10.0.0.9' ([Errno 113] No route to host)\")",
      "Network unreachable"),
     ("(2003, \"Can't connect to MySQL server on '10.0.0.9' (timed out)\")",
@@ -307,7 +308,8 @@ def test_humaniser_driver_texts_seen_off_this_host(raw, prefix):
 
     msg = humanize_connection_error("amazon_aurora", raw)
     assert msg.startswith(prefix), msg
-    assert "Driver:" in msg, msg
+    # W3 error taxonomy: no host in the copy.
+    assert "10.0.0.9" not in msg and "db.example" not in msg, msg
 
 
 def test_store_keeps_the_legacy_5432_heal_for_drivers_that_never_listen_there():

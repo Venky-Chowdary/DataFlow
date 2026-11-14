@@ -47,7 +47,13 @@ export function ThroughputChart({ series }: ThroughputChartProps) {
     ? `M ${points[0].x} ${pad.t + innerH} L ${points.map((p) => `${p.x} ${p.y}`).join(" L ")} L ${points[points.length - 1].x} ${pad.t + innerH} Z`
     : "";
 
-  const gridLines = [0, 0.5, 1].map((g) => pad.t + innerH * (1 - g));
+  // Gridlines bottom (0) to top (max). UX-35: each label is the value at its
+  // own line; an empty chart labels only the zero line.
+  const empty = series.every((s) => s.rows <= 0);
+  const gridLines = [0, 0.5, 1].map((g) => ({ g, y: pad.t + innerH * (1 - g) }));
+  const summary = `Rows written per day, last ${series.length} days: ${series
+    .map((s) => `${s.label} ${s.rows.toLocaleString()}`)
+    .join(", ")}`;
 
   return (
     <figure ref={wrapRef} className="df2-chart df2-chart-throughput" aria-label="Throughput last 7 days">
@@ -57,6 +63,7 @@ export function ThroughputChart({ series }: ThroughputChartProps) {
         viewBox={`0 0 ${width} ${h}`}
         className="df2-chart-svg df2-chart-svg-fill"
         role="img"
+        aria-label={summary}
       >
         <defs>
           <linearGradient id="df-throughput-fill" x1="0" y1="0" x2="0" y2="1">
@@ -68,12 +75,14 @@ export function ThroughputChart({ series }: ThroughputChartProps) {
             <stop offset="100%" stopColor="var(--df-logo-tile)" />
           </linearGradient>
         </defs>
-        {gridLines.map((y, i) => (
+        {gridLines.map(({ g, y }) => (
           <g key={y}>
             <line x1={pad.l} x2={width - pad.r} y1={y} y2={y} className="df2-chart-grid" />
-            <text x={pad.l - 8} y={y + 4} className="df2-chart-axis" textAnchor="end">
-              {formatAxisValue(maxRows * (1 - i * 0.5))}
-            </text>
+            {(!empty || g === 0) && (
+              <text x={pad.l - 8} y={y + 4} className="df2-chart-axis" textAnchor="end">
+                {formatAxisValue(Math.round(maxRows * g))}
+              </text>
+            )}
           </g>
         ))}
         {areaPath && <path d={areaPath} fill="url(#df-throughput-fill)" />}
@@ -137,7 +146,12 @@ export function StatusDonut({ slices, centerLabel, centerValue }: StatusDonutPro
   return (
     <figure className="df2-chart df2-chart-donut df2-chart-donut-layout" aria-label={`${centerLabel}: ${centerValue}`}>
       <div className="df2-chart-donut-visual">
-        <svg viewBox="0 0 112 112" className="df2-chart-svg df2-chart-donut-svg" role="img">
+        <svg
+          viewBox="0 0 112 112"
+          className="df2-chart-svg df2-chart-donut-svg"
+          role="img"
+          aria-label={`${centerLabel}: ${centerValue}. ${slices.map((x) => `${x.label} ${x.count}`).join(", ")}`}
+        >
           <circle cx={cx} cy={cy} r={r + 5} className="df2-donut-shadow" />
           {arcs.map((a) => (
             <path key={a.key} d={a.d} fill={a.color} className="df2-donut-slice" />

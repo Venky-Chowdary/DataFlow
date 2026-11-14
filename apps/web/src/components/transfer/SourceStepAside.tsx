@@ -1,6 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { connectorDisplayName } from "../../lib/connectorTypes";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
+import { ErrorReferenceChip } from "../ErrorReferenceChip";
+import { errorTitle, isMissingObjectError, splitReference } from "../../lib/errorCopy";
 import { StructurePreview } from "../ui/StructurePreview";
 import { MultiStreamSchemaPreview } from "./MultiStreamSchemaPreview";
 import type { Connector } from "../../lib/types";
@@ -33,6 +36,8 @@ interface SourceStepAsideProps {
   sourceManualType?: string;
   sourceIntrospecting?: boolean;
   sourceIntrospectError?: string | null;
+  /** The taxonomy code of the introspect failure, when the API sent one. */
+  sourceIntrospectErrorCode?: string | null;
   onRetrySourceIntrospect?: () => void;
   /** Existing tables/collections from the last source probe — pick, do not invent. */
   sourceObjectNames?: string[];
@@ -148,26 +153,38 @@ function SchemaAnalyzingPanel({ target }: { target?: string }) {
   );
 }
 
+/** The panel title, decided on the API's code (never on the message text). */
+export function schemaErrorTitle(code: string | null | undefined, objectNoun = "table"): string {
+  if (isMissingObjectError(code)) return `The ${objectNoun} is not on this source`;
+  if (code === "access.source_read_denied") return `No permission to read this ${objectNoun}`;
+  return code ? errorTitle(code, "Couldn’t read the source") : "Couldn’t read the source";
+}
+
 function SchemaErrorPanel({
   message,
+  code,
   onRetry,
   suggestedObjects,
   onPickObject,
   objectNoun = "table",
 }: {
   message: string;
+  /** The API's taxonomy code (error.code); the panel never guesses from the text (ERR-37). */
+  code?: string | null;
   onRetry?: () => void;
   suggestedObjects?: string[];
   onPickObject?: (name: string) => void;
   objectNoun?: string;
 }) {
-  const missing = /was not found|could not be read|does not exist/i.test(message);
+  const missing = isMissingObjectError(code);
+  const { text, reference } = splitReference(message);
   return (
     <div className="df2-source-aside df2-source-aside-error">
       <div className="df2-source-aside-head">
         <div>
-          <h4>{missing ? "Table is not on this source" : "Couldn’t read the source"}</h4>
-          <p>{message}</p>
+          <h4>{schemaErrorTitle(code, objectNoun)}</h4>
+          <p>{text}</p>
+          {reference && <ErrorReferenceChip reference={reference} />}
         </div>
         <span className="df2-badge df2-badge-xs df2-badge-run">Error</span>
       </div>
@@ -176,7 +193,7 @@ function SchemaErrorPanel({
         <p>
           {missing
             ? `Studio will not invent a ${objectNoun} that does not exist. Pick one from the catalog, then Retry.`
-            : "Verify the table or collection name, credentials, and network access."}
+            : "Fix the cause above, then retry the schema read."}
         </p>
         {suggestedObjects && suggestedObjects.length > 0 && onPickObject && (
           <ul className="df2-source-object-picks" aria-label={`Existing ${objectNoun}s`}>
@@ -262,6 +279,7 @@ export function SourceStepAside({
   sourceManualType,
   sourceIntrospecting,
   sourceIntrospectError,
+  sourceIntrospectErrorCode,
   onRetrySourceIntrospect,
   sourceObjectNames = [],
   onPickSourceObject,
@@ -361,6 +379,7 @@ export function SourceStepAside({
     return (
       <SchemaErrorPanel
         message={sourceIntrospectError}
+        code={sourceIntrospectErrorCode}
         onRetry={onRetrySourceIntrospect}
         suggestedObjects={sourceObjectNames}
         onPickObject={onPickSourceObject}
@@ -394,7 +413,7 @@ export function SourceStepAside({
               <ConnectorIcon id={sourceConnector.type} size={28} />
               <div>
                 <strong>{sourceConnector.name}</strong>
-                <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
+                <span>{connectorDisplayName(sourceConnector.type)}{sourceConnector.host ? ` · ${sourceConnector.host}` : ""}</span>
                 <span>{sourceConnector.database || "default database"}</span>
               </div>
               <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
@@ -414,7 +433,7 @@ export function SourceStepAside({
                 <ConnectorIcon id={c.type} size={18} />
                 <div>
                   <strong>{c.name}</strong>
-                  <span>{c.type} · {c.database || c.host}</span>
+                  <span>{connectorDisplayName(c.type)} · {c.database || c.host}</span>
                 </div>
               </div>
             ))}
@@ -462,7 +481,7 @@ export function SourceStepAside({
           <ConnectorIcon id={sourceConnector.type} size={28} />
           <div>
             <strong>{sourceConnector.name}</strong>
-            <span>{sourceConnector.type}</span>
+            <span>{connectorDisplayName(sourceConnector.type)}</span>
             {cloudPath.trim() && <code className="df2-source-aside-path">{cloudPath.trim()}</code>}
           </div>
         </article>
@@ -473,7 +492,7 @@ export function SourceStepAside({
               <ConnectorIcon id={c.type} size={18} />
               <div>
                 <strong>{c.name}</strong>
-                <span>{c.type}</span>
+                <span>{connectorDisplayName(c.type)}</span>
               </div>
             </div>
           ))}

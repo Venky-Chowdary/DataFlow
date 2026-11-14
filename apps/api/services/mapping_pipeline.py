@@ -1378,6 +1378,12 @@ def run_mapping_pipeline(
         tgt_type = _dest_schema_physical_type(
             target_by_name.get(m["target"], {}), destination_db_type
         )
+        # DATA-25: bytes into a text-valued store land base64-encoded; say so.
+        from services.binary_text_carrier import base64_text_note
+
+        carrier_note = base64_text_note(declared_src_type, destination_db_type or "")
+        if carrier_note and carrier_note not in reasoning:
+            reasoning = f"{reasoning} · {carrier_note}"
         # Provenance, not just a value: a stamp read out of the destination
         # catalog records what exists today, while an operator stamp records an
         # approved ceiling. Writers must be able to tell them apart — otherwise

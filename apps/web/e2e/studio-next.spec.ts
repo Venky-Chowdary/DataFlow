@@ -1221,7 +1221,9 @@ test.describe("schedules sync", () => {
     await expect(page.getByText("Nightly orders")).toBeVisible();
   }
 
-  test("sync now stays clear of the row and confirms in the app dialog", async ({ page }) => {
+  // UX-36: the schedule row has one action, "Run now" (it was "Sync now" beside a
+  // second "Run now"); the signed-contract path confirms in the same app dialog.
+  test("run now stays clear of the row and confirms in the app dialog", async ({ page }) => {
     let nativeDialog = false;
     page.on("dialog", async (dialog) => {
       nativeDialog = true;
@@ -1231,7 +1233,7 @@ test.describe("schedules sync", () => {
     for (const width of [1366, 1440, 1920]) {
       await page.setViewportSize({ width, height: width === 1920 ? 1080 : width === 1440 ? 900 : 768 });
       const row = page.locator(".df2-pipeline-row").first();
-      const sync = row.getByRole("button", { name: "Sync now" });
+      const sync = row.getByRole("button", { name: "Run now" });
       const opener = row.getByRole("button", { name: "Open Nightly orders details" });
       const status = row.locator(".df2-badge").last();
       await expect(sync).toBeVisible();
@@ -1243,14 +1245,14 @@ test.describe("schedules sync", () => {
       });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.locator(".df2-pipeline-row").first().getByRole("button", { name: "Sync now" }).click();
-    const dialog = page.getByRole("dialog", { name: "Sync now" });
+    await page.locator(".df2-pipeline-row").first().getByRole("button", { name: "Run now" }).click();
+    const dialog = page.getByRole("dialog", { name: "Run now" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Nightly orders", { exact: true })).toBeVisible();
     await expect(dialog.getByText("contract-orders", { exact: true })).toBeVisible();
     await expect(dialog.getByText("orders", { exact: true })).toBeVisible();
     await expect(dialog.getByText("warehouse_orders", { exact: true })).toBeVisible();
-    await dialog.getByRole("button", { name: "Sync now" }).click();
+    await dialog.getByRole("button", { name: "Run now" }).click();
     await expect(page.getByText(/Triggered from Nightly orders/)).toBeVisible();
     await expect(page).toHaveURL(/#\/jobs/);
     await expect(page.getByRole("heading", { name: "Nightly orders sync" })).toBeVisible();

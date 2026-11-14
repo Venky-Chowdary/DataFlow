@@ -24,6 +24,7 @@ from test_review_h2_h3_residency_at_run_and_query_export import (  # noqa: F401
     eu_workspace,
     writes,
 )
+from _boto3_client_stub import stub_boto3_client  # noqa: F401  (the imported `writes` fixture needs it)
 from tenancy_world import tenancy_world  # noqa: F401
 
 

@@ -89,19 +89,10 @@ export function PipelineCard({
           highlighted ? "is-highlighted" : "",
           selected ? "selected" : "",
         ].filter(Boolean).join(" ")}
+        // UX-16: a list item opened by its own Open button, not a button
+        // that holds Sync now and the row menu (nested-interactive).
         onClick={onSelect}
-        onKeyDown={
-          onSelect
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelect();
-                }
-              }
-            : undefined
-        }
-        role={onSelect ? "button" : undefined}
-        tabIndex={onSelect ? 0 : undefined}
+        role="listitem"
         aria-current={selected || undefined}
       >
         <span
@@ -171,20 +162,9 @@ export function PipelineCard({
               className="df2-pipeline-row-sync-label"
               onClick={onSync}
             >
-              Sync now
+              {/* UX-36: one run action per row; the "more" menu only repeated it. */}
+              Run now
             </Button>
-          )}
-          {onSync && (
-            <details className="df2-pipeline-row-menu">
-              <summary className="df2-pipeline-row-menu-summary" aria-label={`More actions for ${sched.name}`}>
-                <DtIcon name="menu" size={16} />
-              </summary>
-              <div className="df2-pipeline-row-menu-panel" role="menu">
-                <button type="button" role="menuitem" className="df2-pipeline-row-menu-item" onClick={onSync}>
-                  Sync now
-                </button>
-              </div>
-            </details>
           )}
           <button
             type="button"

@@ -39,10 +39,20 @@ END
 GO
 
 -- Best-effort Agent start (ignored when unavailable in containers).
-BEGIN TRY
-    EXEC xp_servicecontrol N'START', N'SQLServerAGENT';
-END TRY
-BEGIN CATCH
-    -- Agent optional; tests use sys.sp_cdc_scan.
-END CATCH
+-- Only when Agent is not already running: with MSSQL_AGENT_ENABLED=true (CI)
+-- it is, and xp_servicecontrol then raises error 1056 ("An instance of the
+-- service is already running"), which TRY/CATCH does not swallow, so
+-- `sqlcmd -b` failed the whole init.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.dm_server_services
+    WHERE servicename LIKE N'SQL Server Agent%' AND status_desc = N'Running'
+)
+BEGIN
+    BEGIN TRY
+        EXEC xp_servicecontrol N'START', N'SQLServerAGENT';
+    END TRY
+    BEGIN CATCH
+        -- Agent optional; tests use sys.sp_cdc_scan.
+    END CATCH
+END
 GO

@@ -680,6 +680,11 @@
     "GET /auth/sso/{sso_type}/start": {
       "scope": "exempt",
       "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/stream-ticket": {
+      "scope": "workspace",
+      "resource": "job",
+      "viewer_may_call": "Issues a one-time ticket to watch a job's progress stream; it changes nothing, and a viewer may watch."
     }
   },
   "body_routes": {
@@ -1127,6 +1132,73 @@
         "contract_id"
       ],
       "reason": "A multipart form route: its connector ids are checked read/write by the route (test_connector_route_authz) and its contract by assert_body_ids (review 3, Low); the JSON harness here cannot send a form."
+    },
+    "POST /api/v1/ops/cdc-cursors/clear": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Clears a CDC/sync watermark named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    },
+    "POST /api/v1/ops/cdc-leases/force-release": {
+      "scope": "workspace",
+      "resource": "cdc_cursor",
+      "body_ids": [
+        "cursor_key"
+      ],
+      "reason": "Breaks the live CDC lease named by its cursor_key: the key's workspace (stamped in the metadata, else its job's or its connector's) must be one the caller can write; another workspace's key is a 404 like a missing one (SEC-1)."
+    },
+    "POST /api/v1/schedules/import": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "spec.source_connector_id",
+        "spec.dest_connector_id",
+        "spec.contract_id",
+        "spec.transform_recipe_id"
+      ],
+      "reason": "Imports a PipelineSchedule GitOps artifact: every connector, contract and recipe it names gets the POST /schedules ownership check before anything is saved (SEC-5).",
+      "owner_status": [
+        201
+      ]
+    },
+    "POST /api/v1/schedules/gitops/apply": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "resources[].spec.source_connector_id",
+        "resources[].spec.dest_connector_id",
+        "resources[].spec.contract_id"
+      ],
+      "reason": "Applies a GitOps manifest: every PipelineSchedule in it gets the POST /schedules ownership check before anything is applied (SEC-5)."
+    }
+  },
+  "_query_routes_about": "query_routes: routes that take a resource id in the QUERY string, or list resources with no id. tests/test_tenancy_route_scoping.py::test_every_query_id_route_answers_other_tenants_like_a_missing_id calls each as B's administrator and B's API key: an id route answers exactly as for an id that does not exist, a list route never names A's resource, and A's administrator is served (owner control).",
+  "query_routes": {
+    "GET /api/v1/ops/cdc-cursors": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a watermark by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases": {
+      "resource": "cdc_cursor",
+      "query_ids": [
+        "cursor_key"
+      ],
+      "reason": "Reads a CDC lease by cursor_key (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-cursors/keys": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists cursor keys: only the caller's workspaces' (SEC-1)."
+    },
+    "GET /api/v1/ops/cdc-leases/list": {
+      "resource": "cdc_cursor",
+      "query_ids": [],
+      "reason": "Lists held CDC leases: only the caller's workspaces' (SEC-1)."
     }
   }
 }

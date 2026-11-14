@@ -236,6 +236,8 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await stubMapStudio(page);
     await reachMap(page);
     await showAllRows(page);
+    // Below 1440 px the destination panel starts closed (W6, UX-23): open it first.
+    await page.getByRole("button", { name: "Show destination columns" }).click();
     const row = destRow(page, "email_address");
     await grip(page, "customer_email").scrollIntoViewIfNeeded();
     // Away from the list's edges, where a resting finger scrolls it.
@@ -279,11 +281,14 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await stubMapStudio(page);
     await reachMap(page);
     const download = page.waitForEvent("download");
-    await page.getByRole("button", { name: "Export YAML" }).click();
+    // Export and Computed column live in the toolbar's More menu (W6).
+    await page.getByRole("button", { name: "More mapping actions" }).click();
+    await page.getByRole("menuitem", { name: "Export YAML" }).click();
     expect((await download).suggestedFilename()).toBe("sample-orders-orders_dest.mapping.yaml");
     await expect(page.getByTestId("map-code-status")).toContainText("checksum included");
 
-    await page.getByRole("button", { name: "Computed column…" }).click();
+    await page.getByRole("button", { name: "More mapping actions" }).click();
+    await page.getByRole("menuitem", { name: "Computed column…" }).click();
     const dialog = page.getByRole("dialog", { name: "Computed destination column" });
     await dialog.getByLabel("Destination column", { exact: true }).fill("notes");
     await dialog.getByRole("textbox", { name: "Expression" }).fill("CONCAT(customer_email, ' / ', status)");

@@ -76,3 +76,26 @@ export function exportDownloadError(status: number, apiMessage: string): Error {
   if (status === 404) return new Error(apiMessage || "This job has no file export.");
   return new Error(apiMessage || "Could not prepare the export download.");
 }
+
+/**
+ * Whether a download URL is served by our API (and so needs the session's
+ * bearer token): a relative ``/api/...`` path, or an absolute URL on the API's
+ * own origin. A presigned object-store URL on another host carries its own
+ * credentials and must not receive ours.
+ */
+export function exportUrlNeedsSession(
+  url: string,
+  apiBase: string,
+  pageOrigin: string = typeof window !== "undefined" ? window.location.origin : "",
+): boolean {
+  const target = (url || "").trim();
+  if (!target) return false;
+  if (!/^https?:\/\//i.test(target)) return true;
+  // A relative API base is served from the page's own origin.
+  const apiOrigin = /^https?:\/\//i.test(apiBase) ? apiBase : pageOrigin;
+  try {
+    return new URL(target).origin === new URL(apiOrigin).origin;
+  } catch {
+    return false;
+  }
+}

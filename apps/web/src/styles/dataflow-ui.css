@@ -6596,3 +6596,22 @@ html,
     transform: none;
   }
 }
+
+/* ERR-40: the support reference is its own chip, never clipped by the
+   two-line toast clamp or the nowrap/ellipsis toast dock. */
+.df2-error-reference,
+.df2-toast-dock .df2-error-reference {
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
+  text-overflow: clip;
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.df2-error-reference .df2-copy-id-value {
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+  user-select: all;
+}

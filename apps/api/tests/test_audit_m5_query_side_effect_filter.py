@@ -208,6 +208,9 @@ def test_query_route_refuses_a_package_qualified_call(tenancy_world):  # noqa: F
             "/api/v1/query/execute", json={"connector_id": connector.id, "query": sql}
         )
         assert refused.status_code == 400, (sql, refused.text)
-        assert refused.json() == {
-            "detail": "Only safe read/metadata queries are allowed in the playground"
-        }, refused.text
+        # ERR-43: the refusal names the function it refused (or the generic
+        # playground sentence when it cannot point at one call).
+        detail = refused.json()["detail"]
+        assert detail == "Only safe read/metadata queries are allowed in the playground" or (
+            detail.startswith("The query calls ") and "doesn't allow" in detail
+        ), refused.text

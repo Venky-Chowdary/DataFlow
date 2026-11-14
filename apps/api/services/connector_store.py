@@ -7,6 +7,7 @@ mode it falls back to a JSON file under `data_dir()`.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -27,6 +28,13 @@ except ImportError:  # pragma: no cover - non-POSIX platform
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
+from services.secret_fields import (
+    has_plaintext_secrets,
+    keep_stored_secrets,
+    mask_secret_tree,
+    open_secret_tree,
+    seal_secret_tree,
+)
 from services.secret_vault import decrypt_for_workspace, decrypt_secret, encrypt_secret, tenant_id_from_workspace
 from services.workspace_filter import bound_allows, bound_workspace_filter, current_workspace_filter
 
@@ -454,7 +462,11 @@ class SavedConnector:
             path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
             workspace_id=data.get("workspace_id", ""),
-            extra=connector_extra_from_payload(data),
+            extra=(
+                open_secret_tree(connector_extra_from_payload(data), lambda v: decrypt_for_workspace(v, workspace_id))
+                if secrets_encrypted
+                else connector_extra_from_payload(data)
+            ),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
             last_used_at=data.get("last_used_at"),
@@ -558,7 +570,8 @@ def _merged_extra(
     if endpoint_moved:
         for key in _HOST_BOUND_TRUST_KEYS:
             base.pop(key, None)
-    return {**base, **connector_extra_from_payload(data)}
+    # A masked ``****`` sent back for a secret extra keeps the stored one (SEC-3).
+    return {**base, **keep_stored_secrets(connector_extra_from_payload(data), base)}
 
 
 def _resolve_backend() -> str:
@@ -687,6 +700,12 @@ def _encrypt_connector_doc(d: dict[str, Any]) -> dict[str, Any]:
         val = d.get(key)
         if isinstance(val, str) and val and val != "****" and not val.startswith("["):
             d[key] = encrypt_secret(val, tenant_id=tenant_id, label=f"connector-{key}")
+    if isinstance(d.get("extra"), dict):
+        # Secret-named extras (client_secret, refresh_token, headers.Authorization,
+        # ...) are sealed with the same vault and tenant key as the password (SEC-3).
+        d["extra"] = seal_secret_tree(
+            d["extra"], lambda v: encrypt_secret(v, tenant_id=tenant_id, label="connector-extra")
+        )
     return d
 
 
@@ -746,6 +765,7 @@ def _materialize_docs(docs: Any) -> list[SavedConnector]:
 
     out: list[SavedConnector] = []
     for doc in docs:
+        _heal_mongo_doc(doc)
         try:
             out.append(_doc_to_connector(doc))
         except ControlPlaneUnavailable:
@@ -784,9 +804,57 @@ def _load_all() -> list[SavedConnector]:
         items = [SavedConnector.from_dict(c) for c in raw.get("connectors", [])]
     except Exception:
         return _seed_defaults() if _seed_enabled() else []
+    if _HEAL_ON_READ.get() and any(
+        has_plaintext_secrets(c.get("extra")) for c in raw.get("connectors", []) if isinstance(c, dict)
+    ):
+        _heal_file_extras()
     if not _seed_enabled():
         items = [c for c in items if not c.id.startswith("demo-")]
     return items
+
+
+#: False inside :func:`read_only`: a read never rewrites the store (audit scripts).
+_HEAL_ON_READ: contextvars.ContextVar[bool] = contextvars.ContextVar("connector_heal_on_read", default=True)
+
+
+@contextmanager
+def read_only() -> Iterator[None]:
+    """Reads inside this block never seal legacy plaintext extras (read-only tools)."""
+    token = _HEAL_ON_READ.set(False)
+    try:
+        yield
+    finally:
+        _HEAL_ON_READ.reset(token)
+
+
+def _heal_file_extras() -> None:
+    """Re-save a file store that still holds plaintext secret extras (SEC-3).
+
+    Records written before extras were sealed are encrypted the first time
+    they are read; a failure leaves them readable and retries on the next read.
+    """
+    try:
+        with _file_store_mutation():
+            raw = json.loads(_store_path().read_text(encoding="utf-8"))
+            docs = [c for c in raw.get("connectors", []) if isinstance(c, dict)]
+            if any(has_plaintext_secrets(c.get("extra")) for c in docs):
+                _save_all([SavedConnector.from_dict(c) for c in docs])
+    except Exception as exc:  # noqa: BLE001 - the read itself already succeeded
+        logger.warning("Could not seal plaintext connector extras: %s", type(exc).__name__)
+
+
+def _heal_mongo_doc(doc: Any) -> None:
+    """Seal plaintext secret extras of one stored Mongo connector (SEC-3)."""
+    if not _HEAL_ON_READ.get() or not isinstance(doc, dict) or not has_plaintext_secrets(doc.get("extra")):
+        return
+    try:
+        tenant_id = tenant_id_from_workspace(doc.get("workspace_id") or "")
+        sealed = seal_secret_tree(
+            doc["extra"], lambda v: encrypt_secret(v, tenant_id=tenant_id, label="connector-extra")
+        )
+        _mongo_collection().update_one({"_id": doc.get("_id"), "extra": doc["extra"]}, {"$set": {"extra": sealed}})
+    except Exception as exc:  # noqa: BLE001 - the read itself already succeeded
+        logger.warning("Could not seal plaintext connector extras: %s", type(exc).__name__)
 
 
 _FILE_MUTATION_GUARD = threading.RLock()
@@ -1029,6 +1097,7 @@ def _connector_id_query(connector_id: str, workspace_id: str | None = None) -> d
 def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     coll = _mongo_collection()
     doc = coll.find_one(_connector_id_query(connector_id, workspace_id))
+    _heal_mongo_doc(doc)
     return _doc_to_connector(doc) if doc else None
 
 
@@ -1241,6 +1310,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                         name: decrypt_secret(str(doc.get(name) or ""), tenant_id=tenant)
                         for name in ("connection_string", "api_key", "service_account", "password", "private_key")
                     },
+                    "extra": open_secret_tree(doc.get("extra") or {}, lambda v: decrypt_secret(v, tenant_id=tenant)),
                 })
             else:
                 doc.pop("region_verification", None)
@@ -1495,34 +1565,9 @@ def mark_used(*connector_ids: str | None) -> int:
     return stamped
 
 
-_RESPONSE_SECRET_KEYS = frozenset(
-    {
-        "password",
-        "api_key",
-        "service_account",
-        "private_key",
-        "private_key_passphrase",
-        "secret",
-        "token",
-        "secret_access_key",
-    }
-)
-
-
 def _redact_response_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            if str(key).lower() in _RESPONSE_SECRET_KEYS and item:
-                redacted[key] = "****"
-            elif str(key).lower() in {"connection_string", "url", "uri"} and item:
-                redacted[key] = _mask_conn_str(str(item))
-            else:
-                redacted[key] = _redact_response_value(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_response_value(item) for item in value]
-    return value
+    """Every secret-named value masked, at any depth (SEC-3: one rule, viewers included)."""
+    return mask_secret_tree(value, mask_url=_mask_conn_str)
 
 
 def mask_connector(c: SavedConnector) -> dict[str, Any]:

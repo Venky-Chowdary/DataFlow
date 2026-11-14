@@ -19,10 +19,11 @@ from typing import Any
 from services.tracing import submit_in_context
 from services.value_serializer import json_default
 from services.workspace_filter import current_actor
-from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
+from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .answer_contract import RenderTracker, result_used
 from .pilot_egress import history_for_model, model_payload, narration_allowed
+from . import transfer_answer
 from .schedule_questions import (
     asks_next_run,
     ground_schedule_plan,
@@ -337,9 +338,6 @@ def _live_rows_lead(o: dict[str, Any], *, sample: bool) -> str:
     )
 
 
-_GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
-
-
 def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     """Show the plan an operator has to sign off on: route, casts, gates.
 
@@ -401,23 +399,18 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
                 f"{c.get('to_type')} on `{c.get('target_column')}`"
                 + (f" ({c.get('fidelity')})" if c.get("fidelity") else "")
             )
-    elif conversions:
-        lines.append(
-            f"• {len(conversions)} type conversion(s) stamped preserve — "
-            "no cast/mutate/lossy fidelity risks in the plan."
-        )
+    else:
+        # UX-19: from the plan's own conversions and the gate result shown below,
+        # so "no risks" never sits beside a blocker.
+        conv_line = transfer_answer.conversions_line(plan, pf)
+        if conv_line:
+            lines.append(conv_line)
 
-    gates = pf.get("gates") or []
-    if gates:
-        summary = " ".join(
-            f"{_GATE_ICON.get(str(g.get('status')).lower(), '?')}{g.get('id')}" for g in gates
-        )
-        lines.append(
-            f"• Preflight **{pf.get('passed_count')}/{pf.get('total_gates')}** "
-            f"({pf.get('readiness_score')}%): {summary}"
-        )
-    for blocker in (pf.get("blockers") or [])[:4]:
-        lines.append(f"  – **BLOCK {blocker.get('id')}**: {blocker.get('message')}")
+    gate_line = transfer_answer.gate_summary_line(pf)
+    if gate_line:
+        lines.append(gate_line)
+    for title, text in transfer_answer.honest_blockers(plan, pf):
+        lines.append(f"  – **Blocked · {title}**: {text}")
     if pf.get("run_id"):
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
@@ -3885,9 +3878,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"• Only in B: {', '.join(o['only_in_b'][:6]) or 'none'}"
                 )
             elif tr.name == "get_transfer_capabilities" and tr.success:
-                combos = tr.output.get("live_combinations", [])
+                # The summary output omits the matrix and carries its count; reading
+                # len(live_combinations) said "0 live routes" (CLM-9).
+                out = tr.output or {}
+                route_count = out.get("live_combination_count")
+                if route_count is None:
+                    route_count = len(out.get("live_combinations") or [])
                 parts.append(
-                    f"Universal transfer supports **{len(combos)} live routes** — "
+                    f"Universal transfer supports **{route_count:,} live routes** — "
                     "any file (CSV/JSON/JSONL/TSV) to MongoDB, PostgreSQL, Snowflake; "
                     "DB-to-DB migrations; and file exports. Tables and collections are auto-created."
                 )
@@ -4364,10 +4362,10 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             "Show my recent jobs",
             "What can you do?",
         ])
-        # Keep a couple of curated domain prompts after the proven ones.
-        for extra in (SUGGESTED_PROMPTS or [])[:2]:
-            if extra not in prompts and "logistics" not in extra.lower():
-                prompts.append(extra)
+        # UX-18: the curated domain prompts name demo connections ("Local
+        # Postgres", "Warehouse") this workspace may not have; offered as a
+        # starter they dead-ended. Only prompts grounded in this workspace's
+        # own datasets and connectors are suggested.
         return prompts
 
 

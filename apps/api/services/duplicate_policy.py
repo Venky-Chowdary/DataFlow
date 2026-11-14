@@ -416,13 +416,28 @@ def resolve_duplicate_policy(
             False,
             "Upsert on the business key.",
         )
+    from services.sync_cursor import is_append_sync
+
+    # Not incremental_append: its next run merges on the declared key (the
+    # watermark overlap), so that CREATE must keep the key (d334).
+    append_sync = (
+        caller != "upsert"
+        and is_append_sync(sync_mode or "")
+        and "incremental" not in str(sync_mode or "").lower()
+    )
     return DuplicateDecision(
         "append" if caller != "upsert" else "upsert",
         caller or "insert",
         "update",
         False,
-        "",
+        APPEND_SYNC_REASON if append_sync else "",
     )
+
+
+#: The implicit decision of an append sync mode: each run inserts its rows
+#: again (two runs land 2N), so a declared key is not enforced on the CREATE —
+#: the same table the fast path creates (MYSQL-DEF-1).
+APPEND_SYNC_REASON = "Append sync mode: every run inserts its rows again."
 
 
 def set_match_action(action: str, *, duplicates_allowed: bool = False):
@@ -438,9 +453,75 @@ def reset_match_action(token) -> None:
     _MATCH.reset(match_token)
 
 
+def restores_match_action(fn):
+    """Decorator: the match action and duplicates-allowed flag never outlive ``fn``.
+
+    ``stream_write._write_batch`` resets them only on its normal return paths;
+    a writer that raised (or a destination branch with no reset) left the flag
+    set for the next write in the same thread, so a later create-new append
+    silently withheld its declared key (QA1 x MYSQL-DEF-1 in CI shard 5).
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        match, rows = _MATCH.get(), _ROWS_ALLOWED.get()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if _MATCH.get() != match:
+                _MATCH.set(match)
+            if _ROWS_ALLOWED.get() != rows:
+                _ROWS_ALLOWED.set(rows)
+
+    return _wrapped
+
+
 def duplicates_allowed(decision: "DuplicateDecision | None") -> bool:
     """The operator explicitly allowed repeated keys (append / allow_duplicates)."""
     return bool(decision is not None and decision.explicit and decision.policy == "append")
+
+
+_PK_REQUIRED_CACHE: dict[tuple, tuple[float, bool]] = {}
+
+
+def _mysql_requires_primary_key(cfg: Any) -> bool:
+    """``sql_require_primary_key`` (or an unreadable answer) on this MySQL; cached 60 s."""
+    import time
+
+    cfg = dict(cfg or {})
+    key = tuple(str(cfg.get(k) or "") for k in ("host", "port", "database", "username", "connection_string"))
+    hit = _PK_REQUIRED_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    from services.dest_require_primary_key import server_requires_primary_key
+
+    answer = server_requires_primary_key(cfg)
+    required = bool(getattr(answer, "variable", "") or getattr(answer, "unreadable", ""))
+    _PK_REQUIRED_CACHE[key] = (time.monotonic(), required)
+    return required
+
+
+def create_allows_repeated_keys(decision: "DuplicateDecision | None", dest_type: str, cfg: Any) -> bool:
+    """Whether a create-new for this write leaves the declared key unenforced.
+
+    An explicit append policy always does. A plain append sync mode does too
+    (two runs land 2N rows): the fast path's CREATE never carried the key, so
+    the row path withholding it is the same table on every route (MYSQL-DEF-1:
+    with local_infile=OFF the row path enforced it and the second append was
+    refused). The one exception is a MySQL server that requires a PRIMARY KEY
+    (``sql_require_primary_key``): there the declared key is the only key a
+    CREATE can have.
+    """
+    if duplicates_allowed(decision):
+        return True
+    if decision is None or decision.explicit or decision.reason != APPEND_SYNC_REASON:
+        return False
+    from services.dialect_profiles import normalize_driver
+
+    if (normalize_driver(str(dest_type or "")) or str(dest_type or "")).lower() == "mysql":
+        return not _mysql_requires_primary_key(cfg)
+    return True
 
 
 def current_duplicates_allowed() -> bool:

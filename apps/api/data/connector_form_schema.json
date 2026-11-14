@@ -3342,8 +3342,47 @@
   },
   "salesforce": {
     "label": "Salesforce",
-    "default_auth_mode": "api_key",
+    "default_auth_mode": "user_pass",
     "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "OAuth client credentials",
+        "description": "Connected App client-credentials flow: a fresh access token for every run.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Instance URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Use your org instance URL (*.my.salesforce.com). Do not use login.salesforce.com.",
+            "placeholder": "https://yourorg.my.salesforce.com"
+          },
+          {
+            "key": "database",
+            "label": "Object / table (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "Account"
+          },
+          {
+            "key": "username",
+            "label": "Consumer Key",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "From a Connected App with the OAuth client-credentials flow enabled and a run-as user."
+          },
+          {
+            "key": "password",
+            "label": "Consumer Secret",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      },
       {
         "value": "api_key",
         "label": "API key",
@@ -3368,11 +3407,11 @@
           },
           {
             "key": "apiKey",
-            "label": "Access token (Bearer)",
+            "label": "Session access token (expires, not refreshed)",
             "type": "textarea",
             "optional": false,
             "sensitive": true,
-            "hint": "Paste a Bearer access token (not username/password). Default object/table used when none is specified: Account.",
+            "hint": "A pasted session token expires (two hours by default) and cannot be refreshed, so scheduled runs fail once it does. For schedules, use OAuth client credentials. Default object/table used when none is specified: Account.",
             "placeholder": "00D…!AQEA… (session access token)"
           }
         ]
@@ -3380,10 +3419,10 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "Use your Salesforce username + password plus the security token (My Settings → Reset My Security Token — it arrives by email).",
-      "Or create a Connected App (Setup → App Manager → New Connected App) with OAuth scopes api and refresh_token for client-credentials login.",
-      "Enter the instance URL — https://yourorg.salesforce.com (or .sandbox for sandboxes).",
-      "Test proves OAuth login works — LOGIN_MUST_USE_SECURITY_TOKEN means append the token to the password."
+      "Create a Connected App (Setup → App Manager → New Connected App) with OAuth scope api, enable the client-credentials flow and set a run-as user.",
+      "Choose OAuth client credentials and enter the Consumer Key and Consumer Secret. Datawrap mints a fresh access token for every run, so schedules keep working.",
+      "Enter the instance URL — https://yourorg.my.salesforce.com (not login.salesforce.com).",
+      "A pasted session access token also works for one-off transfers, but it expires and cannot be refreshed, so a schedule on it fails once it does."
     ]
   },
   "sendgrid": {

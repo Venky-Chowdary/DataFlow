@@ -209,6 +209,31 @@ const paths: Record<string, React.ReactNode> = {
     </>
   ),
   minus: <line x1="5" y1="12" x2="19" y2="12" />,
+  "panel-right": (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="15" y1="3" x2="15" y2="21" />
+    </>
+  ),
+  undo: (
+    <>
+      <path d="M9 14L4 9l5-5" />
+      <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+    </>
+  ),
+  redo: (
+    <>
+      <path d="M15 14l5-5-5-5" />
+      <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="5" cy="12" r="1.2" />
+      <circle cx="12" cy="12" r="1.2" />
+      <circle cx="19" cy="12" r="1.2" />
+    </>
+  ),
   "git-branch": (
     <>
       <line x1="6" y1="3" x2="6" y2="15" />

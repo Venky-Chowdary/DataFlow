@@ -9,6 +9,12 @@ import logging
 logger = logging.getLogger("src.transfer.engine")
 
 
+class SchemaPropagationRefused(ValueError):
+    """Datawrap's own refusal to evolve the destination (a breaking drift, an
+    unapproved key widen). A product exception, so the job keeps its words
+    whole instead of "cause not identified" (services.error_handling)."""
+
+
 def _destination_schema_types(
     destination: EndpointConfig, sync_mode: str = ""
 ) -> dict[str, str]:
@@ -268,7 +274,7 @@ def _plan_schema_auto_propagate(
 
     acknowledged = bool(getattr(request, "schema_drift_acknowledged", False))
     if execute_must_pause(evolution, schema_drift_acknowledged=acknowledged):
-        raise ValueError(
+        raise SchemaPropagationRefused(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
         )
     _key_props = [p for p in _widen_props or [] if p.get("key")]
@@ -276,7 +282,7 @@ def _plan_schema_auto_propagate(
         # propagate_* approves additive evolution, never a key rewrite.
         from services.schema_drift import key_widen_approval_message
 
-        raise ValueError(key_widen_approval_message(_key_props))
+        raise SchemaPropagationRefused(key_widen_approval_message(_key_props))
     from services.db_type_utils import dest_declares_column_ddl
     from services.schema_drift import (
         PROPAGATE_POLICIES,

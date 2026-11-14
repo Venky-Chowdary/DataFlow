@@ -4,8 +4,8 @@
  * A disabled control and a 403 from the gate are the same fact seen at two
  * moments, so they must read alike. The gate's own wording,
  * `Permission denied: workspace.manage`, is a fact about the gate rather than
- * an explanation to a person; the permission name is kept — support needs it —
- * but after the action it withheld and the role that lacked it.
+ * an explanation to a person: the sentence names the action, who may do it
+ * and whom to ask. The permission id is developer detail (a data attribute).
  */
 
 const ROLE_PHRASE: Record<string, string> = {
@@ -45,12 +45,22 @@ const PERMISSION_ROLE: Record<string, string> = {
   "member.invite": "admin",
 };
 
+const HOLDERS: Record<string, string> = {
+  editor: "workspace editors and admins",
+  admin: "workspace admins",
+};
+
 /**
  * The sentence a refused caller should read.
  *
  * `action` overrides the default verb when the same permission gates a
  * different surface. Contracts use connector.write, but the page must say
  * "sign or change contracts", not "add or change connections".
+ *
+ * UX-22: the raw permission id (`connector.write`) is not user copy. It stays
+ * available to support through {@link refusalPermissionAttrs} (a data
+ * attribute on the disabled control) and the API error's
+ * `required_permission`, never in the sentence.
  */
 export function refusalSentence(permission: string, role: string, action?: string): string {
   const verb = action || PERMISSION_PHRASE[permission] || "do this";
@@ -59,10 +69,14 @@ export function refusalSentence(permission: string, role: string, action?: strin
   return (
     `You don't have permission to ${verb}` +
     (who ? ` — you are ${who} in this workspace` : "") +
-    `. Ask a workspace admin for the ${needed} role` +
-    (permission ? ` (needs ${permission})` : "") +
-    `.`
+    `. Only ${HOLDERS[needed] ?? "workspace editors and admins"} can do this. ` +
+    `Ask a workspace admin for the ${needed} role.`
   );
+}
+
+/** The permission id for developer details: spread onto the disabled control. */
+export function refusalPermissionAttrs(permission: string): { "data-required-permission"?: string } {
+  return permission ? { "data-required-permission": permission } : {};
 }
 
 /** The permission a gate refusal names, taken from its body or its wording. */

@@ -114,17 +114,54 @@ def request_refusal(request: Any) -> str:
     """Why Execute must not start this request, or ``""`` (checked before any write).
 
     One ordered list of the up-front refusals: a local-disk destination this
-    deployment does not allow (D276), an unsafe destination identifier, and a
-    source filter that cannot be honoured.
+    deployment does not allow (D276), an unsafe destination identifier, a
+    mapped target name the destination would rename or cut (G11), and a source
+    filter that cannot be honoured.
     """
+    from connectors.destination_naming import target_names_refusal
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
     from services.local_file_policy import local_destination_refusal
+    from services.target_name_legacy import (
+        AdoptionUnverified,
+        adopt_for_request,
+        adopted_collision_refusal,
+        legacy_field_policy_refusal,
+        legacy_fields_refusal,
+        selected_streams,
+        streams_refusal,
+    )
 
     dest = request.destination
-    return (
+    # map_target is the server's own record: an inbound one is dropped here,
+    # first, for every route (security re-check F1a).
+    from services.target_name_legacy import strip_request_map_targets
+
+    strip_request_map_targets(request)
+    from services.multi_stream_plan import repeated_stream_name_refusal
+
+    # One contract per stream name: a twin decided which rows a stream wrote (B1).
+    repeated = repeated_stream_name_refusal(getattr(request, "stream_contracts", None))
+    if repeated:
+        return repeated
+    # G11: an existing table keeps the columns an earlier run named; the
+    # mapping is retargeted before any read, write or Gate-8 digest.
+    try:
+        adopt_for_request(request)
+    except AdoptionUnverified as exc:  # fail closed (re-review L2)
+        return str(exc)
+    refusal = (
         local_destination_refusal(dest)
+        or legacy_field_policy_refusal(dest)
         or unsafe_destination_identifier_reason(
             str(dest.format or ""), str(dest.table or dest.collection or "")
+        )
+        or (
+            # Multi-stream: each stream against its own object and Map rows.
+            streams_refusal(request)
+            if selected_streams(request)
+            else target_names_refusal(str(dest.format or ""), getattr(request, "mappings", None))
+            or adopted_collision_refusal(str(dest.format or ""), getattr(request, "mappings", None))
+            or legacy_fields_refusal(request)
         )
         or source_filter_refusal(
             getattr(request, "source_filter", None),
@@ -133,3 +170,11 @@ def request_refusal(request: Any) -> str:
         )
         or ""
     )
+    if not refusal and not selected_streams(request):
+        # G11: this run's naming decision on its job (multi-stream: per stream).
+        from services.naming_history import record_request_naming
+        from services.target_name_legacy import writer_object_name
+
+        record_request_naming(
+            request, writer_object_name(dest, getattr(request, "source", None)))
+    return refusal

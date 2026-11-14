@@ -28,7 +28,7 @@ def build_catalog_tree(
 
     if listed:
         schema_names = listed
-        message = "Schemas listed from the account."
+        message = "Schemas listed from the database."
         listed_live = True
     elif configured:
         schema_names = [configured]
@@ -79,6 +79,8 @@ def live_schema_names(endpoint: Any) -> list[str] | None:
     answered and had no names, which the tree reports instead of inventing one.
     """
     fmt = str(getattr(endpoint, "format", "") or "").lower()
+    if fmt in _POSTGRES_FAMILY:
+        return _postgres_schema_names(endpoint)
     if fmt != "snowflake":
         return None
     try:
@@ -117,3 +119,55 @@ def live_schema_names(endpoint: Any) -> list[str] | None:
             conn.close()
         except Exception:
             logger.debug("Snowflake catalog connection close failed", exc_info=True)
+
+
+#: Engines whose schemas are listed from ``information_schema.schemata`` (UX-9).
+_POSTGRES_FAMILY = frozenset({"postgresql", "postgres"})
+
+_PG_SCHEMAS_SQL = """
+    SELECT schema_name FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+      AND schema_name NOT LIKE 'pg\\_toast%%'
+      AND schema_name NOT LIKE 'pg\\_temp\\_%%'
+    ORDER BY schema_name
+    LIMIT 500
+"""
+
+
+def _postgres_schema_names(endpoint: Any) -> list[str] | None:
+    """Schemas the login can see, so the browser can leave ``public`` (UX-9).
+
+    None (use the configured schema) when the listing cannot run.
+    """
+    if not (getattr(endpoint, "database", "") or getattr(endpoint, "connection_string", "")):
+        # Nothing names a database to list from: keep the configured schema.
+        return None
+    try:
+        from connectors.postgresql_conn import get_connection
+    except ImportError:
+        return None
+    try:
+        conn = get_connection(
+            host=getattr(endpoint, "host", "") or "localhost",
+            port=int(getattr(endpoint, "port", 0) or 5432),
+            database=getattr(endpoint, "database", "") or "",
+            username=getattr(endpoint, "username", "") or "",
+            password=getattr(endpoint, "password", "") or "",
+            connection_string=getattr(endpoint, "connection_string", "") or "",
+            ssl=bool(getattr(endpoint, "ssl", False)),
+        )
+    except Exception as exc:
+        logger.info("PostgreSQL schema listing did not connect: %s", type(exc).__name__)
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_PG_SCHEMAS_SQL)
+            return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+    except Exception as exc:
+        logger.info("PostgreSQL schema listing failed: %s", type(exc).__name__)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("PostgreSQL catalog connection close failed", exc_info=True)

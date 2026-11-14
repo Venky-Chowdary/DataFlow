@@ -3,6 +3,9 @@ name = "dataflow-preflight"
 version = "0.1.0"
 description = "G1–G9 fail-fast preflight engine for data transfers"
 requires-python = ">=3.11"
+# Proprietary, all rights reserved: see LICENSE at the repository root.
+license = { text = "Proprietary" }
+classifiers = ["License :: Other/Proprietary License", "Private :: Do Not Upload"]
 dependencies = []
 
 [project.optional-dependencies]

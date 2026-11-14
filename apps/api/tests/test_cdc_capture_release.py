@@ -6,6 +6,8 @@ half uses fakes so it runs everywhere.
 
 from __future__ import annotations
 
+from tests.pg_slot_guard import track_created_slot
+
 import socket
 import sys
 import uuid
@@ -399,6 +401,7 @@ def test_live_release_is_idempotent_and_leaves_active_slots() -> None:
             "SELECT pg_create_logical_replication_slot(%s, 'test_decoding')", (slot,)
         )
     setup.close()
+    track_created_slot(slot)  # dropped at session end if a failure skips teardown
     try:
         first = release_pg_capture(CFG, slot_name=slot, publication_name=pub)
         assert first["slot"] == "dropped" and first["publication"] == "dropped"

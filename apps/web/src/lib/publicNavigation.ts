@@ -8,7 +8,7 @@ import {
   isHelpDocRoute,
   type HelpDocId,
 } from "./helpDocs";
-import { TRANSFER_READY_DRIVERS } from "./provenEvidence";
+import { provenDriversPhrase } from "./provenEvidence";
 
 export type PublicRoute =
   | "home"
@@ -218,7 +218,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   integrations: {
     title: "Connectors",
-    description: `${TRANSFER_READY_DRIVERS} transfer-ready drivers: PostgreSQL, SQL Server, Oracle, MySQL, MongoDB, Snowflake, BigQuery, S3, Kafka, pgvector, and more.`,
+    description: `${provenDriversPhrase()}, plus more implemented: databases, warehouses, object storage, files, streams, vector stores, and apps.`,
     keywords: "Datawrap connectors, PostgreSQL MySQL SQL Server Oracle MongoDB Snowflake BigQuery S3 Iceberg Kafka pgvector",
     canonicalPath: "#/integrations",
   },

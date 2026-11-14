@@ -8,7 +8,7 @@ that honesty bar.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from services.workspace_filter import WorkspaceFilter
 from services.brand import (
@@ -513,8 +513,13 @@ def apply_manifest(
     require_signed_contracts: bool = False,
     workspace_id: str = "",
     workspace_filter: WorkspaceFilter | None = None,
+    authorize_schedule: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Apply a DatawrapManifest (or single resource). ``dry_run=True`` delegates to plan.
+
+    ``authorize_schedule`` is the route's body-id ownership check (the one
+    ``POST /schedules`` runs): it is called for every PipelineSchedule before
+    anything is applied, and its refusal fails the whole manifest (SEC-5).
 
     When ``require_signed_contracts=True`` (CD / staging), every PipelineSchedule
     must reference a SIGNED contract — even if the YAML omits
@@ -541,6 +546,18 @@ def apply_manifest(
 
     resources = _normalize_resources(payload)
     _assert_policy_values(resources)
+    if authorize_schedule is not None:
+        for resource in resources:
+            if _resource_identity(resource)[0] != "PipelineSchedule":
+                continue
+            spec = apply_schedule_spec(resource.get("spec") if isinstance(resource.get("spec"), dict) else {})
+            sid = str(spec.get("id") or "").strip()
+            existing = get_schedule(sid) if sid else None
+            if existing and not _visible(
+                getattr(existing, "workspace_id", ""), (workspace_id or "").strip(), workspace_filter
+            ):
+                raise WorkspaceScopeError("Schedule belongs to another workspace")
+            authorize_schedule(spec)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
 
@@ -625,7 +642,12 @@ def apply_manifest(
                 "kind": kind or "Unknown",
                 "action": "error",
                 "ok": False,
-                "error": str(exc)[:400],
+                # SEC-13: a missing field is named, never a bare KeyError text.
+                "error": (
+                    f"The {kind or 'resource'} is missing the field {exc.args[0]}."
+                    if isinstance(exc, KeyError) and exc.args
+                    else str(exc)[:400]
+                ),
             }
             if isinstance(exc, WorkspaceScopeError):
                 result["error_code"] = "cross_workspace"

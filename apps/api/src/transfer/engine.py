@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.usage_metering import record_job_usage
 from services.brand_env import getenv_brand
 import sys
 import time
@@ -1449,6 +1450,7 @@ class UniversalTransferEngine:
                         result.destination_summary["trace_id"] = trace_id
                     if correlation:
                         result.destination_summary["correlation_id"] = correlation
+                record_job_usage(request, result)  # UX-12: one meter for every finished run
                 self._notify_job_status(request, result)
                 return result
         finally:
@@ -1467,10 +1469,10 @@ class UniversalTransferEngine:
     def _notify_job_status(
         self, request: TransferRequest, result: TransferResult
     ) -> None:
-        """Fire workspace notifications for failed or partially-quarantined jobs."""
+        """Notify failed or quarantined jobs; a schedule's runner notifies its own runs (ERR-41)."""
         rejected = result.destination_summary.get("rejected_rows", 0) or 0
         coerced = result.destination_summary.get("coerced_null_rows", 0) or 0
-        if result.success and not rejected and not coerced:
+        if (result.success and not rejected and not coerced) or (request.source.extra or {}).get("schedule_id"):
             return
         try:
             from services.notification_service import (
@@ -1490,8 +1492,8 @@ class UniversalTransferEngine:
             payload = build_job_payload(
                 job_id=result.job_id,
                 status=status,
-                source=request.source.kind or "unknown",
-                destination=request.destination.kind or "unknown",
+                source=request.source.table or request.source.collection or request.source.kind or "unknown",
+                destination=request.destination.table or request.destination.collection or request.destination.kind or "unknown",
                 records_transferred=result.records_transferred or 0,
                 rejected_rows=int(rejected),
                 error=result.error or "",
@@ -2416,7 +2418,7 @@ class UniversalTransferEngine:
                                     request, "ddl_changes_acknowledged", False
                                 )
                             ),
-                            release_records=True,
+                            release_records=True, refuse_all_quarantined=True,
                             retain_engine_spill=True,
                             collect_mirror_keys=effective_sync_lower
                             in ("full_refresh_mirror", "mirror"),
@@ -2682,7 +2684,7 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
-                            delete_mode=_mirror_delete_mode,
+                            delete_mode=_mirror_delete_mode, rejected_details=dest_summary.get("rejected_details"),
                             source_spool=getattr(spill_holder, "spool", None),
                             source_key_spool=getattr(spill_holder, "key_spool", None),
                             pk_sources=getattr(spill_holder, "pk_sources", None),
@@ -2768,7 +2770,7 @@ class UniversalTransferEngine:
                             export_bytes,
                             job_id=job_id,
                             sync_mode=request.sync_mode,
-                            export_name=export_name,
+                            export_name=export_name, stream_contracts=request.stream_contracts, mappings=mappings,
                         )
                     )
                 except ValueError as refusal:
@@ -2974,18 +2976,6 @@ class UniversalTransferEngine:
                 schema_policy=request.schema_policy,
                 validation_mode=request.validation_mode,
             )
-            try:
-                from services.usage_metering import record_transfer_usage
-
-                record_transfer_usage(
-                    job_id=job_id,
-                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
-                    rows_written=rows_written,
-                    source_type=request.source.format,
-                    dest_type=request.destination.format,
-                )
-            except Exception as exc:
-                logger.debug("usage metering suppressed: %s", exc, exc_info=exc)
             if getenv_brand("POST_TRANSFER_TRAINING", "").lower() in {
                 "1",
                 "true",
@@ -3081,7 +3071,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -4297,7 +4287,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -5141,7 +5131,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
-            _settle_overwrite_backup(request.destination, restore=True)
+            blocked.destination_restored = _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -5374,8 +5364,8 @@ class UniversalTransferEngine:
                 p = confine_source_path(request.source_path)
                 if p.is_file():
                     content = p.read_bytes()
-            if not content:
-                raise ValueError("File content required for file source")
+            if not content:  # ERR-30: a missing file is named as one (object.file_not_found)
+                raise FileNotFoundError(2, "No such file or directory", request.source_path or request.source_filename or "")
             enable_ocr = bool((request.source.extra or {}).get("enable_ocr"))
             return parse_file_content(
                 content,

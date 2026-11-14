@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorCatalogPanel } from "./ConnectorCatalogPanel";
 import { ButtonLoader } from "./LoadingState";
 import { DtIcon } from "./DtIcon";
+import { ErrorReferenceChip } from "./ErrorReferenceChip";
+import { splitReference } from "../lib/errorCopy";
 import { useToast } from "./Toast";
 import { HiddenFileInput } from "./ui/HiddenFileInput";
 import type { CatalogConnector } from "../lib/api";
@@ -14,6 +16,7 @@ import {
   uploadedFileMatchesConnector,
 } from "../lib/connectorFileUpload";
 import {
+  connectorDisplayName,
   connectorListenPort,
   getConnectorDefaults,
   isAwsConnector,
@@ -41,6 +44,7 @@ import {
 import { getConnectorSetupGuide } from "../lib/connectorSetupGuide";
 import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { looksLikeUserinfoHost, parseUrlAuthority } from "../lib/urlAuthority";
+import { useOverlayFocus } from "../lib/restoreFocus";
 
 interface ConnectorModalProps {
   initialType?: string;
@@ -276,7 +280,7 @@ export function ConnectorModal({
         title: "Driver not installed here",
         message:
           item.environment_gap_reason ||
-          `${item.name} is Certified but its driver package is not loadable on this host. You can still save credentials; Test and Execute fail until the package is installed.`,
+          `${item.name}'s driver package is not loadable on this host. You can still save credentials; Test and Execute fail until the package is installed.`,
         tone: "warning",
       });
     }
@@ -314,6 +318,7 @@ export function ConnectorModal({
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
+    code?: string;
     source_ha?: Record<string, unknown>;
   } | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
@@ -331,6 +336,10 @@ export function ConnectorModal({
     setFieldError(null);
     return true;
   };
+
+  // UX-15: take focus on open and hand it back to the trigger on close.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useOverlayFocus(true, panelRef);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -483,14 +492,14 @@ export function ConnectorModal({
         const authMatch = result.message.match(/authSource=([^\s)]+)/);
         if (authMatch && !authSource) setAuthSource(authMatch[1]);
       }
-      toast({
-        title: result.success ? "Connection successful" : "Connection failed",
-        message: result.message,
-        tone: result.success ? "success" : "error",
-      });
-    } catch {
-      setTestResult({ success: false, message: "Connection test failed" });
-      toast({ title: "Connection test failed", tone: "error" });
+      // UX-7: a failure shows once, inline beside the form, with its reference chip.
+      if (result.success) {
+        toast({ title: "Connection successful", message: result.message, tone: "success" });
+      }
+    } catch (error) {
+      // UX-8: keep the reason (the API's words, or the browser's timeout) — never a bare failure.
+      const message = error instanceof Error && error.message ? error.message : "Connection test failed";
+      setTestResult({ success: false, message });
     }
     setTesting(false);
   };
@@ -720,6 +729,8 @@ export function ConnectorModal({
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
         className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-conn-setup"}${helpOpen ? " is-help-open" : ""}`}
+        ref={panelRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -789,7 +800,8 @@ export function ConnectorModal({
                   <input
                     id="df2-conn-name"
                     className="df2-input"
-                    placeholder="Production Snowflake"
+                    // UX-31: the example names the engine being configured.
+                    placeholder={`Production ${connectorDisplayName(type)}`}
                     value={name}
                     onChange={(e) => {
                       setName(e.target.value);
@@ -942,8 +954,9 @@ export function ConnectorModal({
                         </span>
                       )}
                     </div>
-                    <p className="df2-conn-probe-msg">{testResult.message}</p>
-                    {!testResult.success && /ssl|tls|certificate/i.test(testResult.message) && (
+                    <p className="df2-conn-probe-msg">{splitReference(testResult.message).text}</p>
+                    <ErrorReferenceChip reference={splitReference(testResult.message).reference} />
+                    {!testResult.success && (testResult.code === "network.tls_required" || testResult.code === "network.tls_untrusted") && (
                       <p className="df2-conn-probe-hint">
                         Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
                         emulators and plaintext Docker ports usually need it off.

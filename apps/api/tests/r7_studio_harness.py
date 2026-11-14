@@ -90,12 +90,22 @@ class Studio:
         resp = self.client.post(f"/api/v1/transfer/plans/{plan_id}/preflight", json=ack)
         assert resp.status_code == 200, resp.text
         pf = resp.json()
+        self.last_pf = pf
         decision = ((pf.get("proof_bundle") or {}).get("transfer_decision") or {}).get("decision")
         if pf.get("passed") and decision == "approve":
             self.client.post(f"/api/v1/transfer/plans/{plan_id}/approve")
         return pf
 
     # -- Execute -----------------------------------------------------------
+    def _validate_stamps(self) -> dict[str, str]:
+        proof = (getattr(self, "last_pf", None) or {}).get("proof_bundle") or {}
+        decision = str(proof.get("decision_artifact_hash")
+                       or (proof.get("decision_artifact") or {}).get("content_hash") or "")
+        if not decision:
+            return {}
+        return {"approved_decision_artifact_hash": decision,
+                "approved_ddl_identity_hash": str((proof.get("ddl_identity") or {}).get("ddl_identity_hash") or "")}
+
     def execute(self, mappings, **extra) -> dict:
         if self.plan_id:
             self.client.post(
@@ -118,6 +128,9 @@ class Studio:
             "schema_policy": self.policies.get("schema_policy", "manual_review"),
             "validation_mode": self.policies.get("validation_mode", "strict"),
             **({"plan_id": self.plan_id} if self.plan_id else {}),
+            # Studio runs under the stamps its last Validate returned (TransferPage
+            # refuses Run without them; SEC-APPROVAL-1 P1 refuses it server-side too).
+            **self._validate_stamps(),
             **{k: (json.dumps(v) if isinstance(v, (list, dict)) else str(v)) for k, v in extra.items()},
         }
         if self.source.get("database"):

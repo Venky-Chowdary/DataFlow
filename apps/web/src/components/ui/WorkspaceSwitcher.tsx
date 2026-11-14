@@ -11,6 +11,7 @@ import {
   useActiveWorkspaceId,
   workspaceChoices,
 } from "../../lib/workspace";
+import { CREATE_WORKSPACE_CHOICE, WORKSPACE_CREATE_REQUEST_EVENT } from "../../lib/firstRunWorkspace";
 
 /**
  * Canonical workspace picker. Changing it names `X-Workspace-Id` for every
@@ -30,12 +31,15 @@ export function WorkspaceSwitcher({
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [views, setViews] = useState<WorkspaceView[]>([]);
   const [loadError, setLoadError] = useState("");
+  const [canCreate, setCanCreate] = useState(false);
 
   const reload = useCallback(() => {
     fetchWorkspaces()
-      .then(({ workspaces: rows, defaultWorkspaceId, views: adminViews }) => {
+      .then(({ workspaces: rows, defaultWorkspaceId, views: adminViews, platformAdmin }) => {
         setWorkspaces(rows);
         setViews(adminViews);
+        // Only platform administrators may create a workspace (POST /team/workspaces).
+        setCanCreate(platformAdmin);
         setLoadError("");
         const current = getActiveWorkspaceId();
         if (rows.length === 0 && adminViews.length === 0) return;
@@ -77,7 +81,7 @@ export function WorkspaceSwitcher({
           Active workspace
         </label>
       )}
-      {choices.length <= 1 ? (
+      {choices.length <= 1 && !canCreate ? (
         <strong className="df2-workspace-switcher-name" data-testid="workspace-switcher-name">
           {activeName || (loadError ? "Workspace unavailable" : "Workspace")}
         </strong>
@@ -88,7 +92,15 @@ export function WorkspaceSwitcher({
           data-testid="workspace-switcher"
           value={active ? activeId : ""}
           title={loadError || undefined}
-          onChange={(e) => setActiveWorkspaceId(e.target.value)}
+          onChange={(e) => {
+            if (e.target.value === CREATE_WORKSPACE_CHOICE) {
+              // Not a workspace: open the create dialog and keep the current choice.
+              e.target.value = active ? activeId : "";
+              window.dispatchEvent(new Event(WORKSPACE_CREATE_REQUEST_EVENT));
+              return;
+            }
+            setActiveWorkspaceId(e.target.value);
+          }}
         >
           {active ? null : (
             <option value="" disabled>
@@ -100,6 +112,11 @@ export function WorkspaceSwitcher({
               {c.label}
             </option>
           ))}
+          {canCreate && (
+            <option value={CREATE_WORKSPACE_CHOICE} data-testid="workspace-switcher-create">
+              Create workspace…
+            </option>
+          )}
         </select>
       )}
     </div>

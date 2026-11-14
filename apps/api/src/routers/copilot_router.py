@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from services.api_errors import ApiError
 from services.rbac import require_admin_connector_access, require_admin_for_endpoints
 from src.services import auth_service
+from services.safe_errors import safe_http_exception
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
@@ -460,7 +461,10 @@ async def _run_lifecycle_confirm(
         try:
             closing = workspace_closing(repair_workspace_id, fail_closed=True)
         except WorkspaceStateUnavailable as exc:
-            raise HTTPException(status_code=503, detail={"kind": "store_unavailable", "message": str(exc)}) from exc
+            raise safe_http_exception(
+                exc, event="copilot.workspace_state.unavailable",
+                public_message="Workspace state is unavailable right now.", status_code=503,
+            ) from exc
         if closing:
             # A repair writes to the workspace's destination (review 6).
             raise HTTPException(status_code=409, detail="This workspace is being deleted")
@@ -540,9 +544,13 @@ async def _run_lifecycle_confirm(
     if kind == "clear_cursor_resnapshot":
         from services.sync_cursor import clear_watermark
 
+        from services.cdc_ops_scope import assert_cursor_writable
+
         cursor_key = str(payload.get("cursor_key") or "").strip()
         if not cursor_key:
             raise HTTPException(status_code=400, detail="cursor_key is required")
+        # SEC-1: the same workspace check as POST /ops/cdc-cursors/clear.
+        assert_cursor_writable(http_request, cursor_key, workspace_id=workspace_id or None)
         role, actor = _caller(http_request)
         result = clear_watermark(cursor_key)
         result["actor"] = actor or None
@@ -1129,7 +1137,14 @@ async def train_copilot(request: TrainRequest, http_request: Request):
     Run the separate Training Agent.
     Feeds universal data, synthesizes conversations, updates RAG knowledge.
     Runs on the app's training runtime thread; API shutdown stops it.
+    Platform-wide, so platform administrators only (SEC-10).
     """
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        http_request, tenant_scope(http_request), "ai.training.run",
+        "Training runs for every workspace: platform administrators only.",
+    )
     try:
         from ..ai.training.training_runtime import app_training_runtime
         from ..ai.training.training_scheduler import run_admin_training

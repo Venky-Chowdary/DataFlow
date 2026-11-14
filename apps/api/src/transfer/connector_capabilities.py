@@ -267,7 +267,7 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     # Enterprise SQL / cloud managed (SKU-backed drivers only)
     "postgresql_rds", "mysql_rds", "postgresql_cloud_sql", "mysql_cloud_sql",
     "postgresql_azure", "mysql_azure", "postgresql_supabase", "postgresql_neon",
-    "amazon_rds_oracle", "oracle_autonomous_warehouse",
+    "amazon_rds_oracle",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
     "snowflake_standard", "snowflake_enterprise",
@@ -280,11 +280,12 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     "cnpg",
     "crunchy_postgres",
     "crunchy_pgo",
-    # Search / cache
-    "opensearch", "amazon_elasticsearch", "elastic_cloud",
-    "elasticsearch_aws", "elasticsearch_gcp",
-    "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis",
-    "google_memorystore_redis",
+    # Search (Elasticsearch itself). OpenSearch is not here: the
+    # elasticsearch>=8 client refuses a non-Elastic server ("unknown
+    # product"), so it is Planned (_PLANNED_UNTIL_DRIVER, CLM-3). The Redis
+    # services are wire-compatible brands that need their own evidence
+    # (_WIRE_COMPATIBLE_UNCERTIFIED_BRANDS, CLM-7).
+    "elastic_cloud", "elasticsearch_aws", "elasticsearch_gcp",
     # Object / files
     "s3_us_east_1", "s3_eu_west_1", "s3_ap_southeast_1",
     "gcs_us_central1", "gcs_europe_west1",
@@ -827,6 +828,11 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
         # SQLAlchemy itself is installed (concrete engines use connection URLs).
         if not catalog_id or catalog_id == "generic_sql":
             return True
+        from connectors.vendor_drivers import missing_packages, vendor_driver
+
+        # SAP HANA / Teradata: operator-installed DBAPI *and* dialect (owner decision).
+        if (vendor := vendor_driver(catalog_id)) and missing_packages(vendor):
+            return False
         drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
         module = _generic_sql_dbapi_module(drivername)
         if module is None or not _module_is_installed(module):
@@ -963,7 +969,35 @@ _UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
 _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS = frozenset({
     "singlestore", "cockroachdb", "yugabytedb", "vitess", "tidb",
     "oceanbase", "polardb", "planetscale", "mysql_planetscale",
+    # CLM-7: these speak the base engine's protocol but are other products.
+    # The base engine's CI run does not prove them; each needs evidence
+    # recorded under its own id (services/connector_proof.alias_proven).
+    "mariadb", "gaussdb", "goldendb", "documentdb", "azure_cosmos_db",
+    "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis",
+    "google_memorystore_redis", "oracle_autonomous_warehouse",
 })
+
+# Tiles whose driver cannot serve them today (CLM-3, CLM-4). Planned, with why.
+_PLANNED_UNTIL_DRIVER: dict[str, str] = {
+    "opensearch": (
+        "Planned: the Elasticsearch 8 client refuses an OpenSearch server "
+        "(\"unknown product\"). An OpenSearch driver is not built yet."
+    ),
+    "amazon_elasticsearch": (
+        "Planned: Amazon OpenSearch Service runs OpenSearch, which the "
+        "Elasticsearch 8 client refuses (\"unknown product\"). An OpenSearch "
+        "driver is not built yet."
+    ),
+    "redis_cluster": (
+        "Planned: the Redis driver opens a single-node client, and a cluster "
+        "answers its writes with MOVED redirects. Cluster mode is not built yet."
+    ),
+}
+
+
+def planned_reason(catalog_id: str) -> str:
+    """Why a tile whose driver exists is still Planned ('' when it is not)."""
+    return _PLANNED_UNTIL_DRIVER.get((catalog_id or "").lower().strip(), "")
 
 # Legacy helper kept for tests that still probe generic_sql brand certification.
 _CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
@@ -1002,7 +1036,9 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         return False
     # Wire-compatible brand engines (e.g. SingleStore, CockroachDB, TiDB) are not
     # automatically Certified just because they speak the mysql/postgresql protocol.
-    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+    if catalog_id in _PLANNED_UNTIL_DRIVER:
+        return False
+    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS and not _alias_proven(catalog_id):
         return False
     # Marketing SaaS/API brand IDs that only route to generic rest_api are never
     # certified transfer-ready — only the first-class driver id itself qualifies.
@@ -1047,10 +1083,18 @@ def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:
     return driver == "rest_api" and (catalog_id or "") != "rest_api"
 
 
+def _alias_proven(catalog_id: str) -> bool:
+    from services.connector_proof import alias_proven
+
+    return alias_proven(catalog_id)
+
+
 def _is_uncertified_driver_alias(catalog_id: str, driver: str) -> bool:
     """True when catalog id should not inherit Certified from its resolved driver."""
-    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+    if catalog_id in _PLANNED_UNTIL_DRIVER:
         return True
+    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+        return not _alias_proven(catalog_id)
     if _is_rest_api_brand_alias(catalog_id, driver):
         return True
     if driver == "generic_sql" and catalog_id != "generic_sql":
@@ -1068,16 +1112,40 @@ def certification_tier(
     *,
     transfer_ready_flag: bool,
 ) -> str:
-    """Honest marketplace tier: certified | source_only | connect_only | planned."""
+    """Honest marketplace tier: certified | implemented | source_only | connect_only | planned.
+
+    ``certified`` needs CI evidence: a green, non-skipped run of a job that
+    proves the engine (or, for a wire-compatible brand, the brand itself).
+    An implemented engine without it is ``implemented`` (CLM-7).
+    """
     if _is_uncertified_driver_alias(catalog_id, driver):
         return "planned"
     if transfer_ready_flag and transfer_ready(caps):
-        return "certified"
+        return "certified" if _tile_proven(catalog_id, driver) else "implemented"
     if _source_only_ready(caps) and catalog_id == driver:
         return "source_only"
     if connect_only(caps):
         return "connect_only"
     return "planned"
+
+
+def _tile_proven(catalog_id: str, driver: str) -> bool:
+    from services.connector_proof import alias_proven, driver_proven
+
+    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+        return alias_proven(catalog_id)
+    return driver_proven(driver)
+
+
+def role_label(source_ok: bool, dest_ok: bool) -> str:
+    """Which side a tile takes, worded from the same flags the pickers use (CLM-17)."""
+    if source_ok and dest_ok:
+        return "Source and destination"
+    if dest_ok:
+        return "Destination only"
+    if source_ok:
+        return "Source only"
+    return "Not available for transfers"
 
 
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -1103,10 +1171,16 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
         label = capability_label(caps)
         is_connect_only = connect_only(caps) and not ready
     tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
+    proven = _tile_proven(catalog_id, driver)
     if env_gap:
         # Missing DBAPI ≠ roadmap. Transfer pickers still key off transfer_ready.
-        tier = "certified"
-        label = "Certified — driver not installed"
+        # Certified still needs CI evidence (CLM-7).
+        tier = "certified" if proven else "implemented"
+        label = (
+            "Certified — driver not installed"
+            if proven
+            else "Implemented — not yet proven; driver not installed"
+        )
         eff = "live"
         is_connect_only = False
         ready = False
@@ -1114,6 +1188,11 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
         # Uncertified/Planned drivers must not show "live" or "Full transfer".
         eff = "planned"
         label = "Planned"
+    elif tier == "implemented":
+        # Implemented and usable, but no green CI run proves it (CLM-7).
+        from services.connector_proof import IMPLEMENTED_LABEL
+
+        label = IMPLEMENTED_LABEL
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps
@@ -1134,11 +1213,34 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier
+    out["role_label"] = role_label(out["source_ready"], out["dest_ready"])
+    from services.connector_proof import proof_for
+
+    out["ci_evidence"] = proof_for(
+        catalog_id, driver, alias=catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS
+    )
+    # Only a CI-proven connector is offered for production schedules.
+    out["production_schedules"] = tier == "certified"
+    if planned_reason(catalog_id):
+        out["planned_reason"] = planned_reason(catalog_id)
+    elif tier == "planned" and catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+        out["planned_reason"] = (
+            f"Planned: it speaks the protocol of the {driver} driver, but no CI run "
+            f"proves {entry.get('name') or catalog_id} itself, so the base engine's "
+            "proof is not borrowed."
+        )
     out["driver_available"] = package_ok
+    from connectors.vendor_drivers import REQUIRES_OPERATOR_DRIVER, operator_driver_info
+
+    # SAP HANA / Teradata drivers are installed by the operator, never shipped.
+    out["operator_installed_driver"] = operator_driver_info(catalog_id)
+    if out["operator_installed_driver"] and not out["operator_installed_driver"]["installed"]:
+        out["capability_label"] = REQUIRES_OPERATOR_DRIVER
     out["environment_gap"] = env_gap
     if env_gap:
         out["environment_gap_reason"] = (
-            f"{catalog_id} is Certified but its driver package is not loadable here — "
+            f"{catalog_id} is {'Certified' if proven else 'implemented'} but its driver "
+            "package is not loadable here — "
             f"{_driver_install_hint(driver)}. "
             "This is an environment gap, not a Planned connector."
         )
@@ -1269,6 +1371,11 @@ def planned_driver_message(connector_type: str) -> str:
     kind = str(connector_type or "").strip().lower()
     if not kind:
         return ""
+    from connectors.vendor_drivers import operator_driver_message
+
+    # SAP HANA / Teradata: say what the operator installs and under whose licence.
+    if vendor_message := operator_driver_message(kind):
+        return vendor_message
     driver = resolve_driver_type(kind)
     if driver_available(driver, kind):
         return ""
@@ -1364,6 +1471,10 @@ def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
                 "This is an environment gap, not a Planned connector."
             )
 
+    from connectors.vendor_drivers import operator_driver_message
+
+    if vendor_message := operator_driver_message(cid):
+        return False, vendor_message
     row = enrich_catalog_entry(
         {
             "id": cid,
@@ -1476,16 +1587,18 @@ TRANSFER_LIVE_WHEN_PACKAGES_PRESENT: FrozenSet[str] = frozenset({
 })
 
 
-def transfer_live_driver_types() -> list[str]:
+def transfer_live_driver_types(*, declared: bool = False) -> list[str]:
     """Unique driver types that can run transfers *and* are package-available.
 
     Includes duplex read+write, dest-only writers, file sources, and first-class
     source-only drivers (e.g. rest_api) — not SaaS brand aliases.
+    ``declared=True`` ignores this host's installed packages: the product's
+    driver set, the population public copy counts (CLM-6).
     """
     live = []
     keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
     for k in keys:
-        caps = get_capabilities(k)
+        caps = _declared_capabilities(k) if declared else get_capabilities(k)
         if caps.get("evidence") == "synthetic-fixture":
             continue
         if transfer_ready(caps) or _source_only_ready(caps):
@@ -1516,11 +1629,20 @@ def dest_live_driver_types() -> list[str]:
 def manifest_summary() -> dict[str, Any]:
     from .registry import LIVE_MATRIX
 
-    transfer_live = len(transfer_live_driver_types())
+    from services.connector_proof import proven_and_pending
+
+    drivers = transfer_live_driver_types()
+    transfer_live = len(drivers)
     connect_only_count = sum(1 for k in _DRIVER_CAPS if connect_only(_DRIVER_CAPS[k]))
+    split = proven_and_pending(drivers)
     return {
-        "transfer_live_drivers": transfer_live_driver_types(),
+        "transfer_live_drivers": drivers,
         "transfer_live_count": transfer_live,
+        # CLM-6: of those, which a green CI run proves, and which are pending.
+        "proven_drivers": split["proven"],
+        "proven_driver_count": len(split["proven"]),
+        "pending_proof_drivers": split["pending"],
+        "pending_proof_driver_count": len(split["pending"]),
         "connect_only_count": connect_only_count,
         "live_route_combinations": len(LIVE_MATRIX),
     }

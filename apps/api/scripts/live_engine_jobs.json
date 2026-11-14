@@ -1,0 +1,266 @@
+{
+  "schema_version": 1,
+  "about": [
+    "Which CI job proves which live engine, and the only skips each job may report.",
+    "Read by scripts/check_live_skips.py (fails a job on an unexpected skip) and by",
+    "services/connector_ci_evidence.py (an engine is live-verified only when a job",
+    "listed here ran it green). Every expected_skips entry needs `test` (fnmatch on the",
+    "pytest node id), `reason` (regex the skip message must match) and `why`.",
+    "Modes: strict = every skip must be expected; engine_scoped = a skip whose message",
+    "names one of the job's engines must be expected (whole-suite jobs), even when it also",
+    "names an engine the job lacks (mariadb counts as mysql, pg-wire as postgresql);",
+    "report = counted and published, never fails the job.",
+    "Genuine two-engine skips are allowlisted one by one; `only_jobs` limits an entry to",
+    "the jobs where the partner engine is absent (e.g. SQL Server in api-tests).",
+    "`proves` names the engines the job is the proof for; the others in `engines` are",
+    "peers it needs. An engine is live-verified only by a green job that proves it, and a",
+    "red job that proves it makes it red. `emulated` engines ran against an emulator.",
+    "`required_labels`: every listed variant (check_live_skips.py --label key=value) must",
+    "run green before the job counts, e.g. both SQL Server drivers."
+  ],
+  "display_aliases_about": "How docs, READMEs and the web UI name each engine. tests/test_connector_ci_claims.py matches the id and these names case-insensitively, so a live-verified claim is caught however the engine is spelled.",
+  "display_aliases": {
+    "postgresql": ["PostgreSQL", "Postgres", "PG", "pgvector"],
+    "mysql": ["MySQL", "MariaDB"],
+    "mongodb": ["MongoDB", "Mongo"],
+    "redis": ["Redis"],
+    "kafka": ["Kafka", "Apache Kafka"],
+    "sqlserver": ["SQL Server", "SQLServer", "Microsoft SQL Server", "MSSQL", "MS SQL", "Azure SQL"],
+    "oracle": ["Oracle", "Oracle Database"],
+    "bigquery": ["BigQuery", "Google BigQuery", "BQ"],
+    "snowflake": ["Snowflake"],
+    "gcs": ["GCS", "Google Cloud Storage"],
+    "adls": ["ADLS", "ADLS Gen2", "Azure Data Lake Storage", "Azure Blob Storage"],
+    "sqlite": ["SQLite"],
+    "files": ["CSV", "Parquet", "Excel"]
+  },
+  "in_process_engines_about": "sqlite and files (the tabular file formats) run inside the test process, so no service is started; api-tests proves them by running green across all six shards, and a skip naming SQLite or a file-format package (pyarrow, openpyxl, fastavro) counts against them.",
+  "engine_tokens": {
+    "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq", "pg-wire", "df-pg"],
+    "mysql": ["mysql", "pymysql", "mariadb"],
+    "mongodb": ["mongo", "mongodb", "pymongo"],
+    "redis": ["redis"],
+    "kafka": ["kafka", "confluent_kafka"],
+    "sqlserver": ["sqlserver", "sql server", "mssql", "pymssql", "pyodbc"],
+    "oracle": ["oracle", "oracledb", "logminer"],
+    "bigquery": ["bigquery"],
+    "snowflake": ["snowflake", "fakesnow"],
+    "gcs": ["gcs", "fake-gcs"],
+    "adls": ["adls", "azurite"],
+    "s3": ["s3", "minio"],
+    "iceberg": ["iceberg"],
+    "elasticsearch": ["elasticsearch"],
+    "vector_stores": ["qdrant", "weaviate", "milvus", "pinecone"],
+    "sqlite": ["sqlite", "sqlite3"],
+    "files": ["pyarrow", "openpyxl", "fastavro"],
+    "other_sql": ["redshift", "redshift_emulator", "clickhouse", "trino", "presto", "cockroachdb", "tidb", "timescaledb", "citus", "materialize", "risingwave", "questdb", "db2", "teradata", "hana"]
+  },
+  "jobs": {
+    "no-config-transfer": {
+      "proves": ["postgresql", "mysql", "mongodb"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "mongodb"],
+      "min_executed": 20,
+      "expected_skips": []
+    },
+    "cdc-sqlserver": {
+      "proves": ["sqlserver"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["sqlserver", "postgresql", "mysql"],
+      "required_labels": {"driver": ["pymssql", "pyodbc"]},
+      "min_executed": 100,
+      "expected_skips": []
+    },
+    "cdc-oracle": {
+      "proves": ["oracle"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["oracle"],
+      "opt_in": "repo variable ENABLE_ORACLE_CDC=true plus the DATAFLOW_ORACLE_* secrets; without them the job records not_run",
+      "min_executed": 8,
+      "expected_skips": []
+    },
+    "cdc-matrix": {
+      "proves": ["postgresql", "mysql", "mongodb", "redis"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "mongodb", "redis"],
+      "min_executed": 250,
+      "expected_skips": [
+        {
+          "test": "tests/test_cdc_sqlserver_ct_integration.py::*",
+          "reason": "SQL Server with Change Tracking not reachable",
+          "why": "api-and-web starts no SQL Server; the cdc-sqlserver job runs this module live with zero skips."
+        },
+        {
+          "test": "tests/test_cdc_sqlserver_native_integration.py::*",
+          "reason": "SQL Server native CDC .* not reachable",
+          "why": "api-and-web starts no SQL Server; the cdc-sqlserver job runs this module live with zero skips."
+        },
+        {
+          "test": "tests/test_cdc_oracle_integration.py::*",
+          "reason": "(?i)oracle",
+          "why": "Oracle is opt-in (ENABLE_ORACLE_CDC + DATAFLOW_ORACLE_* secrets); the cdc-oracle job runs it when enabled."
+        }
+      ]
+    },
+    "warehouse-sku": {
+      "proves": ["bigquery", "snowflake"],
+      "emulated": ["bigquery", "snowflake"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["bigquery", "snowflake"],
+      "min_executed": 10,
+      "expected_skips": []
+    },
+    "engine-suite": {
+      "proves": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
+      "workflow": ".github/workflows/full-suite.yml",
+      "mode": "engine_scoped",
+      "engines": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver", "gcs", "adls"],
+      "required_labels": {"shard": ["1", "2", "3", "4", "5", "6"]},
+      "report_engines": ["kafka", "sqlserver", "gcs", "adls"],
+      "inherit_expected_skips": ["api-tests"],
+      "report_engines_why": "Kafka and SQL Server cannot run on the development machine, so their nightly skips could not be proven absent before this landed. They are counted per engine and published (evidence never calls them live-verified while any skip names them) but do not fail the nightly. Move them to enforced once a nightly shows zero; cdc-sqlserver already enforces SQL Server on every PR. fake-gcs and Azurite are emulators the nightly starts so that the GCS / ADLS -> PostgreSQL tests run; a skip naming only them is reported, while one also naming PostgreSQL fails the shard.",
+      "min_executed": 1000,
+      "expected_skips": []
+    },
+    "api-tests": {
+      "proves": ["postgresql", "mysql", "mongodb", "redis", "sqlite", "files"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "engine_scoped",
+      "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls", "sqlite", "files"],
+      "report_engines": ["bigquery", "gcs", "adls"],
+      "report_engines_why": "The universal-matrix cells with a BigQuery / GCS / ADLS emulator *source* (8 each) skip as 'not reachable' with the emulators running; not yet investigated. Counted and published, never live-verified, not failing the shard.",
+      "required_labels": {"shard": ["1", "2", "3", "4", "5", "6"]},
+      "min_executed": 1000,
+      "measurement": "2026-11-13: the ~3,330 api-tests skips replayed under the shards' exact environment: 284 named a PostgreSQL / MySQL / Mongo / Redis / emulator engine the job starts, the rest (~2,820) are external (SaaS templates, Oracle, SQL Server, Kafka, Iceberg, vector stores, MinIO, MariaDB, real clouds). With .github/ci-live-engines.vars, 104 of the 284 ran and passed locally; see the PR for the rest.",
+      "expected_skips": [
+        {
+          "test": "tests/test_r7_cdc_replica_message_e2e.py::*",
+          "reason": "wal_level=replica",
+          "why": "Needs a second PostgreSQL running wal_level=replica; the CI PostgreSQL runs wal_level=logical for every CDC test."
+        },
+        {
+          "test": "tests/test_mx3_05_cdc_preflight_wal_level.py::*",
+          "reason": "wal_level=replica",
+          "why": "Needs a second PostgreSQL running wal_level=replica; the CI PostgreSQL runs wal_level=logical."
+        },
+        {
+          "test": "tests/test_d28_pg_non_logical_cdc_poll_live.py::*",
+          "reason": "without logical decoding",
+          "why": "Needs a PostgreSQL without logical decoding; the CI PostgreSQL has it on for CDC."
+        },
+        {
+          "test": "tests/test_r14_mysql_*::*",
+          "reason": "private MySQL for SET GLOBAL",
+          "why": "Changes server-wide MySQL settings (SET GLOBAL); needs a dedicated MySQL, not the one every other test in the shard shares."
+        },
+        {
+          "test": "tests/test_d176_*::*",
+          "reason": "NOREPL|no-replication MySQL user",
+          "why": "Needs a second MySQL account without REPLICATION grants; CI has only the dataflow account, which holds them for CDC."
+        },
+        {
+          "test": "tests/test_gate8_leftover_quarantine_cdc_live.py::*",
+          "reason": "MySQL :\\d+ is open",
+          "why": "By design: this Postgres-only file skips its MySQL leg whenever MySQL is up; the MySQL CDC e2e covers it."
+        },
+        {
+          "test": "tests/test_signed_contract_live_sandbox.py::*",
+          "reason": "MySQL :\\d+ is open",
+          "why": "By design: this Postgres-only file skips its MySQL leg whenever MySQL is up; the MySQL sandbox covers it."
+        },
+        {
+          "test": "tests/test_d53_d70_exact_upsert_keys.py::*",
+          "reason": "only MySQL's default collation is case-insensitive",
+          "why": "Parametrised: the case-insensitive leg applies to MySQL's collation only, so the other engines' legs skip."
+        },
+        {
+          "test": "tests/test_benchmark_harness.py::*",
+          "reason": "DATAFLOW_KEYSET_BENCHMARK_URL",
+          "why": "Opt-in performance benchmark, not a correctness test."
+        },
+        {
+          "test": "tests/test_transform_quarantine_dest_count_pg_live.py::*",
+          "reason": "(redshift|bigquery)_emulator not reachable",
+          "why": "Hold-out legs for the Redshift and BigQuery transform emulators, which CI does not start on these ports."
+        },
+        {
+          "test": "tests/test_schedule_finalize_outcome_atomic.py::*",
+          "reason": "shared \\(Mongo\\) store",
+          "why": "Needs MONGODB_URI, which also moves the product's own stores to Mongo for the whole shard; deliberately not set (.github/ci-live-engines.vars)."
+        },
+        {
+          "test": "tests/test_r10_datetime2_seventh_digit_e2e.py::*",
+          "reason": "route needs ports \\[1433",
+          "only_jobs": ["api-tests"],
+          "why": "The source of every route is SQL Server, which this job does not start (cdc-sqlserver covers it)."
+        },
+        {
+          "test": "tests/test_r13_e10*.py::*mariadb*",
+          "reason": "Connection refused|Can't connect",
+          "why": "MariaDB leg; MariaDB is not started in CI."
+        },
+        {
+          "test": "tests/test_real_cloud_connectors.py::*",
+          "reason": "No credentials available",
+          "why": "Real cloud accounts, not emulators."
+        },
+        {
+          "test": "tests/test_saas_privilege_deny_live.py::*",
+          "reason": "deny matrix not enabled",
+          "why": "Needs a real BigQuery project with a denied principal."
+        },
+        {
+          "test": "tests/test_mx1_07_adls_custom_endpoint_field_form.py::*",
+          "reason": "tunnel Azurite",
+          "why": "Needs an Azurite reached through an SSH tunnel."
+        },
+        {"test": "tests/test_mysql_oracle_copy.py::*", "reason": "MySQL 3306 or Oracle 1521 not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_oracle_mysql_copy.py::*", "reason": "MySQL 3306 or Oracle 1521 not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_pg_oracle_copy.py::*", "reason": "PostgreSQL 5432 or Oracle 1521 not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_oracle_pg_copy.py::*", "reason": "PostgreSQL 5432 or Oracle 1521 not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_cdc_oracle_ddl_schema_history.py::*", "reason": "Oracle LogMiner or df-pg is not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_cdc_oracle_logminer_txn_live.py::*", "reason": "Oracle LogMiner or df-pg is not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_cdc_drift_repair_live.py::*", "reason": "Oracle LogMiner and live PostgreSQL environment are required", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_cdc_poll_reconnects_live.py::*", "reason": "df-oracle or df-pg is not reachable", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_r13_precision_d279_in_file_duplicate_key_case.py::*", "reason": "live Oracle and MongoDB required", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_r13_precision_e1_030_oracle_number_to_new_pg_exact.py::*", "reason": "live Oracle and PostgreSQL required", "why": "Oracle is not started in CI (opt-in cdc-oracle job); the other engine is up, so the skip is Oracle's."},
+        {"test": "tests/test_mysql_sqlserver_copy.py::*", "reason": "MySQL 3306 or SQL Server 1433 not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_sqlserver_mysql_copy.py::*", "reason": "MySQL 3306 or SQL Server 1433 not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_pg_sqlserver_copy.py::*", "reason": "PostgreSQL 5432 or SQL Server 1433 not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_sqlserver_pg_copy.py::*", "reason": "PostgreSQL 5432 or SQL Server 1433 not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_r10_d19_retry_lock_wait_bounded_e2e.py::*", "reason": "MySQL :3306 and SQL Server :1433 required", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_r10_progress_count_failed_attempt_e2e.py::*", "reason": "MySQL :3306 and SQL Server :1433 required", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d168_cancel_reaches_pooled_writers.py::*", "reason": "live MySQL \\+ SQL Server not configured", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d158_mcp_plan_json_samples.py::*", "reason": "live PG \\+ SQL Server not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d157_exact_ieee_float_bounds.py::*", "reason": "live PG \\+ SQL Server: set PG", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d158_pg_sqlserver_rerun_fidelity.py::*", "reason": "live PG \\+ SQL Server: set PG", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d183_pg_sqlserver_timestamp_precision.py::*", "reason": "live PG \\+ SQL Server: set PG", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d149_mysql_collation_polarity_create.py::*", "reason": "live SQL Server \\+ MySQL: set", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_r4_acc_d188_scheduled_mssql_mysql.py::*", "reason": "live SQL Server / MySQL not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_d188_incremental_out_of_window_drift_live.py::*", "reason": "^live (mysql|postgres)->sqlserver engines not reachable$|^live sqlserver->(mysql|postgres) engines not reachable$", "why": "Each pair runs one engine against SQL Server; api-tests starts no SQL Server (cdc-sqlserver and the nightly do). The MySQL / PostgreSQL side is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_e3006_cdc_snapshot_removes_deleted_keys.py::*", "reason": "^live sqlserver / postgresql not reachable$", "why": "The SQL Server source leg (the MySQL leg runs); api-tests starts no SQL Server (the nightly does).", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_x40_wide_decimal_sqlserver_live.py::*", "reason": "set DATAFLOW_TEST_(MONGO|MYSQL|PG)_\\* and DATAFLOW_TEST_MSSQL_\\*", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_cdc_drift_repair_live.py::*", "reason": "SQL Server native CDC and live PostgreSQL environment are required", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_cdc_poll_reconnects_live.py::*", "reason": "df-mssql or df-pg is not reachable", "why": "api-tests starts no SQL Server (cdc-sqlserver and the nightly do); the other engine is up, so the skip is SQL Server's.", "only_jobs": ["api-tests"]},
+        {"test": "tests/test_*.py::*", "reason": "MariaDB not (configured|reachable) \\(DATAFLOW_TEST_MARIADB_", "why": "MariaDB leg (DATAFLOW_TEST_MARIADB_*, port 3307). CI starts MySQL 8 on 3306, not MariaDB."},
+        {"test": "tests/test_live_emulator_matrix.py::test_write_destination_database_local_emulator[[]mariadb[]]", "reason": "^mariadb emulator not reachable on localhost:3307$", "why": "The desktop lab's MariaDB emulator cell (docker-compose mariadb, localhost:3307). CI starts MySQL 8 on 3306 and no MariaDB, like the other MariaDB-3307 legs; the [mysql] cell runs."},
+        {"test": "tests/test_execute_tracked_csv_to_all_destinations.py::test_csv_to_all_destinations[[]mariadb[]]", "reason": "^mariadb emulator not reachable on localhost:3307$", "why": "The desktop lab's MariaDB cell (localhost:3307). CI starts MySQL 8 on 3306 and no MariaDB, like the other MariaDB-3307 legs; the [mysql] cell runs."},
+        {"test": "tests/test_execute_tracked_all_sources_to_postgresql.py::test_all_source_to_postgresql[[]mariadb[]]", "reason": "^mariadb emulator not reachable on localhost:3307$", "why": "The desktop lab's MariaDB cell (localhost:3307). CI starts MySQL 8 on 3306 and no MariaDB, like the other MariaDB-3307 legs; the [mysql] cell runs."},
+        {"test": "tests/test_r11_pg_aborted_transaction_e2e.py::test_mysql_family_tinyint_default_lands_as_boolean_default[[]mariadb[]]", "reason": "^mariadb not configured on :3307$", "why": "The desktop lab's MariaDB cell (localhost:3307). CI starts MySQL 8 on 3306 and no MariaDB, like the other MariaDB-3307 legs; the [mysql] cell runs."},
+        {"test": "tests/test_execute_tracked_csv_to_mysql_upsert.py::*", "reason": "MariaDB emulator not reachable on localhost:3307", "why": "MariaDB leg (DATAFLOW_TEST_MARIADB_*, port 3307). CI starts MySQL 8 on 3306, not MariaDB."},
+        {"test": "tests/test_d350_pipeline_default_on_empty.py::*", "reason": "MariaDB not reachable: .*3307", "why": "MariaDB leg (DATAFLOW_TEST_MARIADB_*, port 3307). CI starts MySQL 8 on 3306, not MariaDB."},
+        {"test": "tests/test_r6_d209_mariadb_into_pgvector_e2e.py::*", "reason": "MariaDB not reachable: .*3307", "why": "MariaDB leg (DATAFLOW_TEST_MARIADB_*, port 3307). CI starts MySQL 8 on 3306, not MariaDB."},
+        {"test": "tests/test_d146_mariadb_null_default_restatement.py::*", "reason": "live PG \\+ MariaDB: set PG\\* and DATAFLOW_TEST_MARIADB_", "why": "MariaDB leg (DATAFLOW_TEST_MARIADB_*, port 3307). CI starts MySQL 8 on 3306, not MariaDB."},
+        {"test": "tests/test_execute_tracked_elasticsearch_to_postgresql.py::*", "reason": "Elasticsearch or PostgreSQL emulator not reachable", "why": "Elasticsearch is not started in CI; PostgreSQL is."},
+        {"test": "tests/test_execute_tracked_s3_to_postgresql.py::*", "reason": "MinIO or PostgreSQL emulator not reachable", "why": "MinIO is not started in CI; PostgreSQL is."},
+        {"test": "tests/test_d53_d70_exact_upsert_keys.py::*", "reason": "PAD SPACE key collation is MySQL / SQL Server behaviour", "why": "By design: the parametrised leg applies to MySQL / SQL Server collations only."},
+        {"test": "tests/test_rule_compiler_unique_live.py::*", "reason": "DATAFLOW_BR_LIVE=1 plus", "why": "Opt-in live bench that needs PostgreSQL, MySQL and SQL Server hosts at once (DATAFLOW_BR_LIVE)."}
+      ]
+    }
+  }
+}

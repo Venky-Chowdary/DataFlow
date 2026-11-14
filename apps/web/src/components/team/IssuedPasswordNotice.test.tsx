@@ -32,4 +32,21 @@ describe("IssuedPasswordNotice", () => {
     assert.match(markup, /Xk9!q-7Lm2-Pw/);
     assert.match(markup, /Hide/);
   });
+
+  it("offers Copy without revealing the password (UX-38)", () => {
+    const markup = renderToStaticMarkup(createElement(IssuedPasswordNotice, { email: "ada@acme.example", password: "Xk9!q-7Lm2-Pw", onDone: () => {} }));
+    assert.match(markup, /Copy password/);
+    assert.doesNotMatch(markup, /Xk9!q-7Lm2-Pw/);
+  });
+});
+
+describe("Team toast after Add directly with a login (UX-38)", () => {
+  it("points where the password actually is", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { dirname, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const team = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "pages", "settings", "TeamSettings.tsx"), "utf8");
+    assert.doesNotMatch(team, /Reveal the one-time password below/);
+    assert.match(team, /The one-time password is at the top of Team/);
+  });
 });

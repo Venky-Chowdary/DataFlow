@@ -112,12 +112,17 @@ def _arm_strict_keyed_backup(
         # table it writes, not only the first one.
         return backups
     try:
-        pair = create_pg_table_backup(
-            dest_cfg,
-            schema=schema_from_cfg(dest_type, dest_cfg),
-            table=dest_table,
-            job_id=job_id,
-        )
+        if dest_type == "mysql":
+            from connectors.mysql_route_backup import create_mysql_table_backup
+
+            pair = create_mysql_table_backup(dest_cfg, table=dest_table, job_id=job_id)
+        else:
+            pair = create_pg_table_backup(
+                dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table=dest_table,
+                job_id=job_id,
+            )
     except PgBackupRestoreRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - never abort a write for the safety net
@@ -189,12 +194,51 @@ def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
         if note:
             setattr(exc, "failed_batch_undo_note", note)
         measured = (run.tally.dest_summary or {}).get("rows_committed_before_failure")
+        if not isinstance(measured, int):
+            measured = _recount_after_failure(run, exc)
         if isinstance(measured, int):
             # What the destination holds of this run, counted — not a writer tally.
             setattr(exc, "rows_committed_measured", measured)
     except Exception:  # noqa: BLE001 - undo must not hide the write failure
         logging.getLogger(__name__).warning("Failed-write undo did not run", exc_info=True)
     return exc
+
+
+def _recount_after_failure(run: Any, exc: BaseException) -> int | None:
+    """REL-2: count what a failed run left in a database destination.
+
+    The writer's tallies are per batch (a disk-full SQLite run said 72,312 rows
+    were written; the table held 74,360). The destination is counted: now
+    minus before. ``None`` when either side can't be counted.
+    """
+    from services.dest_precount import PRECOUNT_KEY, count_dialect, precount_table
+
+    destination = run.cfg.destination
+    summary = run.tally.dest_summary or {}
+    if getattr(destination, "kind", "") != "database" or getattr(exc, "destination_restored", False):
+        return None
+    before = summary.get(PRECOUNT_KEY)
+    if not isinstance(before, int):
+        before = 0 if summary.get("dest_table_existed_before") is False else None
+    if not isinstance(before, int):
+        return None
+    from src.transfer.adapters import resolve_connector_config
+
+    cfg = resolve_connector_config(destination)
+    db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
+    try:
+        now = precount_table(db_type, cfg, str(run.cfg.dest_table or ""))
+    except Exception:  # noqa: BLE001 - an uncounted table stays unmeasured
+        return None
+    if not isinstance(now, int) or now < before:
+        return None
+    committed = now - before
+    if not getattr(exc, "failed_batch_undo_note", ""):
+        setattr(exc, "failed_batch_undo_note", (
+            f"Counted after the failure: {committed:,} row(s) this run wrote are in "
+            f"{run.cfg.dest_table}; they were not removed."
+        ))
+    return committed
 
 
 def _stamp_all_held_out_ledger(

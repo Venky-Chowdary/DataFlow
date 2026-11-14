@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import HTTPException, Response
+from fastapi import Response
+from services.safe_errors import safe_http_exception
 
 
 def issue_browser_session(response: Response, session: dict[str, Any], email: str) -> dict[str, Any]:
@@ -34,5 +35,8 @@ def issue_browser_session(response: Response, session: dict[str, Any], email: st
             email, ip=str(session.get("ip") or ""), ua=str(session.get("ua") or ""),
             device_id=str(session.get("device_id") or ""), cookie_jti=str(session["jti"]))
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc, event="auth.browser_session.token_unavailable",
+            public_message="Sign-in is temporarily unavailable.", status_code=503,
+        ) from exc
     return {"token": token, "expires_at": expires_at, "must_change_password": False}

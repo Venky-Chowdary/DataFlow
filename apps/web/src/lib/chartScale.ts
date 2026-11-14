@@ -48,6 +48,37 @@ export function percentDomain(
   return [lo, hi];
 }
 
+export interface ParityAxis {
+  domain: Domain;
+  ticks: AxisTick[];
+}
+
+/** Spans a parity axis may use: whole, readable steps, never a 0.5-point slice. */
+const PARITY_SPANS = [2, 5, 10, 25, 50, 100];
+
+/**
+ * The parity trend's y axis: always ends at 100%, starts at a round number
+ * below the lowest run with room to spare, and carries three evenly spaced,
+ * round ticks. A 99.5–100% axis made a 0.4-point dip look like a crash; this
+ * one keeps small dips small and still shows them.
+ */
+export function parityAxis(values: ReadonlyArray<number | null | undefined>): ParityAxis | null {
+  const finite = finiteValues(values).map((v) => Math.max(0, Math.min(100, v)));
+  if (finite.length === 0) return null;
+  const need = (100 - Math.min(...finite)) * 1.25;
+  const span = PARITY_SPANS.find((s) => s >= need) ?? 100;
+  const lo = 100 - span;
+  const mid = lo + span / 2;
+  return {
+    domain: [lo, 100],
+    ticks: [
+      { value: 100, label: "100%", kind: "max" },
+      { value: mid, label: formatPercentTick(mid), kind: "floor" },
+      { value: lo, label: formatPercentTick(lo), kind: "min" },
+    ],
+  };
+}
+
 /**
  * Y domain for a non-negative measure (durations, counts): the lowest to the
  * highest value seen, padded by ``pad`` of the span on each side so the marks

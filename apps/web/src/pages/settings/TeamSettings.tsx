@@ -30,6 +30,7 @@ import {
   getActiveWorkspaceId,
   isKnownWorkspaceChoice,
   landingWorkspaceId,
+  memberCountLabel,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
@@ -237,9 +238,17 @@ export function TeamSettings() {
         });
         await refreshMembers(activeWorkspace);
       } catch (err) {
+        const quota = (err as { code?: string } | null)?.code === "email_quota_exceeded";
+        if (quota) {
+          // UX-21: the email allowance is used up. Keep what was typed and
+          // switch to Add directly, which needs no email.
+          setInviteMode("direct");
+        }
         toast({
-          title: "Invitation not sent",
-          message: err instanceof Error ? err.message : "Could not send the invitation.",
+          title: quota ? "Invitation email not sent: email limit reached" : "Invitation not sent",
+          message: `${err instanceof Error ? err.message : "Could not send the invitation."}${
+            quota ? " Add directly is now selected in the form, with the same details; press Add to give access now." : ""
+          }`,
           tone: "error",
         });
       } finally {
@@ -260,7 +269,7 @@ export function TeamSettings() {
         setIssuedPassword({ email: result.membership.email, password: result.temporaryPassword });
         toast({
           title: "Member added with a login",
-          message: `Reveal the one-time password below and give it to ${result.membership.email}.`,
+          message: `The one-time password is at the top of Team: copy or reveal it and give it to ${result.membership.email}.`,
           tone: "success",
         });
       } else {
@@ -475,7 +484,7 @@ export function TeamSettings() {
                 {workspaces.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
-                    {typeof w.member_count === "number" ? ` — ${w.member_count} member(s)` : ""}
+                    {typeof w.member_count === "number" ? ` · ${memberCountLabel(w.member_count)}` : ""}
                   </option>
                 ))}
               </select>

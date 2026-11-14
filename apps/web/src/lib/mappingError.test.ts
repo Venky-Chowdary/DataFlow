@@ -1,46 +1,28 @@
 /**
- * Regression for D-BP-10: the Map step stalled on "Preparing column mappings"
- * forever with no error when the egress allowlist blocked the connector host.
- * These tests pin the surfaced copy: the blocked host + the setting to change.
+ * Regression for D-BP-10 / ERR-39: the Map step shows the API's egress refusal
+ * inline (no stall), without server environment-variable names or a guessed
+ * endpoint role.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MAPPING_TIMEOUT_MS, mappingTimeoutCopy, withEgressHint } from "./mappingError";
 
 describe("withEgressHint", () => {
-  it("names the blocked host and the allowlist setting on an egress refusal", () => {
-    const out = withEgressHint(
-      "Connector probe refused: egress allowlist denied 127.0.0.1",
-      "127.0.0.1",
-      "",
-    );
-    assert.match(out, /egress allowlist denied 127\.0\.0\.1/);
-    assert.match(out, /“127\.0\.0\.1”/);
-    assert.match(out, /DATAWRAP_EGRESS_ALLOWLIST/);
+  it("passes the API's classified refusal through without server setting names (ERR-39)", () => {
+    const api = "Datawrap's network policy doesn't allow connections to this host. "
+      + "Ask your administrator to allow this host for your workspace.";
+    const out = withEgressHint(api, "127.0.0.1", "10.0.0.5");
+    assert.equal(out, api);
+    assert.doesNotMatch(out, /EGRESS_ALLOWLIST|destination host/);
   });
 
-  it("falls back to the source host when no destination host is known", () => {
-    const out = withEgressHint("non-routable private range refused", "", "10.0.0.5");
-    assert.match(out, /“10\.0\.0\.5”/);
-    assert.match(out, /DATAWRAP_EGRESS_ALLOWLIST/);
-  });
-
-  it("still appends the remedy when no host is known", () => {
-    const out = withEgressHint("Refused connector host by egress policy");
-    assert.match(out, /DATAWRAP_EGRESS_ALLOWLIST/);
-    assert.match(out, /reachable host/);
-  });
-
-  it("does not repeat the remedy when the API message already names the allowlist", () => {
-    // Older APIs name the legacy spelling; either one already carries the instruction.
-    for (const name of ["DATAWRAP_EGRESS_ALLOWLIST", "DATAFLOW_EGRESS_ALLOWLIST"]) {
-      const msg = `egress allowlist denied 10.0.0.5 — add it to ${name}`;
-      assert.equal(withEgressHint(msg, "10.0.0.5"), msg);
-    }
+  it("never names the destination for a refused source host", () => {
+    const out = withEgressHint("Refused connector host by egress policy", "", "10.0.0.5");
+    assert.doesNotMatch(out, /destination host|DATAWRAP_/);
   });
 
   it("leaves ordinary failures untouched", () => {
-    const msg = "password authentication failed for user dataflow";
+    const msg = "PostgreSQL rejected the sign-in for user \"dataflow\": the username or password is wrong.";
     assert.equal(withEgressHint(msg, "db.internal"), msg);
   });
 

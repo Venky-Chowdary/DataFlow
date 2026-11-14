@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from connectors.base import ConnectResult
+from connectors.base import ConnectResult, name_filter_pattern
 
 #: Objects returned by a connection probe. A probe is a reachability check, not
 #: a catalog dump, so the page stays bounded and truncation is reported instead.
@@ -21,8 +21,11 @@ def test_mysql(
     schema: str,
     connection_string: str,
     ssl: bool,
+    name_filter: str = "",
 ) -> ConnectResult:
     del schema
+    # UX-9: narrow the bounded page to names containing the search text.
+    pattern = name_filter_pattern(name_filter)
     try:
         from connectors.mysql_conn import get_connection
 
@@ -56,10 +59,11 @@ def test_mysql(
                     """
                     SELECT table_name, table_type FROM information_schema.tables
                     WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
+                      AND (%s = '' OR LOWER(table_name) LIKE LOWER(%s))
                     ORDER BY table_name
                     LIMIT %s
                     """,
-                    (db_name, _TABLE_PAGE + 1),
+                    (db_name, pattern, pattern, _TABLE_PAGE + 1),
                 )
                 fetched = [(row[0], row[1]) for row in cur.fetchall()]
                 truncated = len(fetched) > _TABLE_PAGE
@@ -75,8 +79,9 @@ def test_mysql(
                         """
                         SELECT count(*) FROM information_schema.tables
                         WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
+                          AND (%s = '' OR LOWER(table_name) LIKE LOWER(%s))
                         """,
-                        (db_name,),
+                        (db_name, pattern, pattern),
                     )
                     total = int((cur.fetchone() or [len(tables)])[0])
             else:
@@ -101,6 +106,7 @@ def test_mysql(
             driver="pymysql",
             tables_truncated=truncated,
             table_types=table_types,
+            tables_total=total,
         )
     except Exception as exc:  # noqa: BLE001 — a probe reports the driver error
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="pymysql")

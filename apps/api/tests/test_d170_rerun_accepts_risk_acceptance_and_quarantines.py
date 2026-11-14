@@ -218,7 +218,12 @@ def test_cast_failure_job_error_names_the_quarantine_replan():
     message, details = job_failure._fail_job_preflight(
         store, "j-d170", pf, lineage=lineage, rows_read=3, sync_mode="full_refresh_overwrite"
     )
-    assert "risk_acceptance" in message and "quarantine" in message.lower()
-    assert "CAST_AND_CONTINUE" in message
+    # ERR-33: the job's words are the product action; the MCP / REST form
+    # (risk_acceptance, CAST_AND_CONTINUE) is the action's API form.
+    assert "quarantine" in message.lower() and "Retry" in message
+    assert "risk_acceptance" not in message and "POST /api" not in message
     assert details["remediation"] in message
-    assert "risk_acceptance" in store.get_job("j-d170")["error"]
+    assert "risk_acceptance" in details["remediation_api"]
+    assert "CAST_AND_CONTINUE" in details["remediation_api"]
+    assert details["action"]["ui"] == "retry_with_quarantine"
+    assert "risk_acceptance" not in store.get_job("j-d170")["error"]

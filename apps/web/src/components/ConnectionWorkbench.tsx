@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { Button } from "./ui/Button";
@@ -8,7 +8,7 @@ import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectio
 import { connectorHealthLabel, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { formatJobRowMetric } from "../lib/conservationLedger";
 import { formatJobRoute, formatStreamNames, readJobStreamNames } from "../lib/jobEvidence";
-import { introspectTransferEndpoints, type EndpointIntrospection } from "../lib/api";
+import { SchemaBrowserPanel } from "./connections/SchemaBrowserPanel";
 import {
   formatConnectorRoleLabel,
   resolveConnectorUsage,
@@ -29,8 +29,6 @@ interface ConnectionWorkbenchProps {
   hideHeader?: boolean;
 }
 
-type SchemaObject = { name: string; columns?: { name: string; type?: string }[] };
-
 export function ConnectionWorkbench({
   selectedConnection,
   workbench,
@@ -41,9 +39,6 @@ export function ConnectionWorkbench({
   onOpenTransfer,
   hideHeader,
 }: ConnectionWorkbenchProps) {
-  const [schemaObjects, setSchemaObjects] = useState<SchemaObject[]>([]);
-  const [schemaError, setSchemaError] = useState("");
-  const [schemaLoading, setSchemaLoading] = useState(false);
 
   const roleLabel = selectedConnection
     ? formatConnectorRoleLabel(
@@ -61,57 +56,6 @@ export function ConnectionWorkbench({
         workbench?.relatedSchedules ?? [],
       ).hint
     : null;
-
-  const loadSchema = useCallback(async () => {
-    if (!selectedConnection?.id) {
-      setSchemaObjects([]);
-      return;
-    }
-    setSchemaLoading(true);
-    setSchemaError("");
-    try {
-      const res = await introspectTransferEndpoints({
-        source: {
-          kind: "database",
-          format: selectedConnection.type,
-          connector_id: selectedConnection.id,
-        },
-        destination: {
-          kind: "database",
-          format: "sqlite",
-          connection_string: ":memory:",
-          table: "_probe",
-        },
-      });
-      const src = res.source as EndpointIntrospection & {
-        tables?: SchemaObject[];
-        collections?: SchemaObject[];
-        objects?: Array<string | SchemaObject>;
-        message?: string;
-      };
-      const objsRaw = (src.tables || src.collections || src.objects || []) as Array<string | SchemaObject>;
-      const objs = objsRaw.map((o) =>
-        typeof o === "string"
-          ? { name: o }
-          : { name: o.name || "", columns: o.columns },
-      );
-      setSchemaObjects(objs.filter((o) => o.name));
-      if (!objs.length) {
-        setSchemaError(src.message || "No tables/collections returned. Verify credentials and database name.");
-      }
-    } catch (e) {
-      setSchemaObjects([]);
-      setSchemaError(e instanceof Error ? e.message : "Schema introspection failed");
-    } finally {
-      setSchemaLoading(false);
-    }
-  }, [selectedConnection?.id, selectedConnection?.type]);
-
-  useEffect(() => {
-    if (connectionTab === "Schema" && selectedConnection) {
-      void loadSchema();
-    }
-  }, [connectionTab, selectedConnection, loadSchema]);
 
   return (
     <section className="df2-connection-workbench" aria-label="Connection operations workbench">
@@ -138,7 +82,7 @@ export function ConnectionWorkbench({
               {connectors.length === 0 ? (
                 <option value="">No saved connections</option>
               ) : connectors.map((c) => (
-                <option key={c.id} value={c.id}>{c.name} · {c.type}</option>
+                <option key={c.id} value={c.id}>{c.name} · {connectorDisplayName(c.type)}</option>
               ))}
             </select>
           </div>
@@ -223,48 +167,8 @@ export function ConnectionWorkbench({
         )}
         {connectionTab === "Schema" && (
           selectedConnection ? (
-            <div className="df2-schema-live">
-              <div className="df2-schema-live-toolbar">
-                <div>
-                  <span className="df2-rail-kicker">Live introspection</span>
-                  <h4>{selectedConnection.name}</h4>
-                  <p className="df2-muted">Tables/collections returned by the connector — not marketing placeholders.</p>
-                </div>
-                <Button variant="secondary" size="sm" onClick={() => void loadSchema()} disabled={schemaLoading}>
-                  {schemaLoading ? "Refreshing…" : "Refresh schema"}
-                </Button>
-              </div>
-              {schemaError && !schemaObjects.length ? (
-                <EmptyState compact icon="alert" title="Schema unavailable" description={schemaError} />
-              ) : schemaLoading && !schemaObjects.length ? (
-                <p className="df2-muted">Loading schema…</p>
-              ) : schemaObjects.length === 0 ? (
-                <EmptyState compact icon="database" title="No objects found" description="This database has no introspectable tables yet, or the connector needs a database/schema name." />
-              ) : (
-                <div className="df2-table-wrap">
-                  <table className="df2-table" aria-label="Live schema">
-                    <thead>
-                      <tr>
-                        <th>Object</th>
-                        <th>Columns</th>
-                        <th>Sample types</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {schemaObjects.slice(0, 40).map((obj) => (
-                        <tr key={obj.name}>
-                          <td><strong>{obj.name}</strong></td>
-                          <td>{obj.columns?.length ?? "—"}</td>
-                          <td className="df2-cell-meta">
-                            {(obj.columns || []).slice(0, 4).map((c) => `${c.name}:${c.type || "?"}`).join(", ") || "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            // UX-9: search, schema selector, "N of M" and lazy columns.
+            <SchemaBrowserPanel key={selectedConnection.id} connector={selectedConnection} />
           ) : (
             <EmptyState compact icon="connectors" title="Select a connection" description="Choose a saved connection above to introspect schema." />
           )
@@ -335,7 +239,7 @@ export function ConnectionWorkbench({
                             return (
                               <>
                                 <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
-                                <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
+                                <div className="df2-cell-meta">{connectorDisplayName(job.source_type || "")} → {connectorDisplayName(job.destination_type || "")}</div>
                               </>
                             );
                           })()}

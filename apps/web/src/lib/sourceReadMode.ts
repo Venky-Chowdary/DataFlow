@@ -214,3 +214,28 @@ export function callableSourceExtra(
   if (params && Object.keys(params).length) extra.procedure_params = { ...params };
   return extra;
 }
+
+/**
+ * UX-31: before/after write hook examples in the destination's own dialect.
+ * The MySQL form showed a SQL Server "EXEC dbo." hook.
+ */
+export function writeHookHint(driver: string | undefined | null, when: "before" | "after"): string {
+  const d = String(driver || "").toLowerCase();
+  const before = when === "before";
+  if (d === "sqlserver" || d === "mssql" || d === "azure_sql") {
+    return before ? "EXEC dbo.DisableIndexes" : "EXEC dbo.RebuildStats";
+  }
+  if (d === "postgresql" || d === "postgres" || d === "pgvector" || d === "redshift" || d === "timescaledb") {
+    return before ? "CALL public.before_load()" : "CALL public.rebuild_stats()";
+  }
+  if (d === "mysql" || d === "mariadb") {
+    return before ? "CALL disable_triggers()" : "CALL rebuild_stats()";
+  }
+  if (d === "snowflake") {
+    return before ? "CALL analytics.public.before_load()" : "CALL analytics.public.after_load()";
+  }
+  if (d === "oracle") {
+    return before ? "CALL etl_pkg.before_load()" : "CALL etl_pkg.after_load()";
+  }
+  return before ? "CALL schema.before_load()" : "CALL schema.after_load()";
+}

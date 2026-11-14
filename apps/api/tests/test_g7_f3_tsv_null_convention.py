@@ -55,7 +55,11 @@ def _write(extra: dict | None = None, fmt: str = "tsv"):
 def _decoded(body: bytes, empty_cell: str) -> list[list[str | None]]:
     from services.csv_codec import iter_csv_records
 
-    return list(iter_csv_records(io.StringIO(body.decode("utf-8"), newline=""), "\t", empty_cell=empty_cell))[1:]
+    # The file was written with the ``\\N`` convention, so it is read with it.
+    marker = TEXT_NULL if empty_cell == "keep" else ""
+    return list(iter_csv_records(
+        io.StringIO(body.decode("utf-8"), newline=""), "\t", empty_cell=empty_cell, null_marker=marker
+    ))[1:]
 
 
 # ── the vocabulary ───────────────────────────────────────────────────────────
@@ -97,9 +101,11 @@ def test_endpoint_dto_validates_tsv_null():
 def test_quoted_backslash_n_reads_as_text_unquoted_as_null():
     from services.csv_codec import decode_cell
 
-    assert decode_cell(TEXT_NULL, False) is None
-    assert decode_cell(TEXT_NULL, None) is None
-    assert decode_cell(TEXT_NULL, True) == TEXT_NULL
+    assert decode_cell(TEXT_NULL, False, null_marker=TEXT_NULL) is None
+    assert decode_cell(TEXT_NULL, None, null_marker=TEXT_NULL) is None
+    assert decode_cell(TEXT_NULL, True, null_marker=TEXT_NULL) == TEXT_NULL
+    # DATA-21: undeclared, an unquoted \N is the text.
+    assert decode_cell(TEXT_NULL, False) == TEXT_NULL
 
 
 # ── file_export ──────────────────────────────────────────────────────────────

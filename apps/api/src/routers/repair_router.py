@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from services.safe_errors import classified_http_exception
 
 router = APIRouter(tags=["repair"])
 
@@ -295,5 +296,7 @@ async def ensure_cdc_signal_table(body: EnsureSignalTableBody) -> dict[str, Any]
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"Could not ensure signal table: {exc}") from exc
+        raise classified_http_exception(
+            exc, side="source", phase="ddl", status_code=502, event="repair.ensure_cdc_signal_table.failed"
+        ) from exc
     return {"ok": True, "table": table, "dialect": dialect}

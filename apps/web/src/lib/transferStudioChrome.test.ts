@@ -1076,7 +1076,8 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(page, /canPersistStudioSchedule/);
     assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
     assert.match(page, /studioSchedulePersistable && \(/);
-    assert.match(app, /Gate-8 proof stays on Job Theater/);
+    // UX-34: the completion toast names where the proof is, without internal names.
+    assert.match(app, /The Trust Report and post-write proof are on the job in Jobs\./);
   });
 
   it("Settings API keys own one Generate control; tenant placeholders are not a bank", () => {

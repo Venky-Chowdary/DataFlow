@@ -348,6 +348,19 @@ export function querySchemaErrorCopy(raw: string): string {
   return raw;
 }
 
+/**
+ * Why a schema read did not connect, in the API's own words, or "".
+ *
+ * ``/query/schema`` answers ``connected: false`` with a ``message`` that names
+ * the cause and the fix (for example a SQLite file outside the folders this
+ * server may open). The schema panels used to drop it and show a generic
+ * "The connector did not open".
+ */
+export function schemaNotConnectedReason(data: { connected?: boolean; message?: string | null }): string {
+  if (data.connected !== false) return "";
+  return String(data.message ?? "").trim();
+}
+
 /** Shared execute/export body — bind params travel on both paths. */
 export type PlaygroundQueryBody = {
   connector_id: string;

@@ -45,6 +45,7 @@ from ..transfer.connector_registry import run_probe
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 from services.ops_events import emit_event
 from services.execution_engine_contract import job_contract_flags
+from services.safe_errors import coded_http_exception, run_failure_http_exception, safe_http_exception
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +408,10 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
             "driver": driver,
             "auth_source": cfg.get("auth_source", ""),
         }
+        if not ok:
+            from services.safe_errors import failure_fields
+
+            payload.update(failure_fields(msg, engine=driver))
         if ok and driver in {"sqlserver", "oracle"}:  # ``driver`` is resolved above
             try:
                 from services.source_ha_probe import probe_source_ha_safe
@@ -421,12 +426,16 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
 
     except Exception as e:
         op.errored(e)
+        from services.safe_errors import failure_fields
+
+        message = humanize_connection_error(
+            resolve_driver_type(request.type or ""), e,
+            auth_mode=request.auth_mode or "",
+        )
         return {
             "success": False,
-            "message": humanize_connection_error(
-                resolve_driver_type(request.type or ""), e,
-                auth_mode=request.auth_mode or "",
-            ),
+            "message": message,
+            **failure_fields(message, engine=resolve_driver_type(request.type or "")),
         }
 
 
@@ -529,7 +538,7 @@ def create_connector(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.create_connector.failed", public_message="Couldn't save the connection.", status_code=500)
 
 
 @router.get("/")
@@ -607,7 +616,7 @@ def list_connectors(
         return {"connectors": result, "count": len(result)}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.list_connectors.failed", public_message="Couldn't list connections.", status_code=500)
 
 
 def _can_access_job(request: Request, job: dict) -> bool:
@@ -701,6 +710,17 @@ async def list_transfer_jobs(
             "degraded": False,
         }
     except (PyMongoError, ConnectionError) as e:
+        # ERR-28: the job store's host and topology stay in the log; the
+        # caller gets the taxonomy's copy and a reference.
+        from services.error_taxonomy import DatawrapError, classify
+        from services.safe_errors import public_error
+
+        _detail, cid = public_error(
+            e, event="connectors.list_transfer_jobs.store_unavailable",
+            public_message="Job history unavailable.", status_code=503,
+        )
+        named = classify(DatawrapError("platform.job_store_unavailable"), side="platform")
+        envelope = named.envelope(cid) if named is not None else {"detail": _detail}
         return {
             "jobs": [],
             "count": 0,
@@ -712,10 +732,11 @@ async def list_transfer_jobs(
             "attention_count": 0,
             "degraded": True,
             "persistence": "unavailable",
-            "detail": str(e),
+            "detail": envelope["detail"],
+            "error": envelope.get("error"),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.list_transfer_jobs.failed", public_message="Couldn't list jobs.", status_code=500)
 
 
 @router.get("/jobs/{job_id}")
@@ -743,7 +764,7 @@ def get_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.get_transfer_job.failed", public_message="Couldn't load the job.", status_code=500)
 
 
 @router.patch("/jobs/{job_id}")
@@ -791,7 +812,7 @@ async def patch_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.patch_transfer_job.failed", public_message="Couldn't update the job.", status_code=500)
 
 
 @router.post("/jobs/{job_id}/sync")
@@ -838,7 +859,7 @@ async def sync_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.sync_transfer_job.failed", public_message="Couldn't stage the sync.", status_code=500)
 
 
 class RerunRequest(BaseModel):
@@ -959,10 +980,8 @@ def retry_transfer_job(
 
         hydrate_file_source(xfer_req)
         if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.execution_engine_contract import (
             committed_rows_of,
@@ -1112,7 +1131,7 @@ def retry_transfer_job(
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.retry_transfer_job.failed", public_message="Couldn't retry the job.", status_code=500)
 
 
 def _refuse_rehearsal_extract(job: dict[str, Any], verb: str) -> None:
@@ -1172,10 +1191,8 @@ def rerun_transfer_job(
 
         hydrate_file_source(xfer_req)
         if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.execution_engine_contract import (
             committed_rows_of,
@@ -1277,7 +1294,7 @@ def rerun_transfer_job(
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.rerun_transfer_job.failed", public_message="Couldn't start the job again.", status_code=500)
 
 
 def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
@@ -1389,10 +1406,8 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         if xfer_req_probe.source.kind == "file" and not file_source_bytes_available(
             xfer_req_probe
         ):
-            raise HTTPException(
-                status_code=400,
-                detail="File uploads must be re-submitted from Transfer Studio.",
-            )
+            # ERR-38: a coded refusal; the page decides on the code, not the words.
+            raise coded_http_exception("object.upload_expired", status_code=400)
 
         from services.checkpoint_service import Checkpoint, evaluate_resume_safety
 
@@ -1484,7 +1499,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
     except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.resume_transfer_job.failed", public_message="Couldn't resume the job.", status_code=500)
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -1580,7 +1595,7 @@ def cancel_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.cancel_transfer_job.failed", public_message="Couldn't cancel the job.", status_code=500)
 
 
 #: How often the job stream reads the job, how often it re-sends an unchanged
@@ -1612,6 +1627,39 @@ def _job_stream_frame(job_id: str) -> tuple[str | None, bool]:
     return f"data: {json.dumps(safe, default=json_default)}\n\n", is_terminal(safe.get("status"))
 
 
+STREAM_TICKET_TTL_SECONDS = 60
+
+
+@router.post("/jobs/{job_id}/stream-ticket")
+async def issue_job_stream_ticket(job_id: str, request: Request):
+    """A single-use ticket for ``GET /jobs/{job_id}/stream`` (SEC-14).
+
+    EventSource cannot send an Authorization header; a ticket that works once,
+    for 60 seconds, on this one URL takes the bearer's place in the query
+    string. Empty when the caller's session needs none (a cookie, or sign-in off).
+    """
+    import secrets
+
+    from starlette.concurrency import run_in_threadpool
+
+    def _visible() -> bool:
+        job = get_mongodb_service().get_job(job_id)
+        return bool(job) and _can_access_job(request, job)
+
+    if not await run_in_threadpool(_visible):
+        raise HTTPException(status_code=404, detail="Job not found")
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        return {"ticket": "", "expires_in": 0}
+    from services.auth_state import get_auth_state
+
+    ticket = secrets.token_urlsafe(24)
+    path = f"/api/v1/connectors/jobs/{job_id}/stream"
+    get_auth_state().put_stream_ticket(ticket, {"token": token, "path": path}, STREAM_TICKET_TTL_SECONDS)
+    return {"ticket": ticket, "expires_in": STREAM_TICKET_TTL_SECONDS}
+
+
 @router.get("/jobs/{job_id}/stream")
 async def stream_transfer_job(job_id: str, request: Request):
     """Server-sent events for live transfer job progress."""
@@ -1630,7 +1678,7 @@ async def stream_transfer_job(job_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.stream_transfer_job.failed", public_message="Couldn't stream the job's progress.", status_code=500)
 
     async def event_generator():
         last_frame: str | None = None
@@ -3020,7 +3068,10 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if typed_refusal:
             raise HTTPException(status_code=409, detail=typed_refusal) from e
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # A refused replay is a failed run: the job record's words, with a reference.
+        raise run_failure_http_exception(
+            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write"
+        ) from e
 
 
 @router.get("/{connector_id}")
@@ -3042,7 +3093,7 @@ def get_connector(connector_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.get_connector.failed", public_message="Couldn't load the connection.", status_code=500)
 
 
 @router.delete("/{connector_id}")
@@ -3065,7 +3116,7 @@ def delete_connector(connector_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.delete_connector.failed", public_message="Couldn't delete the connection.", status_code=500)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3128,6 +3179,10 @@ def profile_file_upload(
         )
 
     schema = FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+    if str(getattr(result, "file_type", "") or "") in {"json", "jsonl"}:
+        from services.file_parser import _json_value_kinds_override
+
+        schema = _json_value_kinds_override(schema, list(result.data or [])[:1000])  # DATA-20
     try:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 
@@ -3275,7 +3330,7 @@ async def upload_file(
     except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.upload_file.failed", public_message="Couldn't read the uploaded file.", status_code=500)
 
 
 @router.post("/transfer")
@@ -3445,4 +3500,4 @@ async def transfer_data(
     except (HTTPException, PayloadTooLarge, ResidencyRefused):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_exception(e, event="connectors.transfer_data.failed", public_message="The transfer couldn't start.", status_code=500)

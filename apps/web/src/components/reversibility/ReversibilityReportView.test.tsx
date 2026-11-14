@@ -29,7 +29,7 @@ describe("Reversibility tab (static)", () => {
     assert.match(t, /Reversibility Partly reversible/);
     assert.match(t, /orders Reversible Every mapping is lossless: widened types, renamed columns, no transforms that drop information\./);
     assert.match(t, /customers Not reversible customer_id is hashed \(hash_pii\)/);
-    assert.match(t, /payments Partly amount narrows NUMERIC\(12,4\) to NUMERIC\(12,2\); values that do not fit lose data; 4 of 25 observed row\(s\) would lose data\./);
+    assert.match(t, /payments Partly amount narrows NUMERIC\(12,4\) to NUMERIC\(12,2\); values that do not fit lose data; 4 of 25 observed rows would lose data\./);
     assert.match(t, /Restore from destination/);
     assert.match(t, /Keep source as fallback/);
   });
@@ -55,7 +55,7 @@ describe("Reversibility tab (static)", () => {
     // customers and payments are open; orders (reversible) is closed.
     assert.equal((html.match(/aria-expanded="true"/g) ?? []).length, 2);
     assert.match(t, /Columns \(4\)/);
-    assert.match(t, /amount NUMERIC\(12,4\) → NUMERIC\(12,2\) Lossy Narrowed amount narrows .* 4 of 25 observed row\(s\) would lose data\./);
+    assert.match(t, /amount NUMERIC\(12,4\) → NUMERIC\(12,2\) Lossy Narrowed amount narrows .* 4 of 25 observed rows would lose data\./);
     assert.match(t, /ref TEXT → INTEGER Not checked Cast/);
     assert.ok(t.indexOf("amount NUMERIC") < t.indexOf("payment_id BIGINT"), "lossy before invertible");
   });
@@ -67,7 +67,7 @@ describe("Reversibility tab (static)", () => {
     const t = text(html);
     // Contract 11.1.2: a fit on a sample is "Fits sample only" (Execute blocks it until the whole table is checked).
     assert.match(t, /status TEXT Fits sample only Normalised/);
-    assert.match(t, /Fits the 25 observed row\(s\); not proven for rows not sampled\./);
+    assert.match(t, /Fits the 25 observed rows; not proven for rows not sampled\./);
     // Said once: the API's reason carries the data check, so the view does not repeat it.
     assert.equal(t.split("not proven for rows not sampled").length - 1, 1);
     assert.doesNotMatch(html, /df2-badge-live">Fits sample/);
@@ -245,5 +245,34 @@ describe("Reversibility tab actions (jsdom)", () => {
     await mount(<JobReversibilityTab jobId="job-31" />);
     assert.ok(calls.some((c) => /\/jobs\/job-31\/reversibility$/.test(c.url)));
     assert.match(host!.textContent || "", /Require reversibility: off for this run/);
+  });
+});
+
+describe("Reversibility counts use the shared stat tile (W6)", () => {
+  it("shows Lossy / Conditional / Invertible as neutral tiles with a status dot", () => {
+    const html = renderToStaticMarkup(<ReversibilityReportView report={planReversibilityFixture()} />);
+    const row = /<dl class="df2-stat-tiles is-3 df2-rev-counts" aria-label="Columns by invertibility">([\s\S]*?)<\/dl>/.exec(html);
+    assert.ok(row, "one stat-tile row");
+    assert.equal((row![1].match(/<div class="df2-stat-tile"/g) || []).length, 3);
+    assert.match(text(row![1]), /Lossy \d+ .*Conditional \d+ .*Invertible \d+/);
+    assert.doesNotMatch(row![1], /class="is-lossy"|class="is-conditional"|class="is-invertible"/);
+  });
+});
+
+describe("Reversibility reads cleanly (W6 round 2, item 3)", () => {
+  const report: ReversibilityReport = { ...realPlanReversibility, scope: "job" };
+  const html = renderToStaticMarkup(<ReversibilityReportView report={report} />);
+  const t = text(html);
+
+  it("drops the counts sentence the tiles already say, and keeps the verdict and the tiles", () => {
+    assert.doesNotMatch(t, /table\(s\):|1 table: 1 column/);
+    assert.match(t, /Partly reversible/);
+    assert.match(html, /aria-label="Columns by invertibility"/);
+  });
+
+  it("pluralises properly: no '(s)' anywhere on the tab", () => {
+    assert.match(JSON.stringify(report), /\(s\)/, "the payload carries API '(s)' plurals");
+    assert.doesNotMatch(t, /\(s\)/);
+    assert.match(t, /1 of 2 observed rows would lose data/);
   });
 });

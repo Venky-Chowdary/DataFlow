@@ -2861,6 +2861,8 @@ class DataPilotTools:
         summary = {k: v for k, v in full.items() if k != "live_combinations"}
         summary["detail"] = "summary"
         summary["live_combination_count"] = len(combos)
+        # The renderer reads this count; the matrix itself is not sent (CLM-9).
+        summary["live_route_combinations"] = len(combos)
         summary["full_detail"] = (
             "Pass detail=full to receive every source×destination combination. "
             "The default summary omits that matrix."
@@ -3238,6 +3240,26 @@ class DataPilotTools:
             )
         if asks_unreadable_live_metric(query):
             return ToolResult(name="explain_product", success=True, output=live_metric_output(query))
+        # A capability question ("can I mirror into MongoDB", "CDC from
+        # DynamoDB", "is Shopify supported") has a yes / no verdict in the
+        # tables the product enforces (CLM-10, CLM-14). Answer it from them.
+        from .capability_verdicts import capability_verdict
+
+        verdict = capability_verdict(query)
+        if verdict:
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": "capability_verdict",
+                    "answer": verdict,
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [],
+                    "sources": [],
+                    "grounded": True,
+                    "source": "capability_tables",
+                },
+            )
 
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [
@@ -3447,6 +3469,24 @@ class DataPilotTools:
                 },
             )
 
+        # Nothing documented answered. A question naming a catalog connector
+        # still has a verdict: its tier ("Is Shopify supported?" -> Planned,
+        # CLM-14), not a refusal.
+        verdict = capability_verdict(query, fallback=True)
+        if verdict:
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": "capability_verdict",
+                    "answer": verdict,
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [],
+                    "sources": [],
+                    "grounded": True,
+                    "source": "capability_tables",
+                },
+            )
         # No Help hit and no explicit FAQ regex: refuse. Keyword-bucket
         # CONVERSATION_TEMPLATES are not evidence.
         return ToolResult(

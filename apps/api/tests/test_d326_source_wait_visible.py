@@ -73,8 +73,11 @@ def test_population_walk_names_a_source_that_does_not_answer(fast_pulse):
         yield {"id": 1}
         yield {"id": 2}
 
-    msg = source_wait_message("postgresql", {"host": "db.internal", "port": 5432}, "Validating mapping and schema")
-    assert "postgresql db.internal:5432" in msg and _WAIT_WORDS in msg
+    msg = source_wait_message("postgresql", {"host": "db.internal", "port": 5432, "database": "sales"}, "Validating mapping and schema")
+    # UX-34: users read (and paste) the event log: it names the engine and
+    # database, never the host and port.
+    assert "PostgreSQL · sales" in msg and _WAIT_WORDS in msg
+    assert "db.internal" not in msg and "5432" not in msg
     set_progress_meter(ProgressMeter(_Store(), "job-d326"))
     try:
         assert list(_first_row_waits(_slow_rows(), msg)) == [{"id": 1}, {"id": 2}]
@@ -164,5 +167,5 @@ def test_peek_read_blocked_on_the_source_is_visible_on_the_job(tmp_path: Path, f
         cur.execute(f"DROP TABLE IF EXISTS {table}")
         admin.close()
     assert waiting, fake.messages
-    assert "postgresql" in waiting[0] and "Analyzing source table" in waiting[0]
+    assert "postgresql" in waiting[0].lower() and "Analyzing source table" in waiting[0]
     assert out["result"].success, out["result"].error
