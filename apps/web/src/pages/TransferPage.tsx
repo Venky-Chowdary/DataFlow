@@ -7785,12 +7785,11 @@ export function TransferPage({
                 className="df2-policy-toggle df2-source-ocr-toggle"
                 style={{ marginBottom: 8 }}
                 onClick={(e) => e.stopPropagation()}
+                // UX-41: product words for end users; install steps are the admin's (Help).
                 title={
                   ocrStatus?.available === false
-                    ? `OCR not ready: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}`
-                    : ocrStatus?.available
-                      ? "Tesseract is available — OCR scanned PDFs when no text layer exists"
-                      : "OCR scanned PDFs when no text layer exists (requires Tesseract on the API host)"
+                    ? "Reading scanned PDFs is not set up on this Datawrap deployment. Ask your administrator to enable OCR."
+                    : "Read scanned PDFs (no text layer) with text recognition."
                 }
               >
                 <input
@@ -7804,10 +7803,10 @@ export function TransferPage({
                   <strong>OCR scanned PDFs</strong>
                   <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Unavailable — the API host needs Tesseract installed."
+                      ? "Not set up on this deployment — ask your administrator to enable OCR."
                       : ocrStatus?.available
-                        ? "Tesseract ready — used when a PDF has no text layer."
-                        : "Optional · runs Tesseract when a PDF has no text layer."}
+                        ? "Ready — used when a PDF has no text layer."
+                        : "Optional · used when a PDF has no text layer."}
                   </small>
                 </span>
               </label>
