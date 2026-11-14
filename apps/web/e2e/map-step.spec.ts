@@ -89,10 +89,10 @@ async function reachMap(page: Page): Promise<void> {
   await page.getByRole("radio", { name: /QA Postgres Local/ }).click();
   await page.locator("#dest-col").fill("orders_dest");
   await page.locator("#dest-col").press("Enter");
-  // Leaving the table field re-reads the destination, and Continue is disabled
-  // while that read runs. A click that lands while the button is being disabled
-  // is dropped (W7: the "Continue without transforming" time-outs, 1 run in
-  // ~18). Let the read finish, then continue, and check the step changed.
+  // Editing the table re-reads the destination 350 ms later. That read used to
+  // disable Continue, and a click landing as it started was dropped (the W7
+  // "Continue without transforming" time-outs). Continue now stays enabled and
+  // waits for the read; the re-read spec at the end of this file pins the race.
   await page.locator("#dest-col").blur();
   await page.waitForLoadState("networkidle");
   const toTransform = page.getByRole("button", { name: /Continue to Transform/ });
@@ -768,6 +768,66 @@ test.describe("Map step chrome in both themes (W7 round 2)", () => {
         expect(upcoming.color, `390 ${theme}: "${current!.name}" is drawn like upcoming "${upcoming.name}"`).not.toBe(current!.color);
       }
       await context.close();
+    });
+  }
+});
+
+/**
+ * Destination → Transform must never swallow the Continue click.
+ *
+ * Typing the table name schedules a destination re-read 350 ms later. That read
+ * used to disable Continue while it ran, so a press that began before the read
+ * and released during it was dropped by the browser (a disabled button gets no
+ * click): the read finished, Continue looked ready again, and the operator was
+ * still on Destination (the walk timed out about once in 18-100 runs). The read
+ * is held open here so the press always straddles it.
+ */
+test.describe("Destination Continue while the destination is being re-read", () => {
+  for (const status of [200, 500]) {
+    test(`a press that straddles the re-read still reaches Transform, named and busy meanwhile (read answers ${status})`, async ({ page }) => {
+      await stubMapStudio(page);
+      const intro = fixture("transfer_introspect.json");
+      let release: () => void = () => {};
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      const readsTable = (body: unknown, table: string) =>
+        (body as { destination?: { table?: string } } | null)?.destination?.table === table;
+      await page.route("**/api/v1/transfer/introspect", async (route) => {
+        if (readsTable(route.request().postDataJSON(), "orders_dest")) {
+          await released;
+          // A failed read is reported by its own toast and never blocks Continue.
+          if (status !== 200) {
+            await route.fulfill({ status, contentType: "application/json", body: '{"detail":"catalog unavailable"}' });
+            return;
+          }
+        }
+        await route.fulfill({ status: 200, contentType: "application/json", body: intro });
+      });
+      await openStudio(page);
+      await page.addStyleTag({ content: ".dt-toast, .dt-toast-more { display: none !important; }" });
+      await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+      await page.getByRole("button", { name: /Continue to Destination/ }).click();
+      await page.getByRole("radio", { name: /QA Postgres Local/ }).click();
+      const firstRead = page.waitForResponse((res) =>
+        res.url().includes("/api/v1/transfer/introspect") && readsTable(res.request().postDataJSON(), "orders"));
+      await page.locator("#dest-col").fill("orders");
+      await firstRead;
+
+      const next = page.getByRole("button", { name: /Continue to Transform/ });
+      await expect(next).toBeEnabled();
+      const reread = page.waitForRequest((req) =>
+        req.url().includes("/api/v1/transfer/introspect") && readsTable(req.postDataJSON(), "orders_dest"));
+      await page.locator("#dest-col").fill("orders_dest");
+      await expect(next).toBeEnabled();
+      const box = (await next.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await reread;
+      await page.mouse.up();
+
+      // Waiting on the read: still named, announced busy.
+      await expect.soft(page.getByRole("button", { name: "Continue to Transform" })).toHaveAttribute("aria-busy", "true", { timeout: 5_000 });
+      release();
+      await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
     });
   }
 });
