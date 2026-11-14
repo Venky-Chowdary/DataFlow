@@ -9,7 +9,9 @@
 .df2-ms-automap,
 .df2-ms-computed,
 .df2-ms-templates {
-  --df2-ms-danger-ink: var(--df-danger);
+  /* --df-danger on --df-danger-bg is 4.41:1; a darker ink of the same hue
+     reaches AA (W7: the panel's Required chip). */
+  --df2-ms-danger-ink: color-mix(in srgb, var(--df-danger) 80%, black);
   --df2-ms-row: 76px;
   --df2-ms-option: 48px;
 }
@@ -1038,17 +1040,56 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   min-width: 0;
 }
 
-.df2-column-review.is-triage .df2-column-th-expand { width: 36px; }
-.df2-column-review.is-triage .df2-column-th-source { width: 27%; }
-.df2-column-review.is-triage .df2-column-th-arrow { width: 22px; }
-.df2-column-review.is-triage .df2-column-th-destination { width: 30%; }
-.df2-column-review.is-triage .df2-column-th-transform { width: 17%; }
-.df2-column-review.is-triage .df2-column-th-status { width: 216px; }
+/* W7: fixed tracks for the controls, the rest split between the two names.
+   At 740 px (1440 with the panel open) that is 42 + 24 + 136 + 152 fixed,
+   source 24 % (~178) and destination the rest (~208): every control fits its
+   own cell with 8 px of padding on each side, so neighbours sit 16 px apart.
+   Below 640 px of grid width the rows become cards (container query below). */
+.df2-column-review.is-triage .df2-column-th-expand { width: 42px; }
+.df2-column-review.is-triage .df2-column-th-source { width: 24%; }
+.df2-column-review.is-triage .df2-column-th-arrow { width: 24px; }
+.df2-column-review.is-triage .df2-column-th-destination { width: auto; }
+.df2-column-review.is-triage .df2-column-th-transform { width: 136px; }
+.df2-column-review.is-triage .df2-column-th-status { width: 152px; }
+
+/* One shared first line (W7): every cell starts with a 30 px track whose
+   centre is the row's centre line; secondary text (type, sample, grade) sits
+   on one small line under it. 3 + 30 + 2 + 18 + 2 + 1 (rule) = 56 px a row. */
+.df2-column-review.is-triage {
+  --df2-map-line: 30px;
+}
+
+/* The tracks above are border-box widths, so padding never pushes the table
+   past its scroller (it ran 8 px wide and scrolled sideways). */
+.df2-column-review.is-triage .df2-column-review-table th,
+.df2-column-review.is-triage .df2-column-review-table td {
+  box-sizing: border-box;
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th {
+  padding-inline: 8px;
+  /* Tokens, not the shared table's #f8fafc / #f1f5f9: in dark mode those
+     drew a white header strip and white rules between the rows. */
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-column-review.is-triage .df2-column-review-table td {
+  border-bottom-color: var(--df-border);
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th.df2-column-th-expand {
+  padding-inline: 4px;
+}
+
+.df2-column-review.is-triage .df2-column-review-table thead th.df2-column-th-arrow {
+  padding-inline: 0;
+  text-align: center;
+}
 
 .df2-column-review.is-triage .df2-column-row > td {
   vertical-align: top;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding: 3px 8px 2px;
 }
 
 .df2-column-review.is-triage .df2-column-row.is-expanded > td {
@@ -1260,9 +1301,6 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
 }
 
 /* 1366 x 768 (UX-23): the grid keeps every column readable beside the panel. */
-@media (max-width: 1439.98px) {
-  .df2-column-review.is-triage .df2-column-th-status { width: 200px; }
-}
 
 @media (max-width: 900px) {
   .df2-column-detail {
@@ -1284,47 +1322,6 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
     justify-content: flex-start;
   }
 
-  /* Phone: each row is a card; the cells stack instead of squeezing. */
-  .df2-column-review.is-triage .df2-column-review-table,
-  .df2-column-review.is-triage .df2-column-review-table tbody,
-  .df2-column-review.is-triage .df2-column-review-table tr,
-  .df2-column-review.is-triage .df2-column-review-table td {
-    display: block;
-    width: auto;
-  }
-
-  .df2-column-review.is-triage .df2-column-review-table thead {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-  }
-
-  .df2-column-review.is-triage .df2-column-row {
-    position: relative;
-    padding: 8px 8px 8px 36px;
-    border-bottom: 1px solid var(--df-border);
-  }
-
-  .df2-column-review.is-triage .df2-column-row > td {
-    padding: 2px 0;
-    border: 0;
-  }
-
-  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
-    position: absolute;
-    left: 4px;
-    top: 8px;
-  }
-
-  .df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
-    display: none;
-  }
-
-  .df2-column-detail-row > td {
-    padding: 8px 12px 12px;
-  }
 }
 
 /* The laptop "reclaim height" rules hide every other step's card head (the
@@ -1350,26 +1347,234 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   background: var(--df-surface-muted);
 }
 
-.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
-.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
-  display: inline-flex;
-  margin: 0 0 0 6px;
-  vertical-align: middle;
-}
-
-.df2-column-review.is-triage .df2-column-status .df2-btn {
-  padding-block: 2px;
-  min-height: 26px;
-}
-
 .df2-column-review.is-triage .df2-column-transform,
 .df2-column-review.is-triage .df2-column-transform-cell select {
   min-width: 0;
   width: 100%;
 }
 
-.df2-column-review.is-triage .df2-column-status .df2-column-status-chip + .df2-column-risk-actions {
-  margin-top: 4px;
-  margin-left: 0;
+
+/* ==========================================================================
+   Map step, one clear layout (W7)
+   The step starts under the stepper; one compact blocker line; a toolbar
+   with one leading action and one secondary cluster; grid rows that share a
+   single 30 px first line; rows become cards when the grid itself is narrow.
+   Tokens only.
+   ========================================================================== */
+
+/* -- spacing -------------------------------------------------------------- */
+
+/* The shell's 12 px gap already separates the step from the stepper card;
+   the panel's own 18 px top padding doubled it into an empty band. */
+.df2-page-transfer-studio .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel.df2-map-step-panel {
+  padding-top: 4px;
+}
+
+/* -- grid: one first line per row ----------------------------------------- */
+
+.df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
+  padding-inline: 4px;
+}
+
+.df2-column-review.is-triage .df2-column-expand {
+  margin-top: 2px;
+}
+
+/* Items align on the first line, not the middle of the cell: a long name
+   wraps under itself and the grip stays level with its first line. */
+.df2-column-review.is-triage .df2-column-source-cell > .df2-column-cell-content {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  min-height: var(--df2-map-line);
+}
+
+.df2-column-review.is-triage .df2-column-source-cell .df2-ms-grip {
+  height: 28px;
+  min-height: 28px;
+  margin: 1px 0 0;
+}
+
+.df2-column-review.is-triage .df2-column-source {
+  min-width: 0;
+  padding-block: 5px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-source-cell .df2-badge {
+  flex: none;
+  margin-top: 6px;
+}
+
+.df2-column-review.is-triage .df2-column-source-meta {
+  display: block;
+  margin-top: 2px;
+  padding-left: 28px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
+  padding-inline: 0;
+  line-height: var(--df2-map-line);
+  text-align: center;
+}
+
+.df2-column-review.is-triage .df2-column-destination-cell > .df2-column-cell-content {
+  display: block;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta {
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  min-height: 18px;
+  margin-top: 2px;
+}
+
+.df2-column-review.is-triage .df2-column-dest-type-text {
+  min-width: 0;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-tag,
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-compat-wrap {
+  flex: none;
+}
+
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-tag,
+.df2-column-review.is-triage .df2-column-dest-meta .df2-ms-compat {
+  min-height: 18px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-risk-actions,
+.df2-column-review.is-triage .df2-column-status .df2-column-contract-done {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: var(--df2-map-line);
+  margin: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-btn {
+  min-height: var(--df2-map-line);
+  height: var(--df2-map-line);
+  max-width: 100%;
+  padding-block: 0;
+}
+
+.df2-column-review.is-triage .df2-column-status .df2-column-status-chip {
+  margin-top: 2px;
+}
+
+/* -- the grid as cards, by its own width ---------------------------------- */
+/* A phone, and 1024 px with the panel open, leave the grid under 640 px: the
+   five columns would squeeze, so every row becomes a card whose first line is
+   the grip and the name. The header row is not drawn (each control carries
+   its own label). */
+
+.df2-map-editor-scroll-host {
+  container: df2-map-grid / inline-size;
+}
+
+@container df2-map-grid (max-width: 639.98px) {
+  .df2-column-review.is-triage .df2-column-review-table,
+  .df2-column-review.is-triage .df2-column-review-table tbody,
+  .df2-column-review.is-triage .df2-column-review-table tr,
+  .df2-column-review.is-triage .df2-column-review-table td {
+    display: block;
+    width: auto;
+  }
+
+  .df2-column-review.is-triage .df2-column-review-table thead {
+    display: none;
+  }
+
+  .df2-column-review.is-triage .df2-column-row {
+    position: relative;
+    padding: 8px 8px 8px 40px;
+    border-bottom: 1px solid var(--df-border);
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td {
+    padding: 2px 0;
+    border: 0;
+  }
+
+  /* The chevron sits on the name line whatever padding a cell gets: the cell
+     steps out of the layout and the button is placed on the card itself.
+     Its centre: card padding 8 + cell padding 2 + half the 30 px line 15 −
+     half the button 13 = 12 px. */
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell {
+    display: contents;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-expand-cell .df2-column-expand {
+    position: absolute;
+    left: 6px;
+    top: 12px;
+    margin-top: 0;
+  }
+
+  .df2-column-review.is-triage .df2-column-row > td.df2-column-arrow {
+    display: none;
+  }
+
+  .df2-column-detail-row > td {
+    padding: 8px 12px 12px;
+  }
+
+  /* The three filter tabs fit a phone's grid on one track: tighter tabs,
+     the small type size (they ran 16 px past the track and scrolled). */
+  .df2-app .df2-column-review.is-triage .df2-filter-tabs {
+    flex-wrap: nowrap;
+    overflow: visible;
+  }
+
+  .df2-app .df2-column-review.is-triage .df2-filter-tabs .df2-tab {
+    padding: 0 6px;
+    font-size: var(--df-fs-xs);
+  }
+}
+
+/* -- phone: the step uses the width --------------------------------------- */
+
+@media (max-width: 639.98px) {
+  .df2-page-transfer-studio .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel.df2-map-step-panel {
+    padding-inline: 8px;
+  }
+}
+
+/* -- footer on a phone: two rows ------------------------------------------ */
+/* Back, Clear key and Advanced share the first row; Continue to Validate,
+   the step's one primary action, has the second to itself. */
+
+@media (max-width: 639.98px) {
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions {
+    display: contents;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer > .df2-btn,
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn:not(.df2-btn-primary) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn-primary {
+    flex: 1 0 100%;
+  }
 }
