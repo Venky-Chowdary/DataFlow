@@ -223,3 +223,16 @@ def seven_digit_projection(cols: list[Any], engine: Any) -> list[Any]:
         else:
             out.append(col)
     return out
+
+
+def driver_select_list(cur: Any, table_ref: str) -> str:
+    """``*`` on pyodbc; on pymssql, DATETIME2(7) as style-121 text (raw-cursor readers).
+
+    The CDC snapshot reads with ``SELECT *`` on a DB-API cursor. Under pymssql
+    that dropped the seventh digit of every DATETIME2(7) cell, as the table
+    reader did before :func:`seven_digit_projection`.
+    """
+    module = type(getattr(cur, "_cursor", None) or cur).__module__
+    if not str(module).startswith("pymssql"):
+        return "*"
+    return full_precision_select_list(cur, table_ref, None)

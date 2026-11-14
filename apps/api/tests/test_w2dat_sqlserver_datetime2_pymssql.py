@@ -76,3 +76,23 @@ def test_seven_digit_text_keeps_its_tick_for_a_datetime2_7_copy():
     from connectors.sqlserver_tick import tick_from_text
 
     assert tick_from_text("2024-01-01 10:00:00.1234567") == 7
+
+
+class _Cur:
+    def __init__(self, module: str):
+        self.__class__ = type("Cursor", (_Cur,), {"__module__": module})
+        self.sql: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+
+    def fetchall(self):
+        return [("id", "int", 0), ("at", "datetime2", 7)]
+
+
+def test_cdc_snapshot_select_list_keeps_the_tick_under_pymssql():
+    from connectors.sqlserver_tick import driver_select_list
+
+    assert driver_select_list(_Cur("pyodbc"), "[dbo].[t]") == "*"
+    sel = driver_select_list(_Cur("pymssql._pymssql"), "[dbo].[t]")
+    assert sel == "[id], CONVERT(varchar(27), [at], 121) AS [at]"
