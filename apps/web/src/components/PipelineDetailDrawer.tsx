@@ -693,7 +693,7 @@ export function PipelineDetailDrawer({
             )}
             <p className="df2-drawer-empty-line">
               {liveCampaign?.next_action
-                || "Parallel run compares live source vs destination column profiles (Google Dual Run cycles). Overwrite loads record a cycle automatically. Not per-cell Gate-8."}
+                || "Parallel run compares live source and destination column profiles over repeated cycles. Overwrite loads record a cycle automatically. It is a profile check, not a per-cell proof."}
             </p>
             <Button
               size="sm"

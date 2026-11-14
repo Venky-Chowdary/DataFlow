@@ -673,7 +673,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring same-engine syncs — Map → Validate → Execute on a cadence. Not ADF/Informatica DAG orchestration. A draft without mappings stays paused until Transfer Studio persists a contract."
+      description="Recurring syncs between your connections: each run replays a Validate-approved route on a cadence. A draft without mappings stays paused until Transfer Studio saves its mapping."
     >
       <PageFrame className="df2-pipeline-page">
       <PermissionNotice

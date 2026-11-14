@@ -440,7 +440,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           value={sourceId}
           onChange={setSourceId}
           connectors={connectors}
-          placeholder="Add a connector first"
+          placeholder={connectors.length ? "Choose the source connection" : "Add a connection first"}
           required
           disabled={connectors.length === 0}
         />
@@ -485,7 +485,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           value={destId}
           onChange={setDestId}
           connectors={connectors}
-          placeholder="Add a connector first"
+          placeholder={connectors.length ? "Choose the destination connection" : "Add a connection first"}
           required
           disabled={connectors.length === 0}
         />
