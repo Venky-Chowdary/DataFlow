@@ -151,7 +151,30 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "After write, every source relationship is dest-enforced or anti-join scanned with zero orphans. Schema FK coverage and a sample orphan probe are not dest population proof.",
   },
   {
+    id: "g_create_dest_ddl",
+    code: "G6C",
+    label: "Create destination table",
+    icon: "server",
+    rule: "A destination table that does not exist yet is created only after its CREATE statement is approved.",
+  },
+  {
+    id: "g_upsert_dest_key",
+    code: "G6K",
+    label: "Upsert key on destination",
+    icon: "key",
+    rule: "An upsert needs a unique key on the destination; adding one is DDL that is approved before Execute.",
+  },
+  {
+    id: "g12_staging_policy",
+    code: "G12S",
+    label: "Staging policy",
+    icon: "layers",
+    rule: "Staging tables and their cleanup follow the workspace staging policy.",
+  },
+  {
     id: "g23_destination_name",
+    // G23 is Stream procedures; two gates must not show one code (UX-6).
+    code: "G23N",
     label: "Destination name",
     icon: "alert",
     rule: "The destination table name is a plain SQL identifier, so the table is created under exactly the name the plan shows.",
@@ -211,9 +234,12 @@ export function gateCatalogEntry(id: string): GateCatalogEntry {
   const canonical = canonicalizeGateId(id);
   const hit = GATE_CATALOG.find((g) => g.id === canonical);
   if (hit) return hit;
+  // An id the catalog does not know yet still reads as words, never as a code
+  // ("g_some_new_gate" → "Some new gate").
+  const words = id.replace(/^g\d*[a-z]?_/i, "").replace(/_/g, " ").trim() || id;
   return {
     id,
-    label: id.replace(/^g\d+_/, "").replace(/_/g, " "),
+    label: words.charAt(0).toUpperCase() + words.slice(1),
     icon: "gate",
     rule: "Validation rule enforced before transfer.",
   };
