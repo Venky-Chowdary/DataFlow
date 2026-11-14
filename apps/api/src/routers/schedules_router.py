@@ -625,6 +625,8 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
+    from services.body_id_ownership import assert_schedule_body_ids
+
     ws = resolve_write_workspace(request, workspace_id)
     try:
         result = apply_manifest(
@@ -633,6 +635,8 @@ async def gitops_apply_manifest(
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
             workspace_filter=tenant_scope(request, workspace_id).filter,
+            # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+            authorize_schedule=lambda spec: assert_schedule_body_ids(request, spec),
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
@@ -964,11 +968,15 @@ async def import_pipeline_schedule(
         spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
         if isinstance(spec, dict):
             spec["workspace_id"] = ws
+    from services.body_id_ownership import assert_schedule_body_ids
+
     result = apply_manifest(
         payload,
         dry_run=False,
         workspace_id=ws,
         workspace_filter=tenant_scope(request, workspace_id).filter,
+        # The same connector/contract/recipe ownership check as POST /schedules (SEC-5).
+        authorize_schedule=lambda spec: assert_schedule_body_ids(request, spec),
     )
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)

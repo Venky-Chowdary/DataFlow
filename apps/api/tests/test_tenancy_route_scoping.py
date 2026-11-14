@@ -915,6 +915,15 @@ def _connector_bodies(*shapes: str) -> Callable[[Any, Seeded], list[dict[str, An
     return bodies
 
 
+def _pipeline_resource(world, source: str, dest: str) -> dict[str, Any]:
+    """A GitOps PipelineSchedule naming ``source`` and ``dest`` (SEC-5)."""
+    name = f"gitops-{_next(world)}"
+    return {"apiVersion": "datawrap.io/v1", "kind": "PipelineSchedule", "metadata": {"name": name},
+            "spec": {"name": name, "interval": "daily", "enabled": False, "source_connector_id": source,
+                     "source_table": "t", "dest_connector_id": dest, "dest_table": "t",
+                     "mappings": [{"source": "id", "target": "id", "confidence": 1.0, "user_override": True}]}}
+
+
 #: Body templates: A's connector id where the route reads it.
 _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "query": lambda w, c: {"connector_id": c, "query": "select 1", "language": "sql"},
@@ -943,6 +952,12 @@ _BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
     "schedules.destination": lambda w, c: {"name": f"s{_next(w)}", "interval": "daily",
                                            "source_connector_id": _b_connector(w), "source_table": "t",
                                            "dest_connector_id": c, "dest_table": "t", "mappings": _MAP},
+    "import.source": lambda w, c: _pipeline_resource(w, c, _b_connector(w)),
+    "import.destination": lambda w, c: _pipeline_resource(w, _b_connector(w), c),
+    "gitops.source": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                   "resources": [_pipeline_resource(w, c, _b_connector(w))]},
+    "gitops.destination": lambda w, c: {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest",
+                                        "resources": [_pipeline_resource(w, _b_connector(w), c)]},
     "transforms": lambda w, c: {"name": f"z{_next(w)}", "destination_connector_id": c,
                                 "models": [{"name": "m", "sql": "select 1"}]},
 }
@@ -1019,6 +1034,8 @@ _BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/resource-acls": _job_bodies("acl"),
     "POST /api/v1/schedules/": _connector_bodies("schedules.source", "schedules.destination"),
     "POST /api/v1/schedules/admin/orphans/reconcile": lambda w, s: [{"schedule_ids": [s.params["schedule_id"]]}],
+    "POST /api/v1/schedules/import": _connector_bodies("import.source", "import.destination"),
+    "POST /api/v1/schedules/gitops/apply": _connector_bodies("gitops.source", "gitops.destination"),
     "POST /api/v1/transfer/execute": _connector_bodies("execute.source", "execute.destination"),
     "POST /api/v1/transfer/execute#contract_id": lambda w, s: _contract_bodies(w, s)[1:],
     "POST /api/v1/transfer/execute#plan_id": _plan_bodies,
