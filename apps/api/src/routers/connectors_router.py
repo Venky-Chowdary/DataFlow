@@ -3128,6 +3128,10 @@ def profile_file_upload(
         )
 
     schema = FileParser.infer_schema(result.data, invalid_calendar_votes=True)
+    if str(getattr(result, "file_type", "") or "") in {"json", "jsonl"}:
+        from services.file_parser import _json_value_kinds_override
+
+        schema = _json_value_kinds_override(schema, list(result.data or [])[:1000])  # DATA-20
     try:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 

@@ -2028,7 +2028,9 @@ class FileParser:
         return cell_to_string(value)
 
     @staticmethod
-    def infer_schema(records: list[dict], *, invalid_calendar_votes: bool = False) -> dict[str, str]:
+    def infer_schema(
+        records: list[dict], *, invalid_calendar_votes: bool = False, json_kinds: bool = False
+    ) -> dict[str, str]:
         """Infer rich schema from records using statistical type inference.
 
         ``invalid_calendar_votes``: True only for a file's own rows (uploads,
@@ -2051,7 +2053,47 @@ class FileParser:
         from services.schema_inference import infer_schema_map
 
         schema, _intel = infer_schema_map(samples, invalid_calendar_votes=invalid_calendar_votes)
+        return _json_value_kinds_override(schema, records[:1000]) if json_kinds else schema
+
+
+def _json_value_kinds_override(schema: dict[str, str], records: list[dict]) -> dict[str, str]:
+    """DATA-20: a JSON value's own type beats what its text looks like.
+
+    Inference reads every cell as text, so a JSON string ``"1"`` voted INTEGER
+    (MongoDB then stored the number 1), ``"true"`` voted BOOLEAN, and the
+    float ``1.5`` voted DECIMAL (MongoDB stored Decimal128). For a JSON / JSONL
+    file (``json_kinds``; records with JSON scalars and no date or bytes
+    objects), a column of strings stays text, BOOLEAN needs a
+    real JSON boolean, and a column of JSON floats is DOUBLE. Dates spelled
+    as strings still infer; only an explicit map turns a float into DECIMAL.
+    """
+    import datetime as _dt
+    from decimal import Decimal
+
+    from services.type_system import normalize_logical_type
+
+    typed = False
+    for rec in records:
+        for value in rec.values():
+            if isinstance(value, (_dt.date, _dt.time, bytes, bytearray, memoryview)):
+                return schema
+            if isinstance(value, (bool, int, float, Decimal, dict, list)):
+                typed = True
+    if not typed:
         return schema
+    out = dict(schema)
+    for col, inferred in schema.items():
+        kinds = {type(r.get(col)) for r in records if r.get(col) is not None}
+        if not kinds:
+            continue
+        logical = normalize_logical_type(inferred)
+        if kinds == {str} and logical in {"integer", "decimal", "float", "boolean"}:
+            out[col] = "TEXT"
+        elif logical == "boolean" and bool not in kinds:
+            out[col] = "TEXT"
+        elif logical == "decimal" and float in kinds and kinds <= {int, float}:
+            out[col] = "DOUBLE"
+    return out
 
 
 def _xml_local_name(tag: object) -> str:

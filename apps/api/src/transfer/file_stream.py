@@ -474,7 +474,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True, json_kinds=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
@@ -592,7 +592,7 @@ def _peek_parsed_file_source(
                 '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
             )
         headers = sorted(columns)
-        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True, json_kinds=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "xml":
