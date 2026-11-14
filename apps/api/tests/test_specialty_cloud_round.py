@@ -201,9 +201,13 @@ def test_non_sql_sample_uses_the_reader_not_limit_sql(monkeypatch) -> None:
     assert schema["qty"] == "integer"
 
 
-def test_vector_destination_falls_back_when_sentence_transformers_is_missing(monkeypatch) -> None:
+def test_vector_destination_never_substitutes_a_missing_model(monkeypatch) -> None:
+    """CLM-11: a missing MiniLM is refused; TF-IDF only when chosen (tfidf/local)."""
     import sys
 
+    import pytest
+
+    from services.embedding_providers.base import EmbeddingConfigError
     from services.vectorization import _get_embedder, vectorize_records
 
     _get_embedder.cache_clear()
@@ -211,14 +215,20 @@ def test_vector_destination_falls_back_when_sentence_transformers_is_missing(mon
     import src.ai.rag.embedding_service as embedding_service
 
     monkeypatch.setattr(embedding_service, "_embedding_service", None)
+    with pytest.raises(EmbeddingConfigError, match="tfidf/local"):
+        vectorize_records(
+            [{"id": "1", "content": "postgres row about orders"}],
+            content_column="content",
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            skip_chunking=True,
+        )
     rows = vectorize_records(
         [{"id": "1", "content": "postgres row about orders"}],
         content_column="content",
-        model="sentence-transformers/all-MiniLM-L6-v2",
+        model="tfidf/local",
         skip_chunking=True,
     )
     assert rows
     assert rows[0]["embedding"]
-    assert len(rows[0]["embedding"]) == 384
     assert rows[0]["metadata"].get("_df_embedding_backend") == "tfidf_fallback"
     _get_embedder.cache_clear()

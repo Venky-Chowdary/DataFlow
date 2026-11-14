@@ -551,4 +551,7 @@ def inspect_destination_for_preflight(
     from services.pgvector_layout import document_table_preflight_view, refuse_missing_vector_type
 
     refuse_missing_vector_type(out, endpoint)
+    from services.vectorization import refuse_unchosen_embedding_provider
+
+    refuse_unchosen_embedding_provider(out, endpoint)  # CLM-11: no silent TF-IDF
     return document_table_preflight_view(out)
