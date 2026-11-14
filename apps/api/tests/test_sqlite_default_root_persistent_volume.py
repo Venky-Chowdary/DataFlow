@@ -57,10 +57,12 @@ def test_explicit_root_wins_and_anchors_relative_paths(production, tmp_path, mon
         sqlite_file_path(str(production / "a.db"), "", "")
 
 
-def test_development_paths_are_untouched(tmp_path, monkeypatch):
+def test_development_paths_are_untouched_only_when_opted_out(tmp_path, monkeypatch):
     for name in ("DATAFLOW_SQLITE_ROOT", "DATAWRAP_SQLITE_ROOT"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "development")
+    # SEC-9: development confines (and anchors) too; the opt-out keeps the path.
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     assert sqlite_file_path("local.db", "", "") == "local.db"
     assert sqlite_file_path("/tmp/x.db", "", "") == "/tmp/x.db"
     assert sqlite_file_path(":memory:", "", "") == ":memory:"
