@@ -2376,8 +2376,8 @@
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-field--limit select {
+  --df-select-arrow-gutter: 24px;
   padding-left: 8px;
-  padding-right: 22px;
   background-position: right 6px center;
 }
 
