@@ -4,6 +4,7 @@ import {
   bindNamesFromSql,
   destQueryHint,
   dialectOffersDestQuery,
+  writeHookHint,
   dialectOffersProcedures,
   procedureHint,
 } from "../../lib/sourceReadMode";
@@ -144,7 +145,7 @@ export function DestProcedurePanel({
             onChange={onDestProcedureBefore}
             mode="procedure"
             dialect={destType}
-            placeholder="EXEC dbo.DisableIndexes"
+            placeholder={writeHookHint(destType, "before")}
             rows={4}
           />
           <SqlEditor
@@ -154,7 +155,7 @@ export function DestProcedurePanel({
             onChange={onDestProcedureAfter}
             mode="procedure"
             dialect={destType}
-            placeholder="CALL public.rebuild_stats()"
+            placeholder={writeHookHint(destType, "after")}
             rows={4}
           />
         </details>

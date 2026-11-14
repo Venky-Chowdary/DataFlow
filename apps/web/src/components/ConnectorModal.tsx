@@ -14,6 +14,7 @@ import {
   uploadedFileMatchesConnector,
 } from "../lib/connectorFileUpload";
 import {
+  connectorDisplayName,
   connectorListenPort,
   getConnectorDefaults,
   isAwsConnector,
@@ -796,7 +797,8 @@ export function ConnectorModal({
                   <input
                     id="df2-conn-name"
                     className="df2-input"
-                    placeholder="Production Snowflake"
+                    // UX-31: the example names the engine being configured.
+                    placeholder={`Production ${connectorDisplayName(type)}`}
                     value={name}
                     onChange={(e) => {
                       setName(e.target.value);
