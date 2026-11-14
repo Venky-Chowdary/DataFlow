@@ -2571,6 +2571,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             # onto a stored key at run time, after the rows before it landed.
             found = list(kv_collision.findings)
             key = getattr(kv_collision, "key_column", "") or "identity key"
+            kv_mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+            if kv_mode != "strict":
+                # Balanced / lenient hold a refused row out instead of stopping:
+                # the stored keys keep their values (SET NX) and the run lands
+                # the rest — a note, not a refusal (sync-mode matrix contract).
+                return _warn(
+                    GateId.G6_TARGET_DDL,
+                    (
+                        f"Destination already stores {len(found)} key(s) of this batch on {key} "
+                        f"(e.g. {found[0].get('value')}): an append keeps the stored values, and "
+                        f"{kv_mode} validation holds those rows out of this run."
+                    ),
+                    start,
+                    _scope(
+                        {
+                            "collision_count": len(found),
+                            "rule_id": "g6_target_ddl.append_key_collision_held_out",
+                            "validation_mode": kv_mode,
+                        },
+                        coverage="sample",
+                        note="Destination key collision probe on append batch",
+                    ),
+                )
             return _block(
                 GateId.G6_TARGET_DDL,
                 (
