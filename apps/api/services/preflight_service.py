@@ -1091,6 +1091,11 @@ def run_file_preflight(
         except Exception as fit_exc:
             pre_gate_fit_error = str(fit_exc)[:400]
             logger.warning("pre-gate population fit scan failed: %s", fit_exc, exc_info=fit_exc)
+        if source_error and pre_gate_fit_error and getattr(pre_gate_fit_report, "probe_error", ""):
+            # ERR-31: G1 already names this read failure; the fit gate waits on it.
+            from dataclasses import replace as _dc_replace
+
+            pre_gate_fit_report = _dc_replace(pre_gate_fit_report, probe_error="not run: waiting on Source (G1)")
     from services.population_fit_narrowing import proven_width_narrowings
 
     proven_string_narrowings = proven_width_narrowings(

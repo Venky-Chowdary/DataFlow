@@ -658,9 +658,4 @@ def _walk_error_copy(exc: BaseException, table: Any) -> str:
     from services.error_taxonomy import classify
 
     named = classify(exc, side="source", phase="read", object={"table": str(table or "")})
-    if named is None:
-        return "the source read failed"
-    if named.code.startswith(("auth.", "access.", "network.", "config.", "object.")):
-        # ERR-31: G1's sample read hit the same cause and names it once.
-        return "not run: waiting on Source (G1)"
-    return named.text
+    return named.text if named is not None else "the source read failed"
