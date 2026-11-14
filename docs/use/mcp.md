@@ -94,7 +94,7 @@ The table is generated from the tool registry. Regenerate with
 
 <!-- BEGIN GENERATED: mcp-tools (docs/tools/gen_mcp_tools.py) -->
 
-68 tools: 42 read, 3 plan, 23 change something.
+71 tools: 45 read, 3 plan, 23 change something.
 
 | Tool | Permission | Effect | Staged for Confirm | What it does |
 |---|---|---|---|---|
@@ -102,16 +102,19 @@ The table is generated from the tool registry. Regenerate with
 | `analyze_dataset` | `workspace.read` | read | no | Deep analysis of a dataset: columns, types, PII, quality, samples. |
 | `analyze_result` | `query.use` | read | no | Profile a previously sampled/queried result by result_id (or the latest result in this Pilot session). |
 | `brief_workspace` | `workspace.read` | read | no | Spoken sitrep of this workspace: connectors (tested/failed), recent jobs, pipelines due or parked on approval, contracts. |
+| `check_reversibility` | `job.plan` | read | no | Whether a transfer plan's (or a job's) destination can be turned back into the source: the verdict per table (reversible / partly / not reversible)... |
 | `compare_connectors` | `connector.read` | read | no | Compare two saved connectors side by side on engine, endpoint, connection health, transfer-readiness and live object count. |
 | `compare_datasets` | `workspace.read` | read | no | Compare schemas of two datasets side by side. |
 | `confirm_action` | `workspace.read` | read | no | Consume a pending approval (ack_id) and perform the mutation the operator already staged: create_connector, start_transfer, start_dataset_transfer,... |
 | `describe_connector_transforms` | `workspace.read` | read | no | List every column transform the engine applies — exact semantics, deterministic flag, and lossy flag per op, plus accepted aliases and parameterize... |
 | `describe_pilot` | `workspace.read` | read | no | Explain what Datawrap Pilot knows and can do locally — capabilities, not raw RAG dumps. |
 | `diff_schemas` | `connector.read` | read | no | Diff two live connector schemas (source table vs dest table) using classify_schema_change — additive vs breaking. |
+| `explain_exit_rehearsal` | `job.read` | read | no | Explain one exit rehearsal: its verdict, every table's completeness (row counts, key-set and row digests, control totals, value parity method), the... |
 | `explain_mapping_assurance` | `workspace.read` | read | no | Explain the schema mapping algorithms, confidence scoring, review rules, and guarantees. |
 | `explain_parity` | `job.read` | read | no | Explain whether a finished job's destination matches its source: the parity verdict, how sure it is, every difference with its deterministic cause,... |
 | `explain_product` | `workspace.read` | read | no | Answer product how-to questions about Datawrap (transfer, mapping, preflight, connectors, PII, troubleshooting) from curated local knowledge — not... |
 | `filter_result` | `query.use` | read | no | Filter rows in a stored Pilot result (eq/ne/contains/gt/lt/is_null/…). |
+| `get_exit_readiness` | `job.read` | read | no | Exit readiness of this workspace: the declared systems (what would have to be taken out), which have a proven exit rehearsal, which rehearsals are... |
 | `get_job` | `job.read` | read | no | Fetch a transfer job by exact ID (24-char hex ObjectId or job_id string). |
 | `get_preflight_run` | `job.read` | read | no | Look up a validation/preflight run by ID (pf_…) — blockers, gates, remediations. |
 | `get_schedule` | `schedule.read` | read | no | Fetch one pipeline schedule by id or name, including route, sync mode, and bound contract / breaker when one is set. |
@@ -123,8 +126,8 @@ The table is generated from the tool registry. Regenerate with
 | `list_connector_objects` | `connector.read` | read | no | List live tables/collections on a saved database connector (Postgres, MySQL, Mongo, Snowflake, …). |
 | `list_connectors` | `connector.read` | read | no | List saved database/warehouse connectors. |
 | `list_contracts` | `job.read` | read | no | List data contracts. |
-| `list_datasets` | `workspace.read` | read | no | List every dataset available — uploads, fixtures, and transfer history. |
-| `list_jobs` | `job.read` | read | no | List recent transfer jobs with status, IDs, and record counts. |
+| `list_datasets` | `workspace.read` | read | no | List the datasets available — this workspace's uploaded files and the built-in industry templates. |
+| `list_jobs` | `job.read` | read | no | List transfer jobs with status, IDs, and record counts, newest first. |
 | `list_schedules` | `schedule.read` | read | no | List pipeline schedules (Pipelines page) with cadence, next run, last status, and bound contract / breaker when one is set. |
 | `map_connector_schemas` | `connector.read` | read | no | Live-introspect source and destination tables on saved connectors, then run Datawrap's semantic column mapper (same engine as Transfer Studio Map s... |
 | `navigate` | `workspace.read` | read | no | Navigate the user to an app screen: dashboard, pilot, transfer, connectors, jobs, schedules (pipelines), contracts, query, mcp, settings, docs, ben... |

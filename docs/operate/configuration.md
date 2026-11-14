@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-557 flags: 471 accept both prefixes, 10 are read under one exact product-prefixed name only, 76 are unprefixed.
+591 flags: 510 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -108,14 +108,22 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `AI_METADATA_ONLY` | `true` | Keeps cell values out of prompts sent to a model provider. On by default. | `apps/api/services/ai_egress.py` |
 | `ALLOW_DEV_USER` | `0` | Enables a built-in development login. Production refuses to serve when it is on. | `apps/api/services/platform_config.py`, `apps/api/src/services/auth_service.py` |
 | `ALLOW_EMBEDDING_DOWNLOAD` | unset | Read by `_init_backend()`: Datawrap — Embedding Service | `apps/api/src/ai/rag/embedding_service.py` |
+| `ALLOW_PLATFORM_AWS_CREDENTIALS` | `""` | Read by `platform_aws_credentials_allowed()`: True only when the operator set `DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS` on | `apps/api/services/platform_aws_credentials.py` |
+| `ALLOW_PLATFORM_GCP_AZURE_CREDENTIALS` | `""` | Read by `platform_gcp_azure_credentials_allowed()`: True only when the operator set `DATAFLOW_ALLOW_PLATFORM_GCP_AZURE_CREDENTIALS` on | `apps/api/services/platform_gcp_azure_credentials.py` |
+| `ALLOW_PLATFORM_KERBEROS` | `""` | Read by `platform_kerberos_allowed()`: Kafka logins and client options a tenant connector may use (follow-up review 4, M) | `apps/api/connectors/kafka_sasl_policy.py` |
 | `ALLOW_STUB_WRITES` | `""` | Read by `allow_stub_writes()`: Only allow simulated writes when DATAFLOW_ALLOW_STUB_WRITES=1 | `apps/api/connectors/driver_guard.py` |
 | `API_BASE` | `http://127.0.0.1:8001` | Read by `_api_base()`: Prove unique-engine cartesian + catalog slots + schedules + warehouse ports | `apps/api/services/live_fleet_proof.py` |
 | `API_CLAIM_LOOP` | `1` | Whether the API process also pulls jobs from the queue in claim mode. Default on; set `0` when dedicated workers execute. | `apps/api/services/scheduler_mode.py` |
 | `API_ORPHAN_RESUME` | unset | `0` stops the API from re-queuing orphaned jobs at start. Workers and the scheduler never scan. | `apps/api/services/process_role.py` |
+| `API_SHUTDOWN_BUDGET_SECONDS` | `25` | Read by `shutdown_budget_seconds()`: Total time the teardown may spend stopping and joining (`API_SHUTDOWN_BUDGET_SECONDS`, default 25) | `apps/api/services/background_lifecycle.py` |
 | `APP_URL` | unset | Read by `_mark()`: The app's Datawrap mark (`apps/web/public/brand/datawrap-mark-256.png`, (and other readers) | `apps/api/services/email_templates.py`, `apps/api/services/signup_service.py` |
 | `ASSUME_PRODUCTION` | `0` | `1` turns production policy on for a host that does not set `ENV` (bare metal, Kubernetes). | `apps/api/services/platform_config.py` |
 | `AUDIT_ANCHOR_EVERY` | `1` | Read by `_maybe_anchor_tip()`: Best-effort seal of the chain tip (never fails the audit append) | `apps/api/services/audit_log.py` |
+| `AUDIT_ANCHOR_MIN_INTERVAL_SECONDS` | `""` | Read by `_min_interval()`: External anchoring of digests — the audit chain tip and signed evidence packs | `apps/api/services/audit_anchor.py` |
 | `AUDIT_ANCHOR_PROVIDER` | `stub` | The anchor provider asked for. Only the local anchor file is implemented: any other value is recorded on the receipt as `requested_provider`, the receipt says the request was not met, and a warning is logged. | `apps/api/services/audit_anchor.py` |
+| `AUDIT_ANCHOR_RETENTION_DAYS` | `""` | Read by `retention_days()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
+| `AUDIT_ANCHOR_S3_BUCKET` | `""` | Read by `bucket()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
+| `AUDIT_ANCHOR_S3_PREFIX` | `""` | Read by `prefix()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
 | `AUDIT_ANCHOR_STORE` | `""` | Path of the audit tip anchor file. Defaults to `audit_tip_anchors.jsonl` in the data directory. | `apps/api/services/audit_anchor.py` |
 | `AUDIT_CLOCK_SKEW_S` | `""` | Read by `_clock_skew()`: How far an unverifiable record's own time may run against its verified | `apps/api/services/evidence_chain.py` |
 | `AUDIT_HMAC_KEY` | unset | Key that signs the audit chain. Set the same value on every process that appends audit events. | `apps/api/services/audit_chain_keys.py` |
@@ -123,22 +131,33 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `AUDIT_LEGAL_HOLD` | `""` | `1` suspends audit retention purges. | `apps/api/services/audit_log.py` |
 | `AUDIT_MAX_EVENTS` | `5000` | Read at module level: Append-only workspace audit log — real events, redacted secrets | `apps/api/services/audit_log.py` |
 | `AUDIT_RETENTION_DAYS` | unset | Days of audit events to keep: `off` (or unset) keeps them, otherwise a whole number from 30 to 3650. Any other value is a configuration error. | `apps/api/services/audit_log.py` |
+| `AUTH_ACCOUNT_SLOW_FAILURES` | computed | Read by `record_login_failure()`: Count a failed sign-in. `account_slowed` is True when this failure | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_ACCOUNT_SLOW_MAX_SEC` | `60.0` | Read by `record_login_failure()`: Count a failed sign-in. `account_slowed` is True when this failure | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_FAILURE_WINDOW_SEC` | `900.0` | Read by `_put()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_IP_LOCKOUT_FAILURES` | `30` | Read by `check_login_rate_limit()`: Deny when this account+address pair, or this address, is locked or throttled | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_KNOWN_ADDRESS_DAYS` | `30.0` | Read by `record_login_success()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
 | `AUTH_LEGACY_TOKENS` | `""` | Read by `_legacy_tokens_allowed()`: Allow pre-jti `email:expires:sig` tokens (transition). Default off in production | `apps/api/src/services/auth_service.py` |
-| `AUTH_LOCKOUT_FAILURES` | `8` | Read by `_maybe_engage_lockout()`: If failure threshold reached, engage exponential lockout and deny | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_LOCKOUT_MAX_SEC` | `3600.0` | Read by `_maybe_engage_lockout()`: If failure threshold reached, engage exponential lockout and deny | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_LOCKOUT_SEC` | `300.0` | Read by `_maybe_engage_lockout()`: If failure threshold reached, engage exponential lockout and deny | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_RATE_BURST` | `10.0` | Read by `check_login_rate_limit()`: Deny when per-IP or per-account throttle/lockout is exhausted | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_BACKEND` | `""` | Read by `_lockout_backend_url()`: Redis for lockouts: `DATAFLOW_AUTH_LOCKOUT_REDIS_URL`, else `REDIS_URL` | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_FAILURES` | `8` | Read by `_lock_settings()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_MAX_KEYS` | `10000` | Read by `put()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_MAX_SEC` | `3600.0` | Read by `_lock_settings()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_PREFIX` | `""` | Read by `_store()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_REDIS_URL` | `""` | Read by `_lockout_backend_url()`: Redis for lockouts: `DATAFLOW_AUTH_LOCKOUT_REDIS_URL`, else `REDIS_URL` | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_LOCKOUT_SEC` | `300.0` | Read by `_lock_settings()`: Login rate limit + exponential lockout (audit ITEM 4, SEC-7, REL-1) | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_RATE_BURST` | `10.0` | Read by `check_login_rate_limit()`: Deny when this account+address pair, or this address, is locked or throttled | `apps/api/services/auth_rate_limit.py` |
 | `AUTH_RATE_LIMIT` | `1` | Login rate limiting and lockout. On by default. Counters are kept per process. | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_RATE_MAX_KEYS` | `5000` | Read by `check_login_rate_limit()`: Deny when per-IP or per-account throttle/lockout is exhausted | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_RATE_QPS` | `0.2` | Read by `check_login_rate_limit()`: Deny when per-IP or per-account throttle/lockout is exhausted | `apps/api/services/auth_rate_limit.py` |
-| `AUTH_SECRET` | set in code (not shown) | Secret that signs session tokens. Production refuses to serve when it is unset or shorter than 32 characters. | `apps/api/services/audit_chain_keys.py`, `apps/api/services/form_token.py` +5 more |
+| `AUTH_RATE_MAX_KEYS` | `5000` | Read by `check_login_rate_limit()`: Deny when this account+address pair, or this address, is locked or throttled | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_RATE_QPS` | `0.2` | Read by `check_login_rate_limit()`: Deny when this account+address pair, or this address, is locked or throttled | `apps/api/services/auth_rate_limit.py` |
+| `AUTH_SECRET` | set in code (not shown) | Secret that signs session tokens. Production refuses to serve when it is unset or shorter than 32 characters. | `apps/api/services/audit_chain_keys.py`, `apps/api/services/form_token.py` +6 more |
 | `AUTH_TENANT_BIND` | `""` | How strictly a tenant resolved from the Host header must match the caller's tenant claim: `strict`, `soft` or `off`. Default is `strict` in production and `soft` elsewhere. | `apps/api/services/tenant_bind.py` |
 | `AUTH_USERS` | `""` | JSON array of user accounts, as an alternative to the admin pair. | `apps/api/services/platform_config.py`, `apps/api/src/services/auth_service.py` |
 | `AUTO_INSTALL_DRIVERS` | computed | Read by `_auto_install_enabled()`: Platform driver bootstrap — connectors ship with Datawrap, not end-user installs | `apps/api/services/driver_bootstrap.py` |
 | `BIGQUERY_BIGQUERY_COPY` | `1` | Read by `bigquery_bigquery_copy_enabled()`: BigQuery → BigQuery identity bulk (same-project INSERT SELECT / CTAS) | `apps/api/services/copy_bigquery_bigquery.py` |
 | `BLOB_ROOT` | `""` | Read by `blob_root()`: Shared filesystem stand-in for object storage | `apps/api/services/object_store.py` |
+| `BODY_LIMIT_OVERRIDES` | `""` | Read by `_overrides()`: Request body size limit for non-upload bodies (SEC-8) | `apps/api/src/middleware/body_size_limit.py` |
 | `BRAND_OBJECT_NAMES` | `False` | Read by `object_names_flag_on()`: `DATAWRAP_BRAND_OBJECT_NAMES=1`: new artifacts take the new name | `apps/api/services/brand.py` |
 | `BULK_EXPORT` | `""` / `0` | Read by `bulk_export_enabled()`: Operator gate — default **off** until F6 publishes measured numbers (and other readers) | `apps/api/connectors/bulk_export.py` |
+| `CALLABLE_SPOOL_DIR` | unset | Read by `callable_spool_root()`: Where CALL/SELECT spools live: `DATAFLOW_CALLABLE_SPOOL_DIR`, else `{tmp}/dataflow-callable` | `apps/api/services/procedure_source.py` |
 | `CDC_HEARTBEAT_SEC` | `10` | Read by `heartbeat()`: Keep the lease alive and release WAL an idle slot no longer needs | `apps/api/connectors/postgresql_change_stream.py` |
 | `CDC_IDLE_SLOT_ADVANCE` | `1` | Read by `heartbeat()`: Keep the lease alive and release WAL an idle slot no longer needs | `apps/api/connectors/postgresql_change_stream.py` |
 | `CDC_LEASE_BACKEND` | unset | Where CDC source leases are kept: `file`, `redis` or `memory`. Unset picks `redis` when a lease Redis URL is configured, else `file`. | `apps/api/services/cdc_lease_store.py` |
@@ -171,17 +190,23 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `COMMIT_SAFE_WALK_SECONDS` | `30` | Budget, in seconds, of one PostgreSQL late-commit walk, which holds one read-only snapshot on the source. Past it the walk stops and the run re-reads from the oldest reported row (no row is skipped). `0` = stop after one page. | `apps/api/services/commit_safe_window.py` |
 | `COMMIT_SAFE_WINDOW` | `True` | Kill switch for the commit-safe incremental read window (PR 407). On by default; `0`/`false` turns it off, and the run's evidence then says the window was switched off. | `apps/api/services/commit_safe_routes.py`, `apps/api/src/transfer/stream_commit_window.py` |
 | `COMMIT_SHA` | unset | Read by `_build_commit()`: Best-effort deployed git SHA for health reporting | `apps/api/src/main.py` |
-| `CONFINE_LOCAL_FILES` | `""` | Read by `confine_local_files()`: Where embedded databases and local warehouses may live on the API host | `apps/api/services/local_file_policy.py` |
+| `CONFINE_LOCAL_FILES` | `""` | On unless set to `0`, `false`, `no` or `off`, in every environment. On (the default): a SQLite or DuckDB connector may open files only under `<data dir>/sqlite` or `<data dir>/duckdb`, an upload its workspace owns, its workspace's export folder, or a `SOURCE_PATH_ROOTS` directory; in production Iceberg is confined to `<data dir>/iceberg`. Off: the API logs a warning at start and, in production, records each path the check would refuse as a `local_file.would_confine` audit event. | `apps/api/services/local_file_policy.py` |
 | `CONNECTOR_POOL_WORKERS` | `16` | Read by `__init__()`: A bounded executor of its own for calls that reach a customer's system (D181) | `apps/api/services/connector_executor.py` |
 | `CONNECTOR_READY_MAX_AGE_SECONDS` | `300.0` / computed | Read by `_blocking_step_bound_seconds()`: How long a wait may claim "has not stalled": the existing readiness (and other readers) | `apps/api/services/cancel_check.py`, `apps/api/services/connector_executor.py` |
 | `CONNECTOR_STORE` | `""` | Read by `_store_path()`: Return the effective file store path | `apps/api/services/connector_store.py` |
-| `CONNECTOR_STORE_BACKEND` | `auto` | Read by `_resolve_backend()`: Pick the persistence backend | `apps/api/services/connector_store.py` |
+| `CONNECTOR_STORE_BACKEND` | `auto` | Read by `_resolve_backend()`: Pick the persistence backend (and other readers) | `apps/api/services/connector_store.py` |
 | `CONNECTOR_WORKSPACE_MAX` | `6` | Read by `__init__()`: A bounded executor of its own for calls that reach a customer's system (D181) | `apps/api/services/connector_executor.py` |
 | `CONTACT_EMAIL_CAPACITY` | `2.0` | Read at module level: Public contact-sales intake (D103) | `apps/api/src/routers/contact_router.py` |
 | `CONTACT_EMAIL_REFILL_PER_SEC` | computed | Read at module level: Public contact-sales intake (D103) | `apps/api/src/routers/contact_router.py` |
 | `CONTACT_IP_CAPACITY` | `5.0` | Read at module level: Public contact-sales intake (D103) | `apps/api/src/routers/contact_router.py` |
 | `CONTACT_IP_REFILL_PER_SEC` | computed | Read at module level: Public contact-sales intake (D103) | `apps/api/src/routers/contact_router.py` |
 | `CONTRACTS_PATH` | `""` | Read by `_default_path()`: Durable file-backed contract store — survives restarts when Mongo is memory/unavailable | `apps/api/services/contract_file_store.py` |
+| `CONTROL_STORE_BACKEND` | `""` | Read by `control_store_backend()`: `file` or `mongo` for every store in this module | `apps/api/services/shared_doc_store.py` |
+| `CONTROL_STORE_CACHE_SECONDS` | `2` | Read by `_cache_seconds()`: Control-plane documents and logs that every replica must agree on | `apps/api/services/shared_doc_store.py` |
+| `CONTROL_STORE_IMPORT_LEASE_SECONDS` | `""` | Read by `import_lease_seconds()`: Importing a node's file into an empty record store, under a lease (ops review rounds 2 and 3) | `apps/api/services/control_plane_import.py` |
+| `CONTROL_STORE_OUTAGE_SECONDS` | `2.0` | Read by `outage_seconds()`: Short, bounded calls to the shared control-plane database (ops review High 1) | `apps/api/services/control_plane_bounds.py` |
+| `CONTROL_STORE_TIMEOUT_SECONDS` | `1.0` | Read by `operation_timeout_seconds()`: Short, bounded calls to the shared control-plane database (ops review High 1) | `apps/api/services/control_plane_bounds.py` |
+| `CONTROL_STORE_WRITE_TIMEOUT_SECONDS` | `3.0` | Read by `write_timeout_seconds()`: Short, bounded calls to the shared control-plane database (ops review High 1) | `apps/api/services/control_plane_bounds.py` |
 | `COPY_SPILL_DIR` | unset | Read by `copy_spill_dir()`: Directory for the COPY spill file, when the operator names one | `apps/api/services/copy_fast_path.py` |
 | `CORS_INCLUDE_TENANT_DOMAINS` | `1` | Read by `_tenant_origins_enabled()`: Tenant-aware CORS policy for customer vanity / custom domains | `apps/api/services/cors_policy.py` |
 | `CROSS_EXTENDED` | `""` | Read by `engines_for_run()`: Default is the 5-engine core that dest-COUNTs without probe-retry hangs (and other readers) | `apps/api/services/desktop_lab_cross.py` |
@@ -206,6 +231,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `DEST_LOCK_WAIT_SECONDS` | `120` | Seconds a write session waits for a destination lock before failing (between 1 and 600). | `apps/api/connectors/write_resilience.py` |
 | `DEST_WRITE_LOCK` | `False` | Takes one-writer-at-a-time locks per keyed destination table. Off by default. | `apps/api/services/destination_write_lock.py` |
 | `DEST_WRITE_LOCK_WAIT_SECONDS` | `3600` | Seconds a job waits for another job's destination write lock. | `apps/api/services/destination_write_lock.py` |
+| `DFBAK_RETENTION_HOURS` | `168` | Hours a `<table>__dfbak_<job>` backup left by a failed or cancelled PostgreSQL keyed write is kept before the sweeper drops it (minimum 1). A completed job's backup is dropped at the next sweep. | `apps/api/services/dfbak_sweeper.py` |
 | `DISABLE_OBJECT_STORE` | `""` | Read by `_disabled()`: Object storage for uploaded file staging (MinIO / S3-compatible with local fallback) | `apps/api/services/object_store.py` |
 | `DISPOSABLE_FEED_ENABLED` | `0` | Read by `feed_enabled()`: Disposable-domain list (P2-2) — vendored snapshot, no runtime fetch | `apps/api/services/disposable_list.py` |
 | `DISPOSABLE_FEED_SHA256` | `""` | Read by `sync_feed()`: Optional live refresh — flag-gated, pinned-URL, pinned-checksum | `apps/api/services/disposable_list.py` |
@@ -214,8 +240,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `DUCKDB_DUCKDB_COPY` | `1` | Read by `duckdb_duckdb_copy_enabled()`: DuckDB → DuckDB ATTACH + INSERT SELECT (identity bulk) | `apps/api/services/copy_duckdb_duckdb.py` |
 | `DUCKDB_ROOT` | unset | Read by `_explicit_root()`: The operator-set root for `kind` (`sqlite` \| `duckdb`), or `""` | `apps/api/connectors/sqlite_common.py` |
 | `DYNAMODB_DYNAMODB_COPY` | `1` | Read by `dynamodb_dynamodb_copy_enabled()`: DynamoDB → DynamoDB Scan + BatchWriteItem (identity bulk) | `apps/api/services/copy_dynamodb_dynamodb.py` |
-| `EGRESS_ALLOWLIST` | `""` | Extra networks allowed by the egress guard for this process. Intended for local proof runs; leave unset in production. | `apps/api/services/egress_guard.py` |
-| `EGRESS_ENFORCE_NEW` | `""` | `1` makes the newer egress checkpoints refuse private and loopback targets. Without it those checkpoints only write an `egress.would_block` audit event. | `apps/api/services/egress_guard.py` |
+| `EGRESS_ALLOWLIST` | `""` | Comma-separated networks (for example `127.0.0.0/8`) that this process allows for connector dials in every workspace, on top of each workspace's own allowlist. For local proof runs; leave unset in production. Metadata, link-local and multicast addresses cannot be allowed. | `apps/api/services/egress_guard.py` |
+| `EGRESS_ENFORCE_NEW` | `""` | On unless set to `0`, `false`, `no` or `off`. On (the default): every connector checkpoint refuses private, loopback and CGNAT targets that the workspace allowlist does not cover. Off: the newer checkpoints (connector save, transfer reads and writes, introspection, probes, shared HTTP, SMTP and Mongo clients) only write an `egress.would_block` audit event. Cloud metadata, link-local and multicast targets are refused either way. | `apps/api/services/egress_guard.py` |
 | `ELASTICSEARCH_ELASTICSEARCH_COPY` | `1` | Read by `elasticsearch_elasticsearch_copy_enabled()`: Elasticsearch → Elasticsearch cluster `_reindex` (identity bulk) | `apps/api/services/copy_elasticsearch_elasticsearch.py` |
 | `EMAIL_DAILY_LIMIT` | `100` | Read by `_daily_limit()`: Resend free-tier quota guard (handover addendum) | `apps/api/services/email_quota.py` |
 | `EMAIL_FROM` | computed / `datawrap@example.com` | Read by `_email_from()`: Transactional email sender for the signup/auth surface (P0-2) (and other readers) | `apps/api/services/email_sender.py`, `apps/api/services/platform_config.py` |
@@ -227,7 +253,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `EMBEDDING_BACKEND` | unset | Read by `_init_backend()`: Datawrap — Embedding Service | `apps/api/src/ai/rag/embedding_service.py` |
 | `EMBEDDING_CACHE_PATH` | `""` | Read by `_resolve_db_path()`: Durable embedding cache — SQLite persistence across process restarts | `apps/api/services/embedding_cache.py` |
 | `EMBEDDING_DURABLE_CACHE` | `true` | Read by `durable_cache_enabled_by_default()`: Durable embedding cache — SQLite persistence across process restarts | `apps/api/services/embedding_cache.py` |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Read by `create_embedding_usage()` (and other readers) | `apps/api/services/embedding_providers/runtime.py`, `apps/api/services/pgvector_typed_embedding.py` +3 more |
+| `EMBEDDING_MODEL` | `""` / `sentence-transformers/all-MiniLM-L6-v2` | Read by `create_embedding_usage()` (and other readers) | `apps/api/services/embedding_providers/runtime.py`, `apps/api/services/pgvector_typed_embedding.py` +3 more |
 | `EMCHG_EMAIL_DAILY` | `3` | Read by `request_email_change()`: P4-2: send an OTP to the NEW address — proving ownership — plus a | `apps/api/services/signup_service.py` |
 | `EMCHG_IP_HOURLY` | `10` | Read by `request_email_change()`: P4-2: send an OTP to the NEW address — proving ownership — plus a | `apps/api/services/signup_service.py` |
 | `EMCHG_USER_DAILY` | `5` | Read by `request_email_change()`: P4-2: send an OTP to the NEW address — proving ownership — plus a | `apps/api/services/signup_service.py` |
@@ -240,16 +266,12 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
 | `ES_HOST` | `127.0.0.1` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `ES_PORT` | `9200` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
+| `EXIT_VERIFY_MAX_SECONDS` | `""` | Read by `max_verify_seconds()`: The most a rehearsal's verification may take, all attempts together | `apps/api/services/exit_verify_guard.py` |
 | `EXPORTS_DIR` | unset | Read by `exports_dir()`: The folder exports are confined to: `DATAFLOW_EXPORTS_DIR`, else `apps/api/exports` | `apps/api/services/export_paths.py` |
 | `EXPORT_BUCKET` | `""` | Read by `export_bucket()`: Transfer Studio file exports in a private bucket, downloaded through signed URLs | `apps/api/services/export_object_store.py` |
 | `EXPORT_PART_SIZE_MB` | computed | Read by `export_part_size()`: Transfer Studio file exports in a private bucket, downloaded through signed URLs | `apps/api/services/export_object_store.py` |
 | `EXPORT_PREFIX` | `""` | Read by `export_prefix()`: Transfer Studio file exports in a private bucket, downloaded through signed URLs | `apps/api/services/export_object_store.py` |
 | `EXPORT_RETENTION_HOURS` | computed | Read by `export_retention_hours()`: Transfer Studio file exports in a private bucket, downloaded through signed URLs | `apps/api/services/export_object_store.py` |
-| `EXPORT_S3_ACCESS_KEY` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) | `apps/api/services/export_object_store.py` |
-| `EXPORT_S3_ENDPOINT` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) | `apps/api/services/export_object_store.py` |
-| `EXPORT_S3_PATH_STYLE` | computed | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) | `apps/api/services/export_object_store.py` |
-| `EXPORT_S3_REGION` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) | `apps/api/services/export_object_store.py` |
-| `EXPORT_S3_SECRET_KEY` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) | `apps/api/services/export_object_store.py` |
 | `EXPORT_URL_TTL_SECONDS` | computed | Read by `export_url_ttl_seconds()`: Transfer Studio file exports in a private bucket, downloaded through signed URLs | `apps/api/services/export_object_store.py` |
 | `FAKESNOW_KEEP_PATCH` | unset | Read by `_fakesnow_exit_patch()`: Snowflake connection helper | `apps/api/connectors/snowflake_conn.py` |
 | `FIELD_REDUCTION_STRICT` | `false` | Read by `strict_field_reduction()`: True when every reduction must carry a reason code and an approver | `apps/api/services/field_reduction_ledger.py` |
@@ -257,8 +279,12 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `FINGERPRINT_SPILL_THRESHOLD` | `100000` / `1000000` | Read at module level: Turning a stream of row fingerprints into one order-independent digest (and other readers) | `apps/api/services/fingerprint_accumulator.py`, `apps/api/services/reconciliation.py` |
 | `FORGOT_EMAIL_DAILY` | `5` | Read by `request_password_reset()`: P4-1 forgot-password: uniform 202 with a challenge handle — a fake | `apps/api/services/signup_service.py` |
 | `FORGOT_IP_HOURLY` | `10` | Read by `request_password_reset()`: P4-1 forgot-password: uniform 202 with a challenge handle — a fake | `apps/api/services/signup_service.py` |
+| `FP_LM` | `True` | Read by `lm_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
+| `FP_NARRATE` | `True` | Read by `narrate_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
+| `FP_REWRITE` | `True` | Read by `rewrite_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
 | `GCS_GCS_COPY` | `1` | Read by `gcs_gcs_copy_enabled()`: GCS → GCS server-side copy_blob / rewrite (identity bulk) | `apps/api/services/copy_gcs_gcs.py` |
 | `GEOIP_ENABLED` | `0` | Read by `enabled()`: Optional GeoIP/ASN lookup adapter (P2-8) | `apps/api/services/geoip.py` |
+| `HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Read by `probe_timeout_seconds()`: Upper bound for one dependency check (`HEALTH_PROBE_TIMEOUT_SECONDS`, default 2) | `apps/api/services/health_service.py` |
 | `HIBP_ENABLED` | `""` | Read by `enabled()`: Have I Been Pwned password check (P4-3) — k-anonymity range API | `apps/api/services/hibp.py` |
 | `HSTS` | `""` | `1` always sends the HSTS header; `0` never does. Unset: sent when the request is HTTPS or `X-Forwarded-Proto` says so. | `apps/api/src/main.py` |
 | `ICEBERG_ICEBERG_COPY` | `1` | Read by `iceberg_iceberg_copy_enabled()`: Iceberg snapshot Parquet → Iceberg catalog snapshot (identity bulk) | `apps/api/services/copy_iceberg_iceberg.py` |
@@ -299,6 +325,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `JOURNAL_RETENTION_DAYS` | `""` | Read by `retention_seconds()`: Capture-once transfer journal — extract once, replay to many destinations | `apps/api/services/transfer_journal.py` |
 | `KAFKA_KAFKA_COPY` | `1` | Read by `kafka_kafka_copy_enabled()`: Kafka → Kafka consume-produce of raw bytes (identity bulk) | `apps/api/services/copy_kafka_kafka.py` |
 | `KEY_COLLATION_NO_PAD` | `""` | Read by `no_pad_key_collation_enabled()`: Distinct source keys the destination's comparison rules make equal (D205) | `apps/api/services/dest_key_equality.py` |
+| `LEDGER_TOOL_DEADLINE_SECONDS` | `8.0` | Read by `run_ledger_read()`: `fn()` under the ledger deadline, or `on_timeout(message)` | `apps/api/src/ai/copilot/tool_deadline.py` |
+| `LEGACY_FIELD_PROBE_SECONDS` | `5` | Read by `_probe_seconds()`: Existing SQL tables keep the column names earlier runs gave them (G11 compatibility) | `apps/api/services/target_name_legacy.py` |
 | `LEGACY_UNSCOPED_ADMIN_VIEW` | `False` | Read by `legacy_admin_view_enabled()`: `DATAFLOW_LEGACY_UNSCOPED_ADMIN_VIEW` — off by default (D218) | `apps/api/services/tenant_scope.py` |
 | `LLM_ENABLED`<br>also unprefixed `LLM_ENABLED` | `true` | Read by `is_llm_enabled()`: Return whether LLM inference is globally enabled | `apps/api/services/llm_policy.py` |
 | `LOCAL_FILE_DESTINATIONS` | computed | Read by `local_file_destinations_allowed()`: May a destination write to this server's own disk? Env reads only | `apps/api/services/local_file_policy.py` |
@@ -308,7 +336,9 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MAIL_OUTBOX_SWEEP_SEC` | `30` | Read by `start_mail_outbox_sweeper()`: Keep draining the outbox after boot | `apps/api/services/signup_service.py` |
 | `MAXMIND_LICENSE_KEY` | `""` | Read by `license_key()`: Optional GeoIP/ASN lookup adapter (P2-8) | `apps/api/services/geoip.py` |
 | `MAX_DECOMPRESSED_BYTES` | computed | Read by `max_decompressed_bytes()`: Byte ceilings for uploaded files and for gzip payloads inflated in memory | `apps/api/services/upload_limits.py` |
+| `MAX_JSON_BODY_BYTES` | computed | Read by `body_limit()`: `(limit_bytes, setting)` for this request, or None when it is not limited here | `apps/api/src/middleware/body_size_limit.py` |
 | `MAX_LINEAGE_EVENTS` | `5000` | Read at module level: Lineage and telemetry events for the universal transfer orchestrator | `apps/api/services/lineage_telemetry.py` |
+| `MAX_PUBLIC_BODY_BYTES` | computed | Read by `body_limit()`: `(limit_bytes, setting)` for this request, or None when it is not limited here | `apps/api/src/middleware/body_size_limit.py` |
 | `MAX_REJECTED_DETAILS` | `80` | Read at module level: Durable checkpoint persistence for resumable transfer jobs | `apps/api/services/checkpoint_service.py` |
 | `MAX_UPLOAD_BYTES` | computed | Read by `max_upload_bytes()`: Byte ceilings for uploaded files and for gzip payloads inflated in memory | `apps/api/services/upload_limits.py` |
 | `MCP_LOG_MAX` | `2000` | Read at module level: Persisted MCP tool invocation log — latency, status, and safe error type | `apps/api/services/mcp_invocation_log.py` |
@@ -318,6 +348,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MCP_RATE_LIMIT` | `1` | Read by `rate_limit_enabled()`: Default on at a generous ceiling; set DATAFLOW_MCP_RATE_LIMIT=0 to disable | `apps/api/services/mcp_rate_limit.py` |
 | `MCP_RATE_MAX_KEYS` | `5000` | Read by `check_mcp_rate_limit()`: Consume one token for `principal` | `apps/api/services/mcp_rate_limit.py` |
 | `MCP_RATE_QPS` | `5.0` | Read by `check_mcp_rate_limit()`: Consume one token for `principal` | `apps/api/services/mcp_rate_limit.py` |
+| `METRICS_HOST` | `0.0.0.0` | Read by `start_metrics_server()`: Serve `/health` and `/metrics` on a daemon thread. False when no port is configured | `apps/api/src/metrics_app.py` |
+| `METRICS_PORT` | `""` | Read by `metrics_port()`: `DATAFLOW_METRICS_PORT` as a port number, None when unset or invalid | `apps/api/src/metrics_app.py` |
 | `MFA_CHALLENGE_TTL_SEC` | `300` | Read by `challenge_ttl_sec()`: TOTP second factor for password sign-in accounts (QA S7, round 11) | `apps/api/services/mfa.py` |
 | `MFA_FAILURE_WINDOW_SEC` | `900` | Read by `failure_window_sec()`: TOTP second factor for password sign-in accounts (QA S7, round 11) | `apps/api/services/mfa.py` |
 | `MFA_LOCKOUT_SEC` | `900` | Read by `lockout_sec()`: TOTP second factor for password sign-in accounts (QA S7, round 11) | `apps/api/services/mfa.py` |
@@ -352,6 +384,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MYSQL_SQLSERVER_COPY` | `1` | Read by `mysql_sqlserver_copy_enabled()`: MySQL SELECT → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_mysql_sqlserver.py` |
 | `NOTIFICATION_DELIVERY_RETENTION_DAYS` | `30` | Read by `retention_days()`: Append-only log of every notification delivery attempt (QA SC9) | `apps/api/services/notification_delivery_log.py` |
 | `NOTIFICATION_STORE` | `""` | Read by `_store_path()`: Persisted workspace notification channels for job alerts | `apps/api/services/notification_store.py` |
+| `NULL_MARKER_PROBE_SECONDS` | `""` | Read by `probe_timeout_seconds()`: Gate-8's NULL-marker probe, bounded (review F3) | `apps/api/services/null_marker_probe.py` |
 | `OBJECT_STORE_MATERIALIZE_BATCH` | `""` | Read by `resolve_materialize_batch()`: Accepted-row bundle size before encode. Peak mapped RAM is this many tuples | `apps/api/connectors/object_store_materialize.py` |
 | `OBJECT_STORE_MULTIPART_PART_SIZE` | computed | Read by `resolve_multipart_limits()`: Return `(threshold_bytes, part_size_bytes)` from dest extra / env | `apps/api/connectors/object_store_multipart.py` |
 | `OBJECT_STORE_MULTIPART_THRESHOLD` | computed | Read by `resolve_multipart_limits()`: Return `(threshold_bytes, part_size_bytes)` from dest extra / env | `apps/api/connectors/object_store_multipart.py` |
@@ -401,6 +434,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `PII_HASH_KEY` | unset | Read by `pinned_key()`: The operator-pinned key that every workspace uses, or `""` | `apps/api/services/pii_hash_keys.py` |
 | `PII_MASKING` | `true` | Read by `is_pii_masking_enabled()`: Return whether PII masking before LLM prompts is required | `apps/api/services/llm_policy.py` |
 | `PILOT_ACK_PATH` | `""` | Read by `_default_path()`: Server-side mutation approval ledger for Datawrap Pilot | `apps/api/src/ai/copilot/ack_ledger.py` |
+| `PILOT_DATASET_DIRS` | `""` | Read by `_default_dataset_dirs()`: Where uploaded datasets live: the deployment's upload directory | `apps/api/src/ai/training/universal_data_feeder.py` |
 | `PILOT_ENGINE` | unset | Read by `pilot_engine_decision()`: Which engine Pilot will use, and the reason — never a credential | `apps/api/src/ai/llm/provider.py` |
 | `PILOT_MEMORY_PATH` | `""` | Read by `_default_path()`: Per-session working memory for Datawrap Pilot — the state a follow-up turn edits | `apps/api/src/ai/copilot/working_memory.py` |
 | `PILOT_RAG` | unset | Read by `build()`: Build full context for Datawrap Pilot — every data source in the platform | `apps/api/src/ai/copilot/context_builder.py` |
@@ -410,12 +444,14 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `PILOT_RATE_QPS` | `0.5` | Read by `check_pilot_rate_limit()`: Consume one Pilot chat token for `principal`; DATAFLOW_PILOT_RATE_LIMIT=0 disables | `apps/api/services/mcp_rate_limit.py` |
 | `PILOT_RESULTS_PATH` | `""` | Read by `_default_path()`: Durable Pilot query/sample result references | `apps/api/src/ai/copilot/result_store.py` |
 | `PINECONE_PINECONE_COPY` | `1` | Read by `pinecone_pinecone_copy_enabled()`: Pinecone → Pinecone list + fetch + upsert (identity bulk) | `apps/api/services/copy_pinecone_pinecone.py` |
+| `POD_LOCAL_STORES_ACK` | `""` | Read by `pod_local_stores_acknowledged()`: Control-plane documents and logs that every replica must agree on | `apps/api/services/shared_doc_store.py` |
 | `POST_TRANSFER_TRAINING` | `""` | Read by `_execute_tracked_core()`: Universal transfer orchestrator — routes any source to any destination | `apps/api/src/transfer/engine.py` |
+| `PREFLIGHT_DEADLINE_SECONDS` | `120.0` | Read by `preflight_deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
 | `PROCEDURE_TIMEOUT_S` | unset | Read by `_open_callable_result()`: Stored-procedure / custom-SQL extract — one source-read owner | `apps/api/services/procedure_source.py` |
 | `PROCESS_ROLE` | unset | Which role this process plays: `api` (default), `scheduler` or `worker`. Unknown values are treated as `api`. | `apps/api/services/process_role.py` |
 | `PROXY_CHUNK_SIZE` | `5000` | Read at module level: Shared helpers for durable bulk writes over flaky public proxies | `apps/api/connectors/write_resilience.py` |
-| `PUBLIC_API_ORIGIN` | `""` | Read by `allowed_hosts()`: The public origin (scheme + host) that links handed to users must use (and other readers) | `apps/api/services/public_origin.py` |
-| `PUBLIC_ORIGIN_ALLOWED_HOSTS` | `""` | Read by `allowed_hosts()`: The public origin (scheme + host) that links handed to users must use | `apps/api/services/public_origin.py` |
+| `PUBLIC_API_ORIGIN` | `""` | Read by `configured_hosts()`: The hosts of the configured origins and `DATAWRAP_PUBLIC_ORIGIN_ALLOWED_HOSTS` (and other readers) | `apps/api/services/public_origin.py` |
+| `PUBLIC_ORIGIN_ALLOWED_HOSTS` | `""` | Read by `configured_hosts()`: The hosts of the configured origins and `DATAWRAP_PUBLIC_ORIGIN_ALLOWED_HOSTS` | `apps/api/services/public_origin.py` |
 | `PUBLIC_RATE_BURST` | `120.0` | Read by `check_public_rate_limit()`: Per-IP bucket for unauthenticated routes. Health probes are not counted | `apps/api/services/auth_rate_limit.py` |
 | `PUBLIC_RATE_LIMIT` | `""` | `1` turns on rate limiting for unauthenticated routes. Off by default, including in production. | `apps/api/services/auth_rate_limit.py` |
 | `PUBLIC_RATE_MAX_KEYS` | `5000` | Read by `check_public_rate_limit()`: Per-IP bucket for unauthenticated routes. Health probes are not counted | `apps/api/services/auth_rate_limit.py` |
@@ -428,12 +464,13 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `QUERY_EXTRACT_MAX_OBJECTS` | `25` | Read at module level: Extract-and-query: the query console's fallback for non-SQL connectors | `apps/api/services/query_extract.py` |
 | `QUERY_EXTRACT_MAX_ROWS` | `50000` | Read at module level: Extract-and-query: the query console's fallback for non-SQL connectors | `apps/api/services/query_extract.py` |
 | `QUERY_STATEMENT_TIMEOUT_SECONDS` | `""` | Read by `_apply_statement_timeout()`: Have the server cancel an interactive query that outlives the tool deadline | `apps/api/src/routers/query_router.py` |
+| `QUERY_TOOL_DEADLINE_SECONDS` | `120.0` | Read by `deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
 | `RECONCILE_SOURCE_REREAD` | `auto` | Read by `_env_reread_mode()`: Independent source re-read for Gate-8 — Fivetran/HVR Compare class | `apps/api/services/source_reread.py` |
 | `REDIS_DB` | `0` | Read by `_redis_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine | `apps/api/services/million_row_bench.py` |
 | `REDIS_HOST` | `127.0.0.1` | Read by `_redis_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `REDIS_PORT` | `6379` | Read by `_redis_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `REDIS_REDIS_COPY` | `1` | Read by `redis_redis_copy_enabled()`: Redis → Redis server-side COPY (identity bulk) | `apps/api/services/copy_redis_redis.py` |
-| `REDIS_URL`<br>also unprefixed `REDIS_URL` | unset | Read by `_redis_client()`: Shared auth state (P0-1): sessions and rate-limit counters (and other readers) | `apps/api/services/auth_state.py`, `apps/api/services/cdc_lease_store.py` +2 more |
+| `REDIS_URL`<br>also unprefixed `REDIS_URL` | `""` | Read by `_lockout_backend_url()`: Redis for lockouts: `DATAFLOW_AUTH_LOCKOUT_REDIS_URL`, else `REDIS_URL` (and other readers) | `apps/api/services/auth_rate_limit.py`, `apps/api/services/auth_state.py` +3 more |
 | `REDSHIFT_COPY_GZIP_THRESHOLD` | `1048576` | Read at module level: Redshift COPY FROM S3 — Fivetran/Airbyte-class bulk load | `apps/api/connectors/redshift_copy.py` |
 | `REDSHIFT_COPY_THRESHOLD` | `1000` | Read at module level: Redshift COPY FROM S3 — Fivetran/Airbyte-class bulk load | `apps/api/connectors/redshift_copy.py` |
 | `REDSHIFT_IAM_ROLE` | unset | Read by `resolve_redshift_copy_config()`: Return staging config when both bucket and IAM role are present | `apps/api/connectors/redshift_copy.py` |
@@ -451,19 +488,19 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `RETRY_JITTER` | `True` / `true` | Read at module level: Runtime configuration for Datawrap API (and other readers) Some readers accept only `DATAFLOW_RETRY_JITTER`. | `apps/api/services/config.py`, `apps/api/services/error_handling.py` |
 | `RETRY_MAX_ATTEMPTS` | `3` | Read at module level: Runtime configuration for Datawrap API (and other readers) Some readers accept only `DATAFLOW_RETRY_MAX_ATTEMPTS`. | `apps/api/services/config.py`, `apps/api/services/error_handling.py` |
 | `RETRY_MAX_DELAY_SECONDS` | `60.0` | Read at module level: Runtime configuration for Datawrap API (and other readers) Some readers accept only `DATAFLOW_RETRY_MAX_DELAY_SECONDS`. | `apps/api/services/config.py`, `apps/api/services/error_handling.py` |
-| `S3_ACCESS_KEY` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `S3_ACCESS_KEY` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
 | `S3_BUCKET`<br>also unprefixed `S3_BUCKET` | unset | Read by `_bucket_name()`: Object storage for uploaded file staging (MinIO / S3-compatible with local fallback) (and other readers) | `apps/api/services/object_store.py` |
-| `S3_ENDPOINT` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `S3_ENDPOINT` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
 | `S3_ICEBERG_COPY` | `1` | Read by `s3_iceberg_copy_enabled()`: S3 CSV GET → Iceberg catalog snapshot (cross-engine bulk) | `apps/api/services/copy_s3_iceberg.py` |
 | `S3_MONGO_COPY` | `1` | Read by `s3_mongo_copy_enabled()`: S3 CSV GET → MongoDB insert_many (cross-engine bulk) | `apps/api/services/copy_s3_mongo.py` |
 | `S3_MONGO_COPY_BATCH` | unset | Read by `s3_mongo_copy_batch()`: S3 CSV GET → MongoDB insert_many (cross-engine bulk) | `apps/api/services/copy_s3_mongo.py` |
 | `S3_MYSQL_COPY` | `1` | Read by `s3_mysql_copy_enabled()`: S3 CSV GET → MySQL STRICT LOAD DATA (cross-engine bulk) | `apps/api/services/copy_s3_mysql.py` |
 | `S3_ORACLE_COPY` | `1` | Read by `s3_oracle_copy_enabled()`: S3 CSV GET → Oracle executemany (cross-engine bulk) | `apps/api/services/copy_s3_oracle.py` |
-| `S3_PATH_STYLE` | `1` | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `S3_PATH_STYLE` | `1` | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
 | `S3_PG_COPY` | `1` | Read by `s3_pg_copy_enabled()`: S3 CSV GET → PostgreSQL COPY FROM STDIN (cross-engine bulk) | `apps/api/services/copy_s3_pg.py` |
 | `S3_S3_COPY` | `1` | Read by `s3_s3_copy_enabled()`: S3 → S3 server-side CopyObject (identity bulk) | `apps/api/services/copy_s3_s3.py` |
-| `S3_SECRET_KEY` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
-| `S3_SECURE` | `1` / computed | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `S3_SECRET_KEY` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `S3_SECURE` | `1` / computed | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
 | `S3_SQLITE_COPY` | `1` | Read by `s3_sqlite_copy_enabled()`: S3 CSV GET → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_s3_sqlite.py` |
 | `S3_SQLITE_COPY_BATCH` | `5000` | Read by `s3_sqlite_copy_batch()`: S3 CSV GET → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_s3_sqlite.py` |
 | `S3_SQLSERVER_COPY` | `1` | Read by `s3_sqlserver_copy_enabled()`: S3 CSV GET → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_s3_sqlserver.py` |
@@ -480,7 +517,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `SCHEMA_CACHE_TTL` | `300` | Read by `_ttl()`: Per-table metadata cache for the transfer hot path | `apps/api/services/reflection_cache.py` |
 | `SECRET` | unset | Read by `pinned_key()`: The operator-pinned key that every workspace uses, or `""` | `apps/api/services/pii_hash_keys.py` |
 | `SECRETS_BACKEND` | unset | Where connector secrets are kept: `fernet` (default) or `aws_secretsmanager`. | `apps/api/services/secret_vault.py` |
-| `SECRETS_KEY` | `""` | Fernet key that encrypts connector credentials at rest. Required in production. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` |
+| `SECRETS_KEY` | `""` | Fernet key that encrypts connector credentials at rest. Required in production. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
 | `SECRETS_KMS_KEY_ID` | `""` | Read by `encrypt()`: Encrypt connector credentials at rest | `apps/api/services/secret_vault.py` |
 | `SECRETS_MANAGER_PREFIX` | unset | Read by `_secrets_manager_prefix()`: Encrypt connector credentials at rest | `apps/api/services/secret_vault.py` |
 | `SEED_DEMO` | `""` / `False` | Seeds example data at start. The deployment files in this repository set it to `0`. Some readers accept only `DATAFLOW_SEED_DEMO`. | `apps/api/services/config.py`, `apps/api/services/connector_store.py` |
@@ -510,7 +547,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `SNOWFLAKE_SNOWFLAKE_COPY` | `1` | Read by `snowflake_snowflake_copy_enabled()`: Snowflake → Snowflake identity bulk (same-account INSERT SELECT / CTAS) | `apps/api/services/copy_snowflake_snowflake.py` |
 | `SNOWFLAKE_WARM_LOGIN_EMULATOR` | `""` | Read by `enabled()`: A Snowflake plan login outlives the tool call that opened it (QA D187) | `apps/api/connectors/snowflake_warm_login.py` |
 | `SNOWFLAKE_WARM_LOGIN_SECONDS` | `""` | Read by `idle_seconds()`: A Snowflake plan login outlives the tool call that opened it (QA D187) | `apps/api/connectors/snowflake_warm_login.py` |
-| `SOURCE_PATH_ROOTS` | `""` | Read by `transfer_source_roots()`: Directories a file transfer may read `source_path` from | `apps/api/services/dataset_file.py` |
+| `SOURCE_PATH_ROOTS` | `""` | Extra directories, separated by `:` (the OS path separator), that connectors may read files from: a file transfer's `source_path`, SQLite and DuckDB files, and key or certificate files named in a connector. Applies to every workspace. Unset by default; leave it unset on a shared deployment. | `apps/api/services/dataset_file.py`, `apps/api/services/local_file_policy.py` +1 more |
 | `SOURCE_ROW_SPILL_MAX` | `""` | Read by `resolve_source_spill_max()`: Disk-backed source-row spool for object-store and SQL/warehouse materialize | `apps/api/connectors/source_row_spool.py` |
 | `SPILL_DIR` | unset | Read at module level: Streaming file → database transfer for CSV, TSV, JSONL, NDJSON, JSON arrays, | `apps/api/src/transfer/file_stream.py` |
 | `SPILL_TTL` | `""` | Read by `spill_ttl_seconds()`: How long a spilled download stays reusable for one job | `apps/api/services/object_streaming.py` |
@@ -548,6 +585,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `TEST_MSSQL_PASSWORD` | `""` | Read by `bind_live_engine()`: Bind one unique engine to a live desktop backend, or a skip reason (and other readers) | `apps/api/services/desktop_lab_cross.py`, `apps/api/services/million_row_bench.py` |
 | `TEXT_CURSOR_SHAPE_CHECK_SECONDS` | `""` | How often, in seconds, a text cursor's every-row shape scan re-runs on a route (default daily). It also re-runs when the table's estimated size moves by more than 10%, and always on a route's first run. | `apps/api/services/cursor_order.py` |
 | `TOKEN_TTL_SEC` | set in code (not shown) | Lifetime of a session token in seconds. | `apps/api/src/services/auth_service.py` |
+| `TOOL_DEADLINE_SECONDS` | `45.0` | Read by `deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
 | `TRACE_CONSOLE` | `0` | Read by `ensure_provider()`: Initialize the global TracerProvider once. Safe to call repeatedly | `apps/api/services/tracing.py` |
 | `TRAINING` | `False` | Runs the background training agent. Unset: on outside production, off in production. Set: only `1`, `true`, `yes` or `on` turn it on; any other value, an empty one included, leaves it off. | `apps/api/src/ai/training/training_scheduler.py` |
 | `TRANSFER_WORKERS` | `8` | Read by `_ensure_executor()`: Lazily create the shared thread pool (and other readers) | `apps/api/services/transfer_scheduler.py`, `apps/api/services/worker_fleet.py` +1 more |
@@ -557,7 +595,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `TRUSTED_PROXY_COUNT`<br>also unprefixed `TRUSTED_PROXY_COUNT` | `""` / `0` | Number of trusted proxies in front of the API. With N above 0 the client address is taken from `X-Forwarded-For` entry N from the right. Default 0 changes nothing. Some readers accept only `DATAFLOW_TRUSTED_PROXY_COUNT`, `DATAWRAP_TRUSTED_PROXY_COUNT`. | `apps/api/services/client_ip.py` |
 | `TURNSTILE_SECRET` | `""` | Read by `secret()`: Cloudflare Turnstile verification (P2-5) | `apps/api/services/turnstile.py` |
 | `TURNSTILE_SITE_KEY` | `""` | Read by `turnstile_site_key()`: Cloudflare Turnstile site key — public by design, safe to hand the SPA | `apps/api/services/signup_config.py` |
-| `UPLOAD_DIR` | `""` | Directory for uploaded source files. | `apps/api/services/platform_config.py` |
+| `UPLOAD_DIR` | `""` | Directory for uploaded source files. | `apps/api/services/platform_config.py`, `apps/api/src/ai/copilot/tools.py` |
 | `VECTOR_STORE_BACKEND` | `memory` | Read by `_init_backend()`: Datawrap — Vector Store | `apps/api/src/ai/rag/vector_store.py` |
 | `VECTOR_STORE_DIR` | `""` | Directory for the local vector store. | `apps/api/services/platform_config.py`, `apps/api/src/ai/rag/bootstrap.py` +1 more |
 | `VERIFICATION_LADDER_MAX_ROWS` | `250000` | Largest table, in rows, that the in-memory verification ladder compares row by row. | `apps/api/services/verification_ladder.py` |
@@ -565,6 +603,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `WEAVIATE_WEAVIATE_COPY` | `1` | Read by `weaviate_weaviate_copy_enabled()`: Weaviate → Weaviate list + batch upsert (identity bulk) | `apps/api/services/copy_weaviate_weaviate.py` |
 | `WEB_DOMAIN` | `""` / `http://localhost:5173` | Public domain of the web app. Added to the allowed origins and used for links. | `apps/api/services/platform_config.py`, `apps/api/services/public_origin.py` +1 more |
 | `WEB_URL` | `""` | Public base URL of the web app, used for links in notifications. | `apps/api/services/platform_config.py`, `apps/api/services/public_origin.py` |
+| `WORKER_DRAIN_SECONDS` | `25` | Read by `worker_drain_seconds()`: How long a stopping worker lets in-flight transfers reach a safe point | `apps/api/services/worker_fleet.py` |
 | `WORKER_FLEET` | `""` | `1` forces claim mode (jobs are queued in MongoDB for workers); `0` forces local mode (the API's own thread pool). | `apps/api/services/scheduler_mode.py` |
 | `WORKER_LEASE_TTL` | `60` | Seconds a worker's job lease lasts between heartbeats (minimum 15). | `apps/api/services/lease_heartbeat.py`, `apps/api/services/transfer_scheduler.py` |
 | `WORKER_MODE` | unset | Which workloads a worker claims: `batch`, `cdc`, or both when unset. | `apps/api/services/process_role.py` |
@@ -579,15 +618,10 @@ These are read directly, without the brand helper, so only the name shown works.
 
 | Flag | Default | What it does | Read in |
 |---|---|---|---|
+| `DATAFLOW_CONNECTOR_CI_EVIDENCE` | unset | Read by `evidence_path()`: Certified comes from CI evidence, never from a hand-kept list (CLM-7) | `apps/api/services/connector_proof.py` |
 | `DATAFLOW_EXPOSE_ERROR_DETAIL` | `""` | `1` appends the redacted exception text to safe error responses. Leave off in production. | `apps/api/services/safe_errors.py` |
-| `DATAFLOW_FP_LM` | `True` | Read by `lm_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
-| `DATAFLOW_FP_NARRATE` | `True` | Read by `narrate_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
-| `DATAFLOW_FP_REWRITE` | `True` | Read by `rewrite_enabled()`: Serve path: semantic rewrite + copy-grounded narrate, both fail-closed | `apps/api/src/ai/first_party/engine.py` |
 | `DATAFLOW_JOB_STORE_PERSIST` | `False` | Read at module level: Runtime configuration for Datawrap API | `apps/api/services/config.py` |
-| `DATAFLOW_PREFLIGHT_DEADLINE_SECONDS` | `120.0` | Read by `preflight_deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
-| `DATAFLOW_QUERY_TOOL_DEADLINE_SECONDS` | `120.0` | Read by `deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | unset | What happens to a route with no RBAC rule: `deny` (default) or `allow_and_log`. An invalid value falls back to `deny`. | `apps/api/services/rbac.py` |
-| `DATAFLOW_TOOL_DEADLINE_SECONDS` | `45.0` | Read by `deadline_seconds()`: A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181) | `apps/api/src/ai/copilot/tool_deadline.py` |
 | `DATAFLOW_VOLUME_PATH`<br>`DATAWRAP_VOLUME_PATH` | `""` | Mount path of a persistent volume. `data/`, `uploads/` and `vector_store/` default to folders under it. | `apps/api/services/platform_config.py` |
 
 ### Unprefixed variables
@@ -596,12 +630,12 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 | Flag | Default | What it does | Read in |
 |---|---|---|---|
-| `AWS_ACCESS_KEY_ID` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
-| `AWS_DEFAULT_REGION` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` +1 more |
-| `AWS_ENDPOINT_URL` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
-| `AWS_REGION` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` +1 more |
+| `AWS_ACCESS_KEY_ID` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `AWS_DEFAULT_REGION` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` +1 more |
+| `AWS_ENDPOINT_URL` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `AWS_REGION` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` +1 more |
 | `AWS_S3_BUCKET` | unset | Read by `_bucket_name()`: Object storage for uploaded file staging (MinIO / S3-compatible with local fallback) (and other readers) | `apps/api/services/object_store.py` |
-| `AWS_SECRET_ACCESS_KEY` | unset | Read by `export_client()`: A boto3 S3 client for the export bucket (signature v4, for AWS and R2) (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
+| `AWS_SECRET_ACCESS_KEY` | unset | Read by `s3_client_for()`: A boto3 S3 client whose `<prefix>S3_*` settings win over the staging store's (and other readers) | `apps/api/services/export_object_store.py`, `apps/api/services/object_store.py` |
 | `AZURE_OPENAI_API_KEY` | unset | Read by `resolve_provider()` | `apps/api/services/embedding_providers/config.py` |
 | `AZURITE_ACCOUNT` | `devstoreaccount1` | Read by `_adls_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine | `apps/api/services/million_row_bench.py` |
 | `AZURITE_HOST` | `127.0.0.1` | Read by `_adls_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
@@ -677,6 +711,7 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 These functions read a variable whose name is built at run time, so the name does not appear in the tables above.
 
+- `apps/api/services/export_object_store.py` — `s3_client_for()`
 - `apps/api/services/integrations_store.py` — `apply_integrations_to_env()`
 - `apps/api/services/integrations_store.py` — `provider_key_state()`
 - `apps/api/services/integrations_store.py` — `resolve_provider_api_key()`
