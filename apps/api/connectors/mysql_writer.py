@@ -557,6 +557,15 @@ def _mysql_scan_finished_bundles(**kwargs: Any) -> Any:
         target_types = finished.target_types
         del finished
     acc.stop_writing()
+    if not target_types and kwargs.get("target_cols"):
+        # DATA-6: no bundle (an empty source) left the carriers unresolved and
+        # the CREATE rendered ``()`` — MySQL 1064 on an emptied-source mirror.
+        target_types = _mysql_resolve_carriers(
+            target_cols=list(kwargs["target_cols"]),
+            dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+            logical_types=list(kwargs.get("logical_types") or []),
+            allow_logical_fallback=bool(kwargs.get("allow_logical_fallback", True)),
+        )
     return acc, source_row_count, target_types
 
 

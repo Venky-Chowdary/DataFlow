@@ -7617,6 +7617,22 @@ def _run_reconciliation_impl(
                 active_rows = sub_summary.get("active_rows")
                 active_checksum = sub_summary["active_checksum"]
                 break
+    if (
+        not active_checksum
+        and not source_rows
+        and isinstance(dest_summary, dict)
+        and "active_checksum" in dest_summary
+        and dest_summary.get("active_rows") == 0
+        and (dest_summary.get("scd2_opts") or dest_summary.get("mirror_delete_mode"))
+    ):
+        # DATA-3 / DATA-6: an acknowledged empty source closed (SCD2) or
+        # deleted (mirror) every row. The measured current population is
+        # empty, as the source is; "" is the writer's empty-population digest,
+        # and falling through counted closed history as live rows.
+        from services.fingerprint_accumulator import FingerprintAccumulator
+
+        active_rows = 0
+        active_checksum = source_checksum = FingerprintAccumulator().digest()
     if active_checksum and source_checksum_scope_note:
         return _finalize(
             _merge_cardinality_only_report(
