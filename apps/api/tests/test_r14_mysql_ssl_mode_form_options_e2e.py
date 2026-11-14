@@ -34,6 +34,21 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _ca_folder_is_a_connector_area(monkeypatch):
+    """The CA file lives where the operator puts it, so list its folder as the operator would.
+
+    Connectors may only open TLS files inside connector areas (connectors/tls_file_options.py),
+    and CI writes the MySQL CA under $RUNNER_TEMP. An operator lists such a folder in
+    DATAFLOW_SOURCE_PATH_ROOTS; without it these tests saw the (correct) refusal instead of the
+    ssl_mode check they pin.
+    """
+    ca = os.environ.get("DATAFLOW_TEST_MYSQL_CA", "")
+    if ca:
+        roots = [r for r in os.environ.get("DATAFLOW_SOURCE_PATH_ROOTS", "").split(os.pathsep) if r]
+        monkeypatch.setenv("DATAFLOW_SOURCE_PATH_ROOTS", os.pathsep.join([*roots, os.path.dirname(ca)]))
+
+
 def _ca() -> str:
     ca = os.environ.get("DATAFLOW_TEST_MYSQL_CA", "")
     if not ca or not os.path.exists(ca):
