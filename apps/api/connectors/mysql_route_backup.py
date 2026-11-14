@@ -35,6 +35,18 @@ def _q(name: str) -> str:
     return quote_sql_identifier(str(name), "`")
 
 
+def _stmt(template: str, **identifiers: str) -> str:
+    """``template`` with each ``{name}`` filled by a backquoted identifier.
+
+    ``cols`` is passed already quoted (a list of ``_q`` names) and kept as is.
+    """
+    cols = identifiers.pop("cols", None)
+    filled = {k: _q(v) for k, v in identifiers.items()}
+    if cols is not None:
+        filled["cols"] = cols
+    return template.format(**filled)
+
+
 def create_mysql_table_backup(cfg: dict[str, Any], *, table: str, job_id: str) -> dict[str, str] | None:
     from connectors.table_manager import _mysql_ddl_connection, _mysql_stored_columns
     from services.dfbak_sweeper import backup_comment
@@ -56,11 +68,10 @@ def create_mysql_table_backup(cfg: dict[str, Any], *, table: str, job_id: str) -
             cols = ", ".join(_q(c) for c in _mysql_stored_columns(cur, table))
             if not cols:
                 return None
-            cur.execute(f"DROP TABLE IF EXISTS {_q(backup)}")
-            cur.execute(f"CREATE TABLE {_q(backup)} LIKE {_q(table)}")
-            cur.execute(f"INSERT INTO {_q(backup)} ({cols}) SELECT {cols} FROM {_q(table)}")  # nosec B608
-            comment = backup_comment(str(job_id or "")).replace("'", "")
-            cur.execute(f"ALTER TABLE {_q(backup)} COMMENT = '{comment}'")
+            cur.execute(_stmt("DROP TABLE IF EXISTS {b}", b=backup))
+            cur.execute(_stmt("CREATE TABLE {b} LIKE {t}", b=backup, t=table))
+            cur.execute(_stmt("INSERT INTO {b} ({cols}) SELECT {cols} FROM {t}", b=backup, t=table, cols=cols))  # nosec B608
+            cur.execute(_stmt("ALTER TABLE {b} COMMENT = %s", b=backup), (backup_comment(str(job_id or "")),))
     finally:
         conn.close()
     return {"table": table, "backup": backup, "schema": "", "engine": ENGINE}
@@ -81,20 +92,20 @@ def restore_mysql_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str
                     cols = ", ".join(_q(c) for c in _mysql_stored_columns(cur, table))
                     conn.begin()
                     cur.execute("SET FOREIGN_KEY_CHECKS = 0")
-                    cur.execute(f"DELETE FROM {_q(table)}")  # nosec B608
-                    cur.execute(f"INSERT INTO {_q(table)} ({cols}) SELECT {cols} FROM {_q(backup)}")  # nosec B608
-                    cur.execute(f"SELECT (SELECT COUNT(*) FROM {_q(table)}), (SELECT COUNT(*) FROM {_q(backup)})")  # nosec B608
+                    cur.execute(_stmt("DELETE FROM {t}", t=table))  # nosec B608
+                    cur.execute(_stmt("INSERT INTO {t} ({cols}) SELECT {cols} FROM {b}", t=table, b=backup, cols=cols))  # nosec B608
+                    cur.execute(_stmt("SELECT (SELECT COUNT(*) FROM {t}), (SELECT COUNT(*) FROM {b})", t=table, b=backup))  # nosec B608
                     live_n, bak_n = cur.fetchone()
                     if int(live_n) != int(bak_n):
                         raise RuntimeError(f"restore count {live_n} != backup {bak_n}")
                     conn.commit()
                     cur.execute("SET FOREIGN_KEY_CHECKS = 1")
-                    cur.execute(f"CHECKSUM TABLE {_q(table)}, {_q(backup)}")
+                    cur.execute(_stmt("CHECKSUM TABLE {t}, {b}", t=table, b=backup))
                     sums = [row[1] for row in cur.fetchall()]
                     if len(sums) == 2 and sums[0] != sums[1]:
                         logger.warning("MySQL restore of %s: checksum differs from %s; backup kept", table, backup)
                         continue
-                    cur.execute(f"DROP TABLE IF EXISTS {_q(backup)}")
+                    cur.execute(_stmt("DROP TABLE IF EXISTS {b}", b=backup))
                 restored.append(str(route))
             except Exception as exc:  # noqa: BLE001 - report, keep the backup and the others
                 try:
@@ -117,6 +128,6 @@ def discard_mysql_route_backups(cfg: dict[str, Any], backups: dict[str, dict[str
         with conn.cursor() as cur:
             for pair in (backups or {}).values():
                 if pair.get("backup"):
-                    cur.execute(f"DROP TABLE IF EXISTS {_q(str(pair['backup']))}")
+                    cur.execute(_stmt("DROP TABLE IF EXISTS {b}", b=str(pair["backup"])))
     finally:
         conn.close()

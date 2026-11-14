@@ -2596,7 +2596,7 @@ def create_pg_table_backup(
             cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
             cur.execute(f"CREATE TABLE {bak_ref} (LIKE {live_ref} INCLUDING ALL)")
             cur.execute(f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")
-            cur.execute(f"COMMENT ON TABLE {bak_ref} IS %s", (backup_comment(str(job_id or "")),))
+            cur.execute("COMMENT ON TABLE " + bak_ref + " IS %s", (backup_comment(str(job_id or "")),))
     except PgBackupRestoreRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - a missing backup must not abort the write

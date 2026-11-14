@@ -106,7 +106,7 @@ def sweep_pg_backups(
         # alone, so a locked backup is skipped without touching the others.
         try:
             cur.execute("SET lock_timeout = '2s'")
-            cur.execute(f"DROP TABLE IF EXISTS {quote_table_ref(str(name), schema, dialect='postgresql')}")
+            cur.execute("DROP TABLE IF EXISTS " + quote_table_ref(str(name), schema, dialect="postgresql"))
             dropped.append(str(name))
         except Exception as exc:  # noqa: BLE001 - one locked backup must not stop the run
             logger.warning("dfbak sweep: %s.%s not dropped: %s", schema, name, exc)
