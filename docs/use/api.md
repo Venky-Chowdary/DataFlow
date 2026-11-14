@@ -31,7 +31,7 @@ Other headers:
 |---|---|
 | `X-Workspace-Id` | Names the workspace the request acts in. |
 | `Idempotency-Key` | On `POST /transfer/run`, `POST /transfer/execute`: makes a repeat of the same request safe. |
-| `X-Correlation-ID` | Returned on safe error responses; quote it to your operator. |
+| `X-Correlation-ID` | Returned on error responses that carry a reference; quote it to your operator. |
 
 A missing or invalid credential gives 401. A valid credential without the
 needed permission gives 403. Every route has exactly one required permission;
@@ -84,34 +84,62 @@ To see the exact permission of any route, read
 
 ## Errors
 
-Three shapes are in use. Handle all three.
+Four shapes are in use. Handle all four, and read `detail` as a string when
+nothing else matches.
 
-**1. An error envelope**
-
-```json
-{"error": {"code": "rate_limited", "message": "...", "retry_after_sec": 30}}
-```
-
-Used by newer routes. `retry_after_sec` appears with a `Retry-After` header
-when you should wait.
-
-**2. A safe error with a reference**
+**1. A classified error with a reference**
 
 ```json
-{"detail": "The transfer could not be started. Reference: 3f2a9c..."}
+{
+  "error": {
+    "code": "network.egress_blocked",
+    "title": "Host blocked by network policy",
+    "message": "...",
+    "action": {"label": "...", "ui": "contact_admin", "api": ""},
+    "object": {},
+    "retriable": false,
+    "reference": "3f2a9c...",
+    "driver": {}
+  },
+  "detail": "... Reference: 3f2a9c..."
+}
 ```
 
-The message is deliberately general. The reference id is also in the
-`X-Correlation-ID` header and identifies the full error in the server log.
+Used for failures the product can name: connection tests, queries, the schema
+browser, Validate, job retries and refusals the product decides. `code` is
+stable; branch on it, not on the text. `action.api` names the call that fixes
+it, when there is one. `reference` is also in the `X-Correlation-ID` header:
+quote it to your operator. `detail` repeats the message as one string for
+older clients. Some errors also carry `legacy_code`, an older code kept for
+one release. A connection test that fails answers 200 with
+`{"success": false, "message": "...", "error": {...}, "reference": "..."}`.
 
-**3. A plain detail**
+The driver's own words appear at most as one cleaned sentence: no SQL, no host
+and port, no row values.
+
+**2. A coded refusal without a reference**
+
+```json
+{"error": {"code": "signup_rate_limited", "message": "...", "retry_after_sec": 30}}
+```
+
+Used by the sign-up and account routes. `retry_after_sec` appears with a
+`Retry-After` header when you should wait. Other 429 answers (sign-in, the
+unauthenticated limiter) send `Retry-After` with a plain `detail`.
+
+**3. An unexpected error (HTTP 500)**
+
+```json
+{"error": "Internal Server Error", "detail": "An unexpected error occurred. Reference: 3f2a9c...", "correlation_id": "3f2a9c..."}
+```
+
+**4. A plain detail**
 
 ```json
 {"detail": "Connector not found"}
 ```
 
-On many routes the detail is the raw error text from the underlying system. Do
-not parse it, and do not show it to end users without review.
+Many routes still answer a refusal this way. Do not parse the text.
 
 Request validation failures (HTTP 422) use the framework's standard list of
 field errors under `detail`.
@@ -166,7 +194,8 @@ and `export`. It reads `DATAFLOW_API_BASE` and `DATAFLOW_API_TOKEN`.
 - `apps/api/services/rbac.py`
 - `apps/api/src/main.py` (`/api/v1`, docs switch)
 - `apps/api/src/middleware/auth_middleware.py`, `apps/api/src/services/browser_session.py`
-- `apps/api/services/api_errors.py`, `apps/api/services/safe_errors.py`
+- `apps/api/services/api_errors.py`, `apps/api/services/safe_errors.py`,
+  `apps/api/services/error_taxonomy.py`, `apps/api/src/routers/connectors_router.py` (connection test)
 - `apps/api/src/routers/jobs_router.py`, `apps/api/src/routers/scim_router.py`,
   `apps/api/src/routers/mcp_router.py`, `apps/api/src/routers/transfer_router.py`
 - `apps/api/services/auth_rate_limit.py`

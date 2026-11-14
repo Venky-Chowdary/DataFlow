@@ -1,8 +1,49 @@
 # Changelog
 
 A factual summary of what merged into the main line recently. It is taken from
-the subjects of merge commits only (`git log --merges --first-parent`). It
-does not describe changes that are not named there.
+the subjects of merge commits (`git log --merges --first-parent`). An entry
+that links upgrade notes also says what operators will notice; those points
+were checked against the code.
+
+## 14 November 2026
+
+- **Enterprise hardening** (PR 430). Operators should read the upgrade notes
+  before deploying: see
+  [operate/backup-and-upgrade.md](operate/backup-and-upgrade.md#enterprise-hardening-pr-430).
+  - Connector egress is enforced at every checkpoint by default: private,
+    loopback and carrier-grade NAT hosts are refused unless the workspace
+    allowlist covers them; cloud metadata and link-local hosts are always
+    refused.
+  - Only a platform administrator can widen a workspace's egress allowlist
+    (SEC-16). A workspace administrator can still narrow or clear it.
+  - SQLite and DuckDB files are confined to the service's folders in every
+    environment, not only in production. `DATAWRAP_SOURCE_PATH_ROOTS` adds a
+    directory.
+  - Error responses for failures the product can name carry a code, one next
+    action and a support reference (`error.reference`, also in
+    `X-Correlation-ID`). Driver text is reduced to one cleaned sentence.
+  - Run needs the approval of the Validate that checked the plan, for the
+    same destination and streams.
+  - Sign-in lockouts are per account and address and can be shared through
+    Redis; an administrator's password reset ends the person's sessions;
+    non-upload request bodies are size-limited.
+  - "Certified" connectors are those a green CI run proves; others that work
+    are "Implemented, not yet proven". See
+    [reference/connectors.md](reference/connectors.md).
+
+## 13 November 2026
+
+- **Exports, Map step and engine edge cases** (PR 427).
+- **Transfer plans** (PR 422). Concurrent edits to a plan no longer overwrite
+  each other.
+- **Security follow-ups** (PR 421).
+- **Destination write semantics** (PR 420).
+- **Spreadsheet formula injection** (PR 419). XLSX, CSV and TSV, email and
+  audit exports no longer carry formulas from the data.
+- **Document Modeler core** (PR 417).
+- **MongoDB upsert** (PR 416). An upsert keeps destination fields the mapping
+  does not write.
+- PR 428 (CI PostgreSQL readiness) changes CI only.
 
 ## 12 November 2026
 
@@ -23,6 +64,23 @@ does not describe changes that are not named there.
 - **Schedules** (PR 409). Fixes a race when a schedule run is finalized, and
   classifies a failure by an HTTP status code, not by a port that contains
   the same digits.
+- **Reversibility Proof** (PR 402). Exit rehearsals, a reversibility gate, and
+  an S3 Object Lock anchor for the audit chain (see
+  [operate/security.md](operate/security.md#anchors)).
+- **Ops reliability** (PR 406). Shared control-plane stores, worker drain on
+  SIGTERM, bounded store calls and Helm checks. See
+  [operate/deploy.md](operate/deploy.md#what-is-shared-between-replicas).
+- **Security follow-ups to PR 403** (PR 415). Confinement in production,
+  caller binding, platform credentials and URL parity.
+- **Verification** (PR 411). Fingerprints v2, honest source filters and
+  lossy-type flags.
+- **Multi-stream runs** (PR 413). Each stream is written, verified, exported
+  and measured on its own object.
+- **File transfers** (PR 414). A file transfer's date order no longer stays
+  pinned on its thread.
+- **Pilot grounding** (PR 405). Workspace-isolated sources, an egress gate
+  and accurate answers.
+- PR 418 and PR 412 (test suite reliability) change tests only.
 
 ## 11 November 2026
 

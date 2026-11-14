@@ -30,6 +30,7 @@ When MongoDB is connected, these records live there:
 | Audit events and audit signing keys | `audit_events`, `audit_chain_keys` |
 | Incremental and CDC positions | `sync_cursors` |
 | Accounts, workspaces, memberships, sessions, invitations, MFA, SCIM, SSO state | several account collections |
+| Control-plane stores: workspace settings, customer-managed key records, resource ACLs, notification channels, Validate run history, transform drafts, CDC mapping reviews, the MCP call log, audit tip anchors | `control_plane_docs`, `control_plane_records`, `control_plane_items` |
 
 Collection names were read from the code for the stores named; the last row
 covers stores that write through a shared helper and were not listed one by
@@ -40,16 +41,22 @@ directory. That mode is for a single developer machine.
 
 ### The data directory
 
-`DATAWRAP_DATA_DIR`. The modules behind these files have no database path, so
-the records are files here even when MongoDB is connected:
+`DATAWRAP_DATA_DIR`. The control-plane files below are the store only on a
+single node without MongoDB (`DATAWRAP_CONTROL_STORE_BACKEND` resolves to
+`file`). When MongoDB is connected, or `DATAWRAP_MULTI_REPLICA=1`, they live in
+the control-plane collections above; the first process to reach an empty
+collection imports its local file once, and the file is then left as it was.
+`transfer_plans.json` and `pilot_results.json` have no database path and stay
+files in every mode.
 
 | File | What it holds |
 |---|---|
-| `tenants.json` | Workspace settings: custom domain, data region, session timeout, IP allowlist, require-SSO, MFA required |
+| `tenants.json` | Workspace settings: custom domain, data region, session timeout, IP and egress allowlists, require-SSO, MFA required |
 | `byok_keys.json` | Wrapped customer-managed keys. **Losing this file makes connector secrets wrapped with those keys unreadable.** |
 | `resource_acls.jsonl` | Per-resource access grants |
 | `notifications.json` | Notification channels |
 | `transfer_plans.json` | Saved transfer plans |
+| `pilot_results.json` | Pilot's recent query results (rows sealed with the connector-secret key, kept for about an hour) |
 | `preflight_runs.jsonl` | Validate run history |
 | `shape_drafts.json` | Transform drafts |
 | `audit_tip_anchors.jsonl` | Audit chain anchors |
@@ -132,9 +139,11 @@ backfill code that runs at start (for example
 - **Downgrade is not supported by any tool.** Take a backup before upgrading.
 - Upgrade all processes (API, workers, scheduler) to the same build. They
   share the queue and the job records.
-- Workers have no graceful shutdown. Stop them when no job is running, or
-  expect interrupted jobs to wait for the orphan sweep and then resume from
-  their checkpoint.
+- On SIGTERM a worker stops claiming work and drains for up to
+  `DATAWRAP_WORKER_DRAIN_SECONDS` (default 25); a transfer still running is
+  stopped at its next batch and requeued. A worker killed sooner leaves its
+  jobs to the orphan sweep, which resumes them from their checkpoint. See
+  [deploy.md](deploy.md#stopping-a-worker).
 - The API started by `scripts/start-api.sh` waits at most
   `DATAWRAP_GRACEFUL_SHUTDOWN_SECONDS` (default 10) for open connections on
   SIGTERM, then stops its background work. Background training stops within
@@ -277,6 +286,62 @@ upgrade: the API moves files in both at its first start.
   run). `key_census_every` is off by default; when on, a missing key fails the
   run. Kill switch: `DATAWRAP_COMMIT_SAFE_WINDOW=0`.
 
+#### Enterprise hardening (PR 430)
+
+New defaults. Each turns a protection on that was off or audit-only before.
+
+- **Connector egress is enforced at every checkpoint.** Saving a connector
+  with a new host, reading, writing, introspecting and probing now refuse
+  private, loopback and carrier-grade NAT addresses that the workspace
+  allowlist does not cover. Before, these checkpoints only wrote an
+  `egress.would_block` audit event. A saved connector that points at such an
+  address keeps saving but fails on Test and on its next run. Before
+  upgrading, list the affected connectors with the read-only
+  `python apps/api/scripts/audit_egress_impact.py`, then have a platform
+  administrator allowlist the ranges that are meant to be reachable.
+  `DATAWRAP_EGRESS_ENFORCE_NEW=0` restores audit-only mode for the newer
+  checkpoints while you do this.
+- **Only a platform administrator can widen a workspace's egress allowlist**
+  (SEC-16). A workspace administrator who adds a range now gets 403; they can
+  still narrow or clear it.
+- **Local files are confined in every environment.** SQLite and DuckDB
+  connectors open files only in the data folders, uploads, the workspace's
+  export folder or `DATAWRAP_SOURCE_PATH_ROOTS`; before, this applied in
+  production only. A relative SQLite or DuckDB name is now placed under the
+  data folder. Before upgrading a staging or on-premises install, run the
+  read-only `python apps/api/scripts/audit_sqlite_paths.py --copy-plan` to see
+  which files to move. `DATAWRAP_CONFINE_LOCAL_FILES=0` turns the rule off,
+  with a warning at start.
+- **Run needs the Validate approval it was given.** Running a plan that was
+  validated without that Validate's approval answers 409
+  `validate_approval_required`; an approval for another destination table or
+  set of streams answers 409 `validate_approval_destination`. Run Validate
+  again for plans approved before the upgrade if they are refused. The web
+  app's Validate-then-Run flow is unchanged.
+- **Sign-in.** Lockouts are per account and address, and an account is never
+  locked as a whole. Set `DATAWRAP_AUTH_LOCKOUT_REDIS_URL` (or `REDIS_URL`) so
+  lockouts are shared by every replica. An administrator's password reset now
+  ends all of that person's sessions.
+- **Request bodies** other than uploads are limited to 1 MB without
+  credentials and 8 MB otherwise (413). See
+  [security.md](security.md#rate-limits).
+- **CORS.** With sign-in required, no localhost origin is trusted by default.
+  Set `CORS_ORIGINS` (or the web domain) explicitly.
+
+Changed shapes:
+
+- **Error responses carry a support reference.** A classified failure answers
+  with `{"error": {"code", "title", "message", "action", "object",
+  "retriable", "reference", "driver"}, "detail": "... Reference: <id>"}`.
+  `detail` is still a string. Clients that matched on driver text in `detail`
+  should switch to `error.code`. See
+  [../use/api.md](../use/api.md#errors).
+- **Connector tiers.** "Certified" now needs a green CI run that proves the
+  engine; other working connectors show "Implemented, not yet proven", and
+  wire-compatible brands (MariaDB, DocumentDB, Cosmos DB, hosted Redis) are
+  Planned until proven under their own name. No connector stopped working.
+  See [../reference/connectors.md](../reference/connectors.md).
+
 #### Training and egress (PR 410)
 
 - **`DATAWRAP_TRAINING`.** Set, only `1`, `true`, `yes` or `on` turns
@@ -323,3 +388,10 @@ upgrade: the API moves files in both at its first start.
 - `apps/api/src/ai/training/training_scheduler.py`,
   `apps/api/src/ai/training/training_runtime.py`, `apps/api/services/egress_guard.py`
 - `scripts/start-api.sh` (graceful-shutdown bound)
+- `apps/api/scripts/audit_egress_impact.py`, `apps/api/scripts/audit_sqlite_paths.py`,
+  `apps/api/services/local_file_policy.py` (PR 430 defaults)
+- `apps/api/src/routers/workspace_router.py` (`_require_egress_admin`),
+  `apps/api/services/validate_approvals.py`, `apps/api/services/auth_rate_limit.py`,
+  `apps/api/src/routers/team_router.py` (password reset), `apps/api/services/safe_errors.py`
+- `apps/api/services/shared_doc_store.py`, `apps/api/src/ai/copilot/result_store.py`,
+  `apps/api/services/worker_fleet.py` (worker drain)

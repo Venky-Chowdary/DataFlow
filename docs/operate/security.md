@@ -206,11 +206,16 @@ The playground (`/api/v1/query`) runs reads only. The guards, from
   Manager instead.
 - A workspace can bring its own key. Connector secrets are then wrapped with
   that key, and the platform key wraps the workspace key. The key records are
-  kept in a local file, so every replica must share the data volume.
+  kept in MongoDB when it is connected, else in a local file (see
+  [deploy.md](deploy.md#what-is-shared-between-replicas)).
 - Audit events are passed through a redactor before they are stored, and
   `GET /api/v1/audit/secret-scan` scans stored events for secret-shaped
   values.
-- Safe error responses carry a reference id, not the exception text. See
+- Error responses do not carry raw driver or exception text. A classified
+  failure carries a plain message, one next step and a support reference
+  (`error.reference`, also in the `X-Correlation-ID` header). The only driver
+  text a user sees is one cleaned sentence with the SQL, host and port, and
+  row values removed. See
   [runbooks.md](runbooks.md#reading-an-error-reference).
 - Rotate a connector's stored secrets with
   `POST /api/v1/connectors/saved/{id}/rotate-secrets`.
@@ -219,28 +224,101 @@ The playground (`/api/v1/query`) runs reads only. The guards, from
 ## Outbound connections (egress)
 
 Connector hosts and webhook URLs are supplied by users, so the service checks
-where it is about to connect.
+where it is about to connect, every time it connects. A host name is resolved
+and the address it resolves to is checked, so a name cannot point somewhere
+else later.
 
-Always refused, at every checkpoint and regardless of settings:
+Always refused, at every checkpoint and whatever the settings or allowlists
+say:
 
-- cloud metadata addresses (for example `169.254.169.254`);
+- cloud metadata addresses (for example `169.254.169.254`, `fd00:ec2::254`,
+  `metadata.google.internal`);
 - link-local and multicast addresses.
 
-Refused by default at the established checkpoints (connector Test, the SQL,
-MySQL, PostgreSQL and AWS drivers, CDC, webhooks and Pilot's connector tools):
+Refused by default, at every checkpoint, unless the workspace allowlist covers
+the range:
 
-- private ranges (RFC 1918), loopback, carrier-grade NAT and IPv6
-  unique-local addresses.
+- private ranges (RFC 1918), loopback, carrier-grade NAT (`100.64.0.0/10`)
+  and IPv6 unique-local addresses.
 
-**Audit-only by default at the newer checkpoints** (saving or updating a
-connector, transfer reads and writes, introspection, pre-counts and probes,
-shared HTTP, SMTP and Mongo clients, redirects and pagination): a private or
-loopback target is allowed and an `egress.would_block` audit event is written.
-Set `DATAWRAP_EGRESS_ENFORCE_NEW=1` to make these checkpoints refuse.
+The checkpoints are connector Test, connector save and update, transfer reads
+and writes, introspection, pre-counts and probes, CDC, webhooks, Pilot's
+connector tools, and the shared HTTP, SMTP, Mongo and Redis clients
+(redirects and pagination included).
 
-A workspace administrator can save an allowlist of networks for on-premises
-or VPC ranges. Metadata, link-local, multicast and unspecified addresses
-cannot be allowlisted.
+`DATAWRAP_EGRESS_ENFORCE_NEW=0` puts the newer checkpoints (connector save and
+update, transfer reads and writes, introspection, pre-counts and probes, and
+the shared clients) back into audit-only mode: a private target is then
+allowed and an `egress.would_block` audit event is written. Leave it unset in production.
+
+Saving a connector without changing its host (a rename, a new password) is
+not refused for a private host. Connecting with it still is.
+
+### The workspace egress allowlist
+
+A workspace can hold a list of networks (CIDR ranges) its connectors may reach
+in private address space, for an on-premises or VPC database. It is empty
+unless someone saves one. It is set with `egress_allowlist` on
+`POST /api/v1/workspace/tenant` or `PATCH /api/v1/workspace/tenant/{id}`.
+
+- **Only a platform administrator can widen it**: add a range, or replace a
+  range with a larger one. A workspace administrator who tries gets 403. On a
+  shared deployment those ranges are the operator's own network, so a
+  workspace administrator could otherwise reach the server's neighbours.
+- A workspace administrator may narrow or clear it, which only refuses more.
+- A range that is only metadata or link-local addresses, or the whole address
+  space (`0.0.0.0/0`), cannot be saved. Metadata, link-local and multicast
+  addresses stay refused even inside a listed range.
+
+`DATAWRAP_EGRESS_ALLOWLIST` is a process-wide list that applies to every
+workspace. It exists for local test runs. Leave it unset in production.
+
+### What a user sees
+
+Connector Test answers `success: false` with the refusal and an error
+envelope whose code is `network.egress_blocked`, for example:
+`Refused connector host 10.1.2.3: private 10.x addresses are not connection
+targets.` followed by how to get the range allowed. Saving a connector with a
+new private host answers 400 with the same text. See
+[runbooks.md](runbooks.md#a-connector-host-or-file-path-is-refused) for what
+the operator does.
+
+## Local files on the API host
+
+Connectors that open files on the API host are confined to known folders.
+This is on by default in every environment.
+
+- A SQLite or DuckDB connector may open a file only in `<data dir>/sqlite` or
+  `<data dir>/duckdb`, in an upload its own workspace owns, in its workspace's
+  export folder, or in a directory listed in `DATAWRAP_SOURCE_PATH_ROOTS`. A
+  relative name is placed under the SQLite or DuckDB folder. Symlinks and `..`
+  are resolved first.
+- In production, local Iceberg warehouses are confined to `<data dir>/iceberg`.
+- Key or certificate files named in a connector's settings (Google key files,
+  TLS files, Kafka files) must be an upload the workspace owns, in its export
+  folder, or in `DATAWRAP_SOURCE_PATH_ROOTS`.
+- A file transfer's `source_path` must be in the upload folders or in
+  `DATAWRAP_SOURCE_PATH_ROOTS`; otherwise it is refused as "outside the upload
+  directory".
+- A SQLite or DuckDB connector never opens the service's own data directory
+  (job store, ledgers, secrets) outside its `sqlite/` and `duckdb/` folders,
+  whatever the settings.
+
+A refused SQLite or DuckDB file answers with the code `access.path_not_allowed`
+and says to move the file into the data folder, upload it, or ask the
+operator. A refused key or certificate file says to upload it or paste its
+contents.
+
+To allow a directory, the operator adds it to `DATAWRAP_SOURCE_PATH_ROOTS`
+(several directories separated by `:`) and restarts the API. Every workspace
+can then read that directory, so on a shared deployment leave it unset and
+have users upload files instead.
+
+`DATAWRAP_CONFINE_LOCAL_FILES=0` turns the folder rule off for SQLite, DuckDB
+and Iceberg connectors in this process. The API then logs a warning at start,
+and in production records each path the rule would have refused as a
+`local_file.would_confine` audit event. The data directory stays protected,
+and file transfer source paths and key files keep their rule.
 
 ## Data residency
 
@@ -382,21 +460,37 @@ signed with an HMAC key, so a removed or altered event is detectable.
 ### Anchors
 
 An anchor records the chain head somewhere the application cannot rewrite.
-**Today the anchor is a local file** (`audit_tip_anchors.jsonl`). It is the
-only provider implemented. A receipt always names the store that holds it and
-carries `externally_anchored: false`. If `DATAWRAP_AUDIT_ANCHOR_PROVIDER` asks
-for another provider (for example `s3`), the receipt records it as
-`requested_provider`, says the request was not met, and the API logs a
-warning. There is no external, write-once anchor. Someone who can rewrite the
-data directory can rewrite the anchors.
+`DATAWRAP_AUDIT_ANCHOR_PROVIDER` picks where:
+
+- **Unset (the default): a local file** (`audit_tip_anchors.jsonl`). It is not
+  write-once. Every receipt says `status: not_anchored` and
+  `externally_anchored: false`. Someone who can rewrite the data directory can
+  rewrite these anchors.
+- **`s3`: S3 Object Lock in compliance mode.** Set
+  `DATAWRAP_AUDIT_ANCHOR_S3_BUCKET` to a bucket created with Object Lock on.
+  Each anchor is written with a retain-until date
+  (`DATAWRAP_AUDIT_ANCHOR_RETENTION_DAYS`, default 2555) and read back before
+  it counts: the receipt says `anchored` only when the lock, the retention and
+  the content were confirmed, and `failed` with the reason otherwise. It never
+  falls back to the local file.
+- Any other value is recorded as `failed`: that provider is not in this build.
 
 Command-line check: `apps/api/scripts/audit_chain_check.py`.
 
 ## Rate limits
 
-- Login attempts are limited per address and per account, with a lockout.
-  Counters are held in each process, so the budget multiplies with the number
-  of API replicas.
+- Failed sign-ins lock out the pair of account and address, with a growing
+  wait (`DATAWRAP_AUTH_LOCKOUT_*`), and lock out an address at a higher count.
+  An account is never locked as a whole: failures from other addresses only
+  slow sign-in down, and not from an address the account has signed in from
+  before. With Redis configured (`DATAWRAP_AUTH_LOCKOUT_REDIS_URL`, else
+  `REDIS_URL`) the lockouts are shared by every replica and survive a restart;
+  without it each process keeps its own.
+- Request bodies other than uploads are refused with 413 above 1 MB when the
+  request carries no credentials and sign-in is required, and above 8 MB
+  otherwise (`DATAWRAP_MAX_PUBLIC_BODY_BYTES`, `DATAWRAP_MAX_JSON_BODY_BYTES`;
+  `DATAWRAP_BODY_LIMIT_OVERRIDES` raises it for one route prefix). Uploads
+  keep their own limits.
 - The limiter for unauthenticated routes is off unless
   `DATAWRAP_PUBLIC_RATE_LIMIT=1` (or `DATAFLOW_PUBLIC_RATE_LIMIT=1`).
 - MCP and Pilot have their own limits (`DATAFLOW_MCP_RATE_*`,
@@ -467,7 +561,12 @@ been rebuilt.
 - `apps/api/services/embedded_volume.py`, `apps/api/connectors/sqlite_common.py`,
   `apps/api/services/connector_request_limits.py`
 - `apps/api/src/routers/query_router.py`, `apps/api/services/tsql_select.py`
-- `apps/api/services/egress_guard.py`
+- `apps/api/services/egress_guard.py`, `apps/api/src/routers/connectors_router.py`
+  (connector save refusal), `apps/api/src/routers/workspace_router.py`
+  (`_require_egress_admin`)
+- `apps/api/services/local_file_policy.py`, `apps/api/services/dataset_file.py`,
+  `apps/api/services/tenant_host_files.py`
+- `apps/api/services/error_taxonomy.py`, `apps/api/services/safe_errors.py`
 - `apps/api/services/data_residency.py`, `apps/api/services/residency_addressing.py`,
   `apps/api/services/region_verification.py`, `apps/api/connectors/s3_residency.py`
 - `apps/api/src/routers/transfer_router.py` (`_residency_check`),
@@ -477,7 +576,7 @@ been rebuilt.
 - `deploy/nginx.conf`, `deploy/nginx.conf.template`, `deploy/nginx.static.conf`,
   `apps/api/src/main.py` (API response headers)
 - `apps/api/services/audit_log.py`, `apps/api/services/audit_chain_keys.py`,
-  `apps/api/services/audit_anchor.py`
-- `apps/api/services/auth_rate_limit.py`
+  `apps/api/services/audit_anchor.py`, `apps/api/services/audit_anchor_s3.py`
+- `apps/api/services/auth_rate_limit.py`, `apps/api/src/middleware/body_size_limit.py`
 - `apps/api/tests/fixtures/rbac_route_permissions.json`
 - `.github/workflows/ci.yml`, `bandit.yaml`

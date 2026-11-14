@@ -86,27 +86,35 @@ stays up for health checks and refuses every other route. It refuses:
 - an API with the cadence loop or the claim loop left on;
 - a worker with the cadence loop on, or a scheduler with it off;
 - a file-based approval ledger, which other replicas cannot see.
+- file-based control-plane stores (`DATAWRAP_CONTROL_STORE_BACKEND=file`).
 
 A second scheduler replica may run as a standby; one Mongo lock keeps a single
 beat.
 
-### What is not shared between replicas today
+### What is shared between replicas
 
-The topology check covers the scheduler, the claim loop and the approval
-ledger. It does not cover every store. The following are kept in files under
-the data directory or in process memory with no shared backend, so each
-replica has its own copy unless all replicas mount the same volume:
+With `DATAWRAP_MULTI_REPLICA=1` the control-plane stores live in MongoDB
+(`DATAWRAP_CONTROL_STORE_BACKEND` is `mongo` by default there, and `file` is
+refused at start):
 
 - workspace settings in `tenants.json` (custom domain, data region, session
-  timeout, IP allowlist, require-SSO);
-- customer-managed key records, resource ACLs, notification channels, transfer
-  plans, preflight run history, transform drafts, the MCP call log, audit tip
-  anchors;
-- login rate-limit counters and lockouts, and in-progress Validate runs.
+  timeout, IP and egress allowlists, require-SSO);
+- customer-managed key records, resource ACLs, notification channels,
+  transform drafts, Validate run history, CDC mapping reviews, the MCP call
+  log and audit tip anchors.
 
-The production compose file avoids the problem by mounting the same four
-volumes into every container. If your replicas do not share a volume, treat
-these features as single-replica.
+The first process to reach an empty shared store imports its local file once.
+
+Two stores have no shared backend yet: transfer plans (`transfer_plans.json`)
+and Pilot results (`pilot_results.json`). Once a process role is set, a
+replica refuses to start until each is named in
+`DATAWRAP_POD_LOCAL_STORES_ACK` (for example
+`DATAWRAP_POD_LOCAL_STORES_ACK=transfer_plans,pilot_results`), which accepts
+that each replica keeps its own copy. Mounting one shared data volume on every
+replica avoids the split.
+
+Login lockouts are shared only when Redis is configured
+(`DATAWRAP_AUTH_LOCKOUT_REDIS_URL`, else `REDIS_URL`).
 
 ## The Helm chart
 
@@ -129,6 +137,17 @@ not rely on it as shipped at this commit.** What the templates expect:
   so it needs a writable data volume.
 
 The chart was read, not installed. Nothing here is a claim that it deploys.
+
+## Stopping a worker
+
+On SIGTERM a worker claims nothing new and waits up to
+`DATAWRAP_WORKER_DRAIN_SECONDS` (default 25) for running transfers. Before that
+time is up, a transfer still running is stopped at its next batch and put back
+on the queue, so another worker resumes it. A second signal ends the process
+at once. The Helm chart refuses a worker `terminationGracePeriodSeconds`
+shorter than the drain time plus 10 seconds. A worker killed earlier leaves
+its jobs to the lease expiry and the orphan sweep, as after a crash (see
+[runbooks.md](runbooks.md)).
 
 ## Health and metrics
 
@@ -155,6 +174,27 @@ This matters for the workspace IP allowlist, rate limits and the address
 recorded in audit events. Set the count explicitly, even to 0: the allowlist
 only enforces on an address it can trust.
 
+## Network and file settings in production
+
+Connectors refuse private, loopback and cloud metadata addresses, and open
+local files only inside the service's own folders. Both are on by default. See
+[security.md](security.md#outbound-connections-egress).
+
+- Leave `DATAWRAP_EGRESS_ALLOWLIST` unset. It allows a network for every
+  workspace and exists for local test runs. A workspace that needs a private
+  range gets it on its own allowlist, set by a platform administrator.
+- Leave `DATAWRAP_SOURCE_PATH_ROOTS` unset on a shared deployment. Every
+  directory listed there is readable by every workspace. Users upload files
+  instead.
+- Leave `DATAWRAP_EGRESS_ENFORCE_NEW` and `DATAWRAP_CONFINE_LOCAL_FILES` unset.
+  Setting either to `0` turns a protection off.
+
+**Hosted deployments and customer databases on private networks.** The
+service cannot reach a customer's private address, and a hosted deployment
+should not allow the operator's own private ranges for a customer. Ask the
+customer for an endpoint the service can reach, with its firewall restricted
+to the service's outbound IP addresses, and TLS on.
+
 ## Web container
 
 - `Dockerfile.web` builds the app with `VITE_API_BASE=/api/v1` and serves it
@@ -173,9 +213,6 @@ only enforces on an address it can trust.
   repository at this commit.
 - TLS termination, DNS and ingress for your platform.
 - High availability of MongoDB and Redis themselves.
-- Graceful shutdown: workers handle a keyboard interrupt only. There is no
-  SIGTERM drain, so a stopped worker's job waits for its lease to expire and is
-  then resumed or settled by the orphan sweep (see [runbooks.md](runbooks.md)).
 - The Terraform module. It was not applied or reviewed for this page.
 
 ## Verified against
@@ -194,3 +231,6 @@ only enforces on an address it can trust.
 - `deploy/enterprise/helm/dataflow/values.yaml` and `templates/`
 - `deploy/nginx.conf`, `deploy/nginx.conf.template`, `deploy/railway/*.toml`
 - `apps/api/tests/test_process_topology.py`
+- `apps/api/services/egress_guard.py`, `apps/api/services/local_file_policy.py`
+- `apps/api/src/worker_main.py`, `apps/api/services/worker_fleet.py` (worker drain)
+- `apps/api/services/shared_doc_store.py` (control-plane stores)

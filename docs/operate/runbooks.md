@@ -181,20 +181,69 @@ backup or recovery.
 
 ## Reading an error reference
 
-Many error responses end with `Reference: <id>`, and carry the same id in the
-`X-Correlation-ID` response header. The message is deliberately general; the
-detail is in the server log.
+A failure the product can name answers with an error envelope:
+
+```json
+{"error": {"code": "network.egress_blocked", "message": "...", "action": {...},
+           "reference": "3f2a9c..."},
+ "detail": "... Reference: 3f2a9c..."}
+```
+
+The same id is in the `X-Correlation-ID` response header, and an unexpected
+error (HTTP 500) ends its `detail` with `Reference: <id>`. The message names
+the cause and one next step. The driver's own words appear at most as one
+cleaned sentence, with SQL, host and port, and row values removed.
 
 To find the cause:
 
-1. Copy the reference id.
+1. Ask the user for the reference id.
 2. Search the API's logs for that id. The matching log event carries the
    event name, the HTTP status and the exception.
 
-`DATAFLOW_EXPOSE_ERROR_DETAIL=1` adds a redacted copy of the exception text to
-the response. Use it for debugging only.
+`DATAFLOW_EXPOSE_ERROR_DETAIL=1` (this exact name) adds a redacted copy of the
+exception text to safe error responses. Use it for debugging only.
 
-Not every error has a reference. Some routes still return the raw error text.
+Not every error has a reference: plain refusals such as `Connector not found`
+are answered as `{"detail": "..."}`.
+
+## A connector host or file path is refused
+
+**The user sees** on connector Test, or when saving a connector with a new
+host: `Refused connector host <host>: private 10.x addresses are not
+connection targets...` (the words name the range: loopback, carrier-grade NAT,
+cloud metadata and link-local, and so on). The error code is
+`network.egress_blocked`.
+
+**The operator:**
+
+1. Decides whether the target should be reachable at all. Cloud metadata,
+   link-local and multicast addresses can never be allowed.
+2. For a database on a private network that this workspace should reach: a
+   platform administrator adds its range to the workspace's
+   `egress_allowlist` (`PATCH /api/v1/workspace/tenant/{id}`). A workspace
+   administrator cannot add it; they get 403.
+3. On a shared (hosted) deployment, do not allow the operator's own ranges.
+   Ask the customer for an endpoint the service can reach over the internet,
+   restricted to the service's outbound IP addresses.
+
+**The user sees**, for a SQLite, DuckDB, key or certificate file, a message
+that the file is outside the folders connectors may open on this server, with
+what to do instead. For SQLite and DuckDB files the error code is
+`access.path_not_allowed`. For a file transfer's source path: `File source
+path is outside the upload directory.`
+
+**The operator:**
+
+1. Prefers that the user uploads the file, or moves it into the SQLite or
+   DuckDB data folder.
+2. On a single-tenant install, may add the directory to
+   `DATAWRAP_SOURCE_PATH_ROOTS` (several separated by `:`) and restart the
+   API. Every workspace can then read that directory.
+3. Does not turn the check off (`DATAWRAP_CONFINE_LOCAL_FILES=0`) to fix one
+   connector.
+
+See [security.md](security.md#outbound-connections-egress) and
+[security.md](security.md#local-files-on-the-api-host).
 
 ## The API answers only /health
 
@@ -223,6 +272,8 @@ starting `[FATAL] Production config:` or naming a topology error. See
 - `apps/api/services/batch_undo.py`, `apps/api/services/quarantine_dlq.py`
 - `apps/api/services/parity_report.py` (verdicts), `apps/api/services/parity_signoff.py`
 - `apps/api/services/migration_rollback.py`, `apps/api/services/recovery_honesty.py`
-- `apps/api/services/safe_errors.py`
+- `apps/api/services/safe_errors.py`, `apps/api/services/error_taxonomy.py`
+- `apps/api/services/egress_guard.py`, `apps/api/src/routers/workspace_router.py`,
+  `apps/api/services/local_file_policy.py`
 - `apps/api/src/main.py`, `apps/api/services/platform_config.py`
 - `apps/api/tests/fixtures/rbac_route_permissions.json` (routes and permissions)

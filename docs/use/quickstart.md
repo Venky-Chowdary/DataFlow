@@ -14,9 +14,12 @@ You need:
 - credentials for each: host, port, database, user and password, or a
   connection string.
 
-By default the API refuses to connect to private, loopback and cloud metadata
-addresses at Test time. If your database is on a private network, a workspace
-administrator must add its range to the workspace's network allowlist first.
+The API refuses to connect to private, loopback and cloud metadata addresses,
+at Test time and whenever it connects. If your database is on a private
+network, a platform administrator must add its range to the workspace's
+network allowlist first; a workspace administrator cannot. SQLite and DuckDB
+files must be uploaded, kept in the server's data folder, or in a folder the
+operator allows.
 
 ## Part 1: in the web app
 
@@ -164,10 +167,11 @@ Notes:
 
 | Symptom | Where to look |
 |---|---|
-| Test fails with an egress or private address message | The workspace network allowlist; [../operate/security.md](../operate/security.md) |
+| Test fails with `Refused connector host ...` | The workspace network allowlist; [../operate/runbooks.md](../operate/runbooks.md#a-connector-host-or-file-path-is-refused) |
+| A file is "outside the folders connectors may open" | Upload it instead; [../operate/runbooks.md](../operate/runbooks.md#a-connector-host-or-file-path-is-refused) |
 | Validate blocks | The gate's message; [verification.md](verification.md) |
 | 403 on a route | Your role; the role table in [../operate/security.md](../operate/security.md) |
-| A response ends with `Reference: ...` | [../operate/runbooks.md](../operate/runbooks.md#reading-an-error-reference) |
+| An error shows a reference | [../operate/runbooks.md](../operate/runbooks.md#reading-an-error-reference) |
 | The job stops moving | [../operate/runbooks.md](../operate/runbooks.md#a-job-looks-stuck) |
 
 ## Not covered
@@ -186,5 +190,6 @@ Notes:
 - `apps/api/src/routers/transfer_router.py` (`ExecuteTransferRequest`, `EndpointDTO`, `Idempotency-Key`)
 - `apps/api/src/routers/jobs_router.py` (list parameters)
 - `apps/api/services/rbac.py`, `apps/api/tests/fixtures/rbac_route_permissions.json`
-- `apps/api/services/egress_guard.py`, `apps/api/services/job_status.py`
+- `apps/api/services/egress_guard.py`, `apps/api/services/local_file_policy.py`,
+  `apps/api/src/routers/workspace_router.py` (`_require_egress_admin`), `apps/api/services/job_status.py`
 - `apps/api/services/platform_config.py` (`docs_enabled`)
