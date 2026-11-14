@@ -247,3 +247,14 @@ describe("Reversibility tab actions (jsdom)", () => {
     assert.match(host!.textContent || "", /Require reversibility: off for this run/);
   });
 });
+
+describe("Reversibility counts use the shared stat tile (W6)", () => {
+  it("shows Lossy / Conditional / Invertible as neutral tiles with a status dot", () => {
+    const html = renderToStaticMarkup(<ReversibilityReportView report={planReversibilityFixture()} />);
+    const row = /<dl class="df2-stat-tiles is-3 df2-rev-counts" aria-label="Columns by invertibility">([\s\S]*?)<\/dl>/.exec(html);
+    assert.ok(row, "one stat-tile row");
+    assert.equal((row![1].match(/<div class="df2-stat-tile"/g) || []).length, 3);
+    assert.match(text(row![1]), /Lossy \d+ .*Conditional \d+ .*Invertible \d+/);
+    assert.doesNotMatch(row![1], /class="is-lossy"|class="is-conditional"|class="is-invertible"/);
+  });
+});

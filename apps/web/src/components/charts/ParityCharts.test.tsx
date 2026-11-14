@@ -123,11 +123,16 @@ describe("ParityTrendChart", () => {
     assert.match(html, /aria-label="Parity over the last 12 runs/);
   });
 
-  it("labels the min and max ticks at their scale positions", () => {
-    // Height 180, padding top 18 / bottom 30: 100% sits at y=18, 99.5% at y=150.
+  it("labels three round ticks on an axis that ends at 100% (W6)", () => {
+    // Runs between 99.5% and 100% sit on a 98–100% axis, not a 99.5–100% slice.
+    // Height 180, padding top 18 / bottom 30: 100% at y=18, 99% at y=84, 98% at y=150.
     assert.match(html, /y="22"[^>]*>100%</);
-    assert.match(html, /y="154"[^>]*>99\.5%</);
+    assert.match(html, /y="88"[^>]*>99%</);
+    assert.match(html, /y="154"[^>]*>98%</);
+    assert.equal((html.match(/<line class="df2-parity-grid"/g) || []).length, 3);
     assert.match(html, /<line class="df2-parity-grid"[^>]*y1="18"/);
+    // No filled band under the line.
+    assert.doesNotMatch(html, /df2-parity-trend-area/);
   });
 
   it("breaks the line where a run has no figure and emphasises the last point", () => {
@@ -183,7 +188,9 @@ describe("TableRunHeatmap", () => {
     // One shape per cell of that state, plus one in the legend.
     assert.equal(glyphs("proven"), cells.filter((c) => c === "proven").length + 1);
     assert.equal(glyphs("explained"), cells.filter((c) => c === "explained").length + 1);
-    assert.equal(glyphs("none"), cells.filter((c) => c === "none").length + 1);
+    // Not run is a quiet empty cell (W6): no mark in the grid or the legend.
+    assert.equal(glyphs("none"), 0);
+    assert.equal((html.match(/class="df2-parity-heat-cell is-none"/g) || []).length, cells.filter((c) => c === "none").length);
     assert.equal(glyphs("sampled"), 1);
   });
 

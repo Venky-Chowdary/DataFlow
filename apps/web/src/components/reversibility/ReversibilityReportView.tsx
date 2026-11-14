@@ -12,6 +12,7 @@
 import { Fragment, useId, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
+import { StatTile, StatTileRow } from "../ui/StatTile";
 import { badgeClass, formatDateTime } from "../../lib/parity";
 import {
   checkText,
@@ -215,20 +216,26 @@ export function ReversibilityReportView({
 
       <div className="df2-rev-summary">
         <p className="df2-parity-confidence">{report.verdict_reason}</p>
-        <dl className="df2-rev-counts" aria-label="Columns by invertibility">
-          <div className="is-lossy">
-            <dt>Lossy</dt>
-            <dd>{report.counts.lossy.toLocaleString("en-US")}</dd>
-          </div>
-          <div className="is-conditional">
-            <dt>Conditional</dt>
-            <dd>{report.counts.conditional.toLocaleString("en-US")}</dd>
-          </div>
-          <div className="is-invertible">
-            <dt>Invertible</dt>
-            <dd>{report.counts.invertible.toLocaleString("en-US")}</dd>
-          </div>
-        </dl>
+        <StatTileRow label="Columns by invertibility" className="is-3 df2-rev-counts">
+          <StatTile
+            label="Lossy"
+            value={report.counts.lossy.toLocaleString("en-US")}
+            tone={report.counts.lossy > 0 ? "danger" : "neutral"}
+            caption="cannot be given back"
+          />
+          <StatTile
+            label="Conditional"
+            value={report.counts.conditional.toLocaleString("en-US")}
+            tone={report.counts.conditional > 0 ? "warn" : "neutral"}
+            caption="reversible when values fit"
+          />
+          <StatTile
+            label="Invertible"
+            value={report.counts.invertible.toLocaleString("en-US")}
+            tone={report.counts.invertible > 0 ? "ok" : "neutral"}
+            caption="round-trip exactly"
+          />
+        </StatTileRow>
         <p className="df2-parity-muted">{dataCheckedText(report.data_checked)}</p>
       </div>
 

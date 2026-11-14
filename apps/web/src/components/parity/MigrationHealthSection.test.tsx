@@ -25,11 +25,11 @@ describe("Migration health section", () => {
     const t = text(html);
     assert.match(t, /Migration health/);
     assert.match(t, /Last 30 runs/);
-    assert.match(t, /runs fully proven 96\.4%/);
-    assert.match(t, /runs with unexplained differences 2/);
-    assert.match(t, /runs that failed verification 1/);
-    assert.match(t, /sign-offs 11/);
-    assert.match(t, /most-drifting table payments/);
+    assert.match(t, /Runs fully proven 96\.4%/);
+    assert.match(t, /Unexplained differences 2/);
+    assert.match(t, /Failed verification 1/);
+    assert.match(t, /Sign-offs 11/);
+    assert.match(t, /Most-drifting table: payments/);
     assert.match(t, /Parity trend/);
     assert.match(t, /Tables × runs/);
     assert.match(html, /aria-label="Parity over the last 12 runs/);
@@ -49,7 +49,7 @@ describe("Migration health section", () => {
     const t = text(html);
     assert.match(t, /Run a transfer to see parity here\./);
     assert.match(t, /Start a transfer/);
-    assert.doesNotMatch(t, /runs fully proven/);
+    assert.doesNotMatch(t, /Runs fully proven/);
   });
 
   it("says what went wrong and offers a retry", () => {
@@ -80,5 +80,30 @@ describe("Migration health section", () => {
     assert.match(jobs, /focusPanel === "trust-report"/);
     assert.match(jobs, /\{ id: "trust" as const, label: "Trust Report"/);
     assert.match(jobs, /<TrustReportTab/);
+  });
+});
+
+describe("Migration health KPI row (W6)", () => {
+  const html = renderToStaticMarkup(
+    <MigrationHealthView state="ready" summary={summaryFixture()} limit={30} onOpenJob={() => {}} />,
+  );
+
+  it("is one row of four stat tiles, each a label, a value and a caption or sparkline", () => {
+    const row = /<dl class="df2-stat-tiles df2-parity-health-kpis" aria-label="[^"]+">([\s\S]*?)<\/dl>/.exec(html);
+    assert.ok(row, "one stat-tile row");
+    const tiles = row![1].match(/<div class="df2-stat-tile"/g) || [];
+    assert.equal(tiles.length, 4);
+    assert.equal((row![1].match(/df2-stat-tile-label/g) || []).length, 4);
+    assert.equal((row![1].match(/df2-stat-tile-value/g) || []).length, 4);
+    assert.equal((row![1].match(/df2-stat-tile-foot/g) || []).length, 4);
+    assert.ok((row![1].match(/<svg class="df2-spark/g) || []).length >= 2, "proven and unexplained carry a sparkline");
+    // The most-drifting table is a callout with a link, not a fifth tile.
+    assert.doesNotMatch(row![1], /drifting/i);
+    assert.match(html, /class="df2-parity-drift-callout"[\s\S]*Most-drifting table:[\s\S]*<button[^>]*>Open its latest drifting run/);
+  });
+
+  it("status is a small dot, never a coloured tile background", () => {
+    assert.match(html, /data-tone="warn"[\s\S]*?df2-stat-tile-dot/);
+    assert.doesNotMatch(html, /style="[^"]*background/);
   });
 });

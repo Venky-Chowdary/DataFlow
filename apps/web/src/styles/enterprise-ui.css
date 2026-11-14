@@ -2338,30 +2338,40 @@
   gap: 10px;
 }
 
+/* Same stat tile as Overview / Reversibility (ui-consistency.css): neutral
+   surface, label over value, status as a small dot (W6). */
 .df2-jobs-quarantine-metric {
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  padding: var(--df-space-3) var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
   background: var(--df-surface);
+  box-shadow: var(--df-shadow-xs);
 }
 
 .df2-jobs-quarantine-metric span {
-  display: block;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-secondary);
 }
 
 .df2-jobs-quarantine-metric strong {
   display: block;
-  margin-top: 4px;
-  font-size: 18px;
+  margin-top: 2px;
+  font-family: var(--df-font-display);
+  font-size: var(--df-fs-xl);
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-primary);
 }
 
-.df2-jobs-quarantine-metric.is-warn {
-  border-color: var(--df-warning-border);
-  background: var(--df-warning-bg);
+.df2-jobs-quarantine-metric.is-warn span::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dt-radius-full);
+  background: var(--df-warning);
 }
 
 .df2-jobs-quarantine-actions {
