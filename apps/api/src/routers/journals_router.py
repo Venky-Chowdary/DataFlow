@@ -12,7 +12,7 @@ from typing import Any
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from services.transfer_journal import (
     JournalError,
@@ -59,7 +59,14 @@ async def remove_journal(journal_id: str) -> dict[str, Any]:
 
 
 @router.post("/prune")
-async def prune() -> dict[str, Any]:
+async def prune(request: Request) -> dict[str, Any]:
+    """Prune expired journals of every workspace: platform administrators only (SEC-10)."""
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        request, tenant_scope(request), "journals.prune",
+        "Pruning journals acts on every workspace: platform administrators only.",
+    )
     return prune_journals()
 
 
