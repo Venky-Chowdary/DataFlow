@@ -416,13 +416,22 @@ def resolve_duplicate_policy(
             False,
             "Upsert on the business key.",
         )
+    from services.sync_cursor import is_append_sync
+
+    append_sync = caller != "upsert" and is_append_sync(sync_mode or "")
     return DuplicateDecision(
         "append" if caller != "upsert" else "upsert",
         caller or "insert",
         "update",
         False,
-        "",
+        APPEND_SYNC_REASON if append_sync else "",
     )
+
+
+#: The implicit decision of an append sync mode: each run inserts its rows
+#: again (two runs land 2N), so a declared key is not enforced on the CREATE —
+#: the same table the fast path creates (MYSQL-DEF-1).
+APPEND_SYNC_REASON = "Append sync mode: every run inserts its rows again."
 
 
 def set_match_action(action: str, *, duplicates_allowed: bool = False):
@@ -441,6 +450,48 @@ def reset_match_action(token) -> None:
 def duplicates_allowed(decision: "DuplicateDecision | None") -> bool:
     """The operator explicitly allowed repeated keys (append / allow_duplicates)."""
     return bool(decision is not None and decision.explicit and decision.policy == "append")
+
+
+_PK_REQUIRED_CACHE: dict[tuple, tuple[float, bool]] = {}
+
+
+def _mysql_requires_primary_key(cfg: Any) -> bool:
+    """``sql_require_primary_key`` (or an unreadable answer) on this MySQL; cached 60 s."""
+    import time
+
+    cfg = dict(cfg or {})
+    key = tuple(str(cfg.get(k) or "") for k in ("host", "port", "database", "username", "connection_string"))
+    hit = _PK_REQUIRED_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    from services.dest_require_primary_key import server_requires_primary_key
+
+    answer = server_requires_primary_key(cfg)
+    required = bool(getattr(answer, "variable", "") or getattr(answer, "unreadable", ""))
+    _PK_REQUIRED_CACHE[key] = (time.monotonic(), required)
+    return required
+
+
+def create_allows_repeated_keys(decision: "DuplicateDecision | None", dest_type: str, cfg: Any) -> bool:
+    """Whether a create-new for this write leaves the declared key unenforced.
+
+    An explicit append policy always does. A plain append sync mode does too
+    (two runs land 2N rows): the fast path's CREATE never carried the key, so
+    the row path withholding it is the same table on every route (MYSQL-DEF-1:
+    with local_infile=OFF the row path enforced it and the second append was
+    refused). The one exception is a MySQL server that requires a PRIMARY KEY
+    (``sql_require_primary_key``): there the declared key is the only key a
+    CREATE can have.
+    """
+    if duplicates_allowed(decision):
+        return True
+    if decision is None or decision.explicit or decision.reason != APPEND_SYNC_REASON:
+        return False
+    from services.dialect_profiles import normalize_driver
+
+    if (normalize_driver(str(dest_type or "")) or str(dest_type or "")).lower() == "mysql":
+        return not _mysql_requires_primary_key(cfg)
+    return True
 
 
 def current_duplicates_allowed() -> bool:

@@ -209,9 +209,13 @@ def _write_batch(
         decided = None
     if decided is not None and (decided.explicit or (decided.policy == "upsert" and write_mode == "insert" and conflict_columns)):
         write_mode = decided.write_mode
+    from services.duplicate_policy import create_allows_repeated_keys
+
     match_token = set_match_action(
         decided.match_action if decided else "update",
-        duplicates_allowed=duplicates_allowed(decided),
+        duplicates_allowed=(
+            create_allows_repeated_keys(decided, dest_type, cfg) if create_table else duplicates_allowed(decided)
+        ),
     )
     from services.sync_cursor import is_overwrite_sync
 
