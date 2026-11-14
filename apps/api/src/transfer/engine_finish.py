@@ -8,6 +8,7 @@ from typing import Any
 import logging
 
 from connectors.table_manager import ROW_COPY_BACKUP_ENGINE
+from connectors.overwrite_set_aside import SET_ASIDE_ENGINES
 
 logger = logging.getLogger("src.transfer.engine")
 
@@ -256,7 +257,9 @@ def _finish_verified_run(
 
 
 #: Backup kinds a failed overwrite restores and a committed one discards.
-RESTORABLE_BACKUP_ENGINES = frozenset({"mysql", "mongodb", ROW_COPY_BACKUP_ENGINE})
+RESTORABLE_BACKUP_ENGINES = frozenset(
+    {"mysql", "mongodb", ROW_COPY_BACKUP_ENGINE, *SET_ASIDE_ENGINES}
+)
 
 #: What a failed overwrite reports once its pre-run backup is back in place.
 OVERWRITE_RESTORED_NOTE = (
@@ -289,10 +292,13 @@ def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) 
 def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
     """Drop a rename-aside backup after success, or put it back after failure.
 
-    MySQL and Mongo leave the previous object under ``__df_bak``. A failed
-    load renames that backup back onto the live name, so a refused overwrite
-    does not publish an empty table. Other relational engines empty in place
-    inside a transaction the writer commits once.
+    MySQL and Mongo leave the previous object under ``__df_bak``; Snowflake,
+    BigQuery, Elasticsearch and S3 set it aside the same way
+    (:mod:`connectors.overwrite_set_aside`); the generic SQL driver keeps a
+    row copy. A failed load puts that backup back onto the live name, so a
+    refused overwrite (every row quarantined, a failed proof) does not publish
+    an empty or partial object. PostgreSQL empties in place inside a
+    transaction the writer commits once.
     """
     # A multi-table run parks each landed stream's backup under its table
     # until the run's outcome is known: settled with the rest, never early.
@@ -378,6 +384,14 @@ def settle_single_overwrite_backup(destination: EndpointConfig, *, restore: bool
                 )
             else:
                 discard_generic_sql_overwrite(db_type, cfg, str(backup), schema)
+        elif engine_name in SET_ASIDE_ENGINES:
+            from connectors.overwrite_set_aside import discard_set_aside, restore_set_aside
+
+            schema = cfg.get("schema")
+            if restore:
+                restore_set_aside(engine_name, cfg, table_name, str(backup), schema)
+            else:
+                discard_set_aside(engine_name, cfg, table_name, str(backup), schema)
         elif engine_name == "mongodb":
             from connectors.table_manager import (
                 discard_mongodb_overwrite,
