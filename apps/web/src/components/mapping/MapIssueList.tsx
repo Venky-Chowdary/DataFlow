@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
 import { DtIcon } from "../DtIcon";
+import type { MapStepCounts } from "../../lib/columnWorkbench";
 
 export interface MapIssue {
   id: string;
@@ -13,21 +14,19 @@ export interface MapIssue {
   action?: { label: string; onClick: () => void; disabled?: boolean };
 }
 
-export interface MapStatusCounts {
-  total: number;
-  mapped: number;
-  /** Rows (and destination columns) that need a decision before Validate. */
-  attention: number;
-  /** Rows that only wait for Approve. */
-  toApprove: number;
-}
-
-/** The Map header's one status line: "5 of 7 mapped · 1 needs your review". */
-export function mapStatusLine({ total, mapped, attention, toApprove }: MapStatusCounts): string {
-  const head = `${mapped.toLocaleString("en-US")} of ${total.toLocaleString("en-US")} mapped`;
-  if (attention > 0) return `${head} · ${attention.toLocaleString("en-US")} ${attention === 1 ? "needs" : "need"} your review`;
-  if (toApprove > 0) return `${head} · ${toApprove.toLocaleString("en-US")} ready to approve`;
-  return total > 0 ? `${head} · all approved` : head;
+/** The Map header's one status line, from the same counts as the filter and Review. */
+export function mapStatusLine(counts: MapStepCounts): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  const parts = [`${n(counts.mapped)} of ${n(counts.total)} mapped`];
+  if (counts.attention > 0) parts.push(`${n(counts.attention)} ${counts.attention === 1 ? "needs" : "need"} your review`);
+  if (counts.destinationIssues > 0) {
+    parts.push(`${n(counts.destinationIssues)} destination column ${counts.destinationIssues === 1 ? "issue" : "issues"}`);
+  }
+  if (counts.attention === 0 && counts.approvable > 0) parts.push(`${n(counts.approvable)} ready to approve`);
+  if (counts.attention === 0 && counts.approvable === 0 && counts.destinationIssues === 0 && counts.total > 0) {
+    parts.push("all approved");
+  }
+  return parts.join(" · ");
 }
 
 const VISIBLE = 4;

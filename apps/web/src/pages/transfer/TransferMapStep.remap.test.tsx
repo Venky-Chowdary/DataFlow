@@ -603,7 +603,10 @@ describe("Map step layout (W6): one header, a compact toolbar, triage filter, ex
       m("first_name", "", "VARCHAR(40)", { approved: false }),
     ]);
     assert.match(q(".df2-map-route").textContent ?? "", /mysql\.orders → warehouse\.orders_dest/);
-    assert.match(q('[data-testid="map-status-line"]').textContent ?? "", /^1 of 2 mapped · \d+ needs? your review$/);
+    assert.match(
+      q('[data-testid="map-status-line"]').textContent ?? "",
+      /^1 of 2 mapped · 1 needs your review( · \d+ destination column issues?)?$/,
+    );
   });
 
   it("the column filter is one segmented control: All, Needs attention, Ready", async () => {
@@ -645,5 +648,23 @@ describe("Map step layout (W6): one header, a compact toolbar, triage filter, ex
     assert.equal(policy.value, "QUARANTINE_ROW");
     assert.doesNotMatch(Array.from(policy.options).map((o) => o.text).join(" | "), /FAIL_JOB|QUARANTINE_ROW|CAST_FAIL/);
     assert.match(policy.selectedOptions[0].text, /recommended/);
+  });
+});
+
+describe("Map step counts on screen come from one selector (W6 round 2)", () => {
+  it("header, Review, the tabs and Approve agree on the screenshot's rows", async () => {
+    await render(ORDERS().map((r) => ({ ...r, approved: false })));
+    const tabs = Array.from(q('[role="tablist"][aria-label="Filter columns"]').querySelectorAll('[role="tab"]'))
+      .map((t) => t.textContent ?? "");
+    assert.deepEqual(tabs, ["All (4)", "Needs attention (0)", "Ready (4)"]);
+    const approve = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => /Approve eligible/.test(b.textContent ?? ""));
+    assert.match(approve?.textContent ?? "", /Approve eligible \(4\)/);
+    const review = q<HTMLButtonElement>('[role="toolbar"][aria-label="Mapping actions"] button[aria-keyshortcuts="R"]');
+    assert.equal(review.disabled, true, "nothing needs attention, so Review has nothing to show");
+    assert.equal(review.textContent, "Review");
+    const status = q('[data-testid="map-status-line"]').textContent ?? "";
+    assert.match(status, /^4 of 4 mapped/);
+    assert.match(status, /4 ready to approve$/);
+    assert.doesNotMatch(status, /need your review|needs your review/);
   });
 });

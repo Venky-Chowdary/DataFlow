@@ -21,11 +21,9 @@ import {
   acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
-  approveMappingsHonestly,
   canWidenMapping,
   classifyMappingReview,
   confirmFalseFriendMapping,
-  countApproveEligible,
   isFalseFriendReview,
   mappingHealthSummary,
   mappingReviewKindMeta,
@@ -69,6 +67,8 @@ import {
 } from "../lib/mapping";
 import {
   COLUMN_PAGE_SIZES,
+  mapRowState,
+  mapStepCounts,
   type ColumnFilter,
   type ColumnPageSize,
   type ColumnSort,
@@ -163,19 +163,19 @@ function enumSignalled(m: EditableMapping): boolean {
 /** The Map step's triage filter: one segmented control, three states (plus Rules when a workbook is loaded). */
 const TRIAGE_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "review", label: "Needs attention" },
-  { id: "ready", label: "Ready" },
+  { id: "attention", label: "Needs attention" },
+  { id: "clear", label: "Ready" },
   { id: "rules", label: "Rules" },
 ];
 
 const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "review", label: "Review" },
+  { id: "attention", label: "Needs attention" },
   { id: "block", label: "Critical" },
   { id: "warn", label: "Low" },
   { id: "pii", label: "PII" },
   { id: "new", label: "New" },
-  { id: "ready", label: "Ready" },
+  { id: "clear", label: "Ready" },
   { id: "rules", label: "Rules" },
 ];
 
@@ -207,7 +207,7 @@ export function ColumnReviewPanel({
   remap,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
-  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
+  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("attention");
   const [sort, setSort] = useState<ColumnSort>("confidence-asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
@@ -286,8 +286,7 @@ export function ColumnReviewPanel({
   // Issues-first default when the panel owns its filter (uncontrolled).
   useEffect(() => {
     if (filterProp !== undefined) return;
-    const needs = mappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
-    setInternalFilter(needs > 0 ? "review" : "all");
+    setInternalFilter(mapStepCounts(mappings).attention > 0 ? "attention" : "all");
   }, [mappings, confidenceThreshold, filterProp]);
 
   useEffect(() => {
@@ -345,8 +344,10 @@ export function ColumnReviewPanel({
     onChange(next);
   };
 
+  // Approve exactly the rows the "Ready" filter counts as approvable; a row
+  // that needs attention keeps its own decision (one selector, W6 round 2).
   const approveAll = () => {
-    onChange(approveMappingsHonestly(mappings));
+    onChange(mappings.map((m) => (mapRowState(m) === "approvable" ? approveMappingHonestly(m) : m)));
   };
 
   const approveAllSafe = () => {
@@ -396,7 +397,8 @@ export function ColumnReviewPanel({
     updateMapping(index, approveMappingHonestly(m));
   };
 
-  const eligibleApproveCount = countApproveEligible(mappings);
+  // The rows the bulk Approve clears: the "Ready" rows not approved yet (one selector).
+  const eligibleApproveCount = mapStepCounts(mappings).approvable;
   const health = useMemo(
     () => mappingHealthSummary(mappings, confidenceThreshold),
     [mappings, confidenceThreshold],
@@ -413,7 +415,7 @@ export function ColumnReviewPanel({
   };
 
   const focusIssues = () => {
-    setFilter("review");
+    setFilter("attention");
     setSort("confidence-asc");
     setSearch("");
     setPage(1);
@@ -516,7 +518,8 @@ export function ColumnReviewPanel({
     .filter((tab) => tab.id !== "rules" || filterCounts.rules > 0 || filter === "rules")
     .map((tab) => ({
       ...tab,
-      count: triage && tab.id === "all" ? undefined : filterCounts[tab.id],
+      // All = Needs attention + Ready: every tab shows its count so they reconcile.
+      count: filterCounts[tab.id],
     }));
   const columnCount = triage ? (showTransforms ? 6 : 5) : (showTransforms ? 9 : 8);
 
@@ -774,7 +777,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {needsReview.length > 0 && filter === "review" && !compact && health.falseFriendCount === 0 && (
+        {needsReview.length > 0 && filter === "attention" && !compact && health.falseFriendCount === 0 && (
           <div className="df2-column-review-alert" role="status">
             <DtIcon name="alert" size={16} />
             <span>

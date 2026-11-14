@@ -37,7 +37,7 @@ import { Button } from "../../components/ui/Button";
 import type { JobsMenuItem } from "../../components/jobs/JobsMenu";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
-import { needsMappingReview } from "../../lib/columnWorkbench";
+import { mapRowState, mapStepCounts } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
 import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
@@ -205,7 +205,7 @@ export function TransferMapStep({
   onAddComputedSteps,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ColumnFilter>("review");
+  const [filter, setFilter] = useState<ColumnFilter>("attention");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
@@ -472,8 +472,8 @@ export function TransferMapStep({
   useEffect(() => {
     // Skip while an identity/focus dialog is open so we don't fight setFilter("all").
     if (userPickedFilter || focusSource || operatorEdited.current) return;
-    const needs = columnMappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
-    setFilter(needs > 0 ? "review" : "all");
+    // Same selector as the header, Review and the tabs.
+    setFilter(mapStepCounts(columnMappings).attention > 0 ? "attention" : "all");
   }, [columnMappings, confidenceThreshold, userPickedFilter, focusSource]);
 
   useShellLayoutClass(MAP_STEP_SCROLL_CLASS, ".df2-page-transfer-studio");
@@ -534,13 +534,11 @@ export function TransferMapStep({
 
   // ---- Header status and issue triage ------------------------------------
   const mappedCount = columnMappings.filter((m) => !isIntentionalOmit(m) && m.target.trim()).length;
-  const mapAttention = blockerSummary.blockers.length + targetIssues.length;
-  const statusLine = mapStatusLine({
-    total: columnMappings.length,
-    mapped: mappedCount,
-    attention: mapAttention,
-    toApprove: approvalPendingCount,
-  });
+  // One selector behind every count on this step (W6 round 2): the status
+  // line, Review, the segmented filter and Approve all read stepCounts.
+  const stepCounts = mapStepCounts(columnMappings, targetIssues.length);
+  const mapAttention = stepCounts.attention;
+  const statusLine = mapStatusLine(stepCounts);
   const destTable = targetDatabase && targetCollection ? `${targetDatabase}.${targetCollection}` : targetCollection;
   const routeSummary = [
     `${sourceLabel || "Source"} → ${destRouteLabel || "Destination"}`,
@@ -555,20 +553,20 @@ export function TransferMapStep({
   // Review: the rows that need a decision; when only destination columns are
   // open (nothing maps to a NOT NULL column), the panel where they are fixed.
   const reviewIssues = () => {
-    const first = blockerSummary.blockers[0]?.source;
+    const first = columnMappings.find((m) => mapRowState(m) === "attention")?.source;
     if (!first && targetIssues.length > 0 && remapControls) {
       setPanelOpen(true);
       return;
     }
     setUserPickedFilter(true);
-    setFilter("review");
+    setFilter("attention");
     setSearch("");
     if (first) setFocusSource(first);
   };
   const showRows = (columns: string[]) => {
     setUserPickedFilter(true);
     setSearch("");
-    setFilter("review");
+    setFilter("attention");
     if (columns[0]) setFocusSource(columns[0]);
   };
   const mapIssues: MapIssue[] = [
@@ -581,7 +579,8 @@ export function TransferMapStep({
         ? { label: "Open panel", onClick: () => setPanelOpen(true) }
         : undefined,
     })),
-    ...blockerSummary.groups.map((g) => ({
+    // Rows that only wait for Approve are the Approve button's job, not an issue.
+    ...blockerSummary.groups.filter((g) => g.code !== "approval_required").map((g) => ({
       id: `rows:${g.code}`,
       tone: (g.clearableFromMap ? "warn" : "block") as MapIssue["tone"],
       title: g.title,
@@ -595,8 +594,8 @@ export function TransferMapStep({
     targetIssues.length
       ? `${targetIssues.length} destination column issue${targetIssues.length === 1 ? "" : "s"} block Validate`
       : "",
-    blockerSummary.blockers.length
-      ? `${blockerSummary.blockers.length} column${blockerSummary.blockers.length === 1 ? " needs" : "s need"} your review`
+    stepCounts.attention
+      ? `${stepCounts.attention} column${stepCounts.attention === 1 ? " needs" : "s need"} your review`
       : "",
   ].filter(Boolean).join(" · ");
 
@@ -651,7 +650,7 @@ export function TransferMapStep({
           <h3 className="df2-card-title">Map columns</h3>
           <p className="df2-map-route" title={routeSummary}>{routeSummary}</p>
           <p
-            className={`df2-map-status${mapAttention > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
+            className={`df2-map-status${mapAttention > 0 || stepCounts.destinationIssues > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
             data-testid="map-status-line"
           >
             {statusLine}
