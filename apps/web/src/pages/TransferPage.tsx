@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { routeMessageText, routeOperationLabel, routePlanItemText } from "../lib/routeLabels";
 import { searchCatalogNames } from "../lib/schemaBrowse";
 import { StudioScheduleDialog } from "../components/transfer/StudioScheduleDialog";
 import { defaultStudioScheduleDraft, studioScheduleCreatedToast, type StudioScheduleDraft } from "../lib/studioScheduleDraft";
@@ -3253,7 +3254,7 @@ export function TransferPage({
       }));
       toast({
         title: plan.supported ? "Route ready" : "Route needs attention",
-        message: plan.message || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
+        message: routeMessageText(plan.message) || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
         tone: plan.supported ? "success" : "warning",
       });
     } catch (e) {
@@ -8955,12 +8956,19 @@ export function TransferPage({
               <p className="df2-label-hint">
                 {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
               </p>
-              <p className="df2-label-hint">
-                {schemaPolicyHonestyLine(schemaPolicy)}
-              </p>
-              <p className="df2-label-hint">
-                Change overwrite, CDC, schema drift, and identity in Advanced.
-              </p>
+              {/* UX-39: table-schema rules (ADD COLUMN, CDC, drift) say nothing about a file export. */}
+              {destKindMode === "database" ? (
+                <>
+                  <p className="df2-label-hint">
+                    {schemaPolicyHonestyLine(schemaPolicy)}
+                  </p>
+                  <p className="df2-label-hint">
+                    Change overwrite, CDC, schema drift, and identity in Advanced.
+                  </p>
+                </>
+              ) : (
+                <p className="df2-label-hint">Change the file name and format options in Advanced.</p>
+              )}
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
@@ -8998,7 +9006,7 @@ export function TransferPage({
           {transferPlan && (destKindMode !== "database" || Boolean(connectorId)) && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
               <p className="df2-plan-callout-title">
-                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {transferPlan.operation}
+                {transferPlan.supported ? "Route ready" : "Route needs attention"} · {routeOperationLabel(transferPlan.operation)}
                 {!transferPlan.supported && (
                   <span className="df2-badge df2-badge-run">{transferPlan.message}</span>
                 )}
@@ -9006,7 +9014,7 @@ export function TransferPage({
               {transferPlan.auto_create.length > 0 && (
                 <ul className="df2-plan-callout-list">
                   {transferPlan.auto_create.slice(0, 3).map((item, i) => (
-                    <li key={`${item}-${i}`}>{item}</li>
+                    <li key={`${item}-${i}`}>{routePlanItemText(item)}</li>
                   ))}
                   {transferPlan.auto_create.length > 3 && (
                     <li className="df2-plan-callout-more">+{transferPlan.auto_create.length - 3} more steps</li>
