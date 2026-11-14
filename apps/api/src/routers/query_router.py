@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any
 
@@ -1476,11 +1477,7 @@ async def query_schemas(
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    from services.connector_probe import probe_saved_connector
-
-    ok, probe_message, _cfg = await asyncio.to_thread(
-        _in_connector_scope, body.connector_id, probe_saved_connector, body.connector_id
-    )
+    ok, probe_message = await asyncio.to_thread(_schemas_probe, workspace_id, body.connector_id)
     if not ok:
         # ERR-25: a failed connection is not "connected" with a configured node.
         return QuerySchemasResult(
@@ -1499,6 +1496,48 @@ async def query_schemas(
         live_schemas=live,
     )
     return QuerySchemasResult(**tree)
+
+
+#: A successful /query/schemas probe is reused this long per (workspace,
+#: connection): the schema selector asks on every render, and a fresh
+#: connection each time is the cost ERR-25's honesty added. Failures are never
+#: cached, so a fixed password shows at once and a broken one is never green.
+_SCHEMAS_PROBE_TTL_SECONDS = 30.0
+_SCHEMAS_PROBE_OK: dict[tuple[str, str], tuple[float, str]] = {}
+_SCHEMAS_PROBE_LOCK = threading.Lock()
+
+
+def _probe_clock() -> float:
+    return time.monotonic()
+
+
+def _clear_schemas_probe_cache() -> None:
+    with _SCHEMAS_PROBE_LOCK:
+        _SCHEMAS_PROBE_OK.clear()
+
+
+def _schemas_probe(workspace_id: str, connector_id: str) -> tuple[bool, str]:
+    """Connection probe for /query/schemas, reusing a recent success only."""
+    from services.connector_probe import probe_saved_connector
+
+    key = (str(workspace_id or ""), str(connector_id or ""))
+    now = _probe_clock()
+    with _SCHEMAS_PROBE_LOCK:
+        hit = _SCHEMAS_PROBE_OK.get(key)
+        if hit is not None and now - hit[0] < _SCHEMAS_PROBE_TTL_SECONDS:
+            return True, hit[1]
+        _SCHEMAS_PROBE_OK.pop(key, None)
+    ok, message, _cfg = _in_connector_scope(connector_id, probe_saved_connector, connector_id)
+    if ok:
+        with _SCHEMAS_PROBE_LOCK:
+            if len(_SCHEMAS_PROBE_OK) >= 1024:  # bounded: drop expired entries first
+                for stale in [k for k, (at, _m) in _SCHEMAS_PROBE_OK.items()
+                              if now - at >= _SCHEMAS_PROBE_TTL_SECONDS]:
+                    _SCHEMAS_PROBE_OK.pop(stale, None)
+                if len(_SCHEMAS_PROBE_OK) >= 1024:
+                    _SCHEMAS_PROBE_OK.clear()
+            _SCHEMAS_PROBE_OK[key] = (now, str(message or ""))
+    return bool(ok), str(message or "")
 
 
 def _in_connector_scope(connector_id: str, fn: Any, *args: Any) -> Any:
