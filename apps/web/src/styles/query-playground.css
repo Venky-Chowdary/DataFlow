@@ -2373,7 +2373,9 @@
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-pane {
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-lg);
-  overflow: hidden;
+  /* clip, not hidden: a hidden pane would become the results bar's sticky
+     scrollport and push the bar into the rows. */
+  overflow: clip;
 }
 
 .df2-app .df2-qw-shell[data-wide="false"] .df2-qw-pane--editor {
@@ -2419,6 +2421,11 @@
 
 @media (max-width: 767px) {
   .df2-app .df2-qw-shell .df2-query-editor-shell[data-variant="workspace"] .df2-query-editor-hint {
+    display: none;
+  }
+
+  /* No hardware keyboard hint on a phone; keeps Run on the tools row. */
+  .df2-app .df2-qw-shell .df2-qw-run .df2-qw-kbd {
     display: none;
   }
 
