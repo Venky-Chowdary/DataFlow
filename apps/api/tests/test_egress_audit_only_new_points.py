@@ -1,11 +1,12 @@
-"""The newer egress sites audit private hosts by default and refuse metadata always.
+"""Audit-only mode of the newer egress sites, and metadata refused always.
 
 Production (37c0e268) enforced the egress policy at connector Test, the SQL
 drivers, CDC and webhooks. Connector save/update, transfer reads and writes,
-introspection, precount, shared HTTP/SMTP/Mongo clients and redirects are newer:
-a private or loopback target there logs ``egress.would_block`` and is allowed
-unless ``DATAFLOW_EGRESS_ENFORCE_NEW=1``. Metadata and link-local are refused
-everywhere. Saving an existing connector with an unchanged private host is never
+introspection, precount, shared HTTP/SMTP/Mongo clients and redirects are newer.
+They enforce by default too (SEC-2); under the explicit opt-out
+``DATAFLOW_EGRESS_ENFORCE_NEW=0``, which these tests set, a private or loopback
+target there logs ``egress.would_block`` and is allowed. Metadata and
+link-local are refused everywhere. Saving an existing connector with an unchanged private host is never
 refused for being private.
 """
 
@@ -36,7 +37,7 @@ LOOPBACK = "127.0.0.1"
 
 @pytest.fixture(autouse=True)
 def audit_events(monkeypatch):
-    monkeypatch.delenv("DATAFLOW_EGRESS_ENFORCE_NEW", raising=False)
+    monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "0")  # the audit-only opt-out (SEC-2)
     monkeypatch.delenv("DATAWRAP_EGRESS_ENFORCE_NEW", raising=False)
     monkeypatch.delenv("DATAFLOW_EGRESS_ALLOWLIST", raising=False)
     would_apply_audit.reset_dedupe()
