@@ -2,7 +2,6 @@ import { type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
-import { AlgorithmCinemaBand } from "../../components/landing/AlgorithmCinema";
 import { ProductShot } from "../../components/marketing/ProductShot";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
@@ -26,7 +25,6 @@ function ShotBand({
   src,
   alt,
   surface,
-  beside = false,
 }: {
   kicker: string;
   title: string;
@@ -34,31 +32,21 @@ function ShotBand({
   src: string;
   alt: string;
   surface: string;
-  /** Portrait product UI sits beside the explanation so the row uses its width. */
+  /** Kept so existing call sites still type-check. Every band is a split row. */
   beside?: boolean;
 }) {
-  const figure = (
-    <figure className="lp-shot-band">
-      <img src={src} alt={alt} />
-      <figcaption>{surface}</figcaption>
-    </figure>
-  );
-  if (beside) {
-    return (
-      <section className="lp-proof-beside" aria-label={title}>
-        <div className="lp-proof-beside-copy">
-          <p className="lp-mkt-kicker">{kicker}</p>
-          <h2>{title}</h2>
-          <p>{lead}</p>
-        </div>
-        {figure}
-      </section>
-    );
-  }
   return (
-    <AlgorithmCinemaBand kicker={kicker} title={title} lead={lead} compact>
-      {figure}
-    </AlgorithmCinemaBand>
+    <section className="lp-proof-beside" aria-label={title}>
+      <div className="lp-proof-beside-copy">
+        <p className="lp-mkt-kicker">{kicker}</p>
+        <h2>{title}</h2>
+        <p>{lead}</p>
+      </div>
+      <figure className="lp-shot-band">
+        <img src={src} alt={alt} />
+        <figcaption>{surface}</figcaption>
+      </figure>
+    </section>
   );
 }
 

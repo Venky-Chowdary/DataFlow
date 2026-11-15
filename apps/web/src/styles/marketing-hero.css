@@ -130,8 +130,8 @@
 }
 
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-  /* The drawing carries the argument, so it takes the larger share. */
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
+  /* Copy and the product share the row. The picture does not outgrow the headline. */
+  grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.9fr) !important;
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
@@ -364,7 +364,8 @@
   .lp .lp-sol-hero--ink .lp-sol-hero-inner,
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
   .lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
-  .lp .lp-sales-hero--split .lp-sales-hero-inner {
+  .lp .lp-sales-hero--split .lp-sales-hero-inner,
+  .lp .lp-mkt-live-reel {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
@@ -554,8 +555,32 @@
 }
 
 .lp .lp-mkt-live-reel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.05fr);
+  gap: clamp(20px, 3vw, 40px);
+  align-items: center;
   width: 100%;
-  max-width: 1080px;
+  max-width: min(1080px, 100%);
+  margin: 12px auto 36px;
+}
+
+.lp .lp-mkt-live-reel .docs-shot-reel {
+  margin: 0;
+}
+
+.lp .docs-shot-reel--product .docs-shot-reel-stage {
+  aspect-ratio: 16 / 10;
+  max-height: 420px;
+}
+
+.lp .lp-mkt-hero-visual .lp-product-shot-viewport,
+.lp .lp-mkt-chapter .lp-product-shot-viewport {
+  aspect-ratio: 16 / 10;
+  max-height: 440px;
+}
+
+.lp .lp-mkt-chapter .lp-product-shot {
+  max-width: 880px;
   margin-inline: auto;
 }
 
@@ -568,6 +593,15 @@
 .lp .lp-mkt-hero-band--ink .lp-product-shot-route,
 .lp .lp-sol-hero--ink .lp-product-shot-route {
   color: rgba(180, 199, 219, 0.82);
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-product-shot-route span,
+.lp .lp-sol-hero--ink .lp-product-shot-route span {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
 }
 
 /* Route chips never paint past the frame — long FQDNs ellipsis. */
@@ -733,8 +767,9 @@
 .lp-proof-beside .lp-shot-band img {
   width: auto;
   max-width: 100%;
-  max-height: 560px;
+  max-height: 420px;
   margin-left: auto;
+  object-fit: contain;
 }
 
 .lp-proof-beside .lp-shot-band figcaption {
@@ -910,6 +945,27 @@
     object-position: center center;
   }
 
+  .lp .lp-mkt-live-reel {
+    grid-template-columns: 1fr;
+  }
+
+  .lp .docs-shot-reel--product .docs-shot-reel-stage,
+  .lp .lp-mkt-hero-visual .lp-product-shot-viewport,
+  .lp .lp-mkt-chapter .lp-product-shot-viewport {
+    aspect-ratio: 16 / 10;
+    max-height: 320px;
+  }
+
+  .lp .docs-shot-reel--product .docs-shot-reel-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    object-fit: contain;
+    object-position: center center;
+  }
+
   .lp-product-shot-viewport img,
   .lp-shot-band img,
   .lp-proof-beside .lp-shot-band img,
@@ -1026,4 +1082,53 @@
   .lp-sales-table td:nth-child(2)::before { content: "What you get"; }
   .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
   .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
+}
+
+/* One surface: hairline, soft lift, and a frame that keeps a row aligned.
+   Desktop only — a phone keeps the picture at its own height. */
+@media (min-width: 721px) {
+  .lp-home-flow,
+  .lp-home-features,
+  .lp-home-questions,
+  .lp-home-cases,
+  .lp-home-connectors,
+  .lp-home-videos {
+    padding-block: var(--lp-section-y);
+  }
+
+  .lp-home-bento-cell,
+  .lp-home-case,
+  .lp-home-questions-list article,
+  .lp-home-run-proofs figure,
+  .lp-conn-marquee-tile,
+  .lp .lp-product-shot-chrome,
+  .lp .lp-shot-band {
+    border: 1px solid var(--lp-line);
+    border-radius: var(--df-radius-xl);
+    box-shadow: var(--lp-shadow-soft);
+  }
+
+  .lp .lp-product-shot-chrome {
+    box-shadow: var(--lp-shadow-editorial);
+  }
+
+  .lp-home-bento-cell .lp-home-shot,
+  .lp-home-bento-cell.is-wide .lp-home-shot {
+    aspect-ratio: 16 / 10;
+    display: grid;
+    place-items: center;
+    height: auto;
+    min-height: 0;
+    margin-top: 16px;
+    background: var(--df-surface);
+    overflow: hidden;
+  }
+
+  .lp-home-bento-cell .lp-home-shot img,
+  .lp-home-bento-cell.is-wide .lp-home-shot img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    object-position: center center;
+  }
 }
