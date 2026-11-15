@@ -2572,11 +2572,38 @@
   }
 }
 
-/* Product, solution, and company pages: every other block is a white
-   scene. Closing panels stay on the page color so the teal card reads. */
+/* One flat field behind every card. A full-bleed white sheet with a
+   hairline reads as a card cut into the page. The hero, the measured
+   band, and the closing panel keep their own color. */
+.lp {
+  background-color: var(--df-bg-canvas) !important;
+  background-image: none !important;
+}
+
+.lp .lp-home-stack,
+.lp .lp-home-features,
+.lp .lp-home-cases,
+.lp .lp-home-connectors,
+.lp .lp-home .lp-home-connectors,
+.lp .lp-home-videos,
+.lp .lp-home-trust,
+.lp .lp-home-questions,
+.lp .lp-demos-grid-section,
+.lp .lp-cust3-stories,
+.lp .lp-cust3-sectors,
+.lp .lp-wh-split,
+.lp .lp-wh-split--alt,
+.lp .lp-wh-flow,
+.lp .lp-wh-rail,
+.lp .lp-sales-follow,
+.lp .lp-sales-compare,
+.lp .lp-int-honesty,
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
   :has(.lp-sol-footer, .lp-ent-cta-band, .lp-pricing-v2-cta, .lp-mkt-next-band, .lp-cust3-cta, .lp-int-cta, .lp-wh-cta)
 ) {
-  background: var(--df-surface);
-  border-block: 1px solid var(--lp-line);
+  background: transparent !important;
+  background-image: none !important;
+  border-top: 0 !important;
+  border-bottom: 0 !important;
+  box-shadow: none !important;
 }
