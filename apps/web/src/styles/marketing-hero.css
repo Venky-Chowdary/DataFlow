@@ -527,7 +527,7 @@
 .lp .lp-mkt-page-rich .lp-mkt-body,
 .lp .lp-sol-v2 .lp-mkt-body,
 .lp .lp-wh-v3 .lp-mkt-body {
-  width: min(1080px, var(--lp-shell)) !important;
+  width: var(--lp-shell) !important;
   max-width: 100% !important;
   margin-inline: auto !important;
 }
@@ -567,4 +567,220 @@
 .lp .lp-mkt-hero-band--ink .docs-shot-reel-caption,
 .lp .lp-sol-hero--ink .docs-shot-reel-caption {
   color: rgba(180, 199, 219, 0.78);
+}
+
+/* ── Enterprise type and measure ──────────────────────────────────
+   One modest scale across every public page. Headlines stay in the
+   low 30s, explanations sit beside the title or the product so a
+   section uses its width instead of stacking a narrow column.
+   Loaded last so these win over the older poster sizes. */
+
+.lp {
+  --lp-fs-display: clamp(1.7rem, 1.15rem + 1.05vw, 2.15rem);
+  --lp-fs-title: clamp(1.2rem, 1.05rem + 0.4vw, 1.4rem);
+  --lp-fs-lead: 15px;
+}
+
+.lp .lp-home-run-head h2,
+.lp .lp-home-flow-copy h3,
+.lp .lp-home-section-head h2,
+.lp .lp-sol-section-head h2,
+.lp .lp-sol-footer-inner h2,
+.lp .lp-cinema-band-head h2,
+.lp .lp-proof-beside-copy h2,
+.lp .lp-wh-cta h2 {
+  font-size: var(--lp-fs-title);
+  font-weight: 640;
+  letter-spacing: -0.02em;
+  line-height: 1.28;
+}
+
+.lp .lp-home-run-facts strong,
+.lp .lp-home-connectors-stats dt {
+  font-size: clamp(1.35rem, 1.6vw, 1.65rem);
+}
+
+.lp .lp-home-case h3,
+.lp .lp-sol-outcome h3,
+.lp .lp-sol-step h3,
+.lp .lp-sol-cap h3,
+.lp .lp-home-bento-copy h3 {
+  font-size: 15px;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+}
+
+.lp .lp-cust-hero-quote-mark {
+  font-size: 36px;
+}
+
+/* Explanations that were a tall 50-character column now share the row. */
+.lp .lp-cinema-band-head,
+.lp .lp-sol-section-head {
+  max-width: none;
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  column-gap: clamp(24px, 4vw, 56px);
+  row-gap: 8px;
+  align-items: end;
+  margin-bottom: 22px;
+}
+
+.lp .lp-cinema-band-kicker,
+.lp .lp-sol-section-head .lp-mkt-kicker {
+  grid-column: 1;
+  grid-row: 1;
+  margin-bottom: 0;
+}
+
+.lp .lp-cinema-band-head h2,
+.lp .lp-sol-section-head h2 {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+}
+
+.lp .lp-cinema-band-lead,
+.lp .lp-sol-section-head > p:last-child {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: end;
+  max-width: none;
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.lp .lp-mkt-prose {
+  max-width: none;
+}
+
+@media (min-width: 840px) {
+  .lp .lp-mkt-prose:has(p + p) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 40px;
+    row-gap: 12px;
+  }
+}
+
+.lp .lp-mkt-prose p {
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+@media (min-width: 1081px) {
+  .lp .lp-sol-steps {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .lp .lp-sol-step {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+}
+
+/* Portrait product UI: copy on the left, the panel on the right. */
+.lp-proof-beside {
+  width: var(--lp-shell);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: clamp(28px, 4vh, 48px) 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
+  gap: clamp(24px, 4vw, 64px);
+  align-items: center;
+}
+
+.lp-proof-beside-copy h2 {
+  margin: 8px 0 12px;
+  color: var(--lp-ink);
+  font-family: var(--lp-font-display);
+}
+
+.lp-proof-beside-copy > p:last-child {
+  margin: 0;
+  color: var(--lp-muted);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.lp-proof-beside .lp-shot-band {
+  margin: 0;
+  max-width: none;
+}
+
+.lp-proof-beside .lp-shot-band img {
+  width: auto;
+  max-width: 100%;
+  max-height: 560px;
+  margin-left: auto;
+}
+
+.lp-proof-beside .lp-shot-band figcaption {
+  color: var(--lp-muted);
+}
+
+/* Quiet arrival. Cards follow the section, a few dozen milliseconds apart. */
+.lp .lp-reveal--in .lp-sol-outcome,
+.lp .lp-reveal--in .lp-sol-step,
+.lp .lp-reveal--in .lp-sol-cap,
+.lp .lp-reveal--in .lp-home-bento-cell,
+.lp .lp-reveal--in .lp-home-case {
+  animation: lp-stagger-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.lp .lp-reveal--in .lp-sol-outcome:nth-child(2),
+.lp .lp-reveal--in .lp-sol-step:nth-child(2),
+.lp .lp-reveal--in .lp-sol-cap:nth-child(2),
+.lp .lp-reveal--in .lp-home-case:nth-child(2) { animation-delay: 60ms; }
+.lp .lp-reveal--in .lp-sol-outcome:nth-child(3),
+.lp .lp-reveal--in .lp-sol-step:nth-child(3),
+.lp .lp-reveal--in .lp-sol-cap:nth-child(3),
+.lp .lp-reveal--in .lp-home-case:nth-child(3) { animation-delay: 120ms; }
+.lp .lp-reveal--in .lp-sol-outcome:nth-child(4),
+.lp .lp-reveal--in .lp-sol-step:nth-child(4) { animation-delay: 180ms; }
+
+.lp .lp-product-shot-chrome,
+.lp .lp-shot-band img {
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (hover: hover) {
+  .lp .lp-home-bento-cell:hover .lp-home-shot img,
+  .lp .lp-shot-band:hover img {
+    transform: translateY(-2px);
+  }
+}
+
+@media (max-width: 839px) {
+  .lp .lp-cinema-band-head,
+  .lp .lp-sol-section-head,
+  .lp-proof-beside {
+    grid-template-columns: 1fr;
+  }
+
+  .lp .lp-cinema-band-lead,
+  .lp .lp-sol-section-head > p:last-child {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .lp-proof-beside .lp-shot-band img {
+    margin-inline: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .lp-reveal--in .lp-sol-outcome,
+  .lp .lp-reveal--in .lp-sol-step,
+  .lp .lp-reveal--in .lp-sol-cap,
+  .lp .lp-reveal--in .lp-home-bento-cell,
+  .lp .lp-reveal--in .lp-home-case,
+  .lp .lp-product-shot-chrome,
+  .lp .lp-shot-band img {
+    animation: none;
+    transition: none;
+    transform: none;
+  }
 }

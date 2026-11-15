@@ -326,7 +326,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           </li>
           <li>
             <strong>4 · Reconcile in Jobs</strong>
-            <span>Gate-8 reads the destination back — row counts, checksums, and a value and key census. Scheduled runs land in Job space the same way.</span>
+            <span>The read-back compares the destination with the source: row counts, checksums, and a value and key census. Scheduled runs land in Job space the same way.</span>
           </li>
         </ol>
       </section>

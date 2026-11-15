@@ -65,6 +65,7 @@ describe("marketing product photography", () => {
     assert.match(surfaces, /WORKSPACE_SHOT\.transferMap/);
     assert.match(surfaces, /WORKSPACE_SHOT\.schedules/);
     assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
+    assert.doesNotMatch(surfaces, /MappingCinema|ProofCinema|CdcCinema/);
     assert.doesNotMatch(surfaces, /Job Theater/);
   });
 

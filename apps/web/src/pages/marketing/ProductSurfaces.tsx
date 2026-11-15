@@ -2,12 +2,7 @@ import { type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
-import {
-  AlgorithmCinemaBand,
-  CdcCinema,
-  MappingCinema,
-  ProofCinema,
-} from "../../components/landing/AlgorithmCinema";
+import { AlgorithmCinemaBand } from "../../components/landing/AlgorithmCinema";
 import { ProductShot } from "../../components/marketing/ProductShot";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
@@ -23,6 +18,49 @@ import {
 } from "./productPageShared";
 
 type Nav = (r: PublicRoute) => void;
+
+function ShotBand({
+  kicker,
+  title,
+  lead,
+  src,
+  alt,
+  surface,
+  beside = false,
+}: {
+  kicker: string;
+  title: string;
+  lead: string;
+  src: string;
+  alt: string;
+  surface: string;
+  /** Portrait product UI sits beside the explanation so the row uses its width. */
+  beside?: boolean;
+}) {
+  const figure = (
+    <figure className="lp-shot-band">
+      <img src={src} alt={alt} />
+      <figcaption>{surface}</figcaption>
+    </figure>
+  );
+  if (beside) {
+    return (
+      <section className="lp-proof-beside" aria-label={title}>
+        <div className="lp-proof-beside-copy">
+          <p className="lp-mkt-kicker">{kicker}</p>
+          <h2>{title}</h2>
+          <p>{lead}</p>
+        </div>
+        {figure}
+      </section>
+    );
+  }
+  return (
+    <AlgorithmCinemaBand kicker={kicker} title={title} lead={lead} compact>
+      {figure}
+    </AlgorithmCinemaBand>
+  );
+}
 
 function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
   return (
@@ -294,7 +332,7 @@ export function TransferStudioPage({
       <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After G1–G9 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates held-back rows. Success means a verified read-back: Gate-8 row counts plus a value and key census."
+          lead="After the checks pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates held-back rows. Success means a verified read-back: row counts plus a value and key census."
           steps={[
             {
               name: "Chunk + transform",
@@ -309,7 +347,7 @@ export function TransferStudioPage({
               detail: "Held-back rows stay out of the clean set and wait in a durable, workspace-scoped queue. Operators inspect and replay them from Job space.",
             },
             {
-              name: "Gate-8 verify",
+              name: "Read the destination back",
               detail:
                 "Post-load, the engine reads the destination back and compares row counts, checksums, and a value and key census with the mapped source. The verdict is recorded on the job.",
             },
@@ -318,14 +356,14 @@ export function TransferStudioPage({
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
-          kicker="Mapping · Preflight"
-          title="Watch the semantic mapper score every edge"
-          lead="Format classify, role enrichment, and continuous confidence. Ambiguous edges pause for human review before they can pin into workspace synonyms."
-          compact
-        >
-          <MappingCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Mapping"
+          title="Every pairing shows why it was made"
+          lead="Open a row in Map. It shows the source type, the destination type, the confidence, and the reason the two columns were paired."
+          src={WORKSPACE_SHOT.transferMapWhy}
+          alt="Map row for the attributes column: JSONB to VARIANT through Parse JSON, with confidence and a sample"
+          surface="Transfer Studio · Map"
+        />
       </MarketingReveal>
 
       <Chapter id="ts-scenario" kicker="Worked example" title="sales_orders, Postgres to Snowflake">
@@ -446,7 +484,7 @@ export function JobTheaterPage({
       <Chapter id="jt-algo" kicker="Algorithm" title="How a load is proven">
         <AlgoBlock
           title="Post-load proof"
-          lead="After the write, Gate-8 reads the destination back and compares it with the mapped source: row counts, content checksums, and a value and key census. The Snowflake run's proof scope is a full checksum with an independent re-read of the source."
+          lead="After the write, Datawrap reads the destination back and compares it with the mapped source: row counts, content checksums, and a value and key census. The Snowflake run's proof scope is a full checksum with an independent re-read of the source."
           steps={[
             {
               name: "Map source sample",
@@ -462,7 +500,7 @@ export function JobTheaterPage({
             },
             {
               name: "Compare",
-              detail: "Row counts, checksums, and the census → MATCH, or a named mismatch showing exactly which values differ.",
+              detail: "Row counts, checksums, and the census either agree, or name the values that differ.",
             },
             {
               name: "Surface in Job space",
@@ -480,14 +518,14 @@ export function JobTheaterPage({
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Proof"
-          title="Read-back verification lands on every job"
-          lead="The engine hashes mapped source rows, reads the destination back, runs the census — then flashes MATCH when counts, content, and keys agree."
-          compact
-        >
-          <ProofCinema />
-        </AlgorithmCinemaBand>
+          title="The read-back sits on the job"
+          lead="Job space reads the destination after the write and puts the counts next to the source. When rows differ, each difference is listed with its reason."
+          src={WORKSPACE_SHOT.jobTrustExplained}
+          alt="Trust Report for a filtered load: 5,100 source rows, 3,756 landed, 1,344 differences, every one explained"
+          surface="Job space · Trust Report"
+        />
       </MarketingReveal>
 
       <Chapter id="jt-signoff" kicker="Sign-off" title="Hand the report to the people who answer for it">
@@ -602,21 +640,22 @@ export function PipelinesPage({
             },
             {
               name: "Prove in Job space",
-              detail: "The job record gets its Gate-8 verification and counts. Operators and agents see the same artifact.",
+              detail: "The job record gets its read-back and its counts. Operators and agents see the same artifact.",
             },
           ]}
         />
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
-          kicker="CDC"
-          title="Snapshot handoff, then idempotent streaming upserts"
-          lead="SQL Server native CDC, PostgreSQL logical decoding, MySQL binlog, and Oracle LogMiner: a consistent snapshot, a handoff at the log position, then idempotent upserts on the primary key — so a retried tick converges and deletes carry through."
-          compact
-        >
-          <CdcCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Sync modes"
+          title="CDC is a mode on the same schedule"
+          lead="Full refresh, incremental, CDC, slowly changing dimensions, or mirror. CDC is log-based change with a cursor and a key, on the same checks as every other mode."
+          src={WORKSPACE_SHOT.transferSyncModesCard}
+          alt="Advanced settings listing sync modes, including CDC: log-based changes with a cursor and a key"
+          surface="Transfer Studio · Sync mode"
+          beside
+        />
       </MarketingReveal>
 
       <Chapter id="pl-scenario" kicker="Worked example" title="Orders feed, every two minutes">
@@ -995,7 +1034,7 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Signed proof at cutover",
-          body: "Pilot a subset first, then the full write. Finance archives a signed proof pack — counts, checksums, and a census that MATCH.",
+          body: "Pilot a subset first, then the full write. Finance archives a signed proof pack: counts, checksums, and a census.",
         },
       ]}
       steps={[
@@ -1031,7 +1070,7 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Time to the last digit",
-          body: "Every microsecond carries, DATETIME2(7) keeps its seventh digit, and Gate-8 compares timestamps at full precision.",
+          body: "Every microsecond carries, DATETIME2(7) keeps its seventh digit, and the read-back compares timestamps at full precision.",
         },
         {
           title: "Identity, keys, constraints",
@@ -1047,14 +1086,14 @@ export function MigrationsSolutionPage({
         },
       ]}
       cinema={
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Mapping"
-          title="Watch every edge earn a confidence score"
-          lead="Format classify, role enrichment, and continuous confidence. Ambiguous edges pause for human review before they pin."
-          compact
-        >
-          <MappingCinema />
-        </AlgorithmCinemaBand>
+          title="The map, with the reason on the row"
+          lead="Confident pairs map themselves. A row that is ambiguous waits, and the reason stays on the column so the next person can see it."
+          src={WORKSPACE_SHOT.transferMap}
+          alt="Transfer Studio map: 11 of 11 columns from sales_orders mapped to SALES_ORDERS_REPORTING"
+          surface="Transfer Studio · Map"
+        />
       }
       next="solution-warehouse"
       nextLabel="Warehouse loading"
@@ -1121,7 +1160,7 @@ export function WarehouseSolutionPage({
           <span>BigQuery</span>
           <span>Apache Iceberg</span>
           <span>S3 · ADLS · GCS</span>
-          <span>Gate-8 MATCH</span>
+          <span>Read back and compared</span>
         </div>
       </section>
 
@@ -1214,14 +1253,14 @@ export function WarehouseSolutionPage({
       </MarketingReveal>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Proof"
           title="Read the destination back, then compare"
           lead="The engine hashes the mapped source rows, reads the destination back, and reports a match when the counts, the content, and the keys agree."
-          compact
-        >
-          <ProofCinema />
-        </AlgorithmCinemaBand>
+          src={WORKSPACE_SHOT.jobTrust}
+          alt="Trust Report: 5,100 rows in the source, 5,100 in Snowflake, 0 differ, full checksum"
+          surface="Job space · Trust Report"
+        />
       </MarketingReveal>
 
       <section className="lp-wh-cta">
@@ -1338,14 +1377,15 @@ export function SyncSolutionPage({
         },
       ]}
       cinema={
-        <AlgorithmCinemaBand
-          kicker="CDC"
-          title="Snapshot + LSN handoff, then streaming upserts"
-          lead="Start with a snapshot window, hand off at a logical cursor, and stream idempotent upserts. Redelivery is safe by design."
-          compact
-        >
-          <CdcCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Sync modes"
+          title="One list of modes, CDC included"
+          lead="The schedule runs the mode you pick. CDC sits next to incremental, mirror, and slowly changing dimensions, and it goes through the same checks."
+          src={WORKSPACE_SHOT.transferSyncModesCard}
+          alt="Sync mode list with CDC: log-based changes with a cursor and a key"
+          surface="Transfer Studio · Sync mode"
+          beside
+        />
       }
       next="pricing"
       nextLabel="Pricing"

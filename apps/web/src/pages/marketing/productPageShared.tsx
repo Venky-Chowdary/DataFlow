@@ -188,7 +188,7 @@ export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: strin
     id: "G8", // Pre-write sample reconciliation; post-write checksum after Execute
     title: "Reconciliation plan",
     algorithm:
-      "Select the row-count, checksum, and census strategy for post-load proof. After the write, Gate-8 reads the destination back and verifies it.",
+      "Select the row-count, checksum, and census strategy for post-load proof. After the write, the engine reads the destination back and verifies it.",
   },
   {
     id: "G9", // Data integrity audit — unproven / not-configured fails closed

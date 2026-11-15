@@ -10742,7 +10742,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cinema-band-head h2 {
   margin: 0 0 12px;
-  font-size: clamp(1.8rem, 3vw, 2.4rem);
+  font-size: var(--lp-fs-h2, 1.35rem);
   letter-spacing: -0.03em;
   color: #f8fafc;
 }

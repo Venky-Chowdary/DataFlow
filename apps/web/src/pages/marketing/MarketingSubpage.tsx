@@ -1,10 +1,6 @@
 import { type CSSProperties } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
-import {
-  AlgorithmCinemaBand,
-  ProofCinema,
-} from "../../components/landing/AlgorithmCinema";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import {
   EvidencePlatesArt,
@@ -155,7 +151,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       features: [
         "Transfer Studio — table, destination query, stored procedure",
         "G1–G9 preflight + quarantine with replay",
-        "Gate-8 read-back with value & key census",
+        "Read-back with a value and key census",
         provenDriversPhrase(),
       ],
     },
@@ -195,7 +191,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
   const compareRows = [
     { feature: "Transfer Studio (table / destination query / stored procedure)", starter: true, team: true, enterprise: true },
     { feature: "G1–G9 preflight & quarantine with replay", starter: true, team: true, enterprise: true },
-    { feature: "Gate-8 read-back: value & key census", starter: true, team: true, enterprise: true },
+    { feature: "Read-back: value and key census", starter: true, team: true, enterprise: true },
     { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
     { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
     { feature: "Schedules & typed watermarks", starter: false, team: true, enterprise: true },
@@ -366,7 +362,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Gate-8 read-back</td>
+                  <td>Read-back after the write</td>
                   <td>Row counts plus a value and key census from the destination</td>
                   <td>All plans</td>
                 </tr>
@@ -576,9 +572,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         title={<>Every load leaves proof you can keep.</>}
         lead={
           <>
-            What we publish is measured: schema drift, identity carry, retry safety, and
-            destination read-back on named engines. Book a pilot and get the same evidence on{" "}
-            <em>your</em> sources and destinations.
+            One finished run is on the page: 5,100 orders from Postgres into Snowflake, every
+            column mapped, a full checksum, nothing differing. Book a pilot and get the same
+            evidence on <em>your</em> sources and destinations.
           </>
         }
         actions={
@@ -924,7 +920,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       t: "Prove",
       tag: "Verify",
       d: "Every load is read back and verified value by value. Every action lands in a hash-chained, signed audit log.",
-      pill: "Gate-8 MATCH",
+      pill: "Read back and compared",
     },
   ];
   const controls = [
@@ -1214,7 +1210,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <div><span>01</span><em>Semantic map</em></div>
             <div><span>02</span><em>G1–G9 preflight</em></div>
             <div><span>03</span><em>Quarantine write</em></div>
-            <div><span>04</span><em>Gate-8 verify</em></div>
+            <div><span>04</span><em>Read the destination back</em></div>
           </aside>
         </section>
       </MarketingReveal>

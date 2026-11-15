@@ -14,6 +14,7 @@ export const WORKSPACE_SHOT = {
   transferSource: `${dir}/app-transfer-source.webp`,
   transferDest: `${dir}/app-transfer-destination.webp`,
   transferSyncModes: `${dir}/app-transfer-sync-modes.webp`,
+  transferSyncModesCard: `${dir}/app-transfer-sync-modes-card.webp`,
   transferTransform: `${dir}/app-transfer-transform.webp`,
   transferMap: `${dir}/app-transfer-map.webp`,
   transferMapWhy: `${dir}/app-transfer-map-why.webp`,

@@ -20,9 +20,9 @@
   --lp-teal: var(--df-teal-500);
   --lp-ink-deep: var(--df-logo-tile);
   --lp-fs-kicker: 11px;
-  --lp-fs-h1: clamp(1.75rem, 2.2vw, 2.125rem);
-  --lp-fs-h1-home: clamp(2rem, 2.8vw, 2.625rem);
-  --lp-fs-h2: clamp(1.25rem, 1.5vw, 1.5rem);
+  --lp-fs-h1: clamp(1.7rem, 1.15rem + 1.05vw, 2.15rem);
+  --lp-fs-h1-home: clamp(1.7rem, 1.15rem + 1.05vw, 2.15rem);
+  --lp-fs-h2: clamp(1.2rem, 1.05rem + 0.4vw, 1.4rem);
   --lp-fs-lead: 15px;
   --lp-fs-body: 14.5px;
   --lp-fs-meta: 13px;
@@ -1826,12 +1826,12 @@
 
 .lp-pricing-hero-inner h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2.5rem, 5vw, 4rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.05;
+  font-size: var(--lp-fs-h1);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
   margin: 0 0 16px;
-  max-width: 12ch;
+  max-width: 24ch;
   color: #fff;
 }
 
@@ -2142,13 +2142,13 @@
 .lp-sec-hero-copy h1,
 .lp-int-hero-copy h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2.15rem, 4.4vw, 3.4rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
+  font-size: var(--lp-fs-h1);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
   margin: 0 0 16px;
   color: #fff;
-  max-width: 14ch;
+  max-width: 24ch;
 }
 
 .lp-cust-hero-lead,
@@ -5301,13 +5301,13 @@
 
 .lp-ct5-brand h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2.6rem, 5vw, 3.75rem);
-  font-weight: 760;
-  letter-spacing: -0.048em;
-  line-height: 0.98;
+  font-size: var(--lp-fs-h1);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
   margin: 0 0 16px;
   color: #fff;
-  max-width: 9ch;
+  max-width: 24ch;
 }
 
 .lp-ct5-lead {
@@ -6303,13 +6303,13 @@
 
 .lp-cust3-hero-inner h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2.4rem, 4.8vw, 3.75rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.05;
+  font-size: var(--lp-fs-h1);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
   margin: 0 0 16px;
   color: var(--lp-ink);
-  max-width: 16ch;
+  max-width: 24ch;
 }
 
 .lp-cust3-hero-inner h1 em {
@@ -6933,13 +6933,13 @@
 
 .lp-ent-hero-copy h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2.1rem, 4.2vw, 3.35rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
+  font-size: var(--lp-fs-h1);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
   margin: 0 0 16px;
   color: #fff;
-  max-width: 14ch;
+  max-width: 24ch;
 }
 
 .lp-ent-hero-lead {
@@ -8853,10 +8853,7 @@
   transform: none !important;
 }
 
-.lp-reveal {
-  opacity: 1 !important;
-  transform: none !important;
-}
+/* Scroll reveal stays on. The motion itself lives with .lp-reveal in landing.css. */
 
 /* ── Auth flow pages (signup / verify / forgot / reset) ─────────────────
    Same gate chrome as login, with the copy that was suppressed there:
@@ -9089,6 +9086,43 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
   background: #f4f7f8;
 }
 
+.lp p,
+.lp li,
+.lp td,
+.lp dd,
+.lp figcaption,
+.lp h1,
+.lp h2,
+.lp h3 {
+  overflow-wrap: break-word;
+}
+
+.lp code {
+  overflow-wrap: anywhere;
+}
+
+.lp-shot-band {
+  margin: 8px auto 0;
+  max-width: 960px;
+}
+
+.lp-shot-band img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--df-radius-xl);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.lp-shot-band figcaption {
+  margin: 12px 2px 0;
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .lp-home-inner {
   width: var(--lp-shell);
   max-width: 100%;
@@ -9195,13 +9229,13 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
 
 .lp-home-hero h1 {
   margin: 0 0 18px;
-  max-width: 12ch;
+  max-width: 24ch;
   color: #f8fafc;
   font-family: var(--lp-font-display);
-  font-size: clamp(2.7rem, 4.6vw, 4.35rem);
-  font-weight: 650;
-  letter-spacing: -0.045em;
-  line-height: 0.98;
+  font-size: var(--lp-fs-h1-home);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
 }
 
 .lp-home-hero h1 span {
@@ -9826,7 +9860,7 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
   }
 
   .lp-home-hero h1 {
-    max-width: 16ch;
+    max-width: none;
   }
 
   .lp-home-cases-grid {

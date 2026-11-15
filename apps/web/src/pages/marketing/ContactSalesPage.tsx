@@ -42,7 +42,7 @@ const NEXT_STEPS = [
   {
     n: "03",
     title: "Signed proof pack you keep",
-    body: "Gate-8 read-back with destination COUNT, checksums, and a value and key census that MATCH.",
+    body: "A read-back of the destination: row counts, checksums, and a value and key census.",
   },
 ];
 
@@ -249,7 +249,7 @@ export function ContactSalesPage({
             <p className="lp-sales-kicker">Contact sales</p>
             <h1>Talk to a solutions engineer.</h1>
             <p className="lp-sales-hero-lead">
-              Scope Map → G1–G9 → quarantine → Gate-8 verification on your stack. A solutions
+              Scope the map, the checks, quarantine, and the read-back on your stack. A solutions
               engineer replies within one business day.
             </p>
             <p className="lp-sales-hero-mail">
@@ -528,7 +528,7 @@ export function ContactSalesPage({
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Gate-8 read-back: destination COUNT, checksums, value and key census</td>
+                  <td>Read-back: destination row count, checksums, value and key census</td>
                   <td>A signed proof pack</td>
                 </tr>
                 <tr>
