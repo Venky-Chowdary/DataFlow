@@ -625,21 +625,22 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           <div className="lp-home-videos-feature">
             <VideoPlayer videoId={FEATURED_VIDEO_ID} title={featured?.title ?? "Datawrap demo"} />
           </div>
-          <div className="lp-home-videos-row">
+          <Reveal className="lp-home-videos-row">
             {MARKETING_VIDEOS.filter((v) => v.id !== FEATURED_VIDEO_ID)
               .slice(0, 3)
-              .map((video) => (
+              .map((video, i) => (
                 <button
                   key={video.id}
                   type="button"
                   className="lp-home-videos-card"
+                  style={{ ["--reveal-i" as string]: i }}
                   onClick={() => onNavigate("demos")}
                 >
                   <img src={videoThumb(video.id, "hq")} alt="" loading="lazy" />
                   <span className="lp-home-videos-card-title">{video.title}</span>
                 </button>
               ))}
-          </div>
+          </Reveal>
           <div className="lp-home-actions">
             <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("demos")}>
               All demos

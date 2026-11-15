@@ -2181,6 +2181,33 @@
   color: var(--df-teal-600);
 }
 
+/* Demo scene uses the full shell. Fivetran does not float a small player
+   in the middle of a wide page. */
+.lp .lp-home-videos {
+  background: var(--df-surface);
+  border-block: 1px solid var(--lp-line);
+}
+
+.lp .lp-home-videos-feature,
+.lp .lp-home-videos-row {
+  max-width: none;
+}
+
+.lp .lp-home-videos-row {
+  gap: 16px;
+}
+
+.lp .lp-reveal--in .lp-home-videos-card {
+  animation: lp-stagger-in 750ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--reveal-i, 0) * 70ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .lp-reveal--in .lp-home-videos-card {
+    animation: none;
+  }
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
