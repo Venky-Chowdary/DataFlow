@@ -65,6 +65,16 @@ export const WORKSPACE_SHOT = {
   proofs: `${dir}/app-proofs.webp`,
   settings: `${dir}/app-settings.webp`,
   settingsSso: `${dir}/app-settings-sso.webp`,
+
+  /* Panels cut from the captures above, so a small tile shows legible UI
+     instead of a full window with a dimmed backdrop. */
+  jobTrustCard: `${dir}/app-jobs-trust-card.webp`,
+  jobReversibilityCard: `${dir}/app-jobs-reversibility-card.webp`,
+  transferValidateVerdict: `${dir}/app-transfer-validate-verdict.webp`,
+  schedulesCard: `${dir}/app-schedules-card.webp`,
+  contractsCard: `${dir}/app-contracts-card.webp`,
+  queryCard: `${dir}/app-query-card.webp`,
+  pilotCard: `${dir}/app-pilot-card.webp`,
 } as const;
 
 export type WorkspaceShotKey = keyof typeof WORKSPACE_SHOT;

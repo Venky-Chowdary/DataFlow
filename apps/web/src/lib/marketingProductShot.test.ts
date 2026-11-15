@@ -27,11 +27,13 @@ function helpDocFigureSources(): string[] {
 }
 
 describe("marketing product photography", () => {
-  it("home hero frames the Job space Trust Report on the demo route", () => {
+  it("home hero stages the Studio map with the real verdict and Trust Report on the demo route", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /ProductShot/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.jobTrust\}/);
-    assert.match(home, /route=\{DEMO_ROUTE\}/);
+    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMap\}/);
+    assert.match(home, /src=\{WORKSPACE_SHOT\.transferValidateVerdict\}/);
+    assert.match(home, /src=\{WORKSPACE_SHOT\.jobTrustCard\}/);
+    assert.match(home, /DEMO_ROUTE\.source/);
     assert.doesNotMatch(home, /ProofLoopArt/);
     assert.doesNotMatch(home, /Trust Report 92/);
     assert.equal(DEMO_ROUTE.source, "PostgreSQL · public.sales_orders");
@@ -48,11 +50,12 @@ describe("marketing product photography", () => {
     assert.match(css, /\.lp-sol-v2 \.lp-mkt-body[\s\S]*?1080px/);
   });
 
-  it("product surface tabs take their shots from WORKSPACE_SHOT", () => {
+  it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /shot: WORKSPACE_SHOT\.transferMap/);
-    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesDrawer/);
-    assert.doesNotMatch(home, /SURFACE_SHOTS/);
+    assert.match(home, /shot: WORKSPACE_SHOT\.transferSource/);
+    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesCard/);
+    assert.doesNotMatch(home, /\/docs\/screenshots\//);
+    assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });
 
   it("product and solution heroes frame live workspace shots, not schematic SVGs", () => {

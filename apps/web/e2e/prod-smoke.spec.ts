@@ -20,7 +20,7 @@ test("production build loads with no page errors", async ({ page }) => {
   const response = await page.goto("/");
   expect(response?.ok()).toBe(true);
   await expect(page).toHaveTitle(/Datawrap/);
-  await expect(page.getByRole("heading", { name: /Move any schema/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Move data anywhere/i })).toBeVisible();
 
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
   expect(assetUrls.some((url) => url.includes("react-vendor"))).toBe(false);

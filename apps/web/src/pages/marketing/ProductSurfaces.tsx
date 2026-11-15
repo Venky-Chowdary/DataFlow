@@ -239,7 +239,7 @@ export function TransferStudioPage({
             {
               name: "Format + domain classify",
               detail:
-                "FormatClassifierAgent inspects column names and samples (payment tokens, domain profiles) and returns a format confidence (e.g. payment_feed vs generic_tabular).",
+                "Column names and a sample of the values are classified — amount, email, timestamp, identifier, currency. That classification, not the spelling of the name, is what the pairing is scored on.",
             },
             {
               name: "Column enrichment",
@@ -1185,7 +1185,7 @@ export function WarehouseSolutionPage({
           <div className="lp-shell">
             <div className="lp-wh-section-head">
               <p className="lp-mkt-kicker">How it works</p>
-              <h2>Four steps from probe to MATCH</h2>
+              <h2>Four steps from a capacity check to proof</h2>
             </div>
             <ol className="lp-wh-flow-list">
               <li>
@@ -1206,7 +1206,7 @@ export function WarehouseSolutionPage({
               <li>
                 <span>04</span>
                 <strong>Prove</strong>
-                <p>Row counts, checksums, and a value and key census flash MATCH.</p>
+                <p>Row counts, checksums, and a value and key census, compared with the source.</p>
               </li>
             </ol>
           </div>
@@ -1216,8 +1216,8 @@ export function WarehouseSolutionPage({
       <MarketingReveal>
         <AlgorithmCinemaBand
           kicker="Proof"
-          title="Read-back verification flashes MATCH"
-          lead="The engine hashes mapped source rows, reads the destination back, and flashes MATCH when counts, content, and keys agree."
+          title="Read the destination back, then compare"
+          lead="The engine hashes the mapped source rows, reads the destination back, and reports a match when the counts, the content, and the keys agree."
           compact
         >
           <ProofCinema />
