@@ -2323,6 +2323,29 @@
   border-bottom: 0;
 }
 
+/* The control snapshot is a dark spec card. A later white-card rule
+   painted it white and left the heading in light teal. */
+.lp .lp-ent-engine .lp-ent-panel {
+  background-color: var(--df-logo-tile) !important;
+  background-image: radial-gradient(ellipse 80% 60% at 100% 0%, rgba(45, 212, 191, 0.18), transparent 50%) !important;
+  color: var(--df-success-bg) !important;
+  border-color: transparent !important;
+  border-radius: 16px !important;
+}
+
+.lp .lp-ent-panel h3 {
+  color: var(--df-success-bg);
+}
+
+.lp .lp-ent-panel-row span,
+.lp .lp-ent-panel-row em {
+  color: var(--df-success-bg);
+}
+
+.lp .lp-ent-panel-row em {
+  opacity: 0.82;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
