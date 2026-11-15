@@ -558,7 +558,7 @@
   display: grid;
   grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.05fr);
   gap: clamp(20px, 3vw, 40px);
-  align-items: center;
+  align-items: start;
   width: 100%;
   max-width: min(1080px, 100%);
   margin: 12px auto 36px;
@@ -743,7 +743,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
   gap: clamp(24px, 4vw, 64px);
-  align-items: center;
+  align-items: start;
 }
 
 .lp-proof-beside-copy h2 {
@@ -1082,6 +1082,49 @@
   .lp-sales-table td:nth-child(2)::before { content: "What you get"; }
   .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
   .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
+}
+
+/* Closing band is one centered group. A wide shell with left copy and
+   centered buttons left a hole on the right. */
+.lp .lp-home-final {
+  padding-block: clamp(56px, 8vh, 80px);
+  text-align: center;
+}
+
+.lp .lp-home-final-inner {
+  width: min(36rem, calc(100% - 48px));
+  max-width: 100%;
+  margin-inline: auto;
+  text-align: center;
+}
+
+.lp .lp-home-final h2,
+.lp .lp-home-final p {
+  max-width: 36rem;
+  margin-inline: auto;
+}
+
+.lp .lp-home-final-cta,
+.lp .lp-home-final .lp-hero-cta {
+  justify-content: center !important;
+}
+
+/* A short verdict and a tall Trust Report cannot share a row. */
+.lp .lp-home-run-proofs {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 880px;
+}
+
+.lp .lp-wh-split-grid {
+  align-items: start;
+}
+
+.lp .lp-wh-rail-inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 18px;
+  padding: 14px 0;
 }
 
 /* One surface: hairline, soft lift, and a frame that keeps a row aligned.
