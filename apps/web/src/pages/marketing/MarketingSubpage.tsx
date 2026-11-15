@@ -248,7 +248,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             {plans.map((plan, i) => (
               <article
                 key={plan.name}
-                className={`lp-pricing-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
+                className={`lp-pricing-card lp-scene-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
                 style={{ "--reveal-i": i } as CSSProperties}
               >
                 {plan.featured ? <span className="lp-pricing-card-flag">Recommended</span> : null}
@@ -318,15 +318,15 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
 
       <MarketingReveal>
         <section className="lp-pricing-v2-principles" aria-label="Pricing principles">
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>A real free tier</strong>
             <span>The full Transfer Studio path, verification included.</span>
           </div>
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>Quote when you scale</strong>
             <span>Priced to connectors and cadence.</span>
           </div>
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>One engine everywhere</strong>
             <span>UI, Schedules, Pilot, and MCP share the same gates.</span>
           </div>
@@ -625,7 +625,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             </div>
             <div className="lp-mkt-evidence-grid">
               {MARKETING_PROOF_HIGHLIGHTS.map((row, i) => (
-                <article key={row.title} className="lp-mkt-evidence-card" style={{ ["--reveal-i" as string]: i }}>
+                <article key={row.title} className="lp-mkt-evidence-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                   <span className="lp-cust-industry">{row.stat}</span>
                   <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
@@ -651,7 +651,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             </div>
             <div className="lp-mkt-evidence-grid">
               {MARKETING_STACK.map((row) => (
-                <article key={row.family} className="lp-mkt-evidence-card">
+                <article key={row.family} className="lp-mkt-evidence-card lp-scene-card">
                   <span className="lp-cust-industry">{row.family}</span>
                   <p><strong>{row.items}.</strong> {row.note}</p>
                 </article>
@@ -1164,7 +1164,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           </div>
           <div className="lp-int-family-grid">
             {MARKETING_STACK.map((f, i) => (
-              <article key={f.family} className="lp-int-family-card" style={{ ["--reveal-i" as string]: i }}>
+              <article key={f.family} className="lp-int-family-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                 <header>
                   <h3>{f.family}</h3>
                   <span>{f.badge}</span>

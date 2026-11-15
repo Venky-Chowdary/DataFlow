@@ -523,7 +523,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </SectionHead>
           <Reveal className="lp-home-bento">
             {FEATURES.map((f, i) => (
-              <article key={f.id} className={`lp-home-bento-cell is-${f.size}`} style={{ ["--reveal-i" as string]: i }}>
+              <article key={f.id} className={`lp-home-bento-cell lp-scene-card is-${f.size}`} style={{ ["--reveal-i" as string]: i }}>
                 <div className="lp-home-bento-copy">
                   <span className="lp-home-bento-mark" aria-hidden>
                     <DtIcon name={f.icon} size={18} chrome="product" />
@@ -558,7 +558,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           <SectionHead kicker="Use cases" title="Three jobs teams bring to Datawrap" />
           <Reveal className="lp-home-cases-grid">
             {USE_CASES.map((u, i) => (
-              <article key={u.id} className="lp-home-case" style={{ ["--reveal-i" as string]: i }}>
+              <article key={u.id} className="lp-home-case lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                 <span className="lp-home-case-tag">{u.tag}</span>
                 <h3>{u.title}</h3>
                 <p>{u.body}</p>

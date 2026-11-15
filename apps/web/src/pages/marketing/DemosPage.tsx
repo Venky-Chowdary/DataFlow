@@ -116,7 +116,7 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
               <button
                 key={video.id}
                 type="button"
-                className={`lp-demos-card ${video.id === current.id ? "is-current" : ""}`}
+                className={`lp-demos-card lp-scene-card ${video.id === current.id ? "is-current" : ""}`}
                 onClick={() => play(video)}
               >
                 <span className="lp-demos-thumb">

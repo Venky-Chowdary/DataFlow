@@ -2667,7 +2667,16 @@
 .lp .lp-scene-card,
 .lp .lp-sol-step.lp-scene-card:last-child,
 .lp .lp-sec-layer-card.lp-scene-card,
-.lp .lp-ent-capability.lp-scene-card {
+.lp .lp-ent-capability.lp-scene-card,
+.lp .lp-pricing-card.lp-scene-card,
+.lp .lp-pricing-card.lp-scene-card.is-featured,
+.lp .lp-int-family-card.lp-scene-card,
+.lp .lp-mkt-evidence-card.lp-scene-card,
+.lp .lp-home-bento-cell.lp-scene-card,
+.lp .lp-home-case.lp-scene-card,
+.lp .lp-home-case.lp-scene-card:first-child,
+.lp .lp-demos-card.lp-scene-card,
+.lp .lp-pricing-principle.lp-scene-card {
   border-top: 2px solid var(--df-teal-600) !important;
   transition:
     transform 150ms ease,
