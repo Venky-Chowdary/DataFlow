@@ -2300,6 +2300,12 @@
   flex: 1;
 }
 
+.lp .docs-category-card img {
+  object-fit: contain;
+  object-position: center center;
+  background: var(--df-surface);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
