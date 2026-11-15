@@ -2270,6 +2270,42 @@
   padding: 10px;
 }
 
+/* Docs start path. Four guides in one row, the way Fivetran lines up
+   a "start here" instead of a stacked pair. */
+@media (min-width: 1080px) {
+  .lp .docs-featured-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+  }
+}
+
+.lp .docs-featured-card {
+  height: 100%;
+  animation: lp-home-rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+.lp .docs-category-grid {
+  gap: 16px;
+  align-items: stretch;
+}
+
+.lp .docs-category-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.lp .docs-category-card-body {
+  flex: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .docs-featured-card {
+    animation: none;
+  }
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(

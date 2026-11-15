@@ -257,22 +257,22 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           buttons, and dialogs — so operators can follow along inside the signed-in product.
         </p>
         <div className="docs-featured-grid" aria-label="Start here guides">
-          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-installation")}>
+          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 0 }} onClick={() => onNavigate("help-installation")}>
             <span>01</span>
             <strong>Access your workspace</strong>
             <em>Tenant URL, SSO sign-in, Viewer / Editor / Admin roles, admin checklist.</em>
           </button>
-          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-getting-started")}>
+          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 1 }} onClick={() => onNavigate("help-getting-started")}>
             <span>02</span>
             <strong>How Datawrap works</strong>
             <em>Sidebar map (Platform / Operations / System) and the governed transfer path.</em>
           </button>
-          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-connectors")}>
+          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 2 }} onClick={() => onNavigate("help-connectors")}>
             <span>03</span>
             <strong>Add & manage connectors</strong>
             <em>New connection → Choose a connector dialog → Test passed → use in Studio.</em>
           </button>
-          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-transfer-studio")}>
+          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 3 }} onClick={() => onNavigate("help-transfer-studio")}>
             <span>04</span>
             <strong>Transfer Studio guide</strong>
             <em>A worked Postgres to Snowflake load: Source → Destination → Transform → Map → Validate → Run.</em>
