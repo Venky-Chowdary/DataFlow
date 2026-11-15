@@ -36,7 +36,7 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
         lead={
           <>
             Real runs on the production engine — quarantine, replay, drift review, native CDC,
-            and the checksum match at the end. No slideware, no staged mock-ups.
+            and the checksum match at the end. No slideware. Nothing is staged.
           </>
         }
         slas={[

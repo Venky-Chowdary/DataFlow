@@ -74,17 +74,11 @@ export function PlanLadderArt() {
         priced by cadence and security
       </ArtLabel>
 
-      <ArtText x={64} y={144} size={18}>
+      <ArtText x={64} y={148} size={18}>
         The ladder climbs on cadence
       </ArtText>
-      <ArtText x={64} y={176} size={18}>
+      <ArtText x={64} y={180} size={18}>
         and security.
-      </ArtText>
-      <ArtText x={64} y={228} size={15} tone="teal">
-        one quote per cadence
-      </ArtText>
-      <ArtText x={64} y={258} size={15} tone="muted">
-        verification always included
       </ArtText>
 
       {PLAN_STEPS.map((step, i) => {

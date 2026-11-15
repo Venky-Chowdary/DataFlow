@@ -210,9 +210,9 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         title={<>Plans that scale with proof.</>}
         lead={
           <>
-            Datawrap prices cadence and security. Semantic mapping, G1–G9 preflight, quarantine
-            with replay, destination query and stored-procedure writes, and value-by-value
-            verification all ship in Starter.
+            Starter includes the whole proof path: a map you review, checks that stop a bad
+            write, quarantine with replay, and a value-by-value read of the destination. You pay
+            for cadence and security, not for knowing the rows arrived.
           </>
         }
         actions={
@@ -456,9 +456,9 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         title={<>Controls that travel with every load.</>}
         lead={
           <>
-            SSO, SCIM, RBAC, BYOK, workspace isolation, and a tamper-evident audit chain — on the
-            same Transfer Studio engine, with every G1–G9 gate and every post-write verification
-            in place.
+            SSO, SCIM, role-capped keys, your own encryption key, and a signed audit chain ride
+            the same engine as every load. The checks before a write, and the read-back after it,
+            stay in place when security policy is added.
           </>
         }
         actions={
