@@ -30,7 +30,7 @@ describe("marketing product photography", () => {
   it("home hero stages the Studio map with the real verdict and Trust Report on the demo route", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /ProductShot/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMap\}/);
+    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMapStage\}/);
     assert.match(home, /src=\{WORKSPACE_SHOT\.transferValidateVerdict\}/);
     assert.match(home, /src=\{WORKSPACE_SHOT\.jobTrustCard\}/);
     assert.match(home, /DEMO_ROUTE\.source/);

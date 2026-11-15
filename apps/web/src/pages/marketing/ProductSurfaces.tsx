@@ -360,7 +360,7 @@ export function TransferStudioPage({
           kicker="Mapping"
           title="Every pairing shows why it was made"
           lead="Open a row in Map. It shows the source type, the destination type, the confidence, and the reason the two columns were paired."
-          src={WORKSPACE_SHOT.transferMapWhy}
+          src={WORKSPACE_SHOT.transferMapWhyStage}
           alt="Map row for the attributes column: JSONB to VARIANT through Parse JSON, with confidence and a sample"
           surface="Transfer Studio · Map"
         />
@@ -522,7 +522,7 @@ export function JobTheaterPage({
           kicker="Proof"
           title="The read-back sits on the job"
           lead="Job space reads the destination after the write and puts the counts next to the source. When rows differ, each difference is listed with its reason."
-          src={WORKSPACE_SHOT.jobTrustExplained}
+          src={WORKSPACE_SHOT.jobTrustExplainedStage}
           alt="Trust Report for a filtered load: 5,100 source rows, 3,756 landed, 1,344 differences, every one explained"
           surface="Job space · Trust Report"
         />

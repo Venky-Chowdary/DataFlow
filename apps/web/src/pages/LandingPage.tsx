@@ -131,6 +131,7 @@ type Chapter = {
   shot: string;
   alt: string;
   surface: string;
+  frame?: string;
 };
 
 const CHAPTERS: Chapter[] = [
@@ -158,7 +159,7 @@ const CHAPTERS: Chapter[] = [
       "JSONB attributes land in Snowflake as VARIANT",
       "A written reason on every pairing",
     ],
-    shot: WORKSPACE_SHOT.transferMapWhy,
+    shot: WORKSPACE_SHOT.transferMapWhyStage,
     alt: "Transfer Studio map: the attributes column explained, JSONB to VARIANT through Parse JSON",
     surface: "Transfer Studio · Map",
   },
@@ -200,9 +201,10 @@ const CHAPTERS: Chapter[] = [
       "Differences explained per column, not hidden",
       "A report you can export and sign off",
     ],
-    shot: WORKSPACE_SHOT.jobTrustExplained,
+    shot: WORKSPACE_SHOT.jobTrustExplainedStage,
     alt: "Trust Report for a MongoDB load: 5,100 source rows, 3,756 in the destination, 1,344 differences, every one explained",
     surface: "Job space · Trust Report",
+    frame: "is-panel",
   },
 ];
 
@@ -397,37 +399,39 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <li>SSO, SCIM, and BYOK</li>
           </ul>
         </div>
+          <div className="lp-home-hero-proofs">
+            <figure className="lp-home-hero-float lp-home-hero-float--verdict">
+              <figcaption>
+                <span>1</span>Checked before the write
+              </figcaption>
+              <img
+                src={WORKSPACE_SHOT.transferValidateVerdict}
+                alt="Validate verdict: approve, 17 passed, 0 blocked gates, 6 skipped across 23 gates"
+              />
+            </figure>
+            <figure className="lp-home-hero-float lp-home-hero-float--trust">
+              <figcaption>
+                <span>2</span>Read back after the write
+              </figcaption>
+              <img
+                src={WORKSPACE_SHOT.jobTrustCard}
+                alt="Trust Report: 5,100 rows in source, 5,100 in destination, 0 differ, 100% proven equal"
+              />
+            </figure>
+          </div>
+        </div>
 
         <div className="lp-home-hero-stage">
           <ProductShot
-            src={WORKSPACE_SHOT.transferMap}
+            src={WORKSPACE_SHOT.transferMapStage}
             alt="Transfer Studio map step: 11 of 11 columns from public.sales_orders mapped to SALES_ORDERS_REPORTING"
             surface="Transfer Studio · Map"
           />
-          <figure className="lp-home-hero-float lp-home-hero-float--verdict">
-            <figcaption>
-              <span>1</span>Checked before the write
-            </figcaption>
-            <img
-              src={WORKSPACE_SHOT.transferValidateVerdict}
-              alt="Validate verdict: approve, 17 passed, 0 blocked gates, 6 skipped across 23 gates"
-            />
-          </figure>
-          <figure className="lp-home-hero-float lp-home-hero-float--trust">
-            <figcaption>
-              <span>2</span>Read back after the write
-            </figcaption>
-            <img
-              src={WORKSPACE_SHOT.jobTrustCard}
-              alt="Trust Report: 5,100 rows in source, 5,100 in destination, 0 differ, 100% proven equal"
-            />
-          </figure>
           <p className="lp-home-hero-route">
             <span>{DEMO_ROUTE.source}</span>
             <DtIcon name="arrow-right" size={14} />
             <span>{DEMO_ROUTE.dest}</span>
           </p>
-        </div>
         </div>
       </section>
 
@@ -502,7 +506,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                   </ul>
                 </Reveal>
                 <div className="lp-home-flow-visual">
-                  <ProductShot src={c.shot} alt={c.alt} surface={c.surface} />
+                  <ProductShot src={c.shot} alt={c.alt} surface={c.surface} className={c.frame} />
                 </div>
               </li>
             ))}
