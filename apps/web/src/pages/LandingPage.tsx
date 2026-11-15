@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import { TrustSection } from "../components/landing/TrustSection";
@@ -324,66 +324,21 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
   );
 }
 
-const TOUR_MS = 5600;
-
-function FlowTour() {
-  const [active, setActive] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const chapter = CHAPTERS[active];
-
-  useEffect(() => {
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    if (motion.matches || paused) return;
-    const id = window.setInterval(() => {
-      setActive((n) => (n + 1) % CHAPTERS.length);
-    }, TOUR_MS);
-    return () => window.clearInterval(id);
-  }, [paused, active]);
-
+function ProductSteps() {
   return (
-    <div className="lp-home-tour">
-      <div className="lp-home-tour-copy">
-        <p className="lp-home-flow-num">
-          <span>{chapter.step}</span>
-          {chapter.name}
-        </p>
-        <h3>{chapter.title}</h3>
-        <p>{chapter.body}</p>
-        <ul>
-          {chapter.facts.map((f) => (
-            <li key={f}>
-              <DtIcon name="check" size={14} />
-              {f}
-            </li>
-          ))}
-        </ul>
-        <div className="lp-home-tour-nav" role="tablist" aria-label="Transfer steps">
-          {CHAPTERS.map((c, i) => (
-            <button
-              key={c.step}
-              type="button"
-              role="tab"
-              id={`step-${c.name.toLowerCase()}`}
-              aria-selected={i === active}
-              className={i === active ? "is-active" : ""}
-              onClick={() => {
-                setActive(i);
-                setPaused(true);
-              }}
-            >
-              <span>{c.step}</span>
-              {c.name}
-            </button>
-          ))}
-        </div>
-        <div className={`lp-home-tour-bar${paused ? " is-paused" : ""}`} aria-hidden>
-          <span key={chapter.step} />
-        </div>
-      </div>
-      <div className="lp-home-tour-stage" key={chapter.step}>
-        <ProductShot src={chapter.shot} alt={chapter.alt} surface={chapter.surface} />
-      </div>
-    </div>
+    <ol className="lp-home-steps">
+      {CHAPTERS.map((c) => (
+        <li key={c.step} id={`step-${c.name.toLowerCase()}`}>
+          <span>{c.step}</span>
+          <div>
+            <h3>
+              {c.name}. {c.title}
+            </h3>
+            <p>{c.body}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -470,7 +425,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             The same path runs whether a person starts the transfer in Studio, a schedule fires,
             or an agent calls it through MCP. No surface can skip a check or the read-back.
           </SectionHead>
-          <FlowTour />
+          <ProductSteps />
           <div className="lp-home-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open Transfer Studio
