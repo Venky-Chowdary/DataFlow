@@ -2363,6 +2363,22 @@
   box-shadow: var(--lp-shadow-soft);
 }
 
+/* Migration and sync steps used the same shared frame. */
+.lp .lp-sol-steps {
+  gap: 16px !important;
+  border: 0 !important;
+  background: transparent !important;
+  overflow: visible !important;
+}
+
+.lp .lp-sol-step,
+.lp .lp-sol-step:last-child {
+  border: 1px solid var(--lp-line) !important;
+  border-radius: var(--df-radius-xl) !important;
+  background: var(--df-surface) !important;
+  box-shadow: var(--lp-shadow-soft) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
