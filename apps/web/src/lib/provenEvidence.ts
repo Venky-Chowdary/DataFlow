@@ -215,20 +215,24 @@ export const MARKETING_PROOF_HIGHLIGHTS = [
     title: "Schema changes stay under control",
     body: "Widen safely, refuse unsafe narrows, and carry nullability and defaults — Validate decides before anything is written.",
     stat: "Validate gate",
+    proof: "Decided before the write",
   },
   {
     title: "Identity and keys survive cutover",
     body: "Sequences, foreign keys, and CHECK constraints carry to the destination on create-new and are read back from its catalog.",
     stat: "Create-new",
+    proof: "Read back from the catalog",
   },
   {
     title: "Retries keep a load correct",
     body: "Before any retry, Datawrap checks what the failed attempt already committed and restarts only on a path that converges.",
     stat: "Retry check",
+    proof: "Restart only if the path converges",
   },
   {
     title: "Transforms load by column name",
     body: "Incremental transforms match every column by name and refuse columns that do not match.",
     stat: "By name",
+    proof: "A missing column stops the load",
   },
 ] as const;

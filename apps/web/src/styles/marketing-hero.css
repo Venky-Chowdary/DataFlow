@@ -625,16 +625,15 @@
   color: rgba(180, 199, 219, 0.78);
 }
 
-/* ── Enterprise type and measure ──────────────────────────────────
-   One modest scale across every public page. Headlines stay in the
-   low 30s, explanations sit beside the title or the product so a
-   section uses its width instead of stacking a narrow column.
-   Loaded last so these win over the older poster sizes. */
+/* ── Scene type ───────────────────────────────────────────────────
+   Airbyte and Fivetran keep a section title close to the hero, not
+   down in the low 30s. ~40px at desktop, ~30px on a phone. Loaded
+   last so these win over the older poster sizes. */
 
 .lp {
-  --lp-fs-display: clamp(1.7rem, 1.15rem + 1.05vw, 2.15rem);
-  --lp-fs-title: clamp(1.55rem, 1.15rem + 0.7vw, 1.95rem);
-  --lp-fs-lead: 15px;
+  --lp-fs-display: clamp(2.15rem, 1.3rem + 2vw, 3.25rem);
+  --lp-fs-title: clamp(1.9rem, 1.15rem + 1.35vw, 2.5rem);
+  --lp-fs-lead: 16px;
 }
 
 .lp .lp-home-run-head h2,
@@ -646,9 +645,13 @@
 .lp .lp-proof-beside-copy h2,
 .lp .lp-wh-cta h2 {
   font-size: var(--lp-fs-title);
-  font-weight: 640;
-  letter-spacing: -0.02em;
-  line-height: 1.28;
+  font-weight: 650;
+  letter-spacing: -0.032em;
+  line-height: 1.12;
+}
+
+.lp .lp-home-section-head {
+  max-width: 40rem;
 }
 
 .lp .lp-home-run-facts strong,
@@ -661,10 +664,10 @@
 .lp .lp-sol-step h3,
 .lp .lp-sol-cap h3,
 .lp .lp-home-bento-copy h3 {
-  font-size: 15px;
-  font-weight: 640;
-  letter-spacing: -0.015em;
-  line-height: 1.35;
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.28;
 }
 
 .lp .lp-cust-hero-quote-mark {
@@ -1593,9 +1596,9 @@
 }
 
 .lp .lp-proof-beside-copy h2 {
-  font-size: clamp(1.45rem, 1.1rem + 0.8vw, 1.85rem);
-  letter-spacing: -0.03em;
-  line-height: 1.15;
+  font-size: var(--lp-fs-title);
+  letter-spacing: -0.032em;
+  line-height: 1.12;
 }
 
 .lp-proof-beside,
@@ -1730,9 +1733,9 @@
 }
 
 .lp .lp-home-steps h3 {
-  font-size: clamp(1.45rem, 1.1rem + 0.8vw, 1.85rem);
+  font-size: clamp(1.65rem, 1.1rem + 1vw, 2.15rem);
   font-weight: 650;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.032em;
   line-height: 1.15;
 }
 
@@ -1790,9 +1793,9 @@
 .lp .lp-mkt-chapter-copy > h2,
 .lp .lp-mkt-chapter > h2 {
   margin: 0 0 10px;
-  font-size: clamp(1.7rem, 1.15rem + 0.9vw, 2.05rem) !important;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
+  font-size: var(--lp-fs-title) !important;
+  letter-spacing: -0.032em;
+  line-height: 1.12;
   color: var(--lp-ink);
 }
 
@@ -1908,12 +1911,19 @@
   animation-delay: calc(var(--reveal-i, 0) * 60ms);
 }
 
-/* Subpage section titles were pinned at 22px. A scene title is ~31px,
-   except the plan name on a pricing card. */
+/* Scene titles match the homepage. Plan names, legal copy, and doc
+   sections keep their own size. */
 .lp.lp-subpage h2 {
-  font-size: clamp(1.55rem, 1.15rem + 0.7vw, 1.95rem);
-  letter-spacing: -0.03em;
-  line-height: 1.15;
+  font-size: var(--lp-fs-title);
+  letter-spacing: -0.032em;
+  line-height: 1.12;
+}
+
+.lp.lp-subpage .docs-section h2,
+.lp.lp-subpage .docs-article-content h2 {
+  font-size: 1.4rem;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .lp.lp-subpage .lp-pricing-card h2 {
@@ -2156,20 +2166,146 @@
   border: 0;
 }
 
-/* Trust row. Fivetran spreads the marks across the bar with no box
-   around each one, so the frames cannot collide. */
-.lp .lp-home-stack-row {
-  justify-content: space-between;
-  gap: 16px 12px;
+/* Trust row. Airbyte scrolls the logos under the hero; the edges fade
+   so the strip does not stop hard against the page. */
+.lp .lp-home-stack-marquee {
+  mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 7%, var(--lp-ink) 93%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 7%, var(--lp-ink) 93%, transparent);
+}
+
+.lp .lp-home-stack-track {
+  gap: 0;
+  animation-duration: 36s;
+}
+
+.lp .lp-home-stack-marquee:hover .lp-home-stack-track {
+  animation-play-state: paused;
+}
+
+.lp .lp-home-stack-marquee .lp-home-stack-row {
+  width: max-content;
+  justify-content: flex-start;
+  gap: 8px 36px;
+  flex: 0 0 auto;
+  padding-inline: 18px;
 }
 
 .lp .lp-home-stack-item {
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: 92px;
   padding: 8px 4px;
   border: 0;
   background: transparent;
   box-shadow: none;
+  animation: none;
   transition: color 150ms ease;
+}
+
+@media (max-width: 720px) {
+  .lp .lp-home-stack-marquee.lp-conn-marquee {
+    overflow: hidden;
+    mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 8%, var(--lp-ink) 92%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 8%, var(--lp-ink) 92%, transparent);
+  }
+
+  .lp .lp-home-stack-track.lp-conn-marquee-track {
+    animation: lp-conn-marquee 36s linear infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .lp-home-stack-track {
+    animation: none;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: min(100%, var(--lp-shell-max, 1200px));
+    margin-inline: auto;
+  }
+
+  .lp .lp-home-stack-row[aria-hidden="true"] {
+    display: none;
+  }
+
+  .lp .lp-home-stack-marquee .lp-home-stack-row {
+    width: auto;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .lp .lp-home-bento-cell,
+  .lp .lp-home-bento-cell:hover {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* Capability cards. A small mark gives each tile the same anchor
+   Fivetran uses on a feature card, without another screenshot. */
+.lp .lp-home-bento-mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: var(--df-success-bg);
+  color: var(--df-teal-600);
+}
+
+.lp .lp-home-bento-cell {
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    border-color 150ms ease;
+}
+
+@media (hover: hover) {
+  .lp .lp-home-bento-cell:hover {
+    transform: translateY(-3px);
+  }
+}
+
+/* The call list was a plain disc list. Each line is its own row. */
+.lp .lp-sales-follow {
+  padding: clamp(56px, 7vh, 88px) 0 !important;
+}
+
+.lp .lp-sales-honesty ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.lp .lp-sales-honesty li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--lp-line);
+  border-radius: 12px;
+  background: var(--df-surface);
+  color: var(--lp-ink);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.lp .lp-sales-honesty li::before {
+  content: "";
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-top: 0.45em;
+  border-radius: 99px;
+  background: var(--df-teal-600);
+}
+
+@media (max-width: 960px) {
+  .lp .lp-sales-honesty .lp-sales-rail-links {
+    grid-column: 1;
+  }
 }
 
 .lp .lp-home-stack-item:hover {
@@ -2348,6 +2484,25 @@
 
 /* Warehouse steps were one shared frame, so the rules ran into each other.
    Four separate cards, 16px apart. */
+.lp .lp-home-connector-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 16px;
+}
+
+.lp .lp-home-connector-grid .lp-conn-marquee-tile {
+  flex: 0 0 148px;
+  width: 148px;
+  min-height: 112px;
+  height: 112px;
+}
+
+.lp .lp-home-connector-grid .lp-conn-marquee-tile em {
+  text-align: center;
+  line-height: 1.25;
+}
+
 .lp .lp-wh-flow-list {
   gap: 16px;
   border: 0;

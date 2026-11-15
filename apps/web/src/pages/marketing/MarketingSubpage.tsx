@@ -629,8 +629,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
                   <span className="lp-cust-industry">{row.stat}</span>
                   <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
-                    <strong>Every run</strong>
-                    <span>Destination re-read</span>
+                    <strong>{row.proof}</strong>
                   </footer>
                 </article>
               ))}

@@ -186,6 +186,7 @@ type Feature = {
   route: PublicRoute;
   link: string;
   size: "wide" | "narrow" | "third";
+  icon: string;
 };
 
 const FEATURES: Feature[] = [
@@ -198,6 +199,7 @@ const FEATURES: Feature[] = [
     route: "product-pipelines",
     link: "Explore Schedules",
     size: "wide",
+    icon: "jobs",
   },
   {
     id: "query",
@@ -208,6 +210,7 @@ const FEATURES: Feature[] = [
     route: "product-query",
     link: "Open Query",
     size: "narrow",
+    icon: "search",
   },
   {
     id: "reversibility",
@@ -218,6 +221,7 @@ const FEATURES: Feature[] = [
     route: "product-jobs",
     link: "See Job space",
     size: "third",
+    icon: "eye",
   },
   {
     id: "contracts",
@@ -228,6 +232,7 @@ const FEATURES: Feature[] = [
     route: "product-transfer",
     link: "How contracts work",
     size: "third",
+    icon: "lock",
   },
   {
     id: "agents",
@@ -238,6 +243,7 @@ const FEATURES: Feature[] = [
     route: "product-pilot",
     link: "Meet Pilot",
     size: "third",
+    icon: "sparkle",
   },
 ];
 
@@ -423,18 +429,19 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
 
       <section className="lp-home-stack" aria-label="Works with your stack">
         <p className="lp-home-stack-label">Works with the systems you already run</p>
-        <div className="lp-home-stack-row">
-          {STACK_IDS.map((id, i) => (
-            <span
-              key={id}
-              className="lp-home-stack-item"
-              style={{ ["--i" as string]: i }}
-              title={connectorDisplayName(id)}
-            >
-              <ConnectorIcon id={id} size={28} />
-              <em>{connectorDisplayName(id)}</em>
-            </span>
-          ))}
+        <div className="lp-conn-marquee lp-home-stack-marquee">
+          <div className="lp-conn-marquee-track lp-home-stack-track">
+            {[0, 1].map((copy) => (
+              <div key={copy} className="lp-home-stack-row" aria-hidden={copy === 1 || undefined}>
+                {STACK_IDS.map((id) => (
+                  <span key={`${copy}-${id}`} className="lp-home-stack-item" title={connectorDisplayName(id)}>
+                    <ConnectorIcon id={id} size={28} />
+                    <em>{connectorDisplayName(id)}</em>
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -518,6 +525,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             {FEATURES.map((f, i) => (
               <article key={f.id} className={`lp-home-bento-cell is-${f.size}`} style={{ ["--reveal-i" as string]: i }}>
                 <div className="lp-home-bento-copy">
+                  <span className="lp-home-bento-mark" aria-hidden>
+                    <DtIcon name={f.icon} size={18} chrome="product" />
+                  </span>
                   <h3>{f.title}</h3>
                   <p>{f.body}</p>
                   <button type="button" className="lp-home-link" onClick={() => onNavigate(f.route)}>
