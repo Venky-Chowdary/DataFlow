@@ -633,7 +633,7 @@
 
 .lp {
   --lp-fs-display: clamp(1.7rem, 1.15rem + 1.05vw, 2.15rem);
-  --lp-fs-title: clamp(1.2rem, 1.05rem + 0.4vw, 1.4rem);
+  --lp-fs-title: clamp(1.55rem, 1.15rem + 0.7vw, 1.95rem);
   --lp-fs-lead: 15px;
 }
 
@@ -1859,7 +1859,9 @@
   .lp .lp-reveal--in .lp-mkt-algo-steps li,
   .lp .lp-reveal--in .lp-mkt-scenario li,
   .lp .lp-cust3-metrics-row > div,
-  .lp .lp-reveal--in .lp-int-family-card {
+  .lp .lp-reveal--in .lp-int-family-card,
+  .lp .lp-reveal--in .lp-pricing-card,
+  .lp .lp-reveal--in .lp-mkt-evidence-card {
     animation: none;
   }
 }
@@ -1904,4 +1906,24 @@
 .lp .lp-reveal--in .lp-int-family-card {
   animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: calc(var(--reveal-i, 0) * 60ms);
+}
+
+/* Subpage section titles were pinned at 22px. A scene title is ~31px,
+   except the plan name on a pricing card. */
+.lp.lp-subpage h2 {
+  font-size: clamp(1.55rem, 1.15rem + 0.7vw, 1.95rem);
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.lp.lp-subpage .lp-pricing-card h2 {
+  font-size: 1.15rem;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.lp .lp-reveal--in .lp-pricing-card,
+.lp .lp-reveal--in .lp-mkt-evidence-card {
+  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--reveal-i, 0) * 80ms);
 }

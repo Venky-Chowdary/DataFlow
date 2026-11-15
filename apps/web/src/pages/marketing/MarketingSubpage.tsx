@@ -624,8 +624,8 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <h2>Built for operators who answer for every row</h2>
             </div>
             <div className="lp-mkt-evidence-grid">
-              {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
-                <article key={row.title} className="lp-mkt-evidence-card">
+              {MARKETING_PROOF_HIGHLIGHTS.map((row, i) => (
+                <article key={row.title} className="lp-mkt-evidence-card" style={{ ["--reveal-i" as string]: i }}>
                   <span className="lp-cust-industry">{row.stat}</span>
                   <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
