@@ -327,14 +327,16 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
 function ProductSteps() {
   return (
     <ol className="lp-home-steps">
-      {CHAPTERS.map((c) => (
-        <li key={c.step} id={`step-${c.name.toLowerCase()}`}>
-          <span>{c.step}</span>
+      {CHAPTERS.map((c, i) => (
+        <li key={c.step} id={`step-${c.name.toLowerCase()}`} className={i % 2 ? "is-flip" : ""}>
           <div>
-            <p className="lp-home-steps-name">{c.name}</p>
+            <p className="lp-home-steps-name">
+              {c.step} · {c.name}
+            </p>
             <h3>{c.title}</h3>
             <p>{c.body}</p>
           </div>
+          <ProductShot src={c.shot} alt={c.alt} surface={c.surface} />
         </li>
       ))}
     </ol>

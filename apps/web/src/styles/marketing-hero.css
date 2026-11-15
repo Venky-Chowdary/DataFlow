@@ -1083,6 +1083,15 @@
   .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
   .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
 
+  .lp-home-steps li,
+  .lp-home-steps li.is-flip {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-home-steps li.is-flip > :first-child {
+    order: 0;
+  }
+
   .lp .lp-home-final-panel {
     grid-template-columns: 1fr;
     padding: 28px 22px;
@@ -1132,27 +1141,42 @@
   margin: 0;
 }
 
-/* How a transfer runs: the product, in sentences. The demo is the video. */
+/* How a transfer runs: one idea per band, copy beside one frame.
+   The recorded demo stays in the video section. */
 .lp-home-steps {
   list-style: none;
   margin: 28px 0 8px;
   padding: 0;
-  border-top: 1px solid var(--lp-line);
+  display: grid;
+  gap: 16px;
 }
 
 .lp-home-steps li {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 8px 20px;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--lp-line);
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.14fr);
+  gap: 28px 40px;
+  align-items: center;
+  padding: 28px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
 }
 
-.lp-home-steps span {
-  color: var(--df-teal-600);
-  font-weight: 720;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
+.lp-home-steps li.is-flip > :first-child {
+  order: 2;
+}
+
+.lp-home-steps .lp-product-shot-viewport {
+  aspect-ratio: 16 / 10;
+  max-height: 320px;
+}
+
+.lp-home-steps .lp-product-shot-viewport img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center center;
 }
 
 .lp-home-steps-name {
