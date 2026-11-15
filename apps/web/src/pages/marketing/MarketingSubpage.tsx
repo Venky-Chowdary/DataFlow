@@ -163,7 +163,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       name: "Team",
       price: "Custom",
       period: "usage-aligned",
-      blurb: "Pipelines, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
+      blurb: "Schedules, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "team" as const,
@@ -198,7 +198,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
     { feature: "Gate-8 read-back: value & key census", starter: true, team: true, enterprise: true },
     { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
     { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
-    { feature: "Pipelines, schedules & typed watermarks", starter: false, team: true, enterprise: true },
+    { feature: "Schedules & typed watermarks", starter: false, team: true, enterprise: true },
     { feature: "Native CDC (SQL Server, PostgreSQL, MySQL, Oracle)", starter: false, team: true, enterprise: true },
     { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
     { feature: "MCP for agents", starter: false, team: false, enterprise: true },
@@ -332,7 +332,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           </div>
           <div className="lp-pricing-principle">
             <strong>One engine everywhere</strong>
-            <span>UI, Pipelines, Pilot, and MCP share the same gates.</span>
+            <span>UI, Schedules, Pilot, and MCP share the same gates.</span>
           </div>
         </section>
       </MarketingReveal>
@@ -532,7 +532,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               <h3>Control snapshot</h3>
               <div className="lp-ent-panel-row"><span>Identity</span><em>OIDC / SAML · SCIM</em></div>
               <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
-              <div className="lp-ent-panel-row"><span>Preflight</span><em>9 / 9 required</em></div>
+              <div className="lp-ent-panel-row"><span>Preflight</span><em>G1–G9 + route policy</em></div>
               <div className="lp-ent-panel-row"><span>Quarantine</span><em>replayable</em></div>
               <div className="lp-ent-panel-row"><span>Verify</span><em>value &amp; key census</em></div>
               <div className="lp-ent-panel-row"><span>Audit</span><em>hash-chained · key id</em></div>
@@ -756,7 +756,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
   const terms = [
     {
       h: "Agreement",
-      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, pipelines, Job Theater, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
+      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, schedules, Job space, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
     },
     {
       h: "The service",

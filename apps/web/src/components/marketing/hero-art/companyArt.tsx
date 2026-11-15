@@ -41,7 +41,7 @@ const PLAN_STEPS: {
     name: "Team",
     price: "Custom",
     period: "usage-aligned",
-    adds: ["Pipelines + Pilot", "shared connectors"],
+    adds: ["Schedules + Pilot", "shared connectors"],
     x: 366,
     top: 250,
     tone: "teal",

@@ -23,6 +23,7 @@ import {
 } from "../lib/provenEvidence";
 import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
+import { DEMO_ROUTE, DEMO_SCHEDULE_ROUTE, WORKSPACE_SHOT } from "../lib/workspaceShots";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -121,20 +122,13 @@ function ConnectorMarquee({
   );
 }
 
-const SURFACE_SHOTS: Record<string, string> = {
-  studio: "/docs/screenshots/app-transfer-source.png",
-  theater: "/docs/screenshots/app-jobs.png",
-  reversibility: "/docs/screenshots/app-jobs.png",
-  pipelines: "/docs/screenshots/app-pipelines.png",
-  mcp: "/docs/screenshots/app-mcp.png",
-  query: "/docs/screenshots/app-query.png",
-};
-
 const SURFACES: {
   id: string;
   label: string;
   title: string;
   body: string;
+  shot: string;
+  alt: string;
   route: PublicRoute;
   cta: string;
 }[] = [
@@ -142,41 +136,71 @@ const SURFACES: {
     id: "studio",
     label: "Studio",
     title: "Transfer Studio plans every load",
-    body: "Connect source and destination, review semantic maps with confidence scores, clear nine preflight gates, then write with quarantine and value-by-value verification. Pilot and MCP run the exact same path.",
+    body: "Pick a source and a destination, review the column map, and run Validate. Gates that fail stop the write with the reason and the control that fixes it. On this Postgres to Snowflake route, 11 of 11 columns mapped and 17 gates passed before a row was written.",
+    shot: WORKSPACE_SHOT.transferMap,
+    alt: "Transfer Studio map: 11 of 11 columns mapped from public.sales_orders to SALES_ORDERS_REPORTING",
     route: "product-transfer",
     cta: "Open Transfer Studio",
   },
   {
-    id: "theater",
-    label: "Jobs",
-    title: "Job space shows trust and reversibility",
-    body: "Each run opens in Job space. The Trust Report scores completeness, quarantine, Gate-8 read-back, and freshness — it is not an exactly-once certificate. Reversibility says whether the destination can give the source values back. A hash, mask, or narrowing cast blocks Execute when that requirement is on.",
+    id: "jobs",
+    label: "Job space",
+    title: "Every run gets a Trust Report",
+    body: "The Trust Report reads the destination back and compares it with the source: 5,100 rows in the source, 5,100 in Snowflake, 0 that differ, full checksum match. When values do differ, each difference is listed with its column and reason. It reports at-least-once delivery honestly; it is not an exactly-once certificate.",
+    shot: WORKSPACE_SHOT.jobTrust,
+    alt: "Job space Trust Report: 5,100 rows in source and destination, 0 differ, full checksum match",
     route: "product-jobs",
     cta: "See Job space",
   },
   {
-    id: "pipelines",
-    label: "Pipelines",
-    title: "Schedules that run every gate",
-    body: "Typed watermarks, upsert, append, mirror with soft delete, or native CDC — every tick is a real, verified job. Schema drift waits for your review in Map before the next run.",
-    route: "product-pipelines",
-    cta: "Explore Pipelines",
+    id: "reversibility",
+    label: "Reversibility",
+    title: "Know whether you can get the data back",
+    body: "Reversibility checks each column: could the destination value give you the source value back? A hash, a mask, or a narrowing cast is flagged by name, and Execute can be blocked when a route must stay reversible.",
+    shot: WORKSPACE_SHOT.jobReversibilityColumns,
+    alt: "Reversibility for the Snowflake load: all 11 columns invertible, rollback by restoring from the destination",
+    route: "product-jobs",
+    cta: "See reversibility",
   },
   {
-    id: "mcp",
-    label: "MCP",
-    title: "Agents inherit the same gates",
-    body: "Agents work through secret references, under workspace RBAC and API keys capped at their creator's role. They map, preflight, and verify on the same engine as the UI.",
-    route: "product-mcp",
-    cta: "Read MCP docs",
+    id: "schedules",
+    label: "Schedules",
+    title: "Recurring sync that stops when it should",
+    body: "Incremental, upsert, append, mirror, or native CDC on a cadence you set. Each tick is a full job with the same gates. When a finding needs a person, such as upsert without a business key, the schedule parks and says why.",
+    shot: WORKSPACE_SHOT.schedulesDrawer,
+    alt: "Schedule detail for Orders feed: every 2 minutes, incremental deduped, 0 quarantined, source and destination",
+    route: "product-pipelines",
+    cta: "Explore Schedules",
   },
   {
     id: "query",
     label: "Query",
-    title: "Query the warehouse before you move more",
-    body: "Query is a read-only console: schema browser, several tabs, and a row-limited result. The sample here is open orders from ANALYTICS.ORDERS — order id, customer, amount, and status. It refuses DML. A slice you trust still goes through Transfer Studio before anything is written.",
+    title: "Look at the data on both sides",
+    body: "Query runs read-only SQL against saved connections, with a schema browser and a row limit. On the Snowflake copy of the demo orders, LATAM came to 767 orders and 182,648.65 in revenue. Statements that write are refused.",
+    shot: WORKSPACE_SHOT.query,
+    alt: "Query: revenue by region on Warehouse Snowflake (demo), 5 rows in 3.1 seconds",
     route: "product-query",
-    cta: "Open Query Playground",
+    cta: "Open Query",
+  },
+  {
+    id: "contracts",
+    label: "Contracts",
+    title: "Pin the shape the destination expects",
+    body: "A contract records the columns, types, and nullability a route promises. Later runs check against it, and drift waits for review instead of changing the destination quietly.",
+    shot: WORKSPACE_SHOT.contractsColumns,
+    alt: "Contract columns for the SALES_ORDERS_REPORTING route",
+    route: "product-transfer",
+    cta: "Read about contracts",
+  },
+  {
+    id: "mcp",
+    label: "MCP",
+    title: "Agents go through the same gates",
+    body: "Point any MCP client at one URL. Keys are scoped Viewer, Operator, Editor, or Admin. Anything that creates or moves data returns an ack_id and waits for confirm_action, then runs on the same engine as the UI.",
+    shot: WORKSPACE_SHOT.mcp,
+    alt: "MCP Server page with the server URL and client setup",
+    route: "product-mcp",
+    cta: "Read MCP docs",
   },
 ];
 
@@ -200,8 +224,8 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
           <p className="lp-section-kicker">For operators &amp; agents</p>
           <h2>Your control plane. Our governed engine.</h2>
           <p>
-            Use Transfer Studio, Job space, Query, Pipelines, or MCP. Datawrap manages mapping, gates,
-            quarantine, trust, and reversibility underneath every surface.
+            Use Transfer Studio, Job space, Schedules, Query, or MCP. The same mapping, gates,
+            quarantine, and read-back sit under every one of them.
           </p>
         </Reveal>
 
@@ -239,9 +263,10 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
           </div>
           <div className="lp-home-tab-visual">
             <ProductShot
-              src={SURFACE_SHOTS[current.id] ?? "/docs/screenshots/app-overview.png"}
-              alt={`${current.title} in the Datawrap workspace`}
+              src={current.shot}
+              alt={current.alt}
               surface={current.label}
+              route={current.id === "schedules" ? DEMO_SCHEDULE_ROUTE : current.id === "studio" || current.id === "jobs" ? DEMO_ROUTE : undefined}
             />
           </div>
         </div>
@@ -268,10 +293,10 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Datawrap maps your columns by meaning, clears nine preflight gates before it writes,
-              then reads every load back from the destination and verifies it value by value. If
-              anything doesn&apos;t match, Datawrap tells you instead of reporting success. One
-              governed path for Studio, Pipelines, Pilot, and MCP.
+              Datawrap maps your columns by meaning and checks the route before it writes: nine
+              core gates, plus the policy gates the route needs. Then it reads the load back from
+              the destination and compares it with the source. If anything doesn&apos;t match, you
+              see it instead of a success badge. One path for Studio, Schedules, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -298,10 +323,10 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
             <ProductShot
-              src="/docs/screenshots/app-jobs.png"
-              alt="Datawrap Job space — Trust Report 92 for a completed orders upsert, with sample rows"
+              src={WORKSPACE_SHOT.jobTrust}
+              alt="Datawrap Job space: Trust Report for a 5,100-row Postgres to Snowflake load, 0 rows differ, full checksum match"
               surface="Job space · Trust Report"
-              route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+              route={DEMO_ROUTE}
             />
           </div>
         </div>
@@ -457,7 +482,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p className="lp-section-kicker">What sets Datawrap apart</p>
             <h2>Every load verified. Every exception explained.</h2>
             <p>
-              Semantic maps you review, nine gates before the write, quarantine with replay, and a
+              Semantic maps you review, gates before the write, quarantine with replay, and a
               read-back from the destination engine itself. Every load is verified value by value;
               if anything doesn&apos;t match, Datawrap tells you instead of reporting success.
             </p>
@@ -491,7 +516,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span>Datawrap</span>
               <h3>Map · G1–G9 · quarantine · MATCH</h3>
               <p>
-                One engine behind Transfer Studio, Pipelines, Pilot, and MCP. Destination INSERT,
+                One engine behind Transfer Studio, Schedules, Pilot, and MCP. Destination INSERT,
                 MERGE, and stored-procedure writes use binds, with quarantine on every path.
               </p>
             </article>
@@ -505,7 +530,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p className="lp-section-kicker">What the engine does</p>
             <h2>Every surface runs the same algorithms.</h2>
             <p>
-              Studio, Pipelines, Pilot, and MCP share one engine. Each item below is a shipped
+              Studio, Schedules, Pilot, and MCP share one engine. Each item below is a shipped
               product capability.
             </p>
           </Reveal>
@@ -515,8 +540,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <p>Role, qualifier, and type fit score every edge. Ambiguous pairs wait for review.</p>
             </li>
             <li>
-              <strong>Nine preflight gates</strong>
-              <p>G1–G9 clear before every write, from Studio, schedules, chat, and agents alike.</p>
+              <strong>Preflight gates</strong>
+              <p>G1–G9 plus the policy gates the route needs clear before every write, from Studio, schedules, chat, and agents alike.</p>
             </li>
             <li>
               <strong>Post-write verification</strong>

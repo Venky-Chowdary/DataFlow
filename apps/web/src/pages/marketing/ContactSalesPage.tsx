@@ -53,7 +53,7 @@ const FAQS = [
   },
   {
     q: "Is the pilot the same engine as production?",
-    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Pipelines, Pilot, and MCP use.",
+    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Schedules, Pilot, and MCP use.",
   },
   {
     q: "How many connectors are live?",
@@ -65,7 +65,7 @@ const FAQS = [
   },
   {
     q: "What makes Datawrap different?",
-    a: "Semantic mapping you can review, nine preflight gates before every write, quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
+    a: "Semantic mapping you can review, preflight gates before every write (nine core gates plus the policy gates each route needs), quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
   },
   {
     q: "What do you provide for security review?",

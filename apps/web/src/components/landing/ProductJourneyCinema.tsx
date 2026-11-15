@@ -31,7 +31,7 @@ const STEPS: {
     id: "prove",
     kicker: "04 · Prove",
     title: "Verified on the destination engine",
-    body: "Gate-8 reads the destination back: engine COUNT, a value and key census, and quarantine counts in Job Theater. Every finished job carries its proof.",
+    body: "Gate-8 reads the destination back: engine COUNT, a value and key census, and quarantine counts in Job space. Every finished job carries its proof.",
   },
 ];
 

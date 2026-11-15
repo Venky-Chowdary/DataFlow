@@ -138,16 +138,16 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <span>Map, preflight, and verify any→any loads</span>
                   </a>
                   <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>
-                    <strong>Job Theater</strong>
-                    <span>Live phases, quarantine, and verification reports</span>
+                    <strong>Job space</strong>
+                    <span>Trust Report, reversibility, and sign-off per run</span>
                   </a>
                   <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>
-                    <strong>Pipelines</strong>
-                    <span>Schedules, typed watermarks &amp; native CDC</span>
+                    <strong>Schedules</strong>
+                    <span>Recurring sync, incremental and CDC</span>
                   </a>
                   <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>
                     <strong>Query Playground</strong>
-                    <span>Ad-hoc SQL &amp; document queries</span>
+                    <span>Read-only SQL on saved connections</span>
                   </a>
                   <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
                     <strong>Datawrap Pilot</strong>
@@ -320,8 +320,8 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
             <div>
               <h4>Product</h4>
               <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
-              <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job Theater</a>
-              <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Pipelines</a>
+              <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job space</a>
+              <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Schedules</a>
               <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>Query Playground</a>
               <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
             </div>
