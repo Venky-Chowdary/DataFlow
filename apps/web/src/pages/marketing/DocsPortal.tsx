@@ -18,6 +18,7 @@ import {
   catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -55,7 +56,7 @@ interface DocsPortalProps {
 }
 
 /** Bust browser cache when docs screenshots are recaptured at full desktop size. */
-const DOCS_SHOT_V = "20261115a";
+const DOCS_SHOT_V = "20261115b";
 function docsShotUrl(src: string): string {
   const sep = src.includes("?") ? "&" : "?";
   return `${src}${sep}v=${DOCS_SHOT_V}`;
@@ -63,54 +64,54 @@ function docsShotUrl(src: string): string {
 
 const SPACE_FRAMES = [
   {
-    src: docsShotUrl("/docs/screenshots/app-jobs.png"),
-    alt: "Job space Trust Report for a completed orders upsert",
-    caption: "1 · Jobs — Trust Report on the orders upsert, with the rows that landed",
+    src: docsShotUrl(WORKSPACE_SHOT.jobTrust),
+    alt: "Job space Trust Report: 5,100 rows in source and destination, 0 differ, full checksum match",
+    caption: "1 · Job space: Trust Report for the sales_orders load into Snowflake",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-connectors.png"),
-    alt: "Connectors catalog in the live workspace",
-    caption: "2 · Connectors — saved drivers Studio, Query, and Jobs share",
+    src: docsShotUrl(WORKSPACE_SHOT.connectors),
+    alt: "Connectors page with the saved demo connections",
+    caption: "2 · Connectors: saved connections that Studio, Query, and Schedules share",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
-    alt: "Transfer Studio source step",
-    caption: "3 · Transfer Studio — Source with File, Database, or Cloud",
+    src: docsShotUrl(WORKSPACE_SHOT.transferSource),
+    alt: "Transfer Studio Source step with Orders Postgres (demo) selected",
+    caption: "3 · Transfer Studio: pick the source table",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-transfer-destination.png"),
-    alt: "Transfer Studio Destination",
-    caption: "4 · Destination — File Export or a saved warehouse",
+    src: docsShotUrl(WORKSPACE_SHOT.transferDest),
+    alt: "Transfer Studio Destination step with Warehouse Snowflake (demo)",
+    caption: "4 · Destination: a saved warehouse and the target table",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-transfer-map.png"),
-    alt: "Transfer Studio Map columns",
-    caption: "5 · Map — column edges, confidence, Accept risk",
+    src: docsShotUrl(WORKSPACE_SHOT.transferMap),
+    alt: "Transfer Studio Map: 11 of 11 columns mapped",
+    caption: "5 · Map: every column, its destination type, and a status",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-transfer-validate.png"),
-    alt: "Transfer Studio Validate gates",
-    caption: "6 · Validate — gate dashboard before Execute unlocks",
+    src: docsShotUrl(WORKSPACE_SHOT.transferValidate),
+    alt: "Transfer Studio Validate: 17 passed, 0 blocked, 6 skipped",
+    caption: "6 · Validate: the gates that must pass before Run unlocks",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-pipelines.png"),
-    alt: "Schedules workspace",
-    caption: "7 · Schedules — cadence, mode, and health",
+    src: docsShotUrl(WORKSPACE_SHOT.schedules),
+    alt: "Schedules list with one parked schedule",
+    caption: "7 · Schedules: cadence, mode, last run, and why a schedule parked",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-query.png"),
-    alt: "Query workspace with a read-only orders result",
-    caption: "8 · Query — schema, SQL, and a row-limited read of ANALYTICS.ORDERS",
+    src: docsShotUrl(WORKSPACE_SHOT.query),
+    alt: "Query: revenue by region on Warehouse Snowflake (demo)",
+    caption: "8 · Query: read-only SQL on a saved connection",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-mcp.png"),
+    src: docsShotUrl(WORKSPACE_SHOT.mcp),
     alt: "MCP Server page",
-    caption: "9 · MCP — Cursor / Claude / VS Code governed agent tools",
+    caption: "9 · MCP: connect Cursor, Claude, VS Code, or any MCP client",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-pilot.png"),
-    alt: "Datawrap Pilot",
-    caption: "10 · Pilot — natural-language triage on the same engine",
+    src: docsShotUrl(WORKSPACE_SHOT.pilot),
+    alt: "Pilot answering a row count with the SQL it ran",
+    caption: "10 · Pilot: questions answered with the SQL shown",
   },
 ];
 
@@ -196,12 +197,12 @@ function DocsSpaceShell({
 }
 
 const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl("/docs/screenshots/app-jobs.png"),
-  transfer: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
-  connect: docsShotUrl("/docs/screenshots/app-connectors.png"),
-  ai: docsShotUrl("/docs/screenshots/app-mcp.png"),
-  ops: docsShotUrl("/docs/screenshots/app-jobs.png"),
-  enterprise: docsShotUrl("/docs/screenshots/app-pipelines.png"),
+  start: docsShotUrl(WORKSPACE_SHOT.overview),
+  transfer: docsShotUrl(WORKSPACE_SHOT.transferMap),
+  connect: docsShotUrl(WORKSPACE_SHOT.connectors),
+  ai: docsShotUrl(WORKSPACE_SHOT.mcp),
+  ops: docsShotUrl(WORKSPACE_SHOT.jobs),
+  enterprise: docsShotUrl(WORKSPACE_SHOT.settingsSso),
 };
 
 /** Confluence-style space home — left nav + product-first start page. */
@@ -215,13 +216,13 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <p className="docs-article-kicker">Enterprise product resources</p>
         <h1>Operate Datawrap in your tenant</h1>
         <p className="docs-article-lead">
-          Operator guides with the current workspace. After SSO: connect systems, map schemas, pass Validate, then open Job space for the trust score and reversibility of the run. Query is the read-only check before the next load. Nothing to install on operator laptops.
+          Operator guides with the current workspace. After SSO: connect systems, map schemas, pass Validate, then open Job space for the Trust Report and reversibility of the run. Query is the read-only check before the next load. Nothing to install on operator laptops.
         </p>
         <form className="docs-search docs-search--inline" role="search" onSubmit={(e) => e.preventDefault()}>
           <DtIcon name="search" size={18} />
           <input
             type="search"
-            placeholder="Search guides — e.g. Validate, Pipelines, SSO, MCP…"
+            placeholder="Search guides — e.g. Validate, Schedules, SSO, MCP…"
             aria-label="Search documentation"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -274,7 +275,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-transfer-studio")}>
             <span>04</span>
             <strong>Transfer Studio guide</strong>
-            <em>Full sample-orders example: Source → Destination → Transform → Map → Validate → Run.</em>
+            <em>A worked Postgres to Snowflake load: Source → Destination → Transform → Map → Validate → Run.</em>
           </button>
         </div>
       </section>
@@ -283,7 +284,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <h2>Browse by category</h2>
         <p>
           Each card opens the first guide in that section. Use the left sidebar for every article —
-          Pipelines create form, Contracts, Transforms, MCP, Settings / SSO, and more.
+          Schedules, Contracts, Transforms, MCP, Settings / SSO, and more.
         </p>
         <div className="docs-category-grid">
           {HELP_DOC_CATEGORIES.map((cat) => {
@@ -309,7 +310,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
       </section>
 
       <section className="docs-space-algorithm" aria-label="Governed path overview">
-        <h2>The governed path (every transfer & pipeline tick)</h2>
+        <h2>The governed path (every transfer and schedule run)</h2>
         <ol className="docs-space-algorithm-steps">
           <li>
             <strong>1 · Map</strong>
@@ -325,7 +326,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           </li>
           <li>
             <strong>4 · Reconcile in Jobs</strong>
-            <span>Gate-8 reads the destination back — row counts, checksums, and a value and key census. Pipeline ticks use this same Job Theater path.</span>
+            <span>Gate-8 reads the destination back — row counts, checksums, and a value and key census. Scheduled runs land in Job space the same way.</span>
           </li>
         </ol>
       </section>
@@ -380,7 +381,7 @@ function DocsAnnotatedFigure({ figure }: { figure: HelpDocFigure }) {
         {figure.markers?.map((m) => (
           <span
             key={`${m.n}-${m.label}`}
-            className="docs-shot-marker"
+            className={`docs-shot-marker${Number.parseFloat(m.x) > 70 ? " is-flip" : ""}`}
             style={{ left: m.x, top: m.y }}
             title={m.label}
           >

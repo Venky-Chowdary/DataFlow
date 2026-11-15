@@ -4616,9 +4616,10 @@
 }
 
 /* Product callout pins — numbered markers over live UI */
+/* The numbered circle (32px) is centred on the pin; the label trails it. */
 .docs-shot-marker {
   position: absolute;
-  transform: translate(-50%, -50%);
+  transform: translate(-16px, -50%);
   z-index: var(--df-z-raised);
   display: flex;
   align-items: center;
@@ -4626,6 +4627,11 @@
   pointer-events: none;
   max-width: min(260px, 48%);
   filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.28));
+}
+
+.docs-shot-marker.is-flip {
+  flex-direction: row-reverse;
+  transform: translate(calc(-100% + 16px), -50%);
 }
 
 .docs-shot-marker em {
