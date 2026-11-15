@@ -2111,3 +2111,38 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+
+/* Footer sits on every public page. Fivetran and Airbyte give the columns
+   room and move the link color in about 150ms. */
+.lp .lp-footer.lp-footer--compact .lp-footer-inner {
+  padding: 64px 0 28px !important;
+}
+
+.lp .lp-footer--compact .lp-footer-grid {
+  gap: 36px 48px !important;
+  padding-bottom: 36px !important;
+}
+
+.lp .lp-footer--compact h4,
+.lp .lp-footer--compact .lp-footer-grid h4 {
+  margin-bottom: 16px !important;
+}
+
+.lp .lp-footer--compact a,
+.lp .lp-footer--compact .lp-footer-link {
+  margin-bottom: 12px !important;
+  font-size: 14.5px !important;
+  line-height: 1.4 !important;
+  transition: color 150ms ease !important;
+}
+
+.lp .lp-footer--compact .lp-footer-bottom {
+  margin-top: 8px !important;
+  padding-top: 20px !important;
+}
+
+@media (max-width: 960px) {
+  .lp .lp-footer.lp-footer--compact .lp-footer-inner {
+    padding: 40px 0 24px !important;
+  }
+}
