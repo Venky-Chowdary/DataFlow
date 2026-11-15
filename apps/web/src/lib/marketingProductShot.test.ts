@@ -27,12 +27,12 @@ function helpDocFigureSources(): string[] {
 }
 
 describe("marketing product photography", () => {
-  it("home hero stages the Studio map with the real verdict and Trust Report on the demo route", () => {
+  it("home hero stages the Studio map on the demo route, and the run screenshots stay off the homepage", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /ProductShot/);
     assert.match(home, /src=\{WORKSPACE_SHOT\.transferMapStage\}/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.transferValidateVerdict\}/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.jobTrustCard\}/);
+    assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
+    assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);
     assert.match(home, /DEMO_ROUTE\.source/);
     assert.doesNotMatch(home, /ProofLoopArt/);
     assert.doesNotMatch(home, /Trust Report 92/);

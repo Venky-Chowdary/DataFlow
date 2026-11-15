@@ -92,14 +92,6 @@ const CONNECTOR_MARQUEE_ROW_B = [
 
 const CONNECTOR_WALL = [...new Set([...CONNECTOR_MARQUEE_IDS, ...CONNECTOR_MARQUEE_ROW_B])];
 
-/** Figures from the run every screenshot on this page was captured on. */
-const RUN_FACTS: { value: string; label: string; detail: string }[] = [
-  { value: "11 of 11", label: "columns mapped", detail: "Each pairing shows its reason and confidence" },
-  { value: "23", label: "checks before the write", detail: "17 passed, 6 not applicable, 0 blocked" },
-  { value: "5,100", label: "rows read back", detail: "Snowflake compared with Postgres, row by row" },
-  { value: "0", label: "rows that differ", detail: "Full checksum match in the Trust Report" },
-];
-
 type Chapter = {
   step: string;
   name: string;
@@ -469,49 +461,6 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <em>{connectorDisplayName(id)}</em>
             </span>
           ))}
-        </div>
-      </section>
-
-      <section className="lp-home-run" aria-labelledby="lp-home-run-title">
-        <div className="lp-home-inner">
-          <div className="lp-home-run-head">
-            <p className="lp-section-kicker">One real run</p>
-            <h2 id="lp-home-run-title">Postgres to Snowflake, start to finish</h2>
-            <p>
-              A 5,100-row orders table moved into a Snowflake table that did not exist yet. These
-              are the numbers the product reported, and the screenshots below are from the same
-              hosted workspace.
-            </p>
-          </div>
-          <Reveal>
-            <dl className="lp-home-run-facts">
-              {RUN_FACTS.map((fact, i) => (
-                <div key={fact.label} style={{ ["--reveal-i" as string]: i }}>
-                  <dt>
-                    <strong>{fact.value}</strong>
-                    <span>{fact.label}</span>
-                  </dt>
-                  <dd>{fact.detail}</dd>
-                </div>
-              ))}
-            </dl>
-          </Reveal>
-          <div className="lp-home-run-proofs">
-            <figure>
-              <figcaption>Checked before the write</figcaption>
-              <img
-                src={WORKSPACE_SHOT.transferValidateVerdict}
-                alt="Validate verdict: approve, 17 passed, 0 blocked gates, 6 skipped across 23 gates"
-              />
-            </figure>
-            <figure>
-              <figcaption>Read back after the write</figcaption>
-              <img
-                src={WORKSPACE_SHOT.jobTrustCard}
-                alt="Trust Report: 5,100 rows in source, 5,100 in destination, 0 differ, 100% proven equal"
-              />
-            </figure>
-          </div>
         </div>
       </section>
 
