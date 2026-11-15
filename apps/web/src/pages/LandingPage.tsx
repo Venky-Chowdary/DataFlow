@@ -684,23 +684,27 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
 
       <section className="lp-home-final" aria-labelledby="lp-home-final-title">
         <div className="lp-home-final-inner">
-          <h2 id="lp-home-final-title">Run your first verified transfer today</h2>
-          <p>
-            Start free with the full Transfer Studio path, checks and read-back included. When
-            you&apos;re ready for schedules, CDC, and SSO, we&apos;ll scope it with you.
-          </p>
-          <div className="lp-home-final-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Start free
-              <DtIcon name="arrow-right" size={16} />
-            </button>
-            <button
-              type="button"
-              className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
-              onClick={() => onNavigate("pricing")}
-            >
-              See pricing
-            </button>
+          <div className="lp-home-final-panel">
+            <div>
+              <h2 id="lp-home-final-title">Run your first verified transfer today</h2>
+              <p>
+                Start free with the full Transfer Studio path, checks and read-back included. When
+                you&apos;re ready for schedules, CDC, and SSO, we&apos;ll scope it with you.
+              </p>
+            </div>
+            <div className="lp-home-final-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Start free
+                <DtIcon name="arrow-right" size={16} />
+              </button>
+              <button
+                type="button"
+                className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
+                onClick={() => onNavigate("pricing")}
+              >
+                See pricing
+              </button>
+            </div>
           </div>
         </div>
       </section>

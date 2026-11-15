@@ -1082,37 +1082,62 @@
   .lp-sales-table td:nth-child(2)::before { content: "What you get"; }
   .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
   .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
+
+  .lp .lp-home-final-panel {
+    grid-template-columns: 1fr;
+    padding: 28px 22px;
+  }
+
+  .lp .lp-home-final-panel .lp-home-final-cta {
+    justify-content: flex-start;
+  }
 }
 
-/* Closing band is one centered group. A wide shell with left copy and
-   centered buttons left a hole on the right. */
+/* Closing band is a panel: sentence on the left, actions on the right.
+   A full-bleed field left a hole beside a short sentence. */
 .lp .lp-home-final {
-  padding-block: clamp(56px, 8vh, 80px);
-  text-align: center;
+  background: transparent;
+  padding-block: var(--lp-section-y);
+  text-align: left;
 }
 
-.lp .lp-home-final-inner {
-  width: min(36rem, calc(100% - 48px));
-  max-width: 100%;
-  margin-inline: auto;
-  text-align: center;
+.lp .lp-home-final-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px 40px;
+  align-items: center;
+  padding: 36px 40px;
+  border-radius: 20px;
+  background:
+    radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
+    linear-gradient(135deg, #0a3d3a 0%, #0f766e 62%, #115e59 100%);
 }
 
-.lp .lp-home-final h2,
-.lp .lp-home-final p {
+.lp .lp-home-final-panel h2,
+.lp .lp-home-final-panel p {
   max-width: 36rem;
-  margin-inline: auto;
+  margin-left: 0;
+  margin-right: 0;
+  text-align: left;
+  color: #ecfdf5;
 }
 
-.lp .lp-home-final-cta,
-.lp .lp-home-final .lp-hero-cta {
-  justify-content: center !important;
+.lp .lp-home-final-panel p {
+  color: rgba(236, 253, 245, 0.78);
+  margin-bottom: 0;
 }
 
-/* A short verdict and a tall Trust Report cannot share a row. */
+.lp .lp-home-final-panel .lp-home-final-cta {
+  justify-content: flex-end;
+  margin: 0;
+}
+
+/* The verdict is a strip and the Trust Report is a card. Keep them in one
+   narrow column so neither is stretched across the page. */
 .lp .lp-home-run-proofs {
   grid-template-columns: minmax(0, 1fr);
-  max-width: 880px;
+  max-width: 480px;
+  margin-inline: auto;
 }
 
 .lp .lp-wh-split-grid {

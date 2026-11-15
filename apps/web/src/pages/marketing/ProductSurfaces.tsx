@@ -7,7 +7,6 @@ import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
   GateTable,
-  LiveProductReel,
   PRODUCT_FRAMES,
   ProofCallout,
   SOLUTION_FRAMES,
@@ -97,9 +96,9 @@ function SurfaceShell({
   onSecondary,
   heroVisual,
   stats,
-  liveFrames,
-  liveTitle,
-  liveSurface,
+  liveFrames: _liveFrames,
+  liveTitle: _liveTitle,
+  liveSurface: _liveSurface,
   children,
   next,
   nextLabel,
@@ -144,17 +143,6 @@ function SurfaceShell({
       <MarketingReveal>
         <StatsStrip items={stats} />
       </MarketingReveal>
-      {liveFrames && liveFrames.length > 0 ? (
-        <MarketingReveal>
-          <section className="lp-mkt-body">
-            <LiveProductReel
-              frames={liveFrames}
-              title={liveTitle ?? "Inside the live workspace"}
-              surface={liveSurface ?? "Workspace"}
-            />
-          </section>
-        </MarketingReveal>
-      ) : null}
       {children}
       <MarketingReveal>
         <section className="lp-mkt-next-band">
@@ -1132,16 +1120,6 @@ export function WarehouseSolutionPage({
         </div>
       </section>
 
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <LiveProductReel
-            frames={SOLUTION_FRAMES.warehouse}
-            title="Warehouse loads in the live workspace"
-            surface="Warehouse loading"
-          />
-        </section>
-      </MarketingReveal>
-
       <section className="lp-wh-rail" aria-label="Destinations">
         <div className="lp-shell lp-wh-rail-inner">
           <span>Snowflake</span>
@@ -1391,9 +1369,9 @@ function SolutionShell({
   onPrimary,
   onSecondary,
   heroVisual,
-  liveFrames,
-  liveTitle,
-  liveSurface,
+  liveFrames: _liveFrames,
+  liveTitle: _liveTitle,
+  liveSurface: _liveSurface,
   outcomes,
   steps,
   caps,
@@ -1444,18 +1422,6 @@ function SolutionShell({
           <div className="lp-sol-hero-visual">{heroVisual}</div>
         </div>
       </section>
-
-      {liveFrames && liveFrames.length > 0 ? (
-        <MarketingReveal>
-          <section className="lp-mkt-body">
-            <LiveProductReel
-              frames={liveFrames}
-              title={liveTitle ?? "Inside the live workspace"}
-              surface={liveSurface ?? "Workspace"}
-            />
-          </section>
-        </MarketingReveal>
-      ) : null}
 
       <MarketingReveal>
         <section className="lp-sol-outcomes" aria-label="What you get">
