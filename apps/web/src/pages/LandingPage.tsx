@@ -90,29 +90,7 @@ const CONNECTOR_MARQUEE_ROW_B = [
   "hubspot",
 ];
 
-function ConnectorMarquee({
-  ids,
-  reverse = false,
-  duration = 42,
-}: {
-  ids: string[];
-  reverse?: boolean;
-  duration?: number;
-}) {
-  const loop = [...ids, ...ids];
-  return (
-    <div className={`lp-conn-marquee${reverse ? " is-reverse" : ""}`} aria-hidden>
-      <div className="lp-conn-marquee-track" style={{ ["--lp-marquee-dur" as string]: `${duration}s` }}>
-        {loop.map((id, i) => (
-          <span key={`${id}-${i}`} className="lp-conn-marquee-tile">
-            <ConnectorIcon id={id} size={30} />
-            <em>{connectorDisplayName(id)}</em>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
+const CONNECTOR_WALL = [...new Set([...CONNECTOR_MARQUEE_IDS, ...CONNECTOR_MARQUEE_ROW_B])];
 
 /** Figures from the run every screenshot on this page was captured on. */
 const RUN_FACTS: { value: string; label: string; detail: string }[] = [
@@ -505,17 +483,19 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               hosted workspace.
             </p>
           </div>
-          <dl className="lp-home-run-facts">
-            {RUN_FACTS.map((fact) => (
-              <div key={fact.label}>
-                <dt>
-                  <strong>{fact.value}</strong>
-                  <span>{fact.label}</span>
-                </dt>
-                <dd>{fact.detail}</dd>
-              </div>
-            ))}
-          </dl>
+          <Reveal>
+            <dl className="lp-home-run-facts">
+              {RUN_FACTS.map((fact, i) => (
+                <div key={fact.label} style={{ ["--reveal-i" as string]: i }}>
+                  <dt>
+                    <strong>{fact.value}</strong>
+                    <span>{fact.label}</span>
+                  </dt>
+                  <dd>{fact.detail}</dd>
+                </div>
+              ))}
+            </dl>
+          </Reveal>
           <div className="lp-home-run-proofs">
             <figure>
               <figcaption>Checked before the write</figcaption>
@@ -559,9 +539,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             Schedules, Query, Reversibility, Contracts, and agents sit on the same engine as Studio,
             so a recurring sync is held to the same standard as the first transfer.
           </SectionHead>
-          <div className="lp-home-bento">
-            {FEATURES.map((f) => (
-              <article key={f.id} className={`lp-home-bento-cell is-${f.size}`}>
+          <Reveal className="lp-home-bento">
+            {FEATURES.map((f, i) => (
+              <article key={f.id} className={`lp-home-bento-cell is-${f.size}`} style={{ ["--reveal-i" as string]: i }}>
                 <div className="lp-home-bento-copy">
                   <h3>{f.title}</h3>
                   <p>{f.body}</p>
@@ -573,36 +553,34 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <Shot src={f.shot} alt={f.alt} />
               </article>
             ))}
-          </div>
+          </Reveal>
         </div>
       </section>
 
       <section className="lp-home-questions" aria-label="Questions Datawrap answers">
-        <div className="lp-home-inner lp-home-questions-grid">
+        <div className="lp-home-inner">
           <SectionHead kicker="Built for the review meeting" title="Answers your team will be asked for">
             Moving the data is half the job. The other half is showing it arrived intact. Each of
             these has a screen in Datawrap, not a spreadsheet someone assembles afterwards.
           </SectionHead>
-          <dl className="lp-home-questions-list">
-            {QUESTIONS.map((item) => (
-              <div key={item.q}>
-                <dt>{item.q}</dt>
-                <dd>
-                  {item.a}
-                  <span>{item.where}</span>
-                </dd>
-              </div>
+          <Reveal className="lp-home-questions-list">
+            {QUESTIONS.map((item, i) => (
+              <article key={item.q} style={{ ["--reveal-i" as string]: i }}>
+                <h3>{item.q}</h3>
+                <p>{item.a}</p>
+                <span>{item.where}</span>
+              </article>
             ))}
-          </dl>
+          </Reveal>
         </div>
       </section>
 
       <section className="lp-home-cases" id="usecases" aria-label="Use cases">
         <div className="lp-home-inner">
           <SectionHead kicker="Use cases" title="Three jobs teams bring to Datawrap" />
-          <div className="lp-home-cases-grid">
-            {USE_CASES.map((u) => (
-              <article key={u.id} className="lp-home-case">
+          <Reveal className="lp-home-cases-grid">
+            {USE_CASES.map((u, i) => (
+              <article key={u.id} className="lp-home-case" style={{ ["--reveal-i" as string]: i }}>
                 <span className="lp-home-case-tag">{u.tag}</span>
                 <h3>{u.title}</h3>
                 <p>{u.body}</p>
@@ -620,7 +598,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 </button>
               </article>
             ))}
-          </div>
+          </Reveal>
         </div>
       </section>
 
@@ -647,9 +625,15 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             </div>
           </dl>
         </div>
-        <div className="lp-home-connectors-marquee" aria-hidden>
-          <ConnectorMarquee ids={CONNECTOR_MARQUEE_IDS} duration={48} />
-          <ConnectorMarquee ids={CONNECTOR_MARQUEE_ROW_B} reverse duration={56} />
+        <div className="lp-home-inner">
+          <Reveal className="lp-home-connector-grid">
+            {CONNECTOR_WALL.map((id, i) => (
+              <span key={id} className="lp-conn-marquee-tile" style={{ ["--reveal-i" as string]: i }}>
+                <ConnectorIcon id={id} size={30} />
+                <em>{connectorDisplayName(id)}</em>
+              </span>
+            ))}
+          </Reveal>
         </div>
         <div className="lp-home-inner">
           <p className="lp-home-connectors-note">{catalogHonestyLead()}</p>
