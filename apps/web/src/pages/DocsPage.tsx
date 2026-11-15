@@ -75,14 +75,14 @@ const WORKSPACE_SHOTS = [
     caption: "Local Postgres, MySQL, MongoDB with Test passed / failed status.",
   },
   {
-    src: "/docs/screenshots/app-jobs.png",
-    title: "Job Theater",
-    caption: "Completed e2e_customers run with reconcile timeline and row fidelity.",
+    src: "/docs/screenshots/app-job-space-trust.png",
+    title: "Job space",
+    caption: "Trust Report on the orders upsert — score 92, with the rows that landed.",
   },
   {
-    src: "/docs/screenshots/app-query.png",
-    title: "Query Playground",
-    caption: "Read-only SQL against saved connectors before you transfer.",
+    src: "/docs/screenshots/app-query-orders.png",
+    title: "Query",
+    caption: "Read-only orders query — schema, SQL, and a row-limited result.",
   },
   {
     src: "/docs/screenshots/app-pilot.png",
@@ -645,13 +645,13 @@ function DocsWalkthrough() {
             </figure>
             <figure className="df2-docs-shot df2-docs-shot--wide">
               <img
-                src="/docs/screenshots/app-jobs.png"
-                alt="Job Theater reconcile timeline for completed transfer"
+                src="/docs/screenshots/app-job-space-reversibility.png"
+                alt="Job space Reversibility tab for a reversible orders plan"
                 loading="lazy"
               />
               <figcaption>
-                <strong>Job Theater · Proof</strong>
-                <span>Queue → preflight → extract → load → Gate-8 reconcile with measured row/checksum evidence on a live job (quarantine and writer-ack routes are labeled honestly).</span>
+                <strong>Job space · Reversibility</strong>
+                <span>Require reversibility is on. order_id, customer, amount, and ordered_at round-trip. A hash or narrowing cast would block Execute.</span>
               </figcaption>
             </figure>
           </PageSection>

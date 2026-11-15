@@ -3,10 +3,11 @@ import { DocsShotReel, type DocsShotFrame } from "../../components/docs/DocsShot
 
 /** Current workspace photography — never Overview (first-load count is a separate fix). */
 export const WORKSPACE_SHOT = {
-  jobs: "/docs/screenshots/app-jobs.png",
+  jobs: "/docs/screenshots/app-job-space-trust.png",
+  jobReversibility: "/docs/screenshots/app-job-space-reversibility.png",
   connectors: "/docs/screenshots/app-connectors.png",
   pipelines: "/docs/screenshots/app-pipelines.png",
-  query: "/docs/screenshots/app-query.png",
+  query: "/docs/screenshots/app-query-orders.png",
   pilot: "/docs/screenshots/app-pilot.png",
   mcp: "/docs/screenshots/app-mcp.png",
   transferSource: "/docs/screenshots/app-transfer-source.png",
@@ -47,18 +48,18 @@ export const PRODUCT_FRAMES = {
   jobs: [
     {
       src: WORKSPACE_SHOT.jobs,
-      alt: "Job Theater with whole-history counts and destination population",
-      caption: "Job Theater — queue → preflight → extract → load → reconcile",
+      alt: "Job space Trust Report for a completed orders upsert, score 92",
+      caption: "Job space — Trust Report: completeness, quarantine, Gate-8, freshness",
     },
     {
-      src: WORKSPACE_SHOT.transferSource,
-      alt: "Transfer Studio source that produces jobs",
-      caption: "Upstream plan — the Studio source that feeds Theater",
+      src: WORKSPACE_SHOT.jobReversibility,
+      alt: "Job space Reversibility tab showing a reversible orders plan",
+      caption: "Reversibility — the destination can give the source values back",
     },
     {
-      src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors catalog in the live workspace",
-      caption: "Connectors — saved drivers Jobs and Studio share",
+      src: WORKSPACE_SHOT.transferValidate,
+      alt: "Transfer Studio Validate gates before Execute",
+      caption: "Validate — blocking gates stay locked until the plan is approved",
     },
   ],
   pipelines: [
@@ -81,18 +82,18 @@ export const PRODUCT_FRAMES = {
   query: [
     {
       src: WORKSPACE_SHOT.query,
-      alt: "Query Playground in the live workspace",
-      caption: "Query Playground — read-only SQL against saved connectors",
+      alt: "Query workspace with a read-only orders query and six result rows",
+      caption: "Query — schema browser, SQL, and a row-limited read of ANALYTICS.ORDERS",
     },
     {
-      src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors available to Query",
-      caption: "Same connectors — Query uses the workspace credentials",
+      src: WORKSPACE_SHOT.jobs,
+      alt: "Job space after a governed load of the same orders table",
+      caption: "Same table, after the load — Trust Report on the job that wrote it",
     },
     {
       src: WORKSPACE_SHOT.transferSource,
       alt: "Handoff into Transfer Studio",
-      caption: "Handoff — validated slices become Studio plans",
+      caption: "Handoff — a checked slice still goes through Studio gates before it writes",
     },
   ],
   pilot: [

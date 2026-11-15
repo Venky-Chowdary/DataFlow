@@ -123,10 +123,11 @@ function ConnectorMarquee({
 
 const SURFACE_SHOTS: Record<string, string> = {
   studio: "/docs/screenshots/app-transfer-source.png",
-  theater: "/docs/screenshots/app-jobs.png",
+  theater: "/docs/screenshots/app-job-space-trust.png",
+  reversibility: "/docs/screenshots/app-job-space-reversibility.png",
   pipelines: "/docs/screenshots/app-pipelines.png",
   mcp: "/docs/screenshots/app-mcp.png",
-  query: "/docs/screenshots/app-query.png",
+  query: "/docs/screenshots/app-query-orders.png",
 };
 
 const SURFACES: {
@@ -147,11 +148,11 @@ const SURFACES: {
   },
   {
     id: "theater",
-    label: "Theater",
-    title: "Job Theater proves what ran",
-    body: "Live phases, quarantine samples with reasons, and a Gate-8 verification report read back from the destination. Every finished job comes with proof you can export.",
+    label: "Jobs",
+    title: "Job space shows trust and reversibility",
+    body: "Each run opens in Job space. The Trust Report scores completeness, quarantine, Gate-8 read-back, and freshness — it is not an exactly-once certificate. Reversibility says whether the destination can give the source values back. A hash, mask, or narrowing cast blocks Execute when that requirement is on.",
     route: "product-jobs",
-    cta: "See Job Theater",
+    cta: "See Job space",
   },
   {
     id: "pipelines",
@@ -172,8 +173,8 @@ const SURFACES: {
   {
     id: "query",
     label: "Query",
-    title: "Explore live data safely, then load it in Studio",
-    body: "Query Playground runs read-only SELECT and WITH against saved connectors. When a slice is ready, Transfer Studio writes it — table, destination INSERT/MERGE, or a stored procedure call, all with binds and quarantine.",
+    title: "Query the warehouse before you move more",
+    body: "Query is a read-only console: schema browser, several tabs, and a row-limited result. The sample here is open orders from ANALYTICS.ORDERS — order id, customer, amount, and status. It refuses DML. A slice you trust still goes through Transfer Studio before anything is written.",
     route: "product-query",
     cta: "Open Query Playground",
   },
@@ -199,8 +200,8 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
           <p className="lp-section-kicker">For operators &amp; agents</p>
           <h2>Your control plane. Our governed engine.</h2>
           <p>
-            Use Transfer Studio, Job Theater, Pipelines, or MCP. Datawrap manages mapping, gates,
-            quarantine, and proof underneath every surface.
+            Use Transfer Studio, Job space, Query, Pipelines, or MCP. Datawrap manages mapping, gates,
+            quarantine, trust, and reversibility underneath every surface.
           </p>
         </Reveal>
 
@@ -297,9 +298,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
             <ProductShot
-              src="/docs/screenshots/app-jobs.png"
-              alt="Datawrap Job Theater — whole-history counts, destination population, and run proof"
-              surface="Job Theater · workspace"
+              src="/docs/screenshots/app-job-space-trust.png"
+              alt="Datawrap Job space — Trust Report 92 for a completed orders upsert, with sample rows"
+              surface="Job space · Trust Report"
               route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
             />
           </div>

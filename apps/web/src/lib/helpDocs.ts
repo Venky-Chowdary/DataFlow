@@ -122,7 +122,7 @@ export const HELP_DOC_CATEGORIES: HelpDocCategory[] = [
   {
     id: "ops",
     title: "Operations",
-    description: "Job Theater, transforms, quarantine, and reconciliation.",
+    description: "Job space, trust score, reversibility, quarantine, and reconciliation.",
     docs: ["help-job-theater", "help-transforms"],
   },
   {
@@ -213,13 +213,13 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             },
           },
           {
-            title: "Prove the load in Job Theater",
-            pin: "Operations → Jobs",
-            body: "Open **Operations → Jobs** and select the run. Confirm **Quarantine** is empty (or review each rejected value and reason). Wait for checksum **MATCH** and row fidelity on the reconcile stage — that is the archiveable proof of the load.",
+            title: "Prove the load in Job space",
+            pin: "Operations → Jobs → Trust Report",
+            body: "Open **Operations → Jobs** and select the run. Confirm **Quarantine** is empty (or review each rejected value and reason). Open **Trust Report** for completeness, quarantine, Gate-8, and freshness. Open **Reversibility** if the plan must give the source values back. Checksum **MATCH** is still the archiveable proof of the load. The trust score is not an exactly-once certificate.",
             figure: {
-              src: "/docs/screenshots/app-jobs.png",
-              alt: "Job Theater with reconcile proof",
-              caption: "Marker 1 = selected run · Marker 2 = reconcile proof",
+              src: "/docs/screenshots/app-job-space-trust.png",
+              alt: "Job space Trust Report after the orders load",
+              caption: "Job space — trust score 92 and the orders that landed",
               markers: [
                 { n: 1, label: "Job", x: "28%", y: "40%" },
                 { n: 2, label: "MATCH", x: "70%", y: "55%" },
@@ -1100,11 +1100,11 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "dialects",
         title: "Open Query Playground",
-        body: "Open **Operations → Query**. Pick a saved connector, choose dialect (PostgreSQL, MySQL, Snowflake, BigQuery, or generic SQL), and run read-oriented checks before you map or schedule.",
+        body: "Open **Operations → Query**. Pick a saved connector. The schema browser lists columns and types. Write a read-only SELECT. The sample below is open orders in `ANALYTICS.ORDERS`: `order_id`, `customer`, `amount` at scale 6, and `status`. Kafka topics and vector stores are not queried here.",
         figure: {
-          src: "/docs/screenshots/app-query.png",
-          alt: "Query Playground editor with SQL against saved connectors",
-          caption: "Query — connector picker, SQL editor, and results before Transfer Studio.",
+          src: "/docs/screenshots/app-query-orders.png",
+          alt: "Query workspace with a read-only orders query and result rows",
+          caption: "Query — schema browser, SQL, and a row-limited read of ANALYTICS.ORDERS.",
           markers: [
             { n: 1, label: "Query nav", x: "8%", y: "58%" },
             { n: 2, label: "Editor", x: "55%", y: "45%" },
@@ -1127,19 +1127,19 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     id: "help-job-theater",
     slug: "job-theater",
     category: "Operations",
-    title: "Job Theater & reconciliation",
-    description: "Monitor every run from queue to checksum MATCH — quarantine, proof, and checkpoint resume (not one-click destination undo).",
+    title: "Job space, trust, and reversibility",
+    description: "Open a run in Job space. Read the Trust Report and the Reversibility tab, then quarantine and Gate-8. The score is not exactly-once proof.",
     readTime: "10 min",
     icon: "jobs",
     sections: [
       {
         id: "open",
-        title: "Open Job Theater",
-        body: "Go to Operations → Jobs (also linked as Theater). Filter All / Running / Completed / Failed. Select a job to open Detail, Mapping, Quarantine, and Log tabs. Theater auto-opens Quarantine when a run completed with rejected rows.",
+        title: "Open Job space",
+        body: "Go to **Operations → Jobs**. Filter All / Running / Completed / Failed. Select a job. The detail tabs are **Detail**, **Mapping**, **Quarantine**, **Trust Report**, **Reversibility**, and **Log**. A completed run with rejected rows opens Quarantine first.",
         figure: {
-          src: "/docs/screenshots/app-jobs.png",
-          alt: "Job Theater list and detail with phase timeline",
-          caption: "Jobs — select a run to inspect phases, quarantine, and checksum proof.",
+          src: "/docs/screenshots/app-job-space-trust.png",
+          alt: "Job space Trust Report for Orders nightly upsert, score 92, with sample rows",
+          caption: "Job space — Trust Report on the orders upsert. Sample rows sit under the score.",
           markers: [
             { n: 1, label: "Job list", x: "28%", y: "40%" },
             { n: 2, label: "Phase rail", x: "55%", y: "30%" },
@@ -1187,7 +1187,27 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "proof",
         title: "Checksum MATCH",
-        body: "Gate-8 / post-load proof compares source and destination row counts and content hashes. Theater shows Match or Mismatch with row fidelity. Finance and compliance can treat Match as the archiveable proof of the load — export from the job when required.",
+        body: "Gate-8 / post-load proof compares source and destination row counts and content hashes. Job space shows Match or Mismatch with row fidelity. Finance and compliance can treat Match as the archiveable proof of the load — export from the job when required.",
+      },
+      {
+        id: "trust",
+        title: "Trust Report",
+        body: "The Trust Report is a composite of four factors: **completeness** (every source row is accounted for), **quarantine** (open bad rows), **Gate-8** (destination read-back), and **freshness** (CDC cursor lag). The orders example scores **92**, grade A, high confidence, with freshness at 84 because the cursor is 46 seconds behind.\n\nThe score is **not** an exactly-once certificate. CDC delivery stays at-least-once upsert until a named route proves otherwise. Use the next-step line on the card — for freshness, open the pipeline.",
+        figure: {
+          src: "/docs/screenshots/app-job-space-trust.png",
+          alt: "Trust Report factors for the orders nightly upsert",
+          caption: "Trust Report — 92 from completeness 100, quarantine 100, Gate-8 96, freshness 84.",
+        },
+      },
+      {
+        id: "reversibility",
+        title: "Reversibility",
+        body: "Open the **Reversibility** tab on the same job. With **Require reversibility** on, Execute stays locked until every written column can give the source value back. A hash, mask, redact, drop, or narrowing cast blocks. A conditional cast is checked on the sample and enforced on every row at write. A sample never proves rows that were not seen.\n\nTurning the requirement off does not make a lossy cast safe. It only stops gate `g24_reversibility` from blocking Execute. The orders plan in the sample is reversible: integer, varchar, decimal scale, and timestamp all round-trip. An email hash in that plan would block.",
+        figure: {
+          src: "/docs/screenshots/app-job-space-reversibility.png",
+          alt: "Reversibility tab for a reversible orders plan",
+          caption: "Reversibility — order_id, customer, amount, and ordered_at round-trip. An email hash would block.",
+        },
       },
     ],
   },

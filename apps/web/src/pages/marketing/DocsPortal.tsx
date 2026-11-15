@@ -55,7 +55,7 @@ interface DocsPortalProps {
 }
 
 /** Bust browser cache when docs screenshots are recaptured at full desktop size. */
-const DOCS_SHOT_V = "20260829a";
+const DOCS_SHOT_V = "20261115a";
 function docsShotUrl(src: string): string {
   const sep = src.includes("?") ? "&" : "?";
   return `${src}${sep}v=${DOCS_SHOT_V}`;
@@ -63,9 +63,9 @@ function docsShotUrl(src: string): string {
 
 const SPACE_FRAMES = [
   {
-    src: docsShotUrl("/docs/screenshots/app-jobs.png"),
-    alt: "Job Theater with whole-history counts",
-    caption: "1 · Jobs — Job Theater proof for every transfer and schedule tick",
+    src: docsShotUrl("/docs/screenshots/app-job-space-trust.png"),
+    alt: "Job space Trust Report for a completed orders upsert",
+    caption: "1 · Jobs — Trust Report on the orders upsert, with the rows that landed",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-connectors.png"),
@@ -98,9 +98,9 @@ const SPACE_FRAMES = [
     caption: "7 · Schedules — cadence, mode, and health",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-query.png"),
-    alt: "Query Playground",
-    caption: "8 · Query — read-only SQL against saved connectors",
+    src: docsShotUrl("/docs/screenshots/app-query-orders.png"),
+    alt: "Query workspace with a read-only orders result",
+    caption: "8 · Query — schema, SQL, and a row-limited read of ANALYTICS.ORDERS",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-mcp.png"),
@@ -196,11 +196,11 @@ function DocsSpaceShell({
 }
 
 const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl("/docs/screenshots/app-jobs.png"),
+  start: docsShotUrl("/docs/screenshots/app-job-space-trust.png"),
   transfer: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
   connect: docsShotUrl("/docs/screenshots/app-connectors.png"),
   ai: docsShotUrl("/docs/screenshots/app-mcp.png"),
-  ops: docsShotUrl("/docs/screenshots/app-jobs.png"),
+  ops: docsShotUrl("/docs/screenshots/app-job-space-reversibility.png"),
   enterprise: docsShotUrl("/docs/screenshots/app-pipelines.png"),
 };
 
@@ -215,9 +215,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <p className="docs-article-kicker">Enterprise product resources</p>
         <h1>Operate Datawrap in your tenant</h1>
         <p className="docs-article-lead">
-          Confluence-style operator guides with real workspace screenshots. Follow the same path
-          your team uses after SSO sign-in: connect systems, map schemas, pass Validate, schedule
-          Pipelines, and prove every load in Job Theater. Nothing to install on operator laptops.
+          Operator guides with the current workspace. After SSO: connect systems, map schemas, pass Validate, then open Job space for the trust score and reversibility of the run. Query is the read-only check before the next load. Nothing to install on operator laptops.
         </p>
         <form className="docs-search docs-search--inline" role="search" onSubmit={(e) => e.preventDefault()}>
           <DtIcon name="search" size={18} />

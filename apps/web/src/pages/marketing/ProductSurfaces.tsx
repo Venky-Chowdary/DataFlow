@@ -342,9 +342,9 @@ export function JobTheaterPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Job Theater"
-      title="See every phase from queue to proof"
-      lead="Job Theater is the operations console for transfers — live batch progress, phase timeline, quarantine samples, and reconciliation reports. If it ran, you can prove it here."
+      kicker="Product · Job space"
+      title="Trust score and reversibility on every run"
+      lead="Job space is the operations console. Open a finished load and read the Trust Report — completeness, quarantine, Gate-8, and freshness — then the Reversibility tab, which says whether the destination can give the source values back."
       ctaPrimary="Open the app"
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
@@ -352,19 +352,19 @@ export function JobTheaterPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.jobs}
-          alt="Job Theater with whole-history counts and destination population"
-          surface="Job Theater"
+          alt="Job space Trust Report, score 92, for Orders nightly upsert with sample rows"
+          surface="Job space · Trust Report"
           route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
         />
       }
       liveFrames={PRODUCT_FRAMES.jobs}
-      liveTitle="Job Theater with real reconcile evidence"
-      liveSurface="Job Theater"
+      liveTitle="Job space — trust, reversibility, and the rows that landed"
+      liveSurface="Job space"
       stats={[
-        { value: "Live", label: "Batch progress" },
-        { value: "Phases", label: "Queue → reconcile" },
-        { value: "Quarantine", label: "Bad rows + reasons" },
-        { value: "Verified", label: "Value & key census" },
+        { value: "92", label: "Sample trust score" },
+        { value: "4", label: "Trust factors" },
+        { value: "g24", label: "Reversibility gate" },
+        { value: "Read-back", label: "Not job status alone" },
       ]}
       next="product-pipelines"
       nextLabel="Pipelines"
@@ -373,9 +373,8 @@ export function JobTheaterPage({
       <Chapter id="jt-what" kicker="What it is" title="Operations visibility for governed loads">
         <div className="lp-mkt-prose">
           <p>
-            Transfer Studio plans the load. Job Theater watches it. Every job transitions through explicit phases —
-            Queued, Preflight, Extract/Write, Reconciling, Complete (or Failed) — with counters that reflect what the destination holds.
-            Quarantined rows appear with column, value, and reason so operators can fix the map or the source.
+            Transfer Studio plans the load. Job space is where you read it back. The Trust Report combines completeness, quarantine, Gate-8, and CDC freshness into one score. A 92 on the orders upsert means those four factors were strong. It is not a certificate of exactly-once delivery.
+            Open Reversibility on the same job. With Require reversibility on, Execute stays locked unless every written column can round-trip. A hash, mask, drop, or narrowing cast blocks. Turning the switch off does not make a lossy cast safe.
           </p>
           <p>
             Retries preserve the audit trail: you see which attempt failed which gate, and whether checksums matched
@@ -591,8 +590,8 @@ export function QueryPlaygroundPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.query}
-          alt="Query Playground in the live Datawrap workspace"
-          surface="Query Playground"
+          alt="Query workspace showing a read-only orders query and six result rows"
+          surface="Query"
         />
       }
       liveFrames={PRODUCT_FRAMES.query}
@@ -611,10 +610,8 @@ export function QueryPlaygroundPage({
       <Chapter id="qy-what" kicker="What it is" title="Exploration on the connectors you already trust">
         <div className="lp-mkt-prose">
           <p>
-            Query Playground is built for discovery and validation. It runs read-only SELECT and WITH; destination
-            INSERT/MERGE and stored-procedure writes live in Transfer Studio’s destination step (Query / Stored
-            procedure), with quarantine on every row. You query through the same connector credentials and RBAC as
-            the rest of the workspace, with preview limits that keep exploratory queries light.
+            Query is a read-only console on the connectors you already saved. The sample is open orders in ANALYTICS.ORDERS: order id, customer, amount to six decimal places, and status. The schema browser sits beside the editor. SELECT and WITH run. INSERT, UPDATE, and CALL do not.
+            Destination writes stay in Transfer Studio, with quarantine on every failed row.
           </p>
           <p>
             When a query defines the slice you want to move, hand off to Transfer Studio to attach mapping, preflight,
