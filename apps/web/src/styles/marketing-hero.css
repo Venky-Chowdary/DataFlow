@@ -486,6 +486,14 @@
   object-position: top left;
 }
 
+.lp-home-tour-stage .lp-product-shot-viewport {
+  background: var(--df-surface);
+}
+
+.lp-home-tour-stage .lp-product-shot-viewport img {
+  object-position: center center;
+}
+
 .lp-product-shot-route {
   display: flex;
   align-items: center;
@@ -880,6 +888,22 @@
   .lp-product-shot-viewport {
     aspect-ratio: auto;
     background: var(--df-surface);
+  }
+
+  /* The step tour keeps one frame so advancing a step does not jump the page.
+     The picture stays whole inside that frame. */
+  .lp-home-tour-stage .lp-product-shot-viewport {
+    aspect-ratio: 1400 / 880;
+  }
+
+  .lp-home-tour-stage .lp-product-shot-viewport img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    object-fit: contain;
+    object-position: center center;
   }
 
   .lp-product-shot-viewport img,

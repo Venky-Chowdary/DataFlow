@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import { TrustSection } from "../components/landing/TrustSection";
@@ -354,6 +354,69 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
   );
 }
 
+const TOUR_MS = 5600;
+
+function FlowTour() {
+  const [active, setActive] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const chapter = CHAPTERS[active];
+
+  useEffect(() => {
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (motion.matches || paused) return;
+    const id = window.setInterval(() => {
+      setActive((n) => (n + 1) % CHAPTERS.length);
+    }, TOUR_MS);
+    return () => window.clearInterval(id);
+  }, [paused, active]);
+
+  return (
+    <div className="lp-home-tour">
+      <div className="lp-home-tour-copy">
+        <p className="lp-home-flow-num">
+          <span>{chapter.step}</span>
+          {chapter.name}
+        </p>
+        <h3>{chapter.title}</h3>
+        <p>{chapter.body}</p>
+        <ul>
+          {chapter.facts.map((f) => (
+            <li key={f}>
+              <DtIcon name="check" size={14} />
+              {f}
+            </li>
+          ))}
+        </ul>
+        <div className="lp-home-tour-nav" role="tablist" aria-label="Transfer steps">
+          {CHAPTERS.map((c, i) => (
+            <button
+              key={c.step}
+              type="button"
+              role="tab"
+              id={`step-${c.name.toLowerCase()}`}
+              aria-selected={i === active}
+              className={i === active ? "is-active" : ""}
+              onClick={() => {
+                setActive(i);
+                setPaused(true);
+              }}
+            >
+              <span>{c.step}</span>
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <div className={`lp-home-tour-bar${paused ? " is-paused" : ""}`} aria-hidden>
+          <span key={chapter.step} />
+        </div>
+      </div>
+      <div className="lp-home-tour-stage" key={chapter.step}>
+        <ProductShot src={chapter.shot} alt={chapter.alt} surface={chapter.surface} />
+      </div>
+    </div>
+  );
+}
+
 function Shot({ src, alt }: { src: string; alt: string }) {
   return (
     <span className="lp-home-shot">
@@ -376,9 +439,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <span> Prove every row arrived.</span>
           </h1>
           <p className="lp-home-hero-sub">
-            Datawrap maps columns across systems that were never designed to match, checks the
-            route before it writes, and reads the destination back to compare it with the source.
-            When something doesn&apos;t match, you see which rows, which columns, and why.
+            Map columns across systems that were never designed to match. Stop a bad write before
+            it starts, then read the destination back and see which rows differ, and why.
           </p>
           <div className="lp-home-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -393,45 +455,30 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               Talk to an engineer
             </button>
           </div>
-          <ul className="lp-home-hero-meta">
-            <li>{provenDriversPhrase()}</li>
-            {PROVEN_CDC_SOURCES.length ? <li>CDC on {PROVEN_CDC_SOURCES.join(", ")}</li> : null}
-            <li>SSO, SCIM, and BYOK</li>
+          <ul className="lp-home-hero-facts">
+            <li>
+              <strong>11 of 11</strong>
+              <span>columns mapped</span>
+            </li>
+            <li>
+              <strong>5,100</strong>
+              <span>rows read back</span>
+            </li>
+            <li>
+              <strong>0 differ</strong>
+              <span>full checksum</span>
+            </li>
           </ul>
+          <p className="lp-home-hero-meta">{provenDriversPhrase()}</p>
         </div>
-          <div className="lp-home-hero-proofs">
-            <figure className="lp-home-hero-float lp-home-hero-float--verdict">
-              <figcaption>
-                <span>1</span>Checked before the write
-              </figcaption>
-              <img
-                src={WORKSPACE_SHOT.transferValidateVerdict}
-                alt="Validate verdict: approve, 17 passed, 0 blocked gates, 6 skipped across 23 gates"
-              />
-            </figure>
-            <figure className="lp-home-hero-float lp-home-hero-float--trust">
-              <figcaption>
-                <span>2</span>Read back after the write
-              </figcaption>
-              <img
-                src={WORKSPACE_SHOT.jobTrustCard}
-                alt="Trust Report: 5,100 rows in source, 5,100 in destination, 0 differ, 100% proven equal"
-              />
-            </figure>
-          </div>
-        </div>
-
         <div className="lp-home-hero-stage">
           <ProductShot
             src={WORKSPACE_SHOT.transferMapStage}
             alt="Transfer Studio map step: 11 of 11 columns from public.sales_orders mapped to SALES_ORDERS_REPORTING"
             surface="Transfer Studio · Map"
+            route={{ source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest }}
           />
-          <p className="lp-home-hero-route">
-            <span>{DEMO_ROUTE.source}</span>
-            <DtIcon name="arrow-right" size={14} />
-            <span>{DEMO_ROUTE.dest}</span>
-          </p>
+        </div>
         </div>
       </section>
 
@@ -469,6 +516,22 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </div>
             ))}
           </dl>
+          <div className="lp-home-run-proofs">
+            <figure>
+              <figcaption>Checked before the write</figcaption>
+              <img
+                src={WORKSPACE_SHOT.transferValidateVerdict}
+                alt="Validate verdict: approve, 17 passed, 0 blocked gates, 6 skipped across 23 gates"
+              />
+            </figure>
+            <figure>
+              <figcaption>Read back after the write</figcaption>
+              <img
+                src={WORKSPACE_SHOT.jobTrustCard}
+                alt="Trust Report: 5,100 rows in source, 5,100 in destination, 0 differ, 100% proven equal"
+              />
+            </figure>
+          </div>
         </div>
       </section>
 
@@ -478,39 +541,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             The same path runs whether a person starts the transfer in Studio, a schedule fires,
             or an agent calls it through MCP. No surface can skip a check or the read-back.
           </SectionHead>
-          <nav className="lp-home-flow-index" aria-label="Steps">
-            {CHAPTERS.map((c) => (
-              <a key={c.step} href={`#step-${c.name.toLowerCase()}`}>
-                <span>{c.step}</span>
-                {c.name}
-              </a>
-            ))}
-          </nav>
-          <ol className="lp-home-flow-list">
-            {CHAPTERS.map((c) => (
-              <li key={c.step} id={`step-${c.name.toLowerCase()}`} className="lp-home-flow-step">
-                <Reveal className="lp-home-flow-copy">
-                  <p className="lp-home-flow-num">
-                    <span>{c.step}</span>
-                    {c.name}
-                  </p>
-                  <h3>{c.title}</h3>
-                  <p>{c.body}</p>
-                  <ul>
-                    {c.facts.map((f) => (
-                      <li key={f}>
-                        <DtIcon name="check" size={14} />
-                        {f}
-                      </li>
-                    ))}
-                  </ul>
-                </Reveal>
-                <div className="lp-home-flow-visual">
-                  <ProductShot src={c.shot} alt={c.alt} surface={c.surface} className={c.frame} />
-                </div>
-              </li>
-            ))}
-          </ol>
+          <FlowTour />
           <div className="lp-home-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open Transfer Studio
