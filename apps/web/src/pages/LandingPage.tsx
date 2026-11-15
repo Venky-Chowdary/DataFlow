@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import { TrustSection } from "../components/landing/TrustSection";
+import { MarketingFaq } from "../components/marketing/MarketingFaq";
 import { ProductShot } from "../components/marketing/ProductShot";
 import { VideoPlayer, videoThumb } from "../components/marketing/VideoPlayer";
 import { FEATURED_VIDEO_ID, MARKETING_VIDEOS } from "../lib/videoCatalog";
@@ -536,14 +537,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             Moving the data is half the job. The other half is showing it arrived intact. Each of
             these has a screen in Datawrap, not a spreadsheet someone assembles afterwards.
           </SectionHead>
-          <Reveal className="lp-home-questions-list">
-            {QUESTIONS.map((item, i) => (
-              <article key={item.q} style={{ ["--reveal-i" as string]: i }}>
-                <h3>{item.q}</h3>
-                <p>{item.a}</p>
-                <span>{item.where}</span>
-              </article>
-            ))}
+          <Reveal>
+            <MarketingFaq items={QUESTIONS} />
           </Reveal>
         </div>
       </section>

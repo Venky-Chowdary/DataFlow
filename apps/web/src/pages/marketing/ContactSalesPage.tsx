@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
+import { MarketingFaq } from "../../components/marketing/MarketingFaq";
 import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
 import { catalogHonestyLead } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -545,14 +546,7 @@ export function ContactSalesPage({
       <section className="lp-sales-faq" aria-label="Sales FAQ">
         <div className="lp-mkt-wrap">
           <h2>Questions procurement usually asks</h2>
-          <dl>
-            {FAQS.map((item) => (
-              <div key={item.q}>
-                <dt>{item.q}</dt>
-                <dd>{item.a}</dd>
-              </div>
-            ))}
-          </dl>
+          <MarketingFaq items={FAQS} />
         </div>
       </section>
     </div>

@@ -2022,9 +2022,92 @@
   .lp .lp-reveal--in,
   .lp-home-steps li.lp-reveal,
   .lp-home-steps li.lp-reveal--in,
-  .lp .lp-reveal--in .lp-home-measured-grid > div {
+  .lp .lp-reveal--in .lp-home-measured-grid > div,
+  .lp .lp-faq-panel {
     transform: none !important;
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* Question row. One open answer, the rest a hairline list.
+   Airbyte and Fivetran use this instead of a card of every answer at once. */
+.lp-faq {
+  border-top: 1px solid var(--lp-line);
+}
+
+.lp-faq > div {
+  border-bottom: 1px solid var(--lp-line);
+}
+
+.lp-faq h3 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.lp-faq button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  margin: 0;
+  padding: 18px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--lp-ink);
+  font-family: var(--lp-font-display);
+  font-size: clamp(1.05rem, 1rem + 0.2vw, 1.2rem);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lp-faq button i {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--df-teal-600);
+  border-bottom: 2px solid var(--df-teal-600);
+  transform: rotate(45deg);
+  transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lp-faq .is-open button i {
+  transform: rotate(225deg);
+}
+
+.lp-faq-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 250ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lp-faq .is-open .lp-faq-panel {
+  grid-template-rows: 1fr;
+}
+
+.lp-faq-panel > div {
+  overflow: hidden;
+}
+
+.lp-faq-panel p {
+  margin: 0 0 14px;
+  max-width: 68ch;
+  color: var(--lp-muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.lp-faq-panel span {
+  display: inline-block;
+  margin-bottom: 16px;
+  color: var(--df-teal-600);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
