@@ -9909,16 +9909,30 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
 }
 
 @media (max-width: 720px) {
-  .lp-home-bento,
+  .lp-home-bento {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .lp-home-bento-cell.is-wide,
   .lp-home-bento-cell.is-narrow,
   .lp-home-bento-cell.is-third {
     display: flex;
-    grid-column: auto;
+    flex-direction: column;
+    grid-column: 1 / -1;
+    width: auto;
+    min-width: 0;
   }
 
-  .lp-home-bento {
-    grid-template-columns: 1fr;
+  .lp-home-bento-copy {
+    min-width: 0;
+  }
+
+  .lp-home-bento-cell.is-wide .lp-home-shot {
+    height: auto;
+    min-height: 0;
+    aspect-ratio: 16 / 10;
+    margin-top: 16px;
   }
 
   .lp-home-run-facts {
