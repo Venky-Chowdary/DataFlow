@@ -1197,22 +1197,22 @@ export function WarehouseSolutionPage({
               <h2>Four steps from a capacity check to proof</h2>
             </div>
             <ol className="lp-wh-flow-list">
-              <li>
+              <li className="lp-scene-card">
                 <span>01</span>
                 <strong>Probe</strong>
                 <p>Destination rights and capacity before the window opens.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>02</span>
                 <strong>Map &amp; gate</strong>
                 <p>Semantic maps and nine fail-fast gates (G1–G9) — identical to Studio.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>03</span>
                 <strong>Bulk write</strong>
                 <p>Driver path with quarantine for coerce failures.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>04</span>
                 <strong>Prove</strong>
                 <p>Row counts, checksums, and a value and key census, compared with the source.</p>
@@ -1430,7 +1430,7 @@ function SolutionShell({
       <MarketingReveal>
         <section className="lp-sol-outcomes" aria-label="What you get">
           {outcomes.map((item, i) => (
-            <article key={item.title} className="lp-sol-outcome" style={{ "--reveal-i": i } as CSSProperties}>
+            <article key={item.title} className="lp-sol-outcome lp-scene-card" style={{ "--reveal-i": i } as CSSProperties}>
               <span>{String(i + 1).padStart(2, "0")}</span>
               <h3>{item.title}</h3>
               <p>{item.body}</p>
@@ -1448,7 +1448,7 @@ function SolutionShell({
           </div>
           <ol className="lp-sol-steps">
             {steps.map((step) => (
-              <li key={step.n} className="lp-sol-step">
+              <li key={step.n} className="lp-sol-step lp-scene-card">
                 <span>{step.n}</span>
                 <div>
                   <h3>{step.title}</h3>
@@ -1470,7 +1470,7 @@ function SolutionShell({
           </div>
           <div className="lp-sol-caps">
             {caps.map((cap) => (
-              <article key={cap.title} className="lp-sol-cap">
+              <article key={cap.title} className="lp-sol-cap lp-scene-card">
                 <h3>{cap.title}</h3>
                 <p>{cap.body}</p>
               </article>

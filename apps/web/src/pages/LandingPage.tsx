@@ -465,7 +465,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 body: "The destination is counted and checksummed against the source. Every difference stays listed.",
               },
             ].map((item, i) => (
-              <article key={item.n} style={{ ["--reveal-i" as string]: i }}>
+              <article key={item.n} className="lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                 <span>{item.n}</span>
                 <h2>{item.title}</h2>
                 <p>{item.body}</p>

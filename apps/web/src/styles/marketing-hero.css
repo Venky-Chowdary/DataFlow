@@ -2661,3 +2661,93 @@
   border-bottom: 0 !important;
   box-shadow: none !important;
 }
+
+/* One numbered card. Homepage promises, solution paths, warehouse
+   steps, enterprise controls, and security layers share it. */
+.lp .lp-scene-card,
+.lp .lp-sol-step.lp-scene-card:last-child,
+.lp .lp-sec-layer-card.lp-scene-card,
+.lp .lp-ent-capability.lp-scene-card {
+  border-top: 2px solid var(--df-teal-600) !important;
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    border-color 150ms ease;
+}
+
+.lp .lp-sol-outcome.lp-scene-card,
+.lp .lp-sol-step.lp-scene-card,
+.lp .lp-wh-flow-list li.lp-scene-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  min-height: 100%;
+  padding: 26px 22px 28px !important;
+}
+
+.lp .lp-sol-outcome.lp-scene-card > span,
+.lp .lp-sol-step.lp-scene-card > span,
+.lp .lp-wh-flow-list li.lp-scene-card > span {
+  display: block;
+  width: auto;
+  height: auto;
+  margin: 0 0 16px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent !important;
+  color: var(--df-teal-600) !important;
+  font-family: var(--lp-font-display);
+  font-size: 1.75rem !important;
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.lp .lp-sol-outcome.lp-scene-card h3,
+.lp .lp-sol-step.lp-scene-card h3,
+.lp .lp-wh-flow-list li.lp-scene-card strong {
+  margin: 0 0 8px;
+  font-size: 1.2rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  color: var(--lp-ink);
+}
+
+.lp .lp-sol-outcome:nth-child(1),
+.lp .lp-sol-outcome:nth-child(2),
+.lp .lp-sol-outcome:nth-child(3),
+.lp .lp-sol-outcome:nth-child(4) {
+  background: var(--df-surface) !important;
+  border-style: solid !important;
+  color: var(--lp-ink);
+}
+
+.lp .lp-sol-outcome:nth-child(1) > span {
+  color: var(--df-teal-600) !important;
+}
+
+.lp .lp-sol-outcome:nth-child(1) h3 {
+  color: var(--lp-ink) !important;
+}
+
+.lp .lp-sol-outcome:nth-child(1) p {
+  color: var(--lp-muted) !important;
+}
+
+@media (hover: hover) {
+  .lp .lp-scene-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--df-teal-600);
+    box-shadow: var(--lp-shadow-editorial);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .lp-scene-card,
+  .lp .lp-scene-card:hover {
+    transform: none !important;
+    transition: none !important;
+  }
+}

@@ -496,7 +496,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           </div>
           <div className="lp-ent-capability-grid">
             {capabilities.map((cap) => (
-              <article key={cap.id} className="lp-ent-capability">
+              <article key={cap.id} className="lp-ent-capability lp-scene-card">
                 <span>{cap.kicker}</span>
                 <h3>{cap.title}</h3>
                 <p>{cap.body}</p>
@@ -1007,7 +1007,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-sec-layer-grid">
             {layers.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card">
+              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
                 <div className="lp-sec-layer-top">
                   <span className="lp-sec-layer-num">{layer.phase}</span>
                   <span className="lp-sec-layer-tag">{layer.tag}</span>
@@ -1032,7 +1032,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-sec-layer-grid">
             {controls.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card">
+              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
                 <div className="lp-sec-layer-top">
                   <span className="lp-sec-layer-num">{layer.phase}</span>
                   <span className="lp-sec-layer-tag">{layer.tag}</span>
