@@ -132,7 +132,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                 >
                   Product <DtIcon name="chevron-down" size={12} />
                 </button>
-                <div className="lp-nav-dropdown">
+                <div className="lp-nav-dropdown lp-nav-dropdown--wide">
                   <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>
                     <strong>Transfer Studio</strong>
                     <span>Map, preflight, and verify any→any loads</span>

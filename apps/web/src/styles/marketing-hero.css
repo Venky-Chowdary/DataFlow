@@ -2261,6 +2261,15 @@
   outline-offset: 1px;
 }
 
+/* Product menu. Seven links in one column covered the hero.
+   Airbyte and Fivetran use two columns so the menu stays a panel. */
+.lp .lp-nav-item.is-open .lp-nav-dropdown--wide {
+  grid-template-columns: 1fr 1fr;
+  min-width: 540px;
+  gap: 2px 4px;
+  padding: 10px;
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
