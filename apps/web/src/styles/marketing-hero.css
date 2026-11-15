@@ -2156,6 +2156,31 @@
   border: 0;
 }
 
+/* Trust row. Fivetran spreads the marks across the bar with no box
+   around each one, so the frames cannot collide. */
+.lp .lp-home-stack-row {
+  justify-content: space-between;
+  gap: 16px 12px;
+}
+
+.lp .lp-home-stack-item {
+  min-width: 0;
+  padding: 8px 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transition: color 150ms ease;
+}
+
+.lp .lp-home-stack-item:hover {
+  border-color: transparent;
+  background: transparent;
+}
+
+.lp .lp-home-stack-item:hover em {
+  color: var(--df-teal-600);
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
