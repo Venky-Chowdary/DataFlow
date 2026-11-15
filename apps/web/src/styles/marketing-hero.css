@@ -1589,3 +1589,133 @@
     transition: none;
   }
 }
+
+/* Homepage type and pacing follow the Airbyte / Fivetran scene:
+   a large headline, three promises, then open product rows. */
+.lp .lp-home-hero h1 {
+  font-size: clamp(2.5rem, 1.4rem + 2.4vw, 3.5rem);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1.04;
+  max-width: 14ch;
+}
+
+.lp .lp-home-promises {
+  padding-block: clamp(36px, 5vh, 64px);
+}
+
+.lp .lp-home-promises-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.lp .lp-home-promises-grid article {
+  min-width: 0;
+  padding: 22px 22px 24px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
+}
+
+.lp .lp-home-promises-grid span {
+  display: block;
+  margin-bottom: 12px;
+  color: var(--df-teal-600);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+}
+
+.lp .lp-home-promises-grid h2 {
+  margin: 0 0 8px;
+  color: var(--lp-ink);
+  font-family: var(--lp-font-display);
+  font-size: 1.25rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.lp .lp-home-promises-grid p {
+  margin: 0;
+  color: var(--lp-muted);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.lp .lp-reveal--in .lp-home-promises-grid article {
+  animation: lp-stagger-in 680ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--reveal-i, 0) * 80ms);
+}
+
+.lp .lp-home-steps {
+  gap: 0;
+  margin-top: 8px;
+}
+
+.lp .lp-home-steps > li {
+  padding: clamp(36px, 5vh, 56px) 0;
+  border: 0;
+  border-bottom: 1px solid var(--lp-line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.lp .lp-home-steps h3 {
+  font-size: clamp(1.45rem, 1.1rem + 0.8vw, 1.85rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.lp-home-steps-facts {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.lp-home-steps-facts li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--lp-ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.lp-home-steps-facts li::before {
+  content: "";
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  margin-top: 0.45em;
+  border-radius: 99px;
+  background: var(--df-teal-600);
+}
+
+@media (max-width: 839px) {
+  .lp .lp-home-promises-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lp .lp-home-hero h1 {
+    font-size: clamp(2.05rem, 1.4rem + 3vw, 2.5rem);
+    max-width: 12ch;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp .lp-reveal--in .lp-home-promises-grid article {
+    animation: none;
+  }
+}

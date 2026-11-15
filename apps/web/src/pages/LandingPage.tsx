@@ -342,6 +342,11 @@ function StepBand({
         </p>
         <h3>{step.title}</h3>
         <p>{step.body}</p>
+        <ul className="lp-home-steps-facts">
+          {step.facts.map((fact) => (
+            <li key={fact}>{fact}</li>
+          ))}
+        </ul>
       </div>
       <ProductShot src={step.shot} alt={step.alt} surface={step.surface} />
     </li>
@@ -429,6 +434,36 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <em>{connectorDisplayName(id)}</em>
             </span>
           ))}
+        </div>
+      </section>
+
+      <section className="lp-home-promises" aria-label="What a transfer guarantees">
+        <div className="lp-home-inner">
+          <Reveal className="lp-home-promises-grid">
+            {[
+              {
+                n: "01",
+                title: "Map by meaning",
+                body: "Columns pair on role and type, not on spelling. An ambiguous pair waits for a person.",
+              },
+              {
+                n: "02",
+                title: "Stop a bad write",
+                body: "Checks run before the first row. One failure locks the write and names the control that fixes it.",
+              },
+              {
+                n: "03",
+                title: "Read it back",
+                body: "The destination is counted and checksummed against the source. Every difference stays listed.",
+              },
+            ].map((item, i) => (
+              <article key={item.n} style={{ ["--reveal-i" as string]: i }}>
+                <span>{item.n}</span>
+                <h2>{item.title}</h2>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </Reveal>
         </div>
       </section>
 
