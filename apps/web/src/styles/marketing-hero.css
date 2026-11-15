@@ -2161,3 +2161,12 @@
   background: transparent;
   border: 0;
 }
+
+/* Product, solution, and company pages: every other block is a white
+   scene. Closing panels stay on the page color so the teal card reads. */
+.lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
+  :has(.lp-sol-footer, .lp-ent-cta-band, .lp-pricing-v2-cta, .lp-mkt-next-band, .lp-cust3-cta, .lp-int-cta, .lp-wh-cta)
+) {
+  background: var(--df-surface);
+  border-block: 1px solid var(--lp-line);
+}
