@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode } from "react";
+import { Children, isValidElement, type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
@@ -41,10 +41,7 @@ function ShotBand({
         <h2>{title}</h2>
         <p>{lead}</p>
       </div>
-      <figure className="lp-shot-band">
-        <img src={src} alt={alt} />
-        <figcaption>{surface}</figcaption>
-      </figure>
+      <ProductShot src={src} alt={alt} surface={surface} />
     </section>
   );
 }
@@ -171,12 +168,19 @@ function Chapter({
   title: string;
   children: ReactNode;
 }) {
+  const nodes = Children.toArray(children);
+  const shots = nodes.filter((node) => isValidElement(node) && node.type === ProductShot);
+  const copy = nodes.filter((node) => !(isValidElement(node) && node.type === ProductShot));
+  const band = shots.length === 1;
   return (
     <MarketingReveal>
-      <section id={id} className="lp-mkt-body lp-mkt-chapter">
-        <p className="lp-mkt-kicker">{kicker}</p>
-        <h2>{title}</h2>
-        {children}
+      <section id={id} className={`lp-mkt-body lp-mkt-chapter${band ? " lp-mkt-chapter--band" : ""}`}>
+        <div className="lp-mkt-chapter-copy">
+          <p className="lp-mkt-kicker">{kicker}</p>
+          <h2>{title}</h2>
+          {copy}
+        </div>
+        {band ? shots : null}
       </section>
     </MarketingReveal>
   );
@@ -498,7 +502,7 @@ export function JobTheaterPage({
           kicker="Proof"
           title="The read-back sits on the job"
           lead="Job space reads the destination after the write and puts the counts next to the source. When rows differ, each difference is listed with its reason."
-          src={WORKSPACE_SHOT.jobTrustExplainedStage}
+          src={WORKSPACE_SHOT.jobTrustExplained}
           alt="Trust Report for a filtered load: 5,100 source rows, 3,756 landed, 1,344 differences, every one explained"
           surface="Job space · Trust Report"
         />
@@ -1486,10 +1490,10 @@ function SolutionShell({
               <button type="button" className="lp-btn lp-btn--brand" onClick={onPrimary}>
                 {ctaPrimary}
               </button>
-              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate(next)}>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate(next)}>
                 Next: {nextLabel} →
               </button>
-              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("help")}>
+              <button type="button" className="lp-btn lp-btn--ghost lp-btn--on-ink" onClick={() => onNavigate("help")}>
                 Read the docs
               </button>
             </div>

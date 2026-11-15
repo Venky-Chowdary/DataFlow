@@ -101,7 +101,6 @@ type Chapter = {
   shot: string;
   alt: string;
   surface: string;
-  frame?: string;
 };
 
 const CHAPTERS: Chapter[] = [
@@ -171,10 +170,9 @@ const CHAPTERS: Chapter[] = [
       "Differences explained per column, not hidden",
       "A report you can export and sign off",
     ],
-    shot: WORKSPACE_SHOT.jobTrustExplainedStage,
+    shot: WORKSPACE_SHOT.jobTrustExplained,
     alt: "Trust Report for a MongoDB load: 5,100 source rows, 3,756 in the destination, 1,344 differences, every one explained",
     surface: "Job space · Trust Report",
-    frame: "is-panel",
   },
 ];
 

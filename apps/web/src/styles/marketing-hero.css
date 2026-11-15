@@ -1153,7 +1153,7 @@
 
 .lp-home-steps li {
   display: grid;
-  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.14fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 28px 40px;
   align-items: center;
   padding: 28px;
@@ -1167,14 +1167,33 @@
   order: 2;
 }
 
-.lp-home-steps .lp-product-shot-viewport {
-  aspect-ratio: 16 / 10;
-  max-height: 320px;
+.lp-home-steps .lp-product-shot,
+.lp-proof-beside .lp-product-shot,
+.lp .lp-mkt-chapter--band > .lp-product-shot,
+.lp-home-steps .lp-product-shot-chrome,
+.lp-proof-beside .lp-product-shot-chrome,
+.lp .lp-mkt-chapter--band .lp-product-shot-chrome {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
 }
 
-.lp-home-steps .lp-product-shot-viewport img {
-  width: 100%;
-  height: 100%;
+.lp-home-steps .lp-product-shot-viewport,
+.lp-proof-beside .lp-product-shot-viewport,
+.lp .lp-mkt-chapter--band .lp-product-shot-viewport {
+  aspect-ratio: auto;
+  width: auto;
+  max-height: none;
+  background: var(--df-surface);
+}
+
+.lp-home-steps .lp-product-shot-viewport img,
+.lp-proof-beside .lp-product-shot-viewport img,
+.lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
+  width: auto;
+  height: auto;
+  max-width: min(680px, 100%);
+  max-height: 420px;
   object-fit: contain;
   object-position: center center;
 }
@@ -1301,5 +1320,177 @@
     height: 100%;
     object-fit: contain;
     object-position: center center;
+  }
+}
+
+/* One card material. Fivetran and Airbyte keep every tile on the same
+   surface; a dark first card, a mint second, an amber third, and a
+   dashed fourth read as a prototype. */
+.lp .lp-sol-outcome,
+.lp .lp-home-trust-card,
+.lp .lp-sec-layer-card,
+.lp .lp-int-family-card,
+.lp .lp-ent-capability,
+.lp .lp-sol-step,
+.lp .lp-sol-cap {
+  background: var(--df-surface);
+  border: 1px solid var(--lp-line);
+  border-style: solid;
+  color: var(--lp-ink);
+  box-shadow: var(--lp-shadow-soft);
+}
+
+.lp .lp-sol-outcome h3,
+.lp .lp-sol-outcome > span,
+.lp .lp-home-trust-card h3,
+.lp .lp-home-trust-card .lp-home-trust-tag,
+.lp .lp-sec-layer-card h3,
+.lp .lp-sec-layer-card .lp-sec-layer-num,
+.lp .lp-sec-layer-card em,
+.lp .lp-ent-capability h3,
+.lp .lp-ent-capability > span,
+.lp .lp-sol-step h3,
+.lp .lp-sol-cap h3 {
+  color: var(--lp-ink);
+}
+
+.lp .lp-sol-outcome p,
+.lp .lp-home-trust-card p,
+.lp .lp-sec-layer-card p,
+.lp .lp-ent-capability p,
+.lp .lp-sol-step p,
+.lp .lp-sol-cap p,
+.lp .lp-int-family-card p {
+  color: var(--lp-muted);
+}
+
+.lp .lp-home-trust-num,
+.lp .lp-sec-layer-tag,
+.lp .lp-home-trust-pill {
+  background: var(--df-success-bg);
+  color: var(--df-teal-600);
+  border-color: var(--lp-line);
+}
+
+.lp .lp-sol-outcome > span,
+.lp .lp-ent-capability > span {
+  background: transparent;
+  color: var(--df-teal-600);
+}
+
+/* Product bands: the claim on the left, one framed workspace on the right.
+   Same card as the homepage steps, so a proof row is not text floating
+   in a full-width void. */
+.lp-proof-beside {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: min(var(--lp-shell), 100%);
+  margin: 16px auto;
+  padding: 28px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
+  gap: 28px 48px;
+}
+
+.lp-proof-beside .lp-product-shot {
+  justify-self: end;
+}
+
+@media (min-width: 840px) {
+  .lp .lp-mkt-chapter--band {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 24px 36px;
+    align-items: center;
+    margin-block: 16px;
+    padding: 28px !important;
+    border: 1px solid var(--lp-line);
+    border-radius: var(--df-radius-xl);
+    background: var(--df-surface);
+    box-shadow: var(--lp-shadow-soft);
+  }
+
+  .lp .lp-mkt-chapter--band > .lp-product-shot {
+    max-width: none;
+    margin: 0;
+  }
+}
+
+@media (max-width: 839px) {
+  .lp .lp-mkt-chapter--band {
+    display: grid;
+    gap: 20px;
+  }
+
+  .lp-home-steps .lp-product-shot,
+  .lp-proof-beside .lp-product-shot,
+  .lp .lp-mkt-chapter--band > .lp-product-shot,
+  .lp-home-steps .lp-product-shot-chrome,
+  .lp-proof-beside .lp-product-shot-chrome,
+  .lp .lp-mkt-chapter--band .lp-product-shot-chrome,
+  .lp-home-steps .lp-product-shot-viewport,
+  .lp-proof-beside .lp-product-shot-viewport,
+  .lp .lp-mkt-chapter--band .lp-product-shot-viewport {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .lp-home-steps .lp-product-shot-viewport img,
+  .lp-proof-beside .lp-product-shot-viewport img,
+  .lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: none;
+  }
+}
+
+@media (max-width: 839px) {
+  .lp-proof-beside {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Warehouse and solution closes use the same panel as the homepage. */
+.lp .lp-wh-cta,
+.lp .lp-sol-footer {
+  background: transparent;
+  padding-block: var(--lp-section-y);
+}
+
+.lp .lp-wh-cta-inner,
+.lp .lp-sol-footer-inner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px 40px;
+  align-items: center;
+  padding: 36px 40px;
+  border-radius: 20px;
+  background:
+    radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
+    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
+}
+
+.lp .lp-wh-cta h2,
+.lp .lp-wh-cta p,
+.lp .lp-sol-footer h2,
+.lp .lp-sol-footer p {
+  max-width: 36rem;
+  margin-left: 0;
+  color: var(--df-success-bg);
+}
+
+.lp .lp-wh-cta p,
+.lp .lp-sol-footer p {
+  color: rgba(236, 253, 245, 0.78);
+}
+
+@media (max-width: 839px) {
+  .lp .lp-wh-cta-inner,
+  .lp .lp-sol-footer-inner {
+    grid-template-columns: 1fr;
+    padding: 28px 22px;
   }
 }
