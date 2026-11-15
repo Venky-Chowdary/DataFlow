@@ -2346,6 +2346,23 @@
   opacity: 0.82;
 }
 
+/* Warehouse steps were one shared frame, so the rules ran into each other.
+   Four separate cards, 16px apart. */
+.lp .lp-wh-flow-list {
+  gap: 16px;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.lp .lp-wh-flow-list li,
+.lp .lp-wh-flow-list li:last-child {
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
