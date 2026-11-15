@@ -80,13 +80,22 @@ export async function isolateDrafts(page: Page): Promise<void> {
  * how long the sample-load toast lives. Hide toasts for good (a style tag, so a
  * late arrival is hidden too) and wait until every toast has left the DOM; the
  * dock then holds its idle layout, which is what the baselines show.
+ *
+ * Hiding the pill is not enough at <=480px: the dock reserves an 8px band
+ * below itself while it holds any toast (`.df2-toast-dock:has(.dt-toast)`),
+ * and :has() matches a display:none toast too. A toast that arrived after the
+ * count reached 0 left the pill hidden but the band in place, so the stepper
+ * and everything under it sat 8px lower (wizard-transform-light-390 rendered
+ * both ways on the runner). The style drops that band as well.
  */
 export async function settleToasts(page: Page): Promise<void> {
   await page.evaluate(() => {
     if (document.getElementById("df-e2e-quiet-toasts")) return;
     const style = document.createElement("style");
     style.id = "df-e2e-quiet-toasts";
-    style.textContent = ".dt-toast, .dt-toast-more { display: none !important; }";
+    style.textContent =
+      ".dt-toast, .dt-toast-more { display: none !important; }" +
+      " .df2-page-transfer-studio .df2-toast-dock { margin-bottom: 0 !important; }";
     document.head.appendChild(style);
   });
   await expect(page.locator(".dt-toast, .dt-toast-more")).toHaveCount(0, { timeout: 30_000 });
