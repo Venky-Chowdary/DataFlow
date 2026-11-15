@@ -2226,6 +2226,41 @@
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
+/* Contact form. Fivetran's demo form gives each field room to type.
+   The previous card was 16px of padding and 7px inputs. */
+.lp .lp-sales-form {
+  padding: 28px 28px 24px !important;
+  border-radius: 16px !important;
+}
+
+.lp .lp-sales-form-head h2 {
+  font-size: 1.35rem !important;
+  letter-spacing: -0.02em;
+}
+
+.lp .lp-sales-form-head p {
+  margin-bottom: 16px !important;
+  font-size: 14px !important;
+}
+
+.lp .lp-sales-fields {
+  gap: 14px !important;
+  margin-bottom: 16px !important;
+}
+
+.lp .lp-sales-input,
+.lp .lp-sales-textarea {
+  padding: 12px 14px !important;
+  font-size: 15px !important;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.lp .lp-sales-input:focus-visible,
+.lp .lp-sales-textarea:focus-visible {
+  outline: 2px solid var(--df-teal-600);
+  outline-offset: 1px;
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
