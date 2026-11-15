@@ -467,6 +467,28 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
       </section>
 
+      <section className="lp-home-measured" aria-label="Measured on one run">
+        <div className="lp-home-inner">
+          <SectionHead kicker="One named run" title="Postgres to Snowflake, counted on both sides">
+            These figures are from the load on this page: 5,100 orders, public.sales_orders into
+            DW_DEMO.SALES_ORDERS_REPORTING. They are not a catalog-wide claim.
+          </SectionHead>
+          <Reveal className="lp-home-measured-grid">
+            {[
+              ["11 / 11", "Columns mapped, none flagged"],
+              ["5,100", "Rows in the source and in Snowflake"],
+              ["0", "Rows that differ on the checksum"],
+              ["23", "Gates checked before the write"],
+            ].map(([value, label], i) => (
+              <div key={label} style={{ ["--reveal-i" as string]: i }}>
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
+          </Reveal>
+        </div>
+      </section>
+
       <section className="lp-home-flow" id="how-it-works" aria-label="How a transfer runs">
         <div className="lp-home-inner">
           <SectionHead kicker="How it works" title="Five steps from connection to proof">
