@@ -2306,6 +2306,23 @@
   background: var(--df-surface);
 }
 
+/* Sticky nav is about 106px. Article jumps were landing the step title
+   under that bar. */
+.lp .docs-article-head,
+.lp .docs-section,
+.lp .docs-workflow-step {
+  scroll-margin-top: 120px;
+}
+
+.lp .docs-workflow-step {
+  padding-bottom: 40px;
+  border-bottom: 1px solid var(--lp-line);
+}
+
+.lp .docs-workflow-step:last-child {
+  border-bottom: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
