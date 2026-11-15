@@ -57,7 +57,7 @@
   max-width: 22ch;
   margin: 10px 0 0;
   font-family: var(--df-font-display);
-  font-size: clamp(2.25rem, 1.2rem + 2vw, 3rem) !important;
+  font-size: clamp(2.25rem, 1.2rem + 2vw, 3rem);
   font-weight: 650;
   line-height: 1.08;
   letter-spacing: -0.035em;
@@ -88,7 +88,7 @@
   gap: 8px;
   padding: 6px 13px;
   border: 1px solid rgba(45, 212, 191, 0.32) !important;
-  border-radius: 999px;
+  border-radius: var(--df-radius-pill);
   background: rgba(45, 212, 191, 0.1) !important;
   color: #5eead4 !important;
   font-size: 12px;
@@ -131,7 +131,7 @@
 
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
   /* Copy and the product share the row. The picture does not outgrow the headline. */
-  grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.9fr) !important;
+  grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.9fr);
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
@@ -179,7 +179,7 @@
   display: block;
   width: 100%;
   height: auto;
-  border-radius: 20px;
+  border-radius: var(--df-radius-3xl);
   background: transparent;
   box-shadow:
     0 1px 0 rgba(148, 197, 214, 0.16) inset,
@@ -375,7 +375,7 @@
   .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
   .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
     max-width: 18ch;
-    font-size: clamp(1.85rem, 7.2vw, 2.25rem) !important;
+    font-size: clamp(1.85rem, 7.2vw, 2.25rem);
   }
 
   .lp .lp-hero--home-ink {
@@ -401,7 +401,7 @@
   }
 
   .dw-hero-art-svg {
-    border-radius: 14px;
+    border-radius: var(--df-radius-xl);
   }
 
   .dw-hero-art-caption {
@@ -420,7 +420,7 @@
 .lp-product-shot-chrome {
   min-width: 0;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: var(--df-radius-2xl);
   border: 1px solid rgba(148, 197, 214, 0.18);
   background: #071018;
   box-shadow:
@@ -536,7 +536,7 @@
 .lp .docs-shot-reel--product .docs-shot-reel-stage,
 .lp .docs-shot-reel--hero .docs-shot-reel-stage {
   overflow: hidden;
-  border-radius: 0 0 16px 16px;
+  border-radius: var(--df-radius-none) var(--df-radius-none) var(--df-radius-2xl) var(--df-radius-2xl);
 }
 
 .lp .docs-shot-reel--product .docs-shot-reel-frame,
@@ -608,6 +608,11 @@
 /* Route chips never paint past the frame — long FQDNs ellipsis. */
 .lp .lp-product-shot-route {
   overflow: hidden;
+}
+
+.lp .lp-mkt-chapter .lp-product-shot-route,
+.lp .lp-proof-beside .lp-product-shot-route {
+  color: var(--df-text-secondary);
 }
 
 .docs-shot-reel-caption {
@@ -1120,7 +1125,7 @@
   gap: 28px 40px;
   align-items: center;
   padding: 36px 40px;
-  border-radius: 20px;
+  border-radius: var(--df-radius-3xl);
   background:
     radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
     linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
@@ -1368,9 +1373,9 @@
   color: var(--lp-muted);
 }
 
-.lp .lp-home-trust-num,
-.lp .lp-sec-layer-tag,
-.lp .lp-home-trust-pill {
+.lp .lp-home-trust-card .lp-home-trust-num,
+.lp .lp-sec-layer-card .lp-sec-layer-tag,
+.lp .lp-home-trust-card .lp-home-trust-pill {
   background: var(--df-success-bg);
   color: var(--df-teal-600);
   border-color: var(--lp-line);
@@ -1409,7 +1414,7 @@
     gap: 24px 36px;
     align-items: center;
     margin-block: 16px;
-    padding: 28px !important;
+    padding: 28px;
     border: 1px solid var(--lp-line);
     border-radius: var(--df-radius-xl);
     background: var(--df-surface);
@@ -1464,7 +1469,7 @@
 .lp .lp-cust3-cta,
 .lp .lp-pricing-v2-cta,
 .lp .lp-ent-cta-band {
-  background: transparent !important;
+  background: transparent;
   padding-block: var(--lp-section-y);
 }
 
@@ -1481,10 +1486,10 @@
   width: min(var(--lp-shell), calc(100% - 32px));
   margin-inline: auto;
   padding: 36px 40px;
-  border-radius: 20px !important;
+  border-radius: var(--df-radius-3xl);
   background:
     radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
-    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%) !important;
+    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
 }
 
 .lp .lp-wh-cta h2,
@@ -1530,13 +1535,13 @@
 .lp .lp-home-steps > li.lp-reveal,
 .lp .lp-home-steps > li.is-flip.lp-reveal {
   opacity: 0;
-  transform: translateY(18px) !important;
+  transform: translateY(18px);
 }
 
 .lp .lp-home-steps > li.lp-reveal--in,
 .lp .lp-home-steps > li.is-flip.lp-reveal--in {
   opacity: 1;
-  transform: none !important;
+  transform: none;
 }
 
 .lp-home-steps li.lp-reveal .lp-product-shot {
@@ -1581,14 +1586,14 @@
 .lp .lp-sales-hero--ink .lp-sales-hero-copy > *:nth-child(4) { animation-delay: 210ms; }
 
 .lp .lp-mkt-page-rich .lp-mkt-stats-item strong {
-  font-size: clamp(1.45rem, 1.1rem + 0.7vw, 1.85rem) !important;
+  font-size: clamp(1.45rem, 1.1rem + 0.7vw, 1.85rem);
   letter-spacing: -0.03em;
 }
 
 .lp .lp-proof-beside {
   border: 0;
   border-bottom: 1px solid var(--lp-line);
-  border-radius: 0;
+  border-radius: var(--df-radius-none);
   background: transparent;
   box-shadow: none;
   padding: clamp(40px, 5vh, 64px) 0;
@@ -1651,10 +1656,10 @@
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
   .lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
   .lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
-    opacity: 1 !important;
-    transform: none !important;
-    animation: none !important;
-    transition: none !important;
+    opacity: 1;
+    transform: none;
+    animation: none;
+    transition: none;
   }
 }
 
@@ -1738,7 +1743,7 @@
   padding: clamp(36px, 5vh, 56px) 0;
   border: 0;
   border-bottom: 1px solid var(--lp-line);
-  border-radius: 0;
+  border-radius: var(--df-radius-none);
   background: transparent;
   box-shadow: none;
 }
@@ -1764,7 +1769,7 @@
   align-items: flex-start;
   padding: 0;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--df-radius-none);
   background: transparent;
   box-shadow: none;
   color: var(--lp-ink);
@@ -1778,7 +1783,7 @@
   width: 7px;
   height: 7px;
   margin-top: 0.45em;
-  border-radius: 99px;
+  border-radius: var(--df-radius-pill);
   background: var(--df-teal-600);
 }
 
@@ -1879,7 +1884,7 @@
 .lp .lp-mkt-chapter-copy > h2,
 .lp .lp-mkt-chapter > h2 {
   margin: 0 0 10px;
-  font-size: var(--lp-fs-title) !important;
+  font-size: var(--lp-fs-title);
   letter-spacing: -0.032em;
   line-height: 1.12;
   color: var(--lp-ink);
@@ -1923,7 +1928,7 @@
 .lp .lp-mkt-scenario li {
   padding: 14px 16px 14px 18px;
   border: 1px solid var(--lp-line);
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   background: var(--df-surface);
   box-shadow: var(--lp-shadow-soft);
 }
@@ -2028,14 +2033,14 @@
    items 70ms apart. Ours travels 36px over the same 750ms so a full
    card row does not jump. The easing is the same curve. */
 .lp .lp-reveal {
-  transform: translateY(32px) !important;
+  transform: translateY(32px);
   transition:
     opacity 750ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 750ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+    transform 750ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .lp .lp-reveal--in {
-  transform: none !important;
+  transform: none;
 }
 
 .lp .lp-reveal--in .lp-home-promises-grid article,
@@ -2066,7 +2071,7 @@
   margin: 0;
   padding: 18px 16px;
   border: 1px solid rgba(94, 234, 212, 0.22);
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   background: rgba(7, 17, 31, 0.45);
   overflow: hidden;
 }
@@ -2101,7 +2106,7 @@
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp .lp-home-measured-grid {
     grid-template-columns: 1fr;
   }
@@ -2114,9 +2119,9 @@
   .lp-home-steps li.lp-reveal--in,
   .lp .lp-reveal--in .lp-home-measured-grid > div,
   .lp .lp-faq-panel {
-    transform: none !important;
-    animation: none !important;
-    transition: none !important;
+    transform: none;
+    animation: none;
+    transition: none;
   }
 }
 
@@ -2205,35 +2210,35 @@
 /* Footer sits on every public page. Fivetran and Airbyte give the columns
    room and move the link color in about 150ms. */
 .lp .lp-footer.lp-footer--compact .lp-footer-inner {
-  padding: 64px 0 28px !important;
+  padding: 64px 0 28px;
 }
 
 .lp .lp-footer--compact .lp-footer-grid {
-  gap: 36px 48px !important;
-  padding-bottom: 36px !important;
+  gap: 36px 48px;
+  padding-bottom: 36px;
 }
 
 .lp .lp-footer--compact h4,
 .lp .lp-footer--compact .lp-footer-grid h4 {
-  margin-bottom: 16px !important;
+  margin-bottom: 16px;
 }
 
 .lp .lp-footer--compact a,
 .lp .lp-footer--compact .lp-footer-link {
-  margin-bottom: 12px !important;
-  font-size: 14.5px !important;
-  line-height: 1.4 !important;
-  transition: color 150ms ease !important;
+  margin-bottom: 12px;
+  font-size: 14.5px;
+  line-height: 1.4;
+  transition: color 150ms ease;
 }
 
 .lp .lp-footer--compact .lp-footer-bottom {
-  margin-top: 8px !important;
-  padding-top: 20px !important;
+  margin-top: 8px;
+  padding-top: 20px;
 }
 
 @media (max-width: 960px) {
   .lp .lp-footer.lp-footer--compact .lp-footer-inner {
-    padding: 40px 0 24px !important;
+    padding: 40px 0 24px;
   }
 }
 
@@ -2287,6 +2292,12 @@
   transition: color 150ms ease;
 }
 
+.lp .lp-home-stack-item em,
+.lp .lp-home-stack-label {
+  color: var(--df-steel-400);
+}
+
+
 @media (max-width: 720px) {
   .lp .lp-home-stack-marquee.lp-conn-marquee {
     overflow: hidden;
@@ -2333,7 +2344,7 @@
   width: 36px;
   height: 36px;
   margin-bottom: 14px;
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   background: var(--df-success-bg);
   color: var(--df-teal-600);
 }
@@ -2353,7 +2364,7 @@
 
 /* The call list was a plain disc list. Each line is its own row. */
 .lp .lp-sales-follow {
-  padding: clamp(56px, 7vh, 88px) 0 !important;
+  padding: clamp(56px, 7vh, 88px) 0;
 }
 
 .lp .lp-sales-honesty ul {
@@ -2371,7 +2382,7 @@
   margin: 0;
   padding: 14px 16px;
   border: 1px solid var(--lp-line);
-  border-radius: 12px;
+  border-radius: var(--df-radius-12);
   background: var(--df-surface);
   color: var(--lp-ink);
   font-size: 15px;
@@ -2384,7 +2395,7 @@
   width: 8px;
   height: 8px;
   margin-top: 0.45em;
-  border-radius: 99px;
+  border-radius: var(--df-radius-pill);
   background: var(--df-teal-600);
 }
 
@@ -2451,29 +2462,29 @@
 /* Contact form. Fivetran's demo form gives each field room to type.
    The previous card was 16px of padding and 7px inputs. */
 .lp .lp-sales-form {
-  padding: 28px 28px 24px !important;
-  border-radius: 16px !important;
+  padding: 28px 28px 24px;
+  border-radius: var(--df-radius-2xl);
 }
 
 .lp .lp-sales-form-head h2 {
-  font-size: 1.35rem !important;
+  font-size: 1.35rem;
   letter-spacing: -0.02em;
 }
 
 .lp .lp-sales-form-head p {
-  margin-bottom: 16px !important;
-  font-size: 14px !important;
+  margin-bottom: 16px;
+  font-size: 14px;
 }
 
 .lp .lp-sales-fields {
-  gap: 14px !important;
-  margin-bottom: 16px !important;
+  gap: 14px;
+  margin-bottom: 16px;
 }
 
 .lp .lp-sales-input,
 .lp .lp-sales-textarea {
-  padding: 12px 14px !important;
-  font-size: 15px !important;
+  padding: 12px 14px;
+  font-size: 15px;
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
@@ -2548,11 +2559,11 @@
 /* The control snapshot is a dark spec card. A later white-card rule
    painted it white and left the heading in light teal. */
 .lp .lp-ent-engine .lp-ent-panel {
-  background-color: var(--df-logo-tile) !important;
-  background-image: radial-gradient(ellipse 80% 60% at 100% 0%, rgba(45, 212, 191, 0.18), transparent 50%) !important;
-  color: var(--df-success-bg) !important;
-  border-color: transparent !important;
-  border-radius: 16px !important;
+  background-color: var(--df-logo-tile);
+  background-image: radial-gradient(ellipse 80% 60% at 100% 0%, rgba(45, 212, 191, 0.18), transparent 50%);
+  color: var(--df-success-bg);
+  border-color: transparent;
+  border-radius: var(--df-radius-2xl);
 }
 
 .lp .lp-ent-panel h3 {
@@ -2606,18 +2617,18 @@
 
 /* Migration and sync steps used the same shared frame. */
 .lp .lp-sol-steps {
-  gap: 16px !important;
+  gap: 16px;
   border: 0 !important;
-  background: transparent !important;
-  overflow: visible !important;
+  background: transparent;
+  overflow: visible;
 }
 
 .lp .lp-sol-step,
 .lp .lp-sol-step:last-child {
-  border: 1px solid var(--lp-line) !important;
-  border-radius: var(--df-radius-xl) !important;
-  background: var(--df-surface) !important;
-  box-shadow: var(--lp-shadow-soft) !important;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2630,8 +2641,8 @@
    hairline reads as a card cut into the page. The hero, the measured
    band, and the closing panel keep their own color. */
 .lp {
-  background-color: var(--df-bg-canvas) !important;
-  background-image: none !important;
+  background-color: var(--df-bg-canvas);
+  background-image: none;
 }
 
 .lp .lp-home-stack,
@@ -2655,10 +2666,10 @@
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
   :has(.lp-sol-footer, .lp-ent-cta-band, .lp-pricing-v2-cta, .lp-mkt-next-band, .lp-cust3-cta, .lp-int-cta, .lp-wh-cta)
 ) {
-  background: transparent !important;
-  background-image: none !important;
-  border-top: 0 !important;
-  border-bottom: 0 !important;
+  background: transparent;
+  background-image: none;
+  border-top: 0;
+  border-bottom: 0;
   box-shadow: none !important;
 }
 
@@ -2692,7 +2703,7 @@
   align-items: flex-start;
   gap: 0;
   min-height: 100%;
-  padding: 26px 22px 28px !important;
+  padding: 26px 22px 28px;
 }
 
 .lp .lp-sol-outcome.lp-scene-card > span,
@@ -2703,11 +2714,11 @@
   height: auto;
   margin: 0 0 16px;
   padding: 0;
-  border-radius: 0;
-  background: transparent !important;
-  color: var(--df-teal-600) !important;
+  border-radius: var(--df-radius-none);
+  background: transparent;
+  color: var(--df-teal-600);
   font-family: var(--lp-font-display);
-  font-size: 1.75rem !important;
+  font-size: 1.75rem;
   font-weight: 650;
   letter-spacing: -0.04em;
   line-height: 1;
@@ -2728,21 +2739,21 @@
 .lp .lp-sol-outcome:nth-child(2),
 .lp .lp-sol-outcome:nth-child(3),
 .lp .lp-sol-outcome:nth-child(4) {
-  background: var(--df-surface) !important;
-  border-style: solid !important;
+  background: var(--df-surface);
+  border-style: solid;
   color: var(--lp-ink);
 }
 
 .lp .lp-sol-outcome:nth-child(1) > span {
-  color: var(--df-teal-600) !important;
+  color: var(--df-teal-600);
 }
 
 .lp .lp-sol-outcome:nth-child(1) h3 {
-  color: var(--lp-ink) !important;
+  color: var(--lp-ink);
 }
 
 .lp .lp-sol-outcome:nth-child(1) p {
-  color: var(--lp-muted) !important;
+  color: var(--lp-muted);
 }
 
 @media (hover: hover) {
@@ -2756,7 +2767,20 @@
 @media (prefers-reduced-motion: reduce) {
   .lp .lp-scene-card,
   .lp .lp-scene-card:hover {
-    transform: none !important;
-    transition: none !important;
+    transform: none;
+    transition: none;
   }
+}
+
+/* 11px labels. The accent teal misses 4.5:1 on the canvas. Brand-strong
+   holds on the light field; ink heroes keep their own light label. */
+.lp .lp-mkt-kicker,
+.lp .lp-mkt-packet-node.is-accent strong,
+.lp .lp-demos-tag {
+  color: var(--df-brand-strong);
+}
+
+.lp .lp-demos-filter.is-active {
+  background: var(--df-brand-strong);
+  border-color: var(--df-brand-strong);
 }
