@@ -1525,18 +1525,16 @@
   }
 }
 
-/* Scroll motion matches the band: copy-left slides in from the left,
-   the flipped band from the right. The product frame settles a beat later. */
-.lp-home-steps li.lp-reveal {
+/* The row only rises. A sideways slide left the even steps 28px off
+   the column, so 02 and 04 sat past the content edge. */
+.lp .lp-home-steps > li.lp-reveal,
+.lp .lp-home-steps > li.is-flip.lp-reveal {
   opacity: 0;
-  transform: translate3d(-28px, 18px, 0) !important;
+  transform: translateY(18px) !important;
 }
 
-.lp-home-steps li.is-flip.lp-reveal {
-  transform: translate3d(28px, 18px, 0) !important;
-}
-
-.lp-home-steps li.lp-reveal--in {
+.lp .lp-home-steps > li.lp-reveal--in,
+.lp .lp-home-steps > li.is-flip.lp-reveal--in {
   opacity: 1;
   transform: none !important;
 }
@@ -1641,9 +1639,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lp-home-steps li.lp-reveal,
-  .lp-home-steps li.is-flip.lp-reveal,
-  .lp-home-steps li.lp-reveal--in,
+  .lp .lp-home-steps > li.lp-reveal,
+  .lp .lp-home-steps > li.is-flip.lp-reveal,
+  .lp .lp-home-steps > li.lp-reveal--in,
+  .lp .lp-home-steps > li.is-flip.lp-reveal--in,
   .lp-home-steps li.lp-reveal .lp-product-shot,
   .lp-home-steps li.lp-reveal--in .lp-product-shot,
   .lp-home-stack-item,
@@ -1652,10 +1651,10 @@
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
   .lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
   .lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
-    opacity: 1;
-    transform: none;
-    animation: none;
-    transition: none;
+    opacity: 1 !important;
+    transform: none !important;
+    animation: none !important;
+    transition: none !important;
   }
 }
 
