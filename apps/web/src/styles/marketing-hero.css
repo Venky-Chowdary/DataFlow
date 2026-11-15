@@ -839,8 +839,8 @@
   object-position: top center;
 }
 
-/* Phone: product UI is a sideways reader, and plan tables become rows
-   you can see without hunting for a clipped column. */
+/* Phone: every product image is the whole frame, at the width of the page.
+   Plan tables become rows you can read without a clipped column. */
 @media (max-width: 720px) {
   .lp-home-flow-visual,
   .lp-product-shot,
@@ -858,84 +858,49 @@
     max-width: 100%;
   }
 
-  .lp-shot-band {
+  .lp-shot-band,
+  .lp-product-shot-viewport {
     width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: hidden;
   }
 
   .lp-product-shot-viewport {
     aspect-ratio: auto;
-    overflow-x: auto;
-    overflow-y: hidden;
     background: var(--df-surface);
-    -webkit-overflow-scrolling: touch;
-    scroll-snap-type: x proximity;
   }
 
-  .lp-product-shot-viewport img {
-    width: 1120px;
-    max-width: none;
+  .lp-product-shot-viewport img,
+  .lp-shot-band img,
+  .lp-proof-beside .lp-shot-band img,
+  .lp-product-shot.is-panel .lp-product-shot-viewport img {
+    display: block;
+    width: 100%;
+    max-width: 100%;
     height: auto;
+    max-height: none;
     object-fit: contain;
     object-position: top left;
-    scroll-snap-align: start;
-  }
-
-  .lp-product-shot.is-panel,
-  .lp-product-shot.is-panel .lp-product-shot-chrome {
-    width: 100%;
-  }
-
-  .lp-product-shot.is-panel .lp-product-shot-viewport {
-    display: block;
-  }
-
-  .lp-product-shot.is-panel .lp-product-shot-viewport img {
-    width: 680px;
-    max-width: none;
-    max-height: none;
     flex-shrink: 0;
   }
 
-  .lp-product-shot {
-    position: relative;
+  .lp-product-shot.is-panel,
+  .lp-product-shot.is-panel .lp-product-shot-chrome,
+  .lp-product-shot.is-panel .lp-product-shot-viewport {
+    display: block;
+    width: 100%;
   }
 
-  .lp-product-shot::after {
-    content: "Swipe to read";
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    z-index: var(--df-z-raised);
-    padding: 4px 8px;
-    border-radius: var(--lp-radius-pill);
-    background: rgba(15, 23, 42, 0.72);
-    color: var(--df-surface);
-    font-size: 11px;
-    font-weight: 650;
-    letter-spacing: 0.02em;
-    pointer-events: none;
+  .lp-home-hero-route,
+  .lp-product-shot-route {
+    flex-wrap: wrap;
+    align-items: flex-start;
   }
 
-  .lp-shot-band figcaption {
-    position: sticky;
-    left: 0;
-    width: fit-content;
-    max-width: 100%;
-  }
-
-  .lp-shot-band img {
-    width: 1120px;
-    max-width: none;
-    height: auto;
-  }
-
-  .lp-proof-beside .lp-shot-band img {
-    width: 720px;
-    max-width: none;
-    max-height: none;
-    margin-inline: 0;
+  .lp-home-hero-route span,
+  .lp-product-shot-route span {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
   }
 
   .lp-home-connectors-marquee {

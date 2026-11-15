@@ -9336,8 +9336,8 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
 .lp-home-hero-float img {
   display: block;
   width: 100%;
-  height: 168px;
-  object-fit: cover;
+  height: auto;
+  object-fit: contain;
   object-position: left top;
 }
 
@@ -9898,7 +9898,7 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
   }
 
   .lp-home-hero-float img {
-    height: 132px;
+    height: auto;
   }
 
   .lp-home-hero-stage {
@@ -9928,11 +9928,17 @@ html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
     min-width: 0;
   }
 
+  .lp-home-bento-cell .lp-home-shot,
   .lp-home-bento-cell.is-wide .lp-home-shot {
     height: auto;
     min-height: 0;
-    aspect-ratio: 16 / 10;
+    aspect-ratio: auto;
     margin-top: 16px;
+  }
+
+  .lp-home-bento-cell .lp-home-shot img {
+    height: auto;
+    object-fit: contain;
   }
 
   .lp-home-run-facts {
