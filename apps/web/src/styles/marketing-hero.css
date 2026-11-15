@@ -1402,7 +1402,7 @@
   justify-self: end;
 }
 
-@media (min-width: 840px) {
+@media (min-width: 1100px) {
   .lp .lp-mkt-chapter--band {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1422,9 +1422,10 @@
   }
 }
 
-@media (max-width: 839px) {
+@media (max-width: 1099px) {
   .lp .lp-mkt-chapter--band {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
   }
 
@@ -1451,9 +1452,9 @@
   }
 }
 
-@media (max-width: 839px) {
+@media (max-width: 1099px) {
   .lp-proof-beside {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -1769,6 +1770,37 @@
   margin-top: 0.45em;
   border-radius: 99px;
   background: var(--df-teal-600);
+}
+
+/* A screenshot's intrinsic width was taking the whole row, so the copy
+   column computed to 0px and each letter wrapped onto its own line.
+   Stack until both columns have room, the same point the hero stacks. */
+@media (max-width: 1099px) {
+  .lp .lp-home-steps > li,
+  .lp .lp-home-steps > li.is-flip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lp .lp-home-steps > li.is-flip > :first-child {
+    order: 0;
+  }
+
+  .lp .lp-home-steps > li > div {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .lp .lp-home-final-panel {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+  }
+
+  .lp .lp-home-final-panel h2,
+  .lp .lp-home-final-panel p {
+    max-width: none;
+  }
 }
 
 @media (max-width: 839px) {
