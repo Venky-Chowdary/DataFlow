@@ -217,9 +217,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             pin: "Operations → Jobs → Trust Report",
             body: "Open **Operations → Jobs** and select the run. Confirm **Quarantine** is empty (or review each rejected value and reason). Open **Trust Report** for completeness, quarantine, Gate-8, and freshness. Open **Reversibility** if the plan must give the source values back. Checksum **MATCH** is still the archiveable proof of the load. The trust score is not an exactly-once certificate.",
             figure: {
-              src: "/docs/screenshots/app-job-space-trust.png",
+              src: "/docs/screenshots/app-jobs.png",
               alt: "Job space Trust Report after the orders load",
-              caption: "Job space — trust score 92 and the orders that landed",
+              caption: "Job space — trust score and the rows that landed",
               markers: [
                 { n: 1, label: "Job", x: "28%", y: "40%" },
                 { n: 2, label: "MATCH", x: "70%", y: "55%" },
@@ -1102,9 +1102,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Open Query Playground",
         body: "Open **Operations → Query**. Pick a saved connector. The schema browser lists columns and types. Write a read-only SELECT. The sample below is open orders in `ANALYTICS.ORDERS`: `order_id`, `customer`, `amount` at scale 6, and `status`. Kafka topics and vector stores are not queried here.",
         figure: {
-          src: "/docs/screenshots/app-query-orders.png",
+          src: "/docs/screenshots/app-query.png",
           alt: "Query workspace with a read-only orders query and result rows",
-          caption: "Query — schema browser, SQL, and a row-limited read of ANALYTICS.ORDERS.",
+          caption: "Query — schema browser, SQL, and a row-limited read against a saved connector.",
           markers: [
             { n: 1, label: "Query nav", x: "8%", y: "58%" },
             { n: 2, label: "Editor", x: "55%", y: "45%" },
@@ -1137,7 +1137,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Open Job space",
         body: "Go to **Operations → Jobs**. Filter All / Running / Completed / Failed. Select a job. The detail tabs are **Detail**, **Mapping**, **Quarantine**, **Trust Report**, **Reversibility**, and **Log**. A completed run with rejected rows opens Quarantine first.",
         figure: {
-          src: "/docs/screenshots/app-job-space-trust.png",
+          src: "/docs/screenshots/app-jobs.png",
           alt: "Job space Trust Report for Orders nightly upsert, score 92, with sample rows",
           caption: "Job space — Trust Report on the orders upsert. Sample rows sit under the score.",
           markers: [
@@ -1194,9 +1194,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Trust Report",
         body: "The Trust Report is a composite of four factors: **completeness** (every source row is accounted for), **quarantine** (open bad rows), **Gate-8** (destination read-back), and **freshness** (CDC cursor lag). The orders example scores **92**, grade A, high confidence, with freshness at 84 because the cursor is 46 seconds behind.\n\nThe score is **not** an exactly-once certificate. CDC delivery stays at-least-once upsert until a named route proves otherwise. Use the next-step line on the card — for freshness, open the pipeline.",
         figure: {
-          src: "/docs/screenshots/app-job-space-trust.png",
+          src: "/docs/screenshots/app-jobs.png",
           alt: "Trust Report factors for the orders nightly upsert",
-          caption: "Trust Report — 92 from completeness 100, quarantine 100, Gate-8 96, freshness 84.",
+          caption: "Trust Report — completeness, quarantine, Gate-8, and freshness on the selected job.",
         },
       },
       {
@@ -1204,9 +1204,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Reversibility",
         body: "Open the **Reversibility** tab on the same job. With **Require reversibility** on, Execute stays locked until every written column can give the source value back. A hash, mask, redact, drop, or narrowing cast blocks. A conditional cast is checked on the sample and enforced on every row at write. A sample never proves rows that were not seen.\n\nTurning the requirement off does not make a lossy cast safe. It only stops gate `g24_reversibility` from blocking Execute. The orders plan in the sample is reversible: integer, varchar, decimal scale, and timestamp all round-trip. An email hash in that plan would block.",
         figure: {
-          src: "/docs/screenshots/app-job-space-reversibility.png",
+          src: "/docs/screenshots/app-jobs.png",
           alt: "Reversibility tab for a reversible orders plan",
-          caption: "Reversibility — order_id, customer, amount, and ordered_at round-trip. An email hash would block.",
+          caption: "Reversibility — each written column either round-trips or blocks Execute when the requirement is on.",
         },
       },
     ],

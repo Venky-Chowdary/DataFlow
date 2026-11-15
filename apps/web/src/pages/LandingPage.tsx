@@ -123,11 +123,11 @@ function ConnectorMarquee({
 
 const SURFACE_SHOTS: Record<string, string> = {
   studio: "/docs/screenshots/app-transfer-source.png",
-  theater: "/docs/screenshots/app-job-space-trust.png",
-  reversibility: "/docs/screenshots/app-job-space-reversibility.png",
+  theater: "/docs/screenshots/app-jobs.png",
+  reversibility: "/docs/screenshots/app-jobs.png",
   pipelines: "/docs/screenshots/app-pipelines.png",
   mcp: "/docs/screenshots/app-mcp.png",
-  query: "/docs/screenshots/app-query-orders.png",
+  query: "/docs/screenshots/app-query.png",
 };
 
 const SURFACES: {
@@ -298,7 +298,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
             <ProductShot
-              src="/docs/screenshots/app-job-space-trust.png"
+              src="/docs/screenshots/app-jobs.png"
               alt="Datawrap Job space — Trust Report 92 for a completed orders upsert, with sample rows"
               surface="Job space · Trust Report"
               route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}

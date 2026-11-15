@@ -75,14 +75,14 @@ const WORKSPACE_SHOTS = [
     caption: "Local Postgres, MySQL, MongoDB with Test passed / failed status.",
   },
   {
-    src: "/docs/screenshots/app-job-space-trust.png",
+    src: "/docs/screenshots/app-jobs.png",
     title: "Job space",
-    caption: "Trust Report on the orders upsert — score 92, with the rows that landed.",
+    caption: "Trust Report on a completed run, with the rows that landed.",
   },
   {
-    src: "/docs/screenshots/app-query-orders.png",
+    src: "/docs/screenshots/app-query.png",
     title: "Query",
-    caption: "Read-only orders query — schema, SQL, and a row-limited result.",
+    caption: "Read-only query — schema, SQL, and a row-limited result.",
   },
   {
     src: "/docs/screenshots/app-pilot.png",
@@ -645,7 +645,7 @@ function DocsWalkthrough() {
             </figure>
             <figure className="df2-docs-shot df2-docs-shot--wide">
               <img
-                src="/docs/screenshots/app-job-space-reversibility.png"
+                src="/docs/screenshots/app-jobs.png"
                 alt="Job space Reversibility tab for a reversible orders plan"
                 loading="lazy"
               />

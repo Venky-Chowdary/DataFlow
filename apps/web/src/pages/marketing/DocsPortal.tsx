@@ -63,7 +63,7 @@ function docsShotUrl(src: string): string {
 
 const SPACE_FRAMES = [
   {
-    src: docsShotUrl("/docs/screenshots/app-job-space-trust.png"),
+    src: docsShotUrl("/docs/screenshots/app-jobs.png"),
     alt: "Job space Trust Report for a completed orders upsert",
     caption: "1 · Jobs — Trust Report on the orders upsert, with the rows that landed",
   },
@@ -98,7 +98,7 @@ const SPACE_FRAMES = [
     caption: "7 · Schedules — cadence, mode, and health",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-query-orders.png"),
+    src: docsShotUrl("/docs/screenshots/app-query.png"),
     alt: "Query workspace with a read-only orders result",
     caption: "8 · Query — schema, SQL, and a row-limited read of ANALYTICS.ORDERS",
   },
@@ -196,11 +196,11 @@ function DocsSpaceShell({
 }
 
 const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl("/docs/screenshots/app-job-space-trust.png"),
+  start: docsShotUrl("/docs/screenshots/app-jobs.png"),
   transfer: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
   connect: docsShotUrl("/docs/screenshots/app-connectors.png"),
   ai: docsShotUrl("/docs/screenshots/app-mcp.png"),
-  ops: docsShotUrl("/docs/screenshots/app-job-space-reversibility.png"),
+  ops: docsShotUrl("/docs/screenshots/app-jobs.png"),
   enterprise: docsShotUrl("/docs/screenshots/app-pipelines.png"),
 };
 

@@ -3,11 +3,11 @@ import { DocsShotReel, type DocsShotFrame } from "../../components/docs/DocsShot
 
 /** Current workspace photography — never Overview (first-load count is a separate fix). */
 export const WORKSPACE_SHOT = {
-  jobs: "/docs/screenshots/app-job-space-trust.png",
-  jobReversibility: "/docs/screenshots/app-job-space-reversibility.png",
+  jobs: "/docs/screenshots/app-jobs.png",
+  jobReversibility: "/docs/screenshots/app-jobs.png",
   connectors: "/docs/screenshots/app-connectors.png",
   pipelines: "/docs/screenshots/app-pipelines.png",
-  query: "/docs/screenshots/app-query-orders.png",
+  query: "/docs/screenshots/app-query.png",
   pilot: "/docs/screenshots/app-pilot.png",
   mcp: "/docs/screenshots/app-mcp.png",
   transferSource: "/docs/screenshots/app-transfer-source.png",
