@@ -1790,6 +1790,40 @@
   }
 }
 
+/* One frame width for all five steps. Intrinsic widths (580, 604, 674)
+   left each screenshot on a different edge, so the card looked cut. */
+@media (min-width: 1100px) {
+  .lp .lp-home-steps > li,
+  .lp .lp-home-steps > li.is-flip {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 32px 48px;
+    align-items: center;
+  }
+
+  .lp .lp-home-steps .lp-product-shot,
+  .lp .lp-home-steps .lp-product-shot-chrome,
+  .lp .lp-home-steps .lp-product-shot-viewport {
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .lp .lp-home-steps .lp-product-shot-viewport {
+    aspect-ratio: auto;
+    height: auto;
+    background: var(--df-surface);
+  }
+
+  .lp .lp-home-steps .lp-product-shot-viewport img {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: none;
+    object-fit: contain;
+    object-position: center top;
+  }
+}
+
 @media (max-width: 720px) {
   .lp .lp-home-final-panel {
     grid-template-columns: minmax(0, 1fr);
