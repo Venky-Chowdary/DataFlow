@@ -2208,6 +2208,24 @@
   }
 }
 
+/* Demos page player matches the homepage shell. A 920px player
+   under a 1280px catalog left a gap on both sides. */
+.lp .lp-demos-player .lp-video-frame,
+.lp .lp-demos-player .lp-video-facade,
+.lp .lp-demos-current {
+  max-width: none;
+}
+
+.lp .lp-demos-grid-section {
+  background: var(--df-surface);
+  border-block: 1px solid var(--lp-line);
+  padding-block: clamp(36px, 5vh, 64px);
+}
+
+.lp .lp-demos-filter {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
 /* Product, solution, and company pages: every other block is a white
    scene. Closing panels stay on the page color so the teal card reads. */
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
