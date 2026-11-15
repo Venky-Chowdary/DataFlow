@@ -331,22 +331,13 @@ function ProductSteps() {
         <li key={c.step} id={`step-${c.name.toLowerCase()}`}>
           <span>{c.step}</span>
           <div>
-            <h3>
-              {c.name}. {c.title}
-            </h3>
+            <p className="lp-home-steps-name">{c.name}</p>
+            <h3>{c.title}</h3>
             <p>{c.body}</p>
           </div>
         </li>
       ))}
     </ol>
-  );
-}
-
-function Shot({ src, alt }: { src: string; alt: string }) {
-  return (
-    <span className="lp-home-shot">
-      <img src={src} alt={alt} loading="lazy" decoding="async" />
-    </span>
   );
 }
 
@@ -454,7 +445,6 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                     <DtIcon name="arrow-right" size={14} />
                   </button>
                 </div>
-                <Shot src={f.shot} alt={f.alt} />
               </article>
             ))}
           </Reveal>

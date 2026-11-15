@@ -1155,6 +1155,15 @@
   letter-spacing: 0.04em;
 }
 
+.lp-home-steps-name {
+  margin: 0 0 4px;
+  color: var(--df-teal-600);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .lp-home-steps h3 {
   margin: 0 0 6px;
   color: var(--lp-ink);
@@ -1219,6 +1228,35 @@
 
   .lp .lp-product-shot-chrome {
     box-shadow: var(--lp-shadow-editorial);
+  }
+
+  .lp-home-bento {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .lp-home-bento-cell,
+  .lp-home-bento-cell.is-wide,
+  .lp-home-bento-cell.is-narrow,
+  .lp-home-bento-cell.is-third {
+    display: flex;
+    flex-direction: column;
+    grid-column: span 2;
+  }
+
+  .lp-home-bento-copy {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+
+  .lp-home-bento-copy .lp-home-link {
+    margin-top: auto;
+    padding-top: 18px;
+  }
+
+  .lp-home-bento-cell:nth-child(4),
+  .lp-home-bento-cell:nth-child(5) {
+    grid-column: span 3;
   }
 
   .lp-home-bento-cell .lp-home-shot,
