@@ -322,20 +322,37 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
   );
 }
 
+function StepBand({
+  step,
+  flip,
+}: {
+  step: (typeof CHAPTERS)[number];
+  flip: boolean;
+}) {
+  const { ref, className } = useRevealOnScroll<HTMLLIElement>(0.18);
+  return (
+    <li
+      ref={ref}
+      id={`step-${step.name.toLowerCase()}`}
+      className={`${className}${flip ? " is-flip" : ""}`}
+    >
+      <div>
+        <p className="lp-home-steps-name">
+          {step.step} · {step.name}
+        </p>
+        <h3>{step.title}</h3>
+        <p>{step.body}</p>
+      </div>
+      <ProductShot src={step.shot} alt={step.alt} surface={step.surface} />
+    </li>
+  );
+}
+
 function ProductSteps() {
   return (
     <ol className="lp-home-steps">
       {CHAPTERS.map((c, i) => (
-        <li key={c.step} id={`step-${c.name.toLowerCase()}`} className={i % 2 ? "is-flip" : ""}>
-          <div>
-            <p className="lp-home-steps-name">
-              {c.step} · {c.name}
-            </p>
-            <h3>{c.title}</h3>
-            <p>{c.body}</p>
-          </div>
-          <ProductShot src={c.shot} alt={c.alt} surface={c.surface} />
-        </li>
+        <StepBand key={c.step} step={c} flip={i % 2 === 1} />
       ))}
     </ol>
   );
@@ -401,8 +418,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       <section className="lp-home-stack" aria-label="Works with your stack">
         <p className="lp-home-stack-label">Works with the systems you already run</p>
         <div className="lp-home-stack-row">
-          {STACK_IDS.map((id) => (
-            <span key={id} className="lp-home-stack-item" title={connectorDisplayName(id)}>
+          {STACK_IDS.map((id, i) => (
+            <span
+              key={id}
+              className="lp-home-stack-item"
+              style={{ ["--i" as string]: i }}
+              title={connectorDisplayName(id)}
+            >
               <ConnectorIcon id={id} size={28} />
               <em>{connectorDisplayName(id)}</em>
             </span>

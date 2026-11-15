@@ -87,7 +87,10 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
         const r = el.getBoundingClientRect();
         const hostRect = root instanceof Element ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
         const trigger = isMarketing ? hostRect.bottom - hostRect.top * 0.18 : hostRect.bottom - 24;
-        if (r.top < trigger && r.bottom > hostRect.top + 24) reveal();
+        // A fast jump can skip the intersection frame. Anything whose top has
+        // crossed the trigger has been seen, including bands already above.
+        const seen = isMarketing ? r.top < trigger : r.top < trigger && r.bottom > hostRect.top + 24;
+        if (seen) reveal();
       };
       scrollHost.addEventListener("scroll", onScroll, { passive: true });
 

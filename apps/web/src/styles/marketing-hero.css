@@ -1494,3 +1494,98 @@
     padding: 28px 22px;
   }
 }
+
+/* Scroll motion matches the band: copy-left slides in from the left,
+   the flipped band from the right. The product frame settles a beat later. */
+.lp-home-steps li.lp-reveal {
+  opacity: 0;
+  transform: translate3d(-28px, 18px, 0);
+}
+
+.lp-home-steps li.is-flip.lp-reveal {
+  transform: translate3d(28px, 18px, 0);
+}
+
+.lp-home-steps li.lp-reveal--in {
+  opacity: 1;
+  transform: none;
+}
+
+.lp-home-steps li.lp-reveal .lp-product-shot {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.lp-home-steps li.lp-reveal--in .lp-product-shot {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 720ms cubic-bezier(0.22, 1, 0.36, 1) 90ms,
+    transform 720ms cubic-bezier(0.22, 1, 0.36, 1) 90ms;
+}
+
+.lp-home-stack-item {
+  animation: lp-home-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+.lp .lp-mkt-hero-visual,
+.lp .lp-sol-hero-visual {
+  animation: lp-home-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.14s both;
+}
+
+.lp-proof-beside,
+.lp .lp-mkt-chapter--band,
+.lp-home-bento-cell,
+.lp-sol-outcome,
+.lp-ent-capability,
+.lp-sec-layer-card {
+  transition:
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 320ms ease;
+}
+
+@media (hover: hover) {
+  .lp-home-steps li.lp-reveal--in:hover,
+  .lp-proof-beside:hover,
+  .lp .lp-mkt-chapter--band:hover,
+  .lp-home-bento-cell:hover,
+  .lp-sol-outcome:hover,
+  .lp-ent-capability:hover,
+  .lp-sec-layer-card:hover {
+    border-color: var(--df-teal-600);
+    box-shadow: var(--lp-shadow-editorial);
+  }
+
+  .lp-proof-beside:hover,
+  .lp .lp-mkt-chapter--band:hover,
+  .lp-sol-outcome:hover,
+  .lp-ent-capability:hover,
+  .lp-sec-layer-card:hover {
+    transform: translateY(-3px);
+  }
+
+  .lp-home-steps li:hover .lp-product-shot-chrome,
+  .lp-proof-beside:hover .lp-product-shot-chrome,
+  .lp .lp-mkt-chapter--band:hover .lp-product-shot-chrome,
+  .lp-home-hero-stage:hover .lp-product-shot-chrome {
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-home-steps li.lp-reveal,
+  .lp-home-steps li.is-flip.lp-reveal,
+  .lp-home-steps li.lp-reveal--in,
+  .lp-home-steps li.lp-reveal .lp-product-shot,
+  .lp-home-steps li.lp-reveal--in .lp-product-shot,
+  .lp-home-stack-item,
+  .lp .lp-mkt-hero-visual,
+  .lp .lp-sol-hero-visual {
+    opacity: 1;
+    transform: none;
+    animation: none;
+    transition: none;
+  }
+}
