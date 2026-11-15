@@ -2146,3 +2146,18 @@
     padding: 40px 0 24px !important;
   }
 }
+
+/* Full-width bands. Fivetran and Airbyte break a long page into scenes
+   instead of one continuous wash. Cards keep their hairline on the white. */
+.lp .lp-home-features,
+.lp .lp-home-cases,
+.lp .lp-cust3-stories {
+  background: var(--df-surface);
+  border-block: 1px solid var(--lp-line);
+  padding-block: clamp(56px, 7vh, 88px);
+}
+
+.lp .lp-home-questions {
+  background: transparent;
+  border: 0;
+}
