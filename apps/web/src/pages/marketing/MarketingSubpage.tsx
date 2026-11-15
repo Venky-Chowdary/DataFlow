@@ -602,22 +602,17 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
         <div className="lp-shell lp-cust3-metrics-row">
-          <div>
-            <strong>Migrations</strong>
-            <span>Database cutover with identity, FK, and Unicode carry</span>
-          </div>
-          <div>
-            <strong>Warehouses</strong>
-            <span>Snowflake, BigQuery, Apache Iceberg — MERGE + verified</span>
-          </div>
-          <div>
-            <strong>Lakes</strong>
-            <span>Amazon S3, ADLS, Google Cloud Storage — exact decimals</span>
-          </div>
-          <div>
-            <strong>CDC</strong>
-            <span>Snapshot, stream from the database log, resume</span>
-          </div>
+          {[
+            ["Migrations", "Database cutover with identity, FK, and Unicode carry"],
+            ["Warehouses", "Snowflake, BigQuery, Apache Iceberg — MERGE + verified"],
+            ["Lakes", "Amazon S3, ADLS, Google Cloud Storage — exact decimals"],
+            ["CDC", "Snapshot, stream from the database log, resume"],
+          ].map(([title, body], i) => (
+            <div key={title} style={{ ["--i" as string]: i }}>
+              <strong>{title}</strong>
+              <span>{body}</span>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -1169,8 +1164,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             </p>
           </div>
           <div className="lp-int-family-grid">
-            {MARKETING_STACK.map((f) => (
-              <article key={f.family} className="lp-int-family-card">
+            {MARKETING_STACK.map((f, i) => (
+              <article key={f.family} className="lp-int-family-card" style={{ ["--reveal-i" as string]: i }}>
                 <header>
                   <h3>{f.family}</h3>
                   <span>{f.badge}</span>
@@ -1228,7 +1223,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open connector catalog
             </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate("product-transfer")}>
               See Transfer Studio →
             </button>
           </div>

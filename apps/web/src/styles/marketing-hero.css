@@ -1456,41 +1456,66 @@
 
 /* Warehouse and solution closes use the same panel as the homepage. */
 .lp .lp-wh-cta,
-.lp .lp-sol-footer {
-  background: transparent;
+.lp .lp-sol-footer,
+.lp .lp-cust3-cta,
+.lp .lp-pricing-v2-cta,
+.lp .lp-ent-cta-band {
+  background: transparent !important;
   padding-block: var(--lp-section-y);
 }
 
 .lp .lp-wh-cta-inner,
-.lp .lp-sol-footer-inner {
+.lp .lp-sol-footer-inner,
+.lp .lp-cust3-cta-inner,
+.lp .lp-pricing-v2-cta-inner,
+.lp .lp-ent-cta-inner,
+.lp .lp-int-cta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 28px 40px;
   align-items: center;
+  width: min(var(--lp-shell), calc(100% - 32px));
+  margin-inline: auto;
   padding: 36px 40px;
-  border-radius: 20px;
+  border-radius: 20px !important;
   background:
     radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
-    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
+    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%) !important;
 }
 
 .lp .lp-wh-cta h2,
 .lp .lp-wh-cta p,
 .lp .lp-sol-footer h2,
-.lp .lp-sol-footer p {
+.lp .lp-sol-footer p,
+.lp .lp-cust3-cta h2,
+.lp .lp-cust3-cta p,
+.lp .lp-pricing-v2-cta h3,
+.lp .lp-pricing-v2-cta p,
+.lp .lp-ent-cta-band h2,
+.lp .lp-ent-cta-band p,
+.lp .lp-int-cta h2,
+.lp .lp-int-cta p {
   max-width: 36rem;
   margin-left: 0;
   color: var(--df-success-bg);
 }
 
 .lp .lp-wh-cta p,
-.lp .lp-sol-footer p {
+.lp .lp-sol-footer p,
+.lp .lp-cust3-cta p,
+.lp .lp-pricing-v2-cta p,
+.lp .lp-ent-cta-band p,
+.lp .lp-int-cta p {
   color: rgba(236, 253, 245, 0.78);
 }
 
 @media (max-width: 839px) {
   .lp .lp-wh-cta-inner,
-  .lp .lp-sol-footer-inner {
+  .lp .lp-sol-footer-inner,
+  .lp .lp-cust3-cta-inner,
+  .lp .lp-pricing-v2-cta-inner,
+  .lp .lp-ent-cta-inner,
+  .lp .lp-int-cta {
     grid-template-columns: 1fr;
     padding: 28px 22px;
   }
@@ -1832,7 +1857,51 @@
 
 @media (prefers-reduced-motion: reduce) {
   .lp .lp-reveal--in .lp-mkt-algo-steps li,
-  .lp .lp-reveal--in .lp-mkt-scenario li {
+  .lp .lp-reveal--in .lp-mkt-scenario li,
+  .lp .lp-cust3-metrics-row > div,
+  .lp .lp-reveal--in .lp-int-family-card {
     animation: none;
   }
+}
+
+/* Customers and connectors: the plain divided strip becomes the same card
+   row as the homepage promises. Family cards share one height. */
+.lp .lp-cust3-metrics {
+  background: transparent;
+  border-bottom: 0;
+}
+
+.lp .lp-cust3-metrics-row {
+  gap: 14px;
+  padding-block: 28px 8px;
+}
+
+.lp .lp-cust3-metrics-row > div {
+  padding: 20px 18px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--lp-shadow-soft);
+  animation: lp-home-rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+.lp .lp-int-family-grid {
+  align-items: stretch;
+}
+
+.lp .lp-int-family-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.lp .lp-int-family-icons {
+  margin-top: auto;
+  padding-top: 16px;
+}
+
+.lp .lp-reveal--in .lp-int-family-card {
+  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--reveal-i, 0) * 60ms);
 }
