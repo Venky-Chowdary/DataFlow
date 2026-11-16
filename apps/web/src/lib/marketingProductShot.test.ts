@@ -53,7 +53,7 @@ describe("marketing product photography", () => {
   it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /shot: WORKSPACE_SHOT\.transferSource/);
-    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesCard/);
+    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesHistory/);
     assert.doesNotMatch(home, /\/docs\/screenshots\//);
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });
@@ -63,7 +63,7 @@ describe("marketing product photography", () => {
     assert.match(surfaces, /ProductShot/);
     assert.match(surfaces, /WORKSPACE_SHOT\.jobTrust/);
     assert.match(surfaces, /WORKSPACE_SHOT\.transferMap/);
-    assert.match(surfaces, /WORKSPACE_SHOT\.schedules/);
+    assert.match(surfaces, /WORKSPACE_SHOT\.schedulesHistory/);
     assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
     assert.doesNotMatch(surfaces, /MappingCinema|ProofCinema|CdcCinema/);
     assert.doesNotMatch(surfaces, /Job Theater/);
