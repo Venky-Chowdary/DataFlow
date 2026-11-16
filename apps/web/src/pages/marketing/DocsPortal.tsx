@@ -65,7 +65,7 @@ function docsShotUrl(src: string): string {
 const SPACE_FRAMES = [
   {
     src: docsShotUrl(WORKSPACE_SHOT.jobTrust),
-    alt: "Job space Trust Report: 5,100 rows in source and destination, 0 differ, full checksum match",
+    alt: "Job space Trust Report: 5,100 rows in source and destination, full checksum match",
     caption: "1 · Job space: Trust Report for the sales_orders load into Snowflake",
   },
   {
@@ -90,13 +90,13 @@ const SPACE_FRAMES = [
   },
   {
     src: docsShotUrl(WORKSPACE_SHOT.transferValidate),
-    alt: "Transfer Studio Validate: 17 passed, 0 blocked, 6 skipped",
-    caption: "6 · Validate: the gates that must pass before Run unlocks",
+    alt: "Transfer Studio Validate: 17 gates passed, Execute unlocked",
+    caption: "6 · Validate: the gates are clear and Run is unlocked",
   },
   {
-    src: docsShotUrl(WORKSPACE_SHOT.schedules),
-    alt: "Schedules list with one parked schedule",
-    caption: "7 · Schedules: cadence, mode, last run, and why a schedule parked",
+    src: docsShotUrl(WORKSPACE_SHOT.schedulesHistory),
+    alt: "Run history for the Orders feed, each run linked to its job",
+    caption: "7 · Schedules: cadence, mode, and a job for every tick",
   },
   {
     src: docsShotUrl(WORKSPACE_SHOT.query),

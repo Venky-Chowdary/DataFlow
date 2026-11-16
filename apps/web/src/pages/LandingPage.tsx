@@ -137,7 +137,7 @@ const CHAPTERS: Chapter[] = [
     step: "03",
     name: "Validate",
     title: "Checks run before a single row is written",
-    body: "Nine core checks run on every route, from source access to dry-run coercion, plus the policy checks the route needs. A failed check stops the write, names the cause, and links the control that fixes it.",
+    body: "Nine core checks run on every route, from source access to dry-run coercion, plus the policy checks the route needs. On this route, 23 checks finished clear and the write opened.",
     facts: [
       "23 checks on this route, none blocking",
       "New tables wait for DDL sign-off",
@@ -150,11 +150,11 @@ const CHAPTERS: Chapter[] = [
   {
     step: "04",
     name: "Run",
-    title: "Clean rows land. Bad rows wait in quarantine.",
-    body: "Rows are written in batches with bound parameters. A value that cannot fit the destination is held back with its column, value, and reason, and replays into the same table once the source or the map is fixed.",
+    title: "Clean rows land, and every row is counted.",
+    body: "Rows are written in batches with bound parameters. On the Snowflake run, 5,100 rows were read and 5,100 were written.",
     facts: [
       "Insert, merge, or stored-procedure writes",
-      "Quarantine with replay into the same table",
+      "5,100 written, destination count 5,100",
       "A live log for every batch",
     ],
     shot: WORKSPACE_SHOT.transferRunComplete,
@@ -165,14 +165,14 @@ const CHAPTERS: Chapter[] = [
     step: "05",
     name: "Prove",
     title: "The destination is read back and compared",
-    body: "After the write, Datawrap reads the destination and compares it with the source: row counts, a checksum, and a value census by key. When values differ by design, each difference is listed with its reason.",
+    body: "After the write, Datawrap reads the destination and compares it with the source: row counts, a checksum, and a value census by key. On this run both sides are 5,100, and the checksum matches.",
     facts: [
       "Source and destination counts side by side",
-      "Differences explained per column, not hidden",
+      "Full checksum, match on every table",
       "A report you can export and sign off",
     ],
-    shot: WORKSPACE_SHOT.jobTrustExplained,
-    alt: "Trust Report for a MongoDB load: 5,100 source rows, 3,756 in the destination, 1,344 differences, every one explained",
+    shot: WORKSPACE_SHOT.jobTrust,
+    alt: "Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match",
     surface: "Job space · Trust Report",
   },
 ];
@@ -192,10 +192,10 @@ type Feature = {
 const FEATURES: Feature[] = [
   {
     id: "schedules",
-    title: "Recurring syncs that stop when they should",
-    body: "Incremental, upsert, append, mirror, or CDC on your cadence. Every run is a full job with every check. When a run needs a decision, the schedule parks and tells you exactly what to change.",
-    shot: WORKSPACE_SHOT.schedulesCard,
-    alt: "Schedules: one schedule parked on a finding, upsert needs a business key, with the fix and an Open Transfer Studio button",
+    title: "The same checks, on your cadence",
+    body: "Incremental, upsert, append, mirror, or CDC. Every tick is a full job with the same gates and the same read-back as a run you start by hand.",
+    shot: WORKSPACE_SHOT.schedulesHistory,
+    alt: "Run history for the Orders feed schedule, each run linked to its job",
     route: "product-pipelines",
     link: "Explore Schedules",
     size: "wide",
@@ -250,7 +250,7 @@ const FEATURES: Feature[] = [
 const QUESTIONS: { q: string; a: string; where: string }[] = [
   {
     q: "Did every row arrive?",
-    a: "Rows in the source, rows in the destination, and rows that differ, from a read-back of the destination itself.",
+    a: "Rows in the source and rows in the destination, from a read-back. On this run, 5,100 and 5,100, checksum match.",
     where: "Trust Report",
   },
   {
@@ -259,18 +259,18 @@ const QUESTIONS: { q: string; a: string; where: string }[] = [
     where: "Map",
   },
   {
-    q: "What stopped the load?",
-    a: "The check that failed, the reason, and the control that fixes it. Nothing was written.",
+    q: "What did the checks say?",
+    a: "Each check is named, with its result. On this route, 23 checks finished clear and the write opened.",
     where: "Validate",
   },
   {
-    q: "Where did the bad rows go?",
-    a: "Quarantine keeps the column, the value, and the reason. Replay sends them to the same table.",
+    q: "Where is every row accounted for?",
+    a: "The job lists rows read, rows written, and the destination count. Replay sends a held row into the same table.",
     where: "Quarantine",
   },
   {
     q: "Could we rebuild the source from the copy?",
-    a: "Each column is marked invertible or not, with the transform that made it lossy.",
+    a: "On the Snowflake run, 11 of 11 columns round-trip, so the destination can give the data back.",
     where: "Reversibility",
   },
   {
@@ -385,7 +385,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </h1>
           <p className="lp-home-hero-sub">
             Map columns across systems that were never designed to match. Stop a bad write before
-            it starts, then read the destination back and see which rows differ, and why.
+            it starts, then read the destination back and show the checksum match.
           </p>
           <div className="lp-home-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -410,7 +410,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span>rows read back</span>
             </li>
             <li>
-              <strong>0 differ</strong>
+              <strong>Match</strong>
               <span>full checksum</span>
             </li>
           </ul>
@@ -457,12 +457,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               {
                 n: "02",
                 title: "Stop a bad write",
-                body: "Checks run before the first row. One failure locks the write and names the control that fixes it.",
+                body: "Checks run before the first row. On this route, 23 checks finished clear and the write opened.",
               },
               {
                 n: "03",
                 title: "Read it back",
-                body: "The destination is counted and checksummed against the source. Every difference stays listed.",
+                body: "The destination is counted and checksummed against the source. On this run both sides are 5,100.",
               },
             ].map((item, i) => (
               <article key={item.n} className="lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
@@ -485,7 +485,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             {[
               ["11 / 11", "Columns mapped, none flagged"],
               ["5,100", "Rows in the source and in Snowflake"],
-              ["0", "Rows that differ on the checksum"],
+              ["Match", "Full checksum on every table"],
               ["23", "Gates checked before the write"],
             ].map(([value, label], i) => (
               <div key={label} style={{ ["--reveal-i" as string]: i }}>
@@ -629,7 +629,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       <section className="lp-home-videos" id="demos" aria-label="Video demos">
         <div className="lp-home-videos-inner">
           <SectionHead kicker="Watch it work" title="Real runs, recorded end to end">
-            Quarantine and replay, schema drift, and native CDC on the production engine. Each
+            Mapping, CDC, and the checksum match, recorded on the production engine. Each
             video ends where every transfer should: with the read-back.
           </SectionHead>
           <div className="lp-home-videos-feature">

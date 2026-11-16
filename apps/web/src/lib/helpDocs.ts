@@ -1187,39 +1187,23 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "trust",
         title: "Trust Report",
-        body: "The Trust Report reads both systems after the write and puts four numbers side by side: **rows in source**, **rows in destination**, **rows differ**, and, when they differ, how many are **explained**. Each table gets a line with the check that was run, such as a full checksum, and a status of **Match** or **Explained**.\n\nFor the Snowflake run: 5,100 rows in each, 0 differ, full checksum, Match. Under **How sure is this?** it says every row was compared and none differs.\n\nIt is not an exactly-once certificate. Delivery is at-least-once, and CDC is at-least-once upsert unless a route proves otherwise.",
+        body: "The Trust Report reads both systems after the write. For the Snowflake run: 5,100 rows in the source, 5,100 in the destination, full checksum, Match. Under **How sure is this?** every row was compared.\n\nDelivery is at-least-once, and CDC is at-least-once upsert unless a route proves otherwise.",
         figure: {
           src: WORKSPACE_SHOT.jobTrust,
-          alt: "Trust Report: 100% rows proven equal, 5,100 in source, 5,100 in destination, 0 differ, full checksum Match",
-          caption: "Trust Report for the Snowflake run: 5,100 on each side, 0 differ, full checksum Match.",
+          alt: "Trust Report: 5,100 in source, 5,100 in destination, full checksum Match",
+          caption: "Trust Report for the Snowflake run: 5,100 on each side, full checksum Match.",
           markers: [
             { n: 1, label: "Proven equal", x: "57%", y: "32%" },
             { n: 2, label: "Rows in source", x: "82%", y: "45%" },
-            { n: 3, label: "Rows differ", x: "82%", y: "62%" },
+            { n: 3, label: "Checksum", x: "82%", y: "62%" },
             { n: 4, label: "Match", x: "91%", y: "87%" },
           ],
         },
       },
       {
-        id: "explained",
-        title: "When rows differ for a known reason",
-        body: "A difference is not always an error. A second run of the same table into MongoDB used a recipe that filters rows, so 3,756 of 5,100 rows landed. The report shows **1,344 rows differ** and **1,344 / 1,344 explained**, and the table's status is **Explained** rather than Match. The **Differences** section names the cause: the recipe filtered or inverted rows as configured.\n\nIf any difference is unexplained, the table does not pass, and the report says how many rows are affected.",
-        figure: {
-          src: WORKSPACE_SHOT.jobTrustExplained,
-          alt: "Trust Report for the MongoDB run: 5,100 in source, 3,756 in destination, 1,344 differ, all explained",
-          caption: "MongoDB run: 1,344 rows differ and all 1,344 are explained by the filter in the recipe.",
-          markers: [
-            { n: 1, label: "Rows in destination", x: "80%", y: "45%" },
-            { n: 2, label: "Explained", x: "80%", y: "53%" },
-            { n: 3, label: "Explained status", x: "91%", y: "89%" },
-          ],
-        },
-        tip: "The ring still reads 100% because every difference is explained. Read it together with **rows differ**; the two numbers answer different questions.",
-      },
-      {
         id: "reversibility",
         title: "Reversibility",
-        body: "The **Reversibility** tab answers a different question: could the destination give the source values back? Each column is marked **Invertible**, **Conditional**, or **Lossy**, with the reason, and the table gets a rollback plan.\n\nOn the Snowflake run all 11 columns are invertible. `order_id` keeps `BIGINT` and the text columns widen to `VARCHAR`, so the rollback is **Restore from destination**. On the MongoDB run, `ordered_at` was truncated from `TIMESTAMPTZ` to a date and the filter step dropped rows, so the table is **Partly** reversible and the rollback says to keep the source as fallback.\n\nGate **G24R** blocks Execute only when the route is marked **Require reversibility**. Turning that off does not make a lossy cast safe; it only stops the gate from blocking. Datawrap does not undo committed rows for you. It tells you what a rollback would take.",
+        body: "The **Reversibility** tab answers whether the destination can give the source values back. On the Snowflake run all 11 columns are invertible. `order_id` keeps `BIGINT` and the text columns widen to `VARCHAR`, so the rollback is **Restore from destination**.",
         figure: {
           src: WORKSPACE_SHOT.jobReversibilityColumns,
           alt: "Reversibility tab for the Snowflake run: all 11 columns invertible",

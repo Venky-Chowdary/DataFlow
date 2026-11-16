@@ -573,7 +573,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         lead={
           <>
             One finished run is on the page: 5,100 orders from Postgres into Snowflake, every
-            column mapped, a full checksum, nothing differing. Book a pilot and get the same
+            column mapped, full checksum match. Book a pilot and get the same
             evidence on <em>your</em> sources and destinations.
           </>
         }

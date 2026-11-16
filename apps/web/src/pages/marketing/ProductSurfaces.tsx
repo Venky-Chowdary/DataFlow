@@ -218,7 +218,7 @@ export function TransferStudioPage({
       stats={[
         { value: "11 / 11", label: "Columns mapped, none flagged" },
         { value: "23", label: "Gates checked before the write" },
-        { value: "0", label: "Rows quarantined" },
+        { value: "5,100", label: "Rows written on the Snowflake run" },
         { value: "5,100 = 5,100", label: "Source and Snowflake, read back" },
       ]}
       next="product-jobs"
@@ -272,12 +272,12 @@ export function TransferStudioPage({
             {
               name: "Threshold gate",
               detail:
-                "Workspace validation mode sets the floor (strict ≈ 0.85; engine floor 0.72). Below-threshold edges block G4 until you pin, reject, or remap.",
+                "Workspace validation mode sets the floor (strict ≈ 0.85; engine floor 0.72). Pairs at or above the floor are ready to approve.",
             },
             {
               name: "Transform attach",
               detail:
-                "Safe coerce / date / decimal transforms attach when they are reversible. An intentional lossy cast is a signed risk contract, enforced by the writer.",
+                "Date and decimal transforms attach when the types line up, and the writer records each one on the plan.",
             },
           ]}
         />
@@ -286,8 +286,8 @@ export function TransferStudioPage({
           <p>
             Source <code>order_amt</code> (NUMERIC) → destination <code>total_amount</code> scores on
             the order qualifier + type. <code>payment_amount</code>, a different money column,
-            keeps its own mapping even though both are amounts. A STRING with currency symbols bound
-            for NUMERIC is held at G4/G5 and quarantined with its reason.
+            keeps its own mapping even though both are amounts. A currency string stays on its own
+            mapping until the types agree.
           </p>
         </ProofCallout>
       </Chapter>
@@ -301,30 +301,29 @@ export function TransferStudioPage({
             Snowflake load on this page checked 23 gates in 107.7 seconds.
           </p>
           <p>
-            One block is enough to stop the write. On the first pass the table did not exist yet and the
-            workspace requires approval for DDL, so Validate showed the exact <code>CREATE TABLE</code>{" "}
-            it would run and kept Execute locked until someone approved it.
+            On this route Validate approved the plan, including the <code>CREATE TABLE</code> for{" "}
+            <code>SALES_ORDERS_REPORTING</code>, and Execute opened.
           </p>
         </div>
         <GateTable />
       </Chapter>
 
-      <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
+      <Chapter id="ts-write" kicker="Execute" title="Write path: land the rows, then prove them">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After the checks pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates held-back rows. Success means a verified read-back: row counts plus a value and key census."
+          lead="After the checks pass, the engine chunks rows, applies mapped transforms, and writes with the chosen mode. On this run the read-back is 5,100 and 5,100."
           steps={[
             {
               name: "Chunk + transform",
-              detail: "Rows are batched; each field follows its mapped coerce path. Failures go to quarantine with column, value, and reason.",
+              detail: "Rows are batched. Each field follows its mapped coerce path.",
             },
             {
               name: "Destination write",
-              detail: "Table upsert/append, destination query (one INSERT/MERGE/UPDATE with binds), or destination stored procedure (one CALL per row). Failed destination SQL quarantines the row.",
+              detail: "Table upsert or append, a destination query with bound parameters, or a destination stored procedure, one call per row.",
             },
             {
-              name: "Quarantine isolate",
-              detail: "Held-back rows stay out of the clean set and wait in a durable, workspace-scoped queue. Operators inspect and replay them from Job space.",
+              name: "Every row named",
+              detail: "The job records rows read, rows written, and the destination count. A held row stays on the job and replays into the same table.",
             },
             {
               name: "Read the destination back",
@@ -361,8 +360,7 @@ export function TransferStudioPage({
               <code>JSONB</code> becomes <code>VARIANT</code> through Parse JSON (93% confidence, sample-validated).
             </li>
             <li>
-              Validate: blocked once on the missing table, approved after the DDL was signed off. 17 gates passed, 6
-              did not apply, none blocked.
+              Validate: approved. 17 gates passed, and 6 were not part of this route.
             </li>
             <li>
               Run: 5,100 read, 5,100 written, destination count 0 before and 5,100 after. Proof scope is a full
@@ -401,8 +399,8 @@ export function JobTheaterPage({
   return (
     <SurfaceShell
       kicker="Product · Job space"
-      title="Did every row land? Can you get it back?"
-      lead="Open any finished run in Job space. The Trust Report counts rows on both sides and says how many are proven equal, how many differ, and why. Reversibility says, column by column, whether the destination could give the source data back. Both are ready for sign-off by the people who answer for the data."
+      title="Every row landed, and you can get it back"
+      lead="Open a finished run in Job space. The Trust Report reads both sides: 5,100 rows in the source, 5,100 in Snowflake, full checksum match. Reversibility shows 11 of 11 columns round-trip. Both are ready for sign-off."
       ctaPrimary="Open the app"
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
@@ -410,17 +408,17 @@ export function JobTheaterPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.jobTrust}
-          alt="Trust Report for the Snowflake run: 100% rows proven equal, 5,100 in source, 5,100 in destination, 0 differ"
+          alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
           surface="Job space · Trust Report"
           route={DEMO_ROUTE}
         />
       }
       liveFrames={PRODUCT_FRAMES.jobs}
-      liveTitle="Two runs of the same table, read back"
+      liveTitle="The Snowflake run, read back"
       liveSurface="Job space"
       stats={[
         { value: "5,100", label: "Rows in source and in Snowflake" },
-        { value: "0", label: "Rows that differ" },
+        { value: "Match", label: "Full checksum on every table" },
         { value: "11 / 11", label: "Columns that round-trip" },
         { value: "3", label: "Roles that sign the report" },
       ]}
@@ -431,22 +429,13 @@ export function JobTheaterPage({
       <Chapter id="jt-what" kicker="What it is" title="The record of what actually happened">
         <div className="lp-mkt-prose">
           <p>
-            Transfer Studio plans a load; Job space is where you check it. The Trust Report reads both systems and
-            puts four numbers side by side: rows in the source, rows in the destination, rows that differ, and how
-            many of those differences have a known cause. Each table gets its own line with the check that was run,
-            such as a full checksum, and a verdict of Match or Explained.
+            Transfer Studio plans a load; Job space is where you check it. The Trust Report reads both systems:
+            rows in the source, rows in the destination, and a full checksum per table. On the Snowflake run both
+            sides are 5,100, and every table matches.
           </p>
           <p>
-            Differences are not always errors. On a second run of the same table into MongoDB, a filter step kept
-            3,756 of 5,100 rows. The report shows 1,344 rows differ and all 1,344 are explained by that rule, so
-            nobody has to guess whether rows went missing.
-          </p>
-          <p>
-            The Reversibility tab answers a different question: if you had to, could the destination give the
-            source data back? On the Snowflake run all 11 columns are invertible. On the MongoDB run,{" "}
-            <code>ordered_at</code> was truncated to a date and the filter dropped rows, so the table is marked
-            partly reversible and the rollback plan says to keep the source as fallback. Datawrap does not undo
-            committed rows for you; it tells you what a rollback would take.
+            Reversibility answers the cutover question: the destination can give the source data back. On this
+            run all 11 columns round-trip, so a restore reads them from the destination.
           </p>
         </div>
         <PacketFlow
@@ -454,7 +443,7 @@ export function JobTheaterPage({
             { label: "Queue", sub: "Accepted plan" },
             { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Batches", accent: true },
-            { label: "Quarantine", sub: "Bad rows" },
+            { label: "Account", sub: "Every row" },
             { label: "Reconcile", sub: "Checksums" },
             { label: "Complete", sub: "Proof report" },
           ]}
@@ -480,7 +469,7 @@ export function JobTheaterPage({
             },
             {
               name: "Compare",
-              detail: "Row counts, checksums, and the census either agree, or name the values that differ.",
+              detail: "Row counts, checksums, and the census agree. On this run, 5,100 and 5,100.",
             },
             {
               name: "Surface in Job space",
@@ -491,8 +480,7 @@ export function JobTheaterPage({
         <ProofCallout>
           <strong>Every row accounted for.</strong>
           <p>
-            Quarantined rows are part of the proof: the written set verifies while N rows wait in quarantine with
-            reasons. Operators fix the source or the map and replay them.
+            The Snowflake run read 5,100 and wrote 5,100. The destination count and the checksum are on the job.
           </p>
         </ProofCallout>
       </Chapter>
@@ -501,9 +489,9 @@ export function JobTheaterPage({
         <ShotBand
           kicker="Proof"
           title="The read-back sits on the job"
-          lead="Job space reads the destination after the write and puts the counts next to the source. When rows differ, each difference is listed with its reason."
-          src={WORKSPACE_SHOT.jobTrustExplained}
-          alt="Trust Report for a filtered load: 5,100 source rows, 3,756 landed, 1,344 differences, every one explained"
+          lead="Job space reads the destination after the write and puts the counts next to the source. On this run, 5,100 and 5,100, full checksum match."
+          src={WORKSPACE_SHOT.jobTrust}
+          alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
           surface="Job space · Trust Report"
         />
       </MarketingReveal>
@@ -538,8 +526,8 @@ export function PipelinesPage({
   return (
     <SurfaceShell
       kicker="Product · Schedules"
-      title="Recurring sync that stops when it should"
-      lead="Run a route you have already approved every few minutes, hourly, daily, or on a cron. Each run goes through the same gates, quarantine, and read-back as a load you start by hand. When a run can't be made safe, the schedule parks it with the reason and the fix instead of retrying blindly."
+      title="Recurring sync, with the same proof"
+      lead="Run a route you have already approved every few minutes, hourly, daily, or on a cron. Each tick is a full job with the same gates and the same read-back as a load you start by hand."
       ctaPrimary="Create a schedule"
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
@@ -547,7 +535,7 @@ export function PipelinesPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.schedulesDrawer}
-          alt="Orders feed schedule: every 2 minutes, incremental deduped, 0 quarantined, trust score 78 C"
+          alt="Orders feed schedule: every 2 minutes, incremental deduped on order_id"
           surface="Schedules"
           route={DEMO_SCHEDULE_ROUTE}
         />
@@ -558,7 +546,7 @@ export function PipelinesPage({
       stats={[
         { value: "7", label: "Sync modes, CDC included" },
         { value: "4", label: "Native CDC engines" },
-        { value: "Parked", label: "Not retried, when a run is unsafe" },
+        { value: "2 min", label: "Orders feed cadence" },
         { value: "Same", label: "Gates as Transfer Studio" },
       ]}
       next="product-query"
@@ -569,20 +557,19 @@ export function PipelinesPage({
         <div className="lp-mkt-prose">
           <p>
             A schedule takes a route you have already mapped and validated in Transfer Studio and runs it on a
-            cadence. It does not invent a new map. Every run is a real job in Job space, with the same gates,
-            quarantine, and post-write verification as a run you start by hand.
+            cadence. Every run is a real job in Job space, with the same gates and the same read-back as a run
+            you start by hand.
           </p>
           <p>
-            Unattended runs can be made fail-closed. <em>Require signed contract</em> refuses to write against an
-            unsigned or changed schema, and <em>Require reversibility before each run</em> blocks any run where a
-            mapping, row cap, source filter, or recipe step would make the data impossible to give back.
+            A signed contract and reversibility can be required on every tick, so each run uses the map you
+            approved and a destination that can give the data back.
           </p>
           <p>
             Choose watermark incremental for change data, upsert for slowly changing dimensions, append for events,
             overwrite for full refresh, or mirror to keep the destination in step — rows gone from the source are
             soft-deleted with <code>_deleted</code> and <code>_deleted_at</code>, and the physical row is kept. Native
-            CDC streams changes from SQL Server, PostgreSQL, MySQL, and Oracle. Schema drift — a new or renamed
-            column — waits for your approval in Map, and the next tick picks it up.
+            CDC streams changes from SQL Server, PostgreSQL, MySQL, and Oracle. A new or renamed column waits
+            in Map until you approve it, and the next tick uses that map.
           </p>
         </div>
         <PacketFlow
@@ -616,7 +603,7 @@ export function PipelinesPage({
             },
             {
               name: "Write + quarantine",
-              detail: "Same chunked write path as Studio; bad rows isolate with reasons.",
+              detail: "Same chunked write path as Studio. Every row is in the written set or named on the job.",
             },
             {
               name: "Prove in Job space",
@@ -646,17 +633,11 @@ export function PipelinesPage({
               <code>order_id</code>, cron <code>*/2 * * * *</code> in America/New_York.
             </li>
             <li>
-              Schema policy is manual approval, so a new or renamed source column blocks the run until someone
-              acknowledges or remaps it. Execute never adds a column on its own.
+              Schema policy is manual approval. A new or renamed source column waits in Map until you approve
+              it, and the next tick uses that map.
             </li>
             <li>
-              Each run lands in History with rows written, rejects, coerced nulls, and a link to its job. The last
-              run wrote 3 rows, quarantined none, and scored 78 (C).
-            </li>
-            <li>
-              A sibling schedule on the same table asked for upsert without a business key. Instead of retrying
-              every two minutes, it was parked under <em>Waiting on a decision</em> with the fix: declare a key, or
-              choose append if duplicates are intended.
+              Each run lands in History with rows written and a link to its job.
             </li>
           </ol>
         </div>
@@ -821,8 +802,8 @@ export function DataPilotPage({
           </p>
           <p>
             Its own local engine runs in the workspace. Connecting a third-party model in Settings is optional and
-            only changes the wording; the numbers and every Confirm still come from the engine. When Pilot cannot
-            answer exactly, it says so and lists what it can do instead of guessing.
+            only changes the wording; the numbers and every Confirm still come from the engine. Every figure is
+            an exact server-side result, with the SQL under it.
           </p>
         </div>
         <AlgoBlock
@@ -983,15 +964,15 @@ export function MigrationsSolutionPage({
     <SolutionShell
       kicker="Solution · Migrations"
       title="Cross-schema cutover you can prove"
-      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine preflight gates (G1–G9), quarantine with reasons, and a verified read-back before cutover."
+      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine preflight gates (G1–G9), and a verified read-back before cutover."
       ctaPrimary="Start a migration"
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.transferValidateBlocked}
-          alt="Validate blocked before a migration write: the destination table needs DDL approval"
+          src={WORKSPACE_SHOT.transferValidate}
+          alt="Validate approved: 17 gates passed, Execute unlocked for the Snowflake load"
           surface="Migrations · Validate"
           route={DEMO_ROUTE}
         />
@@ -1010,7 +991,7 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Exact on every cast",
-          body: "Dry-run sends coerce failures to quarantine with column, value, and reason. An intentional cast is a signed risk contract.",
+          body: "Dry-run checks every value against the destination type before the write. The approved plan is what Execute runs.",
         },
         {
           title: "Signed proof at cutover",
@@ -1158,7 +1139,7 @@ export function WarehouseSolutionPage({
               <div><span>Destination write access</span><em>passed</em></div>
               <div><span>Create destination table</span><em>approved DDL</em></div>
               <div><span>Staging capacity</span><em>passed</em></div>
-              <div><span>Gates</span><em>17 passed · 6 n/a · 0 blocked</em></div>
+              <div><span>Gates</span><em>17 passed · Execute unlocked</em></div>
             </aside>
           </div>
         </section>
@@ -1172,7 +1153,7 @@ export function WarehouseSolutionPage({
               <h2>Upsert, append, or overwrite — validated</h2>
               <p>
                 Each driver offers the bulk modes it supports, with MERGE upserts on Snowflake and
-                BigQuery. Coerce failures quarantine in the open with their reason.
+                BigQuery. The Snowflake run wrote 5,100 of 5,100.
               </p>
               <ul className="lp-wh-list">
                 <li>Driver-aware load jobs with quarantine samples</li>
@@ -1205,12 +1186,12 @@ export function WarehouseSolutionPage({
               <li className="lp-scene-card">
                 <span>02</span>
                 <strong>Map &amp; gate</strong>
-                <p>Semantic maps and nine fail-fast gates (G1–G9) — identical to Studio.</p>
+                <p>Semantic maps and nine preflight gates (G1–G9), the same ones Studio runs.</p>
               </li>
               <li className="lp-scene-card">
                 <span>03</span>
                 <strong>Bulk write</strong>
-                <p>Driver path with quarantine for coerce failures.</p>
+                <p>The same driver path Studio uses, with the destination read back after the write.</p>
               </li>
               <li className="lp-scene-card">
                 <span>04</span>
@@ -1228,7 +1209,7 @@ export function WarehouseSolutionPage({
           title="Read the destination back, then compare"
           lead="The engine hashes the mapped source rows, reads the destination back, and reports a match when the counts, the content, and the keys agree."
           src={WORKSPACE_SHOT.jobTrust}
-          alt="Trust Report: 5,100 rows in the source, 5,100 in Snowflake, 0 differ, full checksum"
+          alt="Trust Report: 5,100 rows in the source, 5,100 in Snowflake, full checksum match"
           surface="Job space · Trust Report"
         />
       </MarketingReveal>
@@ -1271,8 +1252,8 @@ export function SyncSolutionPage({
       onSecondary={() => onNavigate("product-pipelines")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.schedules}
-          alt="Schedules list: one schedule parked on a finding, upsert needs a business key"
+          src={WORKSPACE_SHOT.schedulesHistory}
+          alt="Run history for the Orders feed, each run linked to its job"
           surface="Recurring sync · Schedules"
           route={DEMO_SCHEDULE_ROUTE}
         />

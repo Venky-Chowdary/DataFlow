@@ -14,9 +14,9 @@ export const YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@DatawrapCompany";
 export const MARKETING_VIDEOS: MarketingVideo[] = [
   {
     id: "tSEPnT9WG8k",
-    title: "Datawrap Live Demo: 100,000 Rows, 5 Bad Values Quarantined, Replayed and Proven",
+    title: "Datawrap Live Demo: 100,000 rows loaded, replayed, and proven",
     blurb:
-      "The full proof loop on one run: quarantine isolates the bad rows, replay lands them, and the checksums match.",
+      "The full proof loop on one run: every row is accounted for, replay lands the held rows, and the checksums match.",
     tag: "Verification",
   },
   {
@@ -63,8 +63,8 @@ export const MARKETING_VIDEOS: MarketingVideo[] = [
   },
   {
     id: "vYSBd2_JvII",
-    title: "Bad rows: quarantine, replay and checksum match",
-    blurb: "Bad values never reach the destination — they're quarantined, fixed, replayed, proven.",
+    title: "Quarantine, replay, and a checksum match",
+    blurb: "Every row is accounted for, then replayed and proven with a checksum.",
     tag: "Verification",
   },
   {

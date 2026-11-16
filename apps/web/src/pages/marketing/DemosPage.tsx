@@ -35,8 +35,8 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
         title={<>Watch the engine prove a transfer.</>}
         lead={
           <>
-            Real runs on the production engine — quarantine, replay, drift review, native CDC,
-            and the checksum match at the end. No slideware. Nothing is staged.
+            Real runs on the production engine: mapping, native CDC, and the checksum match.
+            Each demo is a transfer that was actually run.
           </>
         }
         slas={[
