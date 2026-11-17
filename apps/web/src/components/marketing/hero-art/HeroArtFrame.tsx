@@ -7,7 +7,7 @@
  * (the per-page concept notes were removed with the old docs).
  */
 
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 
 export const ART_W = 1000;
 export const ART_H = 640;
@@ -56,26 +56,12 @@ export type HeroArtProps = {
 };
 
 /**
- * A phone gives a hero drawing roughly 350px. The full 1000-unit canvas would
- * then set its type near 7px, so each drawing declares the focal region that
- * carries its argument; narrow screens frame that region instead of shrinking
- * the whole schematic into illegibility.
+ * Drawings may still name a focal region. The frame does not crop to it.
+ * A cropped viewBox on a phone sliced labels that sat outside the window
+ * (plan names, ring captions). The whole canvas scales instead, so every
+ * label stays inside the drawing.
  */
 export type FocalRegion = { x: number; y: number; w: number; h: number };
-
-const NARROW_QUERY = "(max-width: 720px)";
-
-function useNarrowViewport(): boolean {
-  const [narrow, setNarrow] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia(NARROW_QUERY);
-    const sync = () => setNarrow(mq.matches);
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
-  return narrow;
-}
 
 /**
  * Frame: ink field, engineering grid, directional light, mounting plate.
@@ -97,9 +83,11 @@ export function HeroArtFrame({
 }) {
   // Ids must be unique per instance: two drawings on one page must not share defs.
   const uid = `dw${useId().replace(/[^a-z0-9]+/gi, "")}`;
-  const narrow = useNarrowViewport();
   const { w: cw, h: ch } = canvas ?? { w: ART_W, h: ART_H };
-  const view = narrow && focus ? focus : { x: 0, y: 0, w: cw, h: ch };
+  // `focus` stays on the props so each drawing can record its argument.
+  // The viewBox is always the full canvas — a crop cut labels on a phone.
+  void focus;
+  const view = { x: 0, y: 0, w: cw, h: ch };
   return (
     <figure className={`dw-hero-art ${className}`.trim()}>
       <svg

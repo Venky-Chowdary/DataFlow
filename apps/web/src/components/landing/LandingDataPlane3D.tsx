@@ -163,7 +163,7 @@ export function LandingDataPlane3D() {
         </aside>
 
         <aside className="lp-d3-hud lp-d3-hud--proof">
-          <header><span className="lp-d3-led is-ok" /> Job Theater</header>
+          <header><span className="lp-d3-led is-ok" /> Job space</header>
           <ul>
             <li><span>Preflight</span><em>G4 hold</em></li>
             <li><span>Map</span><em>1 review</em></li>

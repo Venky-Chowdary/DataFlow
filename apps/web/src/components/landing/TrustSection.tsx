@@ -27,7 +27,7 @@ const LAYERS = [
     title: "Prove",
     tag: "Verify",
     body: "Every load is read back and verified value by value, and every action lands in a hash-chained audit log signed with its own key.",
-    proof: "Gate-8 MATCH",
+    proof: "Read back and compared",
   },
 ];
 

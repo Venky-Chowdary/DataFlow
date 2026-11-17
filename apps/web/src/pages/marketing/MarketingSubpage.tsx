@@ -1,10 +1,6 @@
 import { type CSSProperties } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
-import {
-  AlgorithmCinemaBand,
-  ProofCinema,
-} from "../../components/landing/AlgorithmCinema";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import {
   EvidencePlatesArt,
@@ -155,7 +151,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       features: [
         "Transfer Studio — table, destination query, stored procedure",
         "G1–G9 preflight + quarantine with replay",
-        "Gate-8 read-back with value & key census",
+        "Read-back with a value and key census",
         provenDriversPhrase(),
       ],
     },
@@ -163,7 +159,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       name: "Team",
       price: "Custom",
       period: "usage-aligned",
-      blurb: "Pipelines, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
+      blurb: "Schedules, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "team" as const,
@@ -195,10 +191,10 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
   const compareRows = [
     { feature: "Transfer Studio (table / destination query / stored procedure)", starter: true, team: true, enterprise: true },
     { feature: "G1–G9 preflight & quarantine with replay", starter: true, team: true, enterprise: true },
-    { feature: "Gate-8 read-back: value & key census", starter: true, team: true, enterprise: true },
+    { feature: "Read-back: value and key census", starter: true, team: true, enterprise: true },
     { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
     { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
-    { feature: "Pipelines, schedules & typed watermarks", starter: false, team: true, enterprise: true },
+    { feature: "Schedules & typed watermarks", starter: false, team: true, enterprise: true },
     { feature: "Native CDC (SQL Server, PostgreSQL, MySQL, Oracle)", starter: false, team: true, enterprise: true },
     { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
     { feature: "MCP for agents", starter: false, team: false, enterprise: true },
@@ -214,9 +210,9 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         title={<>Plans that scale with proof.</>}
         lead={
           <>
-            Datawrap prices cadence and security. Semantic mapping, G1–G9 preflight, quarantine
-            with replay, destination query and stored-procedure writes, and value-by-value
-            verification all ship in Starter.
+            Starter includes the whole proof path: a map you review, checks that stop a bad
+            write, quarantine with replay, and a value-by-value read of the destination. You pay
+            for cadence and security, not for knowing the rows arrived.
           </>
         }
         actions={
@@ -252,7 +248,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             {plans.map((plan, i) => (
               <article
                 key={plan.name}
-                className={`lp-pricing-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
+                className={`lp-pricing-card lp-scene-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
                 style={{ "--reveal-i": i } as CSSProperties}
               >
                 {plan.featured ? <span className="lp-pricing-card-flag">Recommended</span> : null}
@@ -322,17 +318,17 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
 
       <MarketingReveal>
         <section className="lp-pricing-v2-principles" aria-label="Pricing principles">
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>A real free tier</strong>
             <span>The full Transfer Studio path, verification included.</span>
           </div>
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>Quote when you scale</strong>
             <span>Priced to connectors and cadence.</span>
           </div>
-          <div className="lp-pricing-principle">
+          <div className="lp-pricing-principle lp-scene-card">
             <strong>One engine everywhere</strong>
-            <span>UI, Pipelines, Pilot, and MCP share the same gates.</span>
+            <span>UI, Schedules, Pilot, and MCP share the same gates.</span>
           </div>
         </section>
       </MarketingReveal>
@@ -366,7 +362,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Gate-8 read-back</td>
+                  <td>Read-back after the write</td>
                   <td>Row counts plus a value and key census from the destination</td>
                   <td>All plans</td>
                 </tr>
@@ -460,9 +456,9 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         title={<>Controls that travel with every load.</>}
         lead={
           <>
-            SSO, SCIM, RBAC, BYOK, workspace isolation, and a tamper-evident audit chain — on the
-            same Transfer Studio engine, with every G1–G9 gate and every post-write verification
-            in place.
+            SSO, SCIM, role-capped keys, your own encryption key, and a signed audit chain ride
+            the same engine as every load. The checks before a write, and the read-back after it,
+            stay in place when security policy is added.
           </>
         }
         actions={
@@ -500,7 +496,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           </div>
           <div className="lp-ent-capability-grid">
             {capabilities.map((cap) => (
-              <article key={cap.id} className="lp-ent-capability">
+              <article key={cap.id} className="lp-ent-capability lp-scene-card">
                 <span>{cap.kicker}</span>
                 <h3>{cap.title}</h3>
                 <p>{cap.body}</p>
@@ -532,7 +528,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               <h3>Control snapshot</h3>
               <div className="lp-ent-panel-row"><span>Identity</span><em>OIDC / SAML · SCIM</em></div>
               <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
-              <div className="lp-ent-panel-row"><span>Preflight</span><em>9 / 9 required</em></div>
+              <div className="lp-ent-panel-row"><span>Preflight</span><em>G1–G9 + route policy</em></div>
               <div className="lp-ent-panel-row"><span>Quarantine</span><em>replayable</em></div>
               <div className="lp-ent-panel-row"><span>Verify</span><em>value &amp; key census</em></div>
               <div className="lp-ent-panel-row"><span>Audit</span><em>hash-chained · key id</em></div>
@@ -576,9 +572,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         title={<>Every load leaves proof you can keep.</>}
         lead={
           <>
-            What we publish is measured: schema drift, identity carry, retry safety, and
-            destination read-back on named engines. Book a pilot and get the same evidence on{" "}
-            <em>your</em> sources and destinations.
+            One finished run is on the page: 5,100 orders from Postgres into Snowflake, every
+            column mapped, full checksum match. Book a pilot and get the same
+            evidence on <em>your</em> sources and destinations.
           </>
         }
         actions={
@@ -606,22 +602,17 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
         <div className="lp-shell lp-cust3-metrics-row">
-          <div>
-            <strong>Migrations</strong>
-            <span>Database cutover with identity, FK, and Unicode carry</span>
-          </div>
-          <div>
-            <strong>Warehouses</strong>
-            <span>Snowflake, BigQuery, Apache Iceberg — MERGE + verified</span>
-          </div>
-          <div>
-            <strong>Lakes</strong>
-            <span>Amazon S3, ADLS, Google Cloud Storage — exact decimals</span>
-          </div>
-          <div>
-            <strong>CDC</strong>
-            <span>Snapshot, stream from the database log, resume</span>
-          </div>
+          {[
+            ["Migrations", "Database cutover with identity, FK, and Unicode carry"],
+            ["Warehouses", "Snowflake, BigQuery, Apache Iceberg — MERGE + verified"],
+            ["Lakes", "Amazon S3, ADLS, Google Cloud Storage — exact decimals"],
+            ["CDC", "Snapshot, stream from the database log, resume"],
+          ].map(([title, body], i) => (
+            <div key={title} style={{ ["--i" as string]: i }}>
+              <strong>{title}</strong>
+              <span>{body}</span>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -633,13 +624,12 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <h2>Built for operators who answer for every row</h2>
             </div>
             <div className="lp-mkt-evidence-grid">
-              {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
-                <article key={row.title} className="lp-mkt-evidence-card">
+              {MARKETING_PROOF_HIGHLIGHTS.map((row, i) => (
+                <article key={row.title} className="lp-mkt-evidence-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                   <span className="lp-cust-industry">{row.stat}</span>
                   <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
-                    <strong>Every run</strong>
-                    <span>Destination re-read</span>
+                    <strong>{row.proof}</strong>
                   </footer>
                 </article>
               ))}
@@ -661,7 +651,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             </div>
             <div className="lp-mkt-evidence-grid">
               {MARKETING_STACK.map((row) => (
-                <article key={row.family} className="lp-mkt-evidence-card">
+                <article key={row.family} className="lp-mkt-evidence-card lp-scene-card">
                   <span className="lp-cust-industry">{row.family}</span>
                   <p><strong>{row.items}.</strong> {row.note}</p>
                 </article>
@@ -756,7 +746,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
   const terms = [
     {
       h: "Agreement",
-      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, pipelines, Job Theater, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
+      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, schedules, Job space, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
     },
     {
       h: "The service",
@@ -924,7 +914,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       t: "Prove",
       tag: "Verify",
       d: "Every load is read back and verified value by value. Every action lands in a hash-chained, signed audit log.",
-      pill: "Gate-8 MATCH",
+      pill: "Read back and compared",
     },
   ];
   const controls = [
@@ -1017,7 +1007,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-sec-layer-grid">
             {layers.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card">
+              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
                 <div className="lp-sec-layer-top">
                   <span className="lp-sec-layer-num">{layer.phase}</span>
                   <span className="lp-sec-layer-tag">{layer.tag}</span>
@@ -1042,7 +1032,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-sec-layer-grid">
             {controls.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card">
+              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
                 <div className="lp-sec-layer-top">
                   <span className="lp-sec-layer-num">{layer.phase}</span>
                   <span className="lp-sec-layer-tag">{layer.tag}</span>
@@ -1173,8 +1163,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             </p>
           </div>
           <div className="lp-int-family-grid">
-            {MARKETING_STACK.map((f) => (
-              <article key={f.family} className="lp-int-family-card">
+            {MARKETING_STACK.map((f, i) => (
+              <article key={f.family} className="lp-int-family-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
                 <header>
                   <h3>{f.family}</h3>
                   <span>{f.badge}</span>
@@ -1214,7 +1204,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <div><span>01</span><em>Semantic map</em></div>
             <div><span>02</span><em>G1–G9 preflight</em></div>
             <div><span>03</span><em>Quarantine write</em></div>
-            <div><span>04</span><em>Gate-8 verify</em></div>
+            <div><span>04</span><em>Read the destination back</em></div>
           </aside>
         </section>
       </MarketingReveal>
@@ -1232,7 +1222,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open connector catalog
             </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate("product-transfer")}>
               See Transfer Studio →
             </button>
           </div>

@@ -22,8 +22,7 @@ export function ProofEvidenceSection({ onNavigate }: { onNavigate?: (route: Publ
             <span className="lp-cust-industry">{row.stat}</span>
             <p><strong>{row.title}.</strong> {row.body}</p>
             <footer>
-              <strong>Verification report</strong>
-              <span>On every run</span>
+              <strong>{row.proof}</strong>
             </footer>
           </article>
         ))}

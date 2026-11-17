@@ -11,6 +11,7 @@ import { fetchCatalogStats } from "../lib/api";
 import { isHelpDocRoute, type HelpDocId } from "../lib/helpDocs";
 import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./marketing/DocsPortal";
+import { WORKSPACE_SHOT } from "../lib/workspaceShots";
 
 interface CatalogStats {
   total: number;
@@ -60,34 +61,34 @@ const DOC_SECTIONS = [
 
 const WORKSPACE_SHOTS = [
   {
-    src: "/docs/screenshots/app-overview.png",
+    src: WORKSPACE_SHOT.overview,
     title: "Overview",
-    caption: "Live rows moved, success rate, data plane, and connection health.",
+    caption: "Rows moved, success rate, connection health, and recent jobs.",
   },
   {
-    src: "/docs/screenshots/app-transfer-source.png",
+    src: WORKSPACE_SHOT.transferMap,
     title: "Transfer Studio",
-    caption: "Source step with sample-orders.csv — typed columns and real sample rows.",
+    caption: "Map step for public.sales_orders → SALES_ORDERS_REPORTING: 11 of 11 columns mapped.",
   },
   {
-    src: "/docs/screenshots/app-connectors.png",
+    src: WORKSPACE_SHOT.connectors,
     title: "Connectors",
-    caption: "Local Postgres, MySQL, MongoDB with Test passed / failed status.",
+    caption: "Saved connections with their last test result.",
   },
   {
-    src: "/docs/screenshots/app-jobs.png",
-    title: "Job Theater",
-    caption: "Completed e2e_customers run with reconcile timeline and row fidelity.",
+    src: WORKSPACE_SHOT.jobTrust,
+    title: "Job space",
+    caption: "Trust Report: 5,100 rows in source and destination, 0 differ, full checksum match.",
   },
   {
-    src: "/docs/screenshots/app-query.png",
-    title: "Query Playground",
-    caption: "Read-only SQL against saved connectors before you transfer.",
+    src: WORKSPACE_SHOT.query,
+    title: "Query",
+    caption: "Read-only SQL on Warehouse Snowflake (demo): revenue by region, 5 rows.",
   },
   {
-    src: "/docs/screenshots/app-pilot.png",
+    src: WORKSPACE_SHOT.pilot,
     title: "Datawrap Pilot",
-    caption: "Natural-language triage on the same governed engine.",
+    caption: "A row count and a group-by answered with the SQL Pilot ran.",
   },
 ] as const;
 
@@ -106,8 +107,8 @@ function DocsHero({
         </span>
         <h2 className="df2-docs-hero-title">Move any schema anywhere — proven.</h2>
         <p className="df2-docs-hero-sub">
-          One governed path — map, preflight G1–G9, write with quarantine, and checksum reconcile —
-          so every surface (Studio, Pipelines, Pilot, MCP) proves the load.
+          One governed path (map, preflight gates, write with quarantine, checksum reconcile)
+          behind every surface: Studio, Schedules, Pilot, and MCP.
         </p>
         <div className="df2-docs-hero-actions">
           <Button
@@ -157,7 +158,7 @@ function ArchitectureDiagram() {
     { x: 230, w: 118, label: "Ingestion", sub: "Parse · Profile · Normalize", tone: "core" },
     { x: 384, w: 118, label: "Canonical", sub: "Schema · Types · Keys", tone: "core" },
     { x: 538, w: 118, label: "Mapper", sub: "AI · Semantic · Rules", tone: "core" },
-    { x: 692, w: 118, label: "Preflight", sub: "9 gates · Evidence", tone: "gate" },
+    { x: 692, w: 118, label: "Preflight", sub: "Gates · Evidence", tone: "gate" },
     { x: 846, w: 118, label: "Execution", sub: "Chunk · Transform · Write", tone: "core" },
     { x: 1004, w: 148, label: "Targets", sub: "DB · File · Warehouse", tone: "edge" },
   ];
@@ -173,7 +174,7 @@ function ArchitectureDiagram() {
     { label: "Transfer Studio", x: 180 },
     { label: "Datawrap Pilot", x: 420 },
     { label: "MCP Agents", x: 640 },
-    { label: "Pipelines API", x: 880 },
+    { label: "Schedules", x: 880 },
   ];
 
   return (
@@ -549,7 +550,7 @@ function DocsWalkthrough() {
                 <strong>Transfer Studio</strong> — Source → Destination → Transform → Map → Validate → Run.
               </li>
               <li>
-                <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.
+                <strong>Job space</strong> — open the job and read the Trust Report and Reversibility tabs.
               </li>
               <li>
                 <strong>Query / Pilot</strong> — inspect data or triage failures in plain language.
@@ -634,24 +635,24 @@ function DocsWalkthrough() {
             </div>
             <figure className="df2-docs-shot df2-docs-shot--wide">
               <img
-                src="/docs/screenshots/app-transfer-source.png"
-                alt="Transfer Studio source profiling with sample orders rows"
+                src={WORKSPACE_SHOT.transferValidate}
+                alt="Transfer Studio Validate: 17 passed, 0 blocked, 6 skipped across 23 gates"
                 loading="lazy"
               />
               <figcaption>
-                <strong>Transfer Studio · Source</strong>
-                <span>Profiled sample-orders.csv with INTEGER / VARCHAR / DECIMAL / DATE columns before destination.</span>
+                <strong>Transfer Studio · Validate</strong>
+                <span>23 gates on the Postgres → Snowflake route: 17 passed, 6 not applicable, 0 blocked. Execute unlocks; the post-write read-back still has to pass.</span>
               </figcaption>
             </figure>
             <figure className="df2-docs-shot df2-docs-shot--wide">
               <img
-                src="/docs/screenshots/app-jobs.png"
-                alt="Job Theater reconcile timeline for completed transfer"
+                src={WORKSPACE_SHOT.jobReversibilityColumns}
+                alt="Job space Reversibility tab: all 11 columns invertible"
                 loading="lazy"
               />
               <figcaption>
-                <strong>Job Theater · Proof</strong>
-                <span>Queue → preflight → extract → load → Gate-8 reconcile with measured row/checksum evidence on a live job (quarantine and writer-ack routes are labeled honestly).</span>
+                <strong>Job space · Reversibility</strong>
+                <span>All 11 columns are invertible: order_id keeps BIGINT and the text columns widen to VARCHAR. A hash, mask, or narrowing cast would be flagged here.</span>
               </figcaption>
             </figure>
           </PageSection>

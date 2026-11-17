@@ -41,7 +41,7 @@ const PLAN_STEPS: {
     name: "Team",
     price: "Custom",
     period: "usage-aligned",
-    adds: ["Pipelines + Pilot", "shared connectors"],
+    adds: ["Schedules + Pilot", "shared connectors"],
     x: 366,
     top: 250,
     tone: "teal",
@@ -74,17 +74,11 @@ export function PlanLadderArt() {
         priced by cadence and security
       </ArtLabel>
 
-      <ArtText x={64} y={144} size={18}>
+      <ArtText x={64} y={148} size={18}>
         The ladder climbs on cadence
       </ArtText>
-      <ArtText x={64} y={176} size={18}>
+      <ArtText x={64} y={180} size={18}>
         and security.
-      </ArtText>
-      <ArtText x={64} y={228} size={15} tone="teal">
-        one quote per cadence
-      </ArtText>
-      <ArtText x={64} y={258} size={15} tone="muted">
-        verification always included
       </ArtText>
 
       {PLAN_STEPS.map((step, i) => {
@@ -120,7 +114,7 @@ export function PlanLadderArt() {
         in every plan
       </ArtLabel>
       <ArtText x={48} y={RAIL_Y + 78} size={15} tone="muted">
-        semantic map · G1–G9 · quarantine · Gate-8 read-back
+        semantic map · preflight · quarantine · read-back
       </ArtText>
     </HeroArtFrame>
   );
@@ -129,16 +123,16 @@ export function PlanLadderArt() {
 /* ── Customers · named evidence plates, not a logo wall ─────────── */
 
 const EVIDENCE_PLATES: { stat: string; claim: string; scope: string }[] = [
-  { stat: "48 cases", claim: "schema drift held", scope: "widen · refuse narrow · defaults" },
-  { stat: "43 cases", claim: "identity and keys", scope: "carried, proven on the destination" },
-  { stat: "14 cases", claim: "retries stay correct", scope: "committed rows checked before retry" },
+  { stat: "5,100", claim: "rows read back", scope: "Postgres sales_orders → Snowflake" },
+  { stat: "11 / 11", claim: "columns mapped", scope: "none flagged on the run" },
+  { stat: "0 differ", claim: "full checksum", scope: "independent re-read of the source" },
 ];
 
 export function EvidencePlatesArt() {
   return (
     <HeroArtFrame
-      label="Measured evidence plates with an open plate for your pilot"
-      caption="Each plate names its case count and engines. The open plate is reserved for your pilot."
+      label="The named Postgres to Snowflake run, with an open plate for your pilot"
+      caption="Each plate is a figure from one finished run. The open plate is reserved for your pilot."
       focus={{ x: 40, y: 96, w: 560, h: 440 }}
     >
       {EVIDENCE_PLATES.map((plate, i) => {
@@ -161,10 +155,10 @@ export function EvidencePlatesArt() {
       })}
 
       <ArtLabel x={64} y={92}>
-        recorded on live engines
+        one named run
       </ArtLabel>
       <ArtText x={64} y={534} size={14} tone="muted">
-        PostgreSQL · MySQL · SQL Server · Oracle
+        PostgreSQL → Snowflake
       </ArtText>
 
       {/* The plate we refuse to fill — the page's actual claim. */}

@@ -495,8 +495,8 @@ export interface ProductSurfaceStripProps<Route extends string> {
 
 const DEFAULT_SURFACES = [
   { label: "Transfer Studio", route: "product-transfer", sub: "Map → gates → write → prove" },
-  { label: "Job Theater", route: "product-jobs", sub: "Live phases · quarantine · proof" },
-  { label: "Pipelines", route: "product-pipelines", sub: "Schedules on the governed engine" },
+  { label: "Job space", route: "product-jobs", sub: "Trust Report · reversibility · sign-off" },
+  { label: "Schedules", route: "product-pipelines", sub: "Recurring sync on the same engine" },
   { label: "Query", route: "product-query", sub: "Safe preview · Studio handoff" },
   { label: "Pilot", route: "product-pilot", sub: "Local-engine copilot on real evidence" },
   { label: "MCP", route: "product-mcp", sub: "Agent tools · secret references only" },

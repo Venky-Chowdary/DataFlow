@@ -226,7 +226,7 @@
 .lp-mkt-body > h2,
 .lp-mkt-chapter > h2 {
   margin: 0 0 8px !important;
-  font-size: clamp(1.35rem, 2.2vw, 1.75rem) !important;
+  font-size: var(--lp-fs-h2) !important;
   letter-spacing: -0.03em;
   line-height: 1.15;
   color: var(--lp-ink);
@@ -306,7 +306,7 @@
 
 .lp-cinema-band .lp-cinema-band-head p,
 .lp-cinema-band .lp-cinema-band-lead {
-  color: var(--df-text-tertiary) !important;
+  color: #cbd5e1 !important;
 }
 
 .lp-cinema-band .lp-mkt-kicker,
@@ -2285,7 +2285,7 @@
   gap: 0.06em;
   margin: 0 0 16px !important;
   max-width: none !important;
-  font-size: clamp(2.15rem, 3.4vw, 3.15rem) !important;
+  font-size: var(--lp-fs-h1-home) !important;
   font-weight: 720 !important;
   letter-spacing: -0.04em;
   line-height: 1.08 !important;
@@ -3017,7 +3017,7 @@
   margin: 0 0 16px;
   max-width: 14ch;
   font-family: var(--df-font-display);
-  font-size: clamp(2.4rem, 5.5vw, 3.75rem);
+  font-size: var(--lp-fs-h1);
   font-weight: 800;
   letter-spacing: -0.045em;
   line-height: 1.05;

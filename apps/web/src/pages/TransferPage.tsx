@@ -430,8 +430,16 @@ export function TransferPage({
   const canvasNav = useRef(false);
   const [wizard, dispatchWizard] = useReducer(transferWizardReducer, WIZARD_START);
   const step = wizard.step;
+  /** The step on screen now, for async work that must not act on a step the user has left. */
+  const stepRef = useRef(step);
+  useEffect(() => {
+    stepRef.current = step;
+  }, [step]);
   const transformOpen = wizard.transformOpen;
   const setStep = useCallback((next: number) => {
+    // "go" always lands on `next`; set the ref now so work started later in
+    // this same handler (goToMapping's route analysis) sees the new step.
+    stepRef.current = next;
     dispatchWizard({ type: "go", step: next });
   }, []);
   const setTransformOpen = useCallback((open: boolean) => {
@@ -3215,6 +3223,7 @@ export function TransferPage({
       return;
     }
     setPlanLoading(true);
+    const startedOnStep = stepRef.current;
     try {
       const destination = destKindMode === "file_export"
         ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
@@ -3252,6 +3261,14 @@ export function TransferPage({
             ? prev.source_schema
             : parsed?.schema ?? {}),
       }));
+      // "Route ready" confirms the step the analysis started on. The Destination
+      // auto-analysis can answer after the user has moved on (Continue does not
+      // wait for it); a confirmation for a step they left is noise, and at
+      // <=480px it lands in the in-flow toast lane above the stepper and moves
+      // the whole page down. The Transform step cleared it on mount and again
+      // after 700 ms, so a slower answer stayed for its 4.5 s hold. A route that
+      // needs attention still warns wherever the user is.
+      if (plan.supported && stepRef.current !== startedOnStep) return;
       toast({
         title: plan.supported ? "Route ready" : "Route needs attention",
         message: routeMessageText(plan.message) || `${plan.auto_create?.length ?? 0} auto-create steps planned`,

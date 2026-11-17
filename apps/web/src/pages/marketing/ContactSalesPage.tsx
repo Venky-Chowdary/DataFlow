@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
+import { MarketingFaq } from "../../components/marketing/MarketingFaq";
 import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
 import { catalogHonestyLead } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -42,7 +43,7 @@ const NEXT_STEPS = [
   {
     n: "03",
     title: "Signed proof pack you keep",
-    body: "Gate-8 read-back with destination COUNT, checksums, and a value and key census that MATCH.",
+    body: "A read-back of the destination: row counts, checksums, and a value and key census.",
   },
 ];
 
@@ -53,7 +54,7 @@ const FAQS = [
   },
   {
     q: "Is the pilot the same engine as production?",
-    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Pipelines, Pilot, and MCP use.",
+    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Schedules, Pilot, and MCP use.",
   },
   {
     q: "How many connectors are live?",
@@ -65,7 +66,7 @@ const FAQS = [
   },
   {
     q: "What makes Datawrap different?",
-    a: "Semantic mapping you can review, nine preflight gates before every write, quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
+    a: "Semantic mapping you can review, preflight gates before every write (nine core gates plus the policy gates each route needs), quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
   },
   {
     q: "What do you provide for security review?",
@@ -249,7 +250,7 @@ export function ContactSalesPage({
             <p className="lp-sales-kicker">Contact sales</p>
             <h1>Talk to a solutions engineer.</h1>
             <p className="lp-sales-hero-lead">
-              Scope Map → G1–G9 → quarantine → Gate-8 verification on your stack. A solutions
+              Scope the map, the checks, quarantine, and the read-back on your stack. A solutions
               engineer replies within one business day.
             </p>
             <p className="lp-sales-hero-mail">
@@ -528,7 +529,7 @@ export function ContactSalesPage({
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Gate-8 read-back: destination COUNT, checksums, value and key census</td>
+                  <td>Read-back: destination row count, checksums, value and key census</td>
                   <td>A signed proof pack</td>
                 </tr>
                 <tr>
@@ -545,14 +546,7 @@ export function ContactSalesPage({
       <section className="lp-sales-faq" aria-label="Sales FAQ">
         <div className="lp-mkt-wrap">
           <h2>Questions procurement usually asks</h2>
-          <dl>
-            {FAQS.map((item) => (
-              <div key={item.q}>
-                <dt>{item.q}</dt>
-                <dd>{item.a}</dd>
-              </div>
-            ))}
-          </dl>
+          <MarketingFaq items={FAQS} />
         </div>
       </section>
     </div>

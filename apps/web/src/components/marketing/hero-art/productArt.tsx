@@ -111,7 +111,7 @@ export function GateCombArt() {
   );
 }
 
-/* ── Job Theater · the run spine ────────────────────────────────── */
+/* ── Job space · the run spine ────────────────────────────────── */
 
 const PHASES = ["Queued", "Preflight", "Write", "Reread", "Reconcile"];
 

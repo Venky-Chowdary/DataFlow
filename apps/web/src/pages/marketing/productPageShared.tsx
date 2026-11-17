@@ -1,139 +1,127 @@
 import type { ReactNode } from "react";
 import { DocsShotReel, type DocsShotFrame } from "../../components/docs/DocsShotReel";
+import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 
-/** Current workspace photography — never Overview (first-load count is a separate fix). */
-export const WORKSPACE_SHOT = {
-  jobs: "/docs/screenshots/app-jobs.png",
-  connectors: "/docs/screenshots/app-connectors.png",
-  pipelines: "/docs/screenshots/app-pipelines.png",
-  query: "/docs/screenshots/app-query.png",
-  pilot: "/docs/screenshots/app-pilot.png",
-  mcp: "/docs/screenshots/app-mcp.png",
-  transferSource: "/docs/screenshots/app-transfer-source.png",
-  transferDest: "/docs/screenshots/app-transfer-destination.png",
-  transferMap: "/docs/screenshots/app-transfer-map.png",
-  transferValidate: "/docs/screenshots/app-transfer-validate.png",
-  transferRun: "/docs/screenshots/app-transfer-run.png",
-} as const;
+export { WORKSPACE_SHOT, DEMO_ROUTE, DEMO_SCHEDULE_ROUTE } from "../../lib/workspaceShots";
 
 export const PRODUCT_FRAMES = {
   transfer: [
     {
       src: WORKSPACE_SHOT.transferSource,
-      alt: "Transfer Studio source step — File, Database, or Cloud storage",
-      caption: "1 · Source — File, Database, or Cloud. Profile before Dest.",
+      alt: "Transfer Studio Source step with Orders Postgres (demo) sales_orders profiled: 11 fields, 100 sample rows",
+      caption: "Source · sales_orders on Orders Postgres, profiled from 100 sample rows before anything else happens",
     },
     {
       src: WORKSPACE_SHOT.transferDest,
-      alt: "Transfer Studio destination File Export CSV",
-      caption: "2 · Destination — File Export CSV or a saved warehouse",
+      alt: "Transfer Studio Destination step targeting Warehouse Snowflake (demo) DW_DEMO.SALES_ORDERS_REPORTING",
+      caption: "Destination · Snowflake DW_DEMO, a new SALES_ORDERS_REPORTING table, 11 typed columns planned",
     },
     {
-      src: WORKSPACE_SHOT.transferMap,
-      alt: "Transfer Studio Map columns for sample-orders",
-      caption: "3 · Map — Align columns, sign a risk contract where needed, continue",
+      src: WORKSPACE_SHOT.transferMapWhy,
+      alt: "Map step showing JSONB attributes mapped to Snowflake VARIANT with Parse JSON at 93% confidence",
+      caption: "Map · JSONB lands as VARIANT with Parse JSON; the row explains why, with confidence and a sample",
     },
     {
       src: WORKSPACE_SHOT.transferValidate,
-      alt: "Transfer Studio Validate gates dashboard",
-      caption: "4 · Validate — Clear blocking gates before Execute unlocks",
+      alt: "Validate approved: 17 gates passed, Execute unlocked for the Snowflake load",
+      caption: "Validate · approved: 23 gates clear, Execute unlocked",
     },
     {
-      src: WORKSPACE_SHOT.transferRun,
-      alt: "Transfer Studio Run step before Execute",
-      caption: "5 · Run — Execute when Preflight is approved",
+      src: WORKSPACE_SHOT.transferRunComplete,
+      alt: "Run step finished: 5,100 rows appended, checksum recorded, proof scope full checksum with independent source re-read",
+      caption: "Run · 5,100 read, 5,100 written, destination before 0 and after 5,100, checksum on record",
     },
   ],
   jobs: [
     {
-      src: WORKSPACE_SHOT.jobs,
-      alt: "Job Theater with whole-history counts and destination population",
-      caption: "Job Theater — queue → preflight → extract → load → reconcile",
+      src: WORKSPACE_SHOT.jobTrust,
+      alt: "Job space Trust Report: 5,100 rows in source and in Snowflake, full checksum match",
+      caption: "Trust Report · 5,100 rows in source, 5,100 in Snowflake, full checksum on every table",
     },
     {
-      src: WORKSPACE_SHOT.transferSource,
-      alt: "Transfer Studio source that produces jobs",
-      caption: "Upstream plan — the Studio source that feeds Theater",
+      src: WORKSPACE_SHOT.jobSignoff,
+      alt: "Sign-off panel waiting on Engineering, Data owner, and Compliance before the evidence pack is signed",
+      caption: "Sign-off · Engineering, Data owner, and Compliance each sign the same report",
     },
     {
-      src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors catalog in the live workspace",
-      caption: "Connectors — saved drivers Jobs and Studio share",
+      src: WORKSPACE_SHOT.jobReversibility,
+      alt: "Reversibility tab: 11 of 11 columns invertible, restore from the destination",
+      caption: "Reversibility · 11 of 11 columns round-trip exactly, so the destination can give the data back",
     },
   ],
   pipelines: [
     {
-      src: WORKSPACE_SHOT.pipelines,
-      alt: "Schedules workspace",
-      caption: "Schedules — cadence, mode, and health for recurring sync",
+      src: WORKSPACE_SHOT.schedulesHistory,
+      alt: "Run history for the Orders feed schedule, each run linked to its job",
+      caption: "Schedules · every tick is a job, with its rows and its proof",
     },
     {
-      src: WORKSPACE_SHOT.jobs,
-      alt: "Job created by a pipeline tick",
-      caption: "Every tick is a real job — same Theater proof as Studio",
+      src: WORKSPACE_SHOT.schedulesDrawer,
+      alt: "Orders feed schedule drawer: every 2 minutes, incremental deduped on order_id",
+      caption: "Schedule detail · every 2 minutes, incremental deduped, contract and reversibility on",
     },
     {
-      src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors used by scheduled routes",
-      caption: "Same connectors — schedules share the workspace vault",
+      src: WORKSPACE_SHOT.schedulesHistory,
+      alt: "Run history for the Orders feed schedule, each run linked to its job",
+      caption: "History · every run is a real job, with rows written and a link to its evidence",
+    },
+    {
+      src: WORKSPACE_SHOT.schedulesReversibilityRetries,
+      alt: "Create recurring sync form with Require reversibility before each run checked and two retries",
+      caption: "Fail-closed options · require reversibility before each run; retries and alerts per schedule",
     },
   ],
   query: [
     {
       src: WORKSPACE_SHOT.query,
-      alt: "Query Playground in the live workspace",
-      caption: "Query Playground — read-only SQL against saved connectors",
+      alt: "Query on Snowflake: orders, units, and revenue by region from SALES_ORDERS_REPORTING, five rows",
+      caption: "Query · revenue by region on the Snowflake copy, read-only, 5 rows in 3.1 s",
     },
     {
-      src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors available to Query",
-      caption: "Same connectors — Query uses the workspace credentials",
+      src: WORKSPACE_SHOT.querySource,
+      alt: "The same aggregate on the source Postgres sales_orders table returns identical numbers",
+      caption: "Same query on the Postgres source · identical totals, region by region",
     },
     {
-      src: WORKSPACE_SHOT.transferSource,
-      alt: "Handoff into Transfer Studio",
-      caption: "Handoff — validated slices become Studio plans",
+      src: WORKSPACE_SHOT.queryReadonly,
+      alt: "Query refuses a DELETE statement: only read and metadata queries run in the playground",
+      caption: "Read-only by design · a DELETE is refused before it reaches the database",
     },
   ],
   pilot: [
     {
       src: WORKSPACE_SHOT.pilot,
-      alt: "Datawrap Pilot natural-language triage",
-      caption: "Datawrap Pilot — local-engine copilot on the governed engine",
+      alt: "Pilot answering an exact row count and revenue by region for sales_orders with the SQL it ran",
+      caption: "Pilot · exact server-side counts and aggregates, with the SQL shown under every answer",
     },
     {
-      src: WORKSPACE_SHOT.jobs,
-      alt: "Job Theater evidence Pilot references",
-      caption: "Evidence — Pilot cites the same Theater artifacts humans see",
-    },
-    {
-      src: WORKSPACE_SHOT.transferSource,
-      alt: "Transfer Studio handoff from Pilot",
-      caption: "Handoff — fixes still flow through Studio review + gates",
+      src: WORKSPACE_SHOT.jobTrust,
+      alt: "Job space Trust Report for the Snowflake run",
+      caption: "The evidence it answers from · the same job records operators open in Job space",
     },
   ],
   mcp: [
     {
       src: WORKSPACE_SHOT.mcp,
-      alt: "MCP Server page in the live workspace",
-      caption: "Agents share the workspace — MCP works through secret references",
+      alt: "MCP Server page: server URL, client setup for Cursor, Claude Desktop, VS Code, and custom GPT",
+      caption: "MCP Server · one URL, a workspace API key, and setup for each client",
     },
     {
       src: WORKSPACE_SHOT.jobs,
-      alt: "MCP-triggered job in Theater",
-      caption: "Agent runs appear in Job Theater with full gate and verification audit",
+      alt: "Jobs list where agent-started transfers appear beside UI runs",
+      caption: "Agent runs land in Jobs next to everyone else's, with the same verification column",
     },
     {
       src: WORKSPACE_SHOT.connectors,
-      alt: "Connectors agents inherit under RBAC",
-      caption: "Same connectors — agents inherit them under RBAC",
+      alt: "Saved connections an agent can use under its key's role",
+      caption: "Agents use saved connections by reference; credentials never leave the vault",
     },
   ],
 } as const satisfies Record<string, DocsShotFrame[]>;
 
 export const SOLUTION_FRAMES = {
   migrations: PRODUCT_FRAMES.transfer,
-  warehouse: [PRODUCT_FRAMES.jobs[0], PRODUCT_FRAMES.pipelines[0], PRODUCT_FRAMES.transfer[3]],
+  warehouse: [PRODUCT_FRAMES.transfer[2], PRODUCT_FRAMES.transfer[4], PRODUCT_FRAMES.jobs[0], PRODUCT_FRAMES.query[0]],
   sync: PRODUCT_FRAMES.pipelines,
 } as const;
 
@@ -149,7 +137,7 @@ export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: strin
     id: "G2", // Destination reachable with write access
     title: "Destination",
     algorithm:
-      "Probe reachability and write privileges. Block when credentials fail or the role cannot write the target object.",
+      "Confirm the source is reachable and the destination role can write the target object before the load.",
   },
   {
     id: "G3", // Schema contract — typed dest DDL / schemaless SKIP
@@ -185,13 +173,13 @@ export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: strin
     id: "G8", // Pre-write sample reconciliation; post-write checksum after Execute
     title: "Reconciliation plan",
     algorithm:
-      "Select the row-count, checksum, and census strategy for post-load proof. After the write, Gate-8 reads the destination back and verifies it.",
+      "Select the row-count, checksum, and census strategy for post-load proof. After the write, the engine reads the destination back and verifies it.",
   },
   {
     id: "G9", // Data integrity audit — unproven / not-configured fails closed
     title: "Data integrity",
     algorithm:
-      "Audit encoding, required nulls, identity-key duplicates, and financial precision on the Validate sample. Unproven or missing audit adapters fail closed.",
+      "Audit encoding, required values, identity keys, and financial precision on the Validate sample before the write.",
   },
 ];
 
@@ -209,7 +197,7 @@ export function LiveProductReel({
       <div className="lp-mkt-live-reel-head">
         <span className="lp-mkt-live-pill">Live workspace</span>
         <h3>{title}</h3>
-        <p>The same operator surfaces, framed in product chrome.</p>
+        <p>Captured in the hosted workspace on a real Postgres → Snowflake load of 5,100 orders.</p>
       </div>
       <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" surface={surface} />
     </div>
@@ -233,7 +221,7 @@ export function AlgoBlock({
       </div>
       <ol className="lp-mkt-algo-steps">
         {steps.map((s, i) => (
-          <li key={s.name}>
+          <li key={s.name} style={{ ["--i" as string]: i }}>
             <span className="lp-mkt-algo-num">{String(i + 1).padStart(2, "0")}</span>
             <div>
               <strong>{s.name}</strong>

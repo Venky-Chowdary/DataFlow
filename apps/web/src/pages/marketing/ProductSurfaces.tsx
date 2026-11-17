@@ -1,26 +1,50 @@
-import { type CSSProperties, type ReactNode } from "react";
+import { Children, isValidElement, type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
-import {
-  AlgorithmCinemaBand,
-  CdcCinema,
-  MappingCinema,
-  ProofCinema,
-} from "../../components/landing/AlgorithmCinema";
 import { ProductShot } from "../../components/marketing/ProductShot";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
   GateTable,
-  LiveProductReel,
   PRODUCT_FRAMES,
   ProofCallout,
   SOLUTION_FRAMES,
   WORKSPACE_SHOT,
+  DEMO_ROUTE,
+  DEMO_SCHEDULE_ROUTE,
 } from "./productPageShared";
 
 type Nav = (r: PublicRoute) => void;
+
+function ShotBand({
+  kicker,
+  title,
+  lead,
+  src,
+  alt,
+  surface,
+}: {
+  kicker: string;
+  title: string;
+  lead: string;
+  src: string;
+  alt: string;
+  surface: string;
+  /** Kept so existing call sites still type-check. Every band is a split row. */
+  beside?: boolean;
+}) {
+  return (
+    <section className="lp-proof-beside" aria-label={title}>
+      <div className="lp-proof-beside-copy">
+        <p className="lp-mkt-kicker">{kicker}</p>
+        <h2>{title}</h2>
+        <p>{lead}</p>
+      </div>
+      <ProductShot src={src} alt={alt} surface={surface} />
+    </section>
+  );
+}
 
 function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
   return (
@@ -69,9 +93,9 @@ function SurfaceShell({
   onSecondary,
   heroVisual,
   stats,
-  liveFrames,
-  liveTitle,
-  liveSurface,
+  liveFrames: _liveFrames,
+  liveTitle: _liveTitle,
+  liveSurface: _liveSurface,
   children,
   next,
   nextLabel,
@@ -116,17 +140,6 @@ function SurfaceShell({
       <MarketingReveal>
         <StatsStrip items={stats} />
       </MarketingReveal>
-      {liveFrames && liveFrames.length > 0 ? (
-        <MarketingReveal>
-          <section className="lp-mkt-body">
-            <LiveProductReel
-              frames={liveFrames}
-              title={liveTitle ?? "Inside the live workspace"}
-              surface={liveSurface ?? "Workspace"}
-            />
-          </section>
-        </MarketingReveal>
-      ) : null}
       {children}
       <MarketingReveal>
         <section className="lp-mkt-next-band">
@@ -155,12 +168,19 @@ function Chapter({
   title: string;
   children: ReactNode;
 }) {
+  const nodes = Children.toArray(children);
+  const shots = nodes.filter((node) => isValidElement(node) && node.type === ProductShot);
+  const copy = nodes.filter((node) => !(isValidElement(node) && node.type === ProductShot));
+  const band = shots.length === 1;
   return (
     <MarketingReveal>
-      <section id={id} className="lp-mkt-body lp-mkt-chapter">
-        <p className="lp-mkt-kicker">{kicker}</p>
-        <h2>{title}</h2>
-        {children}
+      <section id={id} className={`lp-mkt-body lp-mkt-chapter${band ? " lp-mkt-chapter--band" : ""}`}>
+        <div className="lp-mkt-chapter-copy">
+          <p className="lp-mkt-kicker">{kicker}</p>
+          <h2>{title}</h2>
+          {copy}
+        </div>
+        {band ? shots : null}
       </section>
     </MarketingReveal>
   );
@@ -178,31 +198,31 @@ export function TransferStudioPage({
   return (
     <SurfaceShell
       kicker="Product · Transfer Studio"
-      title="The wizard that verifies every load"
-      lead="Connect any source to any destination, review semantic maps with confidence scores, clear nine preflight gates (G1–G9), then write with quarantine and a value-by-value read-back from the destination — all in one governed path."
+      title="Plan the load. Check it. Then write it."
+      lead="Pick a source and a destination, review how every column will land, and clear preflight before a single row is written. After the load, Datawrap reads the destination back and compares it with the source. Every screenshot on this page is one real run: 5,100 orders from Postgres into a new Snowflake table."
       ctaPrimary="Open Transfer Studio"
-      ctaSecondary="See Job Theater"
+      ctaSecondary="See Job space"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.transferSource}
-          alt="Transfer Studio source step in the live Datawrap workspace"
-          surface="Transfer Studio"
-          route={{ source: "sample-orders.csv", dest: "File export · CSV" }}
+          src={WORKSPACE_SHOT.transferMap}
+          alt="Transfer Studio Map step: 11 of 11 sales_orders columns mapped to Snowflake types, all safe"
+          surface="Transfer Studio · Map"
+          route={DEMO_ROUTE}
         />
       }
       liveFrames={PRODUCT_FRAMES.transfer}
-      liveTitle="Transfer Studio in the live workspace"
+      liveTitle="One load, step by step"
       liveSurface="Transfer Studio"
       stats={[
-        { value: "G1–G9", label: "Real preflight gates" },
-        { value: "Any→any", label: "Route coverage" },
-        { value: "≥0.85", label: "Default confidence floor" },
-        { value: "Verified", label: "Read back after write" },
+        { value: "11 / 11", label: "Columns mapped, none flagged" },
+        { value: "23", label: "Gates checked before the write" },
+        { value: "5,100", label: "Rows written on the Snowflake run" },
+        { value: "5,100 = 5,100", label: "Source and Snowflake, read back" },
       ]}
       next="product-jobs"
-      nextLabel="Job Theater"
+      nextLabel="Job space"
       onNavigate={onNavigate}
     >
       <Chapter id="ts-what" kicker="What it is" title="Transfer Studio is the control surface for every load">
@@ -214,7 +234,7 @@ export function TransferStudioPage({
           </p>
           <p>
             Studio keeps evidence with the job: mapping decisions, gate results, quarantined rows,
-            and reconciliation hashes. That evidence is what Job Theater displays after you click run.
+            and reconciliation hashes. That evidence is what Job space displays after you click run.
           </p>
         </div>
         <PacketFlow
@@ -237,7 +257,7 @@ export function TransferStudioPage({
             {
               name: "Format + domain classify",
               detail:
-                "FormatClassifierAgent inspects column names and samples (payment tokens, domain profiles) and returns a format confidence (e.g. payment_feed vs generic_tabular).",
+                "Column names and a sample of the values are classified — amount, email, timestamp, identifier, currency. That classification, not the spelling of the name, is what the pairing is scored on.",
             },
             {
               name: "Column enrichment",
@@ -252,12 +272,12 @@ export function TransferStudioPage({
             {
               name: "Threshold gate",
               detail:
-                "Workspace validation mode sets the floor (strict ≈ 0.85; engine floor 0.72). Below-threshold edges block G4 until you pin, reject, or remap.",
+                "Workspace validation mode sets the floor (strict ≈ 0.85; engine floor 0.72). Pairs at or above the floor are ready to approve.",
             },
             {
               name: "Transform attach",
               detail:
-                "Safe coerce / date / decimal transforms attach when they are reversible. An intentional lossy cast is a signed risk contract, enforced by the writer.",
+                "Date and decimal transforms attach when the types line up, and the writer records each one on the plan.",
             },
           ]}
         />
@@ -266,41 +286,47 @@ export function TransferStudioPage({
           <p>
             Source <code>order_amt</code> (NUMERIC) → destination <code>total_amount</code> scores on
             the order qualifier + type. <code>payment_amount</code>, a different money column,
-            keeps its own mapping even though both are amounts. A STRING with currency symbols bound
-            for NUMERIC is held at G4/G5 and quarantined with its reason.
+            keeps its own mapping even though both are amounts. A currency string stays on its own
+            mapping until the types agree.
           </p>
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight · G1–G9" title="Nine core gates from the real engine, before every write">
+      <Chapter id="ts-gates" kicker="Preflight" title="Nine core gates, plus the ones your route needs">
         <div className="lp-mkt-prose">
           <p>
-            Each gate maps to <code>GateId</code> in Datawrap&apos;s preflight package. A single{" "}
-            <em>block</em> stops the write before any row moves, and tells you exactly which gate and why.
+            G1 to G9 run on every route. Validate adds policy gates for the route in front of it: a
+            new table adds <em>Create destination table</em>, a sync mode with keys adds{" "}
+            <em>Sync contract</em>, a dropped column adds <em>Field reduction governance</em>. The
+            Snowflake load on this page checked 23 gates in 107.7 seconds.
+          </p>
+          <p>
+            On this route Validate approved the plan, including the <code>CREATE TABLE</code> for{" "}
+            <code>SALES_ORDERS_REPORTING</code>, and Execute opened.
           </p>
         </div>
         <GateTable />
       </Chapter>
 
-      <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
+      <Chapter id="ts-write" kicker="Execute" title="Write path: land the rows, then prove them">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After G1–G9 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates held-back rows. Success means a verified read-back: Gate-8 row counts plus a value and key census."
+          lead="After the checks pass, the engine chunks rows, applies mapped transforms, and writes with the chosen mode. On this run the read-back is 5,100 and 5,100."
           steps={[
             {
               name: "Chunk + transform",
-              detail: "Rows are batched; each field follows its mapped coerce path. Failures go to quarantine with column, value, and reason.",
+              detail: "Rows are batched. Each field follows its mapped coerce path.",
             },
             {
               name: "Destination write",
-              detail: "Table upsert/append, destination query (one INSERT/MERGE/UPDATE with binds), or destination stored procedure (one CALL per row). Failed destination SQL quarantines the row.",
+              detail: "Table upsert or append, a destination query with bound parameters, or a destination stored procedure, one call per row.",
             },
             {
-              name: "Quarantine isolate",
-              detail: "Held-back rows stay out of the clean set and wait in a durable, workspace-scoped queue. Operators inspect and replay them from Job Theater.",
+              name: "Every row named",
+              detail: "The job records rows read, rows written, and the destination count. A held row stays on the job and replays into the same table.",
             },
             {
-              name: "Gate-8 verify",
+              name: "Read the destination back",
               detail:
                 "Post-load, the engine reads the destination back and compares row counts, checksums, and a value and key census with the mapped source. The verdict is recorded on the job.",
             },
@@ -309,25 +335,55 @@ export function TransferStudioPage({
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
-          kicker="Mapping · Preflight"
-          title="Watch the semantic mapper score every edge"
-          lead="Format classify, role enrichment, and continuous confidence. Ambiguous edges pause for human review before they can pin into workspace synonyms."
-          compact
-        >
-          <MappingCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Mapping"
+          title="Every pairing shows why it was made"
+          lead="Open a row in Map. It shows the source type, the destination type, the confidence, and the reason the two columns were paired."
+          src={WORKSPACE_SHOT.transferMapWhyStage}
+          alt="Map row for the attributes column: JSONB to VARIANT through Parse JSON, with confidence and a sample"
+          surface="Transfer Studio · Map"
+        />
       </MarketingReveal>
 
-      <Chapter id="ts-scenario" kicker="Worked example" title="Retail orders CSV → PostgreSQL">
+      <Chapter id="ts-scenario" kicker="Worked example" title="sales_orders, Postgres to Snowflake">
         <div className="lp-mkt-scenario">
           <ol>
-            <li>Upload <code>sample-orders.csv</code> and select PostgreSQL <code>public.orders</code> (or Load sample in Studio).</li>
-            <li>Review map: <code>order_amt → total_amount</code> (qualifier pin), <code>cust_id → customer_key</code> (review — G4 holds; id ≠ warehouse key).</li>
-            <li>Preflight: G1–G3 pass; G5 flags currency-symbol rows — quarantine policy captures them.</li>
-            <li>Write clean rows; Job Theater shows the verified read-back for the written set plus quarantined rows with reasons, ready to replay.</li>
+            <li>
+              Source: <code>public.sales_orders</code> on Orders Postgres, 5,100 rows and 11 columns, including{" "}
+              <code>DECIMAL(10,2)</code> prices, a <code>TIMESTAMPTZ</code>, and a <code>JSONB</code> attributes column.
+            </li>
+            <li>
+              Destination: a new <code>DW_DEMO.SALES_ORDERS_REPORTING</code> table in Snowflake, full append.
+            </li>
+            <li>
+              Map: all 11 columns pair by name and type. <code>TIMESTAMPTZ</code> becomes <code>TIMESTAMP_LTZ</code>,{" "}
+              <code>JSONB</code> becomes <code>VARIANT</code> through Parse JSON (93% confidence, sample-validated).
+            </li>
+            <li>
+              Validate: approved. 17 gates passed, and 6 were not part of this route.
+            </li>
+            <li>
+              Run: 5,100 read, 5,100 written, destination count 0 before and 5,100 after. Proof scope is a full
+              checksum with an independent re-read of the source.
+            </li>
           </ol>
         </div>
+      </Chapter>
+
+      <Chapter id="ts-contract" kicker="Contracts" title="Keep the plan you approved">
+        <div className="lp-mkt-prose">
+          <p>
+            <em>Save contract</em> on Validate stores the approved shape as a versioned contract: 11 columns, 11
+            mappings, and the 23 gate results behind them. Once signed, a schedule can refuse to run when the
+            source or destination no longer matches it.
+          </p>
+        </div>
+        <ProductShot
+          src={WORKSPACE_SHOT.contractsColumns}
+          alt="Contract v1 for Orders Postgres to DW_DEMO.SALES_ORDERS_REPORTING, draft, 11 columns with Snowflake types"
+          surface="Contracts"
+          route={DEMO_ROUTE}
+        />
       </Chapter>
     </SurfaceShell>
   );
@@ -342,44 +398,44 @@ export function JobTheaterPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Job Theater"
-      title="See every phase from queue to proof"
-      lead="Job Theater is the operations console for transfers — live batch progress, phase timeline, quarantine samples, and reconciliation reports. If it ran, you can prove it here."
+      kicker="Product · Job space"
+      title="Every row landed, and you can get it back"
+      lead="Open a finished run in Job space. The Trust Report reads both sides: 5,100 rows in the source, 5,100 in Snowflake, full checksum match. Reversibility shows 11 of 11 columns round-trip. Both are ready for sign-off."
       ctaPrimary="Open the app"
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.jobs}
-          alt="Job Theater with whole-history counts and destination population"
-          surface="Job Theater"
-          route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+          src={WORKSPACE_SHOT.jobTrust}
+          alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
+          surface="Job space · Trust Report"
+          route={DEMO_ROUTE}
         />
       }
       liveFrames={PRODUCT_FRAMES.jobs}
-      liveTitle="Job Theater with real reconcile evidence"
-      liveSurface="Job Theater"
+      liveTitle="The Snowflake run, read back"
+      liveSurface="Job space"
       stats={[
-        { value: "Live", label: "Batch progress" },
-        { value: "Phases", label: "Queue → reconcile" },
-        { value: "Quarantine", label: "Bad rows + reasons" },
-        { value: "Verified", label: "Value & key census" },
+        { value: "5,100", label: "Rows in source and in Snowflake" },
+        { value: "Match", label: "Full checksum on every table" },
+        { value: "11 / 11", label: "Columns that round-trip" },
+        { value: "3", label: "Roles that sign the report" },
       ]}
       next="product-pipelines"
-      nextLabel="Pipelines"
+      nextLabel="Schedules"
       onNavigate={onNavigate}
     >
-      <Chapter id="jt-what" kicker="What it is" title="Operations visibility for governed loads">
+      <Chapter id="jt-what" kicker="What it is" title="The record of what actually happened">
         <div className="lp-mkt-prose">
           <p>
-            Transfer Studio plans the load. Job Theater watches it. Every job transitions through explicit phases —
-            Queued, Preflight, Extract/Write, Reconciling, Complete (or Failed) — with counters that reflect what the destination holds.
-            Quarantined rows appear with column, value, and reason so operators can fix the map or the source.
+            Transfer Studio plans a load; Job space is where you check it. The Trust Report reads both systems:
+            rows in the source, rows in the destination, and a full checksum per table. On the Snowflake run both
+            sides are 5,100, and every table matches.
           </p>
           <p>
-            Retries preserve the audit trail: you see which attempt failed which gate, and whether checksums matched
-            after a successful rewrite. Agents and humans look at the same job record.
+            Reversibility answers the cutover question: the destination can give the source data back. On this
+            run all 11 columns round-trip, so a restore reads them from the destination.
           </p>
         </div>
         <PacketFlow
@@ -387,17 +443,17 @@ export function JobTheaterPage({
             { label: "Queue", sub: "Accepted plan" },
             { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Batches", accent: true },
-            { label: "Quarantine", sub: "Bad rows" },
+            { label: "Account", sub: "Every row" },
             { label: "Reconcile", sub: "Checksums" },
             { label: "Complete", sub: "Proof report" },
           ]}
         />
       </Chapter>
 
-      <Chapter id="jt-algo" kicker="Algorithm" title="How reconciliation proves a load">
+      <Chapter id="jt-algo" kicker="Algorithm" title="How a load is proven">
         <AlgoBlock
           title="Post-load proof"
-          lead="After the write, Gate-8 reads the destination back and compares it with the mapped source: row counts, content checksums, and a value and key census."
+          lead="After the write, Datawrap reads the destination back and compares it with the mapped source: row counts, content checksums, and a value and key census. The Snowflake run's proof scope is a full checksum with an independent re-read of the source."
           steps={[
             {
               name: "Map source sample",
@@ -413,10 +469,10 @@ export function JobTheaterPage({
             },
             {
               name: "Compare",
-              detail: "Row counts, checksums, and the census → MATCH, or a named mismatch showing exactly which values differ.",
+              detail: "Row counts, checksums, and the census agree. On this run, 5,100 and 5,100.",
             },
             {
-              name: "Surface in Theater",
+              name: "Surface in Job space",
               detail: "Timeline, counters, quarantine samples, and proof report become the operator’s single source of truth.",
             },
           ]}
@@ -424,32 +480,37 @@ export function JobTheaterPage({
         <ProofCallout>
           <strong>Every row accounted for.</strong>
           <p>
-            Quarantined rows are part of the proof: the written set verifies while N rows wait in quarantine with
-            reasons. Operators fix the source or the map and replay them.
+            The Snowflake run read 5,100 and wrote 5,100. The destination count and the checksum are on the job.
           </p>
         </ProofCallout>
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Proof"
-          title="Read-back verification lands on every job"
-          lead="The engine hashes mapped source rows, reads the destination back, runs the census — then flashes MATCH when counts, content, and keys agree."
-          compact
-        >
-          <ProofCinema />
-        </AlgorithmCinemaBand>
+          title="The read-back sits on the job"
+          lead="Job space reads the destination after the write and puts the counts next to the source. On this run, 5,100 and 5,100, full checksum match."
+          src={WORKSPACE_SHOT.jobTrust}
+          alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
+          surface="Job space · Trust Report"
+        />
       </MarketingReveal>
 
-      <Chapter id="jt-scenario" kicker="Worked example" title="A warehouse load, verified end to end">
-        <div className="lp-mkt-scenario">
-          <ol>
-            <li>Pipeline kicks off Snowflake upsert at 02:00 UTC — job appears in Theater as Queued.</li>
-            <li>G2 Destination + G7 Capacity probe warehouse slots; policy continues with a warning.</li>
-            <li>During Write, 42 rows quarantine on null PK; the written set verifies with MATCH.</li>
-            <li>Operator opens the quarantine sample, fixes the source nulls, and replays — Complete with 0 quarantined.</li>
-          </ol>
+      <Chapter id="jt-signoff" kicker="Sign-off" title="Hand the report to the people who answer for it">
+        <div className="lp-mkt-prose">
+          <p>
+            The report lists what it is based on: reconciliation passed, assurance level full checksum, trust
+            score 100, and whether a protection or transform proof applied. Engineering, the data owner, and
+            compliance each sign the same version. Every approval goes to the audit log with the signer&apos;s role,
+            and once all required roles have signed, the evidence pack is signed with the workspace proof key.
+          </p>
         </div>
+        <ProductShot
+          src={WORKSPACE_SHOT.jobTrustEvidence}
+          alt="Evidence behind the Trust Report: reconciliation passed, assurance full checksum, trust score 100"
+          surface="Job space · Evidence"
+          route={DEMO_ROUTE}
+        />
       </Chapter>
     </SurfaceShell>
   );
@@ -464,46 +525,51 @@ export function PipelinesPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Pipelines"
-      title="Recurring sync with every gate, every run"
-      lead="Hourly, daily, and weekly schedules with typed watermarks, upsert, append, overwrite, mirror with soft delete, and native CDC — every tick reuses Transfer Studio’s gates, quarantine, and verification."
-      ctaPrimary="Schedule a pipeline"
+      kicker="Product · Schedules"
+      title="Recurring sync, with the same proof"
+      lead="Run a route you have already approved every few minutes, hourly, daily, or on a cron. Each tick is a full job with the same gates and the same read-back as a load you start by hand."
+      ctaPrimary="Create a schedule"
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.pipelines}
-          alt="Schedules workspace — cadence, mode, and health"
+          src={WORKSPACE_SHOT.schedulesDrawer}
+          alt="Orders feed schedule: every 2 minutes, incremental deduped on order_id"
           surface="Schedules"
-          route={{ source: "PostgreSQL · public.orders", dest: "BigQuery · analytics.orders" }}
+          route={DEMO_SCHEDULE_ROUTE}
         />
       }
       liveFrames={PRODUCT_FRAMES.pipelines}
-      liveTitle="Schedules in the live workspace"
+      liveTitle="Schedules, including the one that refused to run"
       liveSurface="Schedules"
       stats={[
-        { value: "Hourly+", label: "Cadences" },
+        { value: "7", label: "Sync modes, CDC included" },
         { value: "4", label: "Native CDC engines" },
-        { value: "Drift", label: "Manual review in Map" },
-        { value: "Same", label: "Engine as Studio" },
+        { value: "2 min", label: "Orders feed cadence" },
+        { value: "Same", label: "Gates as Transfer Studio" },
       ]}
       next="product-query"
       nextLabel="Query Playground"
       onNavigate={onNavigate}
     >
-      <Chapter id="pl-what" kicker="What it is" title="Schedules on the governed engine">
+      <Chapter id="pl-what" kicker="What it is" title="A clock on top of an approved plan">
         <div className="lp-mkt-prose">
           <p>
-            Pipelines turn a proven Transfer Studio plan into a cadence. Each run is a real job in Job Theater —
-            with the same mapping, gates, quarantine, and post-write verification as a run you start by hand.
+            A schedule takes a route you have already mapped and validated in Transfer Studio and runs it on a
+            cadence. Every run is a real job in Job space, with the same gates and the same read-back as a run
+            you start by hand.
+          </p>
+          <p>
+            A signed contract and reversibility can be required on every tick, so each run uses the map you
+            approved and a destination that can give the data back.
           </p>
           <p>
             Choose watermark incremental for change data, upsert for slowly changing dimensions, append for events,
             overwrite for full refresh, or mirror to keep the destination in step — rows gone from the source are
             soft-deleted with <code>_deleted</code> and <code>_deleted_at</code>, and the physical row is kept. Native
-            CDC streams changes from SQL Server, PostgreSQL, MySQL, and Oracle. Schema drift — a new or renamed
-            column — waits for your approval in Map, and the next tick picks it up.
+            CDC streams changes from SQL Server, PostgreSQL, MySQL, and Oracle. A new or renamed column waits
+            in Map until you approve it, and the next tick uses that map.
           </p>
         </div>
         <PacketFlow
@@ -513,7 +579,7 @@ export function PipelinesPage({
             { label: "Tick", sub: "Enqueue job" },
             { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Sync", sub: "Mode · watermark" },
-            { label: "Proof", sub: "Theater" },
+            { label: "Proof", sub: "Job space" },
           ]}
         />
       </Chapter>
@@ -537,34 +603,42 @@ export function PipelinesPage({
             },
             {
               name: "Write + quarantine",
-              detail: "Same chunked write path as Studio; bad rows isolate with reasons.",
+              detail: "Same chunked write path as Studio. Every row is in the written set or named on the job.",
             },
             {
-              name: "Prove in Theater",
-              detail: "The job record gets its Gate-8 verification and counts. Operators and agents see the same artifact.",
+              name: "Prove in Job space",
+              detail: "The job record gets its read-back and its counts. Operators and agents see the same artifact.",
             },
           ]}
         />
       </Chapter>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
-          kicker="CDC"
-          title="Snapshot handoff, then idempotent streaming upserts"
-          lead="SQL Server native CDC, PostgreSQL logical decoding, MySQL binlog, and Oracle LogMiner: a consistent snapshot, a handoff at the log position, then idempotent upserts on the primary key — so a retried tick converges and deletes carry through."
-          compact
-        >
-          <CdcCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Sync modes"
+          title="CDC is a mode on the same schedule"
+          lead="Full refresh, incremental, CDC, slowly changing dimensions, or mirror. CDC is log-based change with a cursor and a key, on the same checks as every other mode."
+          src={WORKSPACE_SHOT.transferSyncModesCard}
+          alt="Advanced settings listing sync modes, including CDC: log-based changes with a cursor and a key"
+          surface="Transfer Studio · Sync mode"
+          beside
+        />
       </MarketingReveal>
 
-      <Chapter id="pl-scenario" kicker="Worked example" title="Hourly orders into BigQuery">
+      <Chapter id="pl-scenario" kicker="Worked example" title="Orders feed, every two minutes">
         <div className="lp-mkt-scenario">
           <ol>
-            <li>Promote Studio plan Orders PG → BigQuery with watermark on <code>updated_at</code>.</li>
-            <li>Set cadence every hour; first tick backfills, later ticks move only deltas.</li>
-            <li>Source adds a column — drift waits for review; the operator approves it in Map and the next tick resumes.</li>
-            <li>Each hour’s job shows written counts and its verified read-back in Job Theater.</li>
+            <li>
+              Route: <code>orders_feed</code> on Orders Postgres into Analytics Postgres, incremental deduped on{" "}
+              <code>order_id</code>, cron <code>*/2 * * * *</code> in America/New_York.
+            </li>
+            <li>
+              Schema policy is manual approval. A new or renamed source column waits in Map until you approve
+              it, and the next tick uses that map.
+            </li>
+            <li>
+              Each run lands in History with rows written and a link to its job.
+            </li>
           </ol>
         </div>
       </Chapter>
@@ -582,8 +656,8 @@ export function QueryPlaygroundPage({
   return (
     <SurfaceShell
       kicker="Product · Query Playground"
-      title="Inspect live data before you move it"
-      lead="Run ad-hoc SQL and document queries against connected systems, preview results, export samples, and hand validated selections into Transfer Studio — without leaving the workspace."
+      title="Look at the data on both sides"
+      lead="Run read-only SQL against any saved connection. Check a source before you map it, then run the same query on the destination after the load and compare. Open a tab per system, see column types from the driver, and copy results as CSV, JSON, or Markdown."
       ctaPrimary="Open Query Playground"
       ctaSecondary="Connectors"
       onPrimary={onGetStarted}
@@ -591,18 +665,19 @@ export function QueryPlaygroundPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.query}
-          alt="Query Playground in the live Datawrap workspace"
-          surface="Query Playground"
+          alt="Query on Snowflake: orders, units, revenue, and average discount by region from SALES_ORDERS_REPORTING"
+          surface="Query · Snowflake"
+          route={DEMO_ROUTE}
         />
       }
       liveFrames={PRODUCT_FRAMES.query}
-      liveTitle="Query Playground in the live workspace"
-      liveSurface="Query Playground"
+      liveTitle="The same question, asked of both systems"
+      liveSurface="Query"
       stats={[
-        { value: "SQL", label: "Relational drivers" },
-        { value: "Docs", label: "Mongo-style queries" },
-        { value: "Preview", label: "Row-limited safe" },
-        { value: "Handoff", label: "Into Transfer Studio" },
+        { value: "5 / 5", label: "Regions identical on both sides" },
+        { value: "3.1 s", label: "Snowflake aggregate, 5,100 rows" },
+        { value: "1,000", label: "Default row limit" },
+        { value: "Read-only", label: "DML refused before it runs" },
       ]}
       next="product-pilot"
       nextLabel="Datawrap Pilot"
@@ -611,52 +686,58 @@ export function QueryPlaygroundPage({
       <Chapter id="qy-what" kicker="What it is" title="Exploration on the connectors you already trust">
         <div className="lp-mkt-prose">
           <p>
-            Query Playground is built for discovery and validation. It runs read-only SELECT and WITH; destination
-            INSERT/MERGE and stored-procedure writes live in Transfer Studio’s destination step (Query / Stored
-            procedure), with quarantine on every row. You query through the same connector credentials and RBAC as
-            the rest of the workspace, with preview limits that keep exploratory queries light.
+            Query runs on the connections you already saved, with the same encrypted credentials Transfer Studio
+            uses. The screenshots show one aggregate run twice: orders, units, revenue, and average discount by
+            region for paid, shipped, and delivered orders. On Snowflake, LATAM comes back with 767 orders, 3,845
+            units, and 182,648.65 in revenue. The Postgres source returns the same numbers for every region.
           </p>
           <p>
-            When a query defines the slice you want to move, hand off to Transfer Studio to attach mapping, preflight,
-            and verification. Exploration and governed load each get the surface built for them.
+            Only read and metadata statements run: SELECT, WITH, EXPLAIN, SHOW, DESCRIBE, ANALYZE, PRAGMA, and
+            VALUES. A <code>DELETE</code> is refused in the editor before it reaches the database. On PostgreSQL,
+            MySQL, SQLite, and Oracle the statement also runs in a transaction the server itself refuses writes
+            in. Writes belong in Transfer Studio, where they get gates and quarantine.
+          </p>
+          <p>
+            When a query describes the slice you want to move, paste the same SELECT into Transfer Studio&apos;s{" "}
+            <em>SQL query</em> source. From there it is mapped, validated, and verified like any other load.
           </p>
         </div>
         <PacketFlow
           nodes={[
-            { label: "Connect", sub: "Live driver" },
-            { label: "Author", sub: "SQL · docs", accent: true },
-            { label: "Preview", sub: "Limited rows", accent: true },
-            { label: "Validate", sub: "Types · nulls" },
-            { label: "Handoff", sub: "Transfer Studio" },
-            { label: "Prove", sub: "After load" },
+            { label: "Connect", sub: "Saved connection" },
+            { label: "Write", sub: "SQL", accent: true },
+            { label: "Check", sub: "Read-only filter", accent: true },
+            { label: "Run", sub: "Row limit" },
+            { label: "Compare", sub: "Source vs destination" },
+            { label: "Move", sub: "Studio SQL source" },
           ]}
         />
       </Chapter>
 
-      <Chapter id="qy-algo" kicker="Algorithm" title="Safe preview → Studio handoff">
+      <Chapter id="qy-algo" kicker="How it runs" title="What happens when you press Run">
         <AlgoBlock
           title="Query path"
-          lead="Playground reads under connector RBAC, caps result size, and promotes a validated selection into a transfer plan."
+          lead="Every statement is checked before it reaches the database, runs under a row limit, and comes back with the column types the driver reported."
           steps={[
             {
-              name: "Bind connector",
-              detail: "Use the saved connector’s driver + encrypted secret — same vault as Transfer Studio.",
+              name: "Use the saved connection",
+              detail: "The query runs with the connection's own driver and encrypted credentials, the same ones Transfer Studio uses.",
             },
             {
-              name: "Compile dialect",
-              detail: "SQL highlighting and execution path adapt to PostgreSQL, MySQL, Snowflake, BigQuery, etc.",
+              name: "Check the statement",
+              detail: "One statement, a read-only head, no write keyword, and no function with side effects outside the transaction. Anything else is refused in the editor.",
             },
             {
-              name: "Preview limit",
-              detail: "Enforce row/time caps so exploratory queries stay safe in shared workspaces.",
+              name: "Open a read-only session",
+              detail: "On PostgreSQL, MySQL, SQLite, and Oracle the server itself refuses writes for the duration of the query.",
             },
             {
-              name: "Shape check",
-              detail: "Surface column types and null ratios so you know what Studio will map.",
+              name: "Return typed rows",
+              detail: "Results come back under the row limit (1,000 by default) with the types the driver reported, such as DECIMAL(24,2).",
             },
             {
-              name: "Promote",
-              detail: "Handoff creates/updates a Studio plan — mapping + G1–G9 still required before write.",
+              name: "Move it properly",
+              detail: "To load the slice, use the same SELECT as a Transfer Studio SQL query source. Map and Validate still apply.",
             },
           ]}
         />
@@ -665,11 +746,9 @@ export function QueryPlaygroundPage({
       <Chapter id="qy-caps" kicker="Capabilities" title="What you can do in the playground">
         <div className="lp-mkt-prose">
           <p>
-            Author multi-driver SQL against PostgreSQL, MySQL, Snowflake, BigQuery, and other SQLAlchemy-backed
-            engines — plus Mongo-style filters when the connector is document-native. Every result is a preview,
-            capped by workspace policy, with column types surfaced so you know what Studio will map. When a slice
-            is ready, promote it into a Transfer Studio plan with mapping, gates, and verification attached. Every
-            query is attributed to its user in enterprise workspaces.
+            Write SQL against PostgreSQL, MySQL, Snowflake, BigQuery, and other SQL engines you have saved. Keep a
+            tab per system, run one statement or all of them, filter the result, and copy it as CSV, JSON, or
+            Markdown. History keeps what you ran. Kafka topics and vector stores are not queried here.
           </p>
         </div>
       </Chapter>
@@ -687,8 +766,8 @@ export function DataPilotPage({
   return (
     <SurfaceShell
       kicker="Product · Datawrap Pilot"
-      title="A copilot on its own local engine"
-      lead="Ask why a gate failed, how to fix a map, what a Job Theater run did, or how many rows a table holds. Pilot answers from the same evidence Studio and MCP use, on Datawrap’s own local engine — no cloud AI key required — and anything that changes data waits for your Confirm."
+      title="Ask the workspace, see the SQL"
+      lead="Ask how many rows a table holds, what a column adds up to by region, which tables a connection has, or what ran recently. Pilot answers from the live systems and your job records on Datawrap’s own local engine, with no cloud AI key, and shows the SQL behind every number. Anything that would change data waits for your Confirm."
       ctaPrimary="Try Datawrap Pilot"
       ctaSecondary="MCP Server"
       onPrimary={onGetStarted}
@@ -696,18 +775,18 @@ export function DataPilotPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.pilot}
-          alt="Datawrap Pilot in the live workspace"
+          alt="Pilot answering that sales_orders has 5,100 rows and listing order_total by region, with the SQL it ran"
           surface="Datawrap Pilot"
         />
       }
       liveFrames={PRODUCT_FRAMES.pilot}
-      liveTitle="Datawrap Pilot in the live workspace"
+      liveTitle="Exact answers from the live tables"
       liveSurface="Datawrap Pilot"
       stats={[
-        { value: "Local", label: "Own engine · no cloud key" },
-        { value: "Gates", label: "Explain failures" },
-        { value: "Maps", label: "Propose fixes" },
-        { value: "Confirm", label: "Before anything moves" },
+        { value: "5,100", label: "Rows counted server-side, not sampled" },
+        { value: "SQL", label: "Shown under every number" },
+        { value: "Local", label: "Engine, no cloud AI key" },
+        { value: "Confirm", label: "Before anything changes" },
       ]}
       next="product-mcp"
       nextLabel="MCP Server"
@@ -716,35 +795,40 @@ export function DataPilotPage({
       <Chapter id="dp-what" kicker="What it is" title="Chat on the governed engine">
         <div className="lp-mkt-prose">
           <p>
-            Datawrap Pilot is an operator copilot on the governed engine. When it proposes a mapping fix or quarantine
-            policy, the change flows through Transfer Studio’s review and the nine core gates. Pilot’s own local engine
-            answers from your schemas and job evidence, on the box; connecting a third-party model in Settings is
-            optional and only polishes the wording — transfer facts and Confirm always come from the engine.
+            Pilot turns a question into a query against the right connection and says what it ran. Asked how many
+            rows <code>sales_orders</code> holds, it answered 5,100, marked the result as an exact server-side
+            aggregate rather than a sample, and printed the <code>COUNT(*)</code>. Asked for order totals by region,
+            it returned all five regions with the <code>GROUP BY</code> underneath.
+          </p>
+          <p>
+            Its own local engine runs in the workspace. Connecting a third-party model in Settings is optional and
+            only changes the wording; the numbers and every Confirm still come from the engine. Every figure is
+            an exact server-side result, with the SQL under it.
           </p>
         </div>
         <AlgoBlock
-          title="Triage loop"
-          lead="Pilot answers from job evidence — gate messages, quarantine samples, map scores — then hands you into Studio or Theater with context preserved."
+          title="How Pilot answers"
+          lead="Pilot answers from the systems themselves, not from a model's memory of them, and it shows its work."
           steps={[
             {
-              name: "Ground on artifacts",
-              detail: "Load the job’s gate results, mapping edges, and quarantine samples, and answer from them.",
+              name: "Find the connection",
+              detail: "The question names a table and a saved connection, such as sales_orders on Orders Postgres (demo).",
             },
             {
-              name: "Explain failure",
-              detail: "Translate G1–G9 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
+              name: "Build the query",
+              detail: "Counts, sums, and group-bys become one SQL statement for that engine.",
             },
             {
-              name: "Propose fix",
-              detail: "Suggest synonym pins, coerce rules, or quarantine policy — still requiring human/agent confirmation.",
+              name: "Run it on the server",
+              detail: "The aggregate runs over the whole table and is labelled exact, never a sample passed off as a total.",
             },
             {
-              name: "Handoff",
-              detail: "Deep-link into Transfer Studio or Job Theater with the same job ID and map context.",
+              name: "Show the work",
+              detail: "The SQL and a result reference sit under the answer so you can filter or profile it next.",
             },
             {
-              name: "Re-run gates",
-              detail: "Any accepted change re-enters preflight, and proof comes from the engine’s post-write verification.",
+              name: "Confirm before change",
+              detail: "Anything that would create, run, or change something becomes a request you confirm, and then goes through the same gates as Studio.",
             },
           ]}
         />
@@ -772,18 +856,18 @@ export function McpServerPage({
       heroVisual={
         <ProductShot
           src={WORKSPACE_SHOT.mcp}
-          alt="MCP Server page in the live workspace"
+          alt="MCP Server page: server URL online, client setup for Cursor, Claude Desktop, VS Code, custom GPT, and other remote clients"
           surface="MCP Server"
         />
       }
       liveFrames={PRODUCT_FRAMES.mcp}
-      liveTitle="Agent runs still land in the real workspace"
+      liveTitle="Agent runs land in the same workspace"
       liveSurface="MCP Server"
       stats={[
-        { value: "MCP", label: "Tool surface" },
-        { value: "RBAC", label: "On every call" },
-        { value: "Audit", label: "Agent runs logged" },
-        { value: "Same", label: "Gates as UI" },
+        { value: "1 URL", label: "Streamable HTTP, any MCP client" },
+        { value: "4", label: "Key roles: Viewer to Admin" },
+        { value: "ack_id", label: "Then confirm_action to change" },
+        { value: "Same", label: "Gates as the UI" },
       ]}
       next="integrations"
       nextLabel="Connectors"
@@ -794,7 +878,7 @@ export function McpServerPage({
           <p>
             The MCP server exposes connectors, transfer plans, schedules, job status, and controlled run actions behind
             a deny-by-default allow-list. Tool responses carry secret references in place of credentials. If preflight
-            holds a run, the agent sees the same gate evidence a human would in Job Theater.
+            holds a run, the agent sees the same gate evidence a human would in Job space.
           </p>
         </div>
         <PacketFlow
@@ -803,7 +887,7 @@ export function McpServerPage({
             { label: "MCP", sub: "Tools · auth", accent: true },
             { label: "RBAC", sub: "Workspace roles" },
             { label: "Engine", sub: "Map · G1–G9", accent: true },
-            { label: "Job", sub: "Theater" },
+            { label: "Job", sub: "Job space" },
             { label: "Audit", sub: "Immutable log" },
           ]}
         />
@@ -832,7 +916,7 @@ export function McpServerPage({
             },
             {
               name: "Enqueue + audit",
-              detail: "The job appears in Theater tagged as agent-initiated; tool payloads carry secret references only.",
+              detail: "The job appears in Job space tagged as agent-initiated; tool payloads carry secret references only.",
             },
           ]}
         />
@@ -848,12 +932,20 @@ export function McpServerPage({
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">
         <div className="lp-mkt-prose">
           <p>
-            Tools group cleanly around <strong>catalog &amp; connectors</strong> (warehouses, lakes, databases, and
-            apps), <strong>transfer plans</strong> (create and update maps, with review flags kept on ambiguous
-            edges), <strong>run &amp; status</strong> (enqueue governed runs, re-run jobs, and poll phases and
-            proof), <strong>schedules</strong> (create and inspect recurring syncs, each confirmed by a person),
-            and <strong>quarantine read</strong> (sample held-back rows for agent-assisted fixes, policy-scoped).
-            The API surface is thin on purpose — the engine decides what is safe.
+            The tools follow the product. <strong>Connections</strong>: <code>list_connectors</code>,{" "}
+            <code>test_connector</code>, <code>introspect_connector_schema</code>. <strong>Planning</strong>:{" "}
+            <code>plan_transfer</code>, <code>map_connector_schemas</code>, <code>get_preflight_run</code>,{" "}
+            <code>explain_mapping_assurance</code>. <strong>Running</strong>: <code>start_transfer</code>,{" "}
+            <code>retry_job</code>, <code>resume_job</code>, <code>replay_quarantine</code>.{" "}
+            <strong>Proof</strong>: <code>explain_parity</code>, <code>check_reversibility</code>,{" "}
+            <code>compare_datasets</code>. <strong>Schedules</strong>: <code>create_schedule</code>,{" "}
+            <code>run_schedule_now</code>, <code>set_schedule_enabled</code>.
+          </p>
+          <p>
+            Anything that creates or moves something returns an <code>ack_id</code> and does nothing until{" "}
+            <code>confirm_action</code>. Access follows the key: a Viewer key gets read-only tools, an Operator key
+            can run and cancel jobs, an Editor key gets everything except <code>delete_connector</code>, and an
+            Admin key gets every tool.
           </p>
         </div>
       </Chapter>
@@ -872,17 +964,17 @@ export function MigrationsSolutionPage({
     <SolutionShell
       kicker="Solution · Migrations"
       title="Cross-schema cutover you can prove"
-      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine preflight gates (G1–G9), quarantine with reasons, and a verified read-back before cutover."
+      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine preflight gates (G1–G9), and a verified read-back before cutover."
       ctaPrimary="Start a migration"
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.transferSource}
-          alt="Transfer Studio source — profiled sample-orders before a migration write"
-          surface="Migrations · Transfer Studio"
-          route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+          src={WORKSPACE_SHOT.transferValidate}
+          alt="Validate approved: 17 gates passed, Execute unlocked for the Snowflake load"
+          surface="Migrations · Validate"
+          route={DEMO_ROUTE}
         />
       }
       liveFrames={SOLUTION_FRAMES.migrations}
@@ -899,11 +991,11 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Exact on every cast",
-          body: "Dry-run sends coerce failures to quarantine with column, value, and reason. An intentional cast is a signed risk contract.",
+          body: "Dry-run checks every value against the destination type before the write. The approved plan is what Execute runs.",
         },
         {
           title: "Signed proof at cutover",
-          body: "Pilot a subset first, then the full write. Finance archives a signed proof pack — counts, checksums, and a census that MATCH.",
+          body: "Pilot a subset first, then the full write. Finance archives a signed proof pack: counts, checksums, and a census.",
         },
       ]}
       steps={[
@@ -939,7 +1031,7 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Time to the last digit",
-          body: "Every microsecond carries, DATETIME2(7) keeps its seventh digit, and Gate-8 compares timestamps at full precision.",
+          body: "Every microsecond carries, DATETIME2(7) keeps its seventh digit, and the read-back compares timestamps at full precision.",
         },
         {
           title: "Identity, keys, constraints",
@@ -955,14 +1047,14 @@ export function MigrationsSolutionPage({
         },
       ]}
       cinema={
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Mapping"
-          title="Watch every edge earn a confidence score"
-          lead="Format classify, role enrichment, and continuous confidence. Ambiguous edges pause for human review before they pin."
-          compact
-        >
-          <MappingCinema />
-        </AlgorithmCinemaBand>
+          title="The map, with the reason on the row"
+          lead="Confident pairs map themselves. A row that is ambiguous waits, and the reason stays on the column so the next person can see it."
+          src={WORKSPACE_SHOT.transferMap}
+          alt="Transfer Studio map: 11 of 11 columns from sales_orders mapped to SALES_ORDERS_REPORTING"
+          surface="Transfer Studio · Map"
+        />
       }
       next="solution-warehouse"
       nextLabel="Warehouse loading"
@@ -998,30 +1090,20 @@ export function WarehouseSolutionPage({
                 Load a warehouse
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("product-pipelines")}>
-                Explore Pipelines
+                Explore Schedules
               </button>
             </div>
           </div>
           <div className="lp-sol-hero-visual">
             <ProductShot
-              src={WORKSPACE_SHOT.jobs}
-              alt="Job Theater destination population after a warehouse load"
-              surface="Warehouse · Job Theater"
-              route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+              src={WORKSPACE_SHOT.transferRunComplete}
+              alt="Snowflake load finished: 5,100 appended, destination 0 before and 5,100 after, checksum recorded"
+              surface="Warehouse · Run"
+              route={DEMO_ROUTE}
             />
           </div>
         </div>
       </section>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <LiveProductReel
-            frames={SOLUTION_FRAMES.warehouse}
-            title="Warehouse loads in the live workspace"
-            surface="Job Theater"
-          />
-        </section>
-      </MarketingReveal>
 
       <section className="lp-wh-rail" aria-label="Destinations">
         <div className="lp-shell lp-wh-rail-inner">
@@ -1029,7 +1111,7 @@ export function WarehouseSolutionPage({
           <span>BigQuery</span>
           <span>Apache Iceberg</span>
           <span>S3 · ADLS · GCS</span>
-          <span>Gate-8 MATCH</span>
+          <span>Read back and compared</span>
         </div>
       </section>
 
@@ -1046,18 +1128,18 @@ export function WarehouseSolutionPage({
               <ul className="lp-wh-list">
                 <li>Write rights and role checks before any bulk path starts</li>
                 <li>Slot / capacity estimates surfaced for operators</li>
-                <li>The same G1–G9 contract as Studio migrations</li>
+                <li>A new table is created only after its DDL is approved</li>
               </ul>
             </div>
             <aside className="lp-wh-panel" aria-label="Preflight snapshot">
               <header>
-                <strong>Destination probe</strong>
-                <em>Ready</em>
+                <strong>DW_DEMO.SALES_ORDERS_REPORTING</strong>
+                <em>Approved</em>
               </header>
-              <div><span>Reachability</span><em>ok</em></div>
-              <div><span>Privileges</span><em>write granted</em></div>
-              <div><span>Capacity</span><em>slots available</em></div>
-              <div><span>Preflight</span><em>9 / 9</em></div>
+              <div><span>Destination write access</span><em>passed</em></div>
+              <div><span>Create destination table</span><em>approved DDL</em></div>
+              <div><span>Staging capacity</span><em>passed</em></div>
+              <div><span>Gates</span><em>17 passed · Execute unlocked</em></div>
             </aside>
           </div>
         </section>
@@ -1071,12 +1153,12 @@ export function WarehouseSolutionPage({
               <h2>Upsert, append, or overwrite — validated</h2>
               <p>
                 Each driver offers the bulk modes it supports, with MERGE upserts on Snowflake and
-                BigQuery. Coerce failures quarantine in the open with their reason.
+                BigQuery. The Snowflake run wrote 5,100 of 5,100.
               </p>
               <ul className="lp-wh-list">
                 <li>Driver-aware load jobs with quarantine samples</li>
                 <li>Snowflake password or key-pair authentication</li>
-                <li>Promote the same plan into Pipelines for recurring cadence</li>
+                <li>Promote the same plan to a schedule for a recurring cadence</li>
               </ul>
             </div>
             <aside className="lp-wh-modes" aria-label="Write modes">
@@ -1093,28 +1175,28 @@ export function WarehouseSolutionPage({
           <div className="lp-shell">
             <div className="lp-wh-section-head">
               <p className="lp-mkt-kicker">How it works</p>
-              <h2>Four steps from probe to MATCH</h2>
+              <h2>Four steps from a capacity check to proof</h2>
             </div>
             <ol className="lp-wh-flow-list">
-              <li>
+              <li className="lp-scene-card">
                 <span>01</span>
                 <strong>Probe</strong>
                 <p>Destination rights and capacity before the window opens.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>02</span>
                 <strong>Map &amp; gate</strong>
-                <p>Semantic maps and nine fail-fast gates (G1–G9) — identical to Studio.</p>
+                <p>Semantic maps and nine preflight gates (G1–G9), the same ones Studio runs.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>03</span>
                 <strong>Bulk write</strong>
-                <p>Driver path with quarantine for coerce failures.</p>
+                <p>The same driver path Studio uses, with the destination read back after the write.</p>
               </li>
-              <li>
+              <li className="lp-scene-card">
                 <span>04</span>
                 <strong>Prove</strong>
-                <p>Row counts, checksums, and a value and key census flash MATCH.</p>
+                <p>Row counts, checksums, and a value and key census, compared with the source.</p>
               </li>
             </ol>
           </div>
@@ -1122,14 +1204,14 @@ export function WarehouseSolutionPage({
       </MarketingReveal>
 
       <MarketingReveal>
-        <AlgorithmCinemaBand
+        <ShotBand
           kicker="Proof"
-          title="Read-back verification flashes MATCH"
-          lead="The engine hashes mapped source rows, reads the destination back, and flashes MATCH when counts, content, and keys agree."
-          compact
-        >
-          <ProofCinema />
-        </AlgorithmCinemaBand>
+          title="Read the destination back, then compare"
+          lead="The engine hashes the mapped source rows, reads the destination back, and reports a match when the counts, the content, and the keys agree."
+          src={WORKSPACE_SHOT.jobTrust}
+          alt="Trust Report: 5,100 rows in the source, 5,100 in Snowflake, full checksum match"
+          surface="Job space · Trust Report"
+        />
       </MarketingReveal>
 
       <section className="lp-wh-cta">
@@ -1163,17 +1245,17 @@ export function SyncSolutionPage({
     <SolutionShell
       kicker="Solution · Recurring sync"
       title="Incremental schedules you can verify"
-      lead="Keep systems aligned on a cadence — native CDC or typed watermarks, upsert, mirror with soft delete, schema-drift review, and Job Theater verification on every tick."
+      lead="Keep systems aligned on a cadence — native CDC or typed watermarks, upsert, mirror with soft delete, schema-drift review, and Job space verification on every tick."
       ctaPrimary="Create a sync"
-      ctaSecondary="Pipelines product"
+      ctaSecondary="Schedules"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-pipelines")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.pipelines}
-          alt="Schedules workspace for recurring sync"
+          src={WORKSPACE_SHOT.schedulesHistory}
+          alt="Run history for the Orders feed, each run linked to its job"
           surface="Recurring sync · Schedules"
-          route={{ source: "PostgreSQL · public.orders", dest: "BigQuery · analytics.orders" }}
+          route={DEMO_SCHEDULE_ROUTE}
         />
       }
       liveFrames={SOLUTION_FRAMES.sync}
@@ -1193,7 +1275,7 @@ export function SyncSolutionPage({
           body: "A new or renamed column waits for approval in Map, so every write lands in the shape you approved.",
         },
         {
-          title: "Theater on every run",
+          title: "Job space on every run",
           body: "Phases, quarantine samples, and the verified read-back attach to each tick for operators to open later.",
         },
       ]}
@@ -1216,7 +1298,7 @@ export function SyncSolutionPage({
         {
           n: "04",
           title: "Watch and correct",
-          body: "Job Theater surfaces drift reviews and quarantine. Decide once; the next tick reuses the decision.",
+          body: "Job space surfaces drift reviews and quarantine. Decide once; the next tick reuses the decision.",
         },
       ]}
       caps={[
@@ -1246,14 +1328,15 @@ export function SyncSolutionPage({
         },
       ]}
       cinema={
-        <AlgorithmCinemaBand
-          kicker="CDC"
-          title="Snapshot + LSN handoff, then streaming upserts"
-          lead="Start with a snapshot window, hand off at a logical cursor, and stream idempotent upserts. Redelivery is safe by design."
-          compact
-        >
-          <CdcCinema />
-        </AlgorithmCinemaBand>
+        <ShotBand
+          kicker="Sync modes"
+          title="One list of modes, CDC included"
+          lead="The schedule runs the mode you pick. CDC sits next to incremental, mirror, and slowly changing dimensions, and it goes through the same checks."
+          src={WORKSPACE_SHOT.transferSyncModesCard}
+          alt="Sync mode list with CDC: log-based changes with a cursor and a key"
+          surface="Transfer Studio · Sync mode"
+          beside
+        />
       }
       next="pricing"
       nextLabel="Pricing"
@@ -1271,9 +1354,9 @@ function SolutionShell({
   onPrimary,
   onSecondary,
   heroVisual,
-  liveFrames,
-  liveTitle,
-  liveSurface,
+  liveFrames: _liveFrames,
+  liveTitle: _liveTitle,
+  liveSurface: _liveSurface,
   outcomes,
   steps,
   caps,
@@ -1325,22 +1408,10 @@ function SolutionShell({
         </div>
       </section>
 
-      {liveFrames && liveFrames.length > 0 ? (
-        <MarketingReveal>
-          <section className="lp-mkt-body">
-            <LiveProductReel
-              frames={liveFrames}
-              title={liveTitle ?? "Inside the live workspace"}
-              surface={liveSurface ?? "Workspace"}
-            />
-          </section>
-        </MarketingReveal>
-      ) : null}
-
       <MarketingReveal>
         <section className="lp-sol-outcomes" aria-label="What you get">
           {outcomes.map((item, i) => (
-            <article key={item.title} className="lp-sol-outcome" style={{ "--reveal-i": i } as CSSProperties}>
+            <article key={item.title} className="lp-sol-outcome lp-scene-card" style={{ "--reveal-i": i } as CSSProperties}>
               <span>{String(i + 1).padStart(2, "0")}</span>
               <h3>{item.title}</h3>
               <p>{item.body}</p>
@@ -1358,7 +1429,7 @@ function SolutionShell({
           </div>
           <ol className="lp-sol-steps">
             {steps.map((step) => (
-              <li key={step.n} className="lp-sol-step">
+              <li key={step.n} className="lp-sol-step lp-scene-card">
                 <span>{step.n}</span>
                 <div>
                   <h3>{step.title}</h3>
@@ -1380,7 +1451,7 @@ function SolutionShell({
           </div>
           <div className="lp-sol-caps">
             {caps.map((cap) => (
-              <article key={cap.title} className="lp-sol-cap">
+              <article key={cap.title} className="lp-sol-cap lp-scene-card">
                 <h3>{cap.title}</h3>
                 <p>{cap.body}</p>
               </article>
@@ -1400,10 +1471,10 @@ function SolutionShell({
               <button type="button" className="lp-btn lp-btn--brand" onClick={onPrimary}>
                 {ctaPrimary}
               </button>
-              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate(next)}>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate(next)}>
                 Next: {nextLabel} →
               </button>
-              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("help")}>
+              <button type="button" className="lp-btn lp-btn--ghost lp-btn--on-ink" onClick={() => onNavigate("help")}>
                 Read the docs
               </button>
             </div>
