@@ -13,6 +13,11 @@ import pytest
 pytestmark = pytest.mark.timeout(90)
 
 
+def _scratch(tag: str) -> str:
+    """A name that cannot collide with another live test's leftover table."""
+    return f"df6_{tag}_{uuid.uuid4().hex[:10]}"
+
+
 def _pg():
     import psycopg2
     from conftest import pg_test_cfg
@@ -67,8 +72,8 @@ def test_mysql_not_empty_drop_unlocks_and_the_pool_can_use_another_table(monkeyp
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
     conn = _mysql()
-    filled = f"d378f_{uuid.uuid4().hex[:8]}"
-    other = f"d378o_{uuid.uuid4().hex[:8]}"
+    filled = _scratch("d378f")
+    other = _scratch("d378o")
     cfg = {
         "type": "mysql", "host": "127.0.0.1", "port": 3306,
         "database": "dataflow", "username": "dataflow", "password": "dataflow",
@@ -116,7 +121,7 @@ def test_postgres_empty_drop_does_not_wait_forever_on_a_lock(monkeypatch):
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
     conn, cfg = _pg()
-    name = f"d378l_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d378l")
     blocker = None
     try:
         cur = conn.cursor()
@@ -154,7 +159,7 @@ def test_sqlserver_empty_drop_does_not_wait_forever_on_a_lock(monkeypatch):
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
     conn, password = _mssql()
-    name = f"d378l_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d378l")
     blocker = None
     try:
         cur = conn.cursor()
@@ -222,7 +227,7 @@ def test_mysql_quarantine_of_every_check_violation_restores_the_widen(monkeypatc
 
     monkeypatch.setattr("connectors.column_widen_restore.note_restore", _spy)
     conn = _mysql()
-    name = f"d368q_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d368q")
     try:
         cur = conn.cursor()
         cur.execute(
@@ -271,7 +276,7 @@ def test_postgres_quarantine_of_every_check_violation_restores_the_widen(monkeyp
 
     monkeypatch.setattr("connectors.column_widen_restore.note_restore", _spy)
     conn, cfg = _pg()
-    name = f"d368q_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d368q")
     try:
         cur = conn.cursor()
         cur.execute(
@@ -317,7 +322,7 @@ def test_mysql_utf8mb4_0900_ai_ci_matches_a_real_unique_index():
     from services.collation_equality import group_key_values, read_column_collation
 
     conn = _mysql()
-    name = f"d391_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d391")
     try:
         cur = conn.cursor()
         cur.execute(
@@ -378,7 +383,7 @@ def test_sqlserver_pads_trailing_spaces_and_not_tabs(monkeypatch):
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
     conn, password = _mssql()
-    name = f"d391_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d391")
     try:
         cur = conn.cursor()
         cur.execute(
@@ -433,7 +438,7 @@ def test_a_changed_postgres_schema_version_skips_reuse(monkeypatch):
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
     conn, cfg = _pg()
-    name = f"d308s_{uuid.uuid4().hex[:8]}"
+    name = _scratch("d308s")
     try:
         cur = conn.cursor()
         cur.execute(f'CREATE TABLE "{name}" (id int)')
@@ -454,6 +459,13 @@ def test_a_changed_postgres_schema_version_skips_reuse(monkeypatch):
         conn.commit()
         second = destination_schema_version(dest)
         assert second != first
+        cur.execute(f'CREATE UNIQUE INDEX "{name}_id" ON "{name}" (id)')
+        cur.execute(
+            f'ALTER TABLE "{name}" ADD CONSTRAINT "{name}_chk" CHECK (id >= 0)'
+        )
+        conn.commit()
+        third = destination_schema_version(dest)
+        assert third not in {first, second, "", "unread"}
         with bind_staged_preflight("pf_live", "fp", second):
             assert staged_preflight_for_bound() is None
     finally:
@@ -462,6 +474,125 @@ def test_a_changed_postgres_schema_version_skips_reuse(monkeypatch):
         cur.execute(f'DROP TABLE IF EXISTS "{name}"')
         conn.commit()
         conn.close()
+
+
+def test_mysql_drop_does_not_wait_out_a_long_transaction(monkeypatch):
+    import threading
+    import time
+
+    from services.batch_undo import note_dropped_empty_create
+    from services.error_handling import TransferCancelled
+
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
+    conn = _mysql()
+    name = _scratch("d378w")
+    cfg = {
+        "type": "mysql", "host": "127.0.0.1", "port": 3306,
+        "database": "dataflow", "username": "dataflow", "password": "dataflow",
+    }
+    stop = threading.Event()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"CREATE TABLE `{name}` (id INT)")
+        conn.commit()
+        blocker = _mysql()
+
+        def _hold() -> None:
+            held = blocker.cursor()
+            held.execute(f"LOCK TABLES `{name}` WRITE")
+            stop.wait(25)
+            try:
+                held.execute("UNLOCK TABLES")
+            except Exception:
+                pass
+            blocker.close()
+
+        thread = threading.Thread(target=_hold)
+        thread.start()
+        time.sleep(0.4)
+        started = time.monotonic()
+        outcome = TransferCancelled("cancelled", rows_written=0)
+        note_dropped_empty_create(outcome, cfg, name, None)
+        elapsed = time.monotonic() - started
+        stop.set()
+        thread.join(timeout=10)
+        assert 4 <= elapsed < 12, elapsed
+        assert outcome.dropped_created_table == ""
+    finally:
+        stop.set()
+        try:
+            cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS `{name}`")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def test_mysql_upsert_keeps_the_first_key_text_and_the_latest_value(monkeypatch):
+    import pickle
+    import sqlite3
+
+    from src.transfer.models import EndpointConfig
+
+    from services.collation_equality import collapse_destination_equal_keys
+
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
+    conn = _mysql()
+    name = _scratch("d391k")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"CREATE TABLE `{name}` ("
+            "k VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, "
+            "v VARCHAR(20), UNIQUE KEY u (k))"
+        )
+        conn.commit()
+        for key, value in (("a", "v1"), ("A", "v2"), ("a", "v3")):
+            cur.execute(
+                f"INSERT INTO `{name}` (k, v) VALUES (%s, %s) "
+                "ON DUPLICATE KEY UPDATE v = VALUES(v)",
+                (key, value),
+            )
+            conn.commit()
+        cur.execute(f"SELECT k, v FROM `{name}`")
+        assert cur.fetchone() == ("a", "v3")
+
+        store = sqlite3.connect(":memory:")
+        store.execute("CREATE TABLE spill (seq INTEGER PRIMARY KEY, payload BLOB)")
+        store.execute(
+            "CREATE TABLE spill_key (k TEXT PRIMARY KEY, seq INTEGER, latest INTEGER)"
+        )
+        # Exact 'a' is written twice: first at seq 1, latest position 3.
+        store.execute(
+            "INSERT INTO spill (seq, payload) VALUES (?, ?)",
+            (1, pickle.dumps(({"k": "a", "v": "v3"}, {}, None), protocol=4)),
+        )
+        store.execute(
+            "INSERT INTO spill (seq, payload) VALUES (?, ?)",
+            (2, pickle.dumps(({"k": "A", "v": "v2"}, {}, None), protocol=4)),
+        )
+        store.execute(
+            "INSERT INTO spill_key (k, seq, latest) VALUES ('a', 1, 3), ('A', 2, 2)"
+        )
+        dest = EndpointConfig(
+            kind="database", format="mysql", table=name, host="127.0.0.1",
+            port=3306, database="dataflow", username="dataflow", password="dataflow",
+        )
+        dropped = collapse_destination_equal_keys(
+            store, dialect="mysql", endpoint=dest, columns=["k"]
+        )
+        assert dropped == 1
+        left = store.execute("SELECT payload FROM spill ORDER BY seq").fetchall()
+        assert len(left) == 1
+        orow, _shaped, _origin = pickle.loads(left[0][0])
+        assert orow == {"k": "a", "v": "v3"}
+    finally:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS `{name}`")
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def test_a_dead_dns_name_from_mysql_is_dns_not_found():
