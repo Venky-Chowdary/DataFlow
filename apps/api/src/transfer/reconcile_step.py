@@ -1584,7 +1584,63 @@ def _transform_applied_proof_impl(
 
     def _expected_iter():
         nonlocal raw_count, _collapsed_duplicates
-        _held: list[tuple] = []
+        import pickle
+
+        from services.duplicate_policy import duplicate_key_token
+
+        # Last-wins spills to the proof's sqlite file. Holding every source
+        # row in a list made an upsert of a large file a memory copy (D391).
+        # A run with no repeated key never rewrites a row.
+        _spill_ready = False
+        _spill_seq = 0
+        _spill_dropped = 0
+
+        def _spill_init() -> None:
+            nonlocal _spill_ready
+            if _spill_ready or not _collapse_keys:
+                return
+            pin_store.db.execute(
+                "CREATE TABLE IF NOT EXISTS spill (seq INTEGER PRIMARY KEY, payload BLOB)"
+            )
+            pin_store.db.execute(
+                "CREATE TABLE IF NOT EXISTS spill_key (k TEXT PRIMARY KEY, seq INTEGER)"
+            )
+            _spill_ready = True
+
+        def _spill_key(orow: dict) -> str:
+            parts: list[str] = []
+            for col in _collapse_keys:
+                token = duplicate_key_token(orow.get(col), dest_db_type)
+                if token == "\x00NULL\x00":
+                    # A NULL key is not collapsed with another NULL key.
+                    return f"\x00null:{_spill_seq}"
+                parts.append(token)
+            return "\x1f".join(parts)
+
+        def _spill_row(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
+            nonlocal _spill_seq, _spill_dropped
+            _spill_init()
+            key = _spill_key(orow)
+            payload = pickle.dumps((orow, shaped_t, origin_row), protocol=4)
+            found = pin_store.db.execute(
+                "SELECT seq FROM spill_key WHERE k = ?", (key,)
+            ).fetchone()
+            if found is None:
+                _spill_seq += 1
+                pin_store.db.execute(
+                    "INSERT INTO spill (seq, payload) VALUES (?, ?)",
+                    (_spill_seq, payload),
+                )
+                pin_store.db.execute(
+                    "INSERT INTO spill_key (k, seq) VALUES (?, ?)",
+                    (key, _spill_seq),
+                )
+                return
+            _spill_dropped += 1
+            pin_store.db.execute(
+                "UPDATE spill SET payload = ? WHERE seq = ?",
+                (payload, found[0]),
+            )
 
         def _record_expected(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
             _fpm_buf.append(("e", _fph(orow)))
@@ -1698,9 +1754,7 @@ def _transform_applied_proof_impl(
                 if _is_kept(orow, pin_key_cols):
                     continue
                 if _collapse_keys:
-                    # Same last-wins as the load. Emit the survivors once the
-                    # whole source has been read (D391).
-                    _held.append((orow, shaped_t, origin[i]))
+                    _spill_row(orow, shaped_t, origin[i])
                     continue
                 _record_expected(orow, shaped_t, origin[i])
                 yield orow
@@ -1714,21 +1768,18 @@ def _transform_applied_proof_impl(
                 **written,
             }
             if _collapse_keys:
-                _held.append((orow, {}, None))
+                _spill_row(orow, {}, None)
                 continue
             _record_expected(orow, {}, None)
             yield orow
-        if _collapse_keys and _held:
-            from services.duplicate_policy import collapse_keep_last
-
-            kept, dropped = collapse_keep_last(
-                [item[0] for item in _held], _collapse_keys
-            )
-            _collapsed_duplicates = dropped
-            survive = {id(row) for row in kept}
-            for orow, shaped_t, origin_row in _held:
-                if id(orow) not in survive:
-                    continue
+        if _collapse_keys and _spill_ready:
+            # No repeated key: the spill is the source order and nothing is
+            # rewritten. A repeated key already holds the last payload.
+            _collapsed_duplicates = _spill_dropped
+            for (payload,) in pin_store.db.execute(
+                "SELECT payload FROM spill ORDER BY seq"
+            ):
+                orow, shaped_t, origin_row = pickle.loads(payload)
                 _record_expected(orow, shaped_t, origin_row)
                 yield orow
         _flush_ms()

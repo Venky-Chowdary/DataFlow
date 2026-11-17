@@ -172,7 +172,8 @@ def test_folder_keep_last_orders_by_modified_time_then_name():
         RemoteFile(name="a.csv", size=1, mtime="2", checksum=""),
         RemoteFile(name="c.csv", size=1, mtime="1", checksum=""),
     ]
-    assert [item.name for item in ordered_files(files)] == ["c.csv", "a.csv", "b.csv"]
+    assert [item.name for item in ordered_files(files, keep_last=True)] == ["c.csv", "a.csv", "b.csv"]
+    assert [item.name for item in ordered_files(files)] == ["a.csv", "b.csv", "c.csv"]
 
 
 def test_a_stamped_workspace_job_is_in_that_workspaces_list():
@@ -201,6 +202,24 @@ def test_probe_and_reconcile_share_one_mysql_login(monkeypatch):
 
     opened = {"n": 0}
 
+    class _Cur:
+        def __init__(self, conn):
+            self.conn = conn
+            self.sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, sql, *_a):
+            self.sql = str(sql)
+
+        def fetchone(self):
+            seconds = int(getattr(self.conn, "_read_timeout", None) or 40)
+            return (seconds, seconds, "STRICT_TRANS_TABLES")
+
     class _Conn:
         def ping(self, reconnect=False):
             return None
@@ -210,6 +229,9 @@ def test_probe_and_reconcile_share_one_mysql_login(monkeypatch):
 
         def close(self):
             return None
+
+        def cursor(self):
+            return _Cur(self)
 
     monkeypatch.setattr(mysql_conn, "dial_pymysql", lambda *_a, **_k: opened.__setitem__("n", opened["n"] + 1) or _Conn())
     monkeypatch.setattr("services.egress_guard.assert_connector_dial_allowed", lambda *_a, **_k: None)

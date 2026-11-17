@@ -592,6 +592,21 @@ def latest_version_per_key(
     return kept
 
 
+def duplicate_key_token(value: Any, dest_db: str = "") -> str:
+    """Key text for last-wins, using the destination's comparison rules.
+
+    SQL Server and MySQL string keys compare case-insensitively and ignore
+    trailing spaces. Postgres and the other engines keep the literal text.
+    """
+    if value is None:
+        return "\x00NULL\x00"
+    text = value if isinstance(value, str) else str(value)
+    kind = str(dest_db or "").lower()
+    if kind in {"mysql", "mariadb", "sqlserver", "mssql", "azure_sql"}:
+        return text.casefold().rstrip()
+    return text
+
+
 def collapse_keep_last(
     rows: list[dict],
     key_columns: list[str],

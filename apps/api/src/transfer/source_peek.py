@@ -98,8 +98,12 @@ def _peek_each_file(
 
     if not is_file_pattern(table):
         return None
+    keep_last = str(
+        (getattr(source, "extra", None) or {}).get("in_file_dedupe") or ""
+    ).replace("-", "_") == "keep_last"
     listed = ordered_files(
-        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
+        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table),
+        keep_last=keep_last,
     )
     if not listed:
         raise file_not_arrived(table, getattr(source, "extra", None))
@@ -158,8 +162,12 @@ def _matched_files(
 
     if not is_file_pattern(table):
         return None
+    keep_last = str(
+        (getattr(source, "extra", None) or {}).get("in_file_dedupe") or ""
+    ).replace("-", "_") == "keep_last"
     listed = ordered_files(
-        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
+        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table),
+        keep_last=keep_last,
     )
     if not listed:
         raise file_not_arrived(table, getattr(source, "extra", None))

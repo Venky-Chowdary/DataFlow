@@ -2020,8 +2020,14 @@ def write_mapped_rows(
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        # Restore a quarantine-all widen before close. Settling afterwards
+        # ran on a closed connection and left the column widened (D368).
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
+        quarantine_all = bool(_final_abort) and int(written or 0) == 0
         settle_widen_restore(
-            conn, rows_written=written, failed=bool(child_flush_error)
+            conn,
+            rows_written=written,
+            failed=bool(child_flush_error) or quarantine_all,
         )
         close_quietly(conn)
         load_method = (
@@ -2050,9 +2056,6 @@ def write_mapped_rows(
                 warnings=transform_errors,
                 load_method=load_method,
             )
-        _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
-        if _final_abort and int(written or 0) == 0:
-            settle_widen_restore(conn, rows_written=0, failed=True)
         if _final_abort:
             return WriteResult(
                 ok=False,

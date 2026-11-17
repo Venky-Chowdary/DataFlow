@@ -437,16 +437,38 @@ def note_dropped_empty_create(exc: BaseException, cfg: dict[str, Any], table: st
     exc.dropped_created_table = ""  # type: ignore[attr-defined]
 
 
+def _lock_for_empty_drop(kind: str, qualified: str) -> str:
+    """Lock that blocks a concurrent insert until this transaction ends."""
+    if kind in {"postgresql", "postgres"}:
+        return f"LOCK TABLE {qualified} IN ACCESS EXCLUSIVE MODE"
+    if kind in {"mysql", "mariadb"}:
+        return f"LOCK TABLES {qualified} WRITE"
+    if "oracle" in kind:
+        return f"LOCK TABLE {qualified} IN EXCLUSIVE MODE"
+    return ""
+
+
 def _drop_if_still_empty(cfg: dict[str, Any], table: str, schema: Any) -> str:
-    """``dropped`` when the table is empty in the same transaction as the DROP."""
+    """``dropped`` when the table is empty under a lock, in one transaction.
+
+    The count used to run without a lock. Another session could commit a row
+    after the count and before the DROP, and that row was lost (D378).
+    """
     import sqlalchemy as sa
 
     from connectors.generic_sql import _drop_table_sql, _engine, _qualified_table_ref
 
     engine = _engine(cfg)
     qualified = _qualified_table_ref(cfg, table, schema or None)
+    kind = str(cfg.get("type") or "").lower()
+    lock = _lock_for_empty_drop(kind, qualified)
+    count_sql = f"SELECT COUNT(*) FROM {qualified}"
+    if kind in {"sqlserver", "mssql", "azure_sql"}:
+        count_sql = f"SELECT COUNT(*) FROM {qualified} WITH (TABLOCKX)"
     with engine.begin() as conn:
-        count = conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()  # nosec B608
+        if lock:
+            conn.execute(sa.text(lock))
+        count = conn.execute(sa.text(count_sql)).scalar()  # nosec B608
         if int(count or 0) != 0:
             return "not_empty"
         conn.execute(sa.text(_drop_table_sql(engine, qualified, table)))

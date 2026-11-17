@@ -195,7 +195,10 @@ def load_picked_files(
         # D34: an overwrite replaces the destination with the source, and the
         # source is every matched file. Loading only the files the manifest
         # calls new would replace the table with a fraction of the set.
-        files = ordered_files([f for f in listed if matches_pattern(f.name, key)]) or files
+        files = ordered_files(
+            [f for f in listed if matches_pattern(f.name, key)],
+            keep_last=str(extra.get("in_file_dedupe") or "").replace("-", "_") == "keep_last",
+        ) or files
 
     def _reset_checkpoint() -> None:
         # A load starts at its first row: a shared chunk cursor would skip the

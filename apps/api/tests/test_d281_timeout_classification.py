@@ -61,6 +61,26 @@ def test_mysql_introspect_opens_one_session_per_preflight(monkeypatch) -> None:
 
     opened = {"n": 0}
 
+    class _Cur:
+        def __init__(self, conn):
+            self.conn = conn
+            self.sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, sql, *_a):
+            self.sql = str(sql)
+
+        def fetchone(self):
+            if "net_read_timeout" in self.sql:
+                seconds = int(getattr(self.conn, "_read_timeout", None) or 40)
+                return (seconds, seconds, "STRICT_TRANS_TABLES")
+            return ("STRICT_TRANS_TABLES",)
+
     class _Conn:
         def ping(self, reconnect=False):  # noqa: ARG002
             return None
@@ -70,6 +90,9 @@ def test_mysql_introspect_opens_one_session_per_preflight(monkeypatch) -> None:
 
         def close(self):
             return None
+
+        def cursor(self):
+            return _Cur(self)
 
     def _dial(*_args, **_kwargs):
         opened["n"] += 1

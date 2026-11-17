@@ -268,16 +268,6 @@ def get_connection(
         except Exception as exc:
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        from connectors.write_resilience import apply_mysql_session_guards
-
-        # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
-        # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
-        require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
-        apply_mysql_session_guards(
-            opened,
-            lock_wait_seconds=lock_wait_s,
-            require_strict_sql_mode=require_strict,
-        )
         return opened
 
     from services.endpoint_session import borrow, in_scope
@@ -301,10 +291,41 @@ def get_connection(
             alive=_mysql_session_alive,
             reset=_mysql_session_reset,
         )
+        # A login opened for a schema read has a 40s client timeout and may
+        # not have STRICT. Reconcile and DDL re-apply their own limits and
+        # check that they stuck; a mismatch opens a new login (D308).
+        try:
+            _retune_mysql_session(
+                shared,
+                io_timeout=io_timeout,
+                lock_wait_s=lock_wait_s,
+                require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+            )
+        except Exception:
+            logger.debug("mysql session could not be retuned for %s", purpose_l, exc_info=True)
+            try:
+                shared.close()
+            except Exception:
+                pass
+            shared = _open()
+            _retune_mysql_session(
+                shared,
+                io_timeout=io_timeout,
+                lock_wait_s=lock_wait_s,
+                require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+            )
+            release = None
         if release is not None:
             return _MysqlHandback(shared, release)
         return shared
-    return _open()
+    opened = _open()
+    _retune_mysql_session(
+        opened,
+        io_timeout=io_timeout,
+        lock_wait_s=lock_wait_s,
+        require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+    )
+    return opened
 
 
 class _MysqlHandback:
@@ -329,6 +350,42 @@ class _MysqlHandback:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._conn, name)
+
+
+def _retune_mysql_session(
+    conn: Any, *, io_timeout: int, lock_wait_s: int, require_strict: bool
+) -> None:
+    """Apply this purpose's client and session limits, then read them back.
+
+    pymysql's read timeout is fixed at connect time. A reconcile that reused
+    an introspect login kept the 40s client timeout, so ``SELECT SLEEP(45)``
+    died with 2013. A probe that reused a reconcile login kept 1800s and
+    undid the fail-fast budget. STRICT is checked the same way for DDL.
+    """
+    from connectors.write_resilience import apply_mysql_session_guards
+
+    seconds = int(io_timeout)
+    conn._read_timeout = seconds
+    conn._write_timeout = seconds
+    apply_mysql_session_guards(
+        conn,
+        lock_wait_seconds=lock_wait_s,
+        require_strict_sql_mode=require_strict,
+        io_timeout=seconds,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT @@SESSION.net_read_timeout, @@SESSION.net_write_timeout, @@SESSION.sql_mode"
+        )
+        net_read, net_write, mode = cur.fetchone()
+    if int(net_read) < seconds or int(net_write) < seconds:
+        raise RuntimeError(
+            f"MySQL session timeout stayed at {net_read}/{net_write}, wanted {seconds}"
+        )
+    if require_strict:
+        flags = str(mode or "").upper()
+        if "STRICT_TRANS_TABLES" not in flags and "STRICT_ALL_TABLES" not in flags:
+            raise RuntimeError(f"MySQL STRICT sql_mode did not stick ({mode})")
 
 
 def _mysql_session_alive(conn: Any) -> bool:

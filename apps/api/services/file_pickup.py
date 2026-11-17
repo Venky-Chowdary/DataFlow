@@ -116,13 +116,17 @@ def matches_pattern(name: str, pattern: str) -> bool:
     return key == pat
 
 
-def ordered_files(files: list[RemoteFile]) -> list[RemoteFile]:
-    """Stable pickup order: modified time, then name, then checksum.
+def ordered_files(files: list[RemoteFile], *, keep_last: bool = False) -> list[RemoteFile]:
+    """Stable pickup order.
 
-    A folder overwrite that keeps the last copy of a key must be deterministic.
-    The newest file wins; the name breaks a tie (D367).
+    The default is name, then modified time: a glob sample and a manifest
+    must not change which file they read when a file is touched (D367).
+    ``keep_last`` orders by modified time, then name, so the newest file
+    wins a duplicate key. The plan note says so.
     """
-    return sorted(files, key=lambda item: (item.mtime, item.name, item.checksum))
+    if keep_last:
+        return sorted(files, key=lambda item: (item.mtime, item.name, item.checksum))
+    return sorted(files, key=lambda item: (item.name, item.mtime, item.checksum))
 
 
 def select_new_files(

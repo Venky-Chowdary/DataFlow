@@ -1101,6 +1101,16 @@ def classify(
         # MySQL 2013 at connect is a handshake that never finished, not a drop.
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
+    if not code and sqlserver_is_network_failure(full_raw):
+        # pymssql's 20009 text does not always match the anchored patterns.
+        # A dead host must not fall through to unclassified (D366).
+        code = "network.connect_timeout"
+        matched_by = "sqlserver_number"
+    if not code and not isinstance(exc, str):
+        number = exc.args[0] if getattr(exc, "args", None) else None
+        if isinstance(number, int) and number in SQLSERVER_NETWORK:
+            code = "network.connect_timeout"
+            matched_by = "sqlserver_number"
     if not code:
         if not fallback:
             return None

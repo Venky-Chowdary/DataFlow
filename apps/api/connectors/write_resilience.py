@@ -402,6 +402,7 @@ def apply_mysql_session_guards(
     *,
     lock_wait_seconds: int = 0,
     require_strict_sql_mode: bool = True,
+    io_timeout: int | None = None,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
@@ -426,8 +427,9 @@ def apply_mysql_session_guards(
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
-            cur.execute("SET SESSION net_read_timeout = 600")
-            cur.execute("SET SESSION net_write_timeout = 600")
+            net = int(io_timeout) if io_timeout else 600
+            cur.execute(f"SET SESSION net_read_timeout = {net}")
+            cur.execute(f"SET SESSION net_write_timeout = {net}")
             # TIMESTAMP conversion is session-relative. The same pin is used by
             # source readers, dest writers, and generic_sql pooled connections
             # (services.timezone_policy.pin_mysql_session_utc).

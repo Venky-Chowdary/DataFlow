@@ -3199,9 +3199,15 @@ def write_mapped_rows(
             # path leaves a successful transaction open until the last batch.
             finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
-        if close_connection or child_flush_error:
+        # Quarantine-all must restore before close. The later branch never
+        # ran: this path already settled with failed=False and closed (D368).
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+        quarantine_all = bool(_final_abort) and int(written or 0) == 0
+        if close_connection or child_flush_error or quarantine_all:
             settle_widen_restore(
-                conn, rows_written=written, failed=bool(child_flush_error)
+                conn,
+                rows_written=written,
+                failed=bool(child_flush_error) or quarantine_all,
             )
         if close_connection:
             close_quietly(conn)
@@ -3226,11 +3232,6 @@ def write_mapped_rows(
                 warnings=transform_errors,
                 load_method=load_method,
             )
-        _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
-        if _final_abort and int(written or 0) == 0:
-            # Every row was quarantined: the widen has nothing to hold. Restore
-            # it. A later success path would have kept the widened column.
-            settle_widen_restore(conn, rows_written=0, failed=True)
         if _final_abort:
             return WriteResult(
                 ok=False,

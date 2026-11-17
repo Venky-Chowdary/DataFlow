@@ -1180,21 +1180,41 @@ def _decode_conn_text(raw: str) -> str:
     return text
 
 
-def _walk_conn_texts(value: Any) -> list[str]:
-    """Every string in a connection field, including nested ``extra``."""
-    if isinstance(value, str):
-        return [_decode_conn_text(value)]
+_CONNECTION_STRING_KEYS = {"", "connection_string", "dsn", "url", "uri"}
+
+
+def _refused_pairs(pairs: list[tuple[str, str]]) -> list[str]:
+    """Forbidden keys. Values are not scanned, so a password may contain them."""
+    refused: list[str] = []
+    for key, value in pairs:
+        if key in _LIBPQ_FILE_KEYS or key in {"dsn", "filedsn"}:
+            refused.append(key)
+        elif key == "driver" and _odbc_driver_is_path(value):
+            refused.append("driver")
+    return refused
+
+
+def _collect_dsn_keys(value: Any, key: str = "") -> list[str]:
+    """Keys of a connection string or of ``extra``, never substrings of a value."""
+    key_l = str(key or "").strip().lower()
     if isinstance(value, dict):
-        out: list[str] = []
-        for item in value.values():
-            out.extend(_walk_conn_texts(item))
-        return out
+        found: list[str] = []
+        for child_key, child in value.items():
+            found.extend(_collect_dsn_keys(child, str(child_key)))
+        return found
     if isinstance(value, (list, tuple)):
-        out = []
-        for item in value:
-            out.extend(_walk_conn_texts(item))
-        return out
-    return []
+        found = []
+        for child in value:
+            found.extend(_collect_dsn_keys(child, key_l))
+        return found
+    if not isinstance(value, str):
+        return []
+    # The key itself is what extra={"service": "prod"} means. The value is
+    # not a second connection string unless this field is one.
+    own = _refused_pairs([(key_l, value)]) if key_l else []
+    if key_l not in _CONNECTION_STRING_KEYS and "://" not in value:
+        return own
+    return own + _refused_pairs(_connection_pairs(value))
 
 
 def _connection_pairs(raw: str) -> list[tuple[str, str]]:
@@ -1237,12 +1257,7 @@ def server_side_dsn_refusal(*texts: Any) -> str:
     """
     refused: list[str] = []
     for raw in texts:
-        for blob in _walk_conn_texts(raw):
-            for key, value in _connection_pairs(blob):
-                if key in _LIBPQ_FILE_KEYS or key in {"dsn", "filedsn"}:
-                    refused.append(key)
-                elif key == "driver" and _odbc_driver_is_path(value):
-                    refused.append("driver")
+        refused.extend(_collect_dsn_keys(raw))
     if not refused:
         return ""
     named = ", ".join(sorted(set(refused)))

@@ -93,10 +93,10 @@ def oracle_comparable_expr(
 ) -> str:
     """SQL expression for ``column`` usable as an Oracle comparison key.
 
-    LOB columns raise ORA-22848 in ORDER BY / IN, so they are compared on their
-    leading 4000 characters. Keys that differ only beyond that prefix would
-    collide; Oracle offers no wider comparison and refusing the read outright
-    would leave a written table unproven.
+    LOB columns raise ORA-22848 in ORDER BY / IN. ``DBMS_LOB.SUBSTR`` of 4000
+    characters raises ORA-06502 when those characters exceed 4000 bytes, so
+    the order key is a 1000-character prefix. Equality of a sort key uses
+    ``DBMS_LOB.COMPARE`` on the whole value, which does not return a VARCHAR2.
     """
     import sqlalchemy as sa
 
@@ -318,7 +318,22 @@ def read_oracle_target_sample(
             else ""
         )
         ora_order = key_expr or "ROWID"
-        if keys and sort_key:
+        lob_order = key_expr.startswith("DBMS_LOB.SUBSTR")
+        if keys and sort_key and lob_order:
+            # The whole sort key, not the 1000-character order prefix (D362).
+            quoted_col = key_expr[key_expr.find("(") + 1:key_expr.find(",")]
+            params = {f"k{i}": k for i, k in enumerate(keys)}
+            params["lim"] = lim
+            where = " OR ".join(
+                f"DBMS_LOB.COMPARE({quoted_col}, TO_CLOB(:k{i})) = 0"
+                for i in range(len(keys))
+            )
+            sql = (
+                f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
+                f"WHERE {where} "
+                f"ORDER BY {ora_order}, ROWID FETCH FIRST :lim ROWS ONLY"
+            )
+        elif keys and sort_key:
             params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
             params["lim"] = lim
             placeholders = ",".join(f":k{i}" for i in range(len(keys)))

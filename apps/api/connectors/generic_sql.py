@@ -5739,9 +5739,9 @@ def write_mapped_rows(
                     if db_type == "questdb":
                         # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
                         ddl = str(
-                            sa.schema.CreateTable(
-                                table_obj, if_not_exists=True
-                            ).compile(dialect=engine.dialect)
+                            sa.schema.CreateTable(table_obj).compile(
+                                dialect=engine.dialect
+                            )
                         )
                         ddl = ddl.replace(
                             "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP"
@@ -5776,9 +5776,7 @@ def write_mapped_rows(
                             )
                         )
                     else:
-                        create = sa.schema.CreateTable(
-                            table_obj, if_not_exists=True
-                        )
+                        create = sa.schema.CreateTable(table_obj)
                         if placement_suffix:
                             # Placement lives inside CREATE: no engine can
                             # partition or relocate a table after the fact.
@@ -5841,12 +5839,9 @@ def write_mapped_rows(
                         )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
-                    # QuestDB is forced to "missing" because its catalog probe
-                    # cannot see the table. IF NOT EXISTS then succeeding is
-                    # not proof this run created it, so a cancel must not drop
-                    # it (D378).
-                    if db_type != "questdb":
-                        created_this_call = True
+                    # Plain CREATE succeeded, so this attempt created the
+                    # table. IF NOT EXISTS succeeding is not that proof (D378).
+                    created_this_call = True
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
                     # was created concurrently, ignore the error and continue.
