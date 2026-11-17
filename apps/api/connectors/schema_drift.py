@@ -171,6 +171,73 @@ def widen_keeps_logical_family(old_type: str, new_type: str) -> bool:
     return bool(old_logical == new_logical)
 
 
+# CHAR/VARCHAR/NCHAR/NVARCHAR with no length and no MAX. SQL Server's
+# data-definition default for that spelling is length 1.
+_UNSIZED_CHARACTER_DDL = re.compile(
+    r"^(?:NATIONAL\s+)?(?:CHARACTER(?:\s+VARYING)?|N?CHAR|N?VARCHAR|NVARCHAR2|VARCHAR2)\s*$",
+    re.IGNORECASE,
+)
+
+
+def character_ddl_is_unsized(type_name: str | None) -> bool:
+    """True when a character DDL token has no length and is not a LOB.
+
+    ``VARCHAR`` with no ``(n)`` is ``VARCHAR(1)`` in a SQL Server data
+    definition (Microsoft char and varchar). ``TEXT`` / ``CLOB`` /
+    ``VARCHAR(MAX)`` are unlimited carriers and are not this case.
+    """
+    from services.type_system import is_unlimited_string_carrier
+
+    text = re.sub(
+        r"\s+COLLATE\s+\S.*$", "", (type_name or "").strip(), flags=re.I
+    ).strip()
+    if not text or "(" in text:
+        return False
+    if is_unlimited_string_carrier(text):
+        return False
+    return bool(_UNSIZED_CHARACTER_DDL.match(text))
+
+
+def _string_span_for_widen(type_name: str) -> tuple[int | None, bool]:
+    """``(declared length, unlimited)`` for a character carrier.
+
+    Unlimited means TEXT/CLOB/VARCHAR(MAX). An explicit ``(n)`` is that
+    length. A bare character token has no proven span: it is not unlimited,
+    so it never licenses a widen.
+    """
+    from services.type_system import is_unlimited_string_carrier
+
+    if is_unlimited_string_carrier(type_name) or normalize_logical_type(type_name) == "text":
+        return None, True
+    length = _type_length(type_name)
+    if length is not None and length > 0:
+        return length, False
+    return None, False
+
+
+def existing_carrier_holds_source(
+    source_type: str | None,
+    existing_type: str | None,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when the live column already stores every source value.
+
+    SQL Server materializes a logical INTEGER as BIGINT. That invention is
+    not a reason to ALTER an operator's INT column when the source is still
+    32-bit (D368). A real BIGINT source does not fit and is not suppressed.
+    """
+    source = str(source_type or "").strip()
+    existing = str(existing_type or "").strip()
+    if not source or not existing:
+        return False
+    if not is_lossy_coercion(source, existing, dest_db=dest_db):
+        return True
+    src_w = _integer_bit_width(source)
+    dst_w = _integer_bit_width(existing)
+    return src_w is not None and dst_w is not None and dst_w >= src_w
+
+
 def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
@@ -186,16 +253,18 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     if old_vb and new_vb:
         return int(new_vb.group(1)) > int(old_vb.group(1))
 
-    # String / text family: compare length, treating TEXT/unlimited as max.
+    # String / text family: compare a proven span. Unsized VARCHAR is not
+    # unlimited (D368). Unicode loss is refused when the ALTER is built:
+    # the source spelling VARCHAR(n) is only a width witness here.
     if _is_string_like(old_logical) and _is_string_like(new_logical):
-        old_len = _type_length(old_type)
-        new_len = _type_length(new_type)
-        old_is_unlimited = old_logical == "text" or old_len is None
-        new_is_unlimited = new_logical == "text" or new_len is None
-        if old_is_unlimited:
+        old_len, old_unlimited = _string_span_for_widen(old_type)
+        new_len, new_unlimited = _string_span_for_widen(new_type)
+        if old_unlimited:
             return False
-        if new_is_unlimited:
+        if new_unlimited:
             return True
+        if old_len is None or new_len is None:
+            return False
         return new_len > old_len
 
     if old_logical == new_logical:
@@ -259,6 +328,8 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
     # Cross-logical promotions to string-like: length must be sufficient.
     if _is_string_like(new_logical):
+        if character_ddl_is_unsized(new_type):
+            return False
         min_len = _minimum_string_length_for(old_type)
         new_len = _type_length(new_type)
         if new_len is None:
@@ -484,6 +555,21 @@ def _build_widen_ddl(
     """
     dialect = (dialect or "").lower()
     new_type = _sanitize_ddl_type(materialize_widen_type(dialect, new_type))
+    if character_ddl_is_unsized(new_type):
+        raise ValueError(
+            f"Refusing ALTER to unsized character type {new_type!r}. "
+            "A data-definition CHAR/VARCHAR/NCHAR/NVARCHAR without a length "
+            "is length 1 on SQL Server and is never a widen. Name (n) or (MAX)."
+        )
+    if existing_type:
+        from services.type_system import national_charset_would_collapse
+
+        if national_charset_would_collapse(existing_type, new_type, dest_db=dialect):
+            raise ValueError(
+                f"Refusing ALTER that drops Unicode on {dialect or 'this engine'}: "
+                f"{existing_type} -> {new_type}. Keep NVARCHAR/NCHAR/NCLOB "
+                "(or a longer national type), or approve a new table."
+            )
     table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
     col_q = _quote_col(dialect, col)
 
@@ -1238,8 +1324,8 @@ def widen_existing_columns_native(
         ):
             return False
         source_type = str((source_types or {}).get(col) or "").strip()
-        return not (
-            source_type and not is_lossy_coercion(source_type, existing[col], dest_db=dialect)
+        return not existing_carrier_holds_source(
+            source_type, existing[col], dest_db=dialect
         )
 
     for col in [c for c in growing if _will_alter(c)]:
@@ -1268,7 +1354,7 @@ def widen_existing_columns_native(
         ):
             continue
         source_type = str((source_types or {}).get(col) or "").strip()
-        if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
+        if existing_carrier_holds_source(source_type, existing_type, dest_db=dialect):
             if suppressed_out is not None:
                 suppressed_out[col] = existing_type
             logger.debug(

@@ -2681,6 +2681,8 @@ def _widen_existing_columns_sa(
     *,
     stamp_ceiling_by_col: dict[str, str] | None = None,
     refusals_out: list[dict[str, Any]] | None = None,
+    source_types: dict[str, str] | None = None,
+    restore_out: list[str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
 
@@ -2751,15 +2753,48 @@ def _widen_existing_columns_sa(
                         "generic_sql Map≡ALTER refusal (stamp ceiling): %s", refusal
                     )
             desired_type = stamp
-        if not is_wider_type(existing_type, desired_type):
+        if not is_wider_type(existing_type, desired_type, dest_db=dialect_name):
+            continue
+        from connectors.schema_drift import (
+            character_ddl_is_unsized,
+            existing_carrier_holds_source,
+        )
+        from services.type_system import national_charset_would_collapse
+
+        source_type = ""
+        if source_types:
+            source_type = str(
+                source_types.get(col) or source_types.get(col.casefold()) or ""
+            ).strip()
+        # The live column already holds the source (INT holds INTEGER). The
+        # BIGINT a SQL Server create-new would invent is not a widen (D368).
+        if existing_carrier_holds_source(
+            source_type, existing_type, dest_db=dialect_name
+        ):
+            continue
+        if character_ddl_is_unsized(desired_type) or national_charset_would_collapse(
+            existing_type, desired_type, dest_db=dialect_name
+        ):
+            logger.info(
+                "Widen refused for %s.%s: %s -> %s would narrow or drop Unicode",
+                table_name,
+                col,
+                existing_type,
+                desired_type,
+            )
             continue
         try:
             ddl = _build_widen_ddl(
                 dialect_name, schema, table_name, col, desired_type, existing_type
             )
+            restore_sql = _build_widen_ddl(
+                dialect_name, schema, table_name, col, existing_type, existing_type
+            )
             conn.execute(sa.text(ddl))
             conn.commit()
             log.append(ddl)
+            if restore_out is not None:
+                restore_out.append(restore_sql)
             logger.debug(
                 "Widened %s.%s from %s to %s",
                 table_name,
@@ -2782,6 +2817,27 @@ def _widen_existing_columns_sa(
             raise_widen_refusal(col, existing_type, desired_type, exc)
             raise
     return log
+
+
+def _apply_widen_restore(engine: Any, statements: list[str]) -> None:
+    """Put columns back after a failed run that had already altered them.
+
+    SQL Server and PostgreSQL can roll a DDL transaction back; MySQL and
+    Oracle commit DDL implicitly. Re-issuing the original column type covers
+    both, and only runs when the failed attempt committed no rows (D368).
+    """
+    if not statements or engine is None:
+        return
+    try:
+        with engine.connect() as conn:
+            for stmt in statements:
+                conn.execute(sa.text(stmt))
+            conn.commit()
+    except Exception:
+        logger.warning(
+            "Could not restore destination columns after a failed write",
+            exc_info=True,
+        )
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
@@ -5678,6 +5734,10 @@ def write_mapped_rows(
     chunks_completed = 0
     rows_skipped = 0
     identity_session: Any = None
+    # DDL this attempt applied. A failed run with nothing committed puts the
+    # columns back (D368). A successful write keeps the widen.
+    widen_restore: list[str] = []
+    keep_widen = False
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -5946,6 +6006,17 @@ def write_mapped_rows(
                     if col in explicit_stamps and col in target_column_types
                 }
                 alter_widen_refusals: list[dict[str, Any]] = []
+                _widen_source_types: dict[str, str] = {}
+                for _wcol in target_cols:
+                    _wmap = by_tgt.get(_wcol) or by_tgt.get(str(_wcol).lower()) or {}
+                    _wsrc = str(_wmap.get("source") or "")
+                    _wtype = (
+                        column_types.get(_wsrc)
+                        or _wmap.get("source_type")
+                        or ""
+                    )
+                    if _wtype:
+                        _widen_source_types[_wcol] = str(_wtype)
                 _widen_existing_columns_sa(
                     conn,
                     engine,
@@ -5957,6 +6028,8 @@ def write_mapped_rows(
                     conflict_columns=conflict_columns,
                     stamp_ceiling_by_col=stamp_ceiling_by_col or None,
                     refusals_out=alter_widen_refusals,
+                    source_types=_widen_source_types,
+                    restore_out=widen_restore,
                 )
                 if alter_widen_refusals:
                     logger.info(
@@ -6354,6 +6427,7 @@ def write_mapped_rows(
             meta_out = dict(meta_out or {})
             meta_out["schema_fidelity"] = fid_report
         _cleanup_spool()
+        keep_widen = True
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -6408,6 +6482,8 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
+        if widen_restore and written == 0 and not keep_widen:
+            _apply_widen_restore(engine, widen_restore)
         # A pooled connection left with IDENTITY_INSERT ON fails the *next*
         # table's load with an error naming the wrong table, so the release is
         # owed on every exit — success, early return, or exception.

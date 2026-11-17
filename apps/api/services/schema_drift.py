@@ -887,7 +887,18 @@ def widened_dest_carrier(dest_type: str, source_type: str) -> str:
             suffix = dest_m.group(3).strip()
             carrier = f"{dest_m.group(1).strip()}({','.join(src_args)})"
             return f"{carrier} {suffix}".strip().upper()
-    return str(source_type or "").upper()
+    # INTEGER -> BIGINT takes the source spelling. A bare VARCHAR does not:
+    # emitting it ALTERs NVARCHAR(400) to VARCHAR(1) (D368). A national
+    # collapse (NVARCHAR -> VARCHAR) keeps the destination family.
+    fallback = str(source_type or "").upper()
+    from connectors.schema_drift import character_ddl_is_unsized
+    from services.type_system import national_charset_would_collapse
+
+    if character_ddl_is_unsized(fallback) or national_charset_would_collapse(
+        dest_type, fallback
+    ):
+        return str(dest_type or "").upper()
+    return fallback
 
 
 def propose_dest_widens(
@@ -1097,6 +1108,10 @@ def dest_widen_proposal(
     if stamp_is_operator_ceiling(mapping):
         return None
     new_type = widened_dest_carrier(tgt_type, src_type)
+    # The carrier we would emit must itself be a widen. A bare VARCHAR
+    # fallback used to come back here and ALTER NVARCHAR(400) to VARCHAR(1).
+    if not is_wider_type(tgt_type, new_type, dest_db=dest_db):
+        return None
     if key_groups:
         from connectors.schema_drift import keyed_widen_carrier, with_key_charsets
 
@@ -1115,6 +1130,12 @@ def dest_widen_proposal(
         split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == tgt.casefold()
         for g in key_groups or [] for c in g
     )
+    from connectors.schema_drift import character_ddl_is_unsized
+
+    if character_ddl_is_unsized(new_type) or not is_wider_type(
+        tgt_type, new_type, dest_db=dest_db
+    ):
+        return None
     return {
         "kind": "widen_type",
         "column": src,
