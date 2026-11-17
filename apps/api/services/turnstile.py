@@ -65,10 +65,21 @@ def verify(token: str, *, remote_ip: str = "", expected_action: str = "",
                 "codes": data.get("error-codes", [])}
     hostname = str(data.get("hostname") or "").lower()
     action = str(data.get("action") or "")
-    if expected_hostname and hostname != expected_hostname.lower():
-        return {"ok": False, "reason": "hostname_mismatch", "hostname": hostname}
+    expected = (expected_hostname or "").lower()
+    # Apex and www are one site. A token minted on www.datawrap.io must not
+    # fail because the caller pinned expected_hostname to the apex (D322).
     if hostname and hostname not in _ALLOWED_HOSTNAMES:
+        logger.info(
+            "turnstile hostname refused",
+            extra={"reason_code": "turnstile:hostname_not_allowed"},
+        )
         return {"ok": False, "reason": "hostname_not_allowed", "hostname": hostname}
+    if expected and hostname != expected and expected not in _ALLOWED_HOSTNAMES:
+        logger.info(
+            "turnstile hostname refused",
+            extra={"reason_code": "turnstile:hostname_mismatch"},
+        )
+        return {"ok": False, "reason": "hostname_mismatch", "hostname": hostname}
     if expected_action and action != expected_action:
         return {"ok": False, "reason": "action_mismatch", "action": action}
     return {"ok": True, "reason": "ok", "hostname": hostname, "action": action}

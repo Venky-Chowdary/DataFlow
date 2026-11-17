@@ -75,7 +75,7 @@ def test_unknown_host_is_refused_and_the_reason_is_logged(siteverify, caplog):
 def test_verify_accepts_every_served_hostname(monkeypatch, host):
     monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "test-secret")
     verdict = turnstile.verify(
-        "tok", expected_action="signup",
+        "tok", expected_action="signup", expected_hostname="datawrap.io",
         post_fn=lambda **_kw: {"success": True, "hostname": host, "action": "signup"},
     )
     assert verdict["ok"], verdict
