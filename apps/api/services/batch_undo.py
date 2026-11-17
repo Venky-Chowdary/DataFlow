@@ -534,10 +534,17 @@ def _mysql_drop_if_still_empty(engine: Any, lock: str, count_sql: str, drop_sql:
     on the write lock until ``lock_wait_timeout`` (1205).
     """
     # AUTOCOMMIT so the unlock is its own statement, not a participant in
-    # the transaction LOCK TABLES already committed.
+    # the transaction LOCK TABLES already committed. The session lock waits
+    # are 5 seconds for this drop only: a cancel must not sit behind a long
+    # transaction (D378). They go back to the server default before the
+    # pool lends the connection out.
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         locked = False
+        timed = False
         try:
+            conn.exec_driver_sql("SET SESSION lock_wait_timeout = 5")
+            conn.exec_driver_sql("SET SESSION innodb_lock_wait_timeout = 5")
+            timed = True
             if lock:
                 conn.exec_driver_sql(lock)
                 locked = True
@@ -557,6 +564,16 @@ def _mysql_drop_if_still_empty(engine: Any, lock: str, count_sql: str, drop_sql:
                     except Exception:
                         logger.debug("connection invalidate failed", exc_info=True)
                     raise
+            if timed:
+                try:
+                    conn.exec_driver_sql("SET SESSION lock_wait_timeout = DEFAULT")
+                    conn.exec_driver_sql("SET SESSION innodb_lock_wait_timeout = DEFAULT")
+                except Exception:
+                    logger.debug("MySQL lock wait reset failed", exc_info=True)
+                    try:
+                        conn.invalidate()
+                    except Exception:
+                        logger.debug("connection invalidate failed", exc_info=True)
             _release_pooled_connection(conn)
 
 
