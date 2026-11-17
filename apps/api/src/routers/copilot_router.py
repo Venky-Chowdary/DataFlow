@@ -826,9 +826,15 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "start_transfer":
+        # Staging records the workspace when it still has the request stamp.
+        # The connector executor can run that staging without the stamp, and
+        # the job was then saved with no workspace: the member who confirmed
+        # got 404 on the job, the trust report and the proof pack, while an
+        # owner key that can read unscoped rows still saw them (D380).
         if not str(payload.get("workspace_id") or "").strip():
             payload["workspace_id"] = str(peek.get("workspace_id") or staged_in or "")
         try:
+            payload = _confirm_schedule_workspace(payload, http_request)
             result = await _start_confirmed_transfer(payload)
         except DuplicateTransferSubmission:
             ledger.release_claim(ack_id)
