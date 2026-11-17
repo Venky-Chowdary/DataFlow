@@ -29,31 +29,74 @@ _MAX = 50
 _TTL_SECONDS = 600
 # Bump when the gate set changes so a staged result from the previous
 # plan cannot be reused by an execute that checks something new.
-PREFLIGHT_PLAN_VERSION = 2
+PREFLIGHT_PLAN_VERSION = 3
 _BOUND: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "df_staged_preflight", default=None
 )
 logger = logging.getLogger(__name__)
 
 
-def _canonical_mappings(mappings: Any) -> list[dict[str, str]]:
+_SECRET_FIELDS = frozenset({
+    "password", "connection_string", "api_key", "private_key", "service_account",
+    "secret_access_key", "access_key_secret", "token", "refresh_token", "client_secret",
+})
+_SAMPLE_FIELDS = frozenset({
+    "sample", "samples", "sample_rows", "sample_values", "sample_values_by_source",
+})
+_FP_KEY = b"datawrap-preflight-fingerprint-v1"
+
+
+def _keyed_secret(value: str) -> str:
+    """A secret changes the fingerprint without being copied into the payload."""
+    import hmac
+
+    return hmac.new(_FP_KEY, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _seal(value: Any, key_name: str = "") -> Any:
+    if key_name.lower() in _SAMPLE_FIELDS:
+        return None
+    if key_name.lower() in _SECRET_FIELDS and isinstance(value, str):
+        return _keyed_secret(value) if value else ""
+    if isinstance(value, dict):
+        return {
+            str(key): _seal(item, str(key))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _SAMPLE_FIELDS
+        }
+    if isinstance(value, list):
+        return [_seal(item) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return None
+    return value
+
+
+def _canonical_mappings(mappings: Any) -> list[Any]:
     rows = []
     for item in mappings or []:
         if not isinstance(item, dict):
             continue
-        rows.append({
-            "source": str(item.get("source") or ""),
-            "target": str(item.get("target") or item.get("source") or ""),
-            "transform": str(item.get("transform") or ""),
-        })
-    rows.sort(key=lambda row: (row["source"], row["target"], row["transform"]))
+        # Every mapping field (target_type, casts, contracts), not only
+        # source/target/transform. Sample rows on a mapping are not an input.
+        rows.append(_seal(item))
+    rows.sort(key=lambda row: json.dumps(row, sort_keys=True, default=str))
     return rows
 
 
-def _canonical_extra(extra: Any) -> dict[str, Any]:
-    if not isinstance(extra, dict):
+def _endpoint_canonical(endpoint: Any) -> dict[str, Any]:
+    if endpoint is None:
         return {}
-    return {str(key): extra[key] for key in sorted(extra, key=str)}
+    fields = (
+        "kind", "format", "connector_id", "host", "port", "database", "schema",
+        "table", "collection", "username", "password", "connection_string", "ssl",
+        "warehouse", "auth_mode", "auth_source", "region", "endpoint_url",
+        "path_style", "extra",
+    )
+    raw = {name: getattr(endpoint, name, "") for name in fields}
+    raw["port"] = int(raw.get("port") or 0)
+    raw["ssl"] = bool(raw.get("ssl"))
+    raw["path_style"] = bool(raw.get("path_style"))
+    return _seal(raw)
 
 
 def preflight_input_fingerprint(**parts: Any) -> str:
@@ -73,13 +116,28 @@ def preflight_input_fingerprint(**parts: Any) -> str:
         "source_schema": str(parts.get("source_schema") or ""),
         "source_database": str(parts.get("source_database") or ""),
         "source_format": str(parts.get("source_format") or "").strip().lower(),
-        "source_extra": _canonical_extra(parts.get("source_extra")),
+        "source_extra": _seal(parts.get("source_extra") or {}),
+        "source_host": str(parts.get("source_host") or ""),
+        "source_port": int(parts.get("source_port") or 0),
+        "source_ssl": bool(parts.get("source_ssl")),
+        "source_username": str(parts.get("source_username") or ""),
+        "source_password": _keyed_secret(str(parts.get("source_password") or "")) if parts.get("source_password") else "",
+        "source_connection_string": _keyed_secret(str(parts.get("source_connection_string") or "")) if parts.get("source_connection_string") else "",
+        "source_filename": str(parts.get("source_filename") or ""),
+        "source_path": str(parts.get("source_path") or ""),
+        "source_object_uri": str(parts.get("source_object_uri") or ""),
         "destination_connector_id": str(parts.get("destination_connector_id") or ""),
         "destination_table": str(parts.get("destination_table") or ""),
         "destination_schema": str(parts.get("destination_schema") or ""),
         "destination_database": str(parts.get("destination_database") or ""),
         "destination_db_type": str(parts.get("destination_db_type") or "").strip().lower(),
-        "destination_extra": _canonical_extra(parts.get("destination_extra")),
+        "destination_extra": _seal(parts.get("destination_extra") or {}),
+        "destination_host": str(parts.get("destination_host") or ""),
+        "destination_port": int(parts.get("destination_port") or 0),
+        "destination_ssl": bool(parts.get("destination_ssl")),
+        "destination_username": str(parts.get("destination_username") or ""),
+        "destination_password": _keyed_secret(str(parts.get("destination_password") or "")) if parts.get("destination_password") else "",
+        "destination_connection_string": _keyed_secret(str(parts.get("destination_connection_string") or "")) if parts.get("destination_connection_string") else "",
         "sync_mode": str(parts.get("sync_mode") or ""),
         "schema_policy": str(parts.get("schema_policy") or ""),
         "validation_mode": str(parts.get("validation_mode") or ""),
@@ -119,6 +177,13 @@ def preflight_input_fingerprint(**parts: Any) -> str:
             parts.get("approved_decision_artifact_hash") or ""
         ),
         "preflight_scope": str(parts.get("preflight_scope") or ""),
+        "transform_recipe_id": str(parts.get("transform_recipe_id") or ""),
+        "transform_recipe_version": int(parts.get("transform_recipe_version") or 0),
+        "transform_recipe_params": _seal(parts.get("transform_recipe_params") or {}),
+        "document_model": _seal(parts.get("document_model") or {}),
+        "data_region": str(parts.get("data_region") or ""),
+        "historical_resync": bool(parts.get("historical_resync")),
+        "source_timezone": str(parts.get("source_timezone") or ""),
     }
     raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -157,10 +222,14 @@ def staged_preflight_for_bound() -> dict[str, Any] | None:
 
 
 def _schema_still_current(stored: str, fresh: str | None) -> bool:
-    """A recorded schema must be re-read and still match. ``unread`` never matches."""
-    if not stored:
-        return True
-    if stored == "unread" or not fresh or fresh == "unread":
+    """Reuse only when staging stored a schema version and Confirm re-read the same one.
+
+    An empty stored version, or a confirm-time read that failed (``unread``
+    or missing), does not reuse (D308).
+    """
+    if not stored or stored == "unread":
+        return False
+    if not fresh or fresh == "unread":
         return False
     return stored == fresh
 
@@ -227,12 +296,27 @@ def request_preflight_fingerprint(request: Any) -> str:
         source_database=getattr(source, "database", "") or "",
         source_format=getattr(source, "format", "") or "",
         source_extra=getattr(source, "extra", None) or {},
+        source_host=getattr(source, "host", "") or "",
+        source_port=getattr(source, "port", 0) or 0,
+        source_ssl=getattr(source, "ssl", False),
+        source_username=getattr(source, "username", "") or "",
+        source_password=getattr(source, "password", "") or "",
+        source_connection_string=getattr(source, "connection_string", "") or "",
+        source_filename=getattr(request, "source_filename", "") or "",
+        source_path=getattr(request, "source_path", "") or "",
+        source_object_uri=getattr(request, "source_object_uri", "") or "",
         destination_connector_id=getattr(dest, "connector_id", "") or "",
         destination_table=getattr(dest, "table", "") or getattr(dest, "collection", "") or "",
         destination_schema=getattr(dest, "schema", "") or "",
         destination_database=getattr(dest, "database", "") or "",
         destination_db_type=getattr(dest, "format", "") or "",
         destination_extra=getattr(dest, "extra", None) or {},
+        destination_host=getattr(dest, "host", "") or "",
+        destination_port=getattr(dest, "port", 0) or 0,
+        destination_ssl=getattr(dest, "ssl", False),
+        destination_username=getattr(dest, "username", "") or "",
+        destination_password=getattr(dest, "password", "") or "",
+        destination_connection_string=getattr(dest, "connection_string", "") or "",
         mappings=getattr(request, "mappings", None) or [],
         column_types=getattr(request, "column_types", None) or {},
         sync_mode=getattr(request, "sync_mode", "") or "",
@@ -273,6 +357,13 @@ def request_preflight_fingerprint(request: Any) -> str:
         )
         or "",
         preflight_scope=getattr(request, "preflight_scope", "") or "",
+        transform_recipe_id=getattr(request, "transform_recipe_id", "") or "",
+        transform_recipe_version=getattr(request, "transform_recipe_version", 0) or 0,
+        transform_recipe_params=getattr(request, "transform_recipe_params", None) or {},
+        document_model=getattr(request, "document_model", None) or {},
+        data_region=getattr(request, "data_region", "") or "",
+        historical_resync=getattr(request, "historical_resync", False),
+        source_timezone=getattr(request, "source_timezone", "") or "",
     )
 
 
@@ -306,22 +397,41 @@ def destination_schema_version(dest: Any) -> str:
         table = str(getattr(dest, "table", "") or getattr(dest, "collection", "") or "")
         kind = str(getattr(dest, "format", "") or getattr(dest, "type", "") or "").lower()
         connector_id = str(getattr(dest, "connector_id", "") or "")
-    if not host and connector_id:
-        loaded = _connector_endpoint(connector_id)
-        if loaded:
-            host = host or loaded["host"]
-            port = port or loaded["port"]
-            database = database or loaded["database"]
-            username = username or loaded["username"]
-            password = password or loaded["password"]
-            schema = schema or loaded["schema"]
-            kind = kind or loaded["type"]
+    loaded = _connector_endpoint(connector_id) if not host and connector_id else None
+    if loaded:
+        host = host or loaded["host"]
+        port = port or loaded["port"]
+        database = database or loaded["database"]
+        username = username or loaded["username"]
+        password = password or loaded["password"]
+        schema = schema or loaded["schema"]
+        kind = kind or loaded["type"]
     if not host or not table:
         return ""
+    own_ssl = bool(dest.get("ssl") if isinstance(dest, dict) else getattr(dest, "ssl", False))
+    own_cs = str(
+        dest.get("connection_string") if isinstance(dest, dict)
+        else getattr(dest, "connection_string", "") or ""
+    )
+    own_extra = (
+        dest.get("extra") if isinstance(dest, dict) and isinstance(dest.get("extra"), dict)
+        else (getattr(dest, "extra", None) or {})
+    )
+    cfg = {
+        "type": kind,
+        "host": host,
+        "port": port or 0,
+        "database": database,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "table": table,
+        "ssl": own_ssl if own_ssl or not loaded else bool(loaded.get("ssl")),
+        "connection_string": own_cs or (loaded.get("connection_string") if loaded else "") or "",
+        "extra": own_extra or (loaded.get("extra") if loaded else {}) or {},
+    }
     try:
-        rows = _read_column_rows(
-            kind, host, port, database, username, password, schema, table
-        )
+        rows = _read_schema_snapshot(cfg)
     except Exception:
         logger.debug("destination schema version was not read", exc_info=True)
         return "unread"
@@ -346,79 +456,140 @@ def _connector_endpoint(connector_id: str) -> dict[str, Any] | None:
         "password": str(getattr(saved, "password", "") or ""),
         "schema": str(getattr(saved, "schema", "") or ""),
         "type": str(getattr(saved, "type", "") or "").lower(),
+        "ssl": bool(getattr(saved, "ssl", False)),
+        "connection_string": str(getattr(saved, "connection_string", "") or ""),
+        "extra": getattr(saved, "extra", None) or {},
     }
 
 
-def _read_column_rows(
-    kind: str,
-    host: str,
-    port: int,
-    database: str,
-    username: str,
-    password: str,
-    schema: str,
-    table: str,
-) -> list[tuple]:
-    if kind in {"postgresql", "postgres"}:
-        import psycopg2
+def _read_schema_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Columns, keys, indexes, foreign keys, checks, defaults and identity.
 
-        conn = psycopg2.connect(
-            host=host, port=port or 5432, dbname=database, user=username,
-            password=password, connect_timeout=2,
-        )
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT column_name, data_type, character_maximum_length, "
-                "numeric_precision, numeric_scale, collation_name, is_nullable "
-                "FROM information_schema.columns "
-                "WHERE table_schema = %s AND table_name = %s "
-                "ORDER BY ordinal_position",
-                (schema or "public", table),
-            )
-            return list(cur.fetchall())
-        finally:
-            conn.close()
-    if kind in {"mysql", "mariadb"}:
-        import pymysql
+    The dial is the guarded engine, the same path a transfer uses, so the
+    egress guard and the connector's TLS settings apply (D308).
+    """
+    import sqlalchemy as sa
 
-        conn = pymysql.connect(
-            host=host, port=port or 3306, user=username, password=password,
-            database=database, connect_timeout=2,
-        )
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, "
-                "NUMERIC_PRECISION, NUMERIC_SCALE, COLLATION_NAME, IS_NULLABLE "
-                "FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
-                "ORDER BY ORDINAL_POSITION",
-                (table,),
-            )
-            return list(cur.fetchall())
-        finally:
-            conn.close()
-    if kind in {"sqlserver", "mssql", "azure_sql"}:
-        import pymssql
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.engine_pool import release_engine
 
-        conn = pymssql.connect(
-            server=host, port=str(port or 1433), user=username, password=password,
-            database=database, login_timeout=2, timeout=2,
-        )
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT c.name, ty.name, c.max_length, c.precision, c.scale, "
-                "c.collation_name, c.is_nullable "
-                "FROM sys.columns c "
-                "JOIN sys.types ty ON c.user_type_id = ty.user_type_id "
-                "JOIN sys.tables t ON c.object_id = t.object_id "
-                "JOIN sys.schemas s ON t.schema_id = s.schema_id "
-                "WHERE s.name = %s AND t.name = %s ORDER BY c.column_id",
-                (schema or "dbo", table),
-            )
-            return list(cur.fetchall())
-        finally:
-            conn.close()
-    raise RuntimeError(f"schema version is not read for {kind or 'this engine'}")
+    kind = str(cfg.get("type") or "").lower()
+    schema = str(cfg.get("schema") or "")
+    table = str(cfg.get("table") or "")
+    engine = get_sqlalchemy_engine(cfg)
+    try:
+        with engine.connect() as conn:
+            if kind in {"postgresql", "postgres"}:
+                columns = conn.execute(
+                    sa.text(
+                        "SELECT column_name, data_type, character_maximum_length, "
+                        "numeric_precision, numeric_scale, collation_name, is_nullable, "
+                        "column_default, is_identity, identity_generation "
+                        "FROM information_schema.columns "
+                        "WHERE table_schema = :s AND table_name = :t "
+                        "ORDER BY ordinal_position"
+                    ),
+                    {"s": schema or "public", "t": table},
+                ).fetchall()
+                indexes = conn.execute(
+                    sa.text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE schemaname = :s AND tablename = :t ORDER BY indexname"
+                    ),
+                    {"s": schema or "public", "t": table},
+                ).fetchall()
+                constraints = conn.execute(
+                    sa.text(
+                        "SELECT con.conname, con.contype::text, pg_get_constraintdef(con.oid) "
+                        "FROM pg_constraint con "
+                        "JOIN pg_class rel ON rel.oid = con.conrelid "
+                        "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+                        "WHERE nsp.nspname = :s AND rel.relname = :t "
+                        "ORDER BY con.conname"
+                    ),
+                    {"s": schema or "public", "t": table},
+                ).fetchall()
+                return {
+                    "columns": [tuple(row) for row in columns],
+                    "indexes": [tuple(row) for row in indexes],
+                    "constraints": [tuple(row) for row in constraints],
+                }
+            if kind in {"mysql", "mariadb"}:
+                columns = conn.execute(
+                    sa.text(
+                        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
+                        "EXTRA, COLUMN_KEY, GENERATION_EXPRESSION, COLLATION_NAME "
+                        "FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
+                        "ORDER BY ORDINAL_POSITION"
+                    ),
+                    {"t": table},
+                ).fetchall()
+                indexes = conn.execute(
+                    sa.text(
+                        "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, INDEX_TYPE "
+                        "FROM information_schema.STATISTICS "
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
+                        "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+                    ),
+                    {"t": table},
+                ).fetchall()
+                checks = conn.execute(
+                    sa.text(
+                        "SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, cc.CHECK_CLAUSE "
+                        "FROM information_schema.TABLE_CONSTRAINTS tc "
+                        "LEFT JOIN information_schema.CHECK_CONSTRAINTS cc "
+                        "ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA "
+                        "AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME "
+                        "WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = :t "
+                        "ORDER BY tc.CONSTRAINT_NAME"
+                    ),
+                    {"t": table},
+                ).fetchall()
+                return {
+                    "columns": [tuple(row) for row in columns],
+                    "indexes": [tuple(row) for row in indexes],
+                    "constraints": [tuple(row) for row in checks],
+                }
+            if kind in {"sqlserver", "mssql", "azure_sql"}:
+                columns = conn.execute(
+                    sa.text(
+                        "SELECT c.name, ty.name, c.max_length, c.precision, c.scale, "
+                        "c.collation_name, c.is_nullable, c.is_identity, "
+                        "OBJECT_DEFINITION(c.default_object_id) "
+                        "FROM sys.columns c "
+                        "JOIN sys.types ty ON c.user_type_id = ty.user_type_id "
+                        "JOIN sys.tables t ON c.object_id = t.object_id "
+                        "JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                        "WHERE s.name = :s AND t.name = :t ORDER BY c.column_id"
+                    ),
+                    {"s": schema or "dbo", "t": table},
+                ).fetchall()
+                indexes = conn.execute(
+                    sa.text(
+                        "SELECT i.name, i.is_unique, i.is_primary_key, col.name "
+                        "FROM sys.indexes i "
+                        "JOIN sys.tables t ON i.object_id = t.object_id "
+                        "JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                        "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+                        "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
+                        "WHERE s.name = :s AND t.name = :t AND i.name IS NOT NULL "
+                        "ORDER BY i.name, ic.key_ordinal"
+                    ),
+                    {"s": schema or "dbo", "t": table},
+                ).fetchall()
+                checks = conn.execute(
+                    sa.text(
+                        "SELECT name, definition FROM sys.check_constraints "
+                        "WHERE parent_object_id = OBJECT_ID(:qualified) ORDER BY name"
+                    ),
+                    {"qualified": f"{schema or 'dbo'}.{table}"},
+                ).fetchall()
+                return {
+                    "columns": [tuple(row) for row in columns],
+                    "indexes": [tuple(row) for row in indexes],
+                    "constraints": [tuple(row) for row in checks],
+                }
+            raise RuntimeError(f"schema version is not read for {kind or 'this engine'}")
+    finally:
+        release_engine(engine)

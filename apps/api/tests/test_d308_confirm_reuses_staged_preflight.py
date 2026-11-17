@@ -46,8 +46,9 @@ def test_unchanged_inputs_reuse_the_staged_result_and_do_not_dial(monkeypatch):
         "pf_d308",
         fingerprint,
         {"passed": True, "gates": [{"id": "g1", "status": "pass"}], "blockers": []},
+        schema_version="shape-1",
     )
-    with bind_staged_preflight("pf_d308", fingerprint):
+    with bind_staged_preflight("pf_d308", fingerprint, "shape-1"):
         out = run_file_preflight(
             columns=["id", "qty"],
             column_types={"id": "int", "qty": "int"},
@@ -122,6 +123,21 @@ def test_destination_extra_ack_and_locale_are_part_of_the_fingerprint():
     assert request_preflight_fingerprint(changed_policy) != same
     assert request_preflight_fingerprint(changed_backfill) != same
     assert request_preflight_fingerprint(changed_reversible) != same
+    changed_type = _request()
+    changed_type.mappings = [
+        {"source": "id", "target": "id", "target_type": "bigint"},
+        {"source": "qty", "target": "qty"},
+    ]
+    changed_host = _request()
+    changed_host.destination.host = "db.internal"
+    changed_path = _request()
+    changed_path.source_path = "/data/orders.csv"
+    changed_recipe = _request()
+    changed_recipe.transform_recipe_id = "recipe-1"
+    assert request_preflight_fingerprint(changed_type) != same
+    assert request_preflight_fingerprint(changed_host) != same
+    assert request_preflight_fingerprint(changed_path) != same
+    assert request_preflight_fingerprint(changed_recipe) != same
     assert "plan_version" not in same  # the hash, not the payload
 
 
@@ -162,4 +178,9 @@ def test_a_changed_destination_schema_version_is_not_reused():
     with bind_staged_preflight("pf_schema", fingerprint, "v2"):
         assert staged_preflight_for_bound() is None
     with bind_staged_preflight("pf_schema", fingerprint, "unread"):
+        assert staged_preflight_for_bound() is None
+    remember_staged_preflight(
+        "pf_empty", fingerprint, {"passed": True, "gates": []}, schema_version=""
+    )
+    with bind_staged_preflight("pf_empty", fingerprint, "v1"):
         assert staged_preflight_for_bound() is None
