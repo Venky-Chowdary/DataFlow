@@ -60,10 +60,8 @@ from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
 )
 from connectors.upsert_fallback import note_native_upsert_failed, upsert_fallback_warnings
 from connectors.schema_drift import (
-    _build_widen_ddl,
     add_missing_columns,
     is_wider_type,
-    raise_widen_refusal,
 )
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -2669,175 +2667,18 @@ def _source_ddl_for_widen(
     return mapping_source
 
 
-def _widen_existing_columns_sa(
-    conn: Any,
-    engine: Any,
-    dialect_name: str,
-    schema: str | None,
-    table_name: str,
-    target_cols: list[str],
-    target_column_types: dict[str, str],
-    conflict_columns: list[str] | None = None,
-    *,
-    stamp_ceiling_by_col: dict[str, str] | None = None,
-    refusals_out: list[dict[str, Any]] | None = None,
-    source_types: dict[str, str] | None = None,
-    restore_out: list[str] | None = None,
-) -> list[str]:
-    """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
+def _widen_existing_columns_sa(*args: Any, **kwargs: Any) -> list[str]:
+    """SQLAlchemy widen. The body lives in ``column_widen_restore`` (size cap)."""
+    from connectors.column_widen_restore import widen_existing_columns_sa
 
-    Uses SQLAlchemy reflection and text execution so the same helper works for
-    every SQLAlchemy-backed dialect (DuckDB, SQL Server, Oracle, SQLite skipped).
-    Primary-key / conflict columns are skipped because most engines cannot
-    ALTER the type of a key column in place.
-
-    Map≡ALTER: when ``stamp_ceiling_by_col`` is set, never ALTER past the
-    approved Map stamp — refuse-closed with audit evidence in ``refusals_out``.
-    """
-    if not target_cols or not target_column_types:
-        return []
-
-    dialect_name = (dialect_name or "").lower()
-    if dialect_name == "sqlite":
-        return []
-
-    skip_cols = set(conflict_columns or [])
-    ceilings = {
-        str(k): str(v)
-        for k, v in (stamp_ceiling_by_col or {}).items()
-        if k and v
-    }
-
-    try:
-        inspector = sa.inspect(conn)
-        existing_cols = inspector.get_columns(table_name, schema=schema)
-    except Exception as exc:
-        logger.debug("Could not reflect columns for widen: %s", exc, exc_info=exc)
-        return []
-
-    from connectors.schema_drift import existing_column_index
-
-    catalog_names = existing_column_index(
-        dialect_name, (c["name"] for c in existing_cols)
-    )
-    log: list[str] = []
-    for col in target_cols:
-        if col in skip_cols:
-            continue
-        # Reflection normalises Oracle's ``LABEL`` to ``label``; an exact match
-        # skipped the widen and the row it was needed for was truncated or
-        # refused with no ALTER ever attempted.
-        catalog_name = catalog_names.get(col) or catalog_names.get(col.casefold())
-        existing = next(
-            (c for c in existing_cols if c["name"] == catalog_name), None
-        )
-        if not existing:
-            continue
-        existing_type = str(existing["type"].compile(dialect=engine.dialect))
-        proposed = target_column_types.get(col, existing_type)
-        stamp = ceilings.get(col)
-        desired_type = proposed
-        if stamp:
-            # Hard ceiling: align live up to stamp only; never past it.
-            if proposed and is_wider_type(stamp, proposed):
-                refusal = {
-                    "column": col,
-                    "mapped_type": stamp,
-                    "refused_wider": proposed,
-                    "reason": "explicit_map_stamp_ceiling",
-                }
-                if refusals_out is not None:
-                    refusals_out.append(refusal)
-                else:
-                    logger.info(
-                        "generic_sql Map≡ALTER refusal (stamp ceiling): %s", refusal
-                    )
-            desired_type = stamp
-        if not is_wider_type(existing_type, desired_type, dest_db=dialect_name):
-            continue
-        from connectors.schema_drift import (
-            character_ddl_is_unsized,
-            existing_carrier_holds_source,
-        )
-        from services.type_system import national_charset_would_collapse
-
-        source_type = ""
-        if source_types:
-            source_type = str(
-                source_types.get(col) or source_types.get(col.casefold()) or ""
-            ).strip()
-        # The live column already holds the source (INT holds INTEGER). The
-        # BIGINT a SQL Server create-new would invent is not a widen (D368).
-        if existing_carrier_holds_source(
-            source_type, existing_type, dest_db=dialect_name
-        ):
-            continue
-        if character_ddl_is_unsized(desired_type) or national_charset_would_collapse(
-            existing_type, desired_type, dest_db=dialect_name
-        ):
-            logger.info(
-                "Widen refused for %s.%s: %s -> %s would narrow or drop Unicode",
-                table_name,
-                col,
-                existing_type,
-                desired_type,
-            )
-            continue
-        try:
-            ddl = _build_widen_ddl(
-                dialect_name, schema, table_name, col, desired_type, existing_type
-            )
-            restore_sql = _build_widen_ddl(
-                dialect_name, schema, table_name, col, existing_type, existing_type
-            )
-            conn.execute(sa.text(ddl))
-            conn.commit()
-            log.append(ddl)
-            if restore_out is not None:
-                restore_out.append(restore_sql)
-            logger.debug(
-                "Widened %s.%s from %s to %s",
-                table_name,
-                col,
-                existing_type,
-                desired_type,
-            )
-        except Exception as exc:
-            err = str(exc).lower()
-            if any(
-                phrase in err for phrase in ("already", "cannot alter", "not supported")
-            ):
-                logger.debug(
-                    "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
-                )
-                continue
-            logger.warning(
-                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
-            )
-            raise_widen_refusal(col, existing_type, desired_type, exc)
-            raise
-    return log
+    return widen_existing_columns_sa(*args, **kwargs)
 
 
 def _apply_widen_restore(engine: Any, statements: list[str]) -> None:
-    """Put columns back after a failed run that had already altered them.
+    """Compensating ALTER of the captured column. A failure fails the job."""
+    from connectors.column_widen_restore import apply_column_restores
 
-    SQL Server and PostgreSQL can roll a DDL transaction back; MySQL and
-    Oracle commit DDL implicitly. Re-issuing the original column type covers
-    both, and only runs when the failed attempt committed no rows (D368).
-    """
-    if not statements or engine is None:
-        return
-    try:
-        with engine.connect() as conn:
-            for stmt in statements:
-                conn.execute(sa.text(stmt))
-            conn.commit()
-    except Exception:
-        logger.warning(
-            "Could not restore destination columns after a failed write",
-            exc_info=True,
-        )
+    apply_column_restores(engine, statements)
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:

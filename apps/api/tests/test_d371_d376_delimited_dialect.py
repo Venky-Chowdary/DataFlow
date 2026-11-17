@@ -1,8 +1,8 @@
 """D371 / D376(b): TSV uses the CSV quoting dialect, and rows end CRLF.
 
 NULL is an empty unquoted field. ``''`` is ``""``. A quote, tab, CR or LF
-is quoted with doubled quotes. RFC 4180 records end with CRLF. Migration
-rule 9.
+is quoted with doubled quotes. CSV follows RFC 4180. TSV quoting is a
+product choice that uses the same rule and CRLF. Migration rule 9.
 """
 
 from __future__ import annotations
@@ -61,3 +61,34 @@ def test_quoted_crlf_inside_a_field_is_preserved() -> None:
     raw = 'id,note\r\n1,"multi\r\nline"\r\n'
     rows = list(iter_csv_records(io.StringIO(raw, newline=""), ","))
     assert rows[1][1] == "multi\r\nline"
+
+
+def test_fast_s3_export_uses_crlf(tmp_path) -> None:
+    from services.copy_s3_common import s3_write_delimited
+
+    path = tmp_path / "out.tsv"
+    s3_write_delimited(str(path), ["id", "note"], [(1, 'q"uote'), (2, None)], "\t")
+    body = path.read_bytes()
+    assert body.endswith(b"\r\n")
+    assert b"\n" in body and body.count(b"\n") == body.count(b"\r\n")
+    assert b'"q""uote"' in body
+
+
+def test_append_refuses_a_pre_crlf_tsv() -> None:
+    import pytest
+
+    from connectors.object_store_incremental import ObjectMergeRefused, _delimited_concat
+
+    existing = b"id\tnote\n1\thello\n"
+    incoming = b"id\tnote\r\n2\tworld\r\n"
+    with pytest.raises(ObjectMergeRefused):
+        _delimited_concat(existing, incoming, fmt="tsv")
+
+
+def test_csv_append_matches_the_existing_line_ending() -> None:
+    from connectors.object_store_incremental import _delimited_concat
+
+    existing = b"id,note\n1,a\n"
+    incoming = b"id,note\r\n2,b\r\n"
+    merged = _delimited_concat(existing, incoming, fmt="csv")
+    assert merged == b"id,note\n1,a\n2,b\n"

@@ -31,6 +31,7 @@ from services.copy_s3_common import (
     s3_ext,
     s3_list_keys,
     scan_delimited_file,
+    tsv_quotes_follow_product_dialect,
 )
 from services.copy_sql_pairs import pg_ident as _pg_ident
 
@@ -186,12 +187,13 @@ def copy_s3_to_postgres(
                     f"source object {src_key!r} spells NULL as \\N; the row "
                     "path's CSV codec reads it (COPY's CSV NULL is the empty field)"
                 )
-            if ext == "tsv" and scan.quote:
-                # G7 B1: PG's CSV parser reads a mid-field '"' (raw in a
-                # product TSV) as a quote; the row path reads it literally.
+            if ext == "tsv" and scan.quote and not tsv_quotes_follow_product_dialect(tmp_path):
+                # A quoted TSV (the dialect this product writes) is COPY CSV.
+                # A raw mid-field quote from the previous unquoted dialect is not.
                 raise FastPathUnavailable(
-                    f"source TSV object {src_key!r} holds a quote character; "
-                    "COPY (FORMAT csv) would read a mid-field quote as quoting"
+                    f"source TSV object {src_key!r} holds an unquoted quote; "
+                    "COPY (FORMAT csv) would read it as quoting. Overwrite the "
+                    "object with the quoted TSV dialect before a fast load."
                 )
             _census_csv_cells(tmp_path, ext, src_key, pg_ddls)
             # C04 is PostgreSQL's own CSV rule: NULL '' makes an unquoted empty

@@ -1716,7 +1716,7 @@ class UniversalTransferEngine:
                 )
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
-                records = apply_row_filter(records, request.source_filter)
+                records = apply_row_filter(records, request.source_filter, engine=src_fmt)
             from services.duplicate_policy import keep_last_records
             records = keep_last_records(request, records)
             # The batch path reads the source whole, so an incremental mode has
@@ -3235,7 +3235,7 @@ class UniversalTransferEngine:
             read_columns = list(columns)
             raw_sample_size = len(sample_rows)
             if request.source_filter:
-                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+                sample_rows = apply_row_filter(sample_rows, request.source_filter, engine=src_fmt)
 
             # The recipe runs on the read, so Map, the narrowing scan and the DDL
             # identity are decided from the shaped columns and values the writer
@@ -4447,7 +4447,7 @@ class UniversalTransferEngine:
                 )
 
             if request.source_filter:
-                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+                sample_rows = apply_row_filter(sample_rows, request.source_filter, engine=src_fmt)
 
             # The recipe runs before Map on the sample as well as on the stream:
             # Map, the narrowing scan and the DDL identity are all decided from

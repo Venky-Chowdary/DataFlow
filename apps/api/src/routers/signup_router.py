@@ -222,6 +222,7 @@ async def signup(body: SignupRequest, request: Request):
         turnstile_token=body.turnstile_token,
         form_token=body.form_token,
         honeypot=body.honeypot,
+        request_host=request.headers.get("host", ""),
     )
 
 

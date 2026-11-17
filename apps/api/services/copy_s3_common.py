@@ -300,17 +300,42 @@ def s3_write_delimited(
     rows: Iterable[Sequence[object]],
     delimiter: str,
 ) -> int:
-    """Write HEADER plus data rows. Header is not a dest row."""
+    """Write HEADER plus data rows. Header is not a dest row.
+
+    New files use CRLF, the same record terminator as the product CSV/TSV
+    codec. ``newline=""`` so the csv module does not rewrite that terminator.
+    """
+    from services.csv_codec import RECORD_TERMINATOR
+
     written = 0
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(s3_format_delimited_row(list(header), delimiter) + "\n")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(s3_format_delimited_row(list(header), delimiter) + RECORD_TERMINATOR)
         for row in rows:
             handle.write(
                 s3_format_delimited_row([s3_csv_cell(v) for v in row], delimiter)
-                + "\n"
+                + RECORD_TERMINATOR
             )
             written += 1
     return written
+
+
+def tsv_quotes_follow_product_dialect(path: str) -> bool:
+    """True when a TSV's quotes are the product's CSV-style quoting.
+
+    PostgreSQL ``COPY (FORMAT csv)`` reads that file. A raw mid-field quote
+    from the previous unquoted TSV dialect does not parse to a stable width.
+    """
+    import csv
+
+    with open(path, encoding="utf-8", newline="") as handle:
+        try:
+            rows = list(csv.reader(handle, delimiter="\t"))
+        except csv.Error:
+            return False
+    if not rows:
+        return True
+    width = len(rows[0])
+    return width > 0 and all(len(row) == width for row in rows)
 
 
 def s3_iter_fetchmany(cursor: Any, batch: int = 8192) -> Iterator[Any]:

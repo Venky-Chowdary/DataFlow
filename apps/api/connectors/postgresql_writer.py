@@ -23,6 +23,7 @@ from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
 from connectors.pg_tx_guard import tolerated as pg_tolerated
+from connectors.column_widen_restore import bind_restore_cursor, writer_restore_guard
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -1453,6 +1454,7 @@ def _open_pg(
     return conn
 
 
+@writer_restore_guard
 def write_mapped_rows(
     *,
     host: str,
@@ -2218,6 +2220,7 @@ def write_mapped_rows(
                 )
 
             suppressed_widens: dict[str, str] = {}
+            bind_restore_cursor(cursor)
             widen_existing_columns_native(
                 cursor,
                 "postgresql",

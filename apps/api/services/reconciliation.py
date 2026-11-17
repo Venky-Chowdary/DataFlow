@@ -4898,7 +4898,7 @@ def sample_compare_rows(
             if not src_col or not tgt_col:
                 continue
             # An omitted column is not written and is not compared (D369).
-            if m.get("intentional_omit") or m.get("intentionalOmit"):
+            if m.get("intentional_omit") or m.get("intentionalOmit") or m.get("omit") or m.get("omitted"):
                 continue
             if str(m.get("transform") or "").strip().lower() in {
                 "omit",

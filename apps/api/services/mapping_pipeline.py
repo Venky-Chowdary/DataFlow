@@ -1323,6 +1323,22 @@ def run_mapping_pipeline(
         enabled=use_llm,
         job_id=job_id,
     )
+    # The model can propose a non-_id source onto _id. Rule 4 blocks that
+    # here, and the constraint pass below blocks it again (D369).
+    from services.semantic_mapper import mapping_violates_key_rule
+
+    _target_schema_by_name = {
+        str(s.get("name") or ""): s for s in (target_schemas or []) if isinstance(s, dict)
+    }
+    pruned = [
+        m
+        for m in pruned
+        if not mapping_violates_key_rule(
+            str(m.get("source") or ""),
+            str(m.get("target") or ""),
+            _target_schema_by_name.get(str(m.get("target") or "")),
+        )
+    ]
 
     # Module 13 — re-apply operator-locked priors before constraints / proof.
     override_report: dict = {}
@@ -1343,6 +1359,7 @@ def run_mapping_pipeline(
         pruned,
         target_columns,
         confidence_floor=max(0.55, confidence_threshold - 0.35),
+        target_schemas=target_schemas,
     )
     dropped = list(dict.fromkeys([*dropped, *constraint_dropped]))
 

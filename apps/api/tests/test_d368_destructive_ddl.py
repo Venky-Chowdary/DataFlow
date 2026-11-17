@@ -128,7 +128,9 @@ def test_sa_widen_leaves_nvarchar_and_int_alone(monkeypatch) -> None:
                 {"name": "qty", "type": _Type("INT")},
             ]
 
-    monkeypatch.setattr(gs.sa, "inspect", lambda _conn: _Inspector())
+    monkeypatch.setattr(
+        "connectors.column_widen_restore.sa.inspect", lambda _conn: _Inspector()
+    )
     engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
     restore: list[str] = []
     log = gs._widen_existing_columns_sa(
@@ -168,7 +170,9 @@ def test_a_real_bigint_widen_records_a_restore(monkeypatch) -> None:
         def get_columns(self, table_name, schema=None):  # noqa: ARG002
             return [{"name": "qty", "type": _Type()}]
 
-    monkeypatch.setattr(gs.sa, "inspect", lambda _conn: _Inspector())
+    monkeypatch.setattr(
+        "connectors.column_widen_restore.sa.inspect", lambda _conn: _Inspector()
+    )
     engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
     restore: list[str] = []
     log = gs._widen_existing_columns_sa(
@@ -231,3 +235,159 @@ def test_failed_write_restore_replays_the_original_type() -> None:
     )
     assert any("NVARCHAR(400)" in stmt for stmt in executed)
     assert "COMMIT" in executed
+
+
+def test_sqlserver_restore_restates_nullability_and_collation() -> None:
+    from connectors.column_widen_restore import restate_column_ddl
+
+    sql = restate_column_ddl(
+        "sqlserver",
+        "dbo",
+        "orders",
+        "name",
+        "NVARCHAR(400)",
+        nullable=False,
+        collation="Latin1_General_CI_AS",
+        existing_type="NVARCHAR(400)",
+    )
+    assert "NVARCHAR(400)" in sql
+    assert "NOT NULL" in sql
+    assert "COLLATE Latin1_General_CI_AS" in sql
+    assert "NULL" in sql.split("NOT NULL")[0] or sql.endswith("NOT NULL")
+
+
+def test_plan_and_execute_agree_on_national_widen(monkeypatch) -> None:
+    from connectors import generic_sql as gs
+    from services.schema_drift import widened_dest_carrier
+
+    assert widened_dest_carrier("NVARCHAR(400)", "VARCHAR(800)") == "NVARCHAR(800)"
+    assert widened_dest_carrier("NVARCHAR(400)", "VARCHAR(5000)") == "NVARCHAR(MAX)"
+    assert widened_dest_carrier("NVARCHAR(400)", "VARCHAR(MAX)") == "NVARCHAR(MAX)"
+    assert "NVARCHAR(5000)" not in widened_dest_carrier("NVARCHAR(100)", "VARCHAR(5000)")
+
+    executed: list[str] = []
+
+    class _Type:
+        def __init__(self) -> None:
+            self.collation = "Latin1_General_CI_AS"
+
+        def compile(self, dialect=None):  # noqa: ARG002
+            return "NVARCHAR(400)"
+
+    class _Conn:
+        def execute(self, stmt):
+            executed.append(str(stmt))
+            return MagicMock()
+
+        def commit(self):
+            return None
+
+    class _Inspector:
+        def get_columns(self, table_name, schema=None):  # noqa: ARG002
+            return [{"name": "name", "type": _Type(), "nullable": False}]
+
+    monkeypatch.setattr(
+        "connectors.column_widen_restore.sa.inspect", lambda _conn: _Inspector()
+    )
+    engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
+    restore: list[str] = []
+    log = gs._widen_existing_columns_sa(
+        _Conn(),
+        engine,
+        "sqlserver",
+        "dbo",
+        "orders",
+        ["name"],
+        {"name": "VARCHAR(800)"},
+        source_types={"name": "VARCHAR(800)"},
+        restore_out=restore,
+    )
+    assert log and "NVARCHAR(800)" in log[0].upper()
+    assert "NOT NULL" in log[0].upper()
+    assert "COLLATE Latin1_General_CI_AS" in log[0]
+    assert restore and "NVARCHAR(400)" in restore[0].upper()
+    assert "NOT NULL" in restore[0].upper()
+    assert "COLLATE Latin1_General_CI_AS" in restore[0]
+
+
+def test_oracle_byte_length_is_not_a_character_widen() -> None:
+    from connectors.schema_drift import is_wider_type
+
+    assert is_wider_type(
+        "VARCHAR2(400 CHAR)", "VARCHAR2(800 BYTE)", dest_db="oracle"
+    ) is False
+    assert is_wider_type(
+        "VARCHAR2(400 CHAR)", "VARCHAR2(2000 CHAR)", dest_db="oracle"
+    ) is True
+
+
+def test_restore_runs_on_empty_and_populated_tables() -> None:
+    duckdb = pytest.importorskip("duckdb")
+    from connectors.column_widen_restore import apply_column_restores
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE empty_t (name VARCHAR(10) NOT NULL)")
+    con.execute("CREATE TABLE full_t (name VARCHAR(10) NOT NULL)")
+    con.execute("INSERT INTO full_t VALUES ('ada'), ('bea')")
+    con.execute("ALTER TABLE empty_t ALTER name SET DATA TYPE VARCHAR(40)")
+    con.execute("ALTER TABLE full_t ALTER name SET DATA TYPE VARCHAR(40)")
+
+    class _Conn:
+        def execute(self, stmt):
+            con.execute(str(stmt))
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    apply_column_restores(
+        _Engine(),
+        [
+            "ALTER TABLE empty_t ALTER name SET DATA TYPE VARCHAR(10)",
+            "ALTER TABLE full_t ALTER name SET DATA TYPE VARCHAR(10)",
+        ],
+    )
+    empty = con.execute("SELECT COUNT(*) FROM empty_t").fetchone()[0]
+    names = [row[0] for row in con.execute("SELECT name FROM full_t ORDER BY name").fetchall()]
+    types = {
+        row[0]: row[1]
+        for row in con.execute(
+            "SELECT table_name, data_type FROM information_schema.columns "
+            "WHERE column_name = 'name'"
+        ).fetchall()
+    }
+    assert empty == 0
+    assert names == ["ada", "bea"]
+    assert "40" not in str(types["empty_t"])
+    assert "40" not in str(types["full_t"])
+
+
+def test_failed_restore_is_audited_and_raises(monkeypatch) -> None:
+    from connectors.column_widen_restore import WidenRestoreError, apply_column_restores
+
+    events: list[dict] = []
+
+    def _audit(**kwargs):
+        events.append(kwargs)
+        return {}
+
+    monkeypatch.setattr("services.audit_log.append_audit_event", _audit)
+
+    class _Engine:
+        def connect(self):
+            raise RuntimeError("ddl refused")
+
+    with pytest.raises(WidenRestoreError):
+        apply_column_restores(_Engine(), ["ALTER TABLE t ALTER COLUMN c TYPE TEXT"])
+    assert events
+    assert events[0]["outcome"] == "failed"
+    assert events[0]["reason_code"] == "widen_restore_failed"

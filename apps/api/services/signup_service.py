@@ -596,6 +596,7 @@ def request_signup(
     turnstile_token: str = "",
     form_token: str = "",
     honeypot: str = "",
+    request_host: str = "",
 ) -> dict[str, Any]:
     """Accept a signup. Same 202 body for new/pending/existing addresses."""
     # Bot wall: honeypot filled or a bad/expired/fast form token gets a fake
@@ -612,8 +613,17 @@ def request_signup(
     # is checked against every host the site serves (turnstile's allow-list):
     # pinning the apex refused every signup made on www (D322).
     if turnstile.configured():
+        # Only a served public host is pinned. The test client sends
+        # Host: testserver, which must not reject a www token. Production
+        # still refuses an empty token hostname and localhost (D322).
+        from services.turnstile import signup_expected_hostname
+
         verdict = turnstile.verify(
-            turnstile_token, remote_ip=ip, expected_action="signup")
+            turnstile_token,
+            remote_ip=ip,
+            expected_action="signup",
+            expected_hostname=signup_expected_hostname(request_host),
+        )
         if not verdict["ok"]:
             record_security_event("signup.blocked", outcome="failed",
                                   reason_code=f"turnstile:{verdict['reason']}",

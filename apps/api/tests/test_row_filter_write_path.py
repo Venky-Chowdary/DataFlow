@@ -41,7 +41,7 @@ def test_is_null_matches_reader_wire():
     assert _is_null("") is False
     assert _is_null("   ") is False
     assert _is_null(SQL_NULL_SENTINEL) is True
-    assert _is_null(float("nan")) is True
+    assert _is_null(float("nan")) is False
     assert _is_null("kept") is False
     assert _is_null("NULL") is False
     assert _is_null("none") is False

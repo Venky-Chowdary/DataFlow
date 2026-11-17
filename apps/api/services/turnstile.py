@@ -16,6 +16,7 @@ strictness.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -26,7 +27,43 @@ logger = logging.getLogger(__name__)
 
 _VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 _TIMEOUT_SEC = 5.0
-_ALLOWED_HOSTNAMES = {"datawrap.io", "www.datawrap.io", "localhost"}
+_PUBLIC_HOSTNAMES = {"datawrap.io", "www.datawrap.io"}
+_LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def signup_expected_hostname(request_host: str) -> str:
+    """The Host header to pin, or empty when it is not a served public host.
+
+    Signup's test client sends ``testserver``. Pinning that would reject a
+    token Cloudflare minted for www.datawrap.io. A public host is pinned so
+    the apex and www check is live on the signup route.
+    """
+    host = _host_token(request_host)
+    return host if host in _PUBLIC_HOSTNAMES else ""
+
+
+def production_turnstile() -> bool:
+    """True when this process is the production signup host.
+
+    An empty hostname or ``localhost`` is a development widget. Production
+    siteverify must name datawrap.io or www.datawrap.io.
+    """
+    env = (
+        getenv_brand("ENVIRONMENT")
+        or getenv_brand("ENV")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or ""
+    ).strip().lower()
+    return env in {"production", "prod"}
+
+
+def _host_token(value: str) -> str:
+    host = (value or "").strip().lower().rstrip(".")
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    else:
+        host = host.split(":")[0]
+    return host
 
 
 def secret() -> str:
@@ -63,18 +100,22 @@ def verify(token: str, *, remote_ip: str = "", expected_action: str = "",
     if not data.get("success"):
         return {"ok": False, "reason": "rejected",
                 "codes": data.get("error-codes", [])}
-    hostname = str(data.get("hostname") or "").lower()
+    hostname = _host_token(str(data.get("hostname") or ""))
     action = str(data.get("action") or "")
-    expected = (expected_hostname or "").lower()
-    # Apex and www are one site. A token minted on www.datawrap.io must not
-    # fail because the caller pinned expected_hostname to the apex (D322).
-    if hostname and hostname not in _ALLOWED_HOSTNAMES:
+    expected = _host_token(expected_hostname)
+    served = _PUBLIC_HOSTNAMES | (set() if production_turnstile() else _LOCAL_HOSTNAMES)
+    # Apex and www are one site. A token minted on www.datawrap.io matches a
+    # caller that names the apex, and the reverse, because both are served.
+    if not hostname or hostname not in served:
+        reason = "empty_hostname" if not hostname else "hostname_not_allowed"
         logger.info(
             "turnstile hostname refused",
-            extra={"reason_code": "turnstile:hostname_not_allowed"},
+            extra={"reason_code": f"turnstile:{reason}"},
         )
-        return {"ok": False, "reason": "hostname_not_allowed", "hostname": hostname}
-    if expected and hostname != expected and expected not in _ALLOWED_HOSTNAMES:
+        return {"ok": False, "reason": reason, "hostname": hostname}
+    if expected and hostname != expected and not (
+        hostname in _PUBLIC_HOSTNAMES and expected in _PUBLIC_HOSTNAMES
+    ):
         logger.info(
             "turnstile hostname refused",
             extra={"reason_code": "turnstile:hostname_mismatch"},

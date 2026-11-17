@@ -59,3 +59,29 @@ def test_empty_string_is_not_null_on_postgresql() -> None:
     assert empty_string_is_sql_null("postgresql") is False
     assert empty_string_is_sql_null("oracle") is True
     assert empty_string_is_sql_null("sqlserver") is False
+
+
+def test_oracle_empty_string_is_null_when_the_engine_is_passed() -> None:
+    rows = [{"id": 1, "note": ""}, {"id": 2, "note": "a"}, {"id": 3, "note": None}]
+    kept = apply_row_filter(
+        rows, {"column": "note", "operator": "is_not_null"}, engine="oracle"
+    )
+    assert {r["id"] for r in kept} == {2}
+    present = apply_row_filter(
+        rows, {"column": "note", "operator": "is_not_null"}, engine="postgresql"
+    )
+    assert {r["id"] for r in present} == {1, 2}
+
+
+def test_float_nan_is_not_null() -> None:
+    rows = [{"id": 1, "qty": float("nan")}, {"id": 2, "qty": None}]
+    kept = apply_row_filter(rows, {"column": "qty", "operator": "is_not_null"})
+    assert {r["id"] for r in kept} == {1}
+
+
+def test_ne_filter_warns_that_null_rows_are_dropped() -> None:
+    from services.row_filter import null_dropping_warnings
+
+    warnings = null_dropping_warnings({"column": "qty", "op": "ne", "value": 0})
+    assert warnings and "NULL" in warnings[0]
+    assert null_dropping_warnings({"column": "qty", "op": "eq", "value": 0}) == []

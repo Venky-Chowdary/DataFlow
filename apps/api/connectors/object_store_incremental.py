@@ -198,7 +198,7 @@ def _concat_bytes(fmt: str, existing: bytes, new: bytes) -> bytes | None:
     if fmt == "jsonl":
         return _jsonl_concat(existing, new)
     if fmt in {"csv", "tsv"}:
-        return _delimited_concat(existing, new)
+        return _delimited_concat(existing, new, fmt=fmt)
     return None
 
 
@@ -229,14 +229,87 @@ def _jsonl_concat(existing: bytes, new: bytes) -> bytes | None:
     return old + b"\n" + fresh + b"\n"
 
 
-def _delimited_concat(existing: bytes, new: bytes) -> bytes | None:
+def _tsv_quotes_are_product(body: bytes) -> bool:
+    import csv
+
+    try:
+        rows = list(
+            csv.reader(io.StringIO(body.decode("utf-8"), newline=""), delimiter="\t")
+        )
+    except (csv.Error, UnicodeError):
+        return False
+    if not rows:
+        return True
+    width = len(rows[0])
+    return width > 0 and all(len(row) == width for row in rows)
+
+
+def _uniform_record_terminator(body: bytes) -> bytes | None:
+    """``b"\\r\\n"`` or ``b"\\n"`` when every break agrees. Mixed is ``None``."""
+    if not body:
+        return b"\r\n"
+    crlf = body.count(b"\r\n")
+    bare_lf = 0
+    index = 0
+    while True:
+        found = body.find(b"\n", index)
+        if found < 0:
+            break
+        if found == 0 or body[found - 1 : found] != b"\r":
+            bare_lf += 1
+        index = found + 1
+    bare_cr = body.count(b"\r") - crlf
+    if bare_cr > 0 or (crlf and bare_lf):
+        return None
+    if crlf:
+        return b"\r\n"
+    if bare_lf:
+        return b"\n"
+    return b"\r\n"
+
+
+def _retarget_newlines(body: bytes, terminator: bytes) -> bytes:
+    flattened = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if terminator == b"\n":
+        return flattened
+    return flattened.replace(b"\n", b"\r\n")
+
+
+def _delimited_concat(existing: bytes, new: bytes, *, fmt: str = "") -> bytes | None:
     old_header, _old_rest = _first_line(existing)
     new_header, new_rest = _first_line(new)
     if not old_header or old_header != new_header:
         return None
+    existing_term = _uniform_record_terminator(existing)
+    if existing_term is None:
+        raise ObjectMergeRefused(
+            "The existing file mixes LF and CRLF. It was not replaced."
+        )
+    if fmt == "tsv" and existing_term != b"\r\n":
+        raise ObjectMergeRefused(
+            "This TSV was written before quoted CRLF records. "
+            "Overwrite the object; appending would mix two dialects. "
+            "The existing object was not replaced."
+        )
+    if fmt == "tsv" and b'"' in existing and not _tsv_quotes_are_product(existing):
+        raise ObjectMergeRefused(
+            "This TSV uses the previous unquoted dialect. "
+            "Overwrite the object; appending a quoted TSV would mix them. "
+            "The existing object was not replaced."
+        )
     if not new_rest.strip():
-        return existing if existing.endswith(b"\n") else existing + b"\n"
-    base = existing if existing.endswith(b"\n") else existing + b"\n"
+        if existing.endswith(existing_term):
+            return existing
+        return existing + existing_term
+    new_term = _uniform_record_terminator(new)
+    if new_term is None:
+        raise ObjectMergeRefused(
+            "The incoming file mixes LF and CRLF. The existing object was not replaced."
+        )
+    if new_term != existing_term:
+        new = _retarget_newlines(new, existing_term)
+        new_header, new_rest = _first_line(new)
+    base = existing if existing.endswith(existing_term) else existing + existing_term
     return base + new_rest
 
 

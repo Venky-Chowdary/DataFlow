@@ -198,17 +198,43 @@ def character_ddl_is_unsized(type_name: str | None) -> bool:
     return bool(_UNSIZED_CHARACTER_DDL.match(text))
 
 
+def _oracle_character_capacity(type_name: str) -> int | None:
+    """Characters a VARCHAR2/NVARCHAR2 length can hold.
+
+    Oracle's default unit is BYTE. AL32UTF8 uses up to 4 bytes per character,
+    so ``VARCHAR2(800 BYTE)`` holds 200 characters and is not a widen of
+    ``VARCHAR2(400 CHAR)``. An explicit ``CHAR`` length is a character count.
+    ``NVARCHAR2`` is characters. A plain ``CHAR(n)`` with no unit is left to
+    the caller: SQL Server ``CHAR`` is not Oracle BYTE.
+    """
+    upper = str(type_name or "").upper()
+    match = re.search(r"\b(N?VARCHAR2|N?CHAR)\s*\(\s*(\d+)\s*(CHAR|BYTE)?", upper)
+    if not match:
+        return None
+    kind, raw, unit = match.group(1), match.group(2), match.group(3)
+    if kind in {"CHAR", "NCHAR"} and unit is None:
+        return None
+    count = int(raw)
+    if kind.startswith("N") or unit == "CHAR":
+        return count
+    return count // 4
+
+
 def _string_span_for_widen(type_name: str) -> tuple[int | None, bool]:
     """``(declared length, unlimited)`` for a character carrier.
 
     Unlimited means TEXT/CLOB/VARCHAR(MAX). An explicit ``(n)`` is that
     length. A bare character token has no proven span: it is not unlimited,
-    so it never licenses a widen.
+    so it never licenses a widen. Oracle BYTE lengths are converted to
+    characters at 4 bytes per character before the comparison.
     """
     from services.type_system import is_unlimited_string_carrier
 
     if is_unlimited_string_carrier(type_name) or normalize_logical_type(type_name) == "text":
         return None, True
+    oracle = _oracle_character_capacity(type_name)
+    if oracle is not None:
+        return (oracle, False) if oracle > 0 else (None, False)
     length = _type_length(type_name)
     if length is not None and length > 0:
         return length, False
@@ -1243,6 +1269,70 @@ def mysql_keyed_widen_carrier(
     return carrier, False
 
 
+def _note_native_restore(
+    cursor: Any,
+    dialect: str,
+    schema: str | None,
+    table_name: str,
+    column: str,
+    existing_type: str,
+) -> str:
+    """Restore SQL for a column this widen just changed, recorded for a failed write.
+
+    MySQL commits the MODIFY immediately. The statement restates the captured
+    nullability and collation. A probe that is not an information_schema row
+    (test doubles) restores the type only.
+    """
+    from connectors.column_widen_restore import note_restore, restate_column_ddl
+
+    nullable: bool | None = None
+    collation = ""
+    name = (dialect or "").lower()
+    try:
+        if name in {"mysql", "mariadb"}:
+            clause = _mysql_preserved_column_clause(
+                cursor, schema, table_name, column, existing_type
+            )
+            upper = clause.upper()
+            if "NOT NULL" in upper:
+                nullable = False
+            elif re.search(r"\bNULL\b", upper):
+                nullable = True
+            found = re.search(r"\bCOLLATE\s+([A-Za-z0-9_]+)", clause, flags=re.I)
+            collation = found.group(1) if found else ""
+        elif name in {"postgresql", "postgres"}:
+            cursor.execute(
+                """SELECT is_nullable, collation_name
+                   FROM information_schema.columns
+                   WHERE table_schema = %s AND table_name = %s AND column_name = %s""",
+                (schema or "public", table_name, column),
+            )
+            rows = cursor.fetchall() or []
+            if rows and len(rows[0]) >= 1:
+                flag = str(rows[0][0] or "").strip().upper()
+                if flag == "NO":
+                    nullable = False
+                elif flag == "YES":
+                    nullable = True
+                if len(rows[0]) > 1 and rows[0][1]:
+                    collation = str(rows[0][1]).strip()
+    except Exception as exc:  # noqa: BLE001 — type-only restore still runs
+        logger.debug("column attribute probe failed for restore: %s", exc)
+        nullable, collation = None, ""
+    sql = restate_column_ddl(
+        name,
+        schema,
+        table_name,
+        column,
+        existing_type,
+        nullable=nullable,
+        collation=collation,
+        existing_type=existing_type,
+    )
+    note_restore(sql)
+    return sql
+
+
 def widen_existing_columns_native(
     cursor: Any,
     dialect: str,
@@ -1298,6 +1388,7 @@ def widen_existing_columns_native(
         return []
 
     log: list[str] = []
+    mysql_restores: list[tuple[str, str]] = []
     # Every key part this run widens is budgeted together, and MySQL gets one
     # ALTER TABLE for all of them: per-column MODIFYs committed ``a`` and then
     # failed ``b`` with 1071, leaving the key half-migrated.
@@ -1399,10 +1490,15 @@ def widen_existing_columns_native(
                     cursor, schema, table_name, col, new_type
                 )
                 mysql_modifies.append((ddl, col, existing_type, new_type))
+                mysql_restores.append((col, existing_type))
                 continue
             if not dry_run:
                 cursor.execute(ddl)
             log.append(ddl)
+            if not dry_run:
+                _note_native_restore(
+                    cursor, dialect, schema, table_name, col, existing_type
+                )
             logger.debug(
                 "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
             )
@@ -1432,7 +1528,13 @@ def widen_existing_columns_native(
         if dry_run:
             log.append(_combined_mysql_modify(mysql_modifies))
         else:
-            log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
+            issued = _execute_mysql_modifies(cursor, table_name, mysql_modifies)
+            log.extend(issued)
+            if issued:
+                for col, existing_type in mysql_restores:
+                    _note_native_restore(
+                        cursor, dialect, schema, table_name, col, existing_type
+                    )
     return log
 
 

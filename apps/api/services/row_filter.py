@@ -9,8 +9,11 @@ comparison falls back to string equality/case-sensitive containment.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _FILTER_OPS = frozenset({
     "eq", "ne", "gt", "gte", "lt", "lte",
@@ -172,8 +175,12 @@ def _is_null(value: Any, *, engine: str | None = None) -> bool:
 
     if is_reader_null_cell(value):
         return True
-    if isinstance(value, float) and value != value:
-        return True
+    # NaN is a float value. Treating it as NULL dropped it from is_not_null
+    # and from every comparison (D365).
+    if engine is None:
+        from services.source_engine_scope import active_source_engine
+
+        engine = active_source_engine()
     if empty_string_is_sql_null(engine) and value == "":
         return True
     return False
@@ -191,19 +198,22 @@ def _cell_text(value: Any) -> str:
     return present_cell_text(value) or ""
 
 
-def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
+def _compare_values(
+    row_value: Any, filter_value: Any, op: str, *, engine: str | None = None
+) -> bool:
     rv = _to_scalar(row_value)
     fv = _to_scalar(filter_value)
 
     if op == "is_null":
-        return _is_null(rv)
+        return _is_null(rv, engine=engine)
     if op == "is_not_null":
-        return not _is_null(rv)
+        return not _is_null(rv, engine=engine)
 
     # NULL <op> x is UNKNOWN, so the row is excluded. ``ne`` and ``not_in``
     # do not match NULL either (SQL three-valued logic). ``''`` is a value
-    # and is compared below (D364).
-    if _is_null(rv):
+    # and is compared below (D364). On Oracle ``''`` is NULL, so the engine
+    # is part of the predicate (D365).
+    if _is_null(rv, engine=engine):
         return False
 
     if op in {"in", "not_in"}:
@@ -267,14 +277,16 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
     return False
 
 
-def _matches(record: dict[str, Any], spec: dict[str, Any]) -> bool:
+def _matches(
+    record: dict[str, Any], spec: dict[str, Any], *, engine: str | None = None
+) -> bool:
     if not spec:
         return True
 
     if "and" in spec:
-        return all(_matches(record, child) for child in spec["and"] if child)
+        return all(_matches(record, child, engine=engine) for child in spec["and"] if child)
     if "or" in spec:
-        return any(_matches(record, child) for child in spec["or"] if child)
+        return any(_matches(record, child, engine=engine) for child in spec["or"] if child)
 
     column = spec.get("column") or spec.get("field")
     if not column:
@@ -285,7 +297,7 @@ def _matches(record: dict[str, Any], spec: dict[str, Any]) -> bool:
         )
     op = canonical_filter_op(spec.get("operator") or spec.get("op") or "eq")
     value = record.get(column)
-    return _compare_values(value, spec.get("value"), op)
+    return _compare_values(value, spec.get("value"), op, engine=engine)
 
 
 def filter_columns(spec: dict[str, Any] | None) -> list[str]:
@@ -307,11 +319,46 @@ def filter_columns(spec: dict[str, Any] | None) -> list[str]:
     return out
 
 
-def iter_filtered_rows(rows, spec: dict[str, Any] | None):
+def null_dropping_warnings(spec: dict[str, Any] | None) -> list[str]:
+    """Plan-time warning: ``ne`` / ``not_in`` now exclude NULL rows.
+
+    SQL three-valued logic makes ``NULL <> x`` unknown. MongoDB ``$ne`` and
+    ``$nin`` match documents where the field is null or missing, so the
+    snapshot filter adds an existence guard and those rows are no longer kept.
+    """
+    found: list[str] = []
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        for key in ("and", "or"):
+            if key in node:
+                for child in node.get(key) or []:
+                    walk(child)
+                return
+        op = str(node.get("op") or node.get("operator") or "").strip().lower()
+        if op in {"ne", "neq", "!=", "<>", "not_in", "nin"}:
+            column = str(node.get("column") or node.get("field") or "column")
+            found.append(column)
+
+    walk(spec)
+    if not found:
+        return []
+    names = ", ".join(dict.fromkeys(found))
+    return [
+        f"Filter on {names} uses not-equal or not-in, which drops NULL rows. "
+        "SQL treats that comparison as unknown, and MongoDB $ne/$nin match "
+        "null and missing fields unless the plan requires the field to exist "
+        "and be non-null."
+    ]
+
+
+def iter_filtered_rows(rows, spec: dict[str, Any] | None, *, engine: str | None = None):
     """Yield rows that satisfy ``spec``. Pass-through when there is no filter.
 
     Streaming counterpart of :func:`apply_row_filter` so a table walk can
     judge the same subset Execute writes without materialising the table.
+    ``engine`` is the source engine: Oracle treats ``''`` as NULL.
     """
     if rows is None:
         return None
@@ -320,20 +367,29 @@ def iter_filtered_rows(rows, spec: dict[str, Any] | None):
 
     def _gen():
         for rec in rows:
-            if isinstance(rec, dict) and _matches(rec, spec):
+            if isinstance(rec, dict) and _matches(rec, spec, engine=engine):
                 yield rec
 
     return _gen()
 
 
-def apply_row_filter(records: list[dict[str, Any]], spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+def apply_row_filter(
+    records: list[dict[str, Any]],
+    spec: dict[str, Any] | None,
+    *,
+    engine: str | None = None,
+) -> list[dict[str, Any]]:
     """Return only records that satisfy ``spec``.
 
     An empty or ``None`` spec is a no-op (returns the input unchanged).
+    ``engine`` selects Oracle's empty-string rule. A not-equal filter logs
+    the plan warning that NULL rows are dropped.
     """
     if not spec or not records:
         return records
-    return [r for r in records if _matches(r, spec)]
+    for warning in null_dropping_warnings(spec):
+        logger.info(warning)
+    return [r for r in records if _matches(r, spec, engine=engine)]
 
 
 def apply_row_filter_to_matrix(

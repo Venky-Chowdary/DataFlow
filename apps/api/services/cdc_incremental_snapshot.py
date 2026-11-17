@@ -326,6 +326,10 @@ def request_incremental_snapshot(
     from services.cdc_snapshot_filter import describe_snapshot_filter, normalize_snapshot_filter
 
     spec = normalize_snapshot_filter(row_filter)
+    from services.row_filter import null_dropping_warnings
+
+    for warning in null_dropping_warnings(spec):
+        logging.getLogger(__name__).warning(warning)
     sig = SnapshotSignal(
         id=f"snap_{uuid.uuid4().hex[:12]}",
         source_key=source_key,

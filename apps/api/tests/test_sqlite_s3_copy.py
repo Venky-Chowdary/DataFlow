@@ -141,10 +141,9 @@ def test_sqlite_s3_csv_wire_round_trips_null_and_text_backslash_n(tmp_path):
         body = path.read_text(encoding="utf-8")
         assert '"\\N"' in body and body.count("\\N") == 1, body
         rows = list(s3_iter_delimited_rows(str(path), delim))
-        # The default TSV codec writes '' and NULL as the same empty cell (the
-        # opt-in tsv_null "\\N" keeps them apart); CSV quotes '' as "".
-        empty = "" if delim == "," else None
-        assert rows == [["1", None], ["2", "\\N"], ["3", empty], ["4", "x"]], (delim, rows)
+        # Product TSV uses the same quote rule as CSV: NULL is an empty
+        # unquoted cell and '' is "". Both delimiters round-trip them apart.
+        assert rows == [["1", None], ["2", "\\N"], ["3", ""], ["4", "x"]], (delim, rows)
 
 
 def test_sqlite_s3_copy_safe_types():

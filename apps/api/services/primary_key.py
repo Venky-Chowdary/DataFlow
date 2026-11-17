@@ -442,7 +442,7 @@ def _flagged_identity_names(mappings: Iterable[Any] | None) -> list[str]:
     names: list[str] = []
     for item in mappings or []:
         if isinstance(item, dict):
-            if item.get("intentional_omit") or item.get("omit"):
+            if item.get("intentional_omit") or item.get("omit") or item.get("omitted"):
                 continue
             flagged = (
                 item.get("primary_key")

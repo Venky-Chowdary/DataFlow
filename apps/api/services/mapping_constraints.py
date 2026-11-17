@@ -60,6 +60,7 @@ def enforce_destination_constraints(
     target_columns: list[str],
     *,
     confidence_floor: float = 0.55,
+    target_schemas: list[dict] | None = None,
 ) -> tuple[list[dict], list[str], list[str]]:
     """
     Keep mappings whose target exists in the destination schema.
@@ -76,10 +77,23 @@ def enforce_destination_constraints(
     kept: list[dict] = []
     dropped: list[str] = []
     invented: list[str] = []
+    schema_by_name = {
+        str(s.get("name") or ""): s for s in (target_schemas or []) if s.get("name")
+    }
+    from services.mapping_engine_contract import is_operator_locked
+    from services.semantic_mapper import mapping_violates_key_rule
 
     for m in mappings:
         src = m["source"]
         tgt = m["target"]
+        if mapping_violates_key_rule(
+            src,
+            tgt,
+            schema_by_name.get(tgt),
+            operator_locked=is_operator_locked(m),
+        ):
+            dropped.append(src)
+            continue
         if _is_create_new_mapping(m):
             out = dict(m)
             out["create_new"] = True
@@ -101,6 +115,14 @@ def enforce_destination_constraints(
 
         exact = next((c for c in target_columns if name_identical(tgt, c)), None)
         canon = exact or next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
+        if mapping_violates_key_rule(
+            src,
+            canon,
+            schema_by_name.get(canon) or schema_by_name.get(tgt),
+            operator_locked=is_operator_locked(out),
+        ):
+            dropped.append(src)
+            continue
         out["target"] = canon
         kept.append(out)
 

@@ -119,10 +119,45 @@ def is_reserved_document_key(name: str) -> bool:
     """MongoDB ``_id`` is the document key, not a fuzzy-match target.
 
     A DATE, INT or TEXT column must not land on it. Only a source column that
-    is itself ``_id`` (or an explicit operator mapping, which does not go
-    through this scorer) may. Migration rule 4.
+    is itself ``_id`` may. Migration rule 4. An operator lock does not
+    override this: ``_id`` is immutable.
     """
     return _folded_ident(name).lower() == "_id"
+
+
+def column_is_protected_key(name: str, schema: dict | None = None) -> bool:
+    """True for ``_id`` and for a destination primary key or identity column."""
+    if is_reserved_document_key(name):
+        return True
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("primary_key") or schema.get("is_primary_key"):
+        return True
+    if schema.get("identity") or schema.get("is_identity") or schema.get("autoincrement"):
+        return True
+    key = str(schema.get("column_key") or schema.get("key") or "").strip().upper()
+    return key in {"PRI", "PRIMARY", "IDENTITY"}
+
+
+def mapping_violates_key_rule(
+    source: str,
+    target: str,
+    schema: dict | None = None,
+    *,
+    operator_locked: bool = False,
+) -> bool:
+    """Rule 4. Non-``_id`` sources never map onto ``_id``.
+
+    A primary key or identity column accepts a name-identical source, or an
+    operator-locked mapping. A fuzzy or model-proposed pair does not.
+    """
+    if is_reserved_document_key(target) and not is_reserved_document_key(source):
+        return True
+    if operator_locked:
+        return False
+    if not column_is_protected_key(target, schema):
+        return False
+    return _folded_ident(source).lower() != _folded_ident(target).lower()
 
 
 def _folded_ident(name: str) -> str:

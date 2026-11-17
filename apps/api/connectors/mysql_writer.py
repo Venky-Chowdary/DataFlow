@@ -15,6 +15,7 @@ from services.reversibility_enforce import scan_pass
 
 from connectors.destination_naming import column_key
 from connectors.mysql_conn import get_connection
+from connectors.column_widen_restore import bind_restore_cursor, writer_restore_guard
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -650,6 +651,7 @@ def _mysql_materialize_mapped_batch(
     )
 
 
+@writer_restore_guard
 def write_mapped_rows(
     *,
     host: str,
@@ -1301,6 +1303,7 @@ def write_mapped_rows(
                 )
 
             suppressed_widens: dict[str, str] = {}
+            bind_restore_cursor(cursor)
             widen_existing_columns_native(
                 cursor,
                 "mysql",

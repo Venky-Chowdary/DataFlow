@@ -37,9 +37,17 @@ An `ALTER` runs only when the new type can hold every value the column already s
 
 An unsized character type is never emitted. On SQL Server that spelling is length 1.
 
+SQL Server `NVARCHAR` and `NCHAR` without `MAX` stop at 4000. `VARCHAR` and `CHAR` stop at 8000. A source `VARCHAR(n)` with `n > 4000`, and a source `VARCHAR(MAX)`, map to `NVARCHAR(MAX)` on SQL Server. They never map to `NVARCHAR(5000)`, which is not a legal non-MAX length ([nchar and nvarchar](https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql)).
+
+`ALTER COLUMN` on SQL Server restates `NULL` or `NOT NULL` and `COLLATE`. Omitting them makes the column nullable and replaces the collation with the database default ([ALTER TABLE](https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-table-transact-sql)). The restore statement is the original type plus those two clauses, captured before the widen. The widen statement restates them too, so the widen itself does not drop them.
+
+Oracle `VARCHAR2(n)` is `BYTE` unless `CHAR` is written. Under AL32UTF8 a character can take 4 bytes, so `VARCHAR2(800 BYTE)` holds 200 characters and is not a widen of `VARCHAR2(400 CHAR)` ([Oracle data types](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Data-Types.html)). The comparison uses character capacity: `CHAR` counts as characters, `BYTE` counts as `n / 4`.
+
+MySQL `VARCHAR(n)` counts characters. The row-size limit and the InnoDB index limit count bytes: 65,535 bytes per row and 3,072 bytes per index, and utf8mb4 uses up to 4 bytes per character ([CHAR and VARCHAR](https://dev.mysql.com/doc/refman/8.4/en/char.html), [InnoDB limits](https://dev.mysql.com/doc/refman/8.4/en/innodb-limits.html)). A character length that fits the type can still overflow the row.
+
 A widen of a column Datawrap did not create, where the source type already fits the live column, does not run. SQL Server's create-new spelling of integer is `BIGINT`; that is not a reason to alter an `INT` column whose source is `INTEGER` / `INT4`.
 
-Where the engine can roll DDL back (SQL Server and PostgreSQL, inside a transaction), a failed run that committed no rows restores the original column definition. MySQL and Oracle commit DDL implicitly ([MySQL implicit commit](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)); the same restore is a compensating `ALTER` to the captured original type. A table the run created, with nothing committed, is dropped on cancel. A table the customer already had is never dropped.
+The widen is committed before rows are written, including on PostgreSQL. A transaction rollback does not undo it. A failed run that committed no rows issues a compensating `ALTER` back to the captured definition on every engine. MySQL commits DDL implicitly, so that compensating statement is the only restore ([MySQL implicit commit](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)). A restore that fails fails the job and is written to the audit log. A table the run created, with nothing committed, is dropped on cancel. A table the customer already had is never dropped.
 
 Fivetran does not apply narrowing type changes. Datawrap matches that and also refuses the unsized-character footgun Microsoft documents.
 
@@ -51,7 +59,9 @@ SQL uses three-valued logic. `NULL <op> x` is UNKNOWN, so the row does not match
 
 Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`.
 
-A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter.
+A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL.
+
+MongoDB `$ne` and `$nin` match documents where the field is null or missing ([$ne](https://www.mongodb.com/docs/manual/reference/operator/query/ne/)). A not-equal or not-in filter therefore adds an existence and non-null guard, and the plan warns that NULL rows are dropped. That matches SQL, where `NULL <> x` is unknown.
 
 ## 4. Primary keys and MongoDB `_id`
 
@@ -100,9 +110,11 @@ Cancel stops the writer before the next row. The per-row fallback checks the fla
 
 ## 9. CSV and TSV quoting
 
-[RFC 4180](https://www.rfc-editor.org/rfc/rfc4180): records are separated by CRLF; a field that contains comma, CR, LF or double-quote is enclosed in double-quotes; a quote inside a field is doubled. Spaces are data. Datawrap uses that dialect for CSV, including CRLF inside a quoted field, which is data and is preserved.
+CSV follows [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180): records are separated by CRLF; a field that contains comma, CR, LF or double-quote is enclosed in double-quotes; a quote inside a field is doubled. Spaces are data. Datawrap uses that dialect for CSV, including CRLF inside a quoted field, which is data and is preserved.
 
-NULL is an empty unquoted field. `''` is `""`. The literal text `NULL` is quoted when it would otherwise be read as the null marker. TSV uses the same rules with tab as the delimiter: a field that contains a tab, quote, CR or LF is quoted, and `''` is `""`, not the same bytes as NULL.
+NULL is an empty unquoted field. `''` is `""`. The literal text `NULL` is quoted when it would otherwise be read as the null marker.
+
+TSV quoting is a Datawrap product choice, not RFC 4180. The RFC specifies CSV. The product TSV uses the same quote rule with tab as the delimiter and CRLF as the record terminator: a field that contains a tab, quote, CR or LF is quoted, and `''` is `""`, not the same bytes as NULL. Appending to a TSV written before that dialect (LF records, or a raw mid-field quote) is refused. The existing object is left as it is; the operator overwrites it. On append to a CSV, the existing file's line ending is matched when it is uniform, and a mix of LF and CRLF is refused. Fast exports to S3 use CRLF, including PostgreSQL `COPY` output, which the server writes with LF and the product rewrites before the upload.
 
 PostgreSQL `COPY` CSV uses the same distinction: NULL is the null string and is not quoted; a non-NULL value that matches the null string is quoted ([COPY](https://www.postgresql.org/docs/current/sql-copy.html)).
 
