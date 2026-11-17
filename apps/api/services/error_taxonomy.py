@@ -1035,15 +1035,20 @@ def sqlserver_error_numbers(text: str) -> list[int]:
     return nums
 
 
+# Tied to driver phrases. A bare token such as ``eai_again`` also matches
+# ``column eai_again does not exist`` (D366).
 _DNS_FAILURE = re.compile(
-    r"name or service not known|nodename nor servname provided|getaddrinfo|"
-    r"no such host is known|temporary failure in name resolution|"
-    r"could not (?:translate|resolve) host|name resolution|"
+    r"name or service not known|nodename nor servname provided|"
+    r"\bgetaddrinfo\b|no such host is known|temporary failure in name resolution|"
+    r"could not (?:translate|resolve) host(?: name)?|"
     r"no address associated with hostname|unknown mysql server host|"
     r"the dns query name does not exist|dns did not resolve|"
-    r"errno -2|eai_noname|eai_again|nxdomain",
+    r"\[errno -[23]\]|\bnxdomain\b",
     re.I,
 )
+_SQLSERVER_HOST = re.compile(r"does not exist \(([^)]+)\)", re.I)
+_MYSQL_CONNECT_TIMEOUT = re.compile(r"\b2003\b.*timed out|timed out.*\b2003\b", re.I)
+_ORACLE_CONNECT_TIMEOUT = re.compile(r"\bDPY-6005\b", re.I)
 
 
 def sqlserver_is_network_failure(text: str) -> bool:
@@ -1061,6 +1066,24 @@ def sqlserver_is_network_failure(text: str) -> bool:
     if "db-lib error" in low:
         return "unable to connect" in low or "adaptive server is unavailable" in low
     return "adaptive server is unavailable" in low or "unable to connect" in low
+
+
+def _dns_from_sqlserver_numbers(text: str) -> bool:
+    """True when 20009 or 20002 names a host ``socket.getaddrinfo`` cannot resolve."""
+    nums = sqlserver_error_numbers(text)
+    if 20009 not in nums and 20002 not in nums:
+        return False
+    found = _SQLSERVER_HOST.search(str(text or ""))
+    host = str(found.group(1) if found else "").strip()
+    if not host or host.isdigit():
+        return False
+    try:
+        socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def _anchored(raw: str) -> str:
@@ -1112,11 +1135,21 @@ def classify(
         # MySQL 2013 at connect is a handshake that never finished, not a drop.
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
-    if not code and _DNS_FAILURE.search(full_raw):
-        # A name that does not resolve is not a timeout and not an unclassified
-        # connect failure (D366). Checked before the SQL Server network numbers,
-        # which pymssql also uses when the failure is DNS.
+    if _dns_from_sqlserver_numbers(full_raw):
+        # pymssql reports DNS and a dead host as the same 20009/20002, and
+        # the connect-timeout phrase matches both. Resolve the host named in
+        # the message; only a getaddrinfo failure is dns_not_found (D366).
         code = "network.dns_not_found"
+        matched_by = "getaddrinfo"
+    if not code and _DNS_FAILURE.search(full_raw):
+        code = "network.dns_not_found"
+        matched_by = "pattern"
+    if not code and (
+        _MYSQL_CONNECT_TIMEOUT.search(full_raw) or _ORACLE_CONNECT_TIMEOUT.search(full_raw)
+    ):
+        # MySQL 2003 "(timed out)" and Oracle DPY-6005 are a connect timeout,
+        # not an unclassified driver error (D366).
+        code = "network.connect_timeout"
         matched_by = "pattern"
     if not code and sqlserver_is_network_failure(full_raw):
         # pymssql's 20009 text does not always match the anchored patterns.
