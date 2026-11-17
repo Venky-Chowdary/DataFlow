@@ -86,6 +86,7 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
         workspace_id=str(payload.get("workspace_id") or "").strip(),
+        preflight_run_id=str(payload.get("preflight_run_id") or "").strip(),
     )
     stamp_schema_drift_ack(request)
     return request

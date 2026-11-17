@@ -2382,6 +2382,30 @@ def _run_preflight(
             validation_mode=validation_mode,
             route=f"{src_conn.get('type')}->{dst_conn.get('type')}",
         )
+        from services.staged_preflight import (
+            preflight_input_fingerprint,
+            remember_staged_preflight,
+        )
+
+        remember_staged_preflight(
+            str(result.get("run_id") or ""),
+            preflight_input_fingerprint(
+                source_connector_id=str(src_conn.get("id") or ""),
+                source_table=src_table,
+                source_format=src_db_type,
+                destination_connector_id=str(dst_conn.get("id") or ""),
+                destination_table=dst_table,
+                destination_db_type=dest_db_type,
+                mappings=mappings,
+                sync_mode=mode,
+                schema_policy=schema_policy,
+                validation_mode=validation_mode,
+                source_filter=source_filter,
+                shape_recipe=shape_recipe,
+                stream_contracts=list(stream_contracts or []),
+            ),
+            result,
+        )
     except Exception as exc:
         _LOG.warning("preflight failed: %s", exc, exc_info=True)
         # A preflight that could not run is never reported as a pass.

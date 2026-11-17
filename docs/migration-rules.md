@@ -124,7 +124,7 @@ JSON and JSONL write an exact decimal as a string or as a decimal-aware JSON num
 
 Every driver call has a connect timeout and a read timeout in the driver (`connect_timeout`, `login_timeout`, `socketTimeoutMS`, Oracle `tcp_connect_timeout`). A host that accepts TCP and never speaks fails inside that budget and releases its worker. `/health` stays ready because the worker is free.
 
-One preflight reuses one session per endpoint. A second catalog read does not open a second TLS handshake.
+One preflight reuses one session per endpoint. A second catalog read does not open a second TLS handshake. Confirm reuses that staged preflight when the mappings, mode, tables, filter, and recipe are unchanged, and runs it again when any of those inputs changed.
 
 The error names the endpoint that was dialled. A MongoDB URI is parsed with pymongo's URI parser, including several hosts and `mongodb+srv`. The form default `27017` is not used when the URI names another port. SQL Server is classified by error number, not by the `DB-Lib error` text pymssql appends to every server message. `208`, `207`, `4060` and `18456` are a missing table, a missing column, a missing database and a rejected login. `20009` and the other network numbers are "source unreachable". A black-holed handshake is a timeout, not "network unreachable" and not an authentication failure. A MongoDB seed that answers and then names unreachable replica-set members says so, and names `directConnection=true` as the remedy. Snowflake destination probes name the destination account, and they share one login for the plan. One MySQL preflight shares one login across probe, introspect, reconcile and DDL. The job's elapsed time includes queue and validate, not only the read.
 

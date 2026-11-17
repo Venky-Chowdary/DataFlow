@@ -392,6 +392,13 @@ def run_file_preflight(
     source_population_counted: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
+    from services.staged_preflight import staged_preflight_for_bound
+
+    # Confirm reuses staging's result when the inputs are the same (D308).
+    # A miss falls through and opens the catalog, as a first Validate does.
+    staged = staged_preflight_for_bound()
+    if staged is not None:
+        return staged
     from services.schema_drift import (
         PROPAGATE_POLICIES,
         destination_evolution_approved,

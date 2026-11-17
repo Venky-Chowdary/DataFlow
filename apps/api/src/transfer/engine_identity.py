@@ -321,6 +321,12 @@ def reuse_approved_validate_population_fit(request) -> bool:
 
 def execute_preflight_progress_message(request) -> str:
     """Operator-facing Run copy — do not say Validate is running again."""
+    run_id = str(getattr(request, "preflight_run_id", "") or "").strip()
+    if run_id:
+        return (
+            "Confirming the staged preflight. Unchanged inputs are not "
+            "read from the source again. Write-time fit still binds every row."
+        )
     if reuse_approved_validate_population_fit(request):
         return (
             "Confirming approved Validate — mapping and schema already passed. "
