@@ -1560,8 +1560,65 @@ def _transform_applied_proof_impl(
             return _dest_window.position(row) == IN_WINDOW
         return True
 
+    from services.primary_key import sync_collapses_in_file_duplicates
+
+    # D391: an upsert, and an explicit keep_last, writes one row per key (the
+    # last copy). The proof has to grade that same population. Counting every
+    # source line makes a correct load look like the source changed.
+    _collapse_keys: list[str] = []
+    if (
+        sync_collapses_in_file_duplicates(sync_mode)
+        or str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
+    ):
+        _collapse_keys = [
+            str(c)
+            for c in (
+                scope_pk
+                or dest_summary.get("primary_key_columns")
+                or dest_summary.get("conflict_columns")
+                or []
+            )
+            if c
+        ]
+    _collapsed_duplicates = 0
+
     def _expected_iter():
-        nonlocal raw_count
+        nonlocal raw_count, _collapsed_duplicates
+        _held: list[tuple] = []
+
+        def _record_expected(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
+            _fpm_buf.append(("e", _fph(orow)))
+            if keyed:
+                _exp_buf.append(
+                    (
+                        "\x1f".join(
+                            _key_norm(orow.get(c)) for c in pin_key_cols
+                        ),
+                        _fph(orow),
+                        json.dumps(
+                            {
+                                c: _val_norm(orow.get(c), _val_ddl(c), c)
+                                for c in digest_cols
+                            }
+                        ),
+                    )
+                )
+            if scope_keys is not None:
+                scope_keys.add(
+                    "\x1f".join(_key_norm(orow.get(c)) for c in scope_pk)
+                )
+            for sc, tc in col_pairs:
+                _cv_buf.append(
+                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
+                )
+                if origin_row is not None:
+                    _eo_buf.append(
+                        (
+                            tc,
+                            _vh(_key_norm(origin_row.get(sc))),
+                            _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc), tc)),
+                        )
+                    )
         _extra = (
             [
                 c
@@ -1640,42 +1697,12 @@ def _transform_applied_proof_impl(
                 orow = {**shaped_t, **written[i]}
                 if _is_kept(orow, pin_key_cols):
                     continue
-                _fpm_buf.append(("e", _fph(orow)))
-                if keyed:
-                    _exp_buf.append(
-                        (
-                            "\x1f".join(
-                                _key_norm(orow.get(c))
-                                for c in pin_key_cols
-                            ),
-                            _fph(orow),
-                            json.dumps(
-                                {
-                                    c: _val_norm(orow.get(c), _val_ddl(c), c)
-                                    for c in digest_cols
-                                }
-                            ),
-                        )
-                    )
-                if scope_keys is not None:
-                    scope_keys.add(
-                        "\x1f".join(
-                            _key_norm(orow.get(c)) for c in scope_pk
-                        )
-                    )
-                for sc, tc in col_pairs:
-                    _cv_buf.append(
-                        (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
-                    )
-                    if origin[i] is not None:
-                        # The SQL oracle recomputes the recipe stage only.
-                        _eo_buf.append(
-                            (
-                                tc,
-                                _vh(_key_norm(origin[i].get(sc))),
-                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc), tc)),
-                            )
-                        )
+                if _collapse_keys:
+                    # Same last-wins as the load. Emit the survivors once the
+                    # whole source has been read (D391).
+                    _held.append((orow, shaped_t, origin[i]))
+                    continue
+                _record_expected(orow, shaped_t, origin[i])
                 yield orow
             _flush_ms()
         _drained = list(runner.drain() or [])
@@ -1686,33 +1713,24 @@ def _transform_applied_proof_impl(
                 **{map_source_to_target(k, mappings): v for k, v in out.items()},
                 **written,
             }
-            _fpm_buf.append(("e", _fph(orow)))
-            if keyed:
-                _exp_buf.append(
-                    (
-                        "\x1f".join(
-                            _key_norm(orow.get(c)) for c in pin_key_cols
-                        ),
-                        _fph(orow),
-                        json.dumps(
-                            {
-                                c: _val_norm(orow.get(c), _val_ddl(c), c)
-                                for c in digest_cols
-                            }
-                        ),
-                    )
-                )
-            if scope_keys is not None:
-                scope_keys.add(
-                    "\x1f".join(
-                        _key_norm(orow.get(c)) for c in scope_pk
-                    )
-                )
-            for _sc, tc in col_pairs:
-                _cv_buf.append(
-                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
-                )
+            if _collapse_keys:
+                _held.append((orow, {}, None))
+                continue
+            _record_expected(orow, {}, None)
             yield orow
+        if _collapse_keys and _held:
+            from services.duplicate_policy import collapse_keep_last
+
+            kept, dropped = collapse_keep_last(
+                [item[0] for item in _held], _collapse_keys
+            )
+            _collapsed_duplicates = dropped
+            survive = {id(row) for row in kept}
+            for orow, shaped_t, origin_row in _held:
+                if id(orow) not in survive:
+                    continue
+                _record_expected(orow, shaped_t, origin_row)
+                yield orow
         _flush_ms()
 
     try:
@@ -2393,10 +2411,11 @@ def _transform_applied_proof_impl(
             scd2_provenance = ""
 
     if expected_checksum == actual_checksum and actual_rows == exp_n:
-        return {
+        verified = {
             "status": "verified",
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "rows": exp_n,
+            "collapsed_duplicate_rows": _collapsed_duplicates,
             "scoped_to_run_keys": scope_keys is not None,
             "provenance": (
                 "independent SQL oracle"
@@ -2414,6 +2433,7 @@ def _transform_applied_proof_impl(
                 "scd2_invariants": bool(scd2_provenance),
             },
         }
+        return verified
 
     # G-1a: the re-read runs AFTER the write — a busy source may have
     # drifted in between. Row-local steps never change the written row
@@ -9556,6 +9576,12 @@ def run_reconciliation(
                     f"transform output verified — {prov} "
                     f"({proof.get('rows')} rows)"
                 )
+                collapsed = int(proof.get("collapsed_duplicate_rows") or 0)
+                if collapsed:
+                    note += (
+                        f"; {collapsed} duplicate source row(s) collapsed, "
+                        "last copy kept"
+                    )
                 if (
                     proof.get("scoped_to_run_keys")
                     and "per-cell fidelity is NOT proven"
