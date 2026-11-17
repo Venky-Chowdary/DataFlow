@@ -235,6 +235,38 @@ def statement_timeout_seconds() -> float | None:
     return max(1.0, left)
 
 
+def mongo_dial_label(uri: str) -> str:
+    """Hosts a MongoDB URI actually dials, via pymongo's parser (D309).
+
+    ``urlparse().port`` raises ValueError on ``h1:p,h2:p``. An SRV URI names
+    the cluster even when the DNS lookup has no answer yet.
+    """
+    from pymongo.errors import ConfigurationError
+    from pymongo.uri_parser import parse_uri
+
+    raw = str(uri or "").strip()
+    if not raw.lower().startswith("mongodb"):
+        return ""
+    try:
+        parsed = parse_uri(raw)
+    except ConfigurationError:
+        if raw.lower().startswith("mongodb+srv://"):
+            host = urlparse(raw).hostname or ""
+            return f"{host} (SRV)" if host else ""
+        return ""
+    except Exception:
+        return ""
+    fqdn = str(parsed.get("fqdn") or "").strip()
+    if fqdn:
+        return fqdn
+    labels = [
+        f"{host}:{port}" if port else str(host)
+        for host, port in (parsed.get("nodelist") or [])
+        if host
+    ]
+    return ",".join(labels)
+
+
 def describe_target(conn: Any) -> str:
     """``host:port`` of a connector dict, without any credential."""
     if not isinstance(conn, dict):
@@ -245,19 +277,30 @@ def describe_target(conn: Any) -> str:
     raw = str(
         conn.get("connection_string") or cfg.get("connection_string") or ""
     ).strip()
+    if raw.lower().startswith("mongodb"):
+        label = mongo_dial_label(raw)
+        if label:
+            return label
     if raw:
         parsed = urlparse(raw)
         # A connection string names the endpoint that is dialled. The form
         # port is often the driver default (MongoDB 27017) while the URI
         # uses the tunnel port (D309).
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            parsed_port = None
         if parsed.hostname and (not host or host == parsed.hostname):
             host = parsed.hostname
-            if parsed.port:
-                port = parsed.port
+            if parsed_port:
+                port = parsed_port
     if not host and raw:
         parsed = urlparse(raw)
         host = parsed.hostname or ""
-        port = port or parsed.port or ""
+        try:
+            port = port or parsed.port or ""
+        except ValueError:
+            port = port or ""
     if not host:
         # D187: a Snowflake connector may carry only its account (top level or
         # under ``extra``). Without it the destination dropped out of a

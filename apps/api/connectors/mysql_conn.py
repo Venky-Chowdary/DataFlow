@@ -284,13 +284,14 @@ def get_connection(
 
     # Preflight used to open a fresh TLS session for every catalog read (D308).
     # Inside a tool-call scope, introspect and probe share one login.
-    if in_scope("mysql") and purpose_l in {"introspect", "probe"}:
+    if in_scope("mysql") and purpose_l in {"introspect", "probe", "reconcile", "ddl"}:
+        # Purpose is not part of the identity. Probe, introspect, reconcile
+        # and DDL on one endpoint are one login (D308).
         key = (
             kwargs["host"],
             kwargs["port"],
             kwargs["user"],
             kwargs["database"] or "",
-            purpose_l,
             bool(ssl),
         )
         shared, release = borrow(

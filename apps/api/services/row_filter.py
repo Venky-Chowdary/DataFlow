@@ -196,7 +196,9 @@ def _is_numeric_nan(value: Any) -> bool:
             return value.is_nan()
     except Exception:
         return False
-    return str(value).strip().lower() == "nan"
+    # The text "nan" / "Nan" is a string. Only a real float or Decimal NaN
+    # uses PostgreSQL's numeric ordering (D365).
+    return False
 
 
 def _compare_nan(row_value: Any, filter_value: Any, op: str) -> bool:

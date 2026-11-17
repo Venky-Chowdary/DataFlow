@@ -1133,6 +1133,26 @@ _LIBPQ_FILE_KEYS = frozenset({
     "service", "servicefile", "passfile", "sslkey", "sslcert", "sslrootcert", "sslcrl",
 })
 
+# Driver names that do not name a file. A brace does not make a path safe:
+# ``Driver={/tmp/x.so}`` is still a server-side file read (U1).
+_ODBC_DRIVER_ALLOWLIST = frozenset({
+    "odbc driver 18 for sql server",
+    "odbc driver 17 for sql server",
+    "odbc driver 13 for sql server",
+    "odbc driver 11 for sql server",
+    "sql server",
+    "sql server native client 11.0",
+    "sql server native client 10.0",
+    "freetds",
+    "mysql odbc 9.1 unicode driver",
+    "mysql odbc 9.0 unicode driver",
+    "mysql odbc 8.0 unicode driver",
+    "mysql odbc 8.0 ansi driver",
+    "postgresql unicode",
+    "postgresql ansi",
+    "oracle in instantclient_19_3",
+})
+
 
 _DSN_KEY_RE = re.compile(
     r"(?:^|[?&\s;])("
@@ -1143,6 +1163,40 @@ _DSN_KEY_RE = re.compile(
 )
 
 
+def _decode_conn_text(raw: str) -> str:
+    """Percent-decode a connection string before looking for file keys.
+
+    ``?serv%69ce=prod`` is ``?service=prod`` after libpq decodes it. One decode
+    is not enough when the percent sign itself is encoded.
+    """
+    from urllib.parse import unquote
+
+    text = str(raw or "")
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            return text
+        text = decoded
+    return text
+
+
+def _walk_conn_texts(value: Any) -> list[str]:
+    """Every string in a connection field, including nested ``extra``."""
+    if isinstance(value, str):
+        return [_decode_conn_text(value)]
+    if isinstance(value, dict):
+        out: list[str] = []
+        for item in value.values():
+            out.extend(_walk_conn_texts(item))
+        return out
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in value:
+            out.extend(_walk_conn_texts(item))
+        return out
+    return []
+
+
 def _connection_pairs(raw: str) -> list[tuple[str, str]]:
     """Named keys in a libpq URL, a keyword string, or an ODBC connection string.
 
@@ -1150,7 +1204,7 @@ def _connection_pairs(raw: str) -> list[tuple[str, str]]:
     for SQL Server}`` are not a second key.
     """
     pairs: list[tuple[str, str]] = []
-    for match in _DSN_KEY_RE.finditer(str(raw or "")):
+    for match in _DSN_KEY_RE.finditer(_decode_conn_text(raw)):
         key = match.group(1).lower()
         quoted = match.group(3) if match.group(3) is not None else match.group(4)
         value = quoted if quoted is not None else match.group(2)
@@ -1159,14 +1213,19 @@ def _connection_pairs(raw: str) -> list[tuple[str, str]]:
 
 
 def _odbc_driver_is_path(value: str) -> bool:
-    """A filesystem path. ``{ODBC Driver 18 for SQL Server}`` is a driver name."""
+    """True unless the value is an allowlisted driver name with no path separator.
+
+    ``{ODBC Driver 18 for SQL Server}`` is a name. ``{/tmp/x.so}`` and
+    ``{C:\\driver.dll}`` are files the process would open.
+    """
     token = str(value or "").strip()
     if token.startswith("{") and token.endswith("}"):
-        return False
-    bare = token.strip("{}").strip()
-    if not bare:
-        return False
-    return bare.startswith(("/", "\\", ".")) or ":\\" in bare or "/" in bare or "\\" in bare
+        token = token[1:-1].strip()
+    if not token:
+        return True
+    if any(sep in token for sep in ("/", "\\", ":")):
+        return True
+    return token.casefold() not in _ODBC_DRIVER_ALLOWLIST
 
 
 def server_side_dsn_refusal(*texts: Any) -> str:
@@ -1178,11 +1237,7 @@ def server_side_dsn_refusal(*texts: Any) -> str:
     """
     refused: list[str] = []
     for raw in texts:
-        if isinstance(raw, dict):
-            blobs = [str(v) for v in raw.values() if isinstance(v, str)]
-        else:
-            blobs = [str(raw or "")]
-        for blob in blobs:
+        for blob in _walk_conn_texts(raw):
             for key, value in _connection_pairs(blob):
                 if key in _LIBPQ_FILE_KEYS or key in {"dsn", "filedsn"}:
                     refused.append(key)
@@ -1195,8 +1250,8 @@ def server_side_dsn_refusal(*texts: Any) -> str:
         f"Connection string key {named} reads a file on this server "
         "(a libpq service file, a password file, a certificate path, or an "
         "ODBC DSN). Save the host, port, database and password on the connector "
-        "instead. A driver name in braces, such as {ODBC Driver 18 for SQL Server}, "
-        "is allowed."
+        "instead. An allowlisted driver name with no path separator, such as "
+        "{ODBC Driver 18 for SQL Server}, is allowed."
     )
 
 

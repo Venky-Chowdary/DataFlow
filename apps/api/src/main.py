@@ -11,7 +11,8 @@ import threading
 import time
 from contextlib import asynccontextmanager, nullcontext
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -1007,9 +1008,14 @@ async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_reference(request: Request, exc: HTTPException):
-    """Every REST error keeps ``detail`` and also carries ``error.reference``."""
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_reference(request: Request, exc: StarletteHTTPException):
+    """Every REST error keeps ``detail`` and also carries ``error.reference``.
+
+    A dict or list ``detail`` stays that JSON object. Stringifying it made the
+    plan-conflict screen and SSO errors read a Python repr. Unmatched routes
+    are this same Starlette 404, so they carry a reference too.
+    """
     if isinstance(exc, EnvelopeHTTPException):
         return await error_envelope_handler(request, exc)
     import uuid
@@ -1017,10 +1023,19 @@ async def http_exception_reference(request: Request, exc: HTTPException):
     from services.safe_errors import _platform_envelope
     from services.tracing import get_correlation_id
 
-    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    raw = exc.detail
+    if isinstance(raw, (dict, list)):
+        detail_body = jsonable_encoder(raw)
+        if isinstance(raw, dict):
+            message = str(raw.get("message") or raw.get("detail") or raw.get("code") or "Request refused")
+        else:
+            message = "Request refused"
+    else:
+        detail_body = raw if isinstance(raw, str) else str(raw)
+        message = detail_body
     cid = get_correlation_id() or uuid.uuid4().hex
-    body = _platform_envelope(detail, cid, detail, exc.status_code)
-    body["detail"] = detail
+    body = _platform_envelope(message, cid, message, exc.status_code)
+    body["detail"] = detail_body
     headers = {"X-Correlation-ID": cid, **dict(exc.headers or {})}
     return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
 

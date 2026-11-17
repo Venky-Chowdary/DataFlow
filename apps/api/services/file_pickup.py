@@ -117,8 +117,12 @@ def matches_pattern(name: str, pattern: str) -> bool:
 
 
 def ordered_files(files: list[RemoteFile]) -> list[RemoteFile]:
-    """Stable pickup order: path, then mtime, then checksum."""
-    return sorted(files, key=lambda item: (item.name, item.mtime, item.checksum))
+    """Stable pickup order: modified time, then name, then checksum.
+
+    A folder overwrite that keeps the last copy of a key must be deterministic.
+    The newest file wins; the name breaks a tie (D367).
+    """
+    return sorted(files, key=lambda item: (item.mtime, item.name, item.checksum))
 
 
 def select_new_files(

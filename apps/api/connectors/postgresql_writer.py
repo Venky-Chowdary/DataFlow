@@ -3227,6 +3227,10 @@ def write_mapped_rows(
                 load_method=load_method,
             )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+        if _final_abort and int(written or 0) == 0:
+            # Every row was quarantined: the widen has nothing to hold. Restore
+            # it. A later success path would have kept the widened column.
+            settle_widen_restore(conn, rows_written=0, failed=True)
         if _final_abort:
             return WriteResult(
                 ok=False,

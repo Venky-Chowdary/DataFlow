@@ -2776,16 +2776,17 @@ def _is_not_found_error(exc: BaseException) -> bool:
         return True
     blob = " ".join(str(e) for e in chain)[:4000]
     lowered = blob.lower()
-    # pymssql DB-Lib 20009: "Adaptive Server is unavailable or does not exist"
-    # is a dead host, not a missing table (D366). The same for a refused
-    # connect and a DNS failure. Those must not become "Table dbo.t does not exist".
+    from services.error_taxonomy import sqlserver_error_numbers, sqlserver_is_network_failure
+
+    # 208 is "Invalid object name" even though pymssql appends "DB-Lib error"
+    # to it. That suffix is not a dead host (D366).
+    if 208 in sqlserver_error_numbers(blob):
+        return True
+    if sqlserver_is_network_failure(blob):
+        return False
     if any(
         marker in lowered
         for marker in (
-            "unavailable or does not exist",
-            "unable to connect",
-            "db-lib error",
-            "adaptive server is unavailable",
             "login timeout",
             "timeout expired",
             "could not connect",
@@ -5840,7 +5841,12 @@ def write_mapped_rows(
                         )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
-                    created_this_call = True
+                    # QuestDB is forced to "missing" because its catalog probe
+                    # cannot see the table. IF NOT EXISTS then succeeding is
+                    # not proof this run created it, so a cancel must not drop
+                    # it (D378).
+                    if db_type != "questdb":
+                        created_this_call = True
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
                     # was created concurrently, ignore the error and continue.

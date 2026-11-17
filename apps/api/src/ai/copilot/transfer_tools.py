@@ -1579,8 +1579,10 @@ def plan_transfer(
                     "in_file_dedupe": "keep_last",
                     "in_file_dedupe_note": (
                         "Overwrite keeps the last row of each "
-                        f"{row_rules.get('upsert_key') or dedupe_key} in this file. "
-                        "Earlier copies of that key are not written."
+                        f"{row_rules.get('upsert_key') or dedupe_key}. "
+                        "Inside one file, last is the last row. Across a folder, "
+                        "last is the file with the greatest modified time, then "
+                        "the file name. Earlier copies of that key are not written."
                     ),
                 }
                 if keep_last_file
@@ -1664,7 +1666,6 @@ _UNREACHABLE_MARKERS = (
     "unavailable or does not exist",
     "unable to connect",
     "adaptive server is unavailable",
-    "db-lib error",
     "getaddrinfo",
 )
 
@@ -1689,7 +1690,21 @@ def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) ->
     target = describe_target(src_conn)
     name = src_conn.get("name") or "the source"
     where = f"{name} ({target})" if target else str(name)
-    if any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+    from services.error_taxonomy import (
+        SQLSERVER_OBJECT_OR_AUTH,
+        sqlserver_error_numbers,
+        sqlserver_is_network_failure,
+    )
+
+    # pymssql appends "DB-Lib error" to a missing table (208) and a bad login
+    # (18456). Those are not a dead host (D366).
+    numbers = sqlserver_error_numbers(detail)
+    unreachable = bool(numbers) and sqlserver_is_network_failure(detail)
+    if not numbers and any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+        unreachable = True
+    if any(n in SQLSERVER_OBJECT_OR_AUTH for n in numbers):
+        unreachable = False
+    if unreachable:
         return (
             f"source unreachable/slow: {where} did not answer while reading "
             f"`{src_table}` ({detail.strip()}). Check the host and port, the "
@@ -2753,6 +2768,7 @@ def _stage_bound_contract(
     return bound_contract_preview(cid, require_signed=require)
 
 
+@_share_catalog_reads
 def start_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",

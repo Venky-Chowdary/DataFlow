@@ -77,7 +77,9 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
         with naming_job_scope(job_id, str(request.workspace_id or "")), \
                 keyed_write_witness_scope(job_id), egress_workspace(
             str(request.workspace_id or "")
-        ), endpoint_session_scope(engines=("sftp",)), transfer_job_scope(
+        ), endpoint_session_scope(
+            engines=("sftp", "mysql", "mariadb")
+        ), transfer_job_scope(
             request, job_id, store=store
         ), export_job_scope(job_id, str(request.workspace_id or "")), run_clock_scope(
             job_id, store=store

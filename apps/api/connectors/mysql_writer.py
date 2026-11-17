@@ -2051,6 +2051,8 @@ def write_mapped_rows(
                 load_method=load_method,
             )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
+        if _final_abort and int(written or 0) == 0:
+            settle_widen_restore(conn, rows_written=0, failed=True)
         if _final_abort:
             return WriteResult(
                 ok=False,

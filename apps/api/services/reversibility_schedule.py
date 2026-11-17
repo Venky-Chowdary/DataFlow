@@ -23,9 +23,16 @@ def schedule_reversibility_block(schedule: Any) -> str:
     if isinstance(schedule, Mapping):
         require = bool(schedule.get("require_reversibility"))
         mappings = list(schedule.get("mappings") or [])
-        table = str(schedule.get("dest_table") or "")
-        dest_db = str(schedule.get("dest_db_type") or schedule.get("destination_db_type") or "")
-        source_db = str(schedule.get("source_db_type") or "")
+        nested = schedule.get("destination") if isinstance(schedule.get("destination"), Mapping) else {}
+        table = str(schedule.get("dest_table") or nested.get("table") or "")
+        dest_db = str(
+            schedule.get("dest_db_type")
+            or schedule.get("destination_db_type")
+            or nested.get("format")
+            or ""
+        )
+        source = schedule.get("source") if isinstance(schedule.get("source"), Mapping) else {}
+        source_db = str(schedule.get("source_db_type") or source.get("format") or "")
     else:
         require = bool(getattr(schedule, "require_reversibility", False))
         mappings = list(getattr(schedule, "mappings", None) or [])

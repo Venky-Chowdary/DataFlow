@@ -414,22 +414,43 @@ def _decide(
 
 
 def note_dropped_empty_create(exc: BaseException, cfg: dict[str, Any], table: str, schema: Any) -> None:
-    """Drop a table this attempt created when the cancel committed no rows.
+    """Drop a table this attempt created when it is still empty.
 
-    A pre-existing table is never passed here. The cancel result names the
-    table whether the drop succeeded or the empty table is still there.
+    The count and the drop share one transaction. QuestDB is never dropped:
+    its catalog probe cannot prove the table was absent before CREATE
+    IF NOT EXISTS (D378). A pre-existing table is not passed here.
     """
     qualified = f"{schema}.{table}" if schema else str(table or "")
-    try:
-        from connectors.generic_sql import drop_table
-
-        drop_table(cfg, table, schema=schema or None)
-    except Exception:
+    if str(cfg.get("type") or "").lower() == "questdb":
         exc.leftover_created_table = qualified  # type: ignore[attr-defined]
         exc.dropped_created_table = ""  # type: ignore[attr-defined]
         return
-    exc.dropped_created_table = qualified  # type: ignore[attr-defined]
-    exc.leftover_created_table = ""  # type: ignore[attr-defined]
+    try:
+        outcome = _drop_if_still_empty(cfg, table, schema)
+    except Exception:
+        outcome = "error"
+    if outcome == "dropped":
+        exc.dropped_created_table = qualified  # type: ignore[attr-defined]
+        exc.leftover_created_table = ""  # type: ignore[attr-defined]
+        return
+    exc.leftover_created_table = qualified  # type: ignore[attr-defined]
+    exc.dropped_created_table = ""  # type: ignore[attr-defined]
+
+
+def _drop_if_still_empty(cfg: dict[str, Any], table: str, schema: Any) -> str:
+    """``dropped`` when the table is empty in the same transaction as the DROP."""
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _drop_table_sql, _engine, _qualified_table_ref
+
+    engine = _engine(cfg)
+    qualified = _qualified_table_ref(cfg, table, schema or None)
+    with engine.begin() as conn:
+        count = conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()  # nosec B608
+        if int(count or 0) != 0:
+            return "not_empty"
+        conn.execute(sa.text(_drop_table_sql(engine, qualified, table)))
+    return "dropped"
 
 
 def _drop_run_created(db_type: str, cfg: dict[str, Any], table: str, schema: Any) -> bool:

@@ -122,7 +122,8 @@ def oracle_comparable_expr(
         return quoted
     data_type = str((row or [""])[0] or "").upper()
     if data_type in _ORACLE_LOB_TYPES:
-        return f"DBMS_LOB.SUBSTR({quoted}, 4000, 1)"
+        # 1000 characters stays inside VARCHAR2's 4000-byte SQL limit (ORA-06502).
+        return f"DBMS_LOB.SUBSTR({quoted}, 1000, 1)"
     return quoted
 
 

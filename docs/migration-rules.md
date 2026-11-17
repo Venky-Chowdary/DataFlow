@@ -92,7 +92,7 @@ Upsert is an idempotent merge on the declared key: one row per key, last writer 
 
 `incremental_append` appends one new version per change, including a new version of a key that is already present. That is Airbyte's incremental append, not deduped history. It behaves the same way on every run. A duplicate-key guard is a different, declared mode (`incremental_deduped` or upsert) and is applied on run 1 if it is applied on run 3.
 
-A file has a defined row order. Overwrite plus an explicit dedupe key collapses to the last row and says so. A table with no `ORDER BY` does not have an order, so it may still refuse rather than pick an arbitrary copy.
+A file has a defined row order. Overwrite plus an explicit dedupe key collapses to the last row and says so. Inside one file, last is the last row. Across a folder, last is the greatest modified time, then the file name. A table with no `ORDER BY` does not have an order, so it may still refuse rather than pick an arbitrary copy.
 
 `skip_duplicates` keeps the stored row and counts `rows_skipped`. That count is on the job and in the trust report, not only inside the writer.
 
@@ -106,7 +106,7 @@ Datawrap applies the snapshot first, then change events in commit order. A colum
 
 A transfer that requires reversibility is refused at plan and at schedule create when a step cannot be undone (`omit`, `mask_pii`, a destructive type change). Execute checks the same predicate. An unattended run must not be the first place the operator learns it will fail.
 
-Cancel stops the writer before the next row. The per-row fallback checks the flag too. Source transactions roll back and return the connection; no `idle in transaction` session is left holding locks. A table this job created, with zero committed rows, is dropped, and the cancel result names that table. A table the customer already had is never dropped. Offsets and watermarks move only with a committed destination batch (rule 5).
+Cancel stops the writer before the next row. The per-row fallback checks the flag too. Source transactions roll back and return the connection; no `idle in transaction` session is left holding locks. A table this job created is dropped only when a count in the same transaction still shows it empty, and the cancel result names that table. `CREATE TABLE IF NOT EXISTS` returning is not that proof. QuestDB is never dropped on this path: its catalog probe cannot show the table was absent. A table the customer already had is never dropped. A failed widen rolls back before the restore `ALTER`, including when every row was quarantined and nothing was committed. Offsets and watermarks move only with a committed destination batch (rule 5).
 
 ## 9. CSV and TSV quoting
 
@@ -126,9 +126,9 @@ Every driver call has a connect timeout and a read timeout in the driver (`conne
 
 One preflight reuses one session per endpoint. A second catalog read does not open a second TLS handshake.
 
-The error names the endpoint that was dialled. A MongoDB connection string's host and port win over the form default `27017`. SQL Server `Adaptive Server is unavailable or does not exist` and DB-Lib `20009` are "source unreachable", not a missing table. A black-holed handshake is a timeout, not "network unreachable" and not an authentication failure. A MongoDB seed that answers and then names unreachable replica-set members says so, and names `directConnection=true` as the remedy. Snowflake destination probes name the destination account, and they share one login for the plan.
+The error names the endpoint that was dialled. A MongoDB URI is parsed with pymongo's URI parser, including several hosts and `mongodb+srv`. The form default `27017` is not used when the URI names another port. SQL Server is classified by error number, not by the `DB-Lib error` text pymssql appends to every server message. `208`, `207`, `4060` and `18456` are a missing table, a missing column, a missing database and a rejected login. `20009` and the other network numbers are "source unreachable". A black-holed handshake is a timeout, not "network unreachable" and not an authentication failure. A MongoDB seed that answers and then names unreachable replica-set members says so, and names `directConnection=true` as the remedy. Snowflake destination probes name the destination account, and they share one login for the plan. One MySQL preflight shares one login across probe, introspect, reconcile and DDL. The job's elapsed time includes queue and validate, not only the read.
 
-libpq `service`, `servicefile`, `passfile`, `sslkey`, `sslcert`, `sslrootcert` and `sslcrl`, and ODBC `DSN=`, `FILEDSN=` and `Driver=` when the value is a filesystem path, are refused at save and at test before any network or file open. A driver name in braces (`{ODBC Driver 18 for SQL Server}`) is a driver name, not a path ([libpq service](https://www.postgresql.org/docs/current/libpq-pgservice.html), [ODBC connection strings](https://learn.microsoft.com/en-us/sql/connect/odbc/dsn-connection-string-attribute)). On the hosted cloud, SQLite is refused as a source and as a destination, and no server filesystem path is opened.
+libpq `service`, `servicefile`, `passfile`, `sslkey`, `sslcert`, `sslrootcert` and `sslcrl`, and ODBC `DSN=`, `FILEDSN=` and `Driver=`, are refused at save and at test before any network or file open. Percent-encoded keys are decoded first, and the same keys inside `extra` are checked. An ODBC driver value is allowed only when it is an allowlisted driver name with no path separator (`{ODBC Driver 18 for SQL Server}`); `{/tmp/x.so}` is refused ([libpq service](https://www.postgresql.org/docs/current/libpq-pgservice.html), [ODBC connection strings](https://learn.microsoft.com/en-us/sql/connect/odbc/dsn-connection-string-attribute)). On the hosted cloud, SQLite is refused as a source and as a destination, and no server filesystem path is opened.
 
 ## 11. Decimals never pass through float
 
@@ -140,6 +140,8 @@ A check reports the rows this run wrote, after the same filter and the same tran
 
 A correct run is not marked failed. A wrong run still fails, and the message names the key. Rows this pipeline wrote are not "changed outside this pipeline". A column this pipeline added is part of the next baseline. `rebaseline_transfer` moves the baseline the next run uses.
 
-The plan and execute run the same gates on the same inputs. A green plan does not fail at execute for a reason that was knowable. Error text names the cause and a remedy that exists in the product UI and in the MCP tools. No raw driver exception, no internal hostname, no invented job from an empty request. Every REST error keeps its `detail` string and also carries `error.reference`. A job started from the caller's workspace is listed in that workspace.
+The text `nan` or `Nan` is a string. Only a real float NaN, or a NaN from a numeric column, is numeric NaN. An Oracle CLOB comparison uses `DBMS_LOB.SUBSTR` of 1000 characters: `VARCHAR2` is 4000 bytes, and 4000 characters of multibyte text raises ORA-06502 ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/DBMS_LOB.html)).
+
+The plan and execute run the same gates on the same inputs. A green plan does not fail at execute for a reason that was knowable. Error text names the cause and a remedy that exists in the product UI and in the MCP tools. No raw driver exception, no internal hostname, no invented job from an empty request. A REST `detail` that is a dict or a list stays that JSON object. Every REST error, including an unknown route, also carries `error.reference`. A job started from the caller's workspace is listed in that workspace. Replay of a reversible job uses the same reversibility block as schedule create and update.
 
 Catalog count is not transfer-live. Only a route with `TRANSFER_READY` / `PRODUCTION_SKU` evidence is described as live. CDC is at-least-once upsert until an exactly-once proof is attached.

@@ -104,6 +104,14 @@ def settle_widen_restore(
         return
     if conn is None:
         _fail_restore(statements, "no live connection for the restore", original)
+    # The failed statement left the transaction aborted on PostgreSQL, so the
+    # restore ALTER raised "current transaction is aborted". On MySQL the
+    # same ALTER is DDL and implicitly commits the failed statement's rows.
+    # Roll back first, then change the column (D368).
+    try:
+        conn.rollback()
+    except Exception:
+        logger.debug("rollback before widen restore failed", exc_info=True)
     try:
         cursor = conn.cursor()
         try:

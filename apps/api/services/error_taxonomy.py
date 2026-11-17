@@ -942,7 +942,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("network.connect_timeout", re.compile(
         r"timeout expired|connection timed out|timed out connecting|serverselectiontimeout|"
         r"connect timeout|\[errno 110\]|login timeout expired|"
-        r"adaptive server is unavailable or does not exist|db-lib error message 20009|"
+        r"adaptive server is unavailable or does not exist|db-lib error message 20009\b|"
         r"unable to connect: .*unavailable", re.I)),
     ("network.connection_lost", re.compile(
         r"server closed the connection unexpectedly|lost connection to mysql server during query|"
@@ -1012,6 +1012,44 @@ def _typed(exc: Any) -> tuple[str, dict[str, Any]]:
         if number in {_errno.EACCES, _errno.EPERM}:
             return "access.denied", {"file": exc.filename or ""}
     return "", {}
+
+
+# pymssql puts the SQL Server number in the exception args and then appends
+# "DB-Lib error message ..." to every server error, including 208 (missing
+# table) and 207 (missing column). Matching that suffix classified a missing
+# table as a dead host (D366).
+_PYMSSQL_ARG = re.compile(r"^\((\d+),")
+_DBLIB_MESSAGE = re.compile(r"db-lib error message (\d+)", re.I)
+SQLSERVER_OBJECT_OR_AUTH = frozenset({208, 207, 4060, 18456})
+SQLSERVER_NETWORK = frozenset({20009, 20002, 20003, 20004})
+
+
+def sqlserver_error_numbers(text: str) -> list[int]:
+    """SQL Server and DB-Lib numbers in a pymssql exception string."""
+    raw = str(text or "")
+    nums: list[int] = []
+    lead = _PYMSSQL_ARG.match(raw.strip())
+    if lead:
+        nums.append(int(lead.group(1)))
+    nums.extend(int(n) for n in _DBLIB_MESSAGE.findall(raw))
+    return nums
+
+
+def sqlserver_is_network_failure(text: str) -> bool:
+    """True only for a connect failure, never for 208/207/4060/18456.
+
+    Those four are a missing table, a missing column, a missing database, and
+    a rejected login. pymssql appends a DB-Lib line to all of them.
+    """
+    nums = sqlserver_error_numbers(text)
+    if any(n in SQLSERVER_OBJECT_OR_AUTH for n in nums):
+        return False
+    if any(n in SQLSERVER_NETWORK for n in nums):
+        return True
+    low = str(text or "").lower()
+    if "db-lib error" in low:
+        return "unable to connect" in low or "adaptive server is unavailable" in low
+    return "adaptive server is unavailable" in low or "unable to connect" in low
 
 
 def _anchored(raw: str) -> str:

@@ -895,6 +895,12 @@ def _job_tool(
             )
             if isinstance(d, dict)
         ]
+        from services.reversibility_schedule import schedule_reversibility_block
+
+        stored_request = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+        reversible = schedule_reversibility_block(stored_request)
+        if reversible:
+            return _tool_result(tool, success=False, output=None, error=reversible)
         if stored and not replay_quarantine_details(stored):
             return _tool_result(tool, success=False, output=None,
                 error=(

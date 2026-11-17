@@ -343,9 +343,10 @@ def _exact_in(column: Any, dialect: str, values: Any) -> Any:
         # CAST(... AS BINARY) against text: a binary compare, no case folding, no PAD SPACE.
         return sa.cast(column, sa.LargeBinary).in_(values)
     if dialect == "oracle" and _oracle_lob(column):
-        # ORA-22848: a LOB is not a comparison key. The leading 4000 characters
-        # are the same bound the read-back uses (DBMS_LOB.SUBSTR).
-        return sa.func.DBMS_LOB.SUBSTR(column, 4000, 1).in_(values)
+        # ORA-22848: a LOB is not a comparison key. SQL VARCHAR2 is 4000
+        # bytes, so SUBSTR of 4000 characters raises ORA-06502 on multibyte
+        # text (é, CJK). 1000 characters is 4000 bytes at 4 bytes per character.
+        return sa.func.DBMS_LOB.SUBSTR(column, 1000, 1).in_(values)
     return column.in_(values)
 
 

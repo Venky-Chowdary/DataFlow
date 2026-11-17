@@ -142,32 +142,48 @@ def test_sftp_pin_in_extra_reaches_a_nested_path_and_a_missing_folder_is_named(m
     assert "not trusted" not in message
 
 
-def test_cancel_names_and_drops_a_table_this_run_created(monkeypatch):
+def test_cancel_names_and_drops_a_table_this_run_created(tmp_path, monkeypatch):
+    import sqlite3
+
     from services.batch_undo import note_dropped_empty_create
     from services.error_handling import TransferCancelled
     from services.job_status import cancel_outcome_for
 
-    dropped: list[tuple] = []
-
-    def _drop(cfg, table, schema=None):
-        dropped.append((table, schema))
-        return True
-
-    monkeypatch.setattr("connectors.generic_sql.drop_table", _drop)
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
+    db = tmp_path / "empty.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE r44 (id INTEGER)")
+    conn.commit()
+    conn.close()
     exc = TransferCancelled("cancelled", rows_written=0)
-    note_dropped_empty_create(exc, {"type": "sqlserver"}, "r44_big_ms", "dbo")
-    assert dropped == [("r44_big_ms", "dbo")]
+    note_dropped_empty_create(
+        exc, {"type": "sqlite", "database": str(db)}, "r44", None
+    )
+    assert exc.dropped_created_table == "r44"
+    left = sqlite3.connect(db).execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='r44'"
+    ).fetchall()
+    assert left == []
     outcome = cancel_outcome_for(
         0, destination_rows_by_run=0, destination_table_exists=False,
         dropped_created_table=exc.dropped_created_table,
     )
-    assert "dbo.r44_big_ms" in outcome["message"]
-    assert "dropped" in outcome["message"]
-    assert outcome["rows_committed"] == 0
-    # A pre-existing table is not passed to the drop. The message without the
-    # stamp does not claim a drop.
-    plain = cancel_outcome_for(0, destination_rows_by_run=0, destination_rows_now=0)
-    assert "dropped" not in plain["message"]
+    assert "r44" in outcome["message"] and "dropped" in outcome["message"]
+    occupied = tmp_path / "rows.db"
+    conn = sqlite3.connect(occupied)
+    conn.execute("CREATE TABLE r44 (id INTEGER)")
+    conn.execute("INSERT INTO r44 VALUES (1)")
+    conn.commit()
+    conn.close()
+    kept = TransferCancelled("cancelled", rows_written=0)
+    note_dropped_empty_create(
+        kept, {"type": "sqlite", "database": str(occupied)}, "r44", None
+    )
+    assert kept.dropped_created_table == ""
+    assert sqlite3.connect(occupied).execute("SELECT COUNT(*) FROM r44").fetchone()[0] == 1
+    questdb = TransferCancelled("cancelled", rows_written=0)
+    note_dropped_empty_create(questdb, {"type": "questdb"}, "r44", None)
+    assert questdb.dropped_created_table == ""
 
 
 def test_paused_schedule_preview_stays_paused():
