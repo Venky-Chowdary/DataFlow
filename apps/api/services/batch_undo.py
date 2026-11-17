@@ -437,8 +437,20 @@ def note_dropped_empty_create(exc: BaseException, cfg: dict[str, Any], table: st
     exc.dropped_created_table = ""  # type: ignore[attr-defined]
 
 
+# A cancel must not sit behind a transaction that holds the table. Five
+# seconds is long enough for an idle lock to clear and short enough that
+# the worker is released (D378).
+_DROP_LOCK_TIMEOUT = "5s"
+_DROP_LOCK_TIMEOUT_MS = 5000
+
+
 def _lock_for_empty_drop(kind: str, qualified: str) -> str:
-    """Lock that blocks a concurrent insert until this transaction ends."""
+    """Lock that blocks a concurrent insert until this transaction ends.
+
+    MySQL ``LOCK TABLES`` is not one of those locks: ``COMMIT`` does not
+    release it ([LOCK TABLES](https://dev.mysql.com/doc/refman/8.4/en/lock-tables.html)).
+    The caller unlocks that session in a ``finally``, outside the transaction.
+    """
     if kind in {"postgresql", "postgres"}:
         return f"LOCK TABLE {qualified} IN ACCESS EXCLUSIVE MODE"
     if kind in {"mysql", "mariadb"}:
@@ -446,6 +458,14 @@ def _lock_for_empty_drop(kind: str, qualified: str) -> str:
     if "oracle" in kind:
         return f"LOCK TABLE {qualified} IN EXCLUSIVE MODE"
     return ""
+
+
+def _release_pooled_connection(conn: Any) -> None:
+    """Roll the session back before the pool lends this connection out again."""
+    try:
+        conn.rollback()
+    except Exception:
+        logger.debug("pool connection reset failed", exc_info=True)
 
 
 def _drop_if_still_empty(cfg: dict[str, Any], table: str, schema: Any) -> str:
@@ -465,14 +485,79 @@ def _drop_if_still_empty(cfg: dict[str, Any], table: str, schema: Any) -> str:
     count_sql = f"SELECT COUNT(*) FROM {qualified}"
     if kind in {"sqlserver", "mssql", "azure_sql"}:
         count_sql = f"SELECT COUNT(*) FROM {qualified} WITH (TABLOCKX)"
-    with engine.begin() as conn:
-        if lock:
-            conn.execute(sa.text(lock))
-        count = conn.execute(sa.text(count_sql)).scalar()  # nosec B608
-        if int(count or 0) != 0:
-            return "not_empty"
-        conn.execute(sa.text(_drop_table_sql(engine, qualified, table)))
-    return "dropped"
+    drop_sql = _drop_table_sql(engine, qualified, table)
+    if kind in {"mysql", "mariadb"}:
+        return _mysql_drop_if_still_empty(engine, lock, count_sql, drop_sql)
+    with engine.connect() as conn:
+        trans = conn.begin()
+        try:
+            if kind in {"postgresql", "postgres"}:
+                conn.execute(sa.text(f"SET LOCAL lock_timeout = '{_DROP_LOCK_TIMEOUT}'"))
+            if kind in {"sqlserver", "mssql", "azure_sql"}:
+                conn.execute(sa.text(f"SET LOCK_TIMEOUT {_DROP_LOCK_TIMEOUT_MS}"))
+            if lock:
+                conn.execute(sa.text(lock))
+            count = conn.execute(sa.text(count_sql)).scalar()  # nosec B608
+            if int(count or 0) != 0:
+                trans.rollback()
+                trans = None
+                return "not_empty"
+            conn.execute(sa.text(drop_sql))
+            trans.commit()
+            trans = None
+            return "dropped"
+        except Exception:
+            if trans is not None:
+                trans.rollback()
+            raise
+        finally:
+            if kind in {"sqlserver", "mssql", "azure_sql"}:
+                # SET LOCK_TIMEOUT is session-scoped. Put the default back
+                # before this connection is lent to the next checkout.
+                try:
+                    conn.exec_driver_sql("SET LOCK_TIMEOUT -1")
+                except Exception:
+                    logger.debug("LOCK_TIMEOUT reset failed", exc_info=True)
+                    try:
+                        conn.invalidate()
+                    except Exception:
+                        logger.debug("connection invalidate failed", exc_info=True)
+            _release_pooled_connection(conn)
+
+
+def _mysql_drop_if_still_empty(engine: Any, lock: str, count_sql: str, drop_sql: str) -> str:
+    """Count and maybe drop, then ``UNLOCK TABLES`` on every path.
+
+    ``LOCK TABLES`` implicitly commits and is not released by ``COMMIT`` or by
+    returning the connection to the pool. A session that still holds it makes
+    every other table on that connection raise 1100, and other sessions wait
+    on the write lock until ``lock_wait_timeout`` (1205).
+    """
+    # AUTOCOMMIT so the unlock is its own statement, not a participant in
+    # the transaction LOCK TABLES already committed.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        locked = False
+        try:
+            if lock:
+                conn.exec_driver_sql(lock)
+                locked = True
+            count = conn.exec_driver_sql(count_sql).scalar()  # nosec B608
+            if int(count or 0) != 0:
+                return "not_empty"
+            conn.exec_driver_sql(drop_sql)
+            return "dropped"
+        finally:
+            if locked:
+                try:
+                    conn.exec_driver_sql("UNLOCK TABLES")
+                except Exception:
+                    logger.debug("UNLOCK TABLES failed", exc_info=True)
+                    try:
+                        conn.invalidate()
+                    except Exception:
+                        logger.debug("connection invalidate failed", exc_info=True)
+                    raise
+            _release_pooled_connection(conn)
 
 
 def _drop_run_created(db_type: str, cfg: dict[str, Any], table: str, schema: Any) -> bool:

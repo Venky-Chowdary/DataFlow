@@ -26,6 +26,7 @@ from connectors.pg_tx_guard import tolerated as pg_tolerated
 from connectors.column_widen_restore import (
     bind_restore_cursor,
     settle_widen_restore,
+    widen_restore_pending,
     writer_restore_guard,
 )
 from connectors.schema_drift import widen_existing_columns_native
@@ -3199,15 +3200,15 @@ def write_mapped_rows(
             # path leaves a successful transaction open until the last batch.
             finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
-        # Quarantine-all must restore before close. The later branch never
-        # ran: this path already settled with failed=False and closed (D368).
+        # Quarantine does not set the abort flag. A widen with nothing
+        # committed is restored on every policy, before close (D368).
         _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
-        quarantine_all = bool(_final_abort) and int(written or 0) == 0
-        if close_connection or child_flush_error or quarantine_all:
+        restore_empty_widen = int(written or 0) == 0 and widen_restore_pending()
+        if close_connection or child_flush_error or restore_empty_widen:
             settle_widen_restore(
                 conn,
                 rows_written=written,
-                failed=bool(child_flush_error) or quarantine_all,
+                failed=bool(child_flush_error) or restore_empty_widen,
             )
         if close_connection:
             close_quietly(conn)

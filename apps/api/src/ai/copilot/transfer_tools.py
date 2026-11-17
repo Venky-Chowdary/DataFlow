@@ -2102,6 +2102,25 @@ def _preflight_issue_lines(details: dict[str, Any]) -> list[str]:
     return lines[:3]
 
 
+def _align_confirmed_preflight(payload: dict[str, Any]) -> None:
+    """Hash the request Confirm will execute, not the narrower plan subset.
+
+    A fingerprint that does not cover destination schema, database, extra,
+    duplicate policy, backfill, reversibility, acknowledgments, contracts and
+    locales does not match this hash, so reuse is skipped (D308).
+    """
+    run_id = str(payload.get("preflight_run_id") or "").strip()
+    if not run_id:
+        return
+    try:
+        from services.staged_preflight import align_staged_preflight
+        from src.transfer.models import transfer_request_from_dict
+
+        align_staged_preflight(run_id, transfer_request_from_dict(payload))
+    except Exception:
+        _LOG.debug("staged preflight was not aligned to the confirm request", exc_info=True)
+
+
 def _run_preflight(
     *,
     src_conn: dict[str, Any],
@@ -2383,6 +2402,7 @@ def _run_preflight(
             route=f"{src_conn.get('type')}->{dst_conn.get('type')}",
         )
         from services.staged_preflight import (
+            destination_schema_version,
             preflight_input_fingerprint,
             remember_staged_preflight,
         )
@@ -2392,10 +2412,16 @@ def _run_preflight(
             preflight_input_fingerprint(
                 source_connector_id=str(src_conn.get("id") or ""),
                 source_table=src_table,
+                source_schema=str(src_conn.get("schema") or ""),
+                source_database=str(src_conn.get("database") or ""),
                 source_format=src_db_type,
+                source_extra=source_config if isinstance(source_config, dict) else {},
                 destination_connector_id=str(dst_conn.get("id") or ""),
                 destination_table=dst_table,
+                destination_schema=str(dst_conn.get("schema") or ""),
+                destination_database=str(dst_conn.get("database") or ""),
                 destination_db_type=dest_db_type,
+                destination_extra=dst_conn.get("extra") if isinstance(dst_conn.get("extra"), dict) else {},
                 mappings=mappings,
                 sync_mode=mode,
                 schema_policy=schema_policy,
@@ -2403,8 +2429,15 @@ def _run_preflight(
                 source_filter=source_filter,
                 shape_recipe=shape_recipe,
                 stream_contracts=list(stream_contracts or []),
+                compliance_acknowledged=bool(pii_ack),
+                schema_drift_acknowledged=bool(schema_drift_acknowledged),
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+                ddl_changes_acknowledged=bool(ddl_ack),
+                acknowledgment_actor=(pii_ack or ddl_ack or {}).get("approved_by", ""),
+                acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
             ),
             result,
+            schema_version=destination_schema_version(dst_conn),
         )
     except Exception as exc:
         _LOG.warning("preflight failed: %s", exc, exc_info=True)
@@ -3100,6 +3133,7 @@ def start_transfer(
     from .ack_ledger import get_ack_ledger, stamp_caller_workspace
 
     payload = stamp_caller_workspace(payload)
+    _align_confirmed_preflight(payload)
     ack_id = get_ack_ledger().put(
         kind="start_transfer",
         payload=payload,

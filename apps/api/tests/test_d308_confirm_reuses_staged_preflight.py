@@ -97,3 +97,69 @@ def test_a_changed_sync_mode_does_not_reuse_the_staged_result():
         )
     assert out.get("reused_staged_preflight") is not True
     assert out.get("reused_marker") is not True
+
+
+def test_destination_extra_ack_and_locale_are_part_of_the_fingerprint():
+    from services.staged_preflight import request_preflight_fingerprint
+
+    base = _request()
+    same = request_preflight_fingerprint(base)
+    changed_extra = _request()
+    changed_extra.destination.extra = {"foreign_keys_mode": "defer"}
+    changed_ack = _request()
+    changed_ack.compliance_acknowledged = True
+    changed_locale = _request()
+    changed_locale.date_locale = "DMY"
+    changed_policy = _request()
+    changed_policy.duplicate_policy = "append"
+    changed_backfill = _request()
+    changed_backfill.backfill_new_fields = True
+    changed_reversible = _request()
+    changed_reversible.require_reversibility = True
+    assert request_preflight_fingerprint(changed_extra) != same
+    assert request_preflight_fingerprint(changed_ack) != same
+    assert request_preflight_fingerprint(changed_locale) != same
+    assert request_preflight_fingerprint(changed_policy) != same
+    assert request_preflight_fingerprint(changed_backfill) != same
+    assert request_preflight_fingerprint(changed_reversible) != same
+    assert "plan_version" not in same  # the hash, not the payload
+
+
+def test_a_staged_result_older_than_ten_minutes_is_not_reused(monkeypatch):
+    import services.staged_preflight as staged
+    from services.staged_preflight import (
+        bind_staged_preflight,
+        remember_staged_preflight,
+        request_preflight_fingerprint,
+        staged_preflight_for_bound,
+    )
+
+    clock = {"t": 1_000_000.0}
+    monkeypatch.setattr(staged.time, "time", lambda: clock["t"])
+    request = _request()
+    fingerprint = request_preflight_fingerprint(request)
+    remember_staged_preflight("pf_old", fingerprint, {"passed": True, "gates": []})
+    clock["t"] += 601
+    with bind_staged_preflight("pf_old", fingerprint):
+        assert staged_preflight_for_bound() is None
+
+
+def test_a_changed_destination_schema_version_is_not_reused():
+    from services.staged_preflight import (
+        bind_staged_preflight,
+        remember_staged_preflight,
+        request_preflight_fingerprint,
+        staged_preflight_for_bound,
+    )
+
+    request = _request()
+    fingerprint = request_preflight_fingerprint(request)
+    remember_staged_preflight(
+        "pf_schema", fingerprint, {"passed": True, "gates": []}, schema_version="v1"
+    )
+    with bind_staged_preflight("pf_schema", fingerprint, "v1"):
+        assert staged_preflight_for_bound()["reused_staged_preflight"] is True
+    with bind_staged_preflight("pf_schema", fingerprint, "v2"):
+        assert staged_preflight_for_bound() is None
+    with bind_staged_preflight("pf_schema", fingerprint, "unread"):
+        assert staged_preflight_for_bound() is None

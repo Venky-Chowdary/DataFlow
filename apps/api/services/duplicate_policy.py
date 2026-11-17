@@ -593,18 +593,19 @@ def latest_version_per_key(
 
 
 def duplicate_key_token(value: Any, dest_db: str = "") -> str:
-    """Key text for last-wins, using the destination's comparison rules.
+    """Literal key text. NULL is a sentinel that does not collapse.
 
-    SQL Server and MySQL string keys compare case-insensitively and ignore
-    trailing spaces. Postgres and the other engines keep the literal text.
+    Equality is not guessed from the engine name. MySQL 8's default
+    ``utf8mb4_0900_ai_ci`` is accent-insensitive and ``NO PAD`` (``'a'`` and
+    ``'a '`` are different keys). SQL Server pads trailing spaces and not
+    tabs. :func:`services.collation_equality.collapse_destination_equal_keys`
+    asks the destination, using the column's collation, which pairs are the
+    same key (D391). ``dest_db`` is accepted so existing callers keep working.
     """
+    del dest_db
     if value is None:
         return "\x00NULL\x00"
-    text = value if isinstance(value, str) else str(value)
-    kind = str(dest_db or "").lower()
-    if kind in {"mysql", "mariadb", "sqlserver", "mssql", "azure_sql"}:
-        return text.casefold().rstrip()
-    return text
+    return value if isinstance(value, str) else str(value)
 
 
 def collapse_keep_last(

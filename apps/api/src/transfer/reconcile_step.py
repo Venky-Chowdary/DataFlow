@@ -1773,8 +1773,17 @@ def _transform_applied_proof_impl(
             _record_expected(orow, {}, None)
             yield orow
         if _collapse_keys and _spill_ready:
-            # No repeated key: the spill is the source order and nothing is
-            # rewritten. A repeated key already holds the last payload.
+            # Exact text already kept the last copy. Keys the destination
+            # collation treats as equal (accents, trailing spaces) are merged
+            # here, by asking the destination, not by guessing (D391).
+            from services.collation_equality import collapse_destination_equal_keys
+
+            _spill_dropped += collapse_destination_equal_keys(
+                pin_store.db,
+                dialect=dest_db_type,
+                endpoint=endpoint,
+                columns=_collapse_keys,
+            )
             _collapsed_duplicates = _spill_dropped
             for (payload,) in pin_store.db.execute(
                 "SELECT payload FROM spill ORDER BY seq"

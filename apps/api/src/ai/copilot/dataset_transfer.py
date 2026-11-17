@@ -432,7 +432,9 @@ def stage_dataset_transfer(
             if g.get("id") == "g1_source_encoding"
         ]
     from .ack_ledger import get_ack_ledger
+    from .transfer_tools import _align_confirmed_preflight
 
+    _align_confirmed_preflight(payload)
     ack_id = get_ack_ledger().put(kind="start_transfer", payload=payload, preview=preview)
     return _tool_result(
         tool,

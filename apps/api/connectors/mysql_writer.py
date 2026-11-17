@@ -18,6 +18,7 @@ from connectors.mysql_conn import get_connection
 from connectors.column_widen_restore import (
     bind_restore_cursor,
     settle_widen_restore,
+    widen_restore_pending,
     writer_restore_guard,
 )
 from connectors.schema_drift import widen_existing_columns_native
@@ -2020,14 +2021,14 @@ def write_mapped_rows(
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        # Restore a quarantine-all widen before close. Settling afterwards
-        # ran on a closed connection and left the column widened (D368).
+        # Quarantine does not set the abort flag. A widen with nothing
+        # committed is restored on every policy, before close (D368).
         _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
-        quarantine_all = bool(_final_abort) and int(written or 0) == 0
+        restore_empty_widen = int(written or 0) == 0 and widen_restore_pending()
         settle_widen_restore(
             conn,
             rows_written=written,
-            failed=bool(child_flush_error) or quarantine_all,
+            failed=bool(child_flush_error) or restore_empty_widen,
         )
         close_quietly(conn)
         load_method = (

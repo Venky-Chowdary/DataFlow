@@ -33,12 +33,14 @@ def test_a_password_may_contain_service_and_an_extra_key_may_not():
     assert "dsn" in server_side_dsn_refusal({"extra": {"dsn": "Prod"}})
 
 
-def test_mysql_and_sqlserver_keys_ignore_case_and_trailing_space():
+def test_key_text_stays_literal_until_the_destination_collation_decides():
     from services.duplicate_policy import duplicate_key_token
 
-    assert duplicate_key_token("Ada ", "mysql") == duplicate_key_token("ada", "mysql")
-    assert duplicate_key_token("Ada ", "sqlserver") == duplicate_key_token("ADA", "mssql")
-    assert duplicate_key_token("Ada ", "postgresql") != duplicate_key_token("ada", "postgresql")
+    # MySQL utf8mb4_0900_ai_ci is NO PAD. A trim here would collapse 'a' and 'a '.
+    assert duplicate_key_token("Ada ", "mysql") == "Ada "
+    assert duplicate_key_token("Ada ", "mysql") != duplicate_key_token("ada", "mysql")
+    assert duplicate_key_token("a\t", "sqlserver") != duplicate_key_token("a", "sqlserver")
+    assert duplicate_key_token(None, "postgresql") == "\x00NULL\x00"
 
 
 def test_reused_mysql_login_takes_the_new_purpose_timeout():

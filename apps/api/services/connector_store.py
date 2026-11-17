@@ -11,7 +11,6 @@ import contextvars
 import json
 import logging
 import os
-import re
 from services.brand_env import getenv_brand
 import threading
 import uuid
@@ -1154,15 +1153,6 @@ _ODBC_DRIVER_ALLOWLIST = frozenset({
 })
 
 
-_DSN_KEY_RE = re.compile(
-    r"(?:^|[?&\s;])("
-    r"service|servicefile|passfile|sslkey|sslcert|sslrootcert|sslcrl|dsn|filedsn|driver"
-    r")\s*=\s*("
-    r"'([^']*)'|\"([^\"]*)\"|\{[^}]*\}|[^\s;&]*)",
-    re.IGNORECASE,
-)
-
-
 def _decode_conn_text(raw: str) -> str:
     """Percent-decode a connection string before looking for file keys.
 
@@ -1180,7 +1170,7 @@ def _decode_conn_text(raw: str) -> str:
     return text
 
 
-_CONNECTION_STRING_KEYS = {"", "connection_string", "dsn", "url", "uri"}
+_CONNECTION_STRING_KEYS = {"", "connection_string", "dsn", "url", "uri", "odbc_connect"}
 
 
 def _refused_pairs(pairs: list[tuple[str, str]]) -> list[str]:
@@ -1217,18 +1207,64 @@ def _collect_dsn_keys(value: Any, key: str = "") -> list[str]:
     return own + _refused_pairs(_connection_pairs(value))
 
 
-def _connection_pairs(raw: str) -> list[tuple[str, str]]:
+def _connection_pairs(raw: str, _depth: int = 0) -> list[tuple[str, str]]:
     """Named keys in a libpq URL, a keyword string, or an ODBC connection string.
 
-    A braced ODBC driver name is one value, so spaces inside ``{ODBC Driver 18
-    for SQL Server}`` are not a second key.
+    Values are parsed, not scanned. A password inside quotes or ``PWD={...}``
+    may contain ``service=`` and is not a key. A braced ODBC driver name is one
+    value, so spaces inside ``{ODBC Driver 18 for SQL Server}`` are not a
+    second key. The userinfo of a URL (``user:secret@host``) is not a key list;
+    only the query string is.
     """
+    text = _decode_conn_text(raw)
+    if "://" in text:
+        query = text.split("?", 1)[1] if "?" in text else ""
+        body = query
+    else:
+        body = text
     pairs: list[tuple[str, str]] = []
-    for match in _DSN_KEY_RE.finditer(_decode_conn_text(raw)):
-        key = match.group(1).lower()
-        quoted = match.group(3) if match.group(3) is not None else match.group(4)
-        value = quoted if quoted is not None else match.group(2)
-        pairs.append((key, str(value or "").strip()))
+    i = 0
+    n = len(body)
+    while i < n:
+        while i < n and body[i] in " \t\r\n;&?":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and body[i] not in "= \t\r\n;&?":
+            i += 1
+        key = body[start:i].strip().lower()
+        if i >= n or body[i] != "=":
+            while i < n and body[i] not in " \t\r\n;&?":
+                i += 1
+            continue
+        i += 1
+        if i < n and body[i] in "'\"":
+            quote = body[i]
+            i += 1
+            vstart = i
+            while i < n and body[i] != quote:
+                i += 1
+            value = body[vstart:i]
+            if i < n:
+                i += 1
+        elif i < n and body[i] == "{":
+            i += 1
+            vstart = i
+            while i < n and body[i] != "}":
+                i += 1
+            value = body[vstart:i]
+            if i < n:
+                i += 1
+        else:
+            vstart = i
+            while i < n and body[i] not in " \t\r\n;&?":
+                i += 1
+            value = body[vstart:i]
+        if key:
+            pairs.append((key, value.strip()))
+            if key == "odbc_connect" and value.strip() and _depth < 3:
+                pairs.extend(_connection_pairs(value, _depth + 1))
     return pairs
 
 

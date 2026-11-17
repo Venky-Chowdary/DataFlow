@@ -57,6 +57,16 @@ def note_restore(sql: str) -> None:
         bucket.append(sql)
 
 
+def widen_restore_pending() -> bool:
+    """True when this write widened a column and still holds the restore SQL.
+
+    ``policy=quarantine`` never sets the writer's abort flag, including when
+    every row was quarantined and nothing was committed (D368). The restore
+    decision is this flag plus a committed row count of zero.
+    """
+    return bool(_RESTORE_BUCKET.get())
+
+
 def writer_restore_guard(fn):
     """Hold restore SQL for the writer. The writer settles it on a live connection.
 

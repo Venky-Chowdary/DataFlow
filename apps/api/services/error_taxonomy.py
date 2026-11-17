@@ -1035,6 +1035,17 @@ def sqlserver_error_numbers(text: str) -> list[int]:
     return nums
 
 
+_DNS_FAILURE = re.compile(
+    r"name or service not known|nodename nor servname provided|getaddrinfo|"
+    r"no such host is known|temporary failure in name resolution|"
+    r"could not (?:translate|resolve) host|name resolution|"
+    r"no address associated with hostname|unknown mysql server host|"
+    r"the dns query name does not exist|dns did not resolve|"
+    r"errno -2|eai_noname|eai_again|nxdomain",
+    re.I,
+)
+
+
 def sqlserver_is_network_failure(text: str) -> bool:
     """True only for a connect failure, never for 208/207/4060/18456.
 
@@ -1101,6 +1112,12 @@ def classify(
         # MySQL 2013 at connect is a handshake that never finished, not a drop.
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
+    if not code and _DNS_FAILURE.search(full_raw):
+        # A name that does not resolve is not a timeout and not an unclassified
+        # connect failure (D366). Checked before the SQL Server network numbers,
+        # which pymssql also uses when the failure is DNS.
+        code = "network.dns_not_found"
+        matched_by = "pattern"
     if not code and sqlserver_is_network_failure(full_raw):
         # pymssql's 20009 text does not always match the anchored patterns.
         # A dead host must not fall through to unclassified (D366).
