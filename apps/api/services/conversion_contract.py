@@ -223,6 +223,7 @@ def classify_conversion(
     transform: str | None = "none",
     risk_acknowledged: bool = False,
     mapped: bool = True,
+    population: Any = None,
 ) -> dict[str, Any]:
     """Classify one source→target path into the charter ConversionClass.
 
@@ -256,7 +257,9 @@ def classify_conversion(
         }
 
     invent = invents_unproven_capacity(src, tgt, dest_db=dest_db)
-    lossy = bool(is_lossy_coercion(src, tgt, dest_db=dest_db))
+    # Measured cells decide a declared narrowing (D148): TIMESTAMPTZ(6) → a
+    # millisecond instant is not lossy until a value actually has a finer digit.
+    lossy = bool(is_lossy_coercion(src, tgt, dest_db=dest_db, population=population))
     t_fid = transform_fidelity(transform)
 
     if invent and not risk_acknowledged:

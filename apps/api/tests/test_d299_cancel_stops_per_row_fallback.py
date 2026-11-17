@@ -50,6 +50,56 @@ def _mappings() -> list[dict]:
     return [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}]
 
 
+def test_sqlite_per_row_fallback_stops_after_cancel(tmp_path, monkeypatch):
+    """The same per-row loop SQL Server uses, on a local file, so CI can prove it."""
+    import sqlite3
+
+    import connectors.generic_sql as gs
+    from services.cancel_check import set_cancel_probe
+    from services.error_handling import TransferCancelled
+
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
+    db = tmp_path / "d299.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, CHECK (id <> 1))")
+    conn.commit()
+    conn.close()
+    landed: list[int] = [0]
+    real_upsert = gs._upsert_batch
+
+    def counting_upsert(connection, table_obj, batch, *args, **kwargs):
+        written = real_upsert(connection, table_obj, batch, *args, **kwargs)
+        if len(batch) == 1:
+            landed[0] += 1
+        return written
+
+    def probe(rows_written=None):
+        if landed[0] >= 3:
+            raise TransferCancelled(
+                "cancelled",
+                rows_written=rows_written if rows_written is not None else landed[0],
+            )
+
+    monkeypatch.setattr(gs, "_upsert_batch", counting_upsert)
+    set_cancel_probe(probe)
+    try:
+        with pytest.raises(TransferCancelled) as caught:
+            gs.write_mapped_rows(
+                host="", port=0, database=str(db), username="", password="",
+                schema="", connection_string="", ssl=False, type="sqlite",
+                table_name="t", headers=["id", "name"],
+                data_rows=_rows(20), mappings=_mappings(),
+                column_types={"id": "INTEGER", "name": "TEXT"},
+                create_table=False, write_mode="upsert", conflict_columns=["id"],
+                error_policy="quarantine",
+            )
+        count = sqlite3.connect(db).execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        assert count <= 3, count
+        assert caught.value.rows_written == count
+    finally:
+        set_cancel_probe(None)
+
+
 def test_sqlserver_per_row_fallback_stops_after_cancel(monkeypatch):
     cfg = mssql_cfg()
     pytest.importorskip("pyodbc")

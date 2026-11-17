@@ -252,27 +252,51 @@ def mapping_fidelity(
             "requires_risk_contract": True,
         }
 
+    measured = _mapping_population(mapping, population)
     if is_lossy_coercion(
         _tz_effective(src_type, transform),
         tgt_type,
         dest_db=dest,
         dest_table_exists=dest_table_exists,
-        population=_mapping_population(mapping, population),
+        population=measured,
     ):
         from services.conversion_contract import classify_conversion
+        from services.document_instant import (
+            is_document_instant_token,
+            population_fits_document_instant,
+        )
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
+        instant_narrow = (
+            is_document_instant_token(dest, tgt_type)
+            and population_fits_document_instant(measured) is False
+        )
+        # A bare risk_acknowledged flag does not license a millisecond truncation.
+        cleared = (
+            mapping_has_clearing_risk_contract(mapping)
+            if instant_narrow
+            else bool(mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged"))
+        )
         conv = classify_conversion(
             src_type,
             tgt_type,
             dest_db=dest,
             transform=transform,
-            risk_acknowledged=bool(
-                mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged")
-            ),
+            risk_acknowledged=cleared,
+            population=measured,
         )
+        if instant_narrow:
+            reason = (
+                f"{src_type} → date keeps milliseconds. Measured values have "
+                "sub-millisecond digits. Accept that truncation with a "
+                "continue-policy Migration Risk Contract, or map the column to "
+                "a string to keep every digit."
+            )
+        else:
+            reason = f"{src_type} → {tgt_type} can lose precision, range, or domain."
         return {
             "verdict": "lossy_cast",
-            "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
+            "reason": reason,
             "type_narrowing": True,
             "transform_fidelity": t_fidelity,
             "conversion_class": conv["conversion_class"],
