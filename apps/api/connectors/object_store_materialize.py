@@ -255,7 +255,6 @@ class ObjectStoreEncoder:
             self.target_cols,
             self.dest_types,
             exact_decimal=True,
-            omit_document_sql_null=True,
         ):
             if self._records_written or self._header_written:
                 self._spool.write(b"\n")
@@ -279,7 +278,6 @@ class ObjectStoreEncoder:
             self.target_cols,
             self.dest_types,
             exact_decimal=True,
-            omit_document_sql_null=True,
         )
         for record in records:
             if not self._header_written:

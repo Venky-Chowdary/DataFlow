@@ -118,7 +118,7 @@ TSV quoting is a Datawrap product choice, not RFC 4180. The RFC specifies CSV. T
 
 PostgreSQL `COPY` CSV uses the same distinction: NULL is the null string and is not quoted; a non-NULL value that matches the null string is quoted ([COPY](https://www.postgresql.org/docs/current/sql-copy.html)).
 
-JSON and JSONL write an exact decimal as a string or as a decimal-aware JSON number, never via `float()`. A null column is the JSON `null`, including JSON/JSONB columns. The verifier fingerprints the source value, so a rounded float cannot agree with itself.
+JSON and JSONL write an exact decimal as a string or as a decimal-aware JSON number, never via `float()`. `99999999999.999999` stays that value. A null column is the JSON `null`, including JSON/JSONB columns. The key is present. The verifier fingerprints the source value, so a rounded float cannot agree with itself.
 
 ## 10. Bounded connect and a named cause
 
