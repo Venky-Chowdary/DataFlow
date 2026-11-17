@@ -52,7 +52,9 @@ def _same_404(client, name: str) -> None:
     foreign = client.get(DOWNLOAD + name)
     missing = client.get(DOWNLOAD + "no-such-export-anywhere.csv")
     assert foreign.status_code == missing.status_code == 404, foreign.text
-    assert foreign.json() == missing.json() == {"detail": "Export not found"}
+    assert foreign.json()["detail"] == missing.json()["detail"] == "Export not found"
+    assert foreign.json()["error"]["code"] == missing.json()["error"]["code"]
+    assert foreign.json()["error"]["reference"] and missing.json()["error"]["reference"]
 
 
 def test_same_output_path_in_two_workspaces_is_two_files(tenancy_world):  # noqa: F811

@@ -1379,6 +1379,7 @@ def plan_transfer(
 
     blocked_for_contract: set[str] = set()
     preflight: dict[str, Any] = {}
+    keep_last_file = False
     for _contract_pass in (1, 2):
         if risk_acceptance:
             try:
@@ -1399,6 +1400,22 @@ def plan_transfer(
             role="source",
             also=(("destination", dst_conn),),
         )
+        from services.preflight_source_kind import file_overwrite_keep_last
+
+        source_config = _stamp_callable_source_config(
+            _endpoint_dict(src_info.get("endpoint")),
+            callable_plan,
+        )
+        keep_last_file = file_overwrite_keep_last(
+            source_kind="database",
+            source_format=_engine_format(src_info),
+            sync_mode=mode,
+            dedupe_key=str(row_rules.get("upsert_key") or dedupe_key or ""),
+        )
+        if keep_last_file:
+            # A file has a row order. Overwrite plus the operator's key keeps
+            # the last copy and says so. A table is not stamped (no ORDER BY).
+            source_config = {**source_config, "in_file_dedupe": "keep_last"}
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,
@@ -1411,10 +1428,7 @@ def plan_transfer(
             schema_policy=schema_policy,
             validation_mode=validation_mode,
             src_db_type=_engine_format(src_info),
-            source_config=_stamp_callable_source_config(
-                _endpoint_dict(src_info.get("endpoint")),
-                callable_plan,
-            ),
+            source_config=source_config,
             dest_db_type=_engine_format(dst_info),
             dest_exists=map_dest_exists,
             source_primary_key=(
@@ -1560,6 +1574,18 @@ def plan_transfer(
             ),
             "sync_mode": mode,
             "sync_mode_requested": (sync_mode or "").strip(),
+            **(
+                {
+                    "in_file_dedupe": "keep_last",
+                    "in_file_dedupe_note": (
+                        "Overwrite keeps the last row of each "
+                        f"{row_rules.get('upsert_key') or dedupe_key} in this file. "
+                        "Earlier copies of that key are not written."
+                    ),
+                }
+                if keep_last_file
+                else {}
+            ),
             **(
                 {
                     "sync_mode_alias_note": (
@@ -2944,6 +2970,11 @@ def start_transfer(
         "preflight_run_id": preflight.get("run_id"),
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
+    if plan.get("in_file_dedupe") == "keep_last":
+        for side in ("source", "destination"):
+            extra = dict((payload[side].get("extra") or {}))
+            extra["in_file_dedupe"] = "keep_last"
+            payload[side]["extra"] = extra
     pii_ack = _pii_acknowledgement(pii_acknowledgement)
     if pii_ack:
         # Execute re-runs Validate: the same ack and its trail ride on the job.
@@ -3026,8 +3057,9 @@ def start_transfer(
         if bound.get("breaker_state"):
             preview["breaker_state"] = bound["breaker_state"]
 
-    from .ack_ledger import get_ack_ledger
+    from .ack_ledger import get_ack_ledger, stamp_caller_workspace
 
+    payload = stamp_caller_workspace(payload)
     ack_id = get_ack_ledger().put(
         kind="start_transfer",
         payload=payload,

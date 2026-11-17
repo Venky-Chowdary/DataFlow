@@ -187,6 +187,23 @@ def probe_saved_connector(
         from src.transfer.connector_registry import humanize_connection_error, run_probe
 
         cfg = probe_cfg_from_saved(conn)
+        from services.connector_store import server_side_dsn_refusal
+
+        refused = server_side_dsn_refusal(
+            cfg.get("connection_string"), cfg.get("host"), cfg.get("extra")
+        )
+        if refused:
+            op.failed(category="probe_failed")
+            return False, refused, cfg
+        from services.local_file_policy import sqlite_hosted_refusal
+
+        hosted = sqlite_hosted_refusal(
+            str(cfg.get("type") or getattr(conn, "type", "") or ""),
+            str(cfg.get("connection_string") or ""),
+        )
+        if hosted:
+            op.failed(category="probe_failed")
+            return False, hosted, cfg
         try:
             ok, message = run_probe(conn.type or "", cfg)
         except Exception as exc:

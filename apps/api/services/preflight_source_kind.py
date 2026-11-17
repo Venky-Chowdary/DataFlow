@@ -10,7 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 
-_RECORD_BATCH_FORMATS = frozenset({"s3", "gcs", "adls", "sftp"})
+_RECORD_BATCH_FORMATS = frozenset({
+    "s3", "minio", "s3_compatible", "aws_s3",
+    "gcs", "google_cloud_storage",
+    "adls", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+    "sftp",
+    "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "xlsx", "file",
+})
 
 
 def source_is_record_batch(kind: str | None, db_type: str | None = "") -> bool:
@@ -23,6 +29,28 @@ def source_is_record_batch(kind: str | None, db_type: str | None = "") -> bool:
     if (kind or "").strip().lower() == "file":
         return True
     return (db_type or "").strip().lower() in _RECORD_BATCH_FORMATS
+
+
+def file_overwrite_keep_last(
+    *,
+    source_kind: str | None,
+    source_format: str | None,
+    sync_mode: str | None,
+    dedupe_key: str | None,
+) -> bool:
+    """A file overwrite with an explicit key keeps the last row of that key.
+
+    A file and an object payload have a read order. A SQL table does not, so
+    this stays false there and the table route may still refuse.
+    """
+    if not str(dedupe_key or "").strip():
+        return False
+    if not source_is_record_batch(source_kind, source_format):
+        return False
+    from services.sync_cursor import normalize_sync_mode
+
+    mode = normalize_sync_mode(sync_mode or "")
+    return mode in {"full_refresh_overwrite", "overwrite"}
 
 
 def destination_nullability(columns: Any) -> dict[str, bool]:

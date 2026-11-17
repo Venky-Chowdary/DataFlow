@@ -11,7 +11,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, nullcontext
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -1005,6 +1005,24 @@ async def api_info():
 @app.exception_handler(ApiError)
 async def api_error_envelope(request: Request, exc: ApiError):
     return await api_error_handler(request, exc)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_reference(request: Request, exc: HTTPException):
+    """Every REST error keeps ``detail`` and also carries ``error.reference``."""
+    if isinstance(exc, EnvelopeHTTPException):
+        return await error_envelope_handler(request, exc)
+    import uuid
+
+    from services.safe_errors import _platform_envelope
+    from services.tracing import get_correlation_id
+
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    cid = get_correlation_id() or uuid.uuid4().hex
+    body = _platform_envelope(detail, cid, detail, exc.status_code)
+    body["detail"] = detail
+    headers = {"X-Correlation-ID": cid, **dict(exc.headers or {})}
+    return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
 
 
 @app.exception_handler(EnvelopeHTTPException)

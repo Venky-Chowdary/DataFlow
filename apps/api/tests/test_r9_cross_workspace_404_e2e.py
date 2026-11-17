@@ -51,10 +51,18 @@ def _cdc_job(workspace_id: str, host: str) -> str:
     })
 
 
+def _public_error(body: dict) -> dict:
+    error = dict(body.get("error") or {})
+    error.pop("reference", None)
+    return {"detail": body.get("detail"), "code": error.get("code")}
+
+
 def _same_404(foreign, missing, detail: str) -> None:
     assert foreign.status_code == 404, foreign.text
     assert missing.status_code == 404, missing.text
-    assert foreign.json() == missing.json() == {"detail": detail}
+    assert foreign.json()["detail"] == missing.json()["detail"] == detail
+    assert foreign.json()["error"]["reference"]
+    assert _public_error(foreign.json()) == _public_error(missing.json())
 
 
 def test_quarantine_routes_404_another_workspaces_job(r9):

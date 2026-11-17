@@ -729,6 +729,9 @@ class MongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, updates, previous=prev_doc)
+            from services.job_status import promote_rows_skipped
+
+            promote_rows_skipped(updates, prev_doc)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1996,6 +1999,9 @@ class MemoryMongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+            from services.job_status import promote_rows_skipped
+
+            promote_rows_skipped(kwargs, rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

@@ -11,6 +11,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 from services.brand_env import getenv_brand
 import threading
 import uuid
@@ -1128,11 +1129,94 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
     return True, str(getattr(conn, "workspace_id", "") or "")
 
 
+_LIBPQ_FILE_KEYS = frozenset({
+    "service", "servicefile", "passfile", "sslkey", "sslcert", "sslrootcert", "sslcrl",
+})
+
+
+_DSN_KEY_RE = re.compile(
+    r"(?:^|[?&\s;])("
+    r"service|servicefile|passfile|sslkey|sslcert|sslrootcert|sslcrl|dsn|filedsn|driver"
+    r")\s*=\s*("
+    r"'([^']*)'|\"([^\"]*)\"|\{[^}]*\}|[^\s;&]*)",
+    re.IGNORECASE,
+)
+
+
+def _connection_pairs(raw: str) -> list[tuple[str, str]]:
+    """Named keys in a libpq URL, a keyword string, or an ODBC connection string.
+
+    A braced ODBC driver name is one value, so spaces inside ``{ODBC Driver 18
+    for SQL Server}`` are not a second key.
+    """
+    pairs: list[tuple[str, str]] = []
+    for match in _DSN_KEY_RE.finditer(str(raw or "")):
+        key = match.group(1).lower()
+        quoted = match.group(3) if match.group(3) is not None else match.group(4)
+        value = quoted if quoted is not None else match.group(2)
+        pairs.append((key, str(value or "").strip()))
+    return pairs
+
+
+def _odbc_driver_is_path(value: str) -> bool:
+    """A filesystem path. ``{ODBC Driver 18 for SQL Server}`` is a driver name."""
+    token = str(value or "").strip()
+    if token.startswith("{") and token.endswith("}"):
+        return False
+    bare = token.strip("{}").strip()
+    if not bare:
+        return False
+    return bare.startswith(("/", "\\", ".")) or ":\\" in bare or "/" in bare or "\\" in bare
+
+
+def server_side_dsn_refusal(*texts: Any) -> str:
+    """Refuse a connection string that would read a file on this server.
+
+    libpq ``service`` / ``servicefile`` / ``passfile`` / ``sslkey`` and ODBC
+    ``DSN`` / ``FILEDSN`` / ``Driver=<path>`` are opened by the driver before
+    authentication. The refusal happens at save and at test, with no dial.
+    """
+    refused: list[str] = []
+    for raw in texts:
+        if isinstance(raw, dict):
+            blobs = [str(v) for v in raw.values() if isinstance(v, str)]
+        else:
+            blobs = [str(raw or "")]
+        for blob in blobs:
+            for key, value in _connection_pairs(blob):
+                if key in _LIBPQ_FILE_KEYS or key in {"dsn", "filedsn"}:
+                    refused.append(key)
+                elif key == "driver" and _odbc_driver_is_path(value):
+                    refused.append("driver")
+    if not refused:
+        return ""
+    named = ", ".join(sorted(set(refused)))
+    return (
+        f"Connection string key {named} reads a file on this server "
+        "(a libpq service file, a password file, a certificate path, or an "
+        "ODBC DSN). Save the host, port, database and password on the connector "
+        "instead. A driver name in braces, such as {ODBC Driver 18 for SQL Server}, "
+        "is allowed."
+    )
+
+
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
     from services.connector_request_limits import refuse_control_characters
 
     refuse_control_characters("Connector name", data.get("name"))
+    refused = server_side_dsn_refusal(
+        data.get("connection_string"), data.get("host"), data.get("extra")
+    )
+    if refused:
+        raise ValueError(refused)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    hosted = sqlite_hosted_refusal(
+        str(data.get("type") or ""), str(data.get("connection_string") or "")
+    )
+    if hosted:
+        raise ValueError(hosted)
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1237,6 +1321,11 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
     if "name" in data:
         refuse_control_characters("Connector name", data.get("name"))
+    refused = server_side_dsn_refusal(
+        data.get("connection_string"), data.get("host"), data.get("extra")
+    )
+    if refused:
+        raise ValueError(refused)
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None

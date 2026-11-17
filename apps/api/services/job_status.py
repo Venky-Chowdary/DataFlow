@@ -38,6 +38,27 @@ CANCEL_BLOCKS_STATUSES = frozenset(
 )
 
 
+def promote_rows_skipped(updates: dict[str, Any], previous: dict[str, Any] | None = None) -> None:
+    """Copy ``destination_summary.rows_skipped`` onto the job document.
+
+    ``skip_duplicates`` keeps the stored row and nets it out of
+    ``records_processed``. The skip count has to be on the job the operator
+    reads, and on the trust report, or a correct skip looks like a write of 0.
+    """
+    if "rows_skipped" in updates and updates.get("rows_skipped") is not None:
+        return
+    summary = updates.get("destination_summary")
+    if not isinstance(summary, dict):
+        prev = (previous or {}).get("destination_summary")
+        summary = prev if isinstance(prev, dict) else None
+    if not isinstance(summary, dict) or summary.get("rows_skipped") is None:
+        return
+    try:
+        updates["rows_skipped"] = int(summary["rows_skipped"])
+    except (TypeError, ValueError):
+        return
+
+
 def refuse_job_status_write(
     *,
     previous_status: str | None,
@@ -379,6 +400,8 @@ def cancel_outcome_for(
     write_rolled_back: bool = False,
     tally_is_commit_evidence: bool = True,
     tally_is_exact: bool = False,
+    dropped_created_table: str = "",
+    leftover_created_table: str = "",
 ) -> dict:
     """What a cancel left behind, stated as the destination holds it.
 
@@ -448,6 +471,19 @@ def cancel_outcome_for(
             f"the job saw, not re-counted on the destination{held}) — they were "
             "not rolled back. Re-run with full_refresh_overwrite or clear the "
             "destination table to undo them."
+        )
+    elif dropped_created_table and not rows:
+        message = (
+            "Transfer cancelled by user. No row of this run was kept: "
+            f"{dropped_created_table} was created by this run and dropped because "
+            "nothing was committed. A table that already existed is never dropped. "
+            "A retry starts from zero."
+        )
+    elif leftover_created_table and not rows:
+        message = (
+            "Transfer cancelled by user. No row of this run was committed, but "
+            f"{leftover_created_table} was created by this run and could not be dropped. "
+            "It is empty. A table that already existed is never dropped."
         )
     elif source == "destination_count" and destination_table_exists is False:
         message = (

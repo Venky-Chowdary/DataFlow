@@ -783,6 +783,8 @@ def _fail_runtime_job(
             destination_table_exists=getattr(exc, "destination_table_exists", None),
             destination_rows_before=getattr(exc, "destination_rows_before", None),
             write_rolled_back=getattr(exc, "write_rolled_back", None) is True,
+            dropped_created_table=str(getattr(exc, "dropped_created_table", "") or ""),
+            leftover_created_table=str(getattr(exc, "leftover_created_table", "") or ""),
             tally_is_commit_evidence=not ((unmeasured or per_stream) and request is not None),
         )
         if per_stream:

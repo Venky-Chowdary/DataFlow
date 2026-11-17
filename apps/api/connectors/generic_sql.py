@@ -5595,6 +5595,7 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     rows_skipped = 0
+    created_this_call = False
     identity_session: Any = None
     # DDL this attempt applied. A failed run with nothing committed puts the
     # columns back (D368). A successful write keeps the widen.
@@ -5839,6 +5840,7 @@ def write_mapped_rows(
                         )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
+                    created_this_call = True
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
                     # was created concurrently, ignore the error and continue.
@@ -6314,10 +6316,16 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=[*upsert_fallback_warnings(table_obj), *transform_errors],
         )
-    except TransferCancelled:
+    except TransferCancelled as cancelled:
         # D168: cancel is control flow, not a write failure. The chunks already
-        # committed stay (cancel_outcome reports them); the open one was never
-        # begun, and the finally below releases the connection.
+        # committed stay. A table this attempt created, with nothing committed,
+        # is dropped and named on the cancel (D378). A pre-existing table is not.
+        if created_this_call and int(written or 0) == 0 and table_name:
+            from services.batch_undo import note_dropped_empty_create
+
+            note_dropped_empty_create(
+                cancelled, cfg, table_name, schema_name or schema or None
+            )
         raise
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

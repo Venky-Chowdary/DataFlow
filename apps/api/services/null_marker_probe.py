@@ -328,6 +328,13 @@ def _marker_values(texts: list[str]) -> Any:
                         literal_execute=True)
 
 
+def _oracle_lob(column: Any) -> bool:
+    """True when ``column`` is a CLOB/NCLOB. Those cannot be an IN key (ORA-22848)."""
+    type_ = getattr(column, "type", None)
+    name = type(type_).__name__.upper() if type_ is not None else ""
+    return name in {"CLOB", "NCLOB"}
+
+
 def _exact_in(column: Any, dialect: str, values: Any) -> Any:
     """``column IN values``, byte for byte where the engine's own collation may fold or pad."""
     import sqlalchemy as sa
@@ -335,6 +342,10 @@ def _exact_in(column: Any, dialect: str, values: Any) -> Any:
     if dialect in ("mysql", "mariadb"):
         # CAST(... AS BINARY) against text: a binary compare, no case folding, no PAD SPACE.
         return sa.cast(column, sa.LargeBinary).in_(values)
+    if dialect == "oracle" and _oracle_lob(column):
+        # ORA-22848: a LOB is not a comparison key. The leading 4000 characters
+        # are the same bound the read-back uses (DBMS_LOB.SUBSTR).
+        return sa.func.DBMS_LOB.SUBSTR(column, 4000, 1).in_(values)
     return column.in_(values)
 
 

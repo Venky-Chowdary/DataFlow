@@ -413,6 +413,25 @@ def _decide(
     return ("clear", "")
 
 
+def note_dropped_empty_create(exc: BaseException, cfg: dict[str, Any], table: str, schema: Any) -> None:
+    """Drop a table this attempt created when the cancel committed no rows.
+
+    A pre-existing table is never passed here. The cancel result names the
+    table whether the drop succeeded or the empty table is still there.
+    """
+    qualified = f"{schema}.{table}" if schema else str(table or "")
+    try:
+        from connectors.generic_sql import drop_table
+
+        drop_table(cfg, table, schema=schema or None)
+    except Exception:
+        exc.leftover_created_table = qualified  # type: ignore[attr-defined]
+        exc.dropped_created_table = ""  # type: ignore[attr-defined]
+        return
+    exc.dropped_created_table = qualified  # type: ignore[attr-defined]
+    exc.leftover_created_table = ""  # type: ignore[attr-defined]
+
+
 def _drop_run_created(db_type: str, cfg: dict[str, Any], table: str, schema: Any) -> bool:
     """Drop an object the failed run created; ``False`` = no drop support.
 

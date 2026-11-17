@@ -471,11 +471,18 @@ def append_row_count_report(
         )
 
     if keyed:
+        skipped = int(rows_skipped or 0)
+        skip_note = (
+            f" {skipped} row(s) kept as already stored (rows_skipped)."
+            if skipped
+            else ""
+        )
         return ReconciliationReport(
             passed=True,
             message=(
                 f"Keyed delta verified ({expected_rows} event(s) merged, "
-                f"{identity} net new key(s): {target_rows_before} → {target_rows}). "
+                f"{identity} net new key(s): {target_rows_before} → {target_rows})."
+                f"{skip_note} "
                 "Whole-table digests are not comparable for a merge into "
                 "pre-existing rows — per-cell fidelity is NOT proven."
                 f"{sample_note}"

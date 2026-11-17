@@ -91,10 +91,18 @@ def host_key_settings(source: Mapping[str, Any]) -> dict[str, str]:
     operator pinned would verify on write and fall back to ``known_hosts`` (or
     fail) when read back.
     """
+    extra = source.get("extra") if isinstance(source.get("extra"), Mapping) else {}
+
+    def _pick(key: str) -> str:
+        # A form default of "" must not hide the pin saved under extra.
+        top = str(source.get(key) or "").strip()
+        nested = str(extra.get(key) or "").strip()
+        return top or nested
+
     return {
-        "host_key": str(source.get("host_key") or ""),
-        "known_hosts": str(source.get("known_hosts") or ""),
-        "host_key_policy": str(source.get("host_key_policy") or ""),
+        "host_key": _pick("host_key"),
+        "known_hosts": _pick("known_hosts"),
+        "host_key_policy": _pick("host_key_policy"),
     }
 
 
@@ -122,10 +130,17 @@ def parse_sftp_config(
     # Saved connectors persist host-key trust on ``extra`` (and the
     # schedule runner lifts it onto the endpoint). The environment remains
     # the fallback when a caller supplies none; an inline value still wins.
-    cfg.host_key = (host_key or getenv_brand("DATAFLOW_SFTP_HOST_KEY", "")).strip()
-    cfg.known_hosts = (known_hosts or getenv_brand("DATAFLOW_SFTP_KNOWN_HOSTS", "")).strip()
+    nested = host_key_settings(_kwargs)
+    cfg.host_key = (
+        host_key or nested.get("host_key") or getenv_brand("DATAFLOW_SFTP_HOST_KEY", "")
+    ).strip()
+    cfg.known_hosts = (
+        known_hosts or nested.get("known_hosts") or getenv_brand("DATAFLOW_SFTP_KNOWN_HOSTS", "")
+    ).strip()
     cfg.host_key_policy = (
-        host_key_policy or getenv_brand("DATAFLOW_SFTP_HOST_KEY_POLICY", "")
+        host_key_policy
+        or nested.get("host_key_policy")
+        or getenv_brand("DATAFLOW_SFTP_HOST_KEY_POLICY", "")
     ).strip().lower()
     raw = (connection_string or "").strip()
 
@@ -876,7 +891,18 @@ def test_sftp(
                         try:
                             sftp.stat(directory)
                         except OSError:
-                            return False, f"SFTP authenticated but path not found: {cfg.path}"
+                            if not require_object:
+                                # The writer creates the missing chain. A plan
+                                # must say that, not report the host key.
+                                return True, (
+                                    f"SFTP authenticated on {cfg.host}:{cfg.port}; "
+                                    f"directory {directory} does not exist yet and "
+                                    f"will be created when {filename} is written."
+                                )
+                            return False, (
+                                f"SFTP authenticated but directory {directory} "
+                                f"was not found for {cfg.path}"
+                            )
                         if not require_object:
                             return True, (
                                 f"SFTP directory {directory} reachable on "

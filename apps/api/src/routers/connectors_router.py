@@ -228,6 +228,20 @@ _PROBE_FIELDS_EXTRA_CANNOT_SET = frozenset(
 
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
+    from services.connector_store import server_side_dsn_refusal
+
+    refused = server_side_dsn_refusal(
+        request.connection_string, request.host, getattr(request, "extra", None)
+    )
+    if refused:
+        raise HTTPException(status_code=422, detail=refused)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    hosted = sqlite_hosted_refusal(
+        str(request.type or ""), str(request.connection_string or "")
+    )
+    if hosted:
+        raise HTTPException(status_code=422, detail=hosted)
     require_admin_connector_access(http_request, request.type)
     _refuse_unhonourable_ssl_mode(
         request.type, request.ssl_mode, request.connection_string, request.extra

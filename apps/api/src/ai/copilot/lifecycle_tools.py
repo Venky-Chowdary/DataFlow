@@ -633,7 +633,10 @@ def resolve_job(job_id: str = "", selector: str = "") -> tuple[dict[str, Any] | 
 def _stage(tool: str, *, payload: dict[str, Any], preview: dict[str, Any], label: str, destructive: bool) -> ToolResult:
     from .ack_ledger import get_ack_ledger
 
+    from .ack_ledger import stamp_caller_workspace
+
     kind = ACK_KIND_BY_TOOL[tool]
+    payload = stamp_caller_workspace(payload)
     ack_id = get_ack_ledger().put(kind=kind, payload=payload, preview=preview)
     return _tool_result(tool,
         success=True,
@@ -1651,6 +1654,8 @@ def update_schedule(
     current_interval = str(getattr(sched, "interval", "") or "")
     current_cron = str(getattr(sched, "cron", "") or "")
     current_tz = str(getattr(sched, "timezone", "") or "UTC")
+    from services.schedule_store import schedule_is_enabled
+
     payload: dict[str, Any] = {"schedule_id": sched.id}
     preview: dict[str, Any] = {
         "schedule_id": sched.id,
@@ -1658,7 +1663,7 @@ def update_schedule(
         "interval": current_interval,
         "cron": current_cron,
         "timezone": current_tz,
-        "enabled": bool(getattr(sched, "enabled", True)),
+        "enabled": schedule_is_enabled(sched),
     }
     label_bits: list[str] = []
 

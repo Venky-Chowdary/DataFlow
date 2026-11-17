@@ -164,6 +164,29 @@ def import_file_schedules_into_mongo(*, force: bool = False) -> int:
     return len(file_schedules)
 
 
+def coerce_enabled(value: Any, default: bool = True) -> bool:
+    """``bool("false")`` is True. A paused schedule stored as the string stays paused."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"", "false", "0", "no", "off", "paused", "disabled"}:
+            return False
+        if token in {"true", "1", "yes", "on", "enabled"}:
+            return True
+        return default
+    return bool(value)
+
+
+def schedule_is_enabled(sched: Any, default: bool = True) -> bool:
+    """The schedule's enabled flag, whether the caller holds the object or its dict."""
+    if isinstance(sched, dict):
+        raw = sched.get("enabled", default)
+    else:
+        raw = getattr(sched, "enabled", default)
+    return coerce_enabled(raw, default=default)
+
+
 @dataclass
 class PipelineSchedule:
     id: str
@@ -372,7 +395,7 @@ class PipelineSchedule:
             dest_connector_id=data["dest_connector_id"],
             dest_table=data["dest_table"],
             interval=data.get("interval", "daily"),
-            enabled=bool(data.get("enabled", True)),
+            enabled=coerce_enabled(data.get("enabled", True)),
             dest_schema=str(data.get("dest_schema") or "").strip(),
             dest_database=str(data.get("dest_database") or "").strip(),
             enabled_note=str(data.get("enabled_note") or ""),
@@ -1748,14 +1771,13 @@ def create_schedule(
             patch["sync_mode"] = sync_mode
             patch["contract_id"] = contract_id
             patch["require_signed_contract"] = require_signed
-            if "enabled" not in patch:
-                patch["enabled"] = True
+            # An omitted enabled flag keeps the paused schedule paused.
             updated = update_schedule(
                 target.id, patch, refuse_unrunnable_mappings=refuse_unrunnable_mappings
             )
             if updated:
                 return updated
-    enabled = bool(payload.get("enabled", True))
+    enabled = coerce_enabled(payload.get("enabled", True))
     enabled_note = str(payload.get("enabled_note") or "")
     if enabled and not rows:
         # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.

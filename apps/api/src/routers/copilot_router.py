@@ -826,6 +826,8 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "start_transfer":
+        if not str(payload.get("workspace_id") or "").strip():
+            payload["workspace_id"] = str(peek.get("workspace_id") or staged_in or "")
         try:
             result = await _start_confirmed_transfer(payload)
         except DuplicateTransferSubmission:

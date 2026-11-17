@@ -85,6 +85,7 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         ddl_changes_acknowledged=bool(payload.get("ddl_changes_acknowledged")),
         acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
+        workspace_id=str(payload.get("workspace_id") or "").strip(),
     )
     stamp_schema_drift_ack(request)
     return request

@@ -57,7 +57,7 @@ SQL uses three-valued logic. `NULL <op> x` is UNKNOWN, so the row does not match
 
 `''` is a value on PostgreSQL, SQL Server, MySQL, MariaDB, Snowflake and in CSV. It is not NULL. Whitespace is not NULL. The text `'NULL'` and `'none'` are not NULL.
 
-Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`.
+Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`. A `CLOB` or `NCLOB` is not a comparison key (`ORA-22848`); a probe compares `DBMS_LOB.SUBSTR` of the leading 4000 characters ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_LOB.html)).
 
 A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL. PostgreSQL treats NaN as equal to NaN and greater than every non-NaN number; a filter uses that order, not a text compare of the word nan.
 
@@ -94,7 +94,7 @@ Upsert is an idempotent merge on the declared key: one row per key, last writer 
 
 A file has a defined row order. Overwrite plus an explicit dedupe key collapses to the last row and says so. A table with no `ORDER BY` does not have an order, so it may still refuse rather than pick an arbitrary copy.
 
-`skip_duplicates` keeps the stored row and counts `rows_skipped`.
+`skip_duplicates` keeps the stored row and counts `rows_skipped`. That count is on the job and in the trust report, not only inside the writer.
 
 ## 7. CDC ordering
 
@@ -106,7 +106,7 @@ Datawrap applies the snapshot first, then change events in commit order. A colum
 
 A transfer that requires reversibility is refused at plan and at schedule create when a step cannot be undone (`omit`, `mask_pii`, a destructive type change). Execute checks the same predicate. An unattended run must not be the first place the operator learns it will fail.
 
-Cancel stops the writer before the next row. The per-row fallback checks the flag too. Source transactions roll back and return the connection; no `idle in transaction` session is left holding locks. A table this job created, with zero committed rows, is dropped. Offsets and watermarks move only with a committed destination batch (rule 5).
+Cancel stops the writer before the next row. The per-row fallback checks the flag too. Source transactions roll back and return the connection; no `idle in transaction` session is left holding locks. A table this job created, with zero committed rows, is dropped, and the cancel result names that table. A table the customer already had is never dropped. Offsets and watermarks move only with a committed destination batch (rule 5).
 
 ## 9. CSV and TSV quoting
 
@@ -128,6 +128,8 @@ One preflight reuses one session per endpoint. A second catalog read does not op
 
 The error names the endpoint that was dialled. A MongoDB connection string's host and port win over the form default `27017`. SQL Server `Adaptive Server is unavailable or does not exist` and DB-Lib `20009` are "source unreachable", not a missing table. A black-holed handshake is a timeout, not "network unreachable" and not an authentication failure. A MongoDB seed that answers and then names unreachable replica-set members says so, and names `directConnection=true` as the remedy. Snowflake destination probes name the destination account, and they share one login for the plan.
 
+libpq `service`, `servicefile`, `passfile`, `sslkey`, `sslcert`, `sslrootcert` and `sslcrl`, and ODBC `DSN=`, `FILEDSN=` and `Driver=` when the value is a filesystem path, are refused at save and at test before any network or file open. A driver name in braces (`{ODBC Driver 18 for SQL Server}`) is a driver name, not a path ([libpq service](https://www.postgresql.org/docs/current/libpq-pgservice.html), [ODBC connection strings](https://learn.microsoft.com/en-us/sql/connect/odbc/dsn-connection-string-attribute)). On the hosted cloud, SQLite is refused as a source and as a destination, and no server filesystem path is opened.
+
 ## 11. Decimals never pass through float
 
 `99999999999.999999` is `NUMERIC(18,6)`. IEEE-754 double cannot hold it; `float()` yields `100000000000.0`. PostgreSQL says `real` and `double precision` are inexact. Informatica documents the same loss when high precision is off. MongoDB metadata and JSONL use `Decimal128` or a decimal string. A float or a decimal measure is not a payment-card candidate: a PAN is a 13 to 19 digit integer with no decimal point.
@@ -138,6 +140,6 @@ A check reports the rows this run wrote, after the same filter and the same tran
 
 A correct run is not marked failed. A wrong run still fails, and the message names the key. Rows this pipeline wrote are not "changed outside this pipeline". A column this pipeline added is part of the next baseline. `rebaseline_transfer` moves the baseline the next run uses.
 
-The plan and execute run the same gates on the same inputs. A green plan does not fail at execute for a reason that was knowable. Error text names the cause and a remedy that exists in the product UI and in the MCP tools. No raw driver exception, no internal hostname, no invented job from an empty request.
+The plan and execute run the same gates on the same inputs. A green plan does not fail at execute for a reason that was knowable. Error text names the cause and a remedy that exists in the product UI and in the MCP tools. No raw driver exception, no internal hostname, no invented job from an empty request. Every REST error keeps its `detail` string and also carries `error.reference`. A job started from the caller's workspace is listed in that workspace.
 
 Catalog count is not transfer-live. Only a route with `TRANSFER_READY` / `PRODUCTION_SKU` evidence is described as live. CDC is at-least-once upsert until an exactly-once proof is attached.

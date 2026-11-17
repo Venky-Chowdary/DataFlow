@@ -128,7 +128,7 @@ def test_keep_last_on_an_object_store_source_reads_whole_and_collapses():
 
     rows = [{"sku": "A", "v": "1"}, {"sku": "B", "v": "2"}, {"sku": "A", "v": "3"}]
     contracts = [{"name": "t", "sync_mode": "full_refresh_overwrite", "primary_key": "sku", "selected": True}]
-    for fmt in ("s3", "gcs", "adls", "sftp"):
+    for fmt in ("s3", "minio", "gcs", "adls", "sftp"):
         req = SimpleNamespace(
             source=EndpointConfig(kind="database", format=fmt, extra={"in_file_dedupe": "keep_last"}),
             destination=EndpointConfig(kind="database", format="postgresql"),

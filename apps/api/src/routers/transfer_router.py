@@ -1664,6 +1664,37 @@ async def run_universal_transfer(
     continue-policy Risk Contract on the mapped columns that need one, so rows
     that fail to cast are quarantined and the valid rows load (QA r12 D2).
     """
+    supplied_source = any(
+        (
+            file is not None and bool(getattr(file, "filename", None)),
+            str(source_connector_id or "").strip(),
+            str(source_host or "").strip(),
+            str(source_connection_string or "").strip(),
+            str(source_table or "").strip(),
+            str(source_collection or "").strip(),
+            str(source_database or "").strip(),
+            str(source_file_id or "").strip(),
+        )
+    )
+    supplied_dest = any(
+        (
+            str(dest_connector_id or "").strip(),
+            str(dest_host or "").strip(),
+            str(dest_connection_string or "").strip(),
+            str(dest_table or "").strip(),
+            str(dest_collection or "").strip(),
+            str(dest_output_path or "").strip(),
+        )
+    )
+    if not supplied_source and not supplied_dest:
+        # Form defaults (source file, mongodb test_db) are not an operator choice.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Name a source and a destination. This request has neither, "
+                "so no job was started."
+            ),
+        )
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
         assert_delivery_guarantee_allowed,
