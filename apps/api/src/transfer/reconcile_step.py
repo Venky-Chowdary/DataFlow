@@ -256,6 +256,35 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
 # digest only compares against the destination when every declared step is
 # row-local (or an engine-level no-op like scd2): population-changing recipes
 # are proven by the row ledger and the dedupe winner checks instead.
+def stamp_run_proof_context(dest_summary: dict[str, Any] | None, request: Any) -> None:
+    """Publish the filter the writer applied, so the proof re-reads the same rows.
+
+    D331. A missing filter is not invented.
+    """
+    if not isinstance(dest_summary, dict) or request is None:
+        return
+    filt = getattr(request, "source_filter", None)
+    if filt:
+        dest_summary["source_filter"] = filt
+
+
+def _truncate_instant_to_milliseconds(value: Any) -> Any:
+    """BSON Date precision: keep three fractional digits (D325)."""
+    import datetime as dt
+
+    if isinstance(value, dt.datetime):
+        ms = (value.microsecond // 1000) * 1000
+        return value.replace(microsecond=ms)
+    text = str(value)
+    matched = re.match(
+        r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\.\d{3})\d+",
+        text,
+    )
+    if matched:
+        return matched.group(1)
+    return value
+
+
 def _proof_source_batches(
     *,
     source_endpoint: EndpointConfig,
@@ -1199,6 +1228,13 @@ def _transform_applied_proof_impl(
         if v is None:
             return _NULL_SENTINEL
         try:
+            # D325: a risk-accepted BSON date keeps milliseconds. Compare both
+            # sides at that carrier so a correct microsecond source is not
+            # "drift no recipe step explains".
+            if "mongo" in str(dest_db_type or "").lower() and re.search(
+                r"date|time|timestamp", str(ddl or ""), re.I
+            ):
+                v = _truncate_instant_to_milliseconds(v)
             # Oracle VARCHAR2 stores '' AS NULL natively — '' vs NULL
             # can never be told apart on read-back there, so they are
             # the same value on an Oracle destination only.
@@ -1276,6 +1312,7 @@ def _transform_applied_proof_impl(
         or ""
     )
     scope_pk: list[str] = []
+    append_versions = False
     if scd2_opts:
         from connectors.destination_naming import target_identifier
 
@@ -1286,10 +1323,22 @@ def _transform_applied_proof_impl(
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
         digest_cols = _mapped_targets(mappings, columns)
-        if not is_overwrite_sync(sync_mode):
-            # G-1c: an append/upsert can hold rows outside this run's
-            # population — scope the read-back to this run's keys so the
-            # proof still compares honestly.
+        from services.destination_key_collision_probe import (
+            sync_mode_appends_without_key_resolution,
+        )
+        from services.sync_cursor import is_append_sync as _is_append_sync
+
+        # D359: incremental_append keeps every version of a key. Scoping the
+        # read-back by key returns the previous version and a correct new
+        # version looks untransformed. The cursor window is this run's rows.
+        append_versions = bool(
+            _is_append_sync(sync_mode)
+            and sync_mode_appends_without_key_resolution(sync_mode)
+            and not dest_summary.get("key_enforced")
+        )
+        if not is_overwrite_sync(sync_mode) and not append_versions:
+            # G-1c: an upsert holds one row per key — scope the read-back to
+            # this run's keys so earlier rows are not the proof.
             scope_pk = [
                 c
                 for c in (
@@ -1438,8 +1487,28 @@ def _transform_applied_proof_impl(
     from services.incremental_drift import IN_WINDOW, RunWindow
 
     _proof_window = (
-        RunWindow.from_summary(dest_summary) if scope_pk and not scd2_opts else None
+        RunWindow.from_summary(dest_summary)
+        if (scope_pk or append_versions) and not scd2_opts
+        else None
     )
+    _dest_window = None
+    if append_versions and _proof_window is not None:
+        _to_target = {
+            str(m.get("source")): str(m.get("target"))
+            for m in (mappings or [])
+            if isinstance(m, dict) and m.get("source") and m.get("target")
+        }
+        _dest_window = _proof_window.renamed(_to_target)
+    _proof_filter = dest_summary.get("source_filter") if isinstance(dest_summary, dict) else None
+    if append_versions and _proof_window is None:
+        return {
+            "status": "unverifiable",
+            "reason": (
+                "incremental append stores a new version per key, and this run "
+                "did not record its cursor window, so earlier versions cannot "
+                "be separated from the rows this run appended"
+            ),
+        }
 
     from services.mapping_constraints import write_mappings as _write_mappings
 
@@ -1460,6 +1529,12 @@ def _transform_applied_proof_impl(
             validation_mode=validation_mode,
         )
 
+    def _dest_in_this_run(row: dict[str, Any]) -> bool:
+        # D359: only the versions this run appended, not an older copy of the key.
+        if _dest_window is not None:
+            return _dest_window.position(row) == IN_WINDOW
+        return True
+
     def _expected_iter():
         nonlocal raw_count
         _extra = (
@@ -1477,6 +1552,12 @@ def _transform_applied_proof_impl(
             src_cfg=src_cfg,
             read_cols=read_cols + _extra,
         ):
+            if _proof_filter:
+                # D331: the write applied this filter. Rows it excluded are
+                # not "changed in source during run".
+                from services.row_filter import apply_row_filter
+
+                batch = apply_row_filter(list(batch), _proof_filter)
             if _proof_window is not None:
                 batch = [
                     {k: v for k, v in r.items() if k not in _extra}
@@ -1907,6 +1988,8 @@ def _transform_applied_proof_impl(
                 for batch in batches:
                     for r in batch:
                         if _is_kept(r, pin_key_cols):
+                            continue
+                        if not _dest_in_this_run(r):
                             continue
                         if scope_keys is not None and (
                             "\x1f".join(
@@ -2407,6 +2490,8 @@ def _transform_applied_proof_impl(
                         dconn, stmt, sel_cols
                     ):
                         for r in batch:
+                            if not _dest_in_this_run(r):
+                                continue
                             if scope_keys is not None and (
                                 "\x1f".join(
                                     _key_norm(r.get(c)) for c in scope_pk

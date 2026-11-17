@@ -2083,6 +2083,27 @@ def _stream_database_transfer_impl(
     # whose content changed, and a quiet poll stays a no-op, so its covered-
     # content proof still runs. The verify re-read drops the same rows.
     run.cfg._tie_dedupe = seeded_from_watermark or bool(run.cfg.replay_through)
+    # D335: incremental_append's watermark is exclusive on (cursor, key). The
+    # boundary row already read is not selected again. A peer that shares the
+    # timestamp and has a later key still is. A schema change must not rewind
+    # that cursor into an inclusive tie-group re-read.
+    from services.sync_cursor import is_append_sync as _append_mode
+    from services.sync_cursor import requires_upsert as _upsert_mode
+    from services.keyset_pagination import split_cursor_bookmark as _split_bm_seed
+
+    if (
+        _append_mode(getattr(run.cfg, "effective_sync", "") or "")
+        and not _upsert_mode(getattr(run.cfg, "effective_sync", "") or "")
+        and run.cfg.cursor_pk_source
+    ):
+        _seed_text = str(run.cfg.watermark or "")
+        _seed_part, _seed_pk = _split_bm_seed(
+            _seed_text, has_tiebreak=True
+        )
+        if _seed_pk:
+            run.cur.keyset_run_seed = False
+            window_seed_inclusive = False
+            run.cfg._tie_dedupe = False
     run.cur._boundary_fps_state: dict[str, Any] = {
         "fps": None,
         "match_cols": [],

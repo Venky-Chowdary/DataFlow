@@ -2899,10 +2899,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             "delta_scope": delta_scope,
         }
         # A heap stores the second copy. That is what append means on a table
-        # with no key. Resume is the exception: the same batch is re-delivered,
-        # and a heap would store it twice.
-        if not enforced and not delta_scope and not getattr(
-            collision, "resume_redelivery", False
+        # with no key. incremental_append does it on purpose, including for a
+        # key already stored: one new version per change, on every run (D377).
+        # Resume is the exception: the same batch is re-delivered, and a heap
+        # would store that overlap twice.
+        from services.destination_key_collision_probe import (
+            incremental_append_keeps_versions,
+            unenforced_append_warns,
+        )
+
+        versioned_append = incremental_append_keeps_versions(
+            str(getattr(ctx.plan, "sync_mode", "") or "")
+        )
+        if versioned_append and not enforced and delta_scope:
+            cause = (
+                f"{collision_count} key(s) in this batch already have a version "
+                f"on {key}. incremental_append stores one new version per change. "
+                "Use incremental_deduped or upsert when one row per key is required."
+            )
+        if unenforced_append_warns(
+            enforced=enforced,
+            resume_redelivery=bool(getattr(collision, "resume_redelivery", False)),
+            has_delta_scope=bool(delta_scope),
+            sync_mode=str(getattr(ctx.plan, "sync_mode", "") or ""),
         ):
             return _warn(
                 GateId.G6_TARGET_DDL,

@@ -137,7 +137,7 @@ from .models import (
     endpoint_to_dict,
     transfer_request_to_dict,
 )
-from .reconcile_step import run_reconciliation
+from .reconcile_step import run_reconciliation, stamp_run_proof_context
 from .registry import validate_transfer
 from .stream_multi import last_stream_reconcile_inputs
 from .stream import (
@@ -2822,6 +2822,7 @@ class UniversalTransferEngine:
                     # the summary the ladder and the ledger read, not only on the
                     # record written afterwards.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
 
                 spill_holder = (
@@ -3983,6 +3984,7 @@ class UniversalTransferEngine:
                     # summary, so a shaped run balances instead of reporting a
                     # destination population short by the filtered rows.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -4933,6 +4935,7 @@ class UniversalTransferEngine:
                     # Before reconciliation, not after: the cell ladder decides
                     # whether a source re-read is still comparable from this stamp.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
