@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,6 +94,31 @@ def read_column_collation(
     return None
 
 
+def _local_fold(value: str, collation: ColumnCollation) -> str:
+    """A fold that may call two values equal when the destination does not.
+
+    It only decides which values are worth asking the destination about.
+    ``NO PAD`` keeps trailing spaces, so ``'a'`` and ``'a '`` are not sent.
+    ``PAD SPACE`` strips trailing spaces and not tabs. Accents are folded so
+    an accent-insensitive collation still gets the pair.
+    """
+    text = value
+    if str(collation.pad or "").upper() == "PAD SPACE":
+        text = text.rstrip(" ")
+    folded = unicodedata.normalize("NFKD", text).casefold()
+    return "".join(ch for ch in folded if not unicodedata.combining(ch))
+
+
+def _collision_buckets(values: list[str], collation: ColumnCollation) -> list[list[str]]:
+    """Distinct values that might be one key, one list per local fold."""
+    buckets: dict[str, list[str]] = {}
+    for value in values:
+        bucket = buckets.setdefault(_local_fold(value, collation), [])
+        if value not in bucket:
+            bucket.append(value)
+    return [bucket for bucket in buckets.values() if len(bucket) > 1]
+
+
 def group_key_values(
     conn: Any,
     dialect: str,
@@ -131,10 +157,14 @@ def group_key_values(
     conn.execute(sa.text(drop))
     try:
         conn.execute(sa.text(ddl))
-        conn.execute(
-            sa.text(f"INSERT INTO {table} (id, k) VALUES (:id, :k)"),  # nosec B608
-            [{"id": i, "k": value} for i, value in enumerate(values)],
-        )
+        # Insert in batches. One temp table still holds this collision
+        # bucket only, not every distinct key of the proof (D391).
+        for start in range(0, len(values), 100):
+            chunk = values[start:start + 100]
+            conn.execute(
+                sa.text(f"INSERT INTO {table} (id, k) VALUES (:id, :k)"),  # nosec B608
+                [{"id": start + offset, "k": value} for offset, value in enumerate(chunk)],
+            )
         rows = conn.execute(
             sa.text(
                 f"SELECT id, MIN(id) OVER (PARTITION BY k) AS grp FROM {table}"  # nosec B608
@@ -172,26 +202,56 @@ def collapse_destination_equal_keys(
     cannot be asked: exact text was already collapsed, and a guessed pad or
     case fold is not applied (D391).
     """
-    rows = list(db.execute("SELECT k, seq FROM spill_key"))
-    usable = [(str(k), int(seq)) for k, seq in rows if not str(k).startswith(_NULL_KEY)]
+    rows = list(db.execute("SELECT k, seq, latest FROM spill_key"))
+    usable = [
+        (str(k), int(seq), int(latest if latest is not None else seq))
+        for k, seq, latest in rows
+        if not str(k).startswith(_NULL_KEY)
+    ]
     if len(usable) < 2 or not columns:
         return 0
     grouped = _groups_on_destination(usable, dialect=dialect, endpoint=endpoint, columns=columns)
     if not grouped:
         return 0
-    by_group: dict[str, list[tuple[int, str]]] = {}
-    for key, seq in usable:
-        by_group.setdefault(grouped.get(key, key), []).append((seq, key))
+    by_group: dict[str, list[tuple[int, int, str]]] = {}
+    for key, seq, latest in usable:
+        by_group.setdefault(grouped.get(key, key), []).append((seq, latest, key))
     dropped = 0
     for members in by_group.values():
         if len(members) < 2:
             continue
-        members.sort()
-        for seq, key in members[:-1]:
+        # Upsert keeps the key text of the first insert and the value of
+        # the latest write. Keeping the latest row whole kept 'A'/'v2'
+        # when MySQL stored 'a'/'v3' (D391).
+        first_seq, _first_latest, first_key = min(members, key=lambda item: item[0])
+        latest_row_seq, _latest_at, _latest_key = max(members, key=lambda item: item[1])
+        payload_row = db.execute(
+            "SELECT payload FROM spill WHERE seq = ?",
+            (latest_row_seq,),
+        ).fetchone()
+        if payload_row is None:
+            continue
+        payload = _payload_with_first_key(payload_row[0], columns, first_key)
+        db.execute("UPDATE spill SET payload = ? WHERE seq = ?", (payload, first_seq))
+        for seq, _latest, key in members:
+            if seq == first_seq:
+                continue
             db.execute("DELETE FROM spill WHERE seq = ?", (seq,))
             db.execute("DELETE FROM spill_key WHERE k = ?", (key,))
             dropped += 1
     return dropped
+
+
+def _payload_with_first_key(payload: bytes, columns: list[str], first_key: str) -> bytes:
+    """The latest row, with the key text of the first insert."""
+    import pickle
+
+    orow, shaped, origin = pickle.loads(payload)
+    parts = first_key.split("\x1f")
+    if isinstance(orow, dict):
+        for column, part in zip(columns, parts):
+            orow[column] = part
+    return pickle.dumps((orow, shaped, origin), protocol=4)
 
 
 def _groups_on_destination(
@@ -216,7 +276,8 @@ def _groups_on_destination(
     table = str(getattr(endpoint, "table", "") or cfg.get("table") or "")
     if not table:
         return None
-    parts = [tuple(key.split("\x1f")) for key, _seq in usable]
+    keys = [key for key, _seq, _latest in usable]
+    parts = [tuple(key.split("\x1f")) for key in keys]
     if any(len(part) != len(columns) for part in parts):
         return None
     try:
@@ -230,21 +291,22 @@ def _groups_on_destination(
                 ]
                 if any(fact is None for fact in facts):
                     return None
-                # One column is the case the unique-index tests cover. A
-                # composite key is equal when every part is equal, so each
-                # part is grouped on its own collation and the groups are zipped.
+                # Ask the destination only about values a local fold thinks
+                # might collide, one fold-bucket at a time. Every other key
+                # stays itself and is not loaded into a temp table (D391).
                 representatives: list[dict[str, str]] = []
                 for index, fact in enumerate(facts):
                     values = [part[index] for part in parts]
-                    representatives.append(
-                        group_key_values(conn, kind, fact, values)  # type: ignore[arg-type]
-                    )
+                    mapping = {value: value for value in values}
+                    for bucket in _collision_buckets(values, fact):  # type: ignore[arg-type]
+                        mapping.update(group_key_values(conn, kind, fact, bucket))  # type: ignore[arg-type]
+                    representatives.append(mapping)
                 conn.commit()
     except Exception:
         logger.debug("destination key equality failed", exc_info=True)
         return None
     out: dict[str, str] = {}
-    for key, part in zip((item[0] for item in usable), parts):
+    for key, part in zip(keys, parts):
         canonical = "\x1f".join(
             representatives[index].get(part[index], part[index]) for index in range(len(columns))
         )

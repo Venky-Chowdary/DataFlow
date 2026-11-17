@@ -1603,7 +1603,8 @@ def _transform_applied_proof_impl(
                 "CREATE TABLE IF NOT EXISTS spill (seq INTEGER PRIMARY KEY, payload BLOB)"
             )
             pin_store.db.execute(
-                "CREATE TABLE IF NOT EXISTS spill_key (k TEXT PRIMARY KEY, seq INTEGER)"
+                "CREATE TABLE IF NOT EXISTS spill_key ("
+                "k TEXT PRIMARY KEY, seq INTEGER, latest INTEGER)"
             )
             _spill_ready = True
 
@@ -1622,24 +1623,32 @@ def _transform_applied_proof_impl(
             _spill_init()
             key = _spill_key(orow)
             payload = pickle.dumps((orow, shaped_t, origin_row), protocol=4)
+            # ``seq`` stays the first time this exact text was written.
+            # ``latest`` moves on every write, including a repeat of that
+            # text, so a later value is not stuck behind an earlier spelling
+            # the destination treats as the same key (D391).
+            _spill_seq += 1
             found = pin_store.db.execute(
                 "SELECT seq FROM spill_key WHERE k = ?", (key,)
             ).fetchone()
             if found is None:
-                _spill_seq += 1
                 pin_store.db.execute(
                     "INSERT INTO spill (seq, payload) VALUES (?, ?)",
                     (_spill_seq, payload),
                 )
                 pin_store.db.execute(
-                    "INSERT INTO spill_key (k, seq) VALUES (?, ?)",
-                    (key, _spill_seq),
+                    "INSERT INTO spill_key (k, seq, latest) VALUES (?, ?, ?)",
+                    (key, _spill_seq, _spill_seq),
                 )
                 return
             _spill_dropped += 1
             pin_store.db.execute(
                 "UPDATE spill SET payload = ? WHERE seq = ?",
                 (payload, found[0]),
+            )
+            pin_store.db.execute(
+                "UPDATE spill_key SET latest = ? WHERE k = ?",
+                (_spill_seq, key),
             )
 
         def _record_expected(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
