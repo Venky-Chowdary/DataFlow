@@ -118,9 +118,9 @@ def _normalize(name: str) -> str:
 def is_reserved_document_key(name: str) -> bool:
     """MongoDB ``_id`` is the document key, not a fuzzy-match target.
 
-    A DATE, INT or TEXT column must not land on it. Only a source column that
-    is itself ``_id`` may. Migration rule 4. An operator lock does not
-    override this: ``_id`` is immutable.
+    A DATE, INT or TEXT column must not land on it by a fuzzy or model score.
+    An operator-locked mapping may: ``id`` onto ``_id`` is the normal Mongo
+    upsert. Migration rule 4.
     """
     return _folded_ident(name).lower() == "_id"
 
@@ -146,15 +146,15 @@ def mapping_violates_key_rule(
     *,
     operator_locked: bool = False,
 ) -> bool:
-    """Rule 4. Non-``_id`` sources never map onto ``_id``.
+    """Rule 4. Unlocked fuzzy or model pairs do not land on ``_id`` or a key.
 
-    A primary key or identity column accepts a name-identical source, or an
-    operator-locked mapping. A fuzzy or model-proposed pair does not.
+    An operator-locked mapping is the declared key, including ``id`` onto
+    ``_id``. A name-identical source may also land on a primary key.
     """
-    if is_reserved_document_key(target) and not is_reserved_document_key(source):
-        return True
     if operator_locked:
         return False
+    if is_reserved_document_key(target) and not is_reserved_document_key(source):
+        return True
     if not column_is_protected_key(target, schema):
         return False
     return _folded_ident(source).lower() != _folded_ident(target).lower()

@@ -153,3 +153,23 @@ def test_constraint_pass_protects_primary_key_and_identity() -> None:
     assert ("sku", "id") not in pairs
     assert ("id", "id") in pairs
     assert "email" in dropped and "sku" in dropped
+
+
+def test_operator_locked_id_to_mongo_id_is_kept() -> None:
+    from services.mapping_constraints import enforce_destination_constraints
+
+    kept, dropped, _invented = enforce_destination_constraints(
+        [
+            {
+                "source": "id",
+                "target": "_id",
+                "confidence": 0.99,
+                "user_override": True,
+            },
+            {"source": "email", "target": "_id", "confidence": 0.99},
+        ],
+        ["_id"],
+        target_schemas=[{"name": "_id", "primary_key": True}],
+    )
+    assert {(m["source"], m["target"]) for m in kept} == {("id", "_id")}
+    assert dropped == ["email"]

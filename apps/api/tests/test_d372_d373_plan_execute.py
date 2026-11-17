@@ -18,7 +18,10 @@ if str(_API) not in sys.path:
 from services.decision_kernel.type_invent import (  # noqa: E402
     temporal_precision_would_narrow,
 )
-from services.reversibility_schedule import reversibility_refusal  # noqa: E402
+from services.reversibility_schedule import (  # noqa: E402
+    reversibility_refusal,
+    schedule_reversibility_block,
+)
 
 
 def test_datetime2_7_into_6_digits_is_flagged_until_values_fit() -> None:
@@ -52,3 +55,15 @@ def test_schedule_reversibility_names_omit_and_mask() -> None:
         [{"source": "id", "target": "id", "source_type": "INTEGER", "target_type": "INTEGER"}],
         table="q3_rev_out",
     ) == ""
+
+
+def test_rest_and_mcp_update_use_the_same_reversibility_block() -> None:
+    payload = {
+        "require_reversibility": True,
+        "dest_table": "q3_rev_out",
+        "mappings": [
+            {"source": "note", "target": "note", "transform": "mask_pii"},
+        ],
+    }
+    assert "q3_rev_out.note" in schedule_reversibility_block(payload)
+    assert schedule_reversibility_block({**payload, "require_reversibility": False}) == ""

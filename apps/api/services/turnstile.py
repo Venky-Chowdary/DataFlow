@@ -16,7 +16,6 @@ strictness.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -43,18 +42,15 @@ def signup_expected_hostname(request_host: str) -> str:
 
 
 def production_turnstile() -> bool:
-    """True when this process is the production signup host.
+    """True when this process must enforce production Turnstile policy.
 
-    An empty hostname or ``localhost`` is a development widget. Production
-    siteverify must name datawrap.io or www.datawrap.io.
+    ``platform_config.is_production`` is fail-closed: an unknown environment
+    name does not become development, and a deployed host does not stay open
+    because ``ENV`` was left unset (D322).
     """
-    env = (
-        getenv_brand("ENVIRONMENT")
-        or getenv_brand("ENV")
-        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
-        or ""
-    ).strip().lower()
-    return env in {"production", "prod"}
+    from services.platform_config import is_production
+
+    return is_production()
 
 
 def _host_token(value: str) -> str:

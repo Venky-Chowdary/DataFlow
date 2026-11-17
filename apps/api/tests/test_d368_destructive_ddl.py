@@ -321,54 +321,100 @@ def test_oracle_byte_length_is_not_a_character_widen() -> None:
     ) is True
 
 
-def test_restore_runs_on_empty_and_populated_tables() -> None:
-    duckdb = pytest.importorskip("duckdb")
-    from connectors.column_widen_restore import apply_column_restores
+def test_sqlalchemy_nvarchar_collation_is_restated_once() -> None:
+    """Real mssql dialect compilation already emits COLLATE. Do not append it again."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects.mssql import NVARCHAR
 
-    con = duckdb.connect()
-    con.execute("CREATE TABLE empty_t (name VARCHAR(10) NOT NULL)")
-    con.execute("CREATE TABLE full_t (name VARCHAR(10) NOT NULL)")
-    con.execute("INSERT INTO full_t VALUES ('ada'), ('bea')")
-    con.execute("ALTER TABLE empty_t ALTER name SET DATA TYPE VARCHAR(40)")
-    con.execute("ALTER TABLE full_t ALTER name SET DATA TYPE VARCHAR(40)")
+    from connectors.column_widen_restore import restate_column_ddl
+    from services.schema_drift import widened_dest_carrier
 
-    class _Conn:
-        def execute(self, stmt):
-            con.execute(str(stmt))
+    dialect = sa.create_engine("mssql+pyodbc://").dialect
+    compiled = str(NVARCHAR(400, collation="Latin1_General_CI_AS").compile(dialect=dialect))
+    assert compiled.upper().count("COLLATE") == 1
+    proposed = widened_dest_carrier(compiled, "VARCHAR(800)")
+    sql = restate_column_ddl(
+        "sqlserver",
+        "dbo",
+        "orders",
+        "name",
+        proposed,
+        nullable=False,
+        collation="Latin1_General_CI_AS",
+        existing_type=compiled,
+    )
+    assert sql.upper().count("COLLATE") == 1, sql
+    assert "NOT NULL" in sql.upper()
+    assert "NVARCHAR(800)" in sql.upper()
 
-        def commit(self):
+
+def test_mysql_restore_keeps_default_on_update_and_auto_increment() -> None:
+    from connectors.schema_drift import _note_native_restore
+
+    class _Cursor:
+        def execute(self, _sql, _params=None):
             return None
 
-        def __enter__(self):
-            return self
+        def fetchall(self):
+            return [(
+                "NO",
+                "CURRENT_TIMESTAMP",
+                "DEFAULT_GENERATED on update CURRENT_TIMESTAMP auto_increment",
+                "utf8mb4",
+                "utf8mb4_bin",
+            )]
 
-        def __exit__(self, *args):
-            return False
+    sql = _note_native_restore(_Cursor(), "mysql", "app", "t", "note", "VARCHAR(40)")
+    upper = sql.upper()
+    assert "NOT NULL" in upper
+    assert "COLLATE UTF8MB4_BIN" in upper
+    assert "DEFAULT CURRENT_TIMESTAMP" in upper
+    assert "ON UPDATE CURRENT_TIMESTAMP" in upper
+    assert "AUTO_INCREMENT" in upper
 
-    class _Engine:
-        def connect(self):
-            return _Conn()
 
-    apply_column_restores(
-        _Engine(),
-        [
-            "ALTER TABLE empty_t ALTER name SET DATA TYPE VARCHAR(10)",
-            "ALTER TABLE full_t ALTER name SET DATA TYPE VARCHAR(10)",
-        ],
+def test_failed_restore_uses_a_live_connection_and_chains_the_write_error() -> None:
+    from connectors.column_widen_restore import (
+        WidenRestoreError,
+        _RESTORE_BUCKET,
+        settle_widen_restore,
     )
-    empty = con.execute("SELECT COUNT(*) FROM empty_t").fetchone()[0]
-    names = [row[0] for row in con.execute("SELECT name FROM full_t ORDER BY name").fetchall()]
-    types = {
-        row[0]: row[1]
-        for row in con.execute(
-            "SELECT table_name, data_type FROM information_schema.columns "
-            "WHERE column_name = 'name'"
-        ).fetchall()
-    }
-    assert empty == 0
-    assert names == ["ada", "bea"]
-    assert "40" not in str(types["empty_t"])
-    assert "40" not in str(types["full_t"])
+
+    executed: list[str] = []
+
+    class _Cursor:
+        def execute(self, stmt):
+            executed.append(str(stmt))
+
+        def close(self):
+            return None
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            executed.append("COMMIT")
+
+    token = _RESTORE_BUCKET.set(["ALTER TABLE t ALTER COLUMN c TYPE varchar(10)"])
+    try:
+        original = RuntimeError("write failed")
+        with pytest.raises(WidenRestoreError) as raised:
+            class _Bad(_Conn):
+                def cursor(self):
+                    raise RuntimeError("restore refused")
+
+            settle_widen_restore(_Bad(), rows_written=0, failed=True, original=original)
+        assert raised.value.__cause__ is original
+        kept: list[str] = []
+        token2 = _RESTORE_BUCKET.set(["ALTER TABLE t ALTER COLUMN c TYPE varchar(40)"])
+        try:
+            settle_widen_restore(_Conn(), rows_written=3, failed=True, original=original)
+        finally:
+            _RESTORE_BUCKET.reset(token2)
+        assert executed == []
+    finally:
+        _RESTORE_BUCKET.reset(token)
 
 
 def test_failed_restore_is_audited_and_raises(monkeypatch) -> None:

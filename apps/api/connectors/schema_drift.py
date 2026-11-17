@@ -1290,16 +1290,19 @@ def _note_native_restore(
     name = (dialect or "").lower()
     try:
         if name in {"mysql", "mariadb"}:
+            # MODIFY replaces the whole column. The information_schema clause
+            # restates nullability, collation, DEFAULT, ON UPDATE and
+            # AUTO_INCREMENT. Parsing it back down to NULL and COLLATE dropped
+            # the rest (D368).
+            base = _build_widen_ddl(
+                name, schema, table_name, column, existing_type, existing_type
+            )
             clause = _mysql_preserved_column_clause(
                 cursor, schema, table_name, column, existing_type
             )
-            upper = clause.upper()
-            if "NOT NULL" in upper:
-                nullable = False
-            elif re.search(r"\bNULL\b", upper):
-                nullable = True
-            found = re.search(r"\bCOLLATE\s+([A-Za-z0-9_]+)", clause, flags=re.I)
-            collation = found.group(1) if found else ""
+            sql = base + clause
+            note_restore(sql)
+            return sql
         elif name in {"postgresql", "postgres"}:
             cursor.execute(
                 """SELECT is_nullable, collation_name

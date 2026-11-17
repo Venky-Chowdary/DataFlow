@@ -92,3 +92,18 @@ def test_csv_append_matches_the_existing_line_ending() -> None:
     incoming = b"id,note\r\n2,b\r\n"
     merged = _delimited_concat(existing, incoming, fmt="csv")
     assert merged == b"id,note\n1,a\n2,b\n"
+
+
+def test_quoted_newlines_survive_record_terminator_rewrite() -> None:
+    from services.csv_codec import rewrite_record_terminators
+    from connectors.object_store_incremental import _delimited_concat
+
+    copied = b'id,note\n1,"a\nb"\n2,"c\r\nd"\n'
+    assert rewrite_record_terminators(copied, b"\r\n") == (
+        b'id,note\r\n1,"a\nb"\r\n2,"c\r\nd"\r\n'
+    )
+    existing = b'id,note\r\n1,"a\nb"\r\n'
+    incoming = b'id,note\n2,"c\r\nd"\n'
+    assert _delimited_concat(existing, incoming, fmt="csv") == (
+        b'id,note\r\n1,"a\nb"\r\n2,"c\r\nd"\r\n'
+    )

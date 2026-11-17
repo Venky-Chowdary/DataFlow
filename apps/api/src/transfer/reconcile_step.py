@@ -266,6 +266,12 @@ def stamp_run_proof_context(dest_summary: dict[str, Any] | None, request: Any) -
     filt = getattr(request, "source_filter", None)
     if filt:
         dest_summary["source_filter"] = filt
+        from services.row_filter import null_dropping_warnings
+
+        for warning in null_dropping_warnings(filt):
+            warnings = dest_summary.setdefault("warnings", [])
+            if isinstance(warnings, list) and warning not in warnings:
+                warnings.append(warning)
 
 
 def _truncate_instant_to_milliseconds(value: Any) -> Any:
@@ -1217,7 +1223,7 @@ def _transform_applied_proof_impl(
         except Exception:
             return str(v)
 
-    def _val_norm(v: Any, ddl: str = "") -> str:
+    def _val_norm(v: Any, ddl: str = "", column: str = "") -> str:
         # Type-driven canonicalization for VALUE compares (recipe output vs
         # destination read-back). Strings stay literal unless the column is
         # numeric-family — 'A ' vs 'A' and '01' vs '1' on a TEXT column are
@@ -1228,12 +1234,11 @@ def _transform_applied_proof_impl(
         if v is None:
             return _NULL_SENTINEL
         try:
-            # D325: a risk-accepted BSON date keeps milliseconds. Compare both
-            # sides at that carrier so a correct microsecond source is not
-            # "drift no recipe step explains".
-            if "mongo" in str(dest_db_type or "").lower() and re.search(
-                r"date|time|timestamp", str(ddl or ""), re.I
-            ):
+            # D325: truncate to BSON milliseconds only when the plan flagged
+            # this column's precision loss and a continue-policy contract
+            # accepted it. Truncating every Mongo date would hide a real
+            # microsecond mismatch the operator did not accept.
+            if column and _bson_ms_accepted(column):
                 v = _truncate_instant_to_milliseconds(v)
             # Oracle VARCHAR2 stores '' AS NULL natively — '' vs NULL
             # can never be told apart on read-back there, so they are
@@ -1304,7 +1309,27 @@ def _transform_applied_proof_impl(
 
     mappings = mappings or []
     dest_db_type = resolve_driver_type(endpoint.format or "")
+    accepted_bson_ms: set[str] = set()
+
+    def _bson_ms_accepted(column: str) -> bool:
+        if accepted_bson_ms:
+            return column in accepted_bson_ms
+        return False
     dest_types = _dest_types_from_mappings(mappings)
+    if "mongo" in str(dest_db_type or "").lower():
+        from services.millisecond_fit import narrowed_columns
+
+        accepted_bson_ms.update(
+            col.target
+            for col in narrowed_columns(
+                mappings,
+                column_types=source_schema,
+                dest_types=dest_types,
+                dest_db=dest_db_type,
+                source_db=str(getattr(source_endpoint, "format", "") or ""),
+            )
+            if col.acknowledged
+        )
     scd2_opts = dest_summary.get("scd2_opts")
     sync_mode = str(
         dest_summary.get("sync_mode")
@@ -1381,7 +1406,7 @@ def _transform_applied_proof_impl(
     def _fph(row: dict[str, Any]) -> str:
         return hashlib.sha256(
             "\x1f".join(
-                _val_norm(row.get(c), _val_ddl(c)) for c in digest_cols
+                _val_norm(row.get(c), _val_ddl(c), c) for c in digest_cols
             ).encode()
         ).hexdigest()[:16]
 
@@ -1626,7 +1651,7 @@ def _transform_applied_proof_impl(
                             _fph(orow),
                             json.dumps(
                                 {
-                                    c: _val_norm(orow.get(c), _val_ddl(c))
+                                    c: _val_norm(orow.get(c), _val_ddl(c), c)
                                     for c in digest_cols
                                 }
                             ),
@@ -1640,7 +1665,7 @@ def _transform_applied_proof_impl(
                     )
                 for sc, tc in col_pairs:
                     _cv_buf.append(
-                        (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
+                        (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
                     )
                     if origin[i] is not None:
                         # The SQL oracle recomputes the recipe stage only.
@@ -1648,7 +1673,7 @@ def _transform_applied_proof_impl(
                             (
                                 tc,
                                 _vh(_key_norm(origin[i].get(sc))),
-                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc))),
+                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc), tc)),
                             )
                         )
                 yield orow
@@ -1671,7 +1696,7 @@ def _transform_applied_proof_impl(
                         _fph(orow),
                         json.dumps(
                             {
-                                c: _val_norm(orow.get(c), _val_ddl(c))
+                                c: _val_norm(orow.get(c), _val_ddl(c), c)
                                 for c in digest_cols
                             }
                         ),
@@ -1685,7 +1710,7 @@ def _transform_applied_proof_impl(
                 )
             for _sc, tc in col_pairs:
                 _cv_buf.append(
-                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
+                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
                 )
             yield orow
         _flush_ms()
@@ -1883,7 +1908,7 @@ def _transform_applied_proof_impl(
                                             _key_norm(r.get(f"__raw_{c}"))
                                         ),
                                         _vh(
-                                            _val_norm(r.get(f"__o_{c}"), _val_ddl(c))
+                                            _val_norm(r.get(f"__o_{c}"), _val_ddl(c), c)
                                         ),
                                     )
                                 )
@@ -2003,7 +2028,7 @@ def _transform_applied_proof_impl(
                         _fpm_buf.append(("d", _fph(row)))
                         for _sc, tc in col_pairs:
                             _cv_buf.append(
-                                (tc, "d", _vh(_val_norm(row.get(tc), _val_ddl(tc))))
+                                (tc, "d", _vh(_val_norm(row.get(tc), _val_ddl(tc), tc)))
                             )
                         if keyed:
                             _destk_buf.append(
@@ -2015,7 +2040,7 @@ def _transform_applied_proof_impl(
                                     _fph(row),
                                     json.dumps(
                                         {
-                                            c: _val_norm(row.get(c), _val_ddl(c))
+                                            c: _val_norm(row.get(c), _val_ddl(c), c)
                                             for c in digest_cols
                                         }
                                     ),
@@ -2506,7 +2531,7 @@ def _transform_applied_proof_impl(
                                     (
                                         tc,
                                         "d",
-                                        _vh(_val_norm(row.get(tc), _val_ddl(tc))),
+                                        _vh(_val_norm(row.get(tc), _val_ddl(tc), tc)),
                                     )
                                 )
                             if keyed:
@@ -2519,7 +2544,7 @@ def _transform_applied_proof_impl(
                                         _fph(row),
                                         json.dumps(
                                             {
-                                                c: _val_norm(row.get(c), _val_ddl(c))
+                                                c: _val_norm(row.get(c), _val_ddl(c), c)
                                                 for c in digest_cols
                                             }
                                         ),
@@ -2566,7 +2591,7 @@ def _transform_applied_proof_impl(
                     # written column that no recipe step touches must name
                     # itself, not blame the recipe's declared columns.
                     for _tc in digest_cols:
-                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc)) != _evals.get(_tc):
+                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc), _tc) != _evals.get(_tc):
                             culprit_cols_p.add(_tc)
             culprits = (
                 sorted(culprit_cols_p or declared_tcols)

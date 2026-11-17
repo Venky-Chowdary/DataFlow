@@ -1325,6 +1325,7 @@ def run_mapping_pipeline(
     )
     # The model can propose a non-_id source onto _id. Rule 4 blocks that
     # here, and the constraint pass below blocks it again (D369).
+    from services.mapping_engine_contract import is_operator_locked
     from services.semantic_mapper import mapping_violates_key_rule
 
     _target_schema_by_name = {
@@ -1337,6 +1338,7 @@ def run_mapping_pipeline(
             str(m.get("source") or ""),
             str(m.get("target") or ""),
             _target_schema_by_name.get(str(m.get("target") or "")),
+            operator_locked=is_operator_locked(m),
         )
     ]
 

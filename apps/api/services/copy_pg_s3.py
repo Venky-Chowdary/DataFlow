@@ -76,12 +76,13 @@ def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:
 
 
 def _rewrite_copy_newlines_as_crlf(path: str) -> None:
-    """PostgreSQL COPY on Linux writes LF. The product export uses CRLF."""
+    """PostgreSQL COPY on Linux writes LF record breaks. Quoted newlines stay."""
+    from services.csv_codec import rewrite_record_terminators
+
     with open(path, "rb") as handle:
         body = handle.read()
-    body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     with open(path, "wb") as handle:
-        handle.write(body)
+        handle.write(rewrite_record_terminators(body, b"\r\n"))
 
 
 def copy_postgres_to_s3(

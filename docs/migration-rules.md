@@ -59,7 +59,7 @@ SQL uses three-valued logic. `NULL <op> x` is UNKNOWN, so the row does not match
 
 Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`.
 
-A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL.
+A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL. PostgreSQL treats NaN as equal to NaN and greater than every non-NaN number; a filter uses that order, not a text compare of the word nan.
 
 MongoDB `$ne` and `$nin` match documents where the field is null or missing ([$ne](https://www.mongodb.com/docs/manual/reference/operator/query/ne/)). A not-equal or not-in filter therefore adds an existence and non-null guard, and the plan warns that NULL rows are dropped. That matches SQL, where `NULL <> x` is unknown.
 

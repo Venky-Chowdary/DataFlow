@@ -1627,6 +1627,11 @@ def update_schedule(
     sched, err = _schedule("update_schedule", resolver, schedule_id, name)
     if err:
         return err
+    from services.reversibility_schedule import schedule_reversibility_block
+
+    reversible = schedule_reversibility_block(sched)
+    if reversible:
+        return _tool_result("update_schedule", success=False, output=None, error=reversible)
     from .schedule_cadence import parse_cadence
 
     cadence_text = (cadence or "").strip()

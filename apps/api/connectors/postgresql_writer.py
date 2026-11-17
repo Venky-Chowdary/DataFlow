@@ -23,7 +23,11 @@ from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
 from connectors.pg_tx_guard import tolerated as pg_tolerated
-from connectors.column_widen_restore import bind_restore_cursor, writer_restore_guard
+from connectors.column_widen_restore import (
+    bind_restore_cursor,
+    settle_widen_restore,
+    writer_restore_guard,
+)
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -3195,6 +3199,10 @@ def write_mapped_rows(
             # path leaves a successful transaction open until the last batch.
             finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
+        if close_connection or child_flush_error:
+            settle_widen_restore(
+                conn, rows_written=written, failed=bool(child_flush_error)
+            )
         if close_connection:
             close_quietly(conn)
         if child_flush_error:
@@ -3262,6 +3270,7 @@ def write_mapped_rows(
         if isinstance(fid_report, dict):
             meta_out = dict(meta_out or {})
             meta_out["schema_fidelity"] = fid_report
+        settle_widen_restore(conn, rows_written=written, failed=False)
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -3290,6 +3299,9 @@ def write_mapped_rows(
             from connectors.write_resilience import finish_held_overwrite
 
             finish_held_overwrite(conn, success=False)
+        settle_widen_restore(
+            conn, rows_written=written, failed=True, original=exc
+        )
         if close_connection:
             close_quietly(conn)
         return WriteResult(

@@ -79,9 +79,25 @@ def test_float_nan_is_not_null() -> None:
     assert {r["id"] for r in kept} == {1}
 
 
+def test_nan_sorts_above_numbers_like_postgres() -> None:
+    rows = [{"id": 1, "qty": float("nan")}, {"id": 2, "qty": 5}, {"id": 3, "qty": 15}]
+    below = apply_row_filter(rows, {"column": "qty", "operator": "lt", "value": 10})
+    assert {r["id"] for r in below} == {2}
+    above = apply_row_filter(rows, {"column": "qty", "operator": "gt", "value": 10})
+    assert {r["id"] for r in above} == {1, 3}
+    same = apply_row_filter(rows, {"column": "qty", "operator": "eq", "value": float("nan")})
+    assert {r["id"] for r in same} == {1}
+
+
 def test_ne_filter_warns_that_null_rows_are_dropped() -> None:
     from services.row_filter import null_dropping_warnings
+    from src.transfer.reconcile_step import stamp_run_proof_context
 
     warnings = null_dropping_warnings({"column": "qty", "op": "ne", "value": 0})
     assert warnings and "NULL" in warnings[0]
     assert null_dropping_warnings({"column": "qty", "op": "eq", "value": 0}) == []
+    summary: dict = {}
+    stamp_run_proof_context(
+        summary, type("Req", (), {"source_filter": {"column": "qty", "op": "ne", "value": 0}})()
+    )
+    assert summary["warnings"] and "NULL" in summary["warnings"][0]

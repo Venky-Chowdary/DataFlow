@@ -58,10 +58,10 @@ def note_restore(sql: str) -> None:
 
 
 def writer_restore_guard(fn):
-    """Replay captured restores when a writer finishes with no committed rows.
+    """Hold restore SQL for the writer. The writer settles it on a live connection.
 
-    A restore that fails raises :class:`WidenRestoreError` after the audit
-    record. The original write error is chained from it.
+    Replaying after the function returns uses a cursor the writer has already
+    closed, which hides the original error behind "Could not restore" (D368).
     """
     from functools import wraps
 
@@ -71,15 +71,7 @@ def writer_restore_guard(fn):
         token_bucket = _RESTORE_BUCKET.set(bucket)
         token_cursor = _RESTORE_CURSOR.set(None)
         try:
-            try:
-                result = fn(*args, **kwargs)
-            except Exception as exc:
-                _replay_writer_restores(bucket, exc)
-                raise
-            written = int(getattr(result, "rows_written", 0) or 0)
-            if bucket and written == 0 and getattr(result, "ok", True) is False:
-                _replay_writer_restores(bucket, None)
-            return result
+            return fn(*args, **kwargs)
         finally:
             _RESTORE_BUCKET.reset(token_bucket)
             _RESTORE_CURSOR.reset(token_cursor)
@@ -87,25 +79,61 @@ def writer_restore_guard(fn):
     return wrapped
 
 
-def _replay_writer_restores(statements: list[str], original: BaseException | None) -> None:
-    if not statements:
+def settle_widen_restore(
+    conn: Any,
+    *,
+    rows_written: int,
+    failed: bool,
+    original: BaseException | None = None,
+) -> None:
+    """Restore only when the failed run committed no rows.
+
+    A run that already committed wide values leaves the column widened and
+    records that. Narrowing it would truncate those rows on non-strict MySQL.
+    The restore uses ``conn``, which the caller still has open. A restore
+    failure raises :class:`WidenRestoreError` chained from ``original``.
+    """
+    bucket = _RESTORE_BUCKET.get()
+    if not bucket:
         return
-    cursor = _RESTORE_CURSOR.get()
-    if cursor is None:
-        _fail_restore(statements, "no cursor was bound for the restore", original)
-    conn = getattr(cursor, "connection", None)
+    statements = list(bucket)
+    bucket.clear()
+    if not failed or int(rows_written or 0) > 0:
+        if int(rows_written or 0) > 0:
+            _audit_widen_kept(statements, int(rows_written))
+        return
+    if conn is None:
+        _fail_restore(statements, "no live connection for the restore", original)
     try:
-        if conn is not None:
-            conn.rollback()
-    except Exception:
-        logger.debug("restore rollback before compensating ALTER", exc_info=True)
-    try:
-        for stmt in statements:
-            cursor.execute(stmt)
-        if conn is not None:
+        cursor = conn.cursor()
+        try:
+            for stmt in statements:
+                cursor.execute(stmt)
             conn.commit()
+        finally:
+            cursor.close()
     except Exception as exc:
         _fail_restore(statements, exc, original)
+
+
+def _audit_widen_kept(statements: list[str], rows_written: int) -> None:
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="schema.widen_restore",
+            resource="destination_column",
+            actor="system",
+            level="warning",
+            outcome="kept",
+            reason_code="widen_kept_rows_committed",
+            details={
+                "rows_written": rows_written,
+                "statements": [str(s)[:300] for s in statements[:8]],
+            },
+        )
+    except Exception:
+        logger.exception("widen-kept audit record failed")
 
 
 def column_null_and_collation(existing: dict[str, Any]) -> tuple[bool | None, str]:
@@ -146,12 +174,16 @@ def restate_column_ddl(
     coll = collation if collation and _COLLATION_NAME.fullmatch(collation) else ""
     col_q = _quote_col(name, col)
     if name in {"sqlserver", "mssql"}:
+        # The compiled type already carries COLLATE (SQLAlchemy
+        # ``NVARCHAR(n, collation=...)``). Appending it again is
+        # ``COLLATE X COLLATE X``, which SQL Server rejects (D368).
         extra: list[str] = []
-        if coll:
+        if coll and not re.search(r"\bCOLLATE\b", ddl, re.I):
             extra.append(f"COLLATE {coll}")
-        if nullable is False:
+        upper = ddl.upper()
+        if nullable is False and "NOT NULL" not in upper:
             extra.append("NOT NULL")
-        elif nullable is True:
+        elif nullable is True and not re.search(r"\bNULL\b", upper):
             extra.append("NULL")
         return f"{ddl} {' '.join(extra)}".rstrip()
     if name in {"mysql", "mariadb"}:

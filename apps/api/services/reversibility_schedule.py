@@ -13,6 +13,32 @@ from typing import Any
 from services.reversibility import GATE_ID, analyze_table, build_report
 
 
+def schedule_reversibility_block(schedule: Any) -> str:
+    """g24 message for a schedule payload or stored schedule, or ``""``.
+
+    REST create, REST update, and the MCP cadence update all ask this, so a
+    lossy ``require_reversibility`` schedule is refused before it is saved
+    (D373). A schedule that does not require reversibility is left alone.
+    """
+    if isinstance(schedule, Mapping):
+        require = bool(schedule.get("require_reversibility"))
+        mappings = list(schedule.get("mappings") or [])
+        table = str(schedule.get("dest_table") or "")
+        dest_db = str(schedule.get("dest_db_type") or schedule.get("destination_db_type") or "")
+        source_db = str(schedule.get("source_db_type") or "")
+    else:
+        require = bool(getattr(schedule, "require_reversibility", False))
+        mappings = list(getattr(schedule, "mappings", None) or [])
+        table = str(getattr(schedule, "dest_table", "") or "")
+        dest_db = str(getattr(schedule, "dest_db_type", "") or "")
+        source_db = str(getattr(schedule, "source_db_type", "") or "")
+    if not require:
+        return ""
+    return reversibility_refusal(
+        mappings, table=table or "destination", dest_db=dest_db, source_db=source_db
+    )
+
+
 def reversibility_refusal(
     mappings: Sequence[Mapping[str, Any]],
     *,

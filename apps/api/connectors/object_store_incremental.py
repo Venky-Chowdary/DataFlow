@@ -245,21 +245,36 @@ def _tsv_quotes_are_product(body: bytes) -> bool:
 
 
 def _uniform_record_terminator(body: bytes) -> bytes | None:
-    """``b"\\r\\n"`` or ``b"\\n"`` when every break agrees. Mixed is ``None``."""
+    """Record break outside quotes, or ``None`` when those breaks disagree.
+
+    A quoted LF or CRLF is data, not a record break (D376).
+    """
     if not body:
         return b"\r\n"
-    crlf = body.count(b"\r\n")
-    bare_lf = 0
+    crlf = bare_lf = bare_cr = 0
+    quoted = False
     index = 0
-    while True:
-        found = body.find(b"\n", index)
-        if found < 0:
-            break
-        if found == 0 or body[found - 1 : found] != b"\r":
-            bare_lf += 1
-        index = found + 1
-    bare_cr = body.count(b"\r") - crlf
-    if bare_cr > 0 or (crlf and bare_lf):
+    size = len(body)
+    while index < size:
+        byte = body[index]
+        if byte == 0x22:
+            if quoted and index + 1 < size and body[index + 1] == 0x22:
+                index += 2
+                continue
+            quoted = not quoted
+            index += 1
+            continue
+        if not quoted and byte in (0x0A, 0x0D):
+            if byte == 0x0D and index + 1 < size and body[index + 1] == 0x0A:
+                crlf += 1
+                index += 2
+                continue
+            if byte == 0x0A:
+                bare_lf += 1
+            else:
+                bare_cr += 1
+        index += 1
+    if bare_cr or (crlf and bare_lf):
         return None
     if crlf:
         return b"\r\n"
@@ -269,10 +284,9 @@ def _uniform_record_terminator(body: bytes) -> bytes | None:
 
 
 def _retarget_newlines(body: bytes, terminator: bytes) -> bytes:
-    flattened = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    if terminator == b"\n":
-        return flattened
-    return flattened.replace(b"\n", b"\r\n")
+    from services.csv_codec import rewrite_record_terminators
+
+    return rewrite_record_terminators(body, terminator)
 
 
 def _delimited_concat(existing: bytes, new: bytes, *, fmt: str = "") -> bytes | None:

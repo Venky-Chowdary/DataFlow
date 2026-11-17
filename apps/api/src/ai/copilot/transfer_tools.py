@@ -1483,6 +1483,8 @@ def plan_transfer(
     if contract:
         preflight = attach_contract_to_preflight(preflight, contract)
 
+    from services.row_filter import null_dropping_warnings
+
     return _tool_result(
         tool,
         success=True,
@@ -1577,6 +1579,7 @@ def plan_transfer(
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
+            "warnings": null_dropping_warnings(row_rules["source_filter"]),
             "stream_contracts": row_rules["stream_contracts"],
             "data_rules": _data_rules_preview(row_rules, applied_rules, cadence),
             "mapped_count": len(mappings),

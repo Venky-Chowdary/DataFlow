@@ -28,6 +28,39 @@ from typing import IO, Any
 _QUOTE = '"'
 LEGACY_CSV_NULL = "\\N"
 
+
+def rewrite_record_terminators(body: bytes, terminator: bytes = b"\r\n") -> bytes:
+    """Replace record breaks that sit outside quotes. Quoted newlines stay.
+
+    A quoted field may hold LF or CRLF as data (RFC 4180). Rewriting every
+    ``\\n`` turns ``"a\\nb"`` into ``"a\\r\\nb"`` and corrupts the value (D376).
+    """
+    out = bytearray()
+    quoted = False
+    index = 0
+    size = len(body)
+    while index < size:
+        byte = body[index]
+        if byte == 0x22:
+            if quoted and index + 1 < size and body[index + 1] == 0x22:
+                out += b'""'
+                index += 2
+                continue
+            quoted = not quoted
+            out.append(byte)
+            index += 1
+            continue
+        if not quoted and byte in (0x0A, 0x0D):
+            if byte == 0x0D and index + 1 < size and body[index + 1] == 0x0A:
+                index += 2
+            else:
+                index += 1
+            out += terminator
+            continue
+        out.append(byte)
+        index += 1
+    return bytes(out)
+
 # Internal marker the formatter turns into an empty unquoted cell while a real
 # empty string stays quoted ``""``. It is never written to the file.
 _CSV_NULL = "\x00"

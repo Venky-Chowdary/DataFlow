@@ -186,6 +186,42 @@ def _is_null(value: Any, *, engine: str | None = None) -> bool:
     return False
 
 
+def _is_numeric_nan(value: Any) -> bool:
+    if isinstance(value, float):
+        return value != value
+    try:
+        from decimal import Decimal
+
+        if isinstance(value, Decimal):
+            return value.is_nan()
+    except Exception:
+        return False
+    return str(value).strip().lower() == "nan"
+
+
+def _compare_nan(row_value: Any, filter_value: Any, op: str) -> bool:
+    """PostgreSQL float ordering: NaN = NaN, and NaN is greater than every number."""
+    row_nan = _is_numeric_nan(row_value)
+    filt_nan = _is_numeric_nan(filter_value)
+    if op in {"in", "not_in"}:
+        allowed = filter_value if isinstance(filter_value, (list, tuple, set)) else [filter_value]
+        matched = any(_is_numeric_nan(item) for item in allowed) if row_nan else False
+        return matched if op == "in" else not matched
+    if op == "eq":
+        return row_nan and filt_nan
+    if op == "ne":
+        return not (row_nan and filt_nan)
+    if op == "lt":
+        return (not row_nan) and filt_nan
+    if op == "lte":
+        return filt_nan
+    if op == "gt":
+        return row_nan and not filt_nan
+    if op == "gte":
+        return row_nan
+    return False
+
+
 def _cell_text(value: Any) -> str:
     """One filter token. Reader-null / blank become ``""`` (same as None).
 
@@ -215,6 +251,11 @@ def _compare_values(
     # is part of the predicate (D365).
     if _is_null(rv, engine=engine):
         return False
+
+    # PostgreSQL numeric NaN is not NULL. It equals NaN and sorts above every
+    # non-NaN number (D365). A text compare of "nan" against "10" does not.
+    if _is_numeric_nan(rv) or _is_numeric_nan(fv):
+        return _compare_nan(rv, fv, op)
 
     if op in {"in", "not_in"}:
         allowed = fv if isinstance(fv, (list, tuple, set)) else [fv]

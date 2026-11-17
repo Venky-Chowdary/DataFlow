@@ -2819,6 +2819,10 @@ def run_file_preflight(
     )
     if _pii_warnings:
         out.setdefault("warnings", []).extend(_pii_warnings)
+    from services.row_filter import null_dropping_warnings
+
+    for _null_warning in null_dropping_warnings(source_filter):
+        out.setdefault("warnings", []).append(_null_warning)
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(
