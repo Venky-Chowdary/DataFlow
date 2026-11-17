@@ -242,14 +242,22 @@ def describe_target(conn: Any) -> str:
     cfg = conn.get("config") if isinstance(conn.get("config"), dict) else {}
     host = str(conn.get("host") or cfg.get("host") or "").strip()
     port = conn.get("port") or cfg.get("port") or ""
-    if not host:
-        raw = str(
-            conn.get("connection_string") or cfg.get("connection_string") or ""
-        ).strip()
-        if raw:
-            parsed = urlparse(raw)
-            host = parsed.hostname or ""
-            port = port or parsed.port or ""
+    raw = str(
+        conn.get("connection_string") or cfg.get("connection_string") or ""
+    ).strip()
+    if raw:
+        parsed = urlparse(raw)
+        # A connection string names the endpoint that is dialled. The form
+        # port is often the driver default (MongoDB 27017) while the URI
+        # uses the tunnel port (D309).
+        if parsed.hostname and (not host or host == parsed.hostname):
+            host = parsed.hostname
+            if parsed.port:
+                port = parsed.port
+    if not host and raw:
+        parsed = urlparse(raw)
+        host = parsed.hostname or ""
+        port = port or parsed.port or ""
     if not host:
         # D187: a Snowflake connector may carry only its account (top level or
         # under ``extra``). Without it the destination dropped out of a

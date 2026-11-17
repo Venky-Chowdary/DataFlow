@@ -242,42 +242,107 @@ def get_connection(
         kwargs["write_timeout"] = min(kwargs["write_timeout"], bound)
     from services.egress_guard import assert_connector_dial_allowed
 
-    assert_connector_dial_allowed(ep["host"], connection_string)
+    def _open() -> Any:
+        assert_connector_dial_allowed(ep["host"], connection_string)
+        try:
+            opened = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"], local_infile_ok=True)
+        except Exception as exc:
+            hint = private_cloud_host_hint(ep["host"], connection_string)
+            if hint:
+                raise RuntimeError(f"{exc}{hint}") from exc
+            raise
+
+        # TCP keepalive so public proxies do not drop idle bulk-write sockets.
+        try:
+            import socket
+
+            sock = getattr(opened, "_sock", None) or getattr(opened, "socket", None)
+            if sock is not None:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        from connectors.write_resilience import apply_mysql_session_guards
+
+        # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
+        # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
+        require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
+        apply_mysql_session_guards(
+            opened,
+            lock_wait_seconds=lock_wait_s,
+            require_strict_sql_mode=require_strict,
+        )
+        return opened
+
+    from services.endpoint_session import borrow, in_scope
+
+    # Preflight used to open a fresh TLS session for every catalog read (D308).
+    # Inside a tool-call scope, introspect and probe share one login.
+    if in_scope("mysql") and purpose_l in {"introspect", "probe"}:
+        key = (
+            kwargs["host"],
+            kwargs["port"],
+            kwargs["user"],
+            kwargs["database"] or "",
+            purpose_l,
+            bool(ssl),
+        )
+        shared, release = borrow(
+            "mysql",
+            key,
+            _open,
+            alive=_mysql_session_alive,
+            reset=_mysql_session_reset,
+        )
+        if release is not None:
+            return _MysqlHandback(shared, release)
+        return shared
+    return _open()
+
+
+class _MysqlHandback:
+    """A borrowed introspect session. ``close`` returns it to the scope."""
+
+    def __init__(self, conn: Any, release: Any) -> None:
+        self._conn = conn
+        self._release = release
+        self._done = False
+
+    def close(self) -> None:
+        if not self._done:
+            self._done = True
+            self._release()
+
+    def __enter__(self) -> "_MysqlHandback":
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        self.close()
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def _mysql_session_alive(conn: Any) -> bool:
     try:
-        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"], local_infile_ok=True)
-    except Exception as exc:
-        hint = private_cloud_host_hint(ep["host"], connection_string)
-        if hint:
-            raise RuntimeError(f"{exc}{hint}") from exc
-        raise
+        conn.ping(reconnect=False)
+        return True
+    except Exception:
+        return False
 
-    # TCP keepalive so public proxies do not drop idle bulk-write sockets.
+
+def _mysql_session_reset(conn: Any) -> None:
     try:
-        import socket
-
-        sock = getattr(conn, "_sock", None) or getattr(conn, "socket", None)
-        if sock is not None:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            if hasattr(socket, "TCP_KEEPIDLE"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-            if hasattr(socket, "TCP_KEEPINTVL"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-            if hasattr(socket, "TCP_KEEPCNT"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
-    except Exception as exc:
-        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-
-    from connectors.write_resilience import apply_mysql_session_guards
-
-    # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
-    # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
-    require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
-    apply_mysql_session_guards(
-        conn,
-        lock_wait_seconds=lock_wait_s,
-        require_strict_sql_mode=require_strict,
-    )
-    return conn
+        conn.rollback()
+    except Exception:
+        return None
 
 
 def enable_autocommit(conn: Any) -> None:

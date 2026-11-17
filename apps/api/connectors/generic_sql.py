@@ -2775,6 +2775,27 @@ def _is_not_found_error(exc: BaseException) -> bool:
     if names & {"NoSuchTableError", "UndefinedTable", "CatalogException"}:
         return True
     blob = " ".join(str(e) for e in chain)[:4000]
+    lowered = blob.lower()
+    # pymssql DB-Lib 20009: "Adaptive Server is unavailable or does not exist"
+    # is a dead host, not a missing table (D366). The same for a refused
+    # connect and a DNS failure. Those must not become "Table dbo.t does not exist".
+    if any(
+        marker in lowered
+        for marker in (
+            "unavailable or does not exist",
+            "unable to connect",
+            "db-lib error",
+            "adaptive server is unavailable",
+            "login timeout",
+            "timeout expired",
+            "could not connect",
+            "connection refused",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+        )
+    ):
+        return False
     return bool(
         re.search(
             r"does not exist|doesn't exist|invalid object name|"

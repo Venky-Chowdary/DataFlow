@@ -941,7 +941,9 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("network.unreachable", re.compile(r"network is unreachable|no route to host|host is unreachable|\[errno 11[03]\]", re.I)),
     ("network.connect_timeout", re.compile(
         r"timeout expired|connection timed out|timed out connecting|serverselectiontimeout|"
-        r"connect timeout|\[errno 110\]|login timeout expired", re.I)),
+        r"connect timeout|\[errno 110\]|login timeout expired|"
+        r"adaptive server is unavailable or does not exist|db-lib error message 20009|"
+        r"unable to connect: .*unavailable", re.I)),
     ("network.connection_lost", re.compile(
         r"server closed the connection unexpectedly|lost connection to mysql server during query|"
         r"mysql server has gone away|terminating connection due to administrator command|connection reset by peer", re.I)),

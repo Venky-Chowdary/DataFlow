@@ -120,11 +120,19 @@ PostgreSQL `COPY` CSV uses the same distinction: NULL is the null string and is 
 
 JSON and JSONL write an exact decimal as a string or as a decimal-aware JSON number, never via `float()`. A null column is the JSON `null`, including JSON/JSONB columns. The verifier fingerprints the source value, so a rounded float cannot agree with itself.
 
-## 10. Decimals never pass through float
+## 10. Bounded connect and a named cause
+
+Every driver call has a connect timeout and a read timeout in the driver (`connect_timeout`, `login_timeout`, `socketTimeoutMS`, Oracle `tcp_connect_timeout`). A host that accepts TCP and never speaks fails inside that budget and releases its worker. `/health` stays ready because the worker is free.
+
+One preflight reuses one session per endpoint. A second catalog read does not open a second TLS handshake.
+
+The error names the endpoint that was dialled. A MongoDB connection string's host and port win over the form default `27017`. SQL Server `Adaptive Server is unavailable or does not exist` and DB-Lib `20009` are "source unreachable", not a missing table. A black-holed handshake is a timeout, not "network unreachable" and not an authentication failure. A MongoDB seed that answers and then names unreachable replica-set members says so, and names `directConnection=true` as the remedy. Snowflake destination probes name the destination account, and they share one login for the plan.
+
+## 11. Decimals never pass through float
 
 `99999999999.999999` is `NUMERIC(18,6)`. IEEE-754 double cannot hold it; `float()` yields `100000000000.0`. PostgreSQL says `real` and `double precision` are inexact. Informatica documents the same loss when high precision is off. MongoDB metadata and JSONL use `Decimal128` or a decimal string. A float or a decimal measure is not a payment-card candidate: a PAN is a 13 to 19 digit integer with no decimal point.
 
-## 11. Honest trust and audit reporting
+## 12. Honest trust and audit reporting
 
 A check reports the rows this run wrote, after the same filter and the same transforms the writer applied, at the carrier precision the operator accepted (BSON milliseconds, `Decimal128`, `datetime2` to `timestamp(6)` once accepted). It does not compare a two-row delta to the whole table, a raw source value to a transformed destination, or a keyless append table as if it had one row per key.
 

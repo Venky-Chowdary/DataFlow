@@ -1632,6 +1632,11 @@ _UNREACHABLE_MARKERS = (
     "unreachable",
     "name or service not known",
     "no route to host",
+    "unavailable or does not exist",
+    "unable to connect",
+    "adaptive server is unavailable",
+    "db-lib error",
+    "getaddrinfo",
 )
 
 
