@@ -125,7 +125,7 @@ def test_percent_encoded_and_braced_path_drivers_are_refused():
     path = server_side_dsn_refusal("Driver={/tmp/x.so};Server=db;")
     assert "driver" in path
     nested = server_side_dsn_refusal({"extra": {"dsn": "DSN=Prod;UID=sa;"}})
-    assert "dsn" in nested
+    assert "dsn" in nested.lower()
     allowed = server_side_dsn_refusal(
         "Driver={ODBC Driver 18 for SQL Server};Server=db;"
     )

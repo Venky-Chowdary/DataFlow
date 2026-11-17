@@ -1284,26 +1284,68 @@ def _odbc_driver_is_path(value: str) -> bool:
     return token.casefold() not in _ODBC_DRIVER_ALLOWLIST
 
 
+# A field with one of these names is the option itself, not a password that
+# happens to contain the word. Values of password / pwd are never re-parsed.
+_REFUSED_FIELD_KEYS = frozenset({
+    "service", "servicefile", "passfile", "sslkey", "sslcert", "sslrootcert",
+    "sslcrl", "dsn", "filedsn",
+})
+_PASSWORD_FIELDS = frozenset({"password", "pwd"})
+
+
 def server_side_dsn_refusal(*texts: Any) -> str:
     """Refuse a connection string that would read a file on this server.
 
-    libpq ``service`` / ``servicefile`` / ``passfile`` / ``sslkey`` and ODBC
-    ``DSN`` / ``FILEDSN`` / ``Driver=<path>`` are opened by the driver before
-    authentication. The refusal happens at save and at test, with no dial.
+    Save uses the same readings as connect: libpq's own conninfo parser
+    (single quotes and backslash escapes, no double quotes) and the ODBC
+    driver manager (``}}`` is one ``}``). A password field is not a second
+    connection string.
     """
-    refused: list[str] = []
     for raw in texts:
-        refused.extend(_collect_dsn_keys(raw))
-    if not refused:
+        refusal = _refusal_like_connect(raw)
+        if refusal:
+            return refusal
+    return ""
+
+
+def _refusal_like_connect(raw: Any, key: str = "") -> str:
+    from connectors.host_config_selectors import mapping_refusal, text_refusal
+    from connectors.tls_file_options import text_refusal as file_refusal
+
+    flags = {"libpq": True, "odbc": True, "installed_only": False}
+    where = "in this connector's connection settings"
+    key_l = str(key or "").strip().lower()
+    if key_l in _PASSWORD_FIELDS:
         return ""
-    named = ", ".join(sorted(set(refused)))
-    return (
-        f"Connection string key {named} reads a file on this server "
-        "(a libpq service file, a password file, a certificate path, or an "
-        "ODBC DSN). Save the host, port, database and password on the connector "
-        "instead. An allowlisted driver name with no path separator, such as "
-        "{ODBC Driver 18 for SQL Server}, is allowed."
-    )
+    if key_l in _REFUSED_FIELD_KEYS:
+        return (
+            f"Connection string key {key_l} reads a file on this server "
+            "(a libpq service file, a password file, a certificate path, or an "
+            "ODBC DSN). Save the host, port, database and password on the connector "
+            "instead."
+        )
+    if isinstance(raw, dict):
+        refusal = mapping_refusal(raw, where, **flags)
+        if refusal:
+            return refusal
+        for child_key, value in raw.items():
+            found = _refusal_like_connect(value, str(child_key))
+            if found:
+                return found
+        return ""
+    if isinstance(raw, (list, tuple)):
+        for value in raw:
+            found = _refusal_like_connect(value, key_l)
+            if found:
+                return found
+        return ""
+    if isinstance(raw, str) and raw.strip():
+        return (
+            text_refusal(raw, where, **flags)
+            or file_refusal(raw, where)
+            or ""
+        )
+    return ""
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
