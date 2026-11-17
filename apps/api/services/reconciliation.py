@@ -4897,6 +4897,16 @@ def sample_compare_rows(
             tgt_col = str(m.get("target") or "")
             if not src_col or not tgt_col:
                 continue
+            # An omitted column is not written and is not compared (D369).
+            if m.get("intentional_omit") or m.get("intentionalOmit"):
+                continue
+            if str(m.get("transform") or "").strip().lower() in {
+                "omit",
+                "intentional_omit",
+                "drop",
+                "exclude",
+            }:
+                continue
             physical_tgt = tgt_keys.get(tgt_col.lower())
             if physical_tgt is None:
                 # Column absent from read-back sample — do not invent NULL mismatch.

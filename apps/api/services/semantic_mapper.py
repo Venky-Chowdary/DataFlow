@@ -115,6 +115,16 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def is_reserved_document_key(name: str) -> bool:
+    """MongoDB ``_id`` is the document key, not a fuzzy-match target.
+
+    A DATE, INT or TEXT column must not land on it. Only a source column that
+    is itself ``_id`` (or an explicit operator mapping, which does not go
+    through this scorer) may. Migration rule 4.
+    """
+    return _folded_ident(name).lower() == "_id"
+
+
 def _folded_ident(name: str) -> str:
     """Case- and separator-insensitive identifier (UserID ≡ userid ≡ user_id).
 
@@ -658,6 +668,8 @@ def _near_target_by_form(
     for tgt in target_columns:
         if tgt.lower() in used:
             continue
+        if is_reserved_document_key(tgt) and not name_identical(source, tgt):
+            continue
         if not _qualifiers_compatible(source, tgt):
             continue
         ratio = _similarity(src_form, _semantic_form(tgt))
@@ -835,6 +847,11 @@ def _score_pair(
     tgt_norm = _normalize(target)
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
+    if is_reserved_document_key(target) and not name_identical(source, target):
+        return 0.0, (
+            "reserved document key _id is mapped only from a source _id "
+            "or an explicit operator mapping"
+        )
 
     target_type = _scored_dest_type(source_type, target_type, dest_db)
 
