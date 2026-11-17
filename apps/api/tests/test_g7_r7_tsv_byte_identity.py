@@ -1,13 +1,7 @@
-"""G7 re-review B1: TSV quoting must not change bytes of ordinary values.
+"""TSV exports use the same quoting dialect as CSV (RFC 4180, D371).
 
-The H1 fix quoted any TSV cell containing ``"``, so a default ("off") TSV of
-``5" pipe`` became ``"5"" pipe"``. Loaders that read the TSV without quote
-handling (the S3→MySQL LOAD DATA fast path) then stored the literal quotes.
-
-Rule: a TSV cell is quoted only when it contains a tab, CR or LF, or starts
-with ``"``. A mid-field ``"`` stays raw — every product TSV reader takes it
-literally — so rows without those characters are byte-identical to the
-pre-H1 writer (aacea0e05).
+A cell that contains a tab, a quote, CR or LF is quoted and quotes are
+doubled. ``''`` is ``""``. NULL is an empty unquoted field. Rows end CRLF.
 """
 
 from __future__ import annotations
@@ -30,10 +24,10 @@ ORDINARY = [
     ["3", "café", "", "-5"],
 ]
 ORDINARY_TSV = (
-    "id\tnote\tpath\tquote\n"
-    '1\t5" pipe\ta\\b\tsay "hi"\n'
-    '2\t=1+1\ta,b\tx""y\n'
-    "3\tcafé\t\t-5\n"
+    "id\tnote\tpath\tquote\r\n"
+    '1\t"5"" pipe"\ta\\b\t"say ""hi"""\r\n'
+    '2\t=1+1\ta,b\t"x""""y"\r\n'
+    '3\tcafé\t""\t-5\r\n'
 ).encode("utf-8")
 COLS = ["id", "note", "path", "quote"]
 
@@ -83,14 +77,13 @@ def test_object_store_tsv_is_byte_identical_for_ordinary_values():
         dest_types={c: "TEXT" for c in COLS},
     )
     body = export.read_all()
-    # '' is the empty cell on the object-store wire as well.
-    assert body.replace(b"\r\n", b"\n") == ORDINARY_TSV
+    assert body == ORDINARY_TSV
 
 
 def test_s3_copy_row_formatter_keeps_mid_field_quotes_raw():
     from services.copy_s3_common import s3_format_delimited_row
 
-    assert s3_format_delimited_row(['5" pipe', "a\\b", "plain"], "\t") == '5" pipe\ta\\b\tplain'
+    assert s3_format_delimited_row(['5" pipe', "a\\b", "plain"], "\t") == '"5"" pipe"\ta\\b\tplain'
 
 
 @pytest.mark.parametrize(
@@ -101,7 +94,7 @@ def test_s3_copy_row_formatter_keeps_mid_field_quotes_raw():
         ("e\rf", '"e\rf"'),
         ('"lead', '"""lead"'),
         ('mid"tab\there', '"mid""tab\there"'),
-        ('5" pipe', '5" pipe'),
+        ('5" pipe', '"5"" pipe"'),
         ("plain", "plain"),
     ],
 )
@@ -126,7 +119,8 @@ def test_product_tsv_readers_read_the_exact_values(tmp_path, rows):
     from services.file_parser import FileParser
 
     text = _tsv_text(rows)
-    expected = [[c if c != "" else None for c in r] for r in rows]
+    # Quoted ``""`` reads back as an empty string. A SQL NULL is not in these rows.
+    expected = [list(r) for r in rows]
 
     parsed = list(csv.reader(io.StringIO(text, newline=""), delimiter="\t"))[1:]
     assert parsed == rows

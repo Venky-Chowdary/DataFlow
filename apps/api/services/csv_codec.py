@@ -163,26 +163,6 @@ def csv_quote_cell(cell: str, delimiter: str = ",") -> str:
     return cell
 
 
-def _tsv_quote_cell(cell: str) -> str:
-    """A TSV cell, quoted only when an unquoted cell would split or misparse.
-
-    A tab, CR or LF inside an unquoted TSV cell splits the cell or the row
-    (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula cell),
-    and a leading ``"`` opens a quoted field in every RFC-4180 reader. Those
-    cells are quoted (``"`` doubled). A mid-field ``"`` stays raw: the
-    product's TSV readers take it literally, and loaders that read TSV
-    without quote handling must keep receiving the same bytes (G7 re-review
-    B1). Every other cell — NULL and ``''`` included, both empty — is
-    byte-identical to the writer before H1.
-    """
-    if cell == _CSV_NULL:
-        return ""
-    if cell == LEGACY_CSV_NULL or cell.startswith('"') or any(c in cell for c in "\t\n\r"):
-        # A text ``\\N`` is quoted for the same reason as in csv_quote_cell.
-        return '"' + cell.replace('"', '""') + '"'
-    return cell
-
-
 def text_null_cell(cell: str, marker: str, quote: Callable[[str], str]) -> str:
     """One encoded cell in the MySQL/PostgreSQL text NULL convention (G7-F3, opt-in).
 
@@ -199,19 +179,21 @@ def text_null_cell(cell: str, marker: str, quote: Callable[[str], str]) -> str:
     return quote(cell)
 
 
-def format_csv_row(cells: list[str], delimiter: str = ",", *, null_marker: str = "") -> str:
-    """One encoded row as CSV text (no trailing newline).
+#: RFC 4180 record separator. CSV and TSV exports end every row with CRLF.
+RECORD_TERMINATOR = "\r\n"
 
-    A cell holding the row's own delimiter, a quote, CR or LF is quoted for
-    every delimiter (G7-F1: ``;``/``|`` rows used to quote only on ``,``).
-    ``null_marker`` (``\\N``) opts into :func:`text_null_cell`; empty keeps
-    the default codec (NULL and ``''`` as above).
+
+def format_csv_row(cells: list[str], delimiter: str = ",", *, null_marker: str = "") -> str:
+    """One encoded row as delimited text (no record separator).
+
+    CSV and TSV use one quoting rule (RFC 4180, migration rule 9): NULL is an
+    empty unquoted field, ``''`` is ``""``, and a field that contains the
+    delimiter, a quote, CR or LF is quoted with doubled quotes. ``null_marker``
+    (``\\N``) opts into :func:`text_null_cell`.
     """
-    if delimiter == "\t":
-        quote: Callable[[str], str] = _tsv_quote_cell
-    else:
-        def quote(cell: str) -> str:
-            return csv_quote_cell(cell, delimiter)
+
+    def quote(cell: str) -> str:
+        return csv_quote_cell(cell, delimiter)
     if null_marker:
         return delimiter.join(text_null_cell(c, null_marker, quote) for c in cells)
     return delimiter.join(quote(c) for c in cells)

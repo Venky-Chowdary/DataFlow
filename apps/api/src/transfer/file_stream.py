@@ -1047,7 +1047,12 @@ def combine_file_set(
                 counts.append(count)
         return f"{stem}.jsonl", counts
 
-    from services.csv_codec import csv_cell_encode, format_csv_row, iter_csv_records
+    from services.csv_codec import (
+        RECORD_TERMINATOR,
+        csv_cell_encode,
+        format_csv_row,
+        iter_csv_records,
+    )
 
     header: list[str] | None = None
     with open(target, "w", encoding="utf-8", newline="") as out:
@@ -1064,7 +1069,7 @@ def combine_file_set(
                 )
                 if header is None:
                     header = list(headers)
-                    out.write(format_csv_row(header) + "\n")
+                    out.write(format_csv_row(header) + RECORD_TERMINATOR)
                 elif list(headers) != header:
                     raise ValueError(
                         f"{name} has columns {list(headers)} but {first_name} has "
@@ -1073,7 +1078,7 @@ def combine_file_set(
                     )
                 count = 0
                 for row in rows:
-                    out.write(format_csv_row([csv_cell_encode(c) for c in row]) + "\n")
+                    out.write(format_csv_row([csv_cell_encode(c) for c in row]) + RECORD_TERMINATOR)
                     count += 1
                 counts.append(count)
     return f"{stem}.csv", counts
