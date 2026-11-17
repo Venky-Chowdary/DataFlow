@@ -74,8 +74,9 @@ def test_null_filters() -> None:
         {"id": "2", "note": "hello"},
         {"id": "3", "note": None},
     ]
-    assert {r["id"] for r in apply_row_filter(records, {"column": "note", "operator": "is_null"})} == {"1", "3"}
-    assert {r["id"] for r in apply_row_filter(records, {"column": "note", "operator": "is_not_null"})} == {"2"}
+    # '' is a value. Only SQL NULL matches is_null (D365).
+    assert {r["id"] for r in apply_row_filter(records, {"column": "note", "operator": "is_null"})} == {"3"}
+    assert {r["id"] for r in apply_row_filter(records, {"column": "note", "operator": "is_not_null"})} == {"1", "2"}
 
 
 def test_and_or_composition() -> None:

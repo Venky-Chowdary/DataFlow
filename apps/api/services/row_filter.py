@@ -147,18 +147,36 @@ def _to_scalar(value: Any) -> Any:
     return value
 
 
-def _is_null(value: Any) -> bool:
-    """Absence for source filters. Reader-wired SQL NULL is not a token.
+def empty_string_is_sql_null(engine: str | None) -> bool:
+    """Oracle stores a zero-length string as NULL. Every other engine does not.
 
-    ``None`` / ``""`` / NaN used to be the only blanks. After PostgreSQL /
-    SQLite extract emits ``SQL_NULL_SENTINEL``, ``is_null`` missed it and
-    ``is_not_null`` kept the sentinel as a present row.
+    Oracle SQL reference, Nulls: "The database currently treats a character
+    value with a length of zero as null." PostgreSQL, SQL Server, MySQL and
+    MariaDB store ``''`` as a value. A filter on those engines must not drop it.
     """
-    from services.value_serializer import is_null_evidence
+    return (engine or "").strip().lower() in {"oracle", "oracle_db"}
 
-    if is_null_evidence(value):
+
+def _is_null(value: Any, *, engine: str | None = None) -> bool:
+    """SQL NULL for a source filter. Empty text is a value, except on Oracle.
+
+    ``is_null_evidence`` is a type-evidence probe: it is true for blank and
+    whitespace text. That dropped a PostgreSQL ``''`` from ``is_not_null``
+    (D365). The reader predicate (``is_reader_null_cell``) matches ``None``,
+    the missing sentinel and the reader NULL wire, and leaves ``''``,
+    whitespace, ``'NULL'`` and ``'none'`` as values. Comparisons other than
+    ``is_null`` / ``is_not_null`` still do not match a NULL (SQL three-valued
+    logic, D364).
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if is_reader_null_cell(value):
         return True
-    return isinstance(value, float) and value != value
+    if isinstance(value, float) and value != value:
+        return True
+    if empty_string_is_sql_null(engine) and value == "":
+        return True
+    return False
 
 
 def _cell_text(value: Any) -> str:
@@ -181,6 +199,12 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
         return _is_null(rv)
     if op == "is_not_null":
         return not _is_null(rv)
+
+    # NULL <op> x is UNKNOWN, so the row is excluded. ``ne`` and ``not_in``
+    # do not match NULL either (SQL three-valued logic). ``''`` is a value
+    # and is compared below (D364).
+    if _is_null(rv):
+        return False
 
     if op in {"in", "not_in"}:
         allowed = fv if isinstance(fv, (list, tuple, set)) else [fv]

@@ -37,11 +37,14 @@ def test_auto_ambiguous_grouping_stays_text_not_invented_thousands():
 
 def test_is_null_matches_reader_wire():
     assert _is_null(None) is True
-    assert _is_null("") is True
-    assert _is_null("   ") is True
+    # Empty and whitespace are values on every engine except Oracle (D365).
+    assert _is_null("") is False
+    assert _is_null("   ") is False
     assert _is_null(SQL_NULL_SENTINEL) is True
     assert _is_null(float("nan")) is True
     assert _is_null("kept") is False
+    assert _is_null("NULL") is False
+    assert _is_null("none") is False
     assert _is_null("0") is False
     assert _is_null(0) is False
 
@@ -54,10 +57,10 @@ def test_is_null_filter_sees_reader_sentinel():
         {"id": "4", "note": SQL_NULL_SENTINEL},
     ]
     assert {r["id"] for r in apply_row_filter(rows, {"column": "note", "operator": "is_null"})} == {
-        "1",
         "3",
         "4",
     }
     assert {r["id"] for r in apply_row_filter(rows, {"column": "note", "operator": "is_not_null"})} == {
-        "2"
+        "1",
+        "2",
     }
