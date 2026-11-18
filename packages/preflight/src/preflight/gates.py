@@ -2431,6 +2431,45 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     dest_kind = (ctx.plan.destination.db_type or "").lower()
+    # Elasticsearch has no relational DDL, so the schemaless branch below does
+    # not run and a keyless overwrite used to pass with upsert_key ''. The
+    # writer then created an empty index and rejected every row (D301). The
+    # refusal is the writer's, before any index exists.
+    try:
+        from services.primary_key import (
+            _is_elasticsearch_kind,
+            elasticsearch_identity_refusal,
+        )
+
+        if _is_elasticsearch_kind(dest_kind):
+            estimate = int(getattr(ctx.plan.source, "row_count_estimate", 0) or 0)
+            es_refusal = elasticsearch_identity_refusal(
+                ctx.plan.mappings,
+                row_count=estimate or None,
+                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None),
+                stream_contracts=getattr(ctx.plan, "stream_contracts", None),
+                stream_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+            )
+            if es_refusal:
+                return _block(
+                    GateId.G6_TARGET_DDL,
+                    es_refusal,
+                    start,
+                    _scope(
+                        {
+                            "issues": [es_refusal],
+                            "rule_id": "g6_target_ddl.elasticsearch_identity",
+                            "remediation_kind": "set_primary_key",
+                            "upsert_key": "",
+                        },
+                        coverage="declared_ddl",
+                        note="Elasticsearch document identity required before index create",
+                    ),
+                )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Elasticsearch identity gate skipped: %s", exc, exc_info=exc
+        )
     schemaless = is_schemaless_dest(dest_kind)
     # Host apps must never fold fingerprint drift into DDL. Scrub defensively so
     # a stale process cannot block Redis/Mongo/Dynamo as "Target DDL incompatible".

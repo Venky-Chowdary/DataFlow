@@ -167,7 +167,7 @@ def test_every_cause_code_is_labelled_and_stable():
         "whitespace", "letter_case", "unicode_normalization", "numeric_scale", "float_precision",
         "timezone_shift", "null_vs_empty", "truncation", "encoding", "transform_applied",
         "quarantined", "accepted_by_operator", "concurrent_source_update",
-        "out_of_scope_population", "unexplained",
+        "out_of_scope_population", "merged_in_place", "unexplained",
     }
     assert set(pc.CAUSE_LABELS) == codes
     assert {r.__name__ for r in pc.VALUE_RULES} <= codes

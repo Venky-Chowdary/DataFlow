@@ -545,6 +545,21 @@ _COUNTED_ORIGINS = frozenset({"sample_compare", "ladder_l5", "key_census"})
 _KEYED_MODES = frozenset({"upsert", "incremental_deduped", "cdc", "scd2"})
 
 
+def _append_merged_in_place(job: dict[str, Any], mode: str) -> bool:
+    """True when incremental_append landed on a destination that enforces a key.
+
+    The writer updates those keys in place. The destination count does not grow
+    by the changed rows, and the previous version is not kept (D393). A keyless
+    destination is not this case: incremental_append stores a new version.
+    Only ``primary_key_columns`` on the destination summary counts. A contract
+    key the destination does not enforce is a versioned append.
+    """
+    if mode not in {"incremental_append", "incremental_append_only"}:
+        return False
+    dest = _dict(job.get("destination_summary"))
+    return any(str(c or "").strip() for c in dest.get("primary_key_columns") or [])
+
+
 def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observation]:
     """Rows the counts say are missing or extra beyond the keyed evidence.
 
@@ -558,7 +573,8 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
     they are not in the reader-count gap either.
     """
     from services.parity_classifier import (
-        OUT_OF_SCOPE_POPULATION, QUARANTINED, TRANSFORM_APPLIED, UNEXPLAINED, cause,
+        MERGED_IN_PLACE, OUT_OF_SCOPE_POPULATION, QUARANTINED, TRANSFORM_APPLIED,
+        UNEXPLAINED, cause,
     )
 
     recon = _dict(job.get("reconciliation"))
@@ -604,12 +620,18 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
     # An append or upsert into an occupied table writes only source rows: a
     # destination-only key it names was there before — outside this run.
     ev.outside_run = mode not in _OVERWRITE_MODES and before > 0
+    # incremental_append onto an enforced key updates the stored row. Counting
+    # "destination did not grow" as missing rows reported keys that were merged
+    # in place (D393: 31/31 present, empty keys_sample).
+    # A shrink is not an in-place merge: the keyed formula would hide it
+    # because the destination can still hold more rows than this run wrote.
+    merged_in_place = _append_merged_in_place(job, mode) and dst_n >= before
     shortfall = False
     if not ev.outside_run:
         # Overwrite or a first load: the destination is exactly this run's rows.
         unnamed = landed_expected - dst_n - keyed_missing + keyed_extra
         outside = 0
-    elif mode in _KEYED_MODES:
+    elif mode in _KEYED_MODES or merged_in_place:
         # A keyed write may update rows that were already there, so the overlap
         # is unknown — but every row this run wrote must be there now: holding
         # fewer than that is a certain shortfall.
@@ -652,6 +674,19 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
                 explained=True,
             ),
         ))
+    if merged_in_place and ev.outside_run:
+        grew = max(dst_n - before, 0)
+        updated = max(landed_expected - grew - keyed_missing, 0)
+        if updated:
+            out.append(Observation(
+                table=ev.name, kind="value", rows=updated, origin="row_count",
+                cause=cause(
+                    MERGED_IN_PLACE,
+                    "Updated keys were merged in place on the destination primary key. "
+                    "No previous version was kept.",
+                    explained=True,
+                ),
+            ))
     return out
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -48,15 +49,34 @@ logger = logging.getLogger(__name__)
 _field = writer_identifier("mongodb")
 
 
+def _mongo_protection_document(value: str) -> dict[str, str] | None:
+    """A redact token or hash_pii digest as a JSON document, or ``None``.
+
+    ``<redacted>`` and a 32-hex HMAC are what those transforms write. They are
+    not JSON text, so a JSON/VARIANT field refused every row (D397). Wrapping
+    the token keeps the clear source out of the document. Any other non-JSON
+    string still refuses — this is not a silent string invent.
+    """
+    if value == "<redacted>":
+        return {"_datawrap_redacted": value}
+    if re.fullmatch(r"[0-9a-f]{32}", value):
+        return {"_datawrap_hash": value}
+    return None
+
+
 def bind_mongo_json_document(value: Any) -> Any:
     """Parse a Mongo JSON/OBJECT/ARRAY/VARIANT cell.
 
     Numbers match ``json_loads_exact``. Invalid text refuses — never store the
-    raw string as a silent invent. Non-finite constants refuse.
+    raw string as a silent invent. Non-finite constants refuse. A redact token
+    or hash_pii digest is a JSON document of that token, not the clear value.
     """
     if isinstance(value, (dict, list)):
         return value
     if isinstance(value, str):
+        protected = _mongo_protection_document(value)
+        if protected is not None:
+            return protected
         def _reject(name: str) -> None:
             raise ValueError(f"non-finite JSON constant: {name}")
 

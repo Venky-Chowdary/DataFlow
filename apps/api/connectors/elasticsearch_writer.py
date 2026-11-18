@@ -433,6 +433,33 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True,
         identifier=writer_identifier("elasticsearch"),
     )
+    # Before any destination dial or index create. A keyless overwrite used to
+    # create an empty index and then reject every row (D301). A mapped ``id``
+    # is identity. A column named ``order_id`` is not, and is not invented.
+    from services.primary_key import (
+        elasticsearch_document_identity,
+        elasticsearch_identity_refusal,
+    )
+
+    identity_refusal = elasticsearch_identity_refusal(
+        list(mappings or []),
+        row_count=len(data_rows or []),
+        conflict_columns=[c for c in (conflict_columns or []) if c],
+        stream_contracts=_kwargs.get("stream_contracts"),
+        contract_primary_key=_kwargs.get("contract_primary_key"),
+        destination_extra=_kwargs.get("destination_extra"),
+        target_columns=list(headers or []),
+    )
+    if identity_refusal:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=index,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=identity_refusal,
+        )
     source_carriers = _mapped_source_carriers(
         list(mappings or []), column_types, target_cols, logical_types
     )
@@ -459,30 +486,16 @@ def write_mapped_rows(
     tgt_types: list[str] = []
 
     conflict = [c for c in (conflict_columns or []) if c]
-    # Map primary key, Advanced identity, and destination.extra.primary_key are
-    # one document id. A caller that already resolved the stream contract passes
-    # it as conflict_columns; flags and endpoint identity still count when that
-    # list is empty. Disagreement writes nothing. A lone ``*_id`` column is not
-    # a document id.
-    from services.primary_key import explicit_identity_target_columns
-
-    identity_cols, identity_err = explicit_identity_target_columns(
+    # Identity was refused above, before any client. Re-read the same columns
+    # so the bulk ``_id`` is that key. A lone ``*_id`` column is not a document id.
+    identity_cols, _identity_err = elasticsearch_document_identity(
         list(mappings or []),
         conflict_columns=conflict,
         stream_contracts=_kwargs.get("stream_contracts"),
         contract_primary_key=_kwargs.get("contract_primary_key"),
         destination_extra=_kwargs.get("destination_extra"),
+        target_columns=list(headers or []),
     )
-    if identity_err:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=index,
-            target_schema=host or "",
-            checksum="",
-            chunks_completed=0,
-            error=identity_err,
-        )
     if identity_cols:
         conflict = identity_cols
     mode = (write_mode or "insert").lower()
