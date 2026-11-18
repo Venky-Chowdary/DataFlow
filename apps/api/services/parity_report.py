@@ -707,6 +707,16 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
     noted = [t["_note"] for t in tables if t["status"] == "unverifiable" and t.get("_note")]
     if noted:
         return "unverifiable", " ".join(noted)
+    if (
+        tables
+        and all(t["check"] == "readback" for t in tables)
+        and not bad
+    ):
+        return "no_difference_found", (
+            "The destination read-back matched the rows this run wrote, including tombstones. "
+            "The compare is the write-pass fingerprint against the destination, "
+            "not an independent whole-table re-read."
+        )
     blind = [t["name"] for t in tables if t["status"] == "unverifiable"]
     if blind:
         return "unverifiable", (

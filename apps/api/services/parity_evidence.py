@@ -256,7 +256,7 @@ def _drift(recon: dict[str, Any], key_cols: list[str]) -> tuple[set[str], int, l
     return set(keys), rows, keys
 
 
-def _check_kind(recon: dict[str, Any]) -> str:
+def _check_kind(recon: dict[str, Any], *, sync_mode: str = "") -> str:
     """How the run compared values, as the proof classifier files its Gate-8 report.
 
     One authority with the signed proof pack and the Gate-8 tile
@@ -288,6 +288,20 @@ def _check_kind(recon: dict[str, Any]) -> str:
         return "key_diff"
     if not counts_only and _int(_dict(recon.get("sample_compare")).get("rows_compared")):
         return "sampled"
+    # A mirror / SCD2 read-back that matched digests compared values. Filing it
+    # as a row count made parity say "Values were not compared" after Gate-8
+    # had verified the rows, including tombstones (D394). A count with no
+    # digest stays a count. A writer acknowledgement stays a count.
+    src_digest = str(recon.get("source_checksum") or "").strip()
+    dst_digest = str(recon.get("target_checksum") or "").strip()
+    if (
+        not counts_only
+        and recon.get("passed") is True
+        and str(sync_mode or "").lower() in {"mirror", "full_refresh_mirror", "scd2"}
+        and src_digest
+        and src_digest == dst_digest
+    ):
+        return "readback"
     if _int(recon.get("source_rows")) is not None and _int(recon.get("target_rows")) is not None:
         return "count_only"
     return "none"
@@ -734,7 +748,7 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
     key_cols = key_columns_of(job)
     ev = TableEvidence(
         name=name,
-        check=_check_kind(recon),
+        check=_check_kind(recon, sync_mode=sync_mode_of(job)),
         rows_source=_int(recon.get("source_rows")),
         rows_destination=_int(recon.get("target_rows")),
         sampled_rows=_int(_dict(recon.get("sample_compare")).get("rows_compared")) or 0,

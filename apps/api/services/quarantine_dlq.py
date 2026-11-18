@@ -486,6 +486,51 @@ def count_finding_rows(details: Any) -> int:
     return len(keys)
 
 
+def quarantine_row_ledger(
+    details: Any,
+    *,
+    job_rejected_rows: Any = 0,
+    details_total: Any = 0,
+    rows_rolled_back: Any = 0,
+) -> dict[str, int]:
+    """Row ledger for GET /quarantine (D390).
+
+    ``issue_count`` is cell findings. ``rejected_rows`` is distinct source
+    rows. Writers store ``rejected_details_total`` as ``len(details)``, so two
+    findings on one row used to read as two rejected rows and one
+    unaccounted row. A job row count that is larger than the page, and is not
+    that finding count, is a truncated sample and is kept.
+    """
+    page = list(details or [])
+    issue_count = len(page)
+    finding_rows = count_finding_rows(page)
+
+    def _n(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    job_rows = _n(job_rejected_rows)
+    total = _n(details_total)
+    rolled = _n(rows_rolled_back)
+    finding_count = {total, issue_count}
+    if finding_rows:
+        rejected_rows = finding_rows
+        if job_rows > finding_rows and job_rows not in finding_count:
+            rejected_rows = job_rows
+    elif job_rows and job_rows not in finding_count:
+        rejected_rows = job_rows
+    else:
+        rejected_rows = job_rows or total
+    return {
+        "rejected_rows": rejected_rows,
+        "issue_count": issue_count,
+        "finding_rows": finding_rows,
+        "rows_unaccounted": max(0, rejected_rows - finding_rows - rolled),
+    }
+
+
 def quarantine_details_from_dlq(
     job_id: str,
     *,

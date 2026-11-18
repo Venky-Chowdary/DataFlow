@@ -291,6 +291,35 @@ def _truncate_instant_to_milliseconds(value: Any) -> Any:
     return value
 
 
+def canonical_bson_instant(value: Any) -> Any:
+    """One UTC text at millisecond precision, or the value when it is not an instant.
+
+    MySQL ``DATETIME`` after ``assume_timezone:UTC`` and a MongoDB BSON Date of
+    the same instant differ as text (naive wall clock, ``Z``, ``+00:00``, a
+    datetime). The proof compares this form so a correct write is not failed
+    (D398). A value that is not a timestamp is returned unchanged. Sub-millisecond
+    digits are dropped, which is the precision BSON Date stores.
+    """
+    import datetime as dt
+
+    if isinstance(value, dt.datetime):
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=dt.timezone.utc)
+        utc = aware.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        ms = (utc.microsecond // 1000) * 1000
+        return utc.replace(microsecond=ms).isoformat(timespec="milliseconds")
+    text = str(value).strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", text):
+        return value
+    normalised = text.replace("Z", "+00:00")
+    if " " in normalised and "T" not in normalised:
+        normalised = normalised.replace(" ", "T", 1)
+    try:
+        parsed = dt.datetime.fromisoformat(normalised)
+    except ValueError:
+        return _truncate_instant_to_milliseconds(value)
+    return canonical_bson_instant(parsed)
+
+
 def _proof_source_batches(
     *,
     source_endpoint: EndpointConfig,
@@ -1239,7 +1268,8 @@ def _transform_applied_proof_impl(
             # accepted it. Truncating every Mongo date would hide a real
             # microsecond mismatch the operator did not accept.
             if column and _bson_ms_accepted(column):
-                v = _truncate_instant_to_milliseconds(v)
+                folded = canonical_bson_instant(v)
+                v = folded if folded is not None else v
             # Oracle VARCHAR2 stores '' AS NULL natively — '' vs NULL
             # can never be told apart on read-back there, so they are
             # the same value on an Oracle destination only.
@@ -1330,6 +1360,25 @@ def _transform_applied_proof_impl(
             )
             if col.acknowledged
         )
+        # assume_timezone:UTC on a MySQL DATETIME is an instant the destination
+        # stores as a BSON Date. Compare that column at millisecond precision
+        # even when the precision gate did not flag it (D398).
+        for mapping in mappings:
+            raw_tf = str(mapping.get("transform") or mapping.get("engine_transform") or "")
+            if "assume_timezone" in raw_tf.lower():
+                name = str(mapping.get("target") or mapping.get("source") or "").strip()
+                if name:
+                    accepted_bson_ms.add(name)
+        for step in steps:
+            blob = str(step.get("op") or "")
+            options = step.get("options") if isinstance(step.get("options"), dict) else {}
+            blob += " " + " ".join(str(options.get(key) or "") for key in ("transform", "cast", "to"))
+            if "assume_timezone" not in blob.lower():
+                continue
+            for col in _step_cols(step):
+                target = str(map_source_to_target(col, mappings) or col).strip()
+                if target:
+                    accepted_bson_ms.add(target)
     scd2_opts = dest_summary.get("scd2_opts")
     sync_mode = str(
         dest_summary.get("sync_mode")

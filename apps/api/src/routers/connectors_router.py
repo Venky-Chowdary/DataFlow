@@ -1808,7 +1808,7 @@ def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    from services.quarantine_dlq import count_finding_rows, replay_parent_not_committed
+    from services.quarantine_dlq import quarantine_row_ledger, replay_parent_not_committed
 
     parent_refusal = replay_parent_not_committed(job) if open_n else None
     if parent_refusal:
@@ -1816,12 +1816,13 @@ def get_job_quarantine(job_id: str, request: Request):
         replay_block_reason = parent_refusal
         closure = {**closure, "next_action": parent_refusal}
 
-    finding_rows = count_finding_rows(details) or len(details)
-    rejected_rows = int(
-        job.get("rejected_details_total")
-        or job.get("rejected_rows")
-        or 0
-    ) or finding_rows
+    _ledger = quarantine_row_ledger(
+        details,
+        job_rejected_rows=job.get("rejected_rows"),
+        details_total=job.get("rejected_details_total"),
+    )
+    finding_rows = _ledger["finding_rows"]
+    rejected_rows = _ledger["rejected_rows"]
     summary = job.get("destination_summary")
     has_write = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
     source = quarantine_evidence_source(job, details)
