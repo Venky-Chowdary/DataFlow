@@ -61,6 +61,30 @@ __all_gap__ = ("CdcLsnGapError",)
 logger = logging.getLogger(__name__)
 
 
+def _capture_instance_identity_ddl(ddl: str) -> bool:
+    """True for no DDL or the capture's own name, not a switch or a command."""
+    import re
+
+    text = (ddl or "").strip()
+    return not text or bool(re.fullmatch(r"cdc\.capture_instance=\S+", text))
+
+
+def _snapshot_column_names(entry: dict | None) -> list[str]:
+    snap = (entry or {}).get("schema_snapshot") or {}
+    return [
+        str(col.get("name") or "")
+        for col in (snap.get("columns") or [])
+        if isinstance(col, dict) and col.get("name")
+    ]
+
+
+def _columns_named_in_ddl(commands: list[str], known: list[str]) -> list[str]:
+    blob = " ".join(commands).lower()
+    if not blob:
+        return []
+    return [name for name in known if name.lower() in blob]
+
+
 def _sqlserver_error_number(exc: BaseException) -> int | None:
     pending = list(getattr(exc, "args", ()))
     while pending:
@@ -844,6 +868,37 @@ class SqlServerNativeCdc:
         # Net TVF ignores filter text but still requires an option; 'all' is valid.
         return "all"
 
+    def _ddl_history_commands(self, cur) -> list[str]:
+        """DDL text SQL Server recorded for this capture, newest first.
+
+        An empty ``cdc.ddl_history`` is DML. A failed read is not evidence of
+        DDL — the column diff still decides — and must not abort the poll.
+        """
+        try:
+            cur.execute(
+                """
+                SELECT TOP (20) h.ddl_command
+                FROM cdc.ddl_history h
+                JOIN cdc.change_tables ct
+                  ON ct.source_object_id = h.source_object_id
+                WHERE ct.capture_instance = %s
+                ORDER BY h.ddl_time DESC
+                """,
+                (self.capture_instance,),
+            )
+            return [
+                str(row[0])
+                for row in (cur.fetchall() or [])
+                if row and row[0]
+            ]
+        except Exception as exc:
+            logger.debug(
+                "SQL Server CDC ddl_history unread for %s: %s",
+                self.capture_instance,
+                exc,
+            )
+            return []
+
     def _maybe_record_capture_schema(
         self,
         cur,
@@ -882,12 +937,48 @@ class SqlServerNativeCdc:
                 and not force
             ):
                 return
-            from services.cdc_schema_history import record_ddl
+            from services.cdc_schema_history import list_history, record_ddl
 
+            table_key = f"{self.schema}.{table_name}"
+            current_names = [str(c.get("name") or "") for c in cols if c.get("name")]
+            prior = list_history(self.source_key, table_key)
+            prior_names = _snapshot_column_names(prior[-1] if prior else None)
+            # ``cdc.capture_instance=<name>`` is the capture's identity, not DDL.
+            # DML does not change it, and a new process must not open a review
+            # for the column list it already stored (D392). A capture-instance
+            # switch (``old->new``) and a command in cdc.ddl_history are DDL.
+            identity_only = _capture_instance_identity_ddl(ddl)
+            commands = self._ddl_history_commands(cur) if identity_only else []
+            added = [name for name in current_names if name not in prior_names]
+            named = _columns_named_in_ddl(commands, current_names)
+            unchanged = bool(prior_names) and prior_names == current_names
+            if identity_only and not commands and (unchanged or not prior_names):
+                if not prior_names:
+                    record_ddl(
+                        self.source_key,
+                        table_key,
+                        ddl=ddl or f"cdc.capture_instance={self.capture_instance}",
+                        offset=offset or self.start_lsn or self.capture_instance,
+                        schema_snapshot={
+                            "capture_instance": self.capture_instance,
+                            "row_filter": self.row_filter,
+                            "columns": cols,
+                        },
+                    )
+                self._last_schema_fingerprint[table_name] = fingerprint
+                return
+            if identity_only:
+                change_ddl = (
+                    commands[0]
+                    if commands
+                    else ("ADD COLUMN " + ", ".join(added) if added else "")
+                )
+            else:
+                change_ddl = ddl
             entry = record_ddl(
                 self.source_key,
-                f"{self.schema}.{table_name}",
-                ddl=ddl or f"cdc.capture_instance={self.capture_instance}",
+                table_key,
+                ddl=change_ddl or f"cdc.capture_instance={self.capture_instance}",
                 offset=offset or self.start_lsn or self.capture_instance,
                 schema_snapshot={
                     "capture_instance": self.capture_instance,
@@ -901,11 +992,11 @@ class SqlServerNativeCdc:
 
                 flag_mapping_review(
                     source_key=self.source_key,
-                    table=f"{self.schema}.{table_name}",
+                    table=table_key,
                     reason="cdc_schema_drift",
                     schema_version=int(entry.get("version") or 0) or None,
                     ddl=str(entry.get("ddl") or ""),
-                    column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
+                    column_names=named or added or current_names,
                     workspace_id=str(self.cfg.get("workspace_id") or ""),
                 )
             except Exception as exc:

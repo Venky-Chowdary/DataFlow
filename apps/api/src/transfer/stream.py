@@ -475,6 +475,16 @@ def _stream_database_transfer_impl(
     )
     run.cfg.incremental = requires_incremental(run.cfg.effective_sync)
     run.cfg.cursor_source_col = contract.cursor_field if contract else ""
+    if run.cfg.incremental and run.cfg.cursor_source_col:
+        from .engine_kafka import kafka_unpageable_cursor
+
+        # Plan-time refusal, repeated here so a saved contract cannot start
+        # the read and then die on the first page (D404).
+        _kafka_cursor = kafka_unpageable_cursor(
+            run.cfg.src_type, run.cfg.cursor_source_col
+        )
+        if _kafka_cursor:
+            raise ValueError(_kafka_cursor)
     run.cfg.pk_target_cols: list[str] = []
     run.cfg.pk_source_cols: list[str] = []
     run.cfg.cursor_pk_source = ""

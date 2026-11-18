@@ -2311,10 +2311,29 @@ def _g6_mysql_key_refusal(ctx: PreflightContext, dest_kind: str) -> str | None:
 def _g6_dynamodb_key_refusal(
     ctx: PreflightContext, dest_kind: str
 ) -> str | None:
-    if (
-        dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}
-        or ctx.plan.destination.table_exists is not True
-    ):
+    if dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}:
+        return None
+    if ctx.plan.destination.table_exists is False:
+        # Create-new: the writer builds the table from these columns and the
+        # HASH key. Refuse here, before Confirm, when it cannot (D298).
+        try:
+            from connectors.dynamodb_writer import dynamodb_create_refusal
+        except ImportError:
+            return None
+        _sources, key_targets = _g6_sample_identity(ctx, dest_kind)
+        rows = [
+            {
+                "source": str(getattr(mapping, "source", "") or ""),
+                "target": str(getattr(mapping, "target", "") or ""),
+                "assignment_strategy": str(
+                    getattr(mapping, "assignment_strategy", "") or ""
+                ),
+                "intentional_omit": bool(getattr(mapping, "intentional_omit", False)),
+            }
+            for mapping in (ctx.plan.mappings or [])
+        ]
+        return dynamodb_create_refusal(rows, conflict_columns=key_targets) or None
+    if ctx.plan.destination.table_exists is not True:
         return None
     try:
         from connectors.dynamodb_schema import (

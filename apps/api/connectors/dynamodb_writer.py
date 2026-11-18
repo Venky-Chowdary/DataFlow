@@ -791,17 +791,27 @@ def write_mapped_rows(
     # G11: dynamodb stores field / attribute names exactly as mapped.
     from connectors.destination_naming import writer_identifier
 
-    target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("dynamodb"),
-    )
-    live_dest = _kwargs.get("destination_column_types")
-
     # Connect + describe before Map bind — AttributeDefinitions / sample must
     # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
     client = boto3_client("dynamodb", cfg)
+    creating = bool(create_table) and not _table_exists(client, table)
+    # Pending Map rows are skipped while table existence is unknown. A confirmed
+    # create-new (the table is absent) resolves them, so the HASH key and the
+    # mapped columns are what CREATE TABLE receives (D298).
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("dynamodb"),
+        table_exists=False if creating else None,
+    )
+    live_dest = _kwargs.get("destination_column_types")
 
-    if create_table:
+    if creating:
+        refusal = dynamodb_create_refusal(
+            mappings,
+            conflict_columns=conflict_columns or _kwargs.get("conflict_columns"),
+        )
+        if refusal:
+            raise ValueError(refusal)
         _ensure_table(
             client,
             table,
@@ -1537,6 +1547,68 @@ def _attr_type_for_logical(logical: str) -> str:
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         return "B"
     return "S"
+
+
+def _mapped_create_columns(mappings: list[dict] | None) -> list[str]:
+    """Target names a create-new table can be built from, pending rows included."""
+    cols: list[str] = []
+    for raw in mappings or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(raw):
+                continue
+        except Exception:
+            pass
+        name = str(raw.get("target") or raw.get("target_column") or "").strip()
+        if name and name not in cols:
+            cols.append(name)
+    return cols
+
+
+def dynamodb_create_refusal(
+    mappings: list[dict] | None,
+    *,
+    conflict_columns: list[str] | None = None,
+) -> str:
+    """Empty when a missing DynamoDB table can be created. Else the refusal.
+
+    Validate and the writer ask the same question (D298): a create-new table
+    needs mapped columns and a HASH key from the upsert key, the source
+    primary key, or an identity column. Neither side invents a key.
+    """
+    cols = _mapped_create_columns(mappings)
+    keys = [str(c).strip() for c in (conflict_columns or []) if str(c).strip()]
+    if not cols and not keys:
+        return (
+            "DynamoDB table does not exist and no columns were provided to "
+            "create it. Map the columns and declare a HASH key (the upsert "
+            "key or the source primary key) before Confirm."
+        )
+    try:
+        _resolve_key_schema(
+            cols or keys,
+            list(mappings or []),
+            conflict_columns=keys or None,
+            source_types=None,
+        )
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def _table_exists(client, table: str) -> bool:
+    from botocore.exceptions import ClientError
+
+    try:
+        client.describe_table(TableName=table)
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+            raise
+        return False
 
 
 def _resolve_key_schema(

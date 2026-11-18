@@ -1443,6 +1443,7 @@ def plan_transfer(
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
         cursor_lookback_days=cursor_lookback_days,
+        source_type=str(src_info.get("db_type") or src_conn.get("type") or ""),
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
@@ -2005,6 +2006,7 @@ def _identity_stream_contract(
     cursor_column: str = "",
     cursor_semantics: str = "",
     cursor_lookback_days: int = 0,
+    source_type: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
@@ -2117,10 +2119,17 @@ def _identity_stream_contract(
                 MODIFICATION_TIMESTAMP,
                 sole_modification_timestamp_column,
             )
+            from services.copy_kafka_common import kafka_family_name
             from services.preflight_cursor_gate import MODES_REQUIRING_CURSOR
 
             picked = ""
-            if mode in MODES_REQUIRING_CURSOR:
+            # Kafka has no table cursor. Inferring updated_at from the payload
+            # made the plan look safe and the first run refuse to page (D404).
+            # The consumer-group offset is the cursor.
+            if (
+                mode in MODES_REQUIRING_CURSOR
+                and kafka_family_name(source_type) != "kafka"
+            ):
                 picked = sole_modification_timestamp_column(source_columns)
             if picked:
                 cursor = picked

@@ -71,6 +71,30 @@ def kafka_nothing_past_committed(request: Any, total_rows: Any) -> bool:
     return configured_kafka_start({"extra": dict(source.extra or {})}) == "committed"
 
 
+def kafka_unpageable_cursor(source_type: Any, cursor_field: str) -> str:
+    """Refusal when a Kafka incremental plan pages on a payload column (D404).
+
+    The consumer-group offset is the cursor. A topic has no SQL seek, so a
+    column such as ``updated_at`` cannot be paged and must be refused while
+    the plan is built, not after the first run has started. ``_kafka_offset``
+    is the broker position the reader already understands. No column cursor
+    is not a refusal: each run appends the messages past the committed offset.
+    """
+    from services.copy_kafka_common import kafka_family_name
+
+    if kafka_family_name(str(source_type or "")) != "kafka":
+        return ""
+    field = (cursor_field or "").strip()
+    if not field or field.lower() in {"_kafka_offset", "offset"}:
+        return ""
+    return (
+        f"Kafka cannot page an incremental read on cursor {field!r}. "
+        "With no column cursor, the consumer-group offset is the cursor and "
+        "each run appends the new messages. Remove this column cursor, or "
+        "run the sync as full refresh."
+    )
+
+
 def kafka_offsets_bound_the_read(source_type: Any, source_cfg: Any) -> bool:
     """True when a Kafka source's consumer-group offsets already bound this read.
 

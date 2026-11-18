@@ -741,6 +741,13 @@ def build_sync_contract_gate(
         )
     if unknown_pk:
         issues.append(f"Primary key not in source schema: {', '.join(unknown_pk[:5])}")
+    if sync in MODES_REQUIRING_CURSOR:
+        from src.transfer.engine_kafka import kafka_unpageable_cursor
+
+        for contract in contracts:
+            refusal = kafka_unpageable_cursor(source_name, contract_cursor_field(contract))
+            if refusal and refusal not in issues:
+                issues.append(refusal)
 
     from services.type_system import destination_is_file_export as _file_export
 

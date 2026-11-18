@@ -221,6 +221,37 @@ def _fingerprint_row(
     )
 
 
+def stamp_cdc_instant_carriers(
+    dest_types: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    """Mark a text column that carries a source datetime so both spellings match.
+
+    SQL Server ``DATETIMEOFFSET`` written to MySQL ``VARCHAR(64)`` is the same
+    instant as ``2024-11-03T05:37:00Z`` and ``2024-11-03 05:37:00+00:00``
+    (D403). The fingerprint already folds a carried instant; the CDC proof
+    was comparing the destination's physical VARCHAR, so the two texts
+    differed. A text column whose source is not a datetime stays text, and a
+    different instant still differs.
+    """
+    from services.fingerprint_rules import CARRIES_INSTANT, carrying, is_text_family
+    from services.type_system import normalize_logical_type
+
+    out = {str(k): str(v or "") for k, v in (dest_types or {}).items()}
+    for raw in mappings or []:
+        if not isinstance(raw, dict) or raw.get("intentional_omit"):
+            continue
+        target = str(raw.get("target") or raw.get("source") or "").strip()
+        if not target:
+            continue
+        if normalize_logical_type(str(raw.get("source_type") or "")) != "datetime":
+            continue
+        physical = out.get(target) or str(raw.get("target_type") or "")
+        if physical and is_text_family(physical):
+            out[target] = carrying(physical, CARRIES_INSTANT)
+    return out
+
+
 def compare_row_sets(
     source_rows: list[dict[str, Any]],
     dest_rows: list[dict[str, Any]],
@@ -413,13 +444,14 @@ def prove_cdc_values(
         source_rows = inside
     source_named = _apply_carries(_rename(source_rows, pairs), carries)
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
+    compared_types = stamp_cdc_instant_carriers(dest_types, mappings)
     proof = compare_row_sets(
         source_named,
         dest_named,
         columns,
         engine=dest_type,
-        dest_types=dest_types,
-        uuid_columns=_uuid_columns(columns, dest_types, mappings),
+        dest_types=compared_types,
+        uuid_columns=_uuid_columns(columns, compared_types, mappings),
     )
     if window is None or not key_columns or not (before or later):
         return proof
