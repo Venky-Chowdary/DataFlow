@@ -33,6 +33,13 @@ SQL_HISTORY_SYNC_DESTS = frozenset({
     "mssql",
     "oracle",
     "duckdb",
+    # TimescaleDB is PostgreSQL. The writer is the Postgres driver
+    # (connector_capabilities aliases timescaledb → postgresql), so SCD2 and
+    # mirror run the same history path. The product name stays out of
+    # CDC_CAPABLE_SOURCES: a driver alias must not turn Timescale into a
+    # CDC source.
+    "timescaledb",
+    "timescale",
 })
 
 #: Sources that can drive CDC (log / change-stream) in production.

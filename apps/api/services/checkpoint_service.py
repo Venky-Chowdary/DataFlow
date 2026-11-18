@@ -493,6 +493,38 @@ class CheckpointService:
 
 
 
+def _overwrite_must_restart(job: dict) -> str:
+    """An overwrite that already committed rows cannot resume from an empty checkpoint.
+
+    The job recorded the committed count (or its cancel message did) while the
+    checkpoint fields Resume reads are empty. Saying the checkpoint has no
+    progress hides the rows already in the destination. An overwrite restarts.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    request = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+    sync_mode = str(request.get("sync_mode") or job.get("sync_mode") or "")
+    if not is_overwrite_sync(sync_mode):
+        return ""
+    from services.execution_engine_contract import committed_rows_of
+
+    rows, known = committed_rows_of(job)
+    if not known or rows <= 0:
+        import re
+
+        text = str(job.get("message") or job.get("error") or "")
+        found = re.search(r"after ([\d,]+) row", text, re.I)
+        if found:
+            rows = int(found.group(1).replace(",", ""))
+            known = rows > 0
+    if not known or rows <= 0:
+        return ""
+    return (
+        f"This overwrite already committed {rows:,} row(s). An overwrite must restart "
+        "from the beginning; Resume cannot continue a partial overwrite."
+    )
+
+
 def _cancelled_before_any_commit(job: dict, checkpoint: Any) -> bool:
     """A cancelled incremental run that provably committed nothing (QA ACC-05).
 
@@ -608,8 +640,10 @@ def evaluate_resume_safety(
         or cp.es_search_after is not None
     )
     if not has_progress:
+        overwrite_reason = _overwrite_must_restart(job)
         out["reasons"].append(
-            "Checkpoint has no committed progress - refuse Resume to avoid a false restart."
+            overwrite_reason
+            or "Checkpoint has no committed progress - refuse Resume to avoid a false restart."
         )
         return out
 

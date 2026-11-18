@@ -1877,6 +1877,11 @@ def write_mapped_rows(
 
     def _reconnect():
         nonlocal conn, cur, close_connection
+        # A socket that died mid-transaction leaves SQLAlchemy unable to
+        # reconnect until this transaction is rolled back (D406).
+        from connectors.write_resilience import rollback_pending_transaction
+
+        rollback_pending_transaction(conn)
         # Drop the dead handle.
         close_quietly(conn)
         conn = _open_pg(

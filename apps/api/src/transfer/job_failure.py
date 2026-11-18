@@ -552,6 +552,38 @@ def _records_after_failure(prior: Any, incoming: Any) -> int:
     return max(_n(prior), _n(incoming))
 
 
+def transfer_already_complete(exc: BaseException, prev: dict[str, Any]) -> str:
+    """A verified transfer whose session then died is complete, not a new failure.
+
+    The box already matched and verification had passed. The driver's
+    "Can't reconnect until invalid transaction is rolled back" is the closed
+    socket, and it must not replace a finished transfer. Returns the job
+    message, or "" when the run was not already proven.
+    """
+    from connectors.write_resilience import pending_rollback, rollback_pending_transaction
+
+    if not pending_rollback(exc):
+        return ""
+    rollback_pending_transaction(getattr(exc, "connection", None))
+    rollback_pending_transaction(getattr(exc, "session", None))
+    summary = prev.get("destination_summary") if isinstance(prev.get("destination_summary"), dict) else {}
+    recon = summary.get("reconcile") if isinstance(summary.get("reconcile"), dict) else {}
+    if recon.get("passed") is not True:
+        return ""
+    try:
+        src = int(summary.get("source_row_count"))
+        written = int(prev.get("records_processed"))
+    except (TypeError, ValueError):
+        return ""
+    if src <= 0 or src != written:
+        return ""
+    return (
+        f"The transfer already held every one of the {src:,} row(s) and verification passed. "
+        "The database connection closed after that. The session was rolled back. "
+        "The rows in the destination are the completed transfer."
+    )
+
+
 def _verification_interrupted(display: str, exc: BaseException, prev: dict[str, Any]) -> str:
     """REL-4: a run that failed while verifying keeps the rows it wrote; say so.
 
@@ -811,16 +843,25 @@ def _fail_runtime_job(
                 job_id,
                 outcome["rows_committed"],
             )
+    already_complete = "" if cancelled else transfer_already_complete(exc, prev)
+    if already_complete:
+        status = "completed"
+        display = already_complete
+        status_kwargs["error"] = ""
+        status_kwargs["message"] = display
+        status_kwargs["phase"] = "completed"
+        status_kwargs["progress_pct"] = 100
+        status_kwargs["failed_at_phase"] = ""
     mongo.update_job_status(
         job_id,
         status,
         **status_kwargs,
     )
-    if not cancelled and not bool(error_details.get("retriable")):
+    if not cancelled and not already_complete and not bool(error_details.get("retriable")):
         _release_failed_cdc_slot(
             mongo, job_id, request, job=prev, identity=capture
         )
-    if lineage is not None and not cancelled:
+    if lineage is not None and not cancelled and not already_complete:
         lineage.emit_run_failed(
             run_id=job_id,
             job_id=job_id,

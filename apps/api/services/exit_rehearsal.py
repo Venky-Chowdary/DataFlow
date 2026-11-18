@@ -206,6 +206,17 @@ def extract_request(rehearsal: dict[str, Any], index: int, table: dict[str, Any]
     """The extract job of one table: full read into a file export in the system's format."""
     from src.transfer.models import EndpointConfig, TransferRequest
 
+    from services.export_object_store import exports_use_object_store
+    from services.local_file_policy import (
+        local_destination_message,
+        local_file_destinations_allowed,
+    )
+
+    # Cloud has no shared disk. A file export lands in the export bucket when
+    # one is configured; otherwise the rehearsal stops here with that reason,
+    # before a child job fails and the verdict hides the sentence.
+    if not local_file_destinations_allowed() and not exports_use_object_store():
+        raise ExitInvalid(local_destination_message("file_export"))
     fmt = rehearsal["extract_format"]
     name = _SAFE.sub("_", table["name"])[:80] or "table"
     contracts = [{"name": table["name"], "selected": True, "sync_mode": "full_refresh_overwrite",

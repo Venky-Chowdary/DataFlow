@@ -9572,6 +9572,36 @@ def _file_export_cell_readback(
         source_locale=str(summary.get("number_locale") or ""),
     )
 
+def rejection_explains_shortfall(proof: dict[str, Any], dest_summary: dict[str, Any]) -> str:
+    """The write refusal that accounts for a short destination, or "".
+
+    A transform proof that still blames the recipe's name and note steps is
+    wrong when those rows were refused at write and never landed (D408).
+    """
+    rejections = [
+        str(d.get("reason") or "")
+        for d in (dest_summary.get("rejected_details") or [])
+        if isinstance(d, dict) and str(d.get("reason") or "").strip()
+    ]
+    if not rejections:
+        return ""
+    try:
+        expected_n = int(proof.get("expected_rows") or 0)
+        actual_n = int(proof.get("actual_rows") or 0)
+        refused_n = int(dest_summary.get("rejected_rows") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not (
+        (expected_n and actual_n + refused_n >= expected_n)
+        or (actual_n == 0 and refused_n > 0)
+    ):
+        return ""
+    return (
+        f"{refused_n or len(rejections)} row(s) were refused at write "
+        f"and are not in the destination: {rejections[0]}"
+    )
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -9680,6 +9710,9 @@ def run_reconciliation(
                         if steps_txt
                         else str(proof.get('reason') or "the recipe output differs")
                     )
+                    explained = rejection_explains_shortfall(proof, dest_summary)
+                    if explained:
+                        why_txt = explained
                 head = "Transform-applied proof failed: the destination does not hold the approved recipe's output"
                 cell = recon.get("artifact_cell_compare")
                 if isinstance(cell, dict) and cell.get("passed") is False:

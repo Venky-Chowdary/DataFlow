@@ -760,10 +760,25 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
     if after == 0 and (removed or dropped_all):
         dest_summary["partial_batch_removed"] = True
         if dropped_all:
+            refused = 0
+            try:
+                refused = int(dest_summary.get("rejected_rows") or 0)
+            except (TypeError, ValueError):
+                refused = 0
+            # A partial write (some rows landed, some were refused) is dropped
+            # with the table this run created. Say so: the operator must not
+            # have to infer that the one good row disappeared.
+            held = ""
+            if refused:
+                held = (
+                    f" {refused:,} row(s) were refused and are listed on the job; "
+                    "the rows that had landed were dropped with the table."
+                )
             return (
                 "The destination had no such table before this run. The table "
                 "this run created was dropped, so the destination is "
                 "byte-identical to before."
+                + held
             )
         return (
             "The destination was empty before this run. The partial batch was "

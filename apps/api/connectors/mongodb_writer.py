@@ -1176,6 +1176,13 @@ def write_mapped_rows(
                             "to a string, or accept the millisecond-truncation "
                             "risk on this column (refuse silent truncation)"
                         )
+                    if column in ms_ack_cols:
+                        # The contract accepted millisecond precision. Floor here
+                        # so the stored BSON date is that instant, not a value
+                        # the driver would cut without a record.
+                        from services.millisecond_fit import floor_to_millisecond
+
+                        coerced = floor_to_millisecond(coerced)
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -1274,6 +1281,29 @@ def write_mapped_rows(
             carrier_label="MongoDB date",
         )
         if ms_guard.refusal:
+            # The batch is not written (D148). Each refused row is still named,
+            # with its key, so the job and the transform proof can say why the
+            # destination is short instead of blaming an unrelated recipe step.
+            guard_details = list(rejected_details)
+            seen_rows: set[int] = set()
+            key_names = [str(c) for c in (conflict_columns or []) if str(c) in target_cols]
+            for row_no, col in ms_guard.refused_cells:
+                idx = row_no - 1
+                row = mapped_rows[idx] if 0 <= idx < len(mapped_rows) else []
+                values = {
+                    c: (row[i] if i < len(row) else None)
+                    for i, c in enumerate(target_cols)
+                }
+                detail: dict[str, Any] = {
+                    "row": row_no,
+                    "column": col,
+                    "reason": ms_guard.refusal,
+                    "values": values,
+                }
+                if key_names:
+                    detail["source_pk"] = [values.get(c) for c in key_names]
+                guard_details.append(detail)
+                seen_rows.add(row_no)
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -1282,8 +1312,8 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=0,
                 error=ms_guard.refusal,
-                rejected_rows=rejected_rows,
-                rejected_details=list(rejected_details),
+                rejected_rows=len(seen_rows) or rejected_rows,
+                rejected_details=guard_details,
                 warnings=transform_errors,
             )
 
