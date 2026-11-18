@@ -538,6 +538,38 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+def plain_append_sync(mode: str | None) -> bool:
+    """full_refresh_append and its aliases. Not incremental_append (that keeps the key)."""
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode or "", default="") == "full_refresh_append"
+
+
+def append_existing_key_refusal(
+    *,
+    sync_mode: str | None,
+    table_exists: bool,
+    key_columns: list[str] | None,
+) -> str:
+    """Why append into a table that already enforces a business key is refused.
+
+    Create-new append does not declare that key, so a second run inserts
+    another copy. An existing primary key turns the same run into an update
+    or a duplicate-key abort, and the job can still read as verified for the
+    rows it touched (D395). Empty when append is legal.
+    """
+    keys = [str(col).strip() for col in (key_columns or []) if str(col or "").strip()]
+    if not table_exists or not keys or not plain_append_sync(sync_mode):
+        return ""
+    shown = ", ".join(keys)
+    return (
+        f"Append into an existing table is refused because {shown} is already "
+        "a primary key. A second run would update or reject those rows instead "
+        "of appending a copy. Use upsert to replace stored keys, or append into "
+        "a table that has no business primary key."
+    )
+
+
 _APPEND_KEY_REASON = (
     "Append create-new does not declare a key. A second copy of the same row "
     "is legal on this sync. Upsert or merge is what enforces the source key."

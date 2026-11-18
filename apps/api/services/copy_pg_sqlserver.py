@@ -28,6 +28,7 @@ import logging
 from typing import Any, Callable
 
 from services.copy_fast_path import (
+    append_repeat_of_stored_snapshot,
     occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
@@ -61,6 +62,7 @@ from services.copy_sqlserver_sqlserver import (
     _drop_sql as _ss_drop_sql,
     _has_identity,
     _ident as _ss_ident,
+    _primary_key_names as _ss_primary_key_names,
     _range_count as _ss_range_count,
     _schema_of as _ss_schema_of,
     _ss_connect,
@@ -200,6 +202,8 @@ def copy_postgres_to_sqlserver(
             exists = _ss_table_exists(dst_cur, dst_schema, dest_table)
             existed_before = bool(exists)
             dest_occupied = False
+            second_copy = False
+            rows_before = 0
             swap_at_end = False
             swap_schema = dst_schema
             swap_dest_ref = dest_ref
@@ -226,12 +230,19 @@ def copy_postgres_to_sqlserver(
                         "append into non-empty SQL Server dest stays on the row path"
                     )
             else:
-                pk_dest = [
-                    rename
-                    for src_pk in shape.primary_key
-                    for src_col, rename in pairs
-                    if src_col.lower() == src_pk.lower()
-                ]
+                # Overwrite rebuilds one snapshot, so the source key holds.
+                # Append create-new does not: a second run of the same ids
+                # must insert another copy, not update the first (D395).
+                pk_dest = (
+                    [
+                        rename
+                        for src_pk in shape.primary_key
+                        for src_col, rename in pairs
+                        if src_col.lower() == src_pk.lower()
+                    ]
+                    if replace_destination
+                    else []
+                )
                 dst_cur.execute(
                     _ss_create_sql(
                         dest_ref, dest_table, pairs, sqlserver_ddls, pk_dest
@@ -349,6 +360,29 @@ def copy_postgres_to_sqlserver(
                                 dst_cur, dest_ref, dest_ident, part
                             )
                             part["action"] = "reload"
+                    if append_repeat_of_stored_snapshot(
+                        [str(p.get("action") or "") for p in partitions],
+                        replace_destination=replace_destination,
+                    ):
+                        # Every source key is already stored. That is a previous
+                        # append, not a crashed shard of this run (a resume has
+                        # an empty range). Insert another copy when the table
+                        # has no business key; refuse when it enforces one (D395).
+                        live_pk = _ss_primary_key_names(dst_cur, dst_schema, dest_table)
+                        if live_pk:
+                            shown = ", ".join(live_pk)
+                            raise ValueError(
+                                "Append refused: destination table "
+                                f"{dest_table} already enforces {shown}. A second "
+                                "run would update or reject those rows instead of "
+                                "appending a copy. Use upsert to replace stored "
+                                "keys, or append into a table with no business "
+                                "primary key."
+                            )
+                        rows_before = _ss_count(dst_cur, dest_ref)
+                        for part in partitions:
+                            part["action"] = "load"
+                        second_copy = True
                     dest_conn.commit()
                     copy_sqls = [
                         _copy_select_sql(
@@ -409,12 +443,20 @@ def copy_postgres_to_sqlserver(
                         logger.debug("IDENTITY_INSERT OFF skipped", exc_info=True)
 
             dest_count = _ss_count(dst_cur, dest_ref)
-            if dest_count != source_count:
+            if second_copy:
+                expected_dest = rows_before + source_count
+                if dest_count != expected_dest:
+                    raise ValueError(
+                        "PG→SQL Server COPY refused: append dest COUNT(*) "
+                        f"{dest_count} != {rows_before} already stored + "
+                        f"{source_count} in this snapshot"
+                    )
+            elif dest_count != source_count:
                 raise ValueError(
                     "PG→SQL Server COPY refused: dest COUNT(*) "
                     f"{dest_count} != source snapshot {source_count}"
                 )
-            if shard_mode == "pk" and pk_map is not None:
+            if shard_mode == "pk" and pk_map is not None and not second_copy:
                 dest_ident = _ss_ident(pk_map[1])
                 dest_conn.commit()
                 for part in partitions:

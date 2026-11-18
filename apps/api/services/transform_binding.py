@@ -80,6 +80,97 @@ def resolve_recipe_binding(
     )
 
 
+def _mapping_source_columns(mappings: Any) -> list[str]:
+    columns: list[str] = []
+    for item in mappings or []:
+        row = item
+        if not isinstance(row, dict):
+            dump = getattr(row, "model_dump", None)
+            row = dump() if callable(dump) else {}
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("source") or row.get("source_column") or "").strip()
+        if name and name not in columns:
+            columns.append(name)
+    return columns
+
+
+def _recipe_steps(shape: Any) -> list[Any]:
+    if not isinstance(shape, dict):
+        return []
+    steps = shape.get("steps")
+    return list(steps) if isinstance(steps, list) else []
+
+
+def compile_transfer_recipe(request: Any) -> bool:
+    """Compile ``transform_recipe_id`` into ``shape_recipe``, or refuse.
+
+    Execute reads ``shape_recipe`` only. A run that stored the library id and
+    left ``shape_recipe`` empty shipped the raw rows under a verified badge
+    (D400). Pin mode bakes the version resolved here. A library edit between
+    stage and confirm changes the hash and is refused — the new recipe is
+    not applied silently. An empty id does nothing. Returns True when this
+    call attached the compiled recipe.
+    """
+    recipe_id = str(getattr(request, "transform_recipe_id", "") or "").strip()
+    if not recipe_id:
+        return False
+    mode = str(getattr(request, "transform_recipe_version_mode", "") or "pin").strip().lower() or "pin"
+    if mode not in BINDING_MODES:
+        raise ValueError(
+            f"transform_recipe_version_mode must be one of {sorted(BINDING_MODES)}"
+        )
+    version = int(getattr(request, "transform_recipe_version", 0) or 0) or None
+    params = getattr(request, "transform_recipe_params", None) or None
+    bound = resolve_recipe_binding(
+        recipe_id,
+        version=version if mode == "pin" else None,
+        params=params if isinstance(params, dict) else None,
+        source_columns=_mapping_source_columns(getattr(request, "mappings", None)) or None,
+        workspace_id=str(getattr(request, "workspace_id", "") or "") or None,
+    )
+    existing = _recipe_steps(getattr(request, "shape_recipe", None))
+    approved = str(getattr(request, "approved_shape_recipe_hash", "") or "").strip()
+    if existing:
+        if approved and approved == bound.recipe_hash:
+            return False
+        if approved and approved != bound.recipe_hash:
+            raise ValueError(
+                "Transform recipe "
+                f"{recipe_id} changed between stage and confirm "
+                f"(approved {approved}, library now {bound.recipe_hash}). "
+                "The new recipe was not applied. Stage the run again so the "
+                "plan and the execute recipe are the same."
+            )
+        raise ValueError(
+            f"This run has shape_recipe steps and transform_recipe_id {recipe_id}, "
+            "and they are not the same compiled recipe. Put the steps in the "
+            "library recipe, or drop one of them, then stage the run again."
+        )
+    request.shape_recipe = bound.payload
+    request.transform_recipe_version = bound.bound_version
+    request.transform_recipe_version_mode = mode
+    request.approved_shape_recipe_hash = bound.recipe_hash
+    return True
+
+
+def recipe_ignored_failure(request: Any) -> str:
+    """Why a run that named a library recipe must not be called verified.
+
+    The proof checks recipe output. An id with no compiled steps means the
+    raw rows would be certified (D400). Empty when the recipe is absent or
+    compiled.
+    """
+    recipe_id = str(getattr(request, "transform_recipe_id", "") or "").strip()
+    if not recipe_id or _recipe_steps(getattr(request, "shape_recipe", None)):
+        return ""
+    return (
+        f"Transform recipe {recipe_id} was not compiled into this run "
+        "(shape_recipe has no steps). The destination would hold the raw "
+        "rows, so the run is refused instead of verified."
+    )
+
+
 def apply_schedule_binding(
     payload: dict[str, Any],
     *,

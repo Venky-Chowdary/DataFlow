@@ -1456,6 +1456,17 @@ async def execute_transfer_json(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
+    from services.transform_binding import compile_transfer_recipe
+
+    try:
+        compile_transfer_recipe(request_obj)
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.recipe_compile.refused",
+            public_message="Could not compile the saved transform recipe.",
+            status_code=400,
+        ) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -2099,6 +2110,17 @@ async def run_universal_transfer(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
+    from services.transform_binding import compile_transfer_recipe
+
+    try:
+        compile_transfer_recipe(request_obj)
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.recipe_compile.refused",
+            public_message="Could not compile the saved transform recipe.",
+            status_code=400,
+        ) from exc
 
     engine = get_transfer_engine()
     try:

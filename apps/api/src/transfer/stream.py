@@ -610,6 +610,7 @@ def _stream_database_transfer_impl(
         _fast_path_source_catalog(run.cfg.src_read_type, run.cfg.mappings, run.cfg.schema, _src_rich_catalog),
         run.cfg.mappings,
         resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+        run.cfg.effective_sync,
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None

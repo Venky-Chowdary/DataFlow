@@ -2210,10 +2210,21 @@ def stream_file_to_database(
         return rows_copied, copy_ddl, dest_summary, columns
 
     keep_last_key: list[str] = []
-    if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
-        from services.duplicate_policy import iter_keep_last
+    if in_file_dedupe == "keep_last":
+        from services.duplicate_policy import declared_dedupe_columns, iter_keep_last
 
-        keep_last_key = list(contract.primary_key_columns())
+        keep_last_key = list(contract.primary_key_columns()) if contract else []
+        if not keep_last_key:
+            keep_last_key = declared_dedupe_columns(
+                dict(getattr(destination, "extra", None) or {}),
+                dict(dest_cfg or {}),
+            )
+        if not keep_last_key:
+            raise ValueError(
+                "in_file_dedupe=keep_last was set but no dedupe key is declared, "
+                "so both copies of a repeated key would be written. Name dedupe_key, "
+                "or remove keep_last."
+            )
         batch_iter = iter_keep_last(batch_iter, keep_last_key)
         dest_summary["in_file_dedupe"] = "keep_last"
 

@@ -286,11 +286,66 @@ def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
     from services.sync_cursor import resolve_sync_contract
 
     contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
-    keys = list(contract.primary_key_columns()) if contract else []
+    keys = keep_last_key_columns(request, contract)
     if not keys:
-        return records
+        raise ValueError(
+            "in_file_dedupe=keep_last was set but no dedupe key is declared, "
+            "so both copies of a repeated key would be written. Name dedupe_key, "
+            "or remove keep_last."
+        )
     collapsed, _dropped = collapse_keep_last(list(records), keys)
+    repeated = duplicate_keys_remaining(collapsed, keys)
+    if repeated:
+        shown = ", ".join(str(item) for item in repeated[:3])
+        raise ValueError(
+            "keep_last did not collapse the declared key "
+            f"({shown}). Duplicate keys were not written."
+        )
     return collapsed
+
+
+def declared_dedupe_columns(*extras: Any) -> list[str]:
+    """The operator's dedupe key, from route extras, when the contract has none."""
+    for extra in extras:
+        if not isinstance(extra, dict):
+            continue
+        raw = str(extra.get("dedupe_key") or extra.get("in_file_dedupe_key") or "")
+        parts = [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+        if parts:
+            return parts
+    return []
+
+
+def keep_last_key_columns(request: Any, contract: Any = None) -> list[str]:
+    """Columns keep_last collapses on: the contract key, else the declared dedupe key."""
+    keys = list(contract.primary_key_columns()) if contract is not None and hasattr(contract, "primary_key_columns") else []
+    if keys:
+        return keys
+    source = getattr(request, "source", None)
+    dest = getattr(request, "destination", None)
+    return declared_dedupe_columns(
+        dict(getattr(source, "extra", None) or {}),
+        dict(getattr(dest, "extra", None) or {}),
+    )
+
+
+def duplicate_keys_remaining(rows: list[dict], key_columns: list[str]) -> list[tuple]:
+    """Key identities that still occur twice after a collapse. NULL keys are kept."""
+    from services.value_serializer import is_reader_null_cell
+
+    keys = [str(col) for col in key_columns if str(col).strip()]
+    seen: set[tuple] = set()
+    repeated: list[tuple] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        identity = tuple(row.get(col) for col in keys)
+        if any(value is None or is_reader_null_cell(value) for value in identity):
+            continue
+        if identity in seen and identity not in repeated:
+            repeated.append(identity)
+        seen.add(identity)
+    return repeated
 
 
 def schedule_keep_last_refusal(payload: Any) -> str:

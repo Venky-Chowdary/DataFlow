@@ -224,6 +224,40 @@ def _compare_nan(row_value: Any, filter_value: Any, op: str) -> bool:
     return False
 
 
+def _boolean_word(value: Any) -> bool:
+    """True when the cell is a boolean literal, a Python bool, or a one-byte BIT."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (bytes, bytearray)) and len(value) == 1 and value[0] in (0, 1):
+        return True
+    return _cell_text(value).strip().lower() in {"true", "false", "t", "f"}
+
+
+def _boolean_bit(value: Any) -> bool | None:
+    """1/0/true/false as a bit. ``''``, ``yes``, and every other token are not."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    try:
+        from decimal import Decimal
+
+        if isinstance(value, Decimal) and value in (Decimal(0), Decimal(1)):
+            return bool(value)
+    except Exception:
+        pass
+    if isinstance(value, (bytes, bytearray)) and len(value) == 1 and value[0] in (0, 1):
+        return bool(value[0])
+    text = _cell_text(value).strip().lower()
+    if text in {"true", "t", "1", "1.0"}:
+        return True
+    if text in {"false", "f", "0", "0.0"}:
+        return False
+    return None
+
+
 def _cell_text(value: Any) -> str:
     """One filter token. Reader-null / blank become ``""`` (same as None).
 
@@ -268,6 +302,14 @@ def _compare_values(
 
     rv_str = _cell_text(rv)
     fv_str = _cell_text(fv)
+
+    # MySQL BOOLEAN / SQL Server BIT(1) / Oracle NUMBER(1) arrive as 1 or 0.
+    # ``flag eq true`` must match that bit. ``''`` and NULL are not false
+    # (D365, D364). Ordering operators stay numeric or text (D382).
+    if op in {"eq", "ne"} and (_boolean_word(rv) or _boolean_word(fv)):
+        left, right = _boolean_bit(rv), _boolean_bit(fv)
+        if left is not None and right is not None:
+            return (left == right) if op == "eq" else (left != right)
 
     if op == "contains":
         return fv_str in rv_str

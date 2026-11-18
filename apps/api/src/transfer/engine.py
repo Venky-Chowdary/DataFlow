@@ -870,7 +870,33 @@ class UniversalTransferEngine:
         from services.source_filter_gate import request_refusal
         from .job_scope import start_refusal
 
-        ident_err = start_refusal(request) or request_refusal(request)
+        from services.transform_binding import (
+            compile_transfer_recipe,
+            recipe_ignored_failure,
+        )
+
+        try:
+            recipe_compiled = compile_transfer_recipe(request)
+        except ValueError as exc:
+            recipe_compiled = False
+            ident_err = str(exc)
+        else:
+            ident_err = recipe_ignored_failure(request)
+        if recipe_compiled and not ident_err:
+            try:
+                _job_store().update_job_fields(
+                    job_id,
+                    {
+                        "transfer_request.shape_recipe": request.shape_recipe,
+                        "transfer_request.transform_recipe_version": request.transform_recipe_version,
+                        "transfer_request.transform_recipe_version_mode": request.transform_recipe_version_mode,
+                        "transfer_request.approved_shape_recipe_hash": request.approved_shape_recipe_hash,
+                    },
+                    touch_updated_at=False,
+                )
+            except Exception:
+                logger.exception("Could not store the compiled recipe on %s", job_id)
+        ident_err = ident_err or start_refusal(request) or request_refusal(request)
         if ident_err:
             try:
                 from services.mongodb_service import get_mongodb_service

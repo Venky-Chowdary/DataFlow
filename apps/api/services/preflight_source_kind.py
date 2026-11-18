@@ -11,7 +11,7 @@ from typing import Any
 
 
 _RECORD_BATCH_FORMATS = frozenset({
-    "s3", "minio", "s3_compatible", "aws_s3",
+    "s3", "minio", "s3_compatible", "aws_s3", "amazon_s3", "amazon-s3",
     "gcs", "google_cloud_storage",
     "adls", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "sftp",
@@ -51,6 +51,49 @@ def file_overwrite_keep_last(
 
     mode = normalize_sync_mode(sync_mode or "")
     return mode in {"full_refresh_overwrite", "overwrite"}
+
+
+def dedupe_key_unhonoured_reason(
+    *,
+    source_kind: str | None,
+    source_format: str | None,
+    sync_mode: str | None,
+    dedupe_key: str | None,
+    mode_was_explicit: bool,
+) -> str:
+    """Why a declared ``dedupe_key`` must not be accepted and then ignored.
+
+    A file overwrite has a read order, so the last row of the key is the
+    write and the plan says so. Upsert merges on the key. An explicit
+    overwrite of a table has no ORDER BY: accepting the key and writing both
+    copies is the false pass (D402). Empty when the key will be honoured.
+    """
+    key = str(dedupe_key or "").strip()
+    if not key:
+        return ""
+    if file_overwrite_keep_last(
+        source_kind=source_kind,
+        source_format=source_format,
+        sync_mode=sync_mode,
+        dedupe_key=key,
+    ):
+        return ""
+    from services.sync_cursor import normalize_sync_mode
+
+    mode = normalize_sync_mode(sync_mode or "", default="")
+    if mode in {"upsert", "incremental_deduped", "mirror", "cdc", "scd2"}:
+        return ""
+    if not mode_was_explicit:
+        # No spoken mode: the key becomes the upsert identity. That write
+        # merges, so the duplicate is not inserted beside itself.
+        return ""
+    return (
+        f"dedupe_key {key!r} cannot be honoured on this source. "
+        "A file or object overwrite keeps the last row of that key and says "
+        "so on the plan. A table has no read order, so both copies would be "
+        "written and the run would still look verified. Remove dedupe_key, "
+        "or use upsert so one row per key is the write."
+    )
 
 
 def destination_nullability(columns: Any) -> dict[str, bool]:

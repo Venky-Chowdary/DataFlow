@@ -2060,8 +2060,10 @@ def _merge_edited_row_payloads(
         if len(candidates) == 1:
             idx = candidates[0]
             used.add(idx)
-            merged = dict(base_records[idx] if idx < len(base_records) else {})
-            merged.update({str(k): v for k, v in edit.items() if k != "row"})
+            from services.quarantine_dlq import merge_replay_record
+
+            base_row = dict(base_records[idx] if idx < len(base_records) else {})
+            merged = merge_replay_record(base_row, {str(k): v for k, v in edit.items() if k != "row"})
             bound.append((idx, merged))
             continue
         candidates = []
@@ -2106,8 +2108,9 @@ def _merge_edited_row_payloads(
             )
         idx = candidates[0]
         used.add(idx)
-        merged = dict(base_records[idx])
-        merged.update({str(k): v for k, v in edit.items()})
+        from services.quarantine_dlq import merge_replay_record
+
+        merged = merge_replay_record(dict(base_records[idx]), edit)
         bound.append((idx, merged))
     # Replay only the bound findings — unedited open rows stay open.
     return (
@@ -2476,16 +2479,22 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             record_rows = True
             open_details = open_quarantine_details(durable)
             base_records, _ = _quarantine_details_to_records(open_details)
-            records, details = _merge_edited_row_payloads(
-                open_details, base_records, raw_rows, job_id=job_id
-            )
+            try:
+                records, details = _merge_edited_row_payloads(
+                    open_details, base_records, raw_rows, job_id=job_id
+                )
+            except MaskedQuarantineReplayError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             columns = list(dict.fromkeys(k for r in records for k in r))
         else:
-            details = [
-                overlay_cell_edit(d, durable)
-                for d in body.rows
-                if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
-            ]
+            try:
+                details = [
+                    overlay_cell_edit(d, durable)
+                    for d in body.rows
+                    if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+                ]
+            except MaskedQuarantineReplayError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         details = open_quarantine_details(durable)
     if not details:

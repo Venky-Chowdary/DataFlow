@@ -833,6 +833,64 @@ def is_open_retry_status(status: str | None) -> bool:
     return str(status or "open").strip().lower() in RETRY_OPEN_STATUSES
 
 
+def _refuse_mask_without_raw(value: Any, *, column: str, stored: Any) -> None:
+    """A mask with no stored raw cell cannot be written (D401).
+
+    A mask posted over a real stored cell is an echo of the preview. The
+    caller keeps the raw cell. A mask with nothing raw behind it is data
+    the operator never typed, so the replay stops and the ledger stays open.
+    """
+    if not looks_like_stored_mask(value):
+        return
+    if stored is not None and not looks_like_stored_mask(stored):
+        return
+    raise MaskedQuarantineReplayError(
+        "Quarantine replay refused: "
+        f"{value!r} is a masked preview, not a value for {column}. "
+        "The placeholder is not written. The ledger stays open."
+    )
+
+
+def _merge_unmasked_cells(current: dict[str, Any], edit_bag: dict[str, Any]) -> None:
+    """Copy posted cells onto ``current``, dropping preview masks."""
+    for key, value in edit_bag.items():
+        if looks_like_stored_mask(value):
+            _refuse_mask_without_raw(
+                value,
+                column=str(key),
+                stored=current.get(key) if key in current else None,
+            )
+            continue
+        current[key] = value
+
+
+def merge_replay_record(base: dict[str, Any], edit: dict[str, Any]) -> dict[str, Any]:
+    """The row a record-shaped replay would write.
+
+    Real edits replace stored cells. A display mask does not. If the row
+    that would be written still contains a mask, replay is refused.
+    """
+    merged = {str(k): v for k, v in (base or {}).items()}
+    for key, value in (edit or {}).items():
+        name = str(key)
+        if name == "row":
+            continue
+        if looks_like_stored_mask(value):
+            _refuse_mask_without_raw(
+                value,
+                column=name,
+                stored=merged.get(name) if name in merged else None,
+            )
+            continue
+        merged[name] = value
+    if any(looks_like_stored_mask(cell) for cell in merged.values()):
+        raise MaskedQuarantineReplayError(
+            "Quarantine replay refused: the row that would be written still "
+            "contains a masked preview. The ledger stays open."
+        )
+    return merged
+
+
 def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply a one-cell edit onto the stored full source row.
 
@@ -872,7 +930,9 @@ def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> 
             if not isinstance(current, dict):
                 current = {}
                 merged[bag_name] = current
-            current.update(edit_bag)
+            # A display mask echoed from the preview is not an edit. Writing
+            # it replaced BAD_QTY with BA***TY and then closed the ledger (D401).
+            _merge_unmasked_cells(current, edit_bag)
     # D294: the replay builds the row from ``source_values`` (else ``values``)
     # and puts the finding's ``value`` on top, so an edited cell must reach all
     # of them. A flat edit ``{row: 3, id: 3, qty: '30'}`` carries its cells at
@@ -884,12 +944,23 @@ def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> 
     if col and "value" in posted and (
         col != str(base.get("column") or "") or posted["value"] != base.get("value")
     ):
+        if looks_like_stored_mask(posted.get("value")):
+            raise MaskedQuarantineReplayError(
+                "Quarantine replay refused: "
+                f"{posted.get('value')!r} is a masked preview, not a value for {col}. "
+                "The placeholder is not written. The ledger stays open."
+            )
         merged["column"] = col
         merged["value"] = posted["value"]
         for bag_name in ("values", "source_values", "target_values"):
             bag = merged.get(bag_name)
             if isinstance(bag, dict):
                 bag[col] = posted["value"]
+    if detail_has_masked_cell(merged):
+        raise MaskedQuarantineReplayError(
+            "Quarantine replay refused: the row that would be written still "
+            "contains a masked preview. The ledger stays open."
+        )
     return merged
 
 
@@ -906,6 +977,10 @@ def _edited_cells(posted: dict[str, Any], base: dict[str, Any]) -> dict[str, Any
             continue
         stored = stored if isinstance(stored, dict) else {}
         for key, value in edit_bag.items():
+            if looks_like_stored_mask(value):
+                # Echo of the preview mask. The stored raw cell stays.
+                _refuse_mask_without_raw(value, column=str(key), stored=stored.get(key))
+                continue
             if key not in stored or stored[key] != value:
                 edits[key] = value
     for key, value in posted.items():

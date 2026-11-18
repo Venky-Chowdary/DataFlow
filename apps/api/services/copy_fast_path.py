@@ -131,6 +131,23 @@ class FastPathUnavailable(Exception):
         note_copy_decline(str(message), log=False)
 
 
+def append_repeat_of_stored_snapshot(
+    actions: list[str], *, replace_destination: bool
+) -> bool:
+    """True when every source key is already stored on an append.
+
+    A resume has an empty range, so at least one action is ``load``. When
+    every range is ``skip``, the previous append is the whole snapshot and a
+    second run must insert another copy (or refuse, when the destination
+    enforces a key). Overwrite reloads instead (D395).
+    """
+    return (
+        not replace_destination
+        and bool(actions)
+        and all(str(action) == "skip" for action in actions)
+    )
+
+
 def occupied_pk_range_action(
     already: int, expected: int, *, replace_destination: bool, keys_proven: bool = True
 ) -> str:
@@ -166,17 +183,19 @@ def occupied_pk_range_action(
 class _CreateScope:
     """Source catalog handed to a fast path, and the certificate it earned."""
 
-    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report")
+    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report", "sync_mode")
 
     def __init__(
         self,
         catalog: Any,
         mappings: list[dict[str, Any]] | None,
         dest_table: str = "",
+        sync_mode: str = "",
     ) -> None:
         self.catalog = catalog
         self.mappings = list(mappings or [])
         self.dest_table = str(dest_table or "")
+        self.sync_mode = str(sync_mode or "")
         self.pending: FastPathCreate | None = None
         self.report: dict[str, Any] | None = None
 
@@ -248,6 +267,7 @@ def begin_fast_path_create_scope(
     source_schema_catalog: Any,
     mappings: list[dict[str, Any]] | None,
     dest_table: str = "",
+    sync_mode: str = "",
 ) -> tuple[Token, _CreateScope]:
     """Make the source catalog visible to any CREATE a fast path renders.
 
@@ -257,7 +277,7 @@ def begin_fast_path_create_scope(
     carries the catalog in and the settled certificate out, so ``stream``
     stamps it on the summary.
     """
-    scope = _CreateScope(source_schema_catalog, mappings, dest_table)
+    scope = _CreateScope(source_schema_catalog, mappings, dest_table, sync_mode)
     return _CREATE_SCOPE.set(scope), scope
 
 
@@ -306,8 +326,15 @@ def plan_fast_path_create(
     given = tuple(c for c in (primary_key or []) if c in targets)
     if scope is None or scope.catalog is None or not scope.owns(dest_table):
         return FastPathCreate(primary_key=given)
-    from services.schema_fidelity import resolve_create_fidelity_plan
+    from services.schema_fidelity import (
+        plain_append_sync,
+        resolve_create_fidelity_plan,
+        withhold_append_key_constraints,
+    )
 
+    # Append create-new does not copy the source business key. A second run
+    # of the same ids must insert another copy, not update the first (D395).
+    append_create = plain_append_sync(getattr(scope, "sync_mode", ""))
     mappings = scope.mappings or [{"source": s, "target": t} for s, t in pairs]
     plan = resolve_create_fidelity_plan(
         source_schema_catalog=scope.catalog,
@@ -317,16 +344,19 @@ def plan_fast_path_create(
         dest_dialect=dest_dialect,
         dest_table=dest_table,
         dest_schema=dest_schema,
+        carry_keys=not append_create,
     )
+    if append_create:
+        plan = withhold_append_key_constraints(plan)
     planned_pk = sorted(c.lower() for c in plan.primary_key)
     given_pk = sorted(c.lower() for c in given)
-    if planned_pk and given_pk and planned_pk != given_pk:
+    if (not append_create) and planned_pk and given_pk and planned_pk != given_pk:
         raise FastPathUnavailable(
             f"create-new must carry PRIMARY KEY ({', '.join(plan.primary_key)}) "
             f"but the fast path was given ({', '.join(given)}) — the row path "
             "creates and certifies the destination"
         )
-    pk = tuple(plan.primary_key) or given
+    pk = tuple(plan.primary_key) if append_create else (tuple(plan.primary_key) or given)
     dialect = dest_dialect.lower()
     if dialect in _LOB_KEY_REFUSING:
         ddl_of = dict(zip(targets, ddls))

@@ -63,6 +63,13 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         # runs it only under the hash Validate approved.
         shape_recipe=dict(payload.get("shape_recipe") or {}),
         approved_shape_recipe_hash=str(payload.get("approved_shape_recipe_hash") or ""),
+        transform_recipe_id=str(payload.get("transform_recipe_id") or "").strip(),
+        transform_recipe_version=int(payload.get("transform_recipe_version") or 0),
+        transform_recipe_version_mode=str(
+            payload.get("transform_recipe_version_mode") or "pin"
+        ).strip().lower()
+        or "pin",
+        transform_recipe_params=dict(payload.get("transform_recipe_params") or {}),
         source_filename=str(payload.get("source_filename") or ""),
         source_path=source_path,
         source_object_uri=str(payload.get("source_object_uri") or ""),
