@@ -1237,6 +1237,10 @@ def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
     refusal = _host_executable_refusal(conn)
     if refusal:
         return _tool_result("test_connector", success=False, output=None, error=refusal)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(conn.get("type") or "")):
+        return _tool_result("test_connector", success=False, output=None, error=brand)
     from services.connector_probe import probe_saved_connector
     from services.connector_store import mark_tested
 

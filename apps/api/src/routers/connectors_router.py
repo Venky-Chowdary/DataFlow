@@ -235,6 +235,10 @@ async def test_connection(request: TestConnectionRequest, http_request: Request)
     )
     if refused:
         raise HTTPException(status_code=422, detail=refused)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(request.type or "")):
+        raise HTTPException(status_code=422, detail=brand)
     from services.local_file_policy import sqlite_hosted_refusal
 
     hosted = sqlite_hosted_refusal(
@@ -476,6 +480,10 @@ def create_connector(
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(config.type or "")):
+        raise HTTPException(status_code=422, detail=brand)
     _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode, config.connection_string)
     connector_data = {
         "name": config.name,

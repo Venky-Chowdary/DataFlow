@@ -603,6 +603,7 @@ def format_exception_message(error: Exception | str) -> str:
 
 
 _PARAMETERS = re.compile(r"\[parameters:.*?\](?=\s*(?:\(Background|$))", re.S)
+_SQL_TEXT = re.compile(r"\[SQL:.*?\](?=\s*(?:\[parameters:|\(Background|$))", re.S)
 _RAW_CAP = 2000
 
 
@@ -612,7 +613,8 @@ def format_raw_failure(error: Exception | str) -> str:
     SQLAlchemy appends every bound parameter of the failed batch, which put
     customer rows (DATA-16, ~120 kB) on the job record and the API response.
     """
-    raw = _PARAMETERS.sub("[parameters: withheld]", format_exception_message(error))
+    raw = _SQL_TEXT.sub("[SQL: withheld]", format_exception_message(error))
+    raw = _PARAMETERS.sub("[parameters: withheld]", raw)
     if len(raw) > _RAW_CAP:
         raw = raw[:_RAW_CAP] + " …"
     return raw

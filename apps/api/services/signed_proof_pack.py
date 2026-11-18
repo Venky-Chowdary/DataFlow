@@ -1018,27 +1018,8 @@ def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
     return timing
 
 
-def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
-    """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
-    from services.audit_log import latest_event_hash
-    from services.code_crosswalk import proof_pack_code_crosswalk
-
-    prev = None
-    try:
-        prev = latest_event_hash()
-    except Exception:
-        prev = None
-    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
-    rejected = dest.get("rejected_details") or job.get("rejected_details") or []
-    mapping_proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
-    accepted = collect_accepted_risks_from_job(job)
-    expected_risks = mapping_risk_contracts_expected(job)
-    # If mappings were stripped but accepted_risks stamped at execute, expected
-    # may be empty — still fine. If mappings carry contracts and harvest is
-    # empty, completeness errors strip migration_proven.
-    rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
-    if not rollback and isinstance(job.get("rollback_plan"), dict):
-        rollback = job["rollback_plan"]
+def harvest_connector_versions(job: dict[str, Any], dest: dict[str, Any]) -> dict[str, Any]:
+    """The release strings a certificate may cite. Format or kind is not a release."""
     from services.connector_versions import versions_include_release
 
     connector_versions: dict[str, Any] = {}
@@ -1070,24 +1051,13 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
             connector_versions["source"] = src.get("format") or src.get("kind")
         if dst.get("format") or dst.get("kind"):
             connector_versions["destination"] = dst.get("format") or dst.get("kind")
-    pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
-    ddl_identity = (
-        (pf.get("proof_bundle") or {}).get("ddl_identity")
-        if isinstance(pf.get("proof_bundle"), dict)
-        else {}
-    )
-    ddl_hash = (
-        str(dest.get("ddl_hash") or "")
-        or str((ddl_identity or {}).get("ddl_identity_hash") or "")
-        or None
-    )
-    xform_hash = str(dest.get("transformation_hash") or job.get("transformation_hash") or "") or None
-    job_success = str(job.get("status") or "").lower() in {
-        "completed",
-        "completed_with_quarantine",
-        "success",
-        "succeeded",
-    }
+    return connector_versions
+
+
+def harvest_reconciliation_for_proof(
+    job: dict[str, Any], dest: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The reconciliation the certificate classifies, including reread flags."""
     reconciliation = (
         dict(job["reconciliation"]) if isinstance(job.get("reconciliation"), dict) else None
     )
@@ -1108,6 +1078,92 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
             and str(dest.get("checksum_mode") or "") == "source_reread"
         ):
             reconciliation["source_checksum_provenance"] = "independent_source_reread"
+    return reconciliation
+
+
+def migration_proven_blockers(job: dict[str, Any]) -> list[str]:
+    """Why the certificate will not say proven, when the cells would otherwise.
+
+    Empty when the post-write claim is already not migration_proven, so a
+    count-only or sampled job is not given a second, unrelated refusal.
+    Parity uses this so it cannot say proven while the certificate says
+    NOT PROVEN (D381). It does not sign or anchor a pack.
+    """
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    reconciliation = harvest_reconciliation_for_proof(job, dest)
+    if not isinstance(reconciliation, dict):
+        return []
+    if not classify_post_write_assurance(reconciliation).get("migration_proven"):
+        return []
+    mapping_proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
+    pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
+    ddl_identity = (
+        (pf.get("proof_bundle") or {}).get("ddl_identity")
+        if isinstance(pf.get("proof_bundle"), dict)
+        else {}
+    )
+    ddl_hash = (
+        str(dest.get("ddl_hash") or "")
+        or str((ddl_identity or {}).get("ddl_identity_hash") or "")
+        or None
+    )
+    job_success = str(job.get("status") or "").lower() in {
+        "completed",
+        "completed_with_quarantine",
+        "success",
+        "succeeded",
+    }
+    return proof_pack_evidence_completeness_errors(
+        job_success=job_success,
+        ddl_hash=ddl_hash,
+        mapping_hash=str(mapping_proof.get("mapping_hash") or "") or None,
+        connector_versions=harvest_connector_versions(job, dest),
+        reconciliation=reconciliation,
+        claim_migration_proven=True,
+    )
+
+
+def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
+    """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
+    from services.audit_log import latest_event_hash
+    from services.code_crosswalk import proof_pack_code_crosswalk
+
+    prev = None
+    try:
+        prev = latest_event_hash()
+    except Exception:
+        prev = None
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    rejected = dest.get("rejected_details") or job.get("rejected_details") or []
+    mapping_proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
+    accepted = collect_accepted_risks_from_job(job)
+    expected_risks = mapping_risk_contracts_expected(job)
+    # If mappings were stripped but accepted_risks stamped at execute, expected
+    # may be empty — still fine. If mappings carry contracts and harvest is
+    # empty, completeness errors strip migration_proven.
+    rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
+    if not rollback and isinstance(job.get("rollback_plan"), dict):
+        rollback = job["rollback_plan"]
+    connector_versions = harvest_connector_versions(job, dest)
+    pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
+    ddl_identity = (
+        (pf.get("proof_bundle") or {}).get("ddl_identity")
+        if isinstance(pf.get("proof_bundle"), dict)
+        else {}
+    )
+    ddl_hash = (
+        str(dest.get("ddl_hash") or "")
+        or str((ddl_identity or {}).get("ddl_identity_hash") or "")
+        or None
+    )
+    xform_hash = str(dest.get("transformation_hash") or job.get("transformation_hash") or "") or None
+    job_success = str(job.get("status") or "").lower() in {
+        "completed",
+        "completed_with_quarantine",
+        "success",
+        "succeeded",
+    }
+    reconciliation = harvest_reconciliation_for_proof(job, dest)
     return build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
         reconciliation=reconciliation,

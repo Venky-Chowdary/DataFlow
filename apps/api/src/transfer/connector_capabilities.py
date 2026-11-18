@@ -999,6 +999,28 @@ def planned_reason(catalog_id: str) -> str:
     """Why a tile whose driver exists is still Planned ('' when it is not)."""
     return _PLANNED_UNTIL_DRIVER.get((catalog_id or "").lower().strip(), "")
 
+
+def unproven_wire_brand_refusal(catalog_id: str) -> str:
+    """Why save and test must refuse a wire-compatible brand that cannot transfer.
+
+    MariaDB tests as MySQL and then every run fails ``Planned — not available
+    for production transfer`` (D383). The probe and the transfer share this
+    refusal. A brand with its own recorded proof is not refused. ``""`` when
+    the type may be saved. The alternative type is ``resolve_driver_type`` —
+    the same map the writer uses — so the message cannot name a different engine.
+    """
+    cid = (catalog_id or "").lower().strip()
+    if cid not in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS or _alias_proven(cid):
+        return ""
+    alternative = resolve_driver_type(cid)
+    if alternative and alternative not in {cid, "unknown", "generic_sql"}:
+        return (
+            f"{cid} is Planned. It speaks the {alternative} protocol, and a connection "
+            f"test would succeed, but a transfer of type {cid} is refused. "
+            f"Save the connector as type {alternative}."
+        )
+    return f"{cid} is Planned — not available for production transfer."
+
 # Legacy helper kept for tests that still probe generic_sql brand certification.
 _CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
     "oracle", "sql_server", "sqlserver", "mssql", "duckdb",

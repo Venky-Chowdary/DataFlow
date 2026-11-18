@@ -3457,9 +3457,14 @@ def _covered_keyed_noop_verify(
         ),
         pk_column,
     )
-    columns = [str(m.get("target") or "") for m in map_list if m.get("target")]
-    if pk_column not in columns:
-        columns.append(pk_column)
+    from services.mapping_constraints import verify_write_pairs
+
+    # Omitted columns are not created. Reading them fails a correct re-run
+    # (D409). The key stays so a tampered cell can be named.
+    verify_pairs = verify_write_pairs(
+        map_list, key_target=pk_column, key_source=src_pk
+    )
+    columns = [target for _source, target in verify_pairs]
     try:
         dest_rows = _read_verify_rows(
             db_type,
@@ -3472,9 +3477,7 @@ def _covered_keyed_noop_verify(
             src_type,
             src_cfg,
             table=str(source_endpoint.table or src_cfg.get("table") or ""),
-            columns=[
-                str(m.get("source") or "") for m in map_list if m.get("source")
-            ] or None,
+            columns=[source for source, _target in verify_pairs] or None,
         )
     except PopulationTooLarge as exc:
         return {
@@ -3490,7 +3493,16 @@ def _covered_keyed_noop_verify(
         }
     except Exception as exc:
         # A covered destination we cannot re-read has no tamper proof — the
-        # count-only green must not stamp verified (X-22 doctrine).
+        # count-only green must not stamp verified (X-22 doctrine). The job
+        # message is the classified cause. The driver text, including any
+        # statement, stays in the server log (D405, D409).
+        from services.error_taxonomy import new_reference, user_message
+
+        ref = new_reference()
+        cause = user_message(exc, side="destination", phase="read")
+        _logger.exception(
+            "Keyed no-op poll re-read failed reference=%s", ref
+        )
         return {
             "passed": False,
             "unproven": True,
@@ -3498,8 +3510,8 @@ def _covered_keyed_noop_verify(
             "assurance_level": "none",
             "message": (
                 "Keyed no-op poll could not re-verify covered content "
-                f"({exc}). Count unchanged is not a value proof. "
-                "Not migration_proven."
+                f"({cause}). Reference {ref}. "
+                "Count unchanged is not a value proof. Not migration_proven."
             ),
         }
     if src_rows is None or dest_rows is None:
@@ -3512,13 +3524,7 @@ def _covered_keyed_noop_verify(
     # DATAFLOW_INCREMENTAL_DRIFT_FAILS=1).
     from services.incremental_drift import attach_drift, measure_drift
 
-    pairs = [
-        (str(m.get("source") or ""), str(m.get("target") or ""))
-        for m in map_list
-        if m.get("source") and m.get("target")
-    ]
-    if not any(t == pk_column for _s, t in pairs):
-        pairs.append((src_pk, pk_column))
+    pairs = list(verify_pairs)
     as_target = [
         {t: r.get(s) for s, t in pairs} for r in src_rows if isinstance(r, dict)
     ]

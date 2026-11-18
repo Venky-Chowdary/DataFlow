@@ -736,6 +736,15 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
         )
     if explained:
         return "explained", f"{explained:,} row(s) differ and none is unexplained: {_explained_split(tables)}."
+    from services.signed_proof_pack import migration_proven_blockers
+
+    blockers = migration_proven_blockers(job)
+    if blockers:
+        return "unverifiable", (
+            "Compared cells match, and the certificate will not say proven: "
+            + "; ".join(str(item) for item in blockers[:3])
+            + "."
+        )
     return "proven", "No differences: the destination matches the source."
 
 

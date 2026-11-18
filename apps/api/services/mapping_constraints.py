@@ -34,6 +34,32 @@ def write_mappings(mappings: list[dict] | None) -> list[dict]:
     return [m for m in (mappings or []) if not is_intentional_omit(m)]
 
 
+def verify_write_pairs(
+    mappings: list[dict] | None,
+    *,
+    key_target: str = "",
+    key_source: str = "",
+) -> list[tuple[str, str]]:
+    """``(source, destination)`` columns a re-read may select.
+
+    An omitted column is not on the destination, so selecting it fails the
+    poll (``Invalid column name``) and fails a run whose cells were exact
+    (D409). A rename is verified under the destination name. The key is
+    always included so a tampered row can be named.
+    """
+    pairs: list[tuple[str, str]] = []
+    for mapping in write_mappings(mappings):
+        source = str(mapping.get("source") or mapping.get("source_column") or "").strip()
+        target = str(mapping.get("target") or mapping.get("target_column") or "").strip()
+        if not source or not target:
+            continue
+        pairs.append((source, target))
+    key = str(key_target or "").strip()
+    if key and not any(target == key for _source, target in pairs):
+        pairs.append((str(key_source or key).strip() or key, key))
+    return pairs
+
+
 def known_target(name: str, target_columns: list[str]) -> bool:
     """True when name matches a declared destination column (case/underscore insensitive)."""
     if not target_columns:
