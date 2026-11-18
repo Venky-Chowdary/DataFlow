@@ -66,6 +66,16 @@ def rewrite_record_terminators(body: bytes, terminator: bytes = b"\r\n") -> byte
 _CSV_NULL = "\x00"
 
 
+def open_delimited_text(path: Any, encoding: str = "utf-8"):
+    """Text view of a CSV or TSV.
+
+    ``newline=''`` keeps a CRLF that sits inside quotes. The default text
+    opener turns every ``\\r\\n`` into ``\\n`` before the parser sees it, so a
+    field ``multi\\r\\nline`` was stored as ``multi\\nline`` (D318).
+    """
+    return open(path, "r", encoding=encoding, newline="")
+
+
 def decode_cell(
     value: str, was_quoted: bool | None, empty_cell: str = "null", null_marker: str = ""
 ) -> str | None:

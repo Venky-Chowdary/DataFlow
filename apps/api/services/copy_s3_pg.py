@@ -203,7 +203,9 @@ def copy_s3_to_postgres(
                 f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
                 f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
             )
-            with open(tmp_path, "r", encoding="utf-8") as handle:
+            from services.csv_codec import open_delimited_text
+
+            with open_delimited_text(tmp_path) as handle:
                 from services.cancel_check import copy_expert_keeping_cancel
 
                 copy_expert_keeping_cancel(dst_cur, copy_sql, handle)

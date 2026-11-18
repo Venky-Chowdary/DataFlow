@@ -704,7 +704,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     delimiter = record["delimiter"]
 
     if fmt == "csv":
-        from services.csv_codec import iter_csv_records
+        from services.csv_codec import iter_csv_records, open_delimited_text
 
         # C04: unquoted empty is None, quoted "" is '' — the chunk path sees
         # the same cells the stream path does; the carrier bind then lands
@@ -719,7 +719,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             for c in (record.get("columns") or [])
             if isinstance(c, dict)
         }
-        with open(path, "r", encoding=encoding) as f:
+        with open_delimited_text(path, encoding) as f:
             reader = iter_csv_records(f, delimiter, null_marker=str(record.get("null_marker") or ""))
             headers = next(reader, [])
             chunk = []

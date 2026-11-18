@@ -1579,6 +1579,27 @@ async def execute_transfer_json(
     }
 
 
+def incomplete_transfer_run_detail(*, has_source: bool, has_destination: bool) -> str:
+    """Why POST /transfer/run must not start, or ``""`` when it may.
+
+    An empty form used to create a job on the form defaults (source file,
+    MongoDB ``test_db``). A destination with no source did the same (D374).
+    A file with no explicit destination is still the upload form: the caller
+    supplied a source.
+    """
+    if has_source:
+        return ""
+    if has_destination:
+        return (
+            "Name a source. This request has a destination and no source, "
+            "so no job was started."
+        )
+    return (
+        "Name a source and a destination. This request has neither, "
+        "so no job was started."
+    )
+
+
 @router.post("/run")
 async def run_universal_transfer(
     background_tasks: BackgroundTasks,
@@ -1697,15 +1718,12 @@ async def run_universal_transfer(
             str(dest_output_path or "").strip(),
         )
     )
-    if not supplied_source and not supplied_dest:
+    if detail := incomplete_transfer_run_detail(
+        has_source=supplied_source, has_destination=supplied_dest
+    ):
         # Form defaults (source file, mongodb test_db) are not an operator choice.
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Name a source and a destination. This request has neither, "
-                "so no job was started."
-            ),
-        )
+        # A destination with no source used to run on those defaults (D374).
+        raise HTTPException(status_code=422, detail=detail)
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
         assert_delivery_guarantee_allowed,

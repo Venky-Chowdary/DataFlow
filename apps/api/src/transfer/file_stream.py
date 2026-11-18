@@ -981,7 +981,14 @@ def file_empty_cell_bind(value: Any, carrier: str, *, empty_cell: str = "null") 
     """
     if value is None or value != "":
         return value
-    if _TEXT_FAMILY_DDL_RE.match(str(carrier or "").strip()):
+    carrier_text = str(carrier or "").strip()
+    if _TEXT_FAMILY_DDL_RE.match(carrier_text):
+        return ""
+    # SQL Server JSON is an NVARCHAR. A quoted ``""`` stays an empty string;
+    # the unquoted empty field is already None (D297). A number still cannot
+    # store ``''``.
+    folded = carrier_text.lower()
+    if folded.startswith("nvarchar") or folded == "json":
         return ""
     return None
 

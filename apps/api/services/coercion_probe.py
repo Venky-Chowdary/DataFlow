@@ -744,6 +744,16 @@ def analyze_coercion(
                     observed_values.append("")
                     continue
                 cell = cell_to_string(raw_cell)
+                if (
+                    cell == ""
+                    and tgt_logical == "json"
+                    and raw_cell == ""
+                ):
+                    # Quoted CSV ``""`` is an empty string on a JSON/NVARCHAR
+                    # column. None (an unquoted empty field) was counted as
+                    # NULL above. Refusing ``""`` blocked the load (D297).
+                    observed_values.append(cell)
+                    continue
                 if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
                     # Numeric / money destinations: empty is not a natural NULL — write
                     # bind refuses silent invent. Count as coercion failure so Validate

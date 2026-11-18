@@ -400,7 +400,8 @@ def _small_sample_pan_advisory(col: str, values: list[str]) -> dict[str, Any] | 
 
 _NUMERIC_TYPE_RE = re.compile(
     r"^(?:big|small|tiny|medium)?int(?:eger)?\d*\b|^(?:numeric|decimal|number|"
-    r"float\d*|double|real|money|serial|bigserial|smallserial)\b|^u?int\d+$",
+    r"float\d*|double(?:\s+precision)?|real|money|binary_double|binary_float|"
+    r"float[48]|serial|bigserial|smallserial)\b|^u?int\d+$",
     re.I,
 )
 
@@ -410,9 +411,16 @@ def _numeric_column(raw_values: list[Any], declared_type: str = "") -> bool:
     if declared_type and _NUMERIC_TYPE_RE.match(declared_type.strip()):
         return True
     present = [v for v in raw_values if v is not None and not (isinstance(v, str) and not v.strip())]
-    return bool(present) and all(
+    if bool(present) and all(
         isinstance(v, (int, float, Decimal)) and not isinstance(v, bool) for v in present
-    )
+    ):
+        return True
+    # Oracle BINARY_DOUBLE and a CSV read hand a ratio back as text. A column
+    # of decimal literals is still a measure: stripping the point made
+    # 1.4285714285714286 a Luhn-valid PAN (D295). A 13-19 digit integer is
+    # not a decimal literal, so a real card column stays a card column.
+    texts = [str(v).strip() for v in present]
+    return bool(texts) and all(_is_decimal_literal(t) for t in texts)
 
 
 def _bare_digits_may_be_phone(
@@ -537,11 +545,15 @@ def embedded_pii_categories(value: Any) -> list[str]:
     text = str(value if value is not None else "")
     if not text or _EMBED_CHARS.isdisjoint(text):
         return []
+    from services.pii_guard import _inside_decimal_literal
+
     found: list[str] = []
     for label, pattern in PII_PATTERNS.items():
         for match in pattern.finditer(text):
             token = match.group(0)
             if label == "ip_address" and not _is_ip_address(token):
+                continue
+            if label in {"pci_pan", "phone", "ssn"} and _inside_decimal_literal(match):
                 continue
             if label == "pci_pan" and not luhn_valid(token):
                 continue

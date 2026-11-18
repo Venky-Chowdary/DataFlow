@@ -2738,6 +2738,12 @@ def apply_transform(
         return strip_control_characters(unescaped), None
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
+    if text == "" and transform_l == "json" and raw_s == "":
+        # A quoted CSV ``""`` is an empty string. An unquoted empty field
+        # arrives as None and already returned. Inventing SQL NULL here made
+        # the two the same, and refusing the empty string blocked a nullable
+        # SQL Server JSON column (D297, R2).
+        return "", None
     if text == "" and transform_l == "binary":
         # Zero-length binary is a real value — VARBINARY/bytea/BLOB accept it
         # and it is distinct from NULL (which arrives as the null sentinel and
