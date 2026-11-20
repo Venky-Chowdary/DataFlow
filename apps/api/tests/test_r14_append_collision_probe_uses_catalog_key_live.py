@@ -57,13 +57,48 @@ def test_append_probe_keys_on_the_catalog_pk_not_a_column_named_id(isolated):  #
         got = h.run_sql("postgresql", f"SELECT clan_acc, id FROM {out} ORDER BY clan_acc")  # nosec B608
         assert got == [("CL00001", "tRNA"), ("CL00002", "東京 ✓"), ("CL00003", "tRNA")]
 
-        # The real key again (a re-emitted row past the watermark): refused at Validate.
+        # The real key again, changed past the watermark. Run 1 created this
+        # table for an append, so it enforces no key: incremental_append keeps
+        # every version (R6; D396 AC-1), so the change lands as a new version
+        # and the boundary row CL00003 (cursor tie) is not re-appended (R1).
+        h.run_sql("mysql", f"UPDATE {table} SET description = 'moved', "  # nosec B608
+                  "updated_at = '2024-03-01' WHERE clan_acc = 'CL00001'")
+        r3 = _run(isolated, table, out)
+        assert r3.success, r3.error
+        got = h.run_sql("postgresql", f"SELECT clan_acc, description FROM {out} "  # nosec B608
+                        "ORDER BY clan_acc, description NULLS FIRST")
+        assert got == [("CL00001", ""), ("CL00001", "moved"), ("CL00002", None),
+                       ("CL00003", "  ")], got
+    finally:
+        h.drop("mysql", table)
+        h.drop("postgresql", out)
+
+
+def test_a_catalog_key_the_destination_enforces_refuses_a_changed_row(isolated):  # noqa: F811
+    """The same changed key into a destination whose PRIMARY KEY is clan_acc: refused, never merged."""
+    if not h._port_up(3306) or not h._port_up(5432):
+        pytest.skip("live MySQL / PostgreSQL not reachable")
+    table = f"clank_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("mysql", f"CREATE TABLE {table} (clan_acc VARCHAR(7) NOT NULL PRIMARY KEY, "
+                  "id VARCHAR(40) NOT NULL, description VARCHAR(100), updated_at DATETIME(6)) "
+                  "DEFAULT CHARSET=utf8mb4")
+        h.run_sql("postgresql", f"CREATE TABLE {out} (clan_acc VARCHAR(7) PRIMARY KEY, "
+                  "id VARCHAR(40) NOT NULL, description VARCHAR(100), updated_at TIMESTAMP)")
+        h.run_sql("mysql", f"INSERT INTO {table} VALUES (%s, %s, %s, %s)",  # nosec B608
+                  params=[("CL00001", "tRNA", "", "2024-01-01"), ("CL00002", "tRNA", None, "2024-01-02")])
+        assert (r1 := _run(isolated, table, out)).success, r1.error
+        # A new key lands; the boundary row CL00002 is not re-sent (no false collision).
+        h.run_sql("mysql", f"INSERT INTO {table} VALUES ('CL00003', 'x', 'n', '2024-02-01')")  # nosec B608
+        assert (r2 := _run(isolated, table, out)).success, r2.error
         h.run_sql("mysql", f"UPDATE {table} SET description = 'moved', "  # nosec B608
                   "updated_at = '2024-03-01' WHERE clan_acc = 'CL00001'")
         r3 = _run(isolated, table, out)
         assert not r3.success
         assert "clan_acc" in (r3.error or ""), r3.error
-        assert len(h.run_sql("postgresql", f"SELECT 1 FROM {out}")) == 3  # nosec B608
+        got = h.run_sql("postgresql", f"SELECT clan_acc, description FROM {out} ORDER BY clan_acc")  # nosec B608
+        assert got == [("CL00001", ""), ("CL00002", None), ("CL00003", "n")], got
     finally:
         h.drop("mysql", table)
         h.drop("postgresql", out)
