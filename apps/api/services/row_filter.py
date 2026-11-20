@@ -124,6 +124,7 @@ def canonical_filter_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
         )
     key = "operator" if node.get("operator") else "op"
     node[key] = canonical_filter_op(node.get(key) or "eq")
+    _refuse_null_operand(column, node[key], node.get("value"))
     if node[key] == "regex":
         try:
             re.compile(_cell_text(_to_scalar(node.get("value"))))
@@ -132,6 +133,30 @@ def canonical_filter_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
                 f"Filter on {column!r} has an invalid regular expression: {exc}."
             ) from None
     return node
+
+
+def _refuse_null_operand(column: str, op: str, value: Any) -> None:
+    """A comparison against NULL matches no row in SQL; say so before a run.
+
+    ``x = NULL`` and ``x IN (NULL)`` are UNKNOWN, and ``x NOT IN (a, NULL)``
+    is UNKNOWN for every x, so such a filter would land nothing (before D364
+    it matched ``''``). The CDC snapshot compiler refuses the same input.
+    """
+    if op in _NULL_OPS:
+        return
+    from services.value_serializer import is_reader_null_cell
+
+    if op in {"in", "not_in"}:
+        items = list(value) if isinstance(value, (list, tuple, set)) else [value]
+    else:
+        items = [_to_scalar(value)]
+    if not items or any(is_reader_null_cell(item) for item in items):
+        raise ValueError(
+            f"Filter on {column!r}: {op} needs a non-null value. A comparison "
+            "with NULL matches no row in SQL, and NOT IN with a NULL in the "
+            "list matches none. Use is_null or is_not_null, joined with 'or' "
+            "to keep NULL rows."
+        )
 
 
 def _child_node(child: Any, joiner: str) -> dict[str, Any]:
@@ -258,6 +283,14 @@ def _boolean_bit(value: Any) -> bool | None:
     return None
 
 
+def _boolean_equal(left: Any, right: Any) -> bool:
+    """``eq`` for a boolean literal against a bit, shared by ``in`` (D382)."""
+    if not (_boolean_word(left) or _boolean_word(right)):
+        return False
+    a, b = _boolean_bit(left), _boolean_bit(right)
+    return a is not None and a == b
+
+
 def _cell_text(value: Any) -> str:
     """One filter token. Reader-null / blank become ``""`` (same as None).
 
@@ -288,17 +321,31 @@ def _compare_values(
     if _is_null(rv, engine=engine):
         return False
 
+    if op in {"in", "not_in"}:
+        allowed = list(fv) if isinstance(fv, (list, tuple, set)) else [fv]
+        # ``x IN (a, NULL)`` is true only for ``a``: the NULL item equals
+        # nothing. ``x NOT IN (a, NULL)`` is never true, because ``x <> NULL``
+        # is UNKNOWN for every x (SQL three-valued logic; PostgreSQL 9.24 and
+        # MySQL agree). canonical_filter_spec refuses such a list up front.
+        if any(_is_null(item, engine=engine) for item in allowed):
+            if op == "not_in":
+                return False
+            allowed = [item for item in allowed if not _is_null(item, engine=engine)]
+    elif _is_null(fv, engine=engine):
+        # ``x = NULL`` / ``x < NULL`` is UNKNOWN, never a match on ''.
+        return False
+
     # PostgreSQL numeric NaN is not NULL. It equals NaN and sorts above every
     # non-NaN number (D365). A text compare of "nan" against "10" does not.
     if _is_numeric_nan(rv) or _is_numeric_nan(fv):
         return _compare_nan(rv, fv, op)
 
     if op in {"in", "not_in"}:
-        allowed = fv if isinstance(fv, (list, tuple, set)) else [fv]
-        allowed_str = {_cell_text(v) for v in allowed}
-        return (_cell_text(rv) in allowed_str) if op == "in" else (
-            _cell_text(rv) not in allowed_str
-        )
+        hit = any(_boolean_equal(rv, item) for item in allowed)
+        if not hit:
+            allowed_str = {_cell_text(v) for v in allowed}
+            hit = _cell_text(rv) in allowed_str
+        return hit if op == "in" else not hit
 
     rv_str = _cell_text(rv)
     fv_str = _cell_text(fv)
@@ -405,13 +452,16 @@ def filter_columns(spec: dict[str, Any] | None) -> list[str]:
 
 
 def null_dropping_warnings(spec: dict[str, Any] | None) -> list[str]:
-    """Plan-time warning: ``ne`` / ``not_in`` now exclude NULL rows.
+    """Plan-time warning for the D364 behaviour change: NULL rows now drop out.
 
-    SQL three-valued logic makes ``NULL <> x`` unknown. MongoDB ``$ne`` and
-    ``$nin`` match documents where the field is null or missing, so the
-    snapshot filter adds an existence guard and those rows are no longer kept.
+    SQL three-valued logic makes ``NULL <> x`` and ``NULL < x`` unknown.
+    Before D364 the in-memory evaluator read NULL as ``''``, so ``ne``,
+    ``not_in``, ``lt`` and ``lte`` kept NULL rows; an existing schedule with
+    such a filter now lands fewer rows. MongoDB ``$ne``/``$nin`` match null
+    and missing fields, so the snapshot filter adds an existence guard.
     """
-    found: list[str] = []
+    negated: list[str] = []
+    below: list[str] = []
 
     def walk(node: Any) -> None:
         if not isinstance(node, dict):
@@ -421,21 +471,32 @@ def null_dropping_warnings(spec: dict[str, Any] | None) -> list[str]:
                 for child in node.get(key) or []:
                     walk(child)
                 return
-        op = str(node.get("op") or node.get("operator") or "").strip().lower()
-        if op in {"ne", "neq", "!=", "<>", "not_in", "nin"}:
-            column = str(node.get("column") or node.get("field") or "column")
-            found.append(column)
+        raw = " ".join(str(node.get("op") or node.get("operator") or "").split()).lower()
+        op = FILTER_OP_ALIASES.get(raw, {"neq": "ne", "nin": "not_in"}.get(raw, raw))
+        column = str(node.get("column") or node.get("field") or "column")
+        if op in {"ne", "not_in"}:
+            negated.append(column)
+        elif op in {"lt", "lte"}:
+            below.append(column)
 
     walk(spec)
-    if not found:
-        return []
-    names = ", ".join(dict.fromkeys(found))
-    return [
-        f"Filter on {names} uses not-equal or not-in, which drops NULL rows. "
-        "SQL treats that comparison as unknown, and MongoDB $ne/$nin match "
-        "null and missing fields unless the plan requires the field to exist "
-        "and be non-null."
-    ]
+    out: list[str] = []
+    if negated:
+        names = ", ".join(dict.fromkeys(negated))
+        out.append(
+            f"Filter on {names} uses not-equal or not-in, which drops NULL rows. "
+            "SQL treats that comparison as unknown, and MongoDB $ne/$nin match "
+            "null and missing fields unless the plan requires the field to exist "
+            "and be non-null."
+        )
+    if below:
+        names = ", ".join(dict.fromkeys(below))
+        out.append(
+            f"Filter on {names} uses less-than, which drops NULL rows (SQL treats "
+            "NULL < x as unknown). Earlier runs kept them; join an is_null "
+            "condition with 'or' to keep them."
+        )
+    return out
 
 
 def iter_filtered_rows(rows, spec: dict[str, Any] | None, *, engine: str | None = None):

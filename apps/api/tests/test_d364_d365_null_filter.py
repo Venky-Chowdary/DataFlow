@@ -101,3 +101,57 @@ def test_ne_filter_warns_that_null_rows_are_dropped() -> None:
         summary, type("Req", (), {"source_filter": {"column": "qty", "op": "ne", "value": 0}})()
     )
     assert summary["warnings"] and "NULL" in summary["warnings"][0]
+
+
+def test_null_operand_matches_nothing_like_sql() -> None:
+    """``= NULL`` / ``IN (NULL)`` / ``NOT IN (a, NULL)`` follow PostgreSQL and MySQL.
+
+    Checked on PostgreSQL 16, MySQL 8 and SQLite: ``n = NULL`` 0 rows,
+    ``n IN ('a', NULL)`` only 'a', ``n NOT IN ('b', NULL)`` 0 rows. Before this
+    the cell path read the NULL operand as ``''`` and matched the empty row.
+    """
+    rows = [{"id": 1, "n": ""}, {"id": 2, "n": None}, {"id": 3, "n": "a"}]
+
+    def ids(spec):
+        return {r["id"] for r in apply_row_filter(rows, spec)}
+
+    assert ids({"column": "n", "op": "eq", "value": None}) == set()
+    assert ids({"column": "n", "op": "ne", "value": None}) == set()
+    assert ids({"column": "n", "op": "in", "value": [None]}) == set()
+    assert ids({"column": "n", "op": "in", "value": ["a", None]}) == {3}
+    assert ids({"column": "n", "op": "not_in", "value": ["b", None]}) == set()
+    assert ids({"column": "n", "op": "not_in", "value": ["b"]}) == {1, 3}
+    assert ids({"column": "n", "op": "eq", "value": ""}) == {1}
+
+
+def test_null_operand_is_refused_before_a_run() -> None:
+    import pytest
+
+    from services.row_filter import canonical_filter_spec
+
+    for spec in (
+        {"column": "n", "op": "eq", "value": None},
+        {"column": "n", "op": "lt"},
+        {"column": "n", "op": "not_in", "value": ["b", None]},
+        {"column": "n", "op": "in", "value": [SQL_NULL_SENTINEL]},
+    ):
+        with pytest.raises(ValueError, match="is_null"):
+            canonical_filter_spec(spec)
+    assert canonical_filter_spec({"column": "n", "op": "is_null"})
+    assert canonical_filter_spec({"column": "n", "op": "eq", "value": ""})
+
+
+def test_lt_filter_warns_that_null_rows_are_dropped() -> None:
+    from services.row_filter import null_dropping_warnings
+
+    warnings = null_dropping_warnings({"column": "qty", "op": "<", "value": 100})
+    assert warnings and "NULL" in warnings[0]
+    assert null_dropping_warnings({"column": "qty", "op": "not in", "value": [1]})
+
+
+def test_in_true_matches_a_mysql_tinyint_bit_like_eq() -> None:
+    rows = [{"id": 1, "flag": 1}, {"id": 2, "flag": 0}, {"id": 3, "flag": None}]
+    kept = apply_row_filter(rows, {"column": "flag", "op": "in", "value": [True]})
+    assert {r["id"] for r in kept} == {1}
+    kept = apply_row_filter(rows, {"column": "flag", "op": "not_in", "value": [True]})
+    assert {r["id"] for r in kept} == {2}
