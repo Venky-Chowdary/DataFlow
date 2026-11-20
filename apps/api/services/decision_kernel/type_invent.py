@@ -2571,11 +2571,14 @@ def temporal_precision_would_narrow(
         and tgt_p >= cap
         and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
     ):
-        # D372: datetime2(7) into a 6-digit carrier drops the 100 ns digit.
-        # Unmeasured, that is a risk contract, at plan and at execute. A
-        # measured population whose 7th digit is 0 loses nothing at the
-        # value level and is not flagged.
-        return population_fits_temporal_precision(population, tgt_p) is not True
+        # C3/D372: the exemption covers a declared tick the rows do not use.
+        # A measured digit past the cap is rounded away (DATETIME2(7) into
+        # microseconds): flagged at plan and at execute, which both call this
+        # function with the population they read through the tick-preserving
+        # sampler. A 7th digit of 0 loses nothing. Flagging the unmeasured
+        # declaration would grade the product's own create-new carrier lossy
+        # (no PostgreSQL/MySQL type holds 100 ns) and refuse every second run.
+        return population_fits_temporal_precision(population, tgt_p) is False
     if src_p <= tgt_p:
         return False
     # A declared ceiling (a warehouse's nanosecond default) narrows only if the

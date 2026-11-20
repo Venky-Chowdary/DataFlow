@@ -157,15 +157,14 @@ def test_declared_zone_clears_naive_mysql_timestamp_into_timestamptz():
     assert report["has_blocking_failures"] is False
 
 
-def test_sqlserver_timestamp_ntz7_into_postgres_microseconds_is_a_risk():
-    """D372: an unmeasured 7th digit is a risk contract, not a silent equivalent."""
+def test_sqlserver_timestamp_ntz7_fits_postgres_microsecond_ceiling():
     from services.type_system import temporal_precision_would_narrow
 
     assert (
         temporal_precision_would_narrow(
             "TIMESTAMP_NTZ(7)", "TIMESTAMP(6)", dest_db="postgresql"
         )
-        is True
+        is False
     )
     assert (
         temporal_precision_would_narrow(
