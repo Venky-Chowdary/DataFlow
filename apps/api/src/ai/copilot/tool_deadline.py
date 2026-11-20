@@ -260,7 +260,8 @@ def mongo_dial_label(uri: str) -> str:
     if fqdn:
         return fqdn
     labels = [
-        f"{host}:{port}" if port else str(host)
+        # An IPv6 literal is bracketed, or "2001:db8::1:38403" names another address.
+        (f"[{host}]" if ":" in str(host) else str(host)) + (f":{port}" if port else "")
         for host, port in (parsed.get("nodelist") or [])
         if host
     ]
