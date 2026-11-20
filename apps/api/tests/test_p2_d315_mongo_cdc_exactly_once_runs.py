@@ -110,3 +110,63 @@ def test_exactly_once_mongo_cdc_applies_changes_on_every_later_run(isolated, mon
         cdc.client.close()
         drop("postgresql", name)
         drop("postgresql", f"{name}_df_quarantine")
+
+
+@pytest.mark.skipif(not _ready(), reason="MongoDB replica set (change streams) not reachable")
+@pytest.mark.parametrize("semantics", ["", "cdc_position"], ids=["at_least_once", "exactly_once"])
+def test_mongo_to_mysql_cdc_lands_missing_nested_fields_as_null_and_keeps_running(
+    isolated, semantics  # noqa: F811
+):
+    """The story's second pair: Mongo -> MySQL CDC."""
+    from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    endpoint("mysql", "probe")  # skips when MySQL is not configured
+    name = "p2d315m_" + uuid.uuid4().hex[:8]
+    cdc = MongodbChangeStreamCdc(CFG, collection=name, primary_key="_id")
+    docs = [_doc(i) for i in range(1, 31)]
+    cdc.coll.insert_many(docs)
+
+    def run():
+        contract = {"name": name, "selected": True, "sync_mode": "cdc", "primary_key": "_id"}
+        if semantics:
+            contract["cursor_semantics"] = semantics
+        request = TransferRequest(
+            source=EndpointConfig(kind="database", format="mongodb", table=name, **CFG),
+            destination=endpoint("mysql", name),
+            sync_mode="cdc",
+            validation_mode="balanced",
+            stream_contracts=[contract],
+            ddl_changes_acknowledged=True,
+        )
+        job_id = uuid.uuid4().hex[:24]
+        isolated.update_job_status(job_id, "pending", transfer_request={})
+        return UniversalTransferEngine().execute_tracked(request, job_id)
+
+    def landed():
+        return {
+            int(r[0]): r[1:]
+            for r in run_sql("mysql", f"SELECT `_id`, payload_k, payload_s, name FROM `{name}`")  # nosec B608
+        }
+
+    try:
+        first = run()
+        assert first.success, first.error
+        rows = landed()
+        assert len(rows) == 30
+        assert rows[7][:2] == (None, None) and rows[9][:2] == (None, None)
+        assert int(rows[8][0]) == 8 and rows[8][1] == "s8"
+
+        cdc.coll.insert_one({"_id": 31, "name": "n31"})
+        cdc.coll.update_one({"_id": 5}, {"$set": {"name": "renamed"}})
+        cdc.coll.delete_one({"_id": 6})
+        second = run()
+        assert second.success, second.error
+        rows = landed()
+        assert 6 not in rows and rows[31][:2] == (None, None) and rows[5][2] == "renamed"
+    finally:
+        cdc.coll.drop()
+        cdc.client.close()
+        drop("mysql", name)
+        drop("mysql", f"{name}_df_quarantine")
