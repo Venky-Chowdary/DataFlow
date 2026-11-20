@@ -163,12 +163,21 @@ def test_absent_export_is_not_reported_as_left_in_the_bucket(monkeypatch) -> Non
     assert "absent" in note
 
 
-def test_json_null_export_matches_postgres_text_and_sql_null_stays_absent() -> None:
-    """jsonb ``null`` is the text ``null``. SQL NULL is an omitted key (R7-001).
+def test_json_null_export_matches_postgres_text_and_sql_null_is_null() -> None:
+    """jsonb ``null`` is the text ``null`` and verifies against the file (R7-001).
 
     Parsing the export token back to Python None made Gate-8 fingerprint the
     destination as SQL NULL (``\\x00NULL\\x00``) against a source cell ``null``,
     and the undo note then claimed a partial object that the delete had removed.
+
+    D307 (PR #433): the JSON writers keep every key, so a SQL NULL in a JSON
+    column is written as ``null`` like every other NULL column, as the local
+    file export already did and as PostgreSQL's ``row_to_json`` renders it.
+    In the file a JSON null value and a SQL NULL are then the same bytes; R2
+    reads JSON null as NULL. Gate-8 binds both sides to the destination
+    engine (``sample_compare_rows``), so on a file engine both fingerprint as
+    NULL there. The source engine still tells them apart, and a real value
+    against the file's ``null`` still fails.
     """
     import json
 
@@ -178,31 +187,30 @@ def test_json_null_export_matches_postgres_text_and_sql_null_stays_absent() -> N
     from services.value_serializer import json_dumps_exact_numbers
 
     types = {"payload": "JSON"}
-    present = mapped_row_to_json_record(
-        ("null",), ["payload"], types, omit_sql_null=True
-    )
-    absent = mapped_row_to_json_record(
-        (None,), ["payload"], types, omit_sql_null=True
-    )
-    assert present.get("payload") is not None
-    assert "payload" not in absent
-    loaded = json.loads(json_dumps_exact_numbers([present, absent]))
+    present = mapped_row_to_json_record(("null",), ["payload"], types)
+    sql_null = mapped_row_to_json_record((None,), ["payload"], types)
+    assert "payload" in present and "payload" in sql_null
+    loaded = json.loads(json_dumps_exact_numbers([present, sql_null, {}]))
     reread = list(_json_null_cells_as_engine_text(loaded))
-    # The read-back hands a present JSONL null over as the JSON-null token
-    # (D144: plain columns now keep their key and write SQL NULL as null).
+    # The read-back hands a present JSONL null over as the JSON-null token.
     assert str(reread[0]["payload"]) == "null"
-    assert "payload" not in reread[1]
-    source_null = fingerprint_for_reconcile(
-        "null", ddl_type="JSON", engine="postgresql"
-    )
-    dest_null = fingerprint_for_reconcile(
-        reread[0]["payload"], ddl_type="JSON", engine="s3"
-    )
-    source_sql = fingerprint_for_reconcile(None, ddl_type="JSON", engine="postgresql")
-    dest_sql = fingerprint_for_reconcile(None, ddl_type="JSON", engine="s3")
-    assert source_null == dest_null
-    assert source_sql == dest_sql
-    assert source_null != source_sql
+    assert str(reread[1]["payload"]) == "null"
+    assert "payload" not in reread[2]
+
+    def fp(value, engine):
+        return fingerprint_for_reconcile(value, ddl_type="JSON", engine=engine)
+
+    sql_fp = fp(None, "postgresql")
+    # The R7-001 defect: a source JSON null never mismatches the file's null.
+    assert fp("null", "s3") == fp(reread[0]["payload"], "s3")
+    # D307: a source SQL NULL matches the same null in the file.
+    assert fp(None, "s3") == fp(reread[1]["payload"], "s3") == sql_fp
+    # An absent key (an older export) is still SQL NULL.
+    assert fp(None, "s3") == fp(reread[2].get("payload"), "s3")
+    # The source engine keeps JSON null and SQL NULL apart.
+    assert fp("null", "postgresql") != sql_fp
+    # A value the writer did not put there still fails the compare.
+    assert fp('{"k": 1}', "s3") != fp(reread[1]["payload"], "s3")
 
 
 def test_postgres_json_null_exports_to_s3_without_a_false_leftover() -> None:
