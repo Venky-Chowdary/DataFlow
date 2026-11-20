@@ -214,7 +214,7 @@
   min-width: 0;
   margin: 12px 2px 0;
   overflow: hidden;
-  color: var(--df-text-tertiary);
+  color: #64748b;
   font-size: 13px;
   line-height: 1.45;
   text-overflow: ellipsis;

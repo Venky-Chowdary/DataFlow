@@ -2457,3 +2457,67 @@ html[data-theme="dark"] .mk {
   font-weight: 600;
   letter-spacing: 0;
 }
+
+/* Docs portal on the public site reads the theme; the in-app Help keeps
+   its own values from the shared docs rules. */
+.lp.mk .docs-category-card-desc {
+  color: var(--df-text-secondary);
+}
+
+.lp.mk .docs-article-badge {
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
+}
+
+.lp.mk .docs-section > p,
+.lp.mk .docs-article-content > .docs-section p {
+  color: var(--df-text-secondary);
+}
+
+.lp.mk .docs-section strong,
+.lp.mk .docs-workflow-body strong {
+  color: var(--df-text-primary);
+}
+
+.lp.mk .docs-section code,
+.lp.mk .docs-workflow-body code {
+  background: var(--df-surface-muted);
+  color: var(--df-brand-text);
+}
+
+.lp.mk .docs-steps {
+  color: var(--df-text-secondary);
+}
+
+.lp.mk .docs-steps li strong {
+  color: var(--df-text-primary);
+}
+
+.lp.mk .docs-shot-marker > span {
+  color: var(--df-text-primary);
+}
+
+.lp.mk .docs-workflow-pin {
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
+}
+
+.lp.mk .docs-workflow-body > p {
+  color: var(--df-text-secondary);
+}
+
+.lp.mk .docs-callout {
+  background: var(--df-brand-subtle);
+}
+
+.lp.mk .docs-pager button {
+  background: var(--df-surface);
+}
+
+.lp.mk .docs-shot-reel-caption {
+  color: var(--df-text-tertiary);
+}
+
+.lp.mk .docs-featured-card {
+  background: var(--df-surface);
+}

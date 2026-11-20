@@ -290,7 +290,7 @@
   padding: 16px 16px;
   border: 1px solid var(--lp-line);
   border-radius: 12px;
-  background: var(--df-surface);
+  background: #fff;
   color: var(--lp-ink);
   font: inherit;
   cursor: pointer;
