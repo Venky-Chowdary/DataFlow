@@ -74,19 +74,20 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
     from services.naming_history import naming_job_scope
     from services.staged_preflight import (
         bind_staged_preflight,
-        destination_schema_version,
+        bounded_destination_schema_version,
         request_preflight_fingerprint,
     )
 
     try:
+        # The staged-preflight check reads the destination only when a staged
+        # run matches, under the egress scope and the connect deadline (D19).
         with naming_job_scope(job_id, str(request.workspace_id or "")), \
-                bind_staged_preflight(
-                    str(getattr(request, "preflight_run_id", "") or ""),
-                    request_preflight_fingerprint(request),
-                    destination_schema_version(getattr(request, "destination", None)),
-                ), \
                 keyed_write_witness_scope(job_id), egress_workspace(
             str(request.workspace_id or "")
+        ), bind_staged_preflight(
+            str(getattr(request, "preflight_run_id", "") or ""),
+            request_preflight_fingerprint(request),
+            lambda: bounded_destination_schema_version(getattr(request, "destination", None)),
         ), endpoint_session_scope(
             engines=("sftp", "mysql", "mariadb")
         ), transfer_job_scope(

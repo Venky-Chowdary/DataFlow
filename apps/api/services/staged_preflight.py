@@ -16,10 +16,11 @@ import copy
 import hashlib
 import json
 import logging
+import secrets
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -43,7 +44,9 @@ _SECRET_FIELDS = frozenset({
 _SAMPLE_FIELDS = frozenset({
     "sample", "samples", "sample_rows", "sample_values", "sample_values_by_source",
 })
-_FP_KEY = b"datawrap-preflight-fingerprint-v1"
+# Staged runs live in this process only, so the key that seals secrets in a
+# fingerprint is drawn per process, never a constant in the source (D308).
+_FP_KEY = secrets.token_bytes(32)
 
 
 def _keyed_secret(value: str) -> str:
@@ -184,6 +187,12 @@ def preflight_input_fingerprint(**parts: Any) -> str:
         "data_region": str(parts.get("data_region") or ""),
         "historical_resync": bool(parts.get("historical_resync")),
         "source_timezone": str(parts.get("source_timezone") or ""),
+        "transform_recipe_version_mode": str(parts.get("transform_recipe_version_mode") or ""),
+        # Every dial field of each endpoint (region, endpoint_url, warehouse,
+        # auth, collection...), sealed: an input left out could change a gate
+        # without changing the hash (D308).
+        "source_endpoint": parts.get("source_endpoint") or {},
+        "destination_endpoint": parts.get("destination_endpoint") or {},
     }
     raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -238,13 +247,18 @@ def _schema_still_current(stored: str, fresh: str | None) -> bool:
 def bind_staged_preflight(
     run_id: str,
     fingerprint: str = "",
-    schema_version: str | None = None,
+    schema_version: str | None | Callable[[], str | None] = None,
 ) -> Iterator[None]:
     """Bind the staged run only when it is the same check and still fresh.
 
     A different fingerprint, a result older than ten minutes, or a destination
     schema that no longer matches the one staging read all skip reuse. Skipping
     runs the gates. It does not reuse a check of different inputs.
+
+    ``schema_version`` may be a callable: the destination is then read only
+    when a staged run with this fingerprint exists. A run with nothing staged
+    does not dial the destination here (D19: that dial was unbounded and froze
+    a job on a silent destination before its connect deadline started).
     """
     rid = str(run_id or "").strip()
     with _LOCK:
@@ -255,10 +269,10 @@ def bind_staged_preflight(
         row = None
     if row is not None and time.time() - float(row.get("saved_at") or 0) > _TTL_SECONDS:
         row = None
-    if row is not None and not _schema_still_current(
-        str(row.get("schema_version") or ""), schema_version
-    ):
-        row = None
+    if row is not None:
+        fresh = schema_version() if callable(schema_version) else schema_version
+        if not _schema_still_current(str(row.get("schema_version") or ""), fresh):
+            row = None
     token = _BOUND.set(row)
     try:
         yield
@@ -275,7 +289,17 @@ def align_staged_preflight(run_id: str, request: Any) -> None:
     rid = str(run_id or "").strip()
     if not rid:
         return
-    version = destination_schema_version(getattr(request, "destination", None))
+    with _LOCK:
+        row = _RUNS.get(rid)
+        stored = str((row or {}).get("schema_version") or "")
+    if row is None:
+        return
+    # Staging already read the destination: a second read is a second login
+    # for the same answer (D308). Only a staging that stored none reads here,
+    # inside the staging tool call's own deadline.
+    version = "" if stored else destination_schema_version(
+        getattr(request, "destination", None)
+    )
     with _LOCK:
         row = _RUNS.get(rid)
         if not row:
@@ -284,6 +308,40 @@ def align_staged_preflight(run_id: str, request: Any) -> None:
         row["saved_at"] = time.time()
         if version:
             row["schema_version"] = version
+
+
+def bounded_destination_schema_version(dest: Any) -> str:
+    """:func:`destination_schema_version` under the destination connect deadline.
+
+    A destination that accepts the connection and never answers ends this
+    read at the deadline (R10) and yields ``unread``, which never reuses a
+    staged result: the gates then run and fail on their own bounded probe.
+    """
+    from services.connector_executor import get_executor
+    from services.workspace_filter import current_workspace_stamp
+    from src.ai.copilot.tool_deadline import _Progress, deadline_scope, interrupt_connections
+    from src.transfer.engine_destination import _destination_connect_deadline
+
+    seconds = _destination_connect_deadline()
+    progress = _Progress(limit=seconds)
+
+    def _run() -> str:
+        with deadline_scope(seconds, progress):
+            return destination_schema_version(dest)
+
+    try:
+        return str(get_executor().run(
+            "destination_connect",
+            _run,
+            workspace=current_workspace_stamp(for_write=False),
+            seconds=seconds,
+            describe_timeout=lambda: "destination schema version timed out",
+            label=lambda: "destination_connect: destination schema version",
+            interrupt=lambda: interrupt_connections(progress),
+        ) or "")
+    except Exception:  # noqa: BLE001 - a timeout or refusal only means "do not reuse"
+        logger.debug("destination schema version was not read in time", exc_info=True)
+        return "unread"
 
 
 def request_preflight_fingerprint(request: Any) -> str:
@@ -364,6 +422,9 @@ def request_preflight_fingerprint(request: Any) -> str:
         data_region=getattr(request, "data_region", "") or "",
         historical_resync=getattr(request, "historical_resync", False),
         source_timezone=getattr(request, "source_timezone", "") or "",
+        transform_recipe_version_mode=getattr(request, "transform_recipe_version_mode", "") or "",
+        source_endpoint=_endpoint_canonical(source),
+        destination_endpoint=_endpoint_canonical(dest),
     )
 
 
