@@ -4,6 +4,7 @@ import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
 import { DesignPartners } from "../../components/marketing/DesignPartners";
+import { EvidencePanel } from "../../components/marketing/ProductPanels";
 import { catalogHonestyLead, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -32,7 +33,7 @@ const DESTINATIONS = [
 const NEXT_STEPS = [
   {
     title: "We reply",
-    body: "We usually reply within one business day, with a few questions about your source, destination, and constraints.",
+    body: "Usually within one business day, with a few questions about your source, destination, and constraints.",
   },
   {
     title: "A call about your stack",
@@ -75,16 +76,16 @@ function ChipGrid({
   onChange: (next: string[]) => void;
 }) {
   return (
-    <fieldset className="lp-sales-chips">
+    <fieldset className="mk-ct-f-chips">
       <legend>{label}</legend>
-      <div className="lp-sales-chip-row">
+      <div className="mk-ct-f-chip-row">
         {options.map((opt) => {
           const on = value.includes(opt);
           return (
             <button
               key={opt}
               type="button"
-              className={`lp-sales-chip${on ? " is-on" : ""}`}
+              className={`mk-ct-f-chip${on ? " is-on" : ""}`}
               aria-pressed={on}
               onClick={() =>
                 onChange(on ? value.filter((v) => v !== opt) : [...value, opt])
@@ -232,28 +233,35 @@ export function ContactSalesPage({
   };
 
   return (
-    <div className="mk-page mk-contact-page lp-sales">
-      <section className="mk-subhero mk-contact" aria-label="Contact sales">
-        <div className="mk-wrap mk-subhero-grid">
-          <div className="mk-subhero-copy">
-            <p className="mk-subhero-kicker">Contact sales</p>
-            <h1>Tell us what you need to move.</h1>
-            <p className="mk-subhero-lead">
-              A migration, a recurring sync, or a pilot on your own data. We usually reply within one business day.
+    <div className="mk-page mk-contact-page mk-ct-page">
+      <section className="mk-ct" aria-labelledby="mk-ct-title">
+        <div className="mk-wrap mk-ct-grid">
+          <div className="mk-ct-intro">
+            <h1 id="mk-ct-title">Tell us what you need to move.</h1>
+            <p className="mk-ct-lead">
+              A migration, a recurring sync, or a pilot on your own data.
             </p>
-            <p className="mk-contact-mail">
-              <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
-              <span>
-                General questions: <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
-              </span>
-            </p>
-            <h2 className="mk-contact-steps-title">What happens next</h2>
-            <ol className="mk-contact-steps">
+            <dl className="mk-ct-mail">
+              <div>
+                <dt>Sales</dt>
+                <dd>
+                  <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
+                </dd>
+              </div>
+              <div>
+                <dt>General questions</dt>
+                <dd>
+                  <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
+                </dd>
+              </div>
+            </dl>
+            <h2 className="mk-ct-next-title" id="mk-ct-next">What happens next</h2>
+            <ol className="mk-ct-next" aria-labelledby="mk-ct-next">
               {NEXT_STEPS.map((s, i) => (
                 <li key={s.title}>
-                  <span aria-hidden>{i + 1}</span>
+                  <span className="mk-ct-next-num" aria-hidden="true">{i + 1}</span>
                   <div>
-                    <strong>{s.title}</strong>
+                    <h3>{s.title}</h3>
                     <p>{s.body}</p>
                   </div>
                 </li>
@@ -261,22 +269,23 @@ export function ContactSalesPage({
             </ol>
           </div>
 
+          <div className="mk-ct-sheet">
           {sent ? (
-            <div className="lp-sales-success" role="status">
-              <div className="lp-sales-success-mark" aria-hidden>
+            <div className="mk-ct-f-success" role="status">
+              <div className="mk-ct-f-success-mark" aria-hidden>
                 <DtIcon name="check" size={28} />
               </div>
               <h2>Request received</h2>
               <p>
                 We usually reply within one business day
                 {sources.length ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
-                {destinations.length ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
+                {destinations.length ? ` into ${destinations.slice(0, 2).join(", ")}` : ""}.
               </p>
               <p>
                 Or write now:{" "}
                 <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
               </p>
-              <div className="lp-sales-success-actions">
+              <div className="mk-ct-f-success-actions">
                 <button type="button" className="mk-btn mk-btn--primary" onClick={() => onNavigate("help")}>
                   Browse docs
                 </button>
@@ -286,17 +295,17 @@ export function ContactSalesPage({
               </div>
             </div>
           ) : (
-            <form className="lp-sales-form" onSubmit={submit} noValidate>
-              <header className="lp-sales-form-head">
+            <form className="mk-ct-f-form" onSubmit={submit} noValidate>
+              <header className="mk-ct-f-form-head">
                 <h2>Request a scoped pilot</h2>
                 <p>Name, work email, and company. Stack is optional.</p>
               </header>
 
-              <div className="lp-sales-fields">
+              <div className="mk-ct-f-fields">
                 <label>
                   First name
                   <input
-                    className="lp-sales-input"
+                    className="mk-ct-f-input"
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                     required
@@ -306,7 +315,7 @@ export function ContactSalesPage({
                 <label>
                   Last name
                   <input
-                    className="lp-sales-input"
+                    className="mk-ct-f-input"
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                     required
@@ -316,7 +325,7 @@ export function ContactSalesPage({
                 <label>
                   Work email
                   <input
-                    className="lp-sales-input"
+                    className="mk-ct-f-input"
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -328,7 +337,7 @@ export function ContactSalesPage({
                 <label>
                   Company
                   <input
-                    className="lp-sales-input"
+                    className="mk-ct-f-input"
                     value={company}
                     onChange={(e) => setCompany(e.target.value)}
                     required
@@ -337,13 +346,13 @@ export function ContactSalesPage({
                 </label>
               </div>
 
-              <details className="lp-sales-more">
+              <details className="mk-ct-f-more">
                 <summary>Role, phone, and stack <em>optional</em></summary>
-                <div className="lp-sales-fields">
+                <div className="mk-ct-f-fields">
                   <label>
                     Role
                     <select
-                      className="lp-sales-input"
+                      className="mk-ct-f-input"
                       value={role}
                       onChange={(e) => setRole(e.target.value)}
                       autoComplete="organization-title"
@@ -360,7 +369,7 @@ export function ContactSalesPage({
                   <label>
                     Phone
                     <input
-                      className="lp-sales-input"
+                      className="mk-ct-f-input"
                       type="tel"
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
@@ -376,10 +385,10 @@ export function ContactSalesPage({
                   value={destinations}
                   onChange={setDestinations}
                 />
-                <div className="lp-sales-fields lp-sales-fields--3">
+                <div className="mk-ct-f-fields mk-ct-f-fields--3">
                   <label>
                     Daily volume
-                    <select className="lp-sales-input" value={volume} onChange={(e) => setVolume(e.target.value)}>
+                    <select className="mk-ct-f-input" value={volume} onChange={(e) => setVolume(e.target.value)}>
                       <option value="">Optional</option>
                       <option value="lt-1m">&lt; 1M rows/day</option>
                       <option value="1m-100m">1M – 100M rows/day</option>
@@ -389,7 +398,7 @@ export function ContactSalesPage({
                   </label>
                   <label>
                     Region
-                    <select className="lp-sales-input" value={region} onChange={(e) => setRegion(e.target.value)}>
+                    <select className="mk-ct-f-input" value={region} onChange={(e) => setRegion(e.target.value)}>
                       <option value="">Optional</option>
                       <option value="us">US</option>
                       <option value="eu">EU</option>
@@ -399,7 +408,7 @@ export function ContactSalesPage({
                   </label>
                   <label>
                     Timeframe
-                    <select className="lp-sales-input" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+                    <select className="mk-ct-f-input" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
                       <option value="">Optional</option>
                       <option value="pilot">Pilot now</option>
                       <option value="prod-30d">Production in 30 days</option>
@@ -407,10 +416,10 @@ export function ContactSalesPage({
                     </select>
                   </label>
                 </div>
-                <label className="lp-sales-span">
+                <label className="mk-ct-f-span">
                   What must the first load prove? <em>Optional</em>
                   <textarea
-                    className="lp-sales-input lp-sales-textarea"
+                    className="mk-ct-f-input mk-ct-f-textarea"
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     rows={2}
@@ -419,23 +428,23 @@ export function ContactSalesPage({
                 </label>
               </details>
 
-              <label className="lp-sales-hp" aria-hidden="true">
+              <label className="mk-ct-f-hp" aria-hidden="true">
                 Do not fill
                 <input tabIndex={-1} autoComplete="off" value={honeypot} onChange={(e) => setHoneypot(e.target.value)} />
               </label>
 
               <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} action="contact_sales" />
 
-              <div className="lp-sales-form-foot">
+              <div className="mk-ct-f-form-foot">
                 <p>
                   We may email you about this request. See{" "}
-                  <button type="button" className="lp-sales-inline" onClick={() => onNavigate("privacy")}>
+                  <button type="button" className="mk-ct-f-inline" onClick={() => onNavigate("privacy")}>
                     Privacy
                   </button>
                   .
                 </p>
                 {error ? (
-                  <p className="lp-sales-form-error" role="alert">
+                  <p className="mk-ct-f-form-error" role="alert">
                     {error}
                   </p>
                 ) : null}
@@ -445,6 +454,22 @@ export function ContactSalesPage({
               </div>
             </form>
           )}
+          </div>
+        </div>
+      </section>
+
+      <section className="mk-ct-keep" aria-labelledby="mk-ct-keep-title">
+        <div className="mk-wrap mk-ct-keep-grid">
+          <div className="mk-ct-keep-copy">
+            <h2 id="mk-ct-keep-title">What a pilot leaves you with</h2>
+            <p>
+              One load on your own data, on the production engine. Engineering, the data owner, and compliance sign
+              the same report, and you keep the signed proof pack.
+            </p>
+          </div>
+          <div className="mk-subhero-visual mk-ct-keep-visual">
+            <EvidencePanel />
+          </div>
         </div>
       </section>
 

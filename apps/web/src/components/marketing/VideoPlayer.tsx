@@ -20,6 +20,7 @@ export function VideoPlayer({
   glyph,
   showTitle = true,
   poster = true,
+  backdrop,
 }: {
   videoId: string;
   title: string;
@@ -31,6 +32,9 @@ export function VideoPlayer({
   showTitle?: boolean;
   /** Show the poster; false renders the iframe immediately. */
   poster?: boolean;
+  /** A picture behind the play button (product UI rendered in code). It is
+   * decorative and inert; the button stays the only control. */
+  backdrop?: ReactNode;
 }) {
   const [playing, setPlaying] = useState(!poster);
 
@@ -51,8 +55,8 @@ export function VideoPlayer({
 
   // A poster drawn in code: nothing is requested from YouTube until the
   // visitor presses play.
-  return (
-    <button type="button" className="lp-video-facade mk-poster" onClick={() => setPlaying(true)}>
+  const facade = (
+    <button type="button" className={`lp-video-facade mk-poster${backdrop ? " has-backdrop" : ""}`} onClick={() => setPlaying(true)}>
       <span className="mk-poster-art" aria-hidden="true">
         {tag ? (
           <span className="mk-poster-tag">
@@ -70,5 +74,14 @@ export function VideoPlayer({
         <span className="mk-sr-only">: {title}</span>
       </span>
     </button>
+  );
+  if (!backdrop) return facade;
+  return (
+    <div className="mk-poster-stage">
+      <div className="mk-poster-backdrop" aria-hidden="true" inert>
+        {backdrop}
+      </div>
+      {facade}
+    </div>
   );
 }

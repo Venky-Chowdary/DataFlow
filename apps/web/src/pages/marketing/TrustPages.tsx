@@ -57,50 +57,65 @@ export function StatusPage() {
       : OVERALL_LABEL[overall];
 
   const state: DisplayState = loading ? "checking" : unreachable ? "unknown" : overall;
+  const checked =
+    data?.checked_at && !unreachable ? new Date(data.checked_at).toLocaleString() : "";
   return (
-    <div className="mk-page mk-doc">
-      <DocHeader
-        kicker="Status"
-        title="Service status"
-        meta={
-          data?.checked_at && !unreachable
-            ? `Last checked ${new Date(data.checked_at).toLocaleString()}. Refreshes every 30 seconds.`
-            : "Live readiness of the hosted Datawrap service."
-        }
-        lead="Read from the same readiness checks that decide whether the API takes traffic."
-      />
-      <section className="mk-section mk-section--tight">
-        <div className="mk-wrap mk-doc-body">
-          <div className={`mk-status-banner is-${state}`} role="status" aria-live="polite">
+    <div className="mk-page mk-doc mk-trust">
+      <section className="mk-trust-hero" aria-labelledby="mk-trust-title">
+        <div className="mk-wrap mk-trust-hero-grid">
+          <div className="mk-trust-hero-copy">
+            <h1 id="mk-trust-title">Service status</h1>
+            <p className="mk-trust-lead">
+              Read from the same readiness checks that decide whether the API takes traffic.
+            </p>
+          </div>
+          <div className={`mk-trust-readout is-${state}`} role="status" aria-live="polite">
             <StateGlyph state={state} />
-            <strong>{headline}</strong>
+            <strong className="mk-trust-state">{headline}</strong>
+            <p className="mk-trust-checked">
+              {checked ? `Last checked ${checked}. Refreshes every 30 seconds.` : "Live readiness of the hosted Datawrap service."}
+            </p>
             <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => void load()}>
               Check again
             </button>
           </div>
+        </div>
+      </section>
+      <section className="mk-trust-body" aria-label="Components">
+        <div className="mk-wrap">
           {unreachable ? (
-            <p className="mk-status-note">
+            <p className="mk-trust-note">
               Your browser could not reach the status service, so the current state is unknown. This can be your network
               as well as ours. If the app is not working for you, email <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
             </p>
           ) : null}
           {!unreachable && data?.components?.length ? (
-            <ul className="mk-status-list">
-              {data.components.map((c) => (
-                <li key={c.id} className={`is-${c.status}`}>
-                  <div>
-                    <strong>{c.name}</strong>
-                    <span>{c.description}</span>
-                  </div>
-                  <span className="mk-status-pill">
-                    <StateGlyph state={c.status} />
-                    {STATE_LABEL[c.status]}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <table className="mk-trust-ledger">
+              <caption className="mk-sr-only">Component state</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Component</th>
+                  <th scope="col">What it covers</th>
+                  <th scope="col">State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.components.map((c) => (
+                  <tr key={c.id} className={`is-${c.status}`}>
+                    <th scope="row">{c.name}</th>
+                    <td>{c.description}</td>
+                    <td>
+                      <span className="mk-trust-pill">
+                        <StateGlyph state={c.status} />
+                        {STATE_LABEL[c.status]}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           ) : null}
-          <p className="mk-caption">Shows component state only. No hostnames or error details are published.</p>
+          <p className="mk-trust-caption">Shows component state only. No hostnames or error details are published.</p>
         </div>
       </section>
     </div>
@@ -123,20 +138,61 @@ function StateGlyph({ state }: { state: DisplayState }) {
   );
 }
 
+/** Who processes data, by category, as the privacy policy describes it. */
+const PROCESSING: { purpose: string; who: string; named: string }[] = [
+  { purpose: "Hosting the control plane", who: "Infrastructure providers", named: "On request" },
+  { purpose: "Sending transactional email", who: "An email delivery provider", named: "On request" },
+  { purpose: "Single sign-on, on Enterprise", who: "Your identity provider", named: "Chosen by you" },
+  { purpose: "Wrapping connector secrets, on Enterprise", who: "Your KMS", named: "Chosen by you" },
+];
+
 /** The subprocessor list is shared on request; the page is noindex and linked from the footer only. */
 export function SubprocessorsPage() {
   return (
-    <div className="mk-page mk-doc">
+    <div className="mk-page mk-doc mk-legal">
       <DocHeader
-        kicker="Legal"
         title="Subprocessors"
         lead="Third parties that process personal data on Datawrap's behalf to run the hosted service."
+        plate={[
+          ["Document", "Subprocessor list"],
+          ["Availability", "On request"],
+          ["Request from", <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>],
+        ]}
       />
-      <section className="mk-section mk-section--tight">
-        <div className="mk-wrap mk-doc-body mk-prose">
-          <p>
-            Our current subprocessor list is available on request — email{" "}
-            <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
+      <section className="mk-legal-request" aria-labelledby="mk-sub-ledger">
+        <div className="mk-wrap">
+          <div className="mk-legal-request-sheet">
+            <p>
+              Our current subprocessor list is available on request — email{" "}
+              <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
+            </p>
+            <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=Subprocessor%20list">
+              Request the list
+            </a>
+          </div>
+          <h2 className="mk-trust-ledger-title" id="mk-sub-ledger">
+            What is shared, and with whom
+          </h2>
+          <table className="mk-trust-ledger mk-trust-ledger--sub">
+            <thead>
+              <tr>
+                <th scope="col">Purpose</th>
+                <th scope="col">Who</th>
+                <th scope="col">Named</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PROCESSING.map((row) => (
+                <tr key={row.purpose}>
+                  <th scope="row">{row.purpose}</th>
+                  <td>{row.who}</td>
+                  <td>{row.named}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mk-trust-caption">
+            Categories as the privacy policy describes them. We do not share connected datasets with other customers.
           </p>
         </div>
       </section>

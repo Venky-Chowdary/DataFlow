@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 /** Privacy, Terms, and DPA: document pages with an on-page index. */
 export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
@@ -122,28 +122,59 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
       p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: contact@datawrap.io.",
     },
   ];
+  const [active, setActive] = useState("");
+  const blocks = kind === "privacy" ? privacy : kind === "terms" ? terms : [];
+  const slug = (h: string) => h.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+  // The contents follow the reader: the section nearest the top is marked.
+  useEffect(() => {
+    if (!blocks.length || typeof IntersectionObserver === "undefined") return;
+    const seen = new Map<string, boolean>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) seen.set(entry.target.id, entry.isIntersecting);
+        const first = blocks.map((b) => slug(b.h)).find((id) => seen.get(id));
+        if (first) setActive(first);
+      },
+      { rootMargin: "-96px 0px -55% 0px" },
+    );
+    for (const b of blocks) {
+      const el = document.getElementById(slug(b.h));
+      if (el) observer.observe(el);
+    }
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind]);
+
   if (kind === "dpa") {
     return (
-      <div className="mk-page mk-doc">
+      <div className="mk-page mk-doc mk-legal">
         <DocHeader
-          kicker="Legal"
           title="Data processing addendum"
           lead="The processor terms that govern how Datawrap handles personal data in the workspaces and datasets you connect."
+          plate={[
+            ["Document", "Data processing addendum"],
+            ["Availability", "On request"],
+            ["Request from", <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>],
+          ]}
         />
-        <section className="mk-section mk-section--tight">
-          <div className="mk-wrap mk-doc-body mk-prose">
-            <p>
-              Our data processing addendum is available on request — email{" "}
-              <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
-            </p>
+        <section className="mk-legal-request" aria-label="Request the addendum">
+          <div className="mk-wrap">
+            <div className="mk-legal-request-sheet">
+              <p>
+                Our data processing addendum is available on request — email{" "}
+                <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
+              </p>
+              <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=DPA%20request">
+                Request the addendum
+              </a>
+            </div>
           </div>
         </section>
       </div>
     );
   }
 
-  const blocks = kind === "privacy" ? privacy : terms;
-  const slug = (h: string) => h.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const jump = (id: string) => {
     let reduce = false;
     try {
@@ -152,66 +183,102 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
       reduce = true;
     }
     document.getElementById(id)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    setActive(id);
   };
+  const title = kind === "privacy" ? "Privacy policy" : "Terms of service";
+
+  const contents = (
+    <ol>
+      {blocks.map((b, i) => (
+        <li key={b.h}>
+          <a
+            href={`#${slug(b.h)}`}
+            aria-current={active === slug(b.h) ? "true" : undefined}
+            onClick={(e) => {
+              e.preventDefault();
+              jump(slug(b.h));
+            }}
+          >
+            <span className="mk-legal-toc-num" aria-hidden="true">{i + 1}</span>
+            {b.h}
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
 
   return (
-    <div className="mk-page mk-doc">
+    <div className="mk-page mk-doc mk-legal">
       <DocHeader
-        kicker={kind === "privacy" ? "Privacy" : "Terms"}
-        title={kind === "privacy" ? "Privacy policy" : "Terms of service"}
-        meta="Last updated August 2026. Questions: contact@datawrap.io"
+        title={title}
         lead={
           kind === "privacy"
             ? "How Datawrap handles workspace data, credentials, and audit logs, written for security and legal review."
             : "The agreement that governs use of Transfer Studio, schedules, Pilot, and MCP. A signed master agreement controls where it conflicts."
         }
+        plate={[
+          ["Document", title],
+          ["Last updated", "August 2026"],
+          ["Sections", String(blocks.length)],
+          ["Questions", <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>],
+        ]}
       />
-      <section className="mk-section mk-section--tight">
-        <div className="mk-wrap mk-doc-grid">
-          <nav className="mk-doc-nav" aria-label="On this page">
-            <h2>On this page</h2>
-            <ul>
-              {blocks.map((b) => (
-                <li key={b.h}>
-                  <a
-                    href={`#${slug(b.h)}`}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      jump(slug(b.h));
-                    }}
-                  >
-                    {b.h}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </nav>
-          <div className="mk-doc-body mk-prose">
-            {blocks.map((b) => (
-              <section key={b.h} id={slug(b.h)} aria-labelledby={`${slug(b.h)}-h`}>
-                <h2 id={`${slug(b.h)}-h`}>{b.h}</h2>
-                <p>{b.p}</p>
-              </section>
-            ))}
+      <div className="mk-wrap mk-legal-grid">
+        <nav className="mk-legal-toc" aria-label="On this page">
+          <details className="mk-legal-toc-fold">
+            <summary>Contents, {blocks.length} sections</summary>
+            {contents}
+          </details>
+          <div className="mk-legal-toc-rail">
+            <h2>Contents</h2>
+            {contents}
           </div>
-        </div>
-      </section>
+        </nav>
+        <article className="mk-legal-body" aria-label={title}>
+          {blocks.map((b, i) => (
+            <section key={b.h} id={slug(b.h)} aria-labelledby={`${slug(b.h)}-h`}>
+              <h2 id={`${slug(b.h)}-h`}>
+                <span className="mk-legal-num" aria-hidden="true">{i + 1}</span>
+                {b.h}
+              </h2>
+              <p>{b.p}</p>
+            </section>
+          ))}
+        </article>
+      </div>
     </div>
   );
 }
 
-/** Quiet document header for Privacy, Terms, DPA, Subprocessors, and Status. */
-export function DocHeader({ kicker, title, meta, lead }: { kicker: string; title: string; meta?: ReactNode; lead: ReactNode }) {
+/** The document header for Privacy, Terms, DPA, and Subprocessors: the title,
+ * one sentence, and a plate that states what the document is. */
+export function DocHeader({
+  title,
+  lead,
+  plate,
+}: {
+  title: string;
+  lead: ReactNode;
+  plate?: [string, ReactNode][];
+}) {
   return (
-    <section className="mk-subhero mk-subhero--doc" aria-label={kicker}>
-      <div className="mk-wrap mk-subhero-grid is-solo">
-        <div className="mk-subhero-copy">
-          <p className="mk-subhero-kicker">{kicker}</p>
+    <header className="mk-legal-hero">
+      <div className="mk-wrap mk-legal-hero-grid">
+        <div className="mk-legal-hero-copy">
           <h1>{title}</h1>
-          {meta ? <p className="mk-subhero-meta">{meta}</p> : null}
-          <p className="mk-subhero-lead">{lead}</p>
+          <p className="mk-legal-lead">{lead}</p>
         </div>
+        {plate?.length ? (
+          <dl className="mk-legal-plate">
+            {plate.map(([k, v]) => (
+              <div key={k}>
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
       </div>
-    </section>
+    </header>
   );
 }

@@ -3,6 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import {
   HELP_DOC_CATEGORIES,
   getHelpDoc,
+  hashForHelpDoc,
   helpDocNeighbors,
   searchHelpDocs,
   type HelpDocFigure,
@@ -18,6 +19,7 @@ import {
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { shotSize } from "../../lib/workspaceShots";
+import { AppWindow } from "../../components/marketing/app-frame/AppFrame";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -144,167 +146,294 @@ function DocsSpaceShell({
 }
 
 
-/** Confluence-style space home — left nav + product-first start page. */
-export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
+type GuideEntry = { id: HelpDocId; label?: string; note?: string };
+type DocsStep = { name: string; line: string; guides: GuideEntry[] };
+
+/** Guides you read once, before the first load. */
+const BEFORE_FIRST_LOAD: GuideEntry[] = [
+  { id: "help-installation", label: "Access your workspace", note: "Tenant URL, SSO sign-in, and the four workspace roles." },
+  { id: "help-getting-started", note: "The sidebar map and the governed transfer path." },
+];
+
+/** Every guide, grouped by the step of a load it belongs to. */
+const DOCS_STEPS: DocsStep[] = [
+  {
+    name: "Plan",
+    line: "Connect both systems and pair the columns.",
+    guides: [{ id: "help-connectors" }, { id: "help-transfer-studio" }, { id: "help-semantic-mapping" }],
+  },
+  {
+    name: "Validate",
+    line: "Check the plan before the first write.",
+    guides: [{ id: "help-preflight-gates" }, { id: "help-contracts" }],
+  },
+  {
+    name: "Execute",
+    line: "Run it once or on a schedule.",
+    guides: [{ id: "help-pipelines" }, { id: "help-transforms" }],
+  },
+  {
+    name: "Verify",
+    line: "Read the destination back and compare.",
+    guides: [{ id: "help-job-theater", label: "Job space and the Trust Report" }, { id: "help-query" }],
+  },
+  {
+    name: "Evidence",
+    line: "Sign the report and keep the record.",
+    guides: [{ id: "help-job-theater", label: "Sign off a run" }, { id: "help-enterprise" }],
+  },
+];
+
+/** Other ways into the same engine, and reference. */
+const AROUND_THE_LOAD: GuideEntry[] = [
+  { id: "help-data-pilot" },
+  { id: "help-mcp" },
+  { id: "help-api" },
+  { id: "help-faq" },
+];
+
+const GUIDE_COUNT = new Set(
+  [...BEFORE_FIRST_LOAD, ...DOCS_STEPS.flatMap((s) => s.guides), ...AROUND_THE_LOAD].map((g) => g.id),
+).size;
+
+function GuideLink({
+  entry,
+  onNavigate,
+  showNote = false,
+}: {
+  entry: GuideEntry;
+  onNavigate: (route: PublicRoute) => void;
+  showNote?: boolean;
+}) {
+  const doc = getHelpDoc(entry.id);
+  return (
+    <a
+      className="mk-docs-guide"
+      href={hashForHelpDoc(entry.id)}
+      onClick={(e) => {
+        e.preventDefault();
+        onNavigate(entry.id);
+      }}
+    >
+      <span className="mk-docs-guide-title">{entry.label ?? doc.title}</span>
+      {showNote ? <span className="mk-docs-guide-note">{entry.note ?? doc.description}</span> : null}
+      <span className="mk-docs-guide-time">{doc.readTime}</span>
+    </a>
+  );
+}
+
+const WORKSPACE_CAPTION =
+  "An example workspace. Help opens these same guides inside the product, and the numbers mark where each step lives: 1 Plan in Connectors and Transfer, 2 Validate in Transfer and Contracts, 3 Execute in Transfer, Schedules and Transforms, 4 Verify in Jobs and Query, 5 Evidence in Jobs and Settings.";
+
+/** Help inside the example workspace: the same guides, by step. */
+function WorkspaceHelpScene() {
+  return (
+    <div className="mk-docs-scene">
+      <strong className="mk-docs-scene-title">Datawrap documentation</strong>
+      <span className="mk-docs-scene-search">
+        <DtIcon name="search" size={14} />
+        Search the guides
+      </span>
+      <ol className="mk-docs-scene-steps">
+        {DOCS_STEPS.map((step, i) => (
+          <li key={step.name}>
+            <span className="mk-docs-scene-num">{i + 1}</span>
+            <strong>{step.name}</strong>
+            {step.guides.map((g) => (
+              <span key={`${g.id}-${g.label ?? ""}`}>{g.label ?? getHelpDoc(g.id).title}</span>
+            ))}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Documentation home: one search over every guide, and the guides laid out
+ * along the five steps of a load. */
+export function DocsPortal({ onNavigate }: DocsPortalProps) {
   const [query, setQuery] = useState("");
-  const searchHits = useMemo(() => searchHelpDocs(query).slice(0, 8), [query]);
+  const q = query.trim();
+  const hits = useMemo(() => new Set(searchHelpDocs(q).map((d) => d.id)), [q]);
+  const keep = (entry: GuideEntry) => !q || hits.has(entry.id);
+  const matched = q ? hits.size : GUIDE_COUNT;
+
+  const before = BEFORE_FIRST_LOAD.filter(keep);
+  const around = AROUND_THE_LOAD.filter(keep);
 
   return (
-    <DocsSpaceShell activeId="help" onNavigate={onNavigate}>
-      <header className="docs-space-page-head">
-        <p className="docs-article-kicker">Enterprise product resources</p>
-        <h1>Operate Datawrap in your tenant</h1>
-        <p className="docs-article-lead">
-          Operator guides with the current workspace. After SSO: connect systems, map schemas, pass Validate, then open Job space for the Trust Report and reversibility of the run. Query is the read-only check before the next load. Nothing to install on operator laptops.
-        </p>
-        <form className="docs-search docs-search--inline" role="search" onSubmit={(e) => e.preventDefault()}>
-          <DtIcon name="search" size={18} />
-          <input
-            type="search"
-            placeholder="Search guides — e.g. Validate, Schedules, SSO, MCP…"
-            aria-label="Search documentation"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </form>
-        {query.trim() && searchHits.length > 0 ? (
-          <div className="docs-search-results docs-search-results--inline" role="listbox">
-            {searchHits.map((doc) => (
-              <button
-                key={doc.id}
-                type="button"
-                className="docs-search-hit"
-                onClick={() => {
-                  setQuery("");
-                  onNavigate(doc.id);
-                }}
-              >
-                <strong>{doc.title}</strong>
-                <span>{doc.description}</span>
+    <div className="mk mk-docs">
+      <header className="mk-docs-hero">
+        <div className="mk-wrap">
+          <h1>Datawrap documentation</h1>
+          <p className="mk-docs-lead">
+            Operator guides for the hosted workspace, in the order a load runs. Nothing to install on operator laptops.
+          </p>
+          <form
+            className="mk-docs-search"
+            role="search"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const first = [...BEFORE_FIRST_LOAD, ...DOCS_STEPS.flatMap((s) => s.guides), ...AROUND_THE_LOAD].find(keep);
+              if (q && first) onNavigate(first.id);
+            }}
+          >
+            <span className="mk-docs-search-icon" aria-hidden="true">
+              <DtIcon name="search" size={20} />
+            </span>
+            <label className="mk-sr-only" htmlFor="mk-docs-q">
+              Search documentation
+            </label>
+            <input
+              id="mk-docs-q"
+              type="search"
+              placeholder="Search the guides: Validate, schedules, SSO, MCP"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+            />
+            {q ? (
+              <button type="button" className="mk-docs-search-clear" onClick={() => setQuery("")}>
+                Clear
               </button>
-            ))}
-          </div>
-        ) : null}
+            ) : null}
+          </form>
+          <p className="mk-docs-search-count" aria-live="polite">
+            {q
+              ? matched === 0
+                ? "No guide matches that search."
+                : `${matched} of ${GUIDE_COUNT} guides match. Press Enter to open the first.`
+              : `${GUIDE_COUNT} guides, grouped by the five steps of a load.`}
+          </p>
+        </div>
       </header>
 
-      <section className="docs-space-start">
-        <h2>Start here (recommended order)</h2>
-        <p>
-          Work through these four guides first. Each one pins real UI controls — sidebar labels,
-          buttons, and dialogs — so operators can follow along inside the signed-in product.
-        </p>
-        <div className="docs-featured-grid" aria-label="Start here guides">
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 0 }} onClick={() => onNavigate("help-installation")}>
-            <span>01</span>
-            <strong>Access your workspace</strong>
-            <em>Tenant URL, SSO sign-in, the four workspace roles, admin checklist.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 1 }} onClick={() => onNavigate("help-getting-started")}>
-            <span>02</span>
-            <strong>How Datawrap works</strong>
-            <em>Sidebar map (Platform / Operations / System) and the governed transfer path.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 2 }} onClick={() => onNavigate("help-connectors")}>
-            <span>03</span>
-            <strong>Add & manage connectors</strong>
-            <em>New connection → Choose a connector dialog → Test passed → use in Studio.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 3 }} onClick={() => onNavigate("help-transfer-studio")}>
-            <span>04</span>
-            <strong>Transfer Studio guide</strong>
-            <em>A worked Postgres to Snowflake load: Source → Destination → Transform → Map → Validate → Run.</em>
-          </button>
+      <section className="mk-docs-app" aria-label="Where the guides live in the workspace">
+        <div className="mk-wrap">
+          <div className="mk-docs-app-crop">
+            <AppWindow path="help" active="help" caption={WORKSPACE_CAPTION} designWidth={1240}>
+              <WorkspaceHelpScene />
+            </AppWindow>
+          </div>
+          <p className="mk-docs-app-note">{WORKSPACE_CAPTION}</p>
         </div>
       </section>
 
-      <section className="docs-space-start" aria-label="Browse by category">
-        <h2>Browse by category</h2>
-        <p>
-          Each card opens the first guide in that section. Use the left sidebar for every article —
-          Schedules, Contracts, Transforms, MCP, Settings / SSO, and more.
-        </p>
-        <div className="docs-category-grid">
-          {HELP_DOC_CATEGORIES.map((cat) => {
-            const first = getHelpDoc(cat.docs[0]);
-            return (
-              <button
-                key={cat.id}
-                type="button"
-                className="docs-category-card"
-                onClick={() => onNavigate(cat.docs[0])}
-              >
-                <span className="docs-category-tile" aria-hidden="true">
-                  <span className="docs-category-tile-head">{cat.title}</span>
-                  <span className="docs-category-tile-list">
-                    {cat.docs.slice(0, 4).map((id) => (
-                      <span key={id}>{getHelpDoc(id).title}</span>
-                    ))}
+      <section className="mk-docs-map" aria-labelledby="mk-docs-map-title">
+        <div className="mk-wrap">
+          <h2 className="mk-sr-only" id="mk-docs-map-title">
+            Guides by step
+          </h2>
+
+          {before.length ? (
+            <div className="mk-docs-before">
+              <h3>Before the first load</h3>
+              <ul>
+                {before.map((g) => (
+                  <li key={g.id}>
+                    <GuideLink entry={g} onNavigate={onNavigate} showNote />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <ol className="mk-docs-steps">
+            {DOCS_STEPS.map((step, i) => {
+              const guides = step.guides.filter(keep);
+              return (
+                <li key={step.name} className={`mk-docs-step${q && !guides.length ? " is-empty" : ""}`}>
+                  <span className="mk-docs-step-num" aria-hidden="true">
+                    {i + 1}
                   </span>
-                </span>
-                <span className="docs-category-card-body">
-                  <strong>{cat.title}</strong>
-                  <span>{first.title} · {cat.docs.length} guides</span>
-                  <em className="docs-category-card-desc">{cat.description}</em>
-                </span>
-              </button>
-            );
-          })}
+                  <h3>{step.name}</h3>
+                  <p className="mk-docs-step-line">{step.line}</p>
+                  {guides.length ? (
+                    <ul>
+                      {guides.map((g) => (
+                        <li key={`${g.id}-${g.label ?? ""}`}>
+                          <GuideLink entry={g} onNavigate={onNavigate} />
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mk-docs-step-none">No match in this step.</p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+
+          {around.length ? (
+            <div className="mk-docs-around">
+              <h3>Other ways in, and reference</h3>
+              <ul>
+                {around.map((g) => (
+                  <li key={g.id}>
+                    <GuideLink entry={g} onNavigate={onNavigate} showNote />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       </section>
 
-      <section className="docs-space-algorithm" aria-label="Governed path overview">
-        <h2>The governed path (every transfer and schedule run)</h2>
-        <ol className="docs-space-algorithm-steps">
-          <li>
-            <strong>1 · Map</strong>
-            <span>Align source → destination columns. Accept risk for intentional casts before Validate.</span>
-          </li>
-          <li>
-            <strong>2 · Validate</strong>
-            <span>Run preflight gates. Execute stays locked until the API decision is approve.</span>
-          </li>
-          <li>
-            <strong>3 · Write + quarantine</strong>
-            <span>Clean rows land; held-back cells isolate with column, value, and reason, ready to replay.</span>
-          </li>
-          <li>
-            <strong>4 · Reconcile in Jobs</strong>
-            <span>The read-back compares the destination with the source: row counts, checksums, and a value and key census. Scheduled runs land in Job space the same way.</span>
-          </li>
-        </ol>
+      <section className="mk-docs-ledgers" aria-label="Evidence and catalog">
+        <div className="mk-wrap mk-docs-ledgers-grid">
+          <div className="mk-docs-ledger">
+            <h2>Proven in CI{EVIDENCE_AS_OF ? `, ${EVIDENCE_AS_OF}` : ""}</h2>
+            <p>
+              Engines whose proving CI jobs ran green with no skipped test.
+              {EVIDENCE_RUN_ID ? ` Recorded from CI run ${EVIDENCE_RUN_ID}.` : ""}
+            </p>
+            <div className="mk-docs-table-wrap" tabIndex={0} role="region" aria-label="Proven in CI, by engine (scrolls sideways)">
+            <table className="mk-docs-table">
+              <thead>
+                <tr>
+                  <th scope="col">Engine</th>
+                  <th scope="col">Proven against</th>
+                  <th scope="col" className="is-num">Tests</th>
+                  <th scope="col">CI jobs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {PROVEN_EVIDENCE.map((row) => (
+                  <tr key={row.engines}>
+                    <th scope="row">{row.engines}</th>
+                    <td>{/emulator/i.test(row.claim) ? "Emulator" : "Live engine"}</td>
+                    <td className="is-num">{row.cases.toLocaleString("en-US")}</td>
+                    <td>
+                      <code>{row.artifact}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          </div>
+          <div className="mk-docs-ledger">
+            <h2>Catalog families</h2>
+            <p>{catalogHonestyLead()}</p>
+            <ul className="mk-docs-families">
+              {MARKETING_STACK.map((row) => (
+                <li key={row.family}>
+                  <span className="mk-docs-family-name">{row.family}</span>
+                  <span className="mk-docs-family-count">
+                    {row.provenCount} of {row.total} proven
+                  </span>
+                  <span
+                    className="mk-docs-family-bar"
+                    aria-hidden="true"
+                    style={{ ["--mk-docs-share" as string]: `${Math.round((row.provenCount / Math.max(row.total, 1)) * 100)}%` }}
+                  />
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       </section>
-
-      <section className="docs-space-algorithm" aria-label="CI evidence">
-        <h2>Proven in CI{EVIDENCE_AS_OF ? ` (${EVIDENCE_AS_OF})` : ""}</h2>
-        <p className="docs-space-evidence-lead">
-          Each line is an engine whose proving CI jobs ran green with no skipped test.{" "}
-          {EVIDENCE_RUN_ID ? `Recorded from CI run ${EVIDENCE_RUN_ID}.` : null}
-        </p>
-        <ul className="docs-space-evidence-list">
-          {PROVEN_EVIDENCE.map((row) => (
-            <li key={row.engines}>
-              <strong>{row.engines}</strong>
-              <span>
-                {row.claim} · {row.cases} tests · {row.artifact}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="docs-space-algorithm" aria-label="Catalog families">
-        <h2>Catalog families</h2>
-        <p className="docs-space-evidence-lead">{catalogHonestyLead()}</p>
-        <ul className="docs-space-evidence-list">
-          {MARKETING_STACK.map((row) => (
-            <li key={row.family}>
-              <strong>{row.family} · {row.badge}</strong>
-              <span>{row.items} — {row.note}{row.proven && row.badge !== "Proven in CI" ? ` Proven in CI: ${row.proven}.` : ""}</span>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </DocsSpaceShell>
+    </div>
   );
 }
 
@@ -396,7 +525,6 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingC
       </nav>
 
       <header className="docs-article-head">
-        <p className="docs-article-kicker">{doc.category}</p>
         <h1>{doc.title}</h1>
         <p className="docs-article-lead">{doc.description}</p>
         <div className="docs-article-meta-row">

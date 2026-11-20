@@ -4,6 +4,20 @@ import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
 import { isHelpDocRoute } from "../../lib/helpDocs";
+import {
+  ArrowLeftRight,
+  Boxes,
+  Building2,
+  CalendarClock,
+  Cpu,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Shuffle,
+  Sparkles,
+  Warehouse,
+} from "lucide-react";
+import { EXAMPLE_READ, EXAMPLE_STATEMENT } from "./StatementHero";
 
 /** Pages that open on a document header rather than the ink hero. */
 const PAPER_ROUTES = new Set<string>(["privacy", "terms", "dpa", "subprocessors", "status", "help"]);
@@ -19,6 +33,29 @@ export interface MarketingChromeProps {
 }
 
 type NavEntry = { route: PublicRoute; label: string; note: string };
+
+/** One icon per menu entry, drawn at the same size and weight. */
+const NAV_ICON: Partial<Record<PublicRoute, ReactNode>> = {
+  "product-transfer": <ArrowLeftRight size={18} />,
+  "product-jobs": <Boxes size={18} />,
+  "product-pipelines": <CalendarClock size={18} />,
+  "product-query": <Search size={18} />,
+  "product-pilot": <Sparkles size={18} />,
+  "product-mcp": <Cpu size={18} />,
+  customers: <ShieldCheck size={18} />,
+  "solution-migrations": <Shuffle size={18} />,
+  "solution-warehouse": <Warehouse size={18} />,
+  "solution-sync": <RefreshCw size={18} />,
+  enterprise: <Building2 size={18} />,
+};
+
+/** The Product menu in two groups: what moves data, and what proves it. */
+const PRODUCT_GROUPS: { title: string; routes: PublicRoute[] }[] = [
+  { title: "Move", routes: ["product-transfer", "product-pipelines", "product-mcp"] },
+  { title: "Prove", routes: ["product-jobs", "product-query", "product-pilot", "customers"] },
+];
+
+const navFmt = new Intl.NumberFormat("en-US");
 
 const PRODUCT_LINKS: NavEntry[] = [
   { route: "product-transfer", label: "Transfer Studio", note: "Map, check, write, and verify a load" },
@@ -145,6 +182,20 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   const current = (r: PublicRoute) => (route === r ? "page" : undefined);
   const groupHolds = (links: NavEntry[]) => links.some((l) => l.route === route);
 
+  const entry = (l: NavEntry) => (
+    <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)} className="mk-mega-item">
+      {NAV_ICON[l.route] ? (
+        <span className="mk-mega-icon" aria-hidden>
+          {NAV_ICON[l.route]}
+        </span>
+      ) : null}
+      <span className="mk-mega-text">
+        <strong>{l.label}</strong>
+        <span>{l.note}</span>
+      </span>
+    </a>
+  );
+
   const menuGroup = (id: Exclude<NavMenu, null>, label: string, links: NavEntry[]) => (
     <div className={`mk-nav-group${menu === id ? " is-open" : ""}`}>
       <button
@@ -158,16 +209,36 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
         <DtIcon name="chevron-down" size={14} chrome="product" />
       </button>
       <div id={`mk-menu-${id}`} className={`mk-nav-menu mk-nav-menu--${id}`} hidden={menu !== id}>
-        <ul>
-          {links.map((l) => (
-            <li key={l.route}>
-              <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
-                <strong>{l.label}</strong>
-                <span>{l.note}</span>
-              </a>
-            </li>
-          ))}
-        </ul>
+        {id === "product" ? (
+          <div className="mk-mega">
+            {PRODUCT_GROUPS.map((g) => (
+              <div key={g.title} className="mk-mega-group">
+                <p className="mk-mega-title">{g.title}</p>
+                <ul>
+                  {g.routes.map((r) => {
+                    const l = links.find((x) => x.route === r);
+                    return l ? <li key={l.route}>{entry(l)}</li> : null;
+                  })}
+                </ul>
+              </div>
+            ))}
+            <a className="mk-mega-feature" href={href("demos")} onClick={follow("demos")}>
+              <span className="mk-mega-feature-label">Example statement</span>
+              <span className="mk-mega-feature-sum">
+                {navFmt.format(EXAMPLE_READ)} read
+                <br />= {navFmt.format(EXAMPLE_STATEMENT.landed)} landed
+                <br />+ {EXAMPLE_STATEMENT.held} held + {EXAMPLE_STATEMENT.skipped} skipped
+              </span>
+              <strong>Watch a recorded run</strong>
+            </a>
+          </div>
+        ) : (
+          <ul>
+            {links.map((l) => (
+              <li key={l.route}>{entry(l)}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
