@@ -400,3 +400,42 @@ def test_d83_sasl_plaintext_connector_introspects_and_plans_on_its_own_listener(
     assert listeners == {("SASL_PLAINTEXT", "PLAIN")}
     secrets = json.dumps([info.output, plan.output], default=str)
     assert "not-a-real-secret" not in secrets
+
+
+# ---------------------------------------------------------------- D216 / D352
+
+def test_d352_kafka_into_pgvector_document_keeps_every_digit_and_passes_its_proof(
+    broker, pg, monkeypatch
+):
+    """The document proof reads the run's Kafka rows as values (a wire NULL is
+    null) and the metadata keeps 99999999999.999999 exactly (D216/D352)."""
+    conn, made = pg
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
+        if not cur.fetchone():
+            pytest.skip("pgvector extension not available")
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    monkeypatch.setenv("DATAFLOW_EMBEDDING_MODEL", "hash/32")
+    topic, dst = _names("pgv")
+    made.append(dst)
+    for i in range(1, 11):
+        amount = "99999999999.999999" if i == 9 else f"{i}.5"
+        broker.produce(topic, f'{{"id": {i}, "amount": {amount}, "note": "n{i}"}}')
+    broker.produce(topic, json.dumps({"id": 11, "amount": None, "note": None}))
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="kafka", host="127.0.0.1", port=9092,
+                              table=topic, database=topic),
+        destination=EndpointConfig(
+            kind="database", format="pgvector", host="127.0.0.1", port=5432,
+            database="dataflow", username="dataflow", password="dataflow", schema="public",
+            table=dst, extra={"vector_layout": "document", "embedding_model": "hash/32",
+                              "skip_chunking": True}),
+        sync_mode="full_refresh_overwrite", skip_preflight=True, validation_mode="strict",
+    )
+    _job, result = _run(req)
+    assert result.success is True, result.error
+    proof = (result.reconciliation or {}).get("document_value_proof") or {}
+    assert proof.get("passed") is True, result.reconciliation
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT metadata->>'amount' FROM public.\"{dst}\" WHERE source_id = '9'")  # noqa: S608
+        assert cur.fetchone()[0] == "99999999999.999999"
