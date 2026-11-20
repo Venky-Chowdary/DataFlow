@@ -875,14 +875,14 @@ def analyze_coercion(
                 }:
                     nulls += 1
                 else:
-                    # Mongo JSON/VARIANT binds through bind_mongo_json_document.
-                    # A redact token and a hash_pii digest become a JSON document
-                    # there; any other non-JSON text refuses before Execute (D397).
+                    # Mongo JSON/VARIANT binds through the writer's own function:
+                    # a redact / hash_pii token is a JSON string value there, any
+                    # other non-JSON text refuses before Execute (D397, R8).
                     if dest_l in {"mongodb", "mongo"} and tgt_logical in _STRUCTURAL_LOGICALS:
                         try:
-                            from connectors.mongodb_writer import bind_mongo_json_document
+                            from connectors.mongodb_writer import bind_mongo_json_field
 
-                            bind_mongo_json_document(converted)
+                            bind_mongo_json_field(converted, transform)
                         except (TypeError, ValueError) as exc:
                             failed += 1
                             if len(sample_failures) < SAMPLE_FAILURE_LIMIT:

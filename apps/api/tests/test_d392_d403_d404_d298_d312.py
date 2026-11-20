@@ -41,7 +41,10 @@ class _Cursor:
 
     def fetchall(self):
         if self.mode == "ddl":
-            return self.ddl
+            # cdc.ddl_history answers (ddl_command, ddl_lsn); the first fake
+            # returned the command alone. Faithful-catalog cases live in
+            # tests/test_p2_d392_sqlserver_ddl_history.py.
+            return [(row[0], (i + 1).to_bytes(10, "big")) for i, row in enumerate(self.ddl)]
         return self.columns
 
 
