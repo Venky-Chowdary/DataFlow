@@ -53,11 +53,13 @@ def _proof_kwargs(tmp_path: Path) -> dict:
     )
     return {
         "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
-        # A keyed append: the proof opens both the run-key set (df_scope_)
-        # and the pin store (df_pinmap_) before it reads anything.
+        # A keyed upsert: the proof opens both the run-key set (df_scope_)
+        # and the pin store (df_pinmap_) before it reads anything. (Append
+        # modes keep every version per key (R6), so their proof no longer
+        # scopes the read-back by key and opens no run-key set.)
         "dest_summary": {
             "shape_recipe_hash": "h",
-            "sync_mode": "full_refresh_append",
+            "sync_mode": "incremental_upsert",
             "primary_key_columns": ["id"],
         },
         "source_endpoint": src,
