@@ -172,6 +172,12 @@ class PreflightRequest(PolicyFieldsModel):
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
     # gates must judge the transformed image, not the raw source.
     shape_recipe: dict[str, Any] | None = None
+    # A saved library recipe (D400). Validate compiles it into shape_recipe so
+    # the gates judge what Execute runs; a recipe that cannot compile is refused.
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict[str, Any] | None = None
     # Persisted upload from /connectors/upload. Studio posts a preview; when
     # this id is set, Validate scans the stored population (same bytes Execute
     # will stream). Browser-local CSV fallback has no file_id — stay sampled.
@@ -432,6 +438,12 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     # credentials: authorize each against its own workspace first (404).
     assert_connector_accessible(http_request, body.connector_id)
     assert_connector_accessible(http_request, body.source_connector_id)
+    from services.transform_binding import compile_preflight_recipe
+
+    try:
+        compile_preflight_recipe(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     from services.local_file_policy import endpoint_local_destination_refusal
 
     # D276: a local-disk destination on the hosted cloud (SQLite, a DuckDB file,
