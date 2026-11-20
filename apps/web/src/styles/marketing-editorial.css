@@ -9,14 +9,14 @@
   /* Canonical content width — landing + all marketing pages share this */
   --lp-shell: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
   --lp-shell-wide: var(--lp-shell);
-  --lp-bg: #f6f8fa;
-  --lp-ink: var(--df-navy-900);
-  --lp-muted: var(--df-steel-400);
-  --lp-muted-soft: #64748b;
-  --lp-line: #e2e8f0;
-  --lp-panel: #ffffff;
+  --lp-bg: var(--df-bg-canvas);
+  --lp-ink: var(--df-text-primary);
+  --lp-muted: var(--df-text-secondary);
+  --lp-muted-soft: var(--df-text-tertiary);
+  --lp-line: var(--df-border);
+  --lp-panel: var(--df-surface);
   --lp-accent: var(--df-teal-500);
-  --lp-accent-ink: var(--df-teal-600);
+  --lp-accent-ink: var(--df-brand-text);
   --lp-teal: var(--df-teal-500);
   --lp-ink-deep: var(--df-logo-tile);
   --lp-fs-kicker: 11px;
@@ -68,12 +68,12 @@
 
 .lp-btn--outline {
   background: rgba(255, 255, 255, 0.72);
-  border-color: #cbd5e1;
+  border-color: var(--df-border-strong);
 }
 
 .lp-btn--outline:hover {
   border-color: var(--df-text-tertiary);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-mkt-hero-band {
@@ -193,7 +193,7 @@
 
 .lp-pricing-card {
   position: relative;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   border-radius: 18px;
   padding: 28px 24px 24px;
@@ -275,7 +275,7 @@
   align-items: flex-start;
   gap: 8px;
   font-size: 13.5px;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
 }
 
 .lp-pricing-v2-compare {
@@ -300,7 +300,7 @@
   border: 1px solid var(--lp-line);
   border-radius: 16px;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
 }
 
@@ -324,7 +324,7 @@
 }
 
 .lp-pricing-v2-table thead th {
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -356,7 +356,7 @@
 .lp-pricing-principle {
   border-radius: var(--df-radius-xl);
   border: 1px solid var(--lp-line);
-  background: #fff;
+  background: var(--df-surface);
   padding: 20px;
   display: grid;
   gap: 6px;
@@ -459,7 +459,7 @@
   flex-wrap: wrap;
   padding: 16px 18px;
   border-radius: 16px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
 }
@@ -485,7 +485,7 @@
   border-radius: 18px;
   padding: 22px 18px;
   border: 1px solid var(--lp-line);
-  background: #fff;
+  background: var(--df-surface);
   overflow: hidden;
   transition: transform 220ms ease, box-shadow 220ms ease;
 }
@@ -525,7 +525,7 @@
 
 .lp-sec-layer-card:nth-child(4) {
   border-style: dashed;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .lp-sec-layer-card::before {
@@ -572,7 +572,7 @@
   font-size: 1.35rem;
   font-weight: 740;
   letter-spacing: -0.03em;
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
 }
 
 .lp-sec-layer-tag {
@@ -580,7 +580,7 @@
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(13, 148, 136, 0.08);
@@ -608,7 +608,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
 }
 
 .lp-sec-agent {
@@ -722,7 +722,7 @@
 .lp-int-strip > div {
   border-radius: var(--df-radius-xl);
   padding: 16px 14px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
   text-align: center;
@@ -734,7 +734,7 @@
   font-size: 1.15rem;
   font-weight: 740;
   letter-spacing: -0.03em;
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
   margin-bottom: 2px;
 }
 
@@ -753,7 +753,7 @@
   border-radius: 18px;
   padding: 22px 20px;
   border: 1px solid var(--lp-line);
-  background: #fff;
+  background: var(--df-surface);
   transition: transform 220ms ease, box-shadow 220ms ease;
 }
 
@@ -985,7 +985,7 @@
   overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(min(100%, 360px), 0.95fr);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-login-brand {
@@ -1353,7 +1353,7 @@
 
 .lp-login-auth-card {
   position: relative;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid rgba(15, 118, 110, 0.16);
   border-radius: 24px;
   padding: clamp(18px, 2.4vh, 28px) clamp(18px, 2.4vw, 30px) clamp(16px, 2vh, 24px);
@@ -1373,7 +1373,7 @@
   font-weight: 720;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   margin: 0 0 8px;
 }
 
@@ -1394,7 +1394,7 @@
 }
 
 .lp-login-auth-sub strong {
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
   font-weight: 700;
 }
 
@@ -1408,7 +1408,7 @@
 }
 
 .lp-login--gate .lp-input:focus {
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-login--gate .lp-login-submit {
@@ -1452,7 +1452,7 @@
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(13, 148, 136, 0.08), rgba(13, 148, 136, 0.03));
   border: 1px solid rgba(13, 148, 136, 0.12);
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.01em;
@@ -2035,7 +2035,7 @@
   font-style: normal;
   font-size: 13px;
   line-height: 1.45;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   margin-top: 2px;
 }
 
@@ -2124,8 +2124,8 @@
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--df-teal-600);
-  background: #ecfdf5;
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
   border: 1px solid rgba(13, 148, 136, 0.28);
 }
 
@@ -2158,7 +2158,7 @@
 .docs-article-content > .docs-section p {
   font-size: 15.5px;
   line-height: 1.7;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
   margin: 0 0 14px;
   max-width: none;
 }
@@ -2166,7 +2166,7 @@
 .docs-section strong,
 .docs-workflow-body strong {
   font-weight: 720;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .docs-section code,
@@ -2175,14 +2175,14 @@
   font-size: 0.9em;
   padding: 1px 6px;
   border-radius: var(--df-radius-sm);
-  background: #f1f5f9;
-  color: var(--df-teal-600);
+  background: var(--df-surface-muted);
+  color: var(--df-brand-text);
 }
 
 .docs-steps {
   margin: 0 0 16px;
   padding-left: 22px;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
   line-height: 1.7;
   max-width: none;
 }
@@ -2193,7 +2193,7 @@
 
 .docs-steps li strong {
   font-weight: 720;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 /* Space home hero reel — full content column width (no tiny max-height box) */
@@ -2322,7 +2322,7 @@
   font-size: 12px;
   font-weight: 720;
   letter-spacing: -0.01em;
-  color: #0f172a;
+  color: var(--df-text-primary);
   background: rgba(255, 255, 255, 0.96);
   border: none;
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
@@ -2423,8 +2423,8 @@
   border-radius: 999px;
   font-size: 12px;
   font-weight: 650;
-  color: var(--df-teal-600);
-  background: #ecfdf5;
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
   border: 1px solid rgba(13, 148, 136, 0.22);
 }
 
@@ -2437,7 +2437,7 @@
   margin: 0 0 14px;
   font-size: 15.5px;
   line-height: 1.7;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
   max-width: none;
 }
 
@@ -2480,7 +2480,7 @@
 .docs-callout {
   border-radius: 12px;
   border: 1px solid rgba(13, 148, 136, 0.25);
-  background: #f0fdfa;
+  background: var(--df-brand-subtle);
   padding: 14px 16px;
   margin-top: 14px;
 }
@@ -2500,7 +2500,7 @@
 
 .docs-pager button {
   border: 1px solid var(--lp-line);
-  background: #fff;
+  background: var(--df-surface);
   border-radius: var(--df-radius-lg);
   padding: 10px 14px;
   font-size: 13px;
@@ -2568,7 +2568,7 @@
 }
 
 .lp-cust3-metrics {
-  background: #fff;
+  background: var(--df-surface);
   border-bottom: 1px solid var(--lp-line);
 }
 
@@ -2594,7 +2594,7 @@
   font-size: 1.55rem;
   font-weight: 760;
   letter-spacing: -0.04em;
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
   margin-bottom: 4px;
 }
 
@@ -2604,7 +2604,7 @@
 }
 
 .lp-cust3-sectors {
-  background: #fff;
+  background: var(--df-surface);
   border-block: 1px solid var(--lp-line);
   padding: 28px 0;
 }
@@ -2672,7 +2672,7 @@
 }
 
 .lp-wh-rail {
-  background: #fff;
+  background: var(--df-surface);
   border-bottom: 1px solid var(--lp-line);
 }
 
@@ -2688,12 +2688,12 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--df-logo-tile);
+  color: var(--df-brand-text);
 }
 
 .lp-wh-split {
   padding: clamp(48px, 7vh, 80px) 0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-wh-split--alt {
@@ -2817,7 +2817,7 @@
 .lp-wh-modes > div {
   padding: 16px 18px;
   border-radius: var(--df-radius-xl);
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
 }
 
@@ -2835,7 +2835,7 @@
 
 .lp-wh-flow {
   padding: clamp(48px, 7vh, 80px) 0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-wh-section-head {
@@ -2861,7 +2861,7 @@
   border: 1px solid var(--lp-line);
   border-radius: 16px;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-wh-flow-list li {
@@ -2880,7 +2880,7 @@
   font-size: 12px;
   font-weight: 740;
   letter-spacing: 0.08em;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   margin-bottom: 10px;
 }
 
@@ -2937,7 +2937,7 @@
   border: 1px solid var(--lp-line);
   border-radius: 16px;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
   gap: 0 !important;
 }
 
@@ -2946,7 +2946,7 @@
   border: 0 !important;
   border-bottom: 1px solid var(--lp-line) !important;
   box-shadow: none !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
 }
 
 .lp-sol-step:last-child {
@@ -2994,7 +2994,7 @@
   overflow: hidden;
   border: 1px solid var(--lp-line);
   border-radius: 16px;
-  background: #fff;
+  background: var(--df-surface);
   padding: 22px 20px;
   box-shadow: var(--lp-shadow-soft);
 }
@@ -3256,7 +3256,7 @@
 .lp-sol-outcome {
   min-width: 0;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   border-radius: 16px;
   padding: 20px 18px;
@@ -3363,7 +3363,7 @@
   padding: 20px 18px;
   border: 1px solid var(--lp-line);
   border-radius: 16px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-sol-step > span {
@@ -3660,7 +3660,7 @@
   align-items: center;
   border: 0 !important;
   box-shadow: none !important;
-  background: #f7f9fb;
+  background: var(--df-surface-muted);
 }
 
 .lp-mkt-next-cta.lp-section-footer,
@@ -3739,7 +3739,7 @@
   padding: 22px 20px;
   border: 1px solid var(--lp-line);
   border-radius: var(--df-radius-xl);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   min-width: 0;
 }
@@ -3761,7 +3761,7 @@
 
 .lp-mkt-evidence-card footer strong {
   font-size: 13.5px;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
 }
 
 .lp-mkt-evidence-card footer code {
@@ -3839,7 +3839,7 @@
   margin: -4px 0 10px !important;
   font-size: var(--lp-fs-meta) !important;
   line-height: 1.45 !important;
-  color: #64748b !important;
+  color: var(--df-text-tertiary) !important;
   max-width: 62ch !important;
 }
 
@@ -3865,8 +3865,8 @@
 }
 
 .lp-sales-hero--doc .lp-sales-kicker {
-  color: var(--df-teal-600);
-  background: #f0fdfa;
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
   border-color: color-mix(in srgb, var(--df-teal-500) 28%, #e4e8ee);
 }
 
@@ -4148,7 +4148,7 @@
   border: 1px solid var(--lp-line) !important;
   border-radius: 8px !important;
   overflow-x: auto;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none !important;
 }
 
@@ -4159,15 +4159,15 @@
 
 .lp-sales-table thead th,
 .lp-pricing-v2-table thead th {
-  background: #f8fafc !important;
-  color: var(--df-steel-400) !important;
+  background: var(--df-surface-muted) !important;
+  color: var(--df-text-secondary) !important;
   font-size: 11px !important;
   letter-spacing: 0.06em;
 }
 
 .lp-sales-table tbody td:last-child {
-  background: #f8fffd;
-  color: var(--df-teal-600);
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text);
   font-weight: 650;
 }
 
@@ -4186,7 +4186,7 @@
 ) {
   border: 1px solid var(--lp-line) !important;
   border-radius: 8px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: none !important;
   transform: none !important;
   filter: none !important;
@@ -4198,12 +4198,12 @@
 ):hover {
   transform: none !important;
   box-shadow: none !important;
-  border-color: #d0d6de !important;
+  border-color: var(--df-border-strong) !important;
 }
 
 .lp-pricing-card.is-featured {
   border-color: var(--df-teal-500) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: none !important;
   transform: none !important;
 }
@@ -4221,7 +4221,7 @@
 .lp-ent-capability:nth-child(n),
 .lp-sec-layer-card:nth-child(n),
 .lp-int-family-card:nth-child(n) {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border-color: var(--lp-line) !important;
   color: var(--lp-ink) !important;
 }
@@ -4242,7 +4242,7 @@
 .lp-ent-capability > span,
 .lp-sec-layer-num,
 .lp-sec-layer-tag {
-  color: var(--df-teal-600) !important;
+  color: var(--df-brand-text) !important;
 }
 
 .lp-sec-layer-card::before {
@@ -4251,7 +4251,7 @@
 
 .lp-int-honesty {
   border-radius: 8px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: none !important;
 }
 
@@ -4308,7 +4308,7 @@
   font: inherit;
   font-size: 13.5px;
   font-weight: 650;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   white-space: nowrap;
   cursor: pointer;
   border-radius: var(--df-radius-sm);
@@ -4339,7 +4339,7 @@
   padding: 0;
   font: inherit;
   font-weight: 700;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   cursor: pointer;
   border-radius: 4px;
 }
@@ -4356,7 +4356,7 @@
 /* Disabled link buttons (resend cooldown) read muted, not live. */
 .lp-login--gate .lp-login-legal button:disabled,
 .lp-login--gate .lp-login-legal button[aria-disabled="true"] {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   cursor: default;
   font-weight: 500;
 }
@@ -4370,7 +4370,7 @@
   margin: 4px 0 0;
   min-height: 16px;
   font-size: 12.5px;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 

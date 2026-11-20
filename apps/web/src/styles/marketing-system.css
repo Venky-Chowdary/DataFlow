@@ -2344,3 +2344,41 @@ html[data-theme="dark"] .mk {
     gap: 3px;
   }
 }
+
+/* Docs portal on the public site: the shared docs sheet sets fixed inks;
+   point them at the theme so the help pages read in both themes. */
+.lp.mk .docs-article-lead,
+.lp.mk .docs-article-kicker,
+.lp.mk .docs-space-page-head > p,
+.lp.mk .docs-space-evidence-list li > span,
+.lp.mk figcaption {
+  color: var(--df-text-secondary);
+}
+
+.lp.mk .docs-search input {
+  color: var(--df-text-primary);
+}
+
+.lp.mk .docs-featured-card > span {
+  color: var(--df-brand-text);
+}
+
+/* Contact: the address block was drawn for a dark hero. */
+.lp.mk .mk-contact .lp-sales-hero-mail {
+  margin-top: 20px;
+  color: var(--mk-ink-3);
+  font-size: var(--mk-fs-small);
+}
+
+.lp.mk .mk-contact .lp-sales-hero-mail span {
+  color: var(--mk-ink-3);
+}
+
+.lp.mk .mk-contact .lp-sales-mail {
+  color: var(--mk-link);
+  font-weight: 600;
+}
+
+.lp.mk .docs-space-nav-mobile summary em {
+  color: var(--df-brand-text);
+}

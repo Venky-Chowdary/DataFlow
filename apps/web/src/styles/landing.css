@@ -137,9 +137,9 @@ html:has(.lp) {
 .lp-btn--brand:hover { background: var(--lp-accent-ink); }
 
 .lp-btn--outline {
-  background: #fff;
+  background: var(--df-surface);
   color: var(--lp-ink);
-  border-color: #cbd5e1;
+  border-color: var(--df-border-strong);
 }
 
 .lp-btn--outline:hover {
@@ -287,7 +287,7 @@ html:has(.lp) {
   min-height: 100dvh;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  background: #fff;
+  background: var(--df-surface);
   color: var(--lg-ink);
   font-family: var(--lp-font, "IBM Plex Sans", system-ui, sans-serif);
   -webkit-font-smoothing: antialiased;
@@ -504,7 +504,7 @@ html:has(.lp) {
 .lp-login-brand-dest {
   margin: 28px 0 0;
   font-size: 14px;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login-brand-dest strong {
@@ -521,7 +521,7 @@ html:has(.lp) {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 /* ── Auth column (companion to brand plane) ── */
@@ -638,7 +638,7 @@ html:has(.lp) {
 .lp-login--gate .lp-label {
   font-size: 13px;
   font-weight: 650;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
 }
 
 .lp-field-status {
@@ -664,7 +664,7 @@ html:has(.lp) {
   padding: 0 18px;
   border-radius: 12px;
   border: 1.5px solid #cbd5e1;
-  background: #fff;
+  background: var(--df-surface);
   font: inherit;
   font-size: 16px;
   color: var(--lg-ink);
@@ -717,7 +717,7 @@ html:has(.lp) {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   cursor: pointer;
 }
 
@@ -727,7 +727,7 @@ html:has(.lp) {
 }
 
 html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
@@ -736,8 +736,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-login--gate .lp-input-password-toggle:hover {
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
 }
 
 .lp-login-row {
@@ -752,7 +752,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-items: center;
   gap: 8px;
   font-size: 13.5px;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   cursor: pointer;
 }
 
@@ -833,7 +833,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 /* The resend hint is one short line — never let "Didn't get it?" orphan
@@ -849,7 +849,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 0;
   font: inherit;
   font-weight: 650;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   cursor: pointer;
 }
 
@@ -866,14 +866,14 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-login--gate .lp-login-dev-hint {
   margin: 0 0 10px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   line-height: 1.45;
 }
 
 .lp-login--gate .lp-login-dev-hint code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 @media (max-width: 960px) {
@@ -978,7 +978,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   color: #262626;
 }
 
-.lp-mkt-list .dt-nav-icon { color: #0d9488; margin-top: 2px; }
+.lp-mkt-list .dt-nav-icon { color: var(--df-brand-text); margin-top: 2px; }
 
 .lp-mkt-legal-block {
   margin-bottom: 22px;
@@ -993,13 +993,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 0;
   font-size: 15px;
   line-height: 1.65;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
 }
 
 .lp-mkt-footnote {
   margin: 8px 0 0;
   font-size: 13px;
-  color: #737373;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login-dev-hint {
@@ -1007,7 +1007,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 10px 12px;
   font-size: 12px;
   line-height: 1.5;
-  color: #737373;
+  color: var(--df-text-tertiary);
   background: #fafafa;
   border: 1px dashed var(--lp-line);
   border-radius: 8px;
@@ -1107,13 +1107,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 /* ─── Subpages: flat cards, flush page — no inner frame or card shadows ─── */
 .lp.lp-subpage {
-  background: #fff;
+  background: var(--df-surface);
   --lp-card-shadow: none;
 }
 
 .lp.lp-subpage .lp-mkt-page {
   margin: 0;
-  background: #fff;
+  background: var(--df-surface);
   border: none;
   border-radius: 0;
   box-shadow: none !important;
@@ -1152,7 +1152,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 16px 18px;
   border: 1px solid var(--lp-line);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   text-align: center;
 }
 
@@ -1211,7 +1211,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 16px;
   border: 1px solid var(--lp-line);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   max-height: calc(100dvh - 120px);
   overflow-y: auto;
 }
@@ -1449,7 +1449,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-mkt-figure-frame {
   border: 1px solid var(--lp-line);
   border-radius: var(--lp-radius-md);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: var(--lp-shadow-md);
   overflow: hidden;
 }
@@ -1460,7 +1460,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   gap: 6px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--lp-line);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .lp-mkt-figure-dot {
@@ -1704,7 +1704,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 12px 10px;
   border-radius: 12px;
   border: 1px solid var(--lp-line);
-  background: #fff;
+  background: var(--df-surface);
   text-align: center;
 }
 
@@ -1870,13 +1870,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 8px 0 6px;
   font-size: 1.25rem;
   letter-spacing: -0.02em;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-mkt-live-reel-head p {
   margin: 0;
   max-width: 52ch;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -1886,8 +1886,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-items: center;
   padding: 4px 10px;
   border-radius: 999px;
-  background: #ecfdf5;
-  color: var(--df-teal-600);
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text);
   font-size: 11px;
   font-weight: 720;
   letter-spacing: 0.04em;
@@ -1905,19 +1905,19 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 18px 0 8px;
   padding: 22px;
   border-radius: 16px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   background: linear-gradient(180deg, #f8fafc 0%, #fff 55%);
 }
 
 .lp-mkt-algo-copy h3 {
   margin: 0 0 8px;
   font-size: 1.1rem;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-mkt-algo-copy p {
   margin: 0;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   font-size: 14px;
   line-height: 1.55;
 }
@@ -1954,14 +1954,14 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: block;
   margin-bottom: 2px;
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-mkt-algo-steps p {
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-proof-callout {
@@ -1969,29 +1969,29 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 16px 18px;
   border-radius: 12px;
   border-left: 3px solid var(--df-teal-600);
-  background: #f0fdfa;
+  background: var(--df-brand-subtle);
 }
 
 .lp-mkt-proof-callout strong {
   display: block;
   margin-bottom: 6px;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-size: 13px;
 }
 
 .lp-mkt-proof-callout p {
   margin: 0;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
   font-size: 14px;
   line-height: 1.55;
 }
 
 .lp-mkt-gate-table {
   margin-top: 16px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .lp-mkt-gate-table-head,
@@ -2003,7 +2003,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mkt-gate-table-head {
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 11px;
   font-weight: 750;
   letter-spacing: 0.06em;
@@ -2024,21 +2024,21 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: fit-content;
   padding: 2px 6px;
   border-radius: 6px;
-  background: #ecfdf5;
-  color: var(--df-teal-600);
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text);
   font-size: 11px;
   font-weight: 700;
 }
 
 .lp-mkt-gate-table-row strong {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-mkt-gate-table-row span:last-child {
   font-size: 13px;
   line-height: 1.5;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
 }
 
 @media (max-width: 900px) {
@@ -2129,8 +2129,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-cust-industry {
-  background: #ecfdf5;
-  color: var(--df-brand-deep); /* AA on the mint chip */
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text); /* AA on the mint chip */
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2171,7 +2171,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 /* Contact sales — one owner (lp-sales). Not a v7 sibling of lp-contact-v6. */
 .lp-sales {
-  background: #f4f6f8;
+  background: var(--df-surface-muted);
 }
 
 .lp-sales-hero {
@@ -2216,8 +2216,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-sales-kicker--ink {
-  color: var(--df-teal-600);
-  background: #f0fdfa;
+  color: var(--df-brand-text);
+  background: var(--df-brand-subtle);
   border-color: color-mix(in srgb, var(--df-teal-500) 28%, #e4e8ee);
 }
 
@@ -2252,7 +2252,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-sales-form label em {
   font-weight: 500;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 .lp-sales-hero-slas {
@@ -2311,18 +2311,18 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-sales-follow {
-  background: #fff;
+  background: var(--df-surface);
   padding: clamp(28px, 4vw, 40px) 0;
-  border-bottom: 1px solid #e4e8ee;
+  border-bottom: 1px solid var(--df-border);
 }
 
 .lp-sales-form,
 .lp-sales-success {
-  background: #fff;
-  border: 1px solid #e4e8ee;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
   border-radius: 16px;
   box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-sales-hero--split .lp-sales-form,
@@ -2345,13 +2345,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-family: var(--lp-font-display);
   font-size: clamp(1.25rem, 1.8vw, 1.5rem);
   letter-spacing: -0.025em;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .lp-sales-form-head p,
 .lp-sales-success p {
   margin: 0 0 14px;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   font-size: 13.5px;
   line-height: 1.5;
 }
@@ -2371,21 +2371,21 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   gap: 6px;
   font-size: 12.5px;
   font-weight: 650;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
 }
 
 .lp-sales-span { margin: 4px 0 16px; }
-.lp-sales-span em { font-weight: 500; color: #64748b; }
+.lp-sales-span em { font-weight: 500; color: var(--df-text-tertiary); }
 
 .lp-sales-input,
 .lp-sales-textarea {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
-  border: 1px solid #d0d6de;
+  border: 1px solid var(--df-border-strong);
   border-radius: 8px;
-  background: #fff;
-  color: #0f172a;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   font: inherit;
   font-size: 13.5px;
   font-weight: 500;
@@ -2409,7 +2409,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 0 0 8px;
   font-size: 12.5px;
   font-weight: 650;
-  color: var(--df-steel-500);
+  color: var(--df-text-secondary);
 }
 
 .lp-sales-chip-row {
@@ -2421,9 +2421,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-sales-chip {
   padding: 5px 10px;
   border-radius: 999px;
-  border: 1px solid #d0d6de;
-  background: #fff;
-  color: #0f172a;
+  border: 1px solid var(--df-border-strong);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
@@ -2432,15 +2432,15 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-sales-chip:hover { border-color: #0d9488; }
 .lp-sales-chip.is-on {
   border-color: var(--df-teal-500);
-  background: #f0fdfa;
-  color: var(--df-teal-600);
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text);
 }
 
 .lp-sales-more {
   margin: 4px 0 12px;
-  border: 1px solid #e4e8ee;
+  border: 1px solid var(--df-border);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   padding: 0 12px;
 }
 
@@ -2450,12 +2450,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 10px 0;
   font-size: 13px;
   font-weight: 650;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
 }
 
 .lp-sales-more summary::-webkit-details-marker { display: none; }
-.lp-sales-more summary em { font-weight: 500; color: #64748b; }
-.lp-sales-more[open] summary { border-bottom: 1px solid #e4e8ee; margin-bottom: 10px; }
+.lp-sales-more summary em { font-weight: 500; color: var(--df-text-tertiary); }
+.lp-sales-more[open] summary { border-bottom: 1px solid var(--df-border); margin-bottom: 10px; }
 
 .lp-sales-form { position: relative; }
 
@@ -2478,7 +2478,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 0;
   font-size: 12.5px;
   line-height: 1.45;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   max-width: 48ch;
 }
 
@@ -2488,7 +2488,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   background: none;
   padding: 0;
   font: inherit;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-weight: 700;
   cursor: pointer;
   text-decoration: underline;
@@ -2509,7 +2509,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font: inherit;
   font-size: 13.5px;
   font-weight: 650;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   cursor: pointer;
 }
 
@@ -2521,7 +2521,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: #ecfdf5;
+  background: var(--df-brand-subtle);
   color: #059669;
 }
 .lp-sales-success-actions {
@@ -2536,18 +2536,18 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: clamp(40px, 6vw, 64px) 0;
 }
 
-.lp-sales-compare { background: #fff; border-top: 1px solid #e4e8ee; }
+.lp-sales-compare { background: var(--df-surface); border-top: 1px solid var(--df-border); }
 
 .lp-sales-compare header p:last-of-type {
   max-width: 68ch;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   line-height: 1.6;
 }
 
 .lp-sales-table-wrap {
   margin-top: 24px;
   overflow-x: auto;
-  border: 1px solid #e4e8ee;
+  border: 1px solid var(--df-border);
   border-radius: 14px;
 }
 
@@ -2562,32 +2562,32 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 14px 16px;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid #e4e8ee;
-  color: var(--df-steel-500);
+  border-bottom: 1px solid var(--df-border);
+  color: var(--df-text-secondary);
   line-height: 1.45;
 }
 
 .lp-sales-table thead th {
-  background: #f0fdfa;
-  color: var(--df-teal-600);
+  background: var(--df-brand-subtle);
+  color: var(--df-brand-text);
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
 .lp-sales-table tbody th {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 700;
   width: 18%;
 }
 
 .lp-sales-table tbody td:last-child {
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-weight: 650;
-  background: #f8fffd;
+  background: var(--df-brand-subtle);
 }
 
-.lp-sales-faq { background: #f4f6f8; }
+.lp-sales-faq { background: var(--df-surface-muted); }
 .lp-sales-faq dl {
   margin: 20px 0 0;
   display: grid;
@@ -2595,12 +2595,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 .lp-sales-faq dt {
   font-weight: 720;
-  color: #0f172a;
+  color: var(--df-text-primary);
   margin-bottom: 6px;
 }
 .lp-sales-faq dd {
   margin: 0;
-  color: var(--df-steel-400);
+  color: var(--df-text-secondary);
   line-height: 1.6;
   max-width: 78ch;
 }
@@ -2752,7 +2752,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   background: color-mix(in srgb, var(--lp-accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--lp-accent) 30%, transparent);
 }

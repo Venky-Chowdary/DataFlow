@@ -540,7 +540,7 @@
   min-width: 0;
   margin: 12px 2px 0;
   overflow: hidden;
-  color: #64748b;
+  color: var(--df-text-tertiary);
   font-size: 13px;
   line-height: 1.45;
   text-overflow: ellipsis;
@@ -880,7 +880,7 @@
 
   .lp-pricing-v2-table td::before,
   .lp-sales-table td::before {
-    color: var(--df-steel-400);
+    color: var(--df-text-secondary);
     font-size: 11px;
     font-weight: 650;
     letter-spacing: 0.04em;
@@ -1011,14 +1011,14 @@
 
 .lp .lp-sec-layer-card .lp-sec-layer-tag {
   background: var(--df-success-bg);
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   border-color: var(--lp-line);
 }
 
 .lp .lp-sol-outcome > span,
 .lp .lp-ent-capability > span {
   background: transparent;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
 }
 
 /* Product bands: the claim on the left, one framed workspace on the right.
@@ -1514,7 +1514,7 @@
 .lp-faq-panel span {
   display: inline-block;
   margin-bottom: 16px;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-size: 12px;
   font-weight: 720;
   letter-spacing: 0.06em;
@@ -1806,7 +1806,7 @@
   padding: 0;
   border-radius: var(--df-radius-none);
   background: transparent;
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
   font-family: var(--lp-font-display);
   font-size: 1.75rem;
   font-weight: 650;
@@ -1835,7 +1835,7 @@
 }
 
 .lp .lp-sol-outcome:nth-child(1) > span {
-  color: var(--df-teal-600);
+  color: var(--df-brand-text);
 }
 
 .lp .lp-sol-outcome:nth-child(1) h3 {
@@ -1871,8 +1871,8 @@
 }
 
 .lp .lp-demos-filter.is-active {
-  background: var(--df-brand-strong);
-  border-color: var(--df-brand-strong);
+  background: var(--df-action-bg);
+  border-color: var(--df-action-bg);
 }
 
 /* One type ladder. Headlines share the display face; body copy is 15px. */

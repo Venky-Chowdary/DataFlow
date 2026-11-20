@@ -160,7 +160,7 @@ export function SubprocessorsPage() {
       />
       <MarketingReveal>
         <section className="lp-mkt-body">
-          <div className="lp-status-table-wrap">
+          <div className="lp-status-table-wrap" tabIndex={0} role="region" aria-label="Subprocessors">
             <table className="lp-status-table">
               <thead>
                 <tr>
