@@ -6,11 +6,11 @@ NULL ``payload`` (jsonb) and the row before it the exact DECIMAL(18,6)
 ``99999999999.999999``.
 
 Run 2 re-reads the watermark tie group. The delivered-peer dedupe must
-recognise the row it wrote (explicit ``null`` key, exact decimal) and append
-only the two new ids (R1); run 3 appends nothing. Every line keeps the
-``payload`` key, NULL as JSON null and ``{}`` as ``{}`` (D307, R2), and the
-decimal stays exact in every line (D306, R3). Id 8 holds a JSON ``null``
-value: it is written as the same ``null`` and verifies too.
+recognise the row it wrote (exact decimal, SQL NULL payload) and append only
+the two new ids (R1); run 3 appends nothing. SQL NULL and a JSON ``null`` value
+stay distinct in the file (D144, R2, R3): a SQL NULL ``payload`` is an absent
+key, the JSON ``null`` value of id 8 is written as ``null``, and ``{}`` stays
+``{}``. The decimal stays exact in every line (D306).
 """
 
 from __future__ import annotations
@@ -105,14 +105,13 @@ def _three_runs(cur, table: str, dest: EndpointConfig, read_back) -> None:
     lines = _lines(text)
     assert sorted(int(r["id"]) for r in lines) == list(range(1, 13))
     by_id = {int(r["id"]): r for r in lines}
-    assert all("payload" in r for r in lines)
     assert by_id[9]["amount"] == Decimal("99999999999.999999")
-    assert by_id[8]["payload"] is None
+    assert "payload" in by_id[8] and by_id[8]["payload"] is None  # JSON null value
     assert by_id[9]["payload"] == {}
     assert by_id[10]["amount"] == Decimal("-0.000001")
-    assert by_id[10]["payload"] is None
+    assert "payload" not in by_id[10]  # SQL NULL
     assert by_id[11]["amount"] == Decimal("0.100000")
-    assert by_id[11]["payload"] is None
+    assert "payload" not in by_id[11]  # SQL NULL
     assert by_id[12]["payload"] == {"k": None}
     assert "100000000000" not in text and "e-" not in text.lower()
 
