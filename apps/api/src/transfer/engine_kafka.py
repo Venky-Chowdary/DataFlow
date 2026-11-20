@@ -71,6 +71,10 @@ def kafka_nothing_past_committed(request: Any, total_rows: Any) -> bool:
     return configured_kafka_start({"extra": dict(source.extra or {})}) == "committed"
 
 
+#: The broker envelope column that carries a message's partition offset.
+KAFKA_OFFSET_CURSOR = "_kafka_offset"
+
+
 def kafka_unpageable_cursor(source_type: Any, cursor_field: str) -> str:
     """Refusal when a Kafka incremental plan pages on a payload column (D404).
 
@@ -85,7 +89,9 @@ def kafka_unpageable_cursor(source_type: Any, cursor_field: str) -> str:
     if kafka_family_name(str(source_type or "")) != "kafka":
         return ""
     field = (cursor_field or "").strip()
-    if not field or field.lower() in {"_kafka_offset", "offset"}:
+    # Only the broker envelope column is the offset. A payload field that
+    # happens to be called ``offset`` is message data like any other.
+    if not field or field.lower() == KAFKA_OFFSET_CURSOR:
         return ""
     return (
         f"Kafka cannot page an incremental read on cursor {field!r}. "
@@ -93,6 +99,28 @@ def kafka_unpageable_cursor(source_type: Any, cursor_field: str) -> str:
         "each run appends the new messages. Remove this column cursor, or "
         "run the sync as full refresh."
     )
+
+
+def kafka_run_cursor(source_type: Any, incremental: bool, cursor_field: str) -> str:
+    """The column cursor an Execute pages on, for the same rule the plan used (D404).
+
+    Kafka: a payload column is refused before anything is read (the plan's
+    sync-contract gate refuses it with the same text), and a declared
+    ``_kafka_offset`` is the consumer-group offset itself, so the run reads
+    from the committed position with no column watermark. Paging the envelope
+    column as a SQL cursor refused at Execute what the plan had passed ("cannot
+    page ... without a unique tie-break"), and its per-partition values cannot
+    bound a multi-partition read anyway. Any other source keeps its cursor.
+    """
+    field = (cursor_field or "").strip()
+    refusal = kafka_unpageable_cursor(source_type, field) if incremental else ""
+    if refusal:
+        raise ValueError(refusal)
+    from services.copy_kafka_common import kafka_family_name
+
+    if kafka_family_name(str(source_type or "")) == "kafka" and field.lower() == KAFKA_OFFSET_CURSOR:
+        return ""
+    return field
 
 
 def kafka_offsets_bound_the_read(source_type: Any, source_cfg: Any) -> bool:

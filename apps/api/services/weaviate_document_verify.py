@@ -65,8 +65,15 @@ def gate8_weaviate_report(
     run_records: list[dict[str, Any]] | None,
     base: dict[str, Any],
     source_schema: Mapping[str, Any] | None = None,
+    write_rejects: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """The Gate-8 report for a Weaviate class, or ``None`` to keep the identity-only one."""
+    """The Gate-8 report for a Weaviate class, or ``None`` to keep the identity-only one.
+
+    ``write_rejects`` are the run's findings for objects Weaviate itself refused
+    (a lenient run quarantines them, D304). Each carries the record the writer
+    sent, so its source row is accounted for by that exact record and is not a
+    missing row; any other difference still fails the proof (R9).
+    """
     from connectors.weaviate_writer import read_document_properties, weaviate_property_name
 
     if not isinstance(source_rows, int) or source_rows < 0:
@@ -90,8 +97,9 @@ def gate8_weaviate_report(
     renamed = {key: name for key, name in stored.items() if name != key}
     fields = [(source, stored[key]) for source, key in fields]
     instant = {k for _s, k in fields if data_types.get(k) in ("date", "date[]")}
+    refused = _refused_documents(write_rejects, docs, data_types)
     proof = compare_documents(
-        src, docs, fields, numeric_keys(mappings, source_schema),
+        src, docs + refused, fields, numeric_keys(mappings, source_schema),
         boolean_keys(mappings, source_schema), instant
     )
     expansion = object_expansion(source_rows, docs)
@@ -103,6 +111,8 @@ def gate8_weaviate_report(
         "content_caps": caps,
         "source_provenance": provenance.get("source", ""),
         "property_names": renamed,
+        "documents": len(docs),
+        "quarantined_rows": len(refused),
     }
     report = {
         **base,
@@ -130,6 +140,11 @@ def gate8_weaviate_report(
         if caps
         else ""
     )
+    if refused:
+        cap_note += (
+            f" {len(refused)} row(s) Weaviate refused are quarantined with its reason, "
+            "not stored; every other source row is stored value for value."
+        )
     if renamed:
         cap_note += " Stored as Weaviate properties: " + ", ".join(
             f"{key} -> {name}" for key, name in sorted(renamed.items())
@@ -143,3 +158,34 @@ def gate8_weaviate_report(
             "Embedding vectors are opaque and not compared."
         ),
     }
+
+
+def _refused_documents(
+    write_rejects: list[Mapping[str, Any]] | None,
+    docs: list[Mapping[str, Any]],
+    data_types: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """The records of documents Weaviate refused and did not store at all.
+
+    Read the way :func:`read_document_properties` reads a stored object: an
+    unset class property is null and the reserved ``id`` is the source id. A
+    document with a stored chunk is already among ``docs``.
+    """
+    from connectors.weaviate_writer import _RESERVED_PROPERTIES
+
+    stored = {str(d.get("source_id") or "") for d in docs}
+    out: dict[str, dict[str, Any]] = {}
+    for finding in write_rejects or []:
+        record = finding.get("row") if isinstance(finding, Mapping) else None
+        if not finding.get("object_id") or not isinstance(record, Mapping):
+            continue
+        sid = str(finding.get("source_id") or record.get("source_id") or "")
+        if not sid or sid in stored or sid in out:
+            continue
+        props = dict(record)
+        for name in data_types:
+            props.setdefault(name, None)
+        for reserved in _RESERVED_PROPERTIES:
+            props.setdefault(reserved, sid)
+        out[sid] = props
+    return list(out.values())

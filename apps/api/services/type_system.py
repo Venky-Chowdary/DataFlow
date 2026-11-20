@@ -591,16 +591,18 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "string",
     },
     # Weaviate properties carry what the writer stores: an integer is a JSON
-    # int (``int``, 64-bit); a decimal, float, boolean, temporal, UUID, JSON or
-    # text cell is the exact text the payload writes (``text``). The class the
-    # writer creates declares these same carriers, so the plan and the class
-    # agree (D265/D290 follow-up).
+    # int (``int``, 64-bit), a boolean a JSON bool (``boolean``) and an IEEE
+    # float a JSON number (``number``, float64 holds every binary32/64 value)
+    # (D293). A decimal stays the exact text (``number`` would round
+    # 99999999999.999999, R3); temporal, UUID, JSON and text cells are the
+    # exact text the payload writes (``text``). The class the writer creates
+    # declares these same carriers, so the plan and the class agree.
     "weaviate": {
         LOGICAL_STRING: "text",
         LOGICAL_TEXT: "text",
         LOGICAL_INTEGER: "int",
         LOGICAL_DECIMAL: "text",
-        LOGICAL_BOOLEAN: "text",
+        LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "text",
         LOGICAL_DATETIME: "text",
         LOGICAL_TIME: "text",
@@ -821,9 +823,8 @@ _FLOAT_DDL: Final[dict[str, str]] = {
     "clickhouse": "Float64",
     "trino": "double",
     "presto": "double",
-    # A Weaviate property holds the exact text the payload writes; the class the
-    # writer creates declares ``text`` for a float (D265/D290 follow-up).
-    "weaviate": "text",
+    # Weaviate ``number`` is float64: an IEEE float source keeps every value (D293).
+    "weaviate": "number",
 }
 for _dest, _map in DDL_TYPES.items():
     _map[LOGICAL_FLOAT] = _FLOAT_DDL.get(_dest, "DOUBLE PRECISION")
@@ -7938,6 +7939,20 @@ from services.type_ddl_specialty import (  # noqa: E402,F401 — re-export
     _vector_ddl_for_dest,
     parse_vector_dimension,
 )
+
+def weaviate_gate_type(target_type: str, dest_db: str = "") -> str:
+    """The type a coercion gate grades for a Weaviate property (D293).
+
+    Weaviate's ``number`` is float64, not Oracle's ``NUMBER``: graded as
+    ``DOUBLE PRECISION`` an IEEE float keeps every value, and an exact decimal
+    or an integer onto it is still a collapse (float64 rounds them, R3).
+    """
+    if (dest_db or "").strip().lower() == "weaviate" and (
+        strip_identity_qualifier(target_type or "").strip().lower() == "number"
+    ):
+        return "DOUBLE PRECISION"
+    return target_type
+
 
 def _dynamodb_number_wire_preserves(
     source_type: str,

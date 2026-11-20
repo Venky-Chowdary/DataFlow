@@ -416,14 +416,17 @@ def test_weaviate_plan_stamps_name_the_carrier_the_class_declares():
         for src in ("BIGINT", "INT4", "NUMERIC(18,6)", "DOUBLE PRECISION", "REAL", "BOOLEAN",
                     "TIMESTAMPTZ", "UUID", "TEXT", "JSONB")
     }
-    assert stamps == {"BIGINT": "int", "INT4": "int", "NUMERIC(18,6)": "text", "DOUBLE PRECISION": "text",
-                      "REAL": "text", "BOOLEAN": "text", "TIMESTAMPTZ": "text", "UUID": "text",
-                      "TEXT": "text", "JSONB": "text"}, stamps
+    # PR #433 review (D293, R3 same-family): a BOOLEAN is Weaviate ``boolean``
+    # and an IEEE float ``number`` (float64 holds every binary32/64 value); a
+    # NUMERIC stays exact text. The plan and the class still say one thing.
+    assert stamps == {"BIGINT": "int", "INT4": "int", "NUMERIC(18,6)": "text",
+                      "DOUBLE PRECISION": "number", "REAL": "number", "BOOLEAN": "boolean",
+                      "TIMESTAMPTZ": "text", "UUID": "text", "TEXT": "text", "JSONB": "text"}, stamps
     declared = weaviate_writer.weaviate_mapped_property_types(
         [{"source": c, "target": c, "target_type": stamps[c]} for c in stamps],
         {c: c for c in stamps},
     )
-    assert declared == {c: ("int" if c in ("BIGINT", "INT4") else "text") for c in stamps}
+    assert declared == stamps
     # Weaviate's ``int`` is the engine's int64 carrier, and the runtime-fit SSOT
     # says so; a bare ``int`` on a SQL engine stays a width-unknown logical stamp.
     from services.type_system import integer_storage_bounds

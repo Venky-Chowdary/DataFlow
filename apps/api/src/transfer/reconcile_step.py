@@ -8536,6 +8536,7 @@ def _run_reconciliation_impl(
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
             },
+            write_rejects=list((dest_summary or {}).get("rejected_details") or []),
         )
         if value_report is not None:
             return _finalize(value_report)

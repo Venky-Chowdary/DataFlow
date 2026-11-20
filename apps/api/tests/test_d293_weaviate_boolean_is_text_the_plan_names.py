@@ -20,6 +20,14 @@ failed run created).
 
 No Weaviate server here: the fake refuses a value whose JSON type is not
 the property's, as the server does.
+
+PR #433 review (D293 AC-1, rule R3 "same-family only"): a plan built now
+names Weaviate's native ``boolean`` for a BOOLEAN and ``number`` (float64)
+for an IEEE float, the class declares them and the payload sends a JSON bool
+/ number, so a boolean stays filterable as a boolean (Weaviate data types:
+https://weaviate.io/developers/weaviate/config-refs/datatypes). A mapping a
+plan stamped ``text`` still stores the exact text (first test). A DECIMAL is
+never ``number``: float64 rounds it (D285).
 """
 
 from __future__ import annotations
@@ -113,10 +121,10 @@ def test_kafka_shaped_boolean_source_lands_30_of_30_and_passes_gate8(monkeypatch
     res = _run(monkeypatch, qd, wv)
     assert res.success, res.error
     props = {p["name"]: p["dataType"] for p in wv.classes[CLS]["properties"]}
-    assert props["flag"] == ["text"]
+    assert props["flag"] == ["boolean"]  # native type (D293 AC-1, R3)
     stored = _stored(wv, CLS)
     assert len(stored) == 30
-    assert stored["1"]["flag"] == "true" and stored["2"]["flag"] == "false"
+    assert stored["1"]["flag"] is True and stored["2"]["flag"] is False
     assert "flag" not in stored["30"]
 
 
