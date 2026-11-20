@@ -5,7 +5,7 @@ import { RECORDED_CHECK_GROUPS, RECORDED_MAPPING, RECORDED_ROUTE, StatusGlyph } 
 import { COVERAGE_RUNGS, MIGRATION_RUN, PILOT_CANNOT, QUERY_SEGMENTS, RUN, RUN_HELD_KEYS, fmtN, identity } from "./StoryPanels";
 import { TRANSFER_EXAMPLES } from "./StoryScenes";
 import { EXAMPLE_JOBS } from "./app-frame/AppFrame";
-import { ConnectorIcon } from "../../app/brand-icons";
+import { ConnectorIcon } from "../../app/vendor-marks";
 import { PROVEN_CDC_SOURCES } from "../../lib/provenEvidence";
 
 /*

@@ -1,4 +1,4 @@
-import { ConnectorIcon } from "../../app/brand-icons";
+import { ConnectorIcon } from "../../app/vendor-marks";
 import { ALL_CONNECTORS } from "../../lib/provenEvidence";
 
 /**

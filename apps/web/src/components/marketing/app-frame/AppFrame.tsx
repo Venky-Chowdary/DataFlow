@@ -24,7 +24,7 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { ConnectorIcon } from "../../../app/brand-icons";
+import { ConnectorIcon } from "../../../app/vendor-marks";
 import { jobStatusLabel } from "../../../lib/uiUtils";
 import { DtLogo } from "../../DtLogo";
 import { Breakable } from "../StatementHero";

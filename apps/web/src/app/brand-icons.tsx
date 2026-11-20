@@ -1,22 +1,15 @@
 /**
  * Connector marks.
  *
- * Three kinds, and nothing else:
- *  - mark: the vendor's real mark, from Simple Icons (CC0-1.0, a runtime
- *    dependency listed in NOTICE). Each glyph is centred on its own bounding
- *    box and scaled to one optical size, so a tall mark (MongoDB) and a square
- *    one (Couchbase) read as the same size.
- *  - monogram: vendors with no Simple Icons mark (several were removed at the
- *    brand owner's request) get one neutral rounded tile with the product's
- *    initials. It is identical in style for every such vendor and imitates
- *    nobody's logo. Never draw a lookalike of a vendor's mark here.
- *  - generic: things that are not a vendor (delimited files, a file server,
- *    an HTTP API, "other SQL databases") use a plain Lucide glyph.
- *
- * Marks keep the brand colour as their fill attribute; the public site's
- * stylesheet (styles/marketing-icons.css) inks every kind in one neutral ink.
+ * Brands that allow redistribution use the official single-color mark bundled
+ * in Simple Icons (CC0, already a dependency). Trademark-restricted brands
+ * (Microsoft/Oracle/Amazon/Salesforce have no Simple Icons mark) get a
+ * hand-drawn approximation in that product's public color — these are NOT the
+ * official logos. Engines with neither an official mark nor a family alias get
+ * a drawn database mark in a product/family color, never a shared generic
+ * glyph. File formats use a document glyph in the Datawrap logo palette.
  */
-import { Database, File, FileSpreadsheet, FileText, FolderSync, Globe, type LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import type { SimpleIcon } from "simple-icons";
 import {
   siAirtable,
@@ -38,7 +31,6 @@ import {
   siBitbucket,
   siBox,
   siCircleci,
-  siClaude,
   siClickhouse,
   siCloudera,
   siCloudflare,
@@ -46,7 +38,6 @@ import {
   siConfluence,
   siCouchbase,
   siCratedb,
-  siCursor,
   siDatabricks,
   siDatadog,
   siDigitalocean,
@@ -62,16 +53,12 @@ import {
   siGoogledrive,
   siGoogleanalytics,
   siGooglepubsub,
-  siGooglesheets,
   siGraphql,
-  siH2database,
-  siHtml5,
   siHubspot,
   siInfluxdb,
   siIntercom,
   siJenkins,
   siJira,
-  siJson,
   siLooker,
   siMailchimp,
   siMariadb,
@@ -85,7 +72,6 @@ import {
   siNewrelic,
   siNotion,
   siOkta,
-  siOpenapiinitiative,
   siOpensearch,
   siPagerduty,
   siPaypal,
@@ -115,41 +101,16 @@ import {
   siTypeform,
   siVitess,
   siWasabi,
-  siXml,
-  siYaml,
   siZoho,
   siZendesk,
   siZoom,
 } from "simple-icons";
 
-type Mark = Pick<SimpleIcon, "title" | "slug" | "hex" | "path">;
-
-/**
- * The MySQL mark is the dolphin over the "MySQL" wordmark; at icon size the
- * wordmark is unreadable. Keep only the dolphin's own subpaths (the ones that
- * start above the wordmark) of the official path. Every subpath of this path
- * closes, so each one starts where the last one started.
- */
-export function dolphinOnly(path: string): string {
-  let sx = 0;
-  let sy = 0;
-  const kept: string[] = [];
-  for (const part of path.split(/(?=[Mm])/)) {
-    const head = part.slice(1).match(/^[\s,]*(-?(?:\d+\.?\d*|\.\d+))[\s,]*(-?(?:\d+\.?\d*|\.\d+))/);
-    if (!head) continue;
-    const [x, y] = [Number(head[1]), Number(head[2])];
-    if (part[0] === "M") [sx, sy] = [x, y];
-    else [sx, sy] = [sx + x, sy + y];
-    if (sy < 13) kept.push(`M${+sx.toFixed(3)} ${+sy.toFixed(3)}${part.slice(1 + head[0].length)}`);
-  }
-  return kept.join("");
-}
-
-const MYSQL: Mark = { ...siMysql, path: dolphinOnly(siMysql.path) };
+type Mark = Pick<SimpleIcon, "title" | "hex" | "path">;
 
 const MARKS: Record<string, Mark> = {
   postgresql: siPostgresql,
-  mysql: MYSQL,
+  mysql: siMysql,
   mariadb: siMariadb,
   mongodb: siMongodb,
   snowflake: siSnowflake,
@@ -240,74 +201,42 @@ const MARKS: Record<string, Mark> = {
   digitalocean: siDigitalocean,
   alibabacloud: siAlibabacloud,
   cloudflare: siCloudflare,
-  json: siJson,
-  xml: siXml,
-  yaml: siYaml,
-  html: siHtml5,
-  h2: siH2database,
-  googlesheets: siGooglesheets,
-  openapi: siOpenapiinitiative,
-  cursor: siCursor,
-  claude: siClaude,
 };
 
 /**
- * Vendors and projects with no Simple Icons mark. They render as the neutral
- * monogram tile (see `connectorMonogram`), never as a drawn approximation.
+ * Drawn database/stream marks for products with no redistributable official
+ * mark and no family alias — a cylinder in that product's public colour with
+ * its real title, never the shared File/API glyph.
  */
-const MONOGRAMS: Record<string, string> = {
-  sqlserver: "SQL Server",
-  oracle: "Oracle",
-  s3: "Amazon S3",
-  salesforce: "Salesforce",
-  redshift: "Amazon Redshift",
-  dynamodb: "Amazon DynamoDB",
-  azure: "Microsoft Azure",
-  excel: "Microsoft Excel",
-  word: "Microsoft Word",
-  iceberg: "Apache Iceberg",
-  orc: "Apache ORC",
-  weaviate: "Weaviate",
-  pinecone: "Pinecone",
-  singer: "Singer",
-  vscode: "VS Code",
-  db2: "IBM Db2",
-  netezza: "Netezza",
-  informix: "Informix",
-  sybase_ase: "Sybase ASE",
-  vertica: "Vertica",
-  exasol: "Exasol",
-  firebird: "Firebird",
-  pinot: "Apache Pinot",
-  questdb: "QuestDB",
-  risingwave: "RisingWave",
-  materialize: "Materialize",
-  yugabytedb: "YugabyteDB",
-  starrocks: "StarRocks",
-  dremio: "Dremio",
-  impala: "Apache Impala",
-  athena: "Amazon Athena",
-  emr: "Amazon EMR",
-  kinesis: "Amazon Kinesis",
-  neptune: "Amazon Neptune",
-  documentdb: "Amazon DocumentDB",
-  cosmos_db: "Azure Cosmos DB",
-  synapse: "Azure Synapse",
-  firebolt: "Firebolt",
-  yellowbrick: "Yellowbrick",
-  actian: "Actian",
-  delta_lake: "Delta Lake",
-  ibm_cos: "IBM Cloud Object Storage",
-};
-
-/** Not a vendor: a plain glyph, never a brand. */
-const GENERIC: Record<string, { title: string; Icon: LucideIcon }> = {
-  csv: { title: "Delimited file", Icon: FileSpreadsheet },
-  pdf: { title: "PDF", Icon: FileText },
-  file: { title: "File", Icon: File },
-  fileserver: { title: "File transfer server", Icon: FolderSync },
-  api: { title: "HTTP API", Icon: Globe },
-  database: { title: "SQL database", Icon: Database },
+const DRAWN_PRODUCTS: Record<string, { title: string; hex: string }> = {
+  db2: { title: "IBM Db2", hex: "054ADA" },
+  netezza: { title: "Netezza", hex: "1F70C1" },
+  informix: { title: "Informix", hex: "FF3E2B" },
+  sybase_ase: { title: "Sybase ASE", hex: "0065A8" },
+  vertica: { title: "Vertica", hex: "6E1E78" },
+  exasol: { title: "Exasol", hex: "003399" },
+  firebird: { title: "Firebird", hex: "DD4B39" },
+  h2: { title: "H2", hex: "0B3D91" },
+  pinot: { title: "Apache Pinot", hex: "00A99D" },
+  questdb: { title: "QuestDB", hex: "D14071" },
+  risingwave: { title: "RisingWave", hex: "5E2BFF" },
+  materialize: { title: "Materialize", hex: "7B3FE4" },
+  yugabytedb: { title: "YugabyteDB", hex: "FF4E46" },
+  starrocks: { title: "StarRocks", hex: "4B8BF5" },
+  dremio: { title: "Dremio", hex: "26B5C0" },
+  impala: { title: "Apache Impala", hex: "F7941E" },
+  athena: { title: "Amazon Athena", hex: "FF9900" },
+  emr: { title: "Amazon EMR", hex: "E15243" },
+  kinesis: { title: "Amazon Kinesis", hex: "FF7139" },
+  neptune: { title: "Amazon Neptune", hex: "527FFF" },
+  documentdb: { title: "Amazon DocumentDB", hex: "C925D1" },
+  cosmos_db: { title: "Azure Cosmos DB", hex: "4C5FD5" },
+  synapse: { title: "Azure Synapse", hex: "2B88D8" },
+  firebolt: { title: "Firebolt", hex: "FF3E00" },
+  yellowbrick: { title: "Yellowbrick", hex: "F2A900" },
+  actian: { title: "Actian", hex: "F25022" },
+  delta_lake: { title: "Delta Lake", hex: "00ADD4" },
+  ibm_cos: { title: "IBM Cloud Object Storage", hex: "1261FE" },
 };
 
 /** Catalog ids / saved types that share one product mark. */
@@ -438,7 +367,7 @@ const ALIASES: Record<string, string> = {
   excel: "excel",
   xlsx: "excel",
   xls: "excel",
-  google_sheets: "googlesheets",
+  google_sheets: "googledrive",
   weaviate: "weaviate",
   pinecone: "pinecone",
   csv: "csv",
@@ -447,31 +376,30 @@ const ALIASES: Record<string, string> = {
   tsv: "csv",
   csv_upload: "csv",
   tsv_upload: "csv",
-  csv_sftp: "fileserver",
+  csv_sftp: "sftp",
+  json: "json",
   json_documents: "json",
   jsonl: "json",
   jsonl_stream: "json",
   json_api_export: "json",
   ndjson: "json",
+  xml: "file",
+  yaml: "file",
+  html: "file",
   pdf: "pdf",
-  docx: "word",
-  microsoft_word: "word",
-  html5: "html",
-  vs_code: "vscode",
-  visual_studio_code: "vscode",
-  claude_desktop: "claude",
-  claude_code: "claude",
+  docx: "file",
+  orc: "file",
   fixed_width: "file",
   generic_sql: "database",
   database: "database",
   file: "file",
   rest_api: "api",
-  rest_openapi: "openapi",
-  singer_tap: "singer",
+  rest_openapi: "api",
+  singer_tap: "api",
   email: "file",
-  sftp: "fileserver",
-  smb: "fileserver",
-  ftp: "fileserver",
+  sftp: "file",
+  smb: "file",
+  ftp: "file",
   webhook: "api",
   soap: "api",
   odata: "api",
@@ -635,7 +563,7 @@ const CONTAINS: Array<[string, string]> = [
   ["xlsx", "excel"],
   ["googledrive", "googledrive"],
   ["google_drive", "googledrive"],
-  ["google_sheets", "googlesheets"],
+  ["google_sheets", "googledrive"],
   ["dropbox", "dropbox"],
   ["box", "box"],
   ["openshift", "openshift"],
@@ -657,7 +585,7 @@ function normalizeIconId(id: string): string {
 export function connectorIconKey(id: string): string {
   const key = normalizeIconId(id);
   if (!key) return "file";
-  if (isKnown(key)) return key;
+  if (MARKS[key] || DRAWN_PRODUCTS[key] || drawnKeys.has(key)) return key;
   if (ALIASES[key]) return ALIASES[key];
   for (const [substr, target] of CONTAINS) {
     if (key.includes(substr)) return target;
@@ -666,252 +594,220 @@ export function connectorIconKey(id: string): string {
   let trimmed = key;
   while (trimmed.includes("_")) {
     trimmed = trimmed.slice(0, trimmed.lastIndexOf("_"));
-    if (isKnown(trimmed)) return trimmed;
+    if (MARKS[trimmed] || DRAWN_PRODUCTS[trimmed] || drawnKeys.has(trimmed)) {
+      return trimmed;
+    }
     if (ALIASES[trimmed]) return ALIASES[trimmed];
   }
   return "api";
 }
 
-function isKnown(key: string): boolean {
-  return Boolean(MARKS[key] || MONOGRAMS[key] || GENERIC[key]);
-}
-
-export type ConnectorIconKind = "mark" | "monogram" | "generic";
-
-/** Which of the three kinds a connector id renders as. */
-export function connectorIconKind(id: string): ConnectorIconKind {
-  const key = connectorIconKey(id);
-  if (MARKS[key]) return "mark";
-  if (MONOGRAMS[key]) return "monogram";
-  return "generic";
-}
+const drawnKeys = new Set([
+  "sqlserver",
+  "oracle",
+  "s3",
+  "salesforce",
+  "redshift",
+  "dynamodb",
+  "azure",
+  "excel",
+  "iceberg",
+  "weaviate",
+  "pinecone",
+  "csv",
+  "json",
+  "pdf",
+  "api",
+  "database",
+]);
 
 /** Official mark when one exists. Tests use this to prove aliases. */
 export function connectorBrandMark(id: string): Mark | null {
   return MARKS[connectorIconKey(id)] ?? null;
 }
 
-/** Every mark the module can render, for the bounding-box table and its test. */
-export function connectorMarks(): Mark[] {
-  return Object.values(MARKS);
-}
-
-const PARENT = /^(Amazon|AWS|Azure|Microsoft|IBM|Apache|Google)\s+/;
-
-/**
- * Initials for the monogram tile, by one rule for every vendor: drop the
- * parent company, keep a short code name whole (S3, Db2, EMR, SQL, VS), else
- * the initials of the first two words.
- */
-export function connectorMonogram(title: string): string {
-  const words = title.replace(PARENT, "").trim().split(/\s+/);
-  const first = words[0] ?? "";
-  if (first.length <= 3 && (/\d/.test(first) || first === first.toUpperCase())) return first;
-  return words
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
-    .join("");
-}
-
-/** [x, y, width, height] of each mark's path in its 24-unit box, by slug. */
-type Box = [number, number, number, number];
-
-// Measured with getBBox() in Chromium from simple-icons 16.35.0 (MySQL: the
-// dolphin only). Re-measure a mark when its path changes; the test checks that
-// every mark has a box inside the 24-unit square.
-const BOXES: Record<string, Box> = {
-  airtable: [0, 1.97, 24, 20.07],
-  alibabacloud: [0, 4.52, 24, 14.97],
-  apacheavro: [0, 2, 24, 20],
-  apachecassandra: [0, 5.77, 24, 12.47],
-  apachedoris: [2.94, 0, 18.12, 24],
-  apachedruid: [0, 3.19, 24, 17.62],
-  apacheflink: [0.05, 0, 23.91, 24],
-  apachehive: [0, 0.26, 24, 23.48],
-  apachekafka: [4.68, 0, 14.64, 24],
-  apachenifi: [3.45, 0, 17.11, 24],
-  apacheparquet: [0, 2.59, 24, 18.82],
-  apachepulsar: [0, 3.52, 24, 16.95],
-  apachespark: [0.28, 0, 23.45, 24],
-  asana: [0, 0.91, 24, 22.18],
-  auth0: [1.51, 0, 20.97, 24],
-  backblaze: [4.74, 0, 14.53, 24],
-  bitbucket: [0, 1.21, 24, 21.58],
-  box: [0, 5.52, 24, 12.95],
-  circleci: [0.18, 0, 23.64, 24],
-  claude: [0.01, 0, 23.98, 24],
-  clickhouse: [0, 1.34, 24, 21.33],
-  cloudera: [0, 0, 24, 24],
-  cloudflare: [0, 6.57, 24, 10.85],
-  cockroachlabs: [2.4, 0, 19.21, 24],
-  confluence: [0, 0.29, 24, 23.42],
-  couchbase: [0, 0, 24, 24],
-  cratedb: [0, 3, 24, 18],
-  cursor: [1.47, 0, 21.06, 24],
-  databricks: [0.95, 0, 22.1, 24],
-  datadog: [0.79, 0, 22.42, 24],
-  digitalocean: [0.01, 0, 23.99, 24],
-  dropbox: [0, 1.81, 24, 20.39],
-  duckdb: [0, 0, 24, 24],
-  elasticsearch: [1.39, 0, 21.21, 24],
-  firebase: [2.41, 0, 19.19, 24],
-  github: [0, 0.3, 24, 23.41],
-  gitlab: [0, 0.44, 24, 23.11],
-  googleanalytics: [1.16, 0, 21.68, 24],
-  googlebigquery: [0, 0, 24, 24],
-  googlecloud: [0, 2.38, 24, 19.25],
-  googlecloudstorage: [0, 2.4, 24, 19.2],
-  googledrive: [0, 1.49, 24, 21.03],
-  googlepubsub: [1.01, 0, 21.99, 24],
-  googlesheets: [3.27, 0, 17.45, 24],
-  graphql: [1.32, 0, 21.36, 24],
-  h2database: [0, 0, 24, 24],
-  html5: [1.5, 0, 21, 24],
-  hubspot: [0.55, 0, 22.9, 24],
-  influxdb: [0.18, 0, 23.63, 24],
-  intercom: [0, 0, 24, 24],
-  jenkins: [1.12, 0, 21.76, 24],
-  jira: [0, 0, 24, 24],
-  json: [0.03, 0, 23.94, 24],
-  looker: [4.55, 0, 14.89, 24],
-  mailchimp: [0.69, 0, 22.61, 24],
-  mariadb: [0, 4.26, 24, 15.48],
-  milvus: [0, 4, 24, 16],
-  minio: [5.76, 0, 12.49, 24],
-  mongodb: [6.61, 0, 10.78, 24],
-  mqtt: [0, 0.01, 24, 23.99],
-  mysql: [14.17, 3.85, 9.83, 9.65],
-  neo4j: [0, 0.73, 24, 22.54],
-  neon: [0, 0, 24, 24],
-  newrelic: [1.61, 0, 20.78, 24],
-  notion: [0.49, 0, 23.02, 24],
-  okta: [0, 0, 24, 24],
-  openapiinitiative: [0, 0, 24, 24],
-  opensearch: [0, 0, 24, 24],
-  pagerduty: [3.73, 0, 16.54, 24],
-  paypal: [1.82, 0, 20.36, 24],
-  planetscale: [0, 0, 24, 24],
-  postgresql: [0.42, 0, 23.17, 24],
-  presto: [0, 0, 24, 24],
-  qdrant: [1.61, 0, 20.79, 24],
-  rabbitmq: [0, 0, 23.99, 24],
-  redhatopenshift: [0, 0.97, 24, 22.06],
-  redis: [0, 0.93, 24, 22.15],
-  sap: [0, 6.06, 24, 11.87],
-  scylladb: [2.27, 0, 19.46, 24],
-  shopify: [1.45, 0, 21.1, 24],
-  singlestore: [0, 0, 24, 24],
-  snowflake: [0, 0.57, 24, 22.87],
-  splunk: [0, 8.44, 24, 7.12],
-  sqlite: [1.27, 0, 21.46, 24],
-  square: [0, 0, 24, 24],
-  stripe: [3.43, 0, 17.13, 24],
-  supabase: [0.3, 0, 23.39, 24],
-  surveymonkey: [0, 3.64, 24, 16.73],
-  teradata: [0, 0, 24, 24],
-  tidb: [1.61, 0, 20.78, 24],
-  timescale: [0, 0.76, 24, 22.47],
-  trello: [0, 0, 24, 24],
-  trino: [3.91, 0, 16.19, 24],
-  typeform: [0, 9.31, 24, 5.39],
-  vitess: [0, 1.04, 24, 21.91],
-  wasabi: [0, 0, 24, 24],
-  xml: [0, 7.05, 24, 9.89],
-  yaml: [0, 0.97, 24, 22.06],
-  zendesk: [0, 2.9, 24, 18.19],
-  zoho: [0, 6.9, 24, 10.21],
-  zoom: [0, 9.27, 24, 5.46],
-};
-
-/** Every glyph is scaled to this optical size (units of a 24-unit box). */
-const OPTICAL = 20;
-
-/**
- * A viewBox centred on the glyph's bounding box that shows it at one optical
- * size: equal area for every mark, never wider or taller than the box.
- */
-export function markViewBox(box: Box | undefined): string {
-  const [x, y, w, h] = box ?? [0, 0, 24, 24];
-  const scale = Math.min(24 / Math.max(w, h), OPTICAL / Math.sqrt(w * h));
-  const side = 24 / scale;
-  const r = (n: number) => +n.toFixed(3);
-  return `${r(x + w / 2 - side / 2)} ${r(y + h / 2 - side / 2)} ${r(side)} ${r(side)}`;
-}
-
 function OfficialMark({ mark, size }: { mark: Mark; size: number }) {
   return (
-    <svg
-      className="df-cicon df-cicon--mark"
-      width={size}
-      height={size}
-      viewBox={markViewBox(BOXES[mark.slug])}
-      aria-hidden
-      focusable="false"
-    >
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-hidden>
       <title>{mark.title}</title>
       <path d={mark.path} fill={`#${mark.hex}`} />
     </svg>
   );
 }
 
-/** One neutral tile for every vendor without a redistributable mark. */
-function MonogramMark({ title, size }: { title: string; size: number }) {
-  const text = connectorMonogram(title);
-  const fontSize = text.length >= 3 ? 8 : text.length === 2 ? 10 : 12;
+function DrawnMark({
+  size,
+  title,
+  children,
+}: {
+  size: number;
+  title: string;
+  children: ReactNode;
+}) {
   return (
-    <svg
-      className="df-cicon df-cicon--tile"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      aria-hidden
-      focusable="false"
-    >
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-hidden>
       <title>{title}</title>
-      <rect
-        x="1.5"
-        y="1.5"
-        width="21"
-        height="21"
-        rx="5"
-        fill="var(--df-surface-muted)"
-        stroke="var(--df-border)"
-        strokeWidth="1"
-        vectorEffect="non-scaling-stroke"
-      />
-      <text
-        x="12"
-        y="12"
-        dy="0.36em"
-        textAnchor="middle"
-        fontFamily="var(--df-font-sans)"
-        fontSize={fontSize}
-        fontWeight="600"
-        fill="var(--df-text-secondary)"
-      >
-        {text}
-      </text>
+      {children}
     </svg>
   );
+}
+
+/** Database cylinder in a product colour — for engines with no official mark. */
+function DrawnProductDb({ size, title, hex }: { size: number; title: string; hex: string }) {
+  return (
+    <DrawnMark size={size} title={title}>
+      <ellipse cx="12" cy="6" rx="7.5" ry="2.8" fill={`#${hex}`} />
+      <path
+        d={`M4.5 6v9.5c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8V6c0 1.6-3.4 2.8-7.5 2.8S4.5 7.6 4.5 6z`}
+        fill={`#${hex}`}
+        opacity="0.85"
+      />
+      <path
+        d="M4.5 11c1.7 1.1 4.5 1.7 7.5 1.7s5.8-.6 7.5-1.7"
+        stroke="#fff"
+        strokeWidth="0.9"
+        fill="none"
+        opacity="0.7"
+      />
+    </DrawnMark>
+  );
+}
+
+function drawnMark(key: string, size: number) {
+  const product = DRAWN_PRODUCTS[key];
+  if (product) {
+    return <DrawnProductDb size={size} title={product.title} hex={product.hex} />;
+  }
+  switch (key) {
+    case "sqlserver":
+      return (
+        <DrawnMark size={size} title="SQL Server">
+          <ellipse cx="12" cy="6" rx="8" ry="3" fill="#0078D4" />
+          <path d="M4 6v9c0 1.7 3.6 3 8 3s8-1.3 8-3V6c0 1.7-3.6 3-8 3s-8-1.3-8-3z" fill="#0078D4" />
+          <path d="M4 11.2c1.8 1.2 4.7 1.8 8 1.8s6.2-.6 8-1.8" stroke="#fff" strokeWidth="1" fill="none" />
+        </DrawnMark>
+      );
+    case "oracle":
+      return (
+        <DrawnMark size={size} title="Oracle">
+          <rect x="3" y="4.5" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="3" y="8.7" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="3" y="12.9" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="5" y="17.1" width="14" height="2.4" rx="1.2" fill="#C74634" />
+        </DrawnMark>
+      );
+    case "s3":
+      return (
+        <DrawnMark size={size} title="Amazon S3">
+          <path d="M6 8.5h12l-1.2 9.2a2 2 0 0 1-2 1.7H9.2a2 2 0 0 1-2-1.7L6 8.5z" fill="#FF9900" />
+          <path d="M5 7.2h14c.4 0 .7.4.6.8l-.3 1H4.7l-.3-1c-.1-.4.2-.8.6-.8z" fill="#232F3E" />
+          <path d="M8.2 16.2c1.2.7 2.4 1 3.8 1s2.6-.3 3.8-1" stroke="#232F3E" strokeWidth="1" fill="none" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "salesforce":
+      return (
+        <DrawnMark size={size} title="Salesforce">
+          <path d="M8.2 16.8a3.2 3.2 0 0 1-.6-6.3 4.2 4.2 0 0 1 8.1-1.2 3.4 3.4 0 0 1 .7 6.6 3.6 3.6 0 0 1-6.6.9 3.1 3.1 0 0 1-1.6 0z" fill="#00A1E0" />
+        </DrawnMark>
+      );
+    case "redshift":
+      return (
+        <DrawnMark size={size} title="Amazon Redshift">
+          <path d="M12 3 20 7.5v9L12 21 4 16.5v-9L12 3z" fill="#8C4FFF" />
+          <circle cx="12" cy="12" r="2.2" fill="#fff" />
+        </DrawnMark>
+      );
+    case "dynamodb":
+      return (
+        <DrawnMark size={size} title="DynamoDB">
+          <ellipse cx="12" cy="6" rx="7" ry="2.6" fill="#4053D6" />
+          <path d="M5 6v8.5c0 1.5 3.1 2.6 7 2.6s7-1.1 7-2.6V6" fill="#4053D6" />
+          <path d="M5 10.2c1.6 1.1 4.1 1.7 7 1.7s5.4-.6 7-1.7" stroke="#fff" strokeWidth="1" fill="none" />
+        </DrawnMark>
+      );
+    case "azure":
+      return (
+        <DrawnMark size={size} title="Microsoft Azure">
+          <path d="M10.2 4.2 3.8 18.6h5.2l2.4-4.6 4.8 4.6h4.2L13.6 4.2h-3.4z" fill="#0078D4" />
+        </DrawnMark>
+      );
+    case "excel":
+      return (
+        <DrawnMark size={size} title="Microsoft Excel">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="#217346" />
+          <path d="M14 3.5v4h4" fill="#185C37" />
+          <path d="M8 12h2.2M8 15h2.2M12.2 12H15M12.2 15H15" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "iceberg":
+      return (
+        <DrawnMark size={size} title="Apache Iceberg">
+          <path d="M12 3 21 18H3L12 3z" fill="#1F4E79" />
+          <path d="M12 8.5 16.5 16h-9L12 8.5z" fill="#7FDBFF" />
+        </DrawnMark>
+      );
+    case "weaviate":
+      return (
+        <DrawnMark size={size} title="Weaviate">
+          <circle cx="12" cy="12" r="8" fill="#1A1A1A" />
+          <circle cx="12" cy="12" r="3" fill="#00D1B2" />
+        </DrawnMark>
+      );
+    case "pinecone":
+      return (
+        <DrawnMark size={size} title="Pinecone">
+          <path d="M12 3.5 18 8v8l-6 4.5L6 16V8l6-4.5z" fill="#0D1B2A" />
+          <path d="M12 8.5 15 10.2v3.6L12 15.5 9 13.8v-3.6L12 8.5z" fill="#F5C518" />
+        </DrawnMark>
+      );
+    case "csv":
+      return (
+        <DrawnMark size={size} title="Delimited file">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-ink)" />
+          <path d="M8 12h2.5M8 15h2.5M12.5 12H16M12.5 15H16" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "json":
+      return (
+        <DrawnMark size={size} title="JSON">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-strap)" />
+          <path d="M9 11c-1 0-1.4.6-1.4 1.5S8 14 9 14M15 11c1 0 1.4.6 1.4 1.5S16 14 15 14" stroke="#fff" strokeWidth="1.2" fill="none" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "pdf":
+      return (
+        <DrawnMark size={size} title="PDF">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-danger)" />
+          <path d="M8.2 16.2v-4.2h1.5a1.5 1.5 0 0 1 0 3H8.2" stroke="#fff" strokeWidth="1.1" fill="none" />
+        </DrawnMark>
+      );
+    case "api":
+      return (
+        <DrawnMark size={size} title="API">
+          <rect x="3.5" y="6" width="17" height="12" rx="2" fill="var(--df-logo-tile)" />
+          <path d="M8 10.5 6.2 12 8 13.5M16 10.5 17.8 12 16 13.5M11 14.2l2-4.4" stroke="var(--df-logo-arrow)" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </DrawnMark>
+      );
+    case "database":
+      return (
+        <DrawnMark size={size} title="Database">
+          <ellipse cx="12" cy="6.5" rx="7" ry="2.6" fill="var(--df-logo-ink)" />
+          <path d="M5 6.5v8c0 1.5 3.1 2.7 7 2.7s7-1.2 7-2.7v-8c0 1.5-3.1 2.7-7 2.7S5 8 5 6.5z" fill="var(--df-logo-tile)" />
+        </DrawnMark>
+      );
+    default:
+      return (
+        <DrawnMark size={size} title="File">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-tile)" />
+          <path d="M8 13h8M8 16h5" stroke="var(--df-logo-arrow)" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+  }
 }
 
 export function ConnectorIcon({ id, size = 32 }: { id: string; size?: number }) {
   const key = connectorIconKey(id);
   const mark = MARKS[key];
   if (mark) return <OfficialMark mark={mark} size={size} />;
-  const monogram = MONOGRAMS[key];
-  if (monogram) return <MonogramMark title={monogram} size={size} />;
-  const { title, Icon } = GENERIC[key] ?? GENERIC.file;
-  return (
-    <Icon
-      className="df-cicon df-cicon--generic"
-      width={size}
-      height={size}
-      strokeWidth={1.75}
-      aria-hidden
-      focusable="false"
-    >
-      <title>{title}</title>
-    </Icon>
-  );
+  return drawnMark(key, size);
 }

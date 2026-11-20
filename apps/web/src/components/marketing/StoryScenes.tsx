@@ -21,7 +21,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { ConnectorIcon } from "../../app/brand-icons";
+import { ConnectorIcon } from "../../app/vendor-marks";
 import { claudeMcpSnippet, cursorMcpSnippet, mcpHttpUrl, remoteMcpSnippet, vscodeMcpSnippet } from "../../lib/mcpClientConfig";
 import { APP_NARROW_QUERY, AppWindow, EXAMPLE_JOBS, PanelWindow, exampleStateLabel } from "./app-frame/AppFrame";
 import { RECORDED_CHECK_GROUPS, RECORDED_MAPPING } from "./ProductPanels";

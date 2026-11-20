@@ -235,6 +235,8 @@
   color: #5eead4;
   font-size: 11px;
   font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   margin: 0;
 }
 
@@ -266,6 +268,8 @@
 .lp-login-proof-flow span {
   font-size: 11px;
   font-weight: 740;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: #99f6e4;
   padding: 4px 9px;
   border-radius: 999px;
@@ -475,6 +479,8 @@
 .lp-login-auth-kicker {
   font-size: 11px;
   font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--df-teal-600);
   margin: 0 0 8px;
 }

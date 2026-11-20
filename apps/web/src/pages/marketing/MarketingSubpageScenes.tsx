@@ -12,7 +12,7 @@ import {
   Users,
   Zap,
 } from "lucide-react";
-import { ConnectorIcon } from "../../app/brand-icons";
+import { ConnectorIcon } from "../../app/vendor-marks";
 import {
   AppWindow,
   EXAMPLE_JOBS,

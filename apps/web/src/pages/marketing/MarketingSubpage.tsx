@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from "react";
-import { ConnectorIcon } from "../../app/brand-icons";
+import { ConnectorIcon } from "../../app/vendor-marks";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
 import { QuarantinePanel, ROLES, StatusGlyph } from "../../components/marketing/ProductPanels";
