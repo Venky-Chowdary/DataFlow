@@ -462,7 +462,12 @@ class MapColumnsRequest(PolicyFieldsModel):
     target_schema: dict[str, str] = Field(default_factory=dict)
     # Destination primary key / identity / partition key columns, as the probe
     # read them. Map never proposes an unrelated source onto one (rule 4).
+    # Only a hint: with ``destination`` the server reads the keys from the
+    # catalog; without it only names that are target columns are kept.
     target_key_columns: list[str] = Field(default_factory=list)
+    # The destination table being mapped onto, so its keys come from its own
+    # catalog (services.map_key_columns), not from the client's list.
+    destination: Optional[EndpointDTO] = None
     validation_mode: str = "balanced"
     file_format: Optional[str] = None
     use_llm: bool = True
@@ -664,9 +669,8 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
     )
     from services.key_column_guard import with_key_flags
 
-    target_schemas = with_key_flags(
-        target_schemas, {"primary_key_columns": list(body.target_key_columns or [])}
-    )
+    key_columns, key_source = await _map_key_columns(body, request)
+    target_schemas = with_key_flags(target_schemas, {"primary_key_columns": key_columns})
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -730,6 +734,10 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "llm": result.get("llm", {}),
         "confidence_threshold": threshold,
         "destination_aware": bool(body.target_columns),
+        # Which keys Map protected, and where they came from (catalog or the
+        # client's list checked against the target columns).
+        "target_key_columns": key_columns,
+        "target_key_columns_source": key_source,
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
@@ -742,6 +750,33 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "nested_fields": nested_fields,
         "correlation_id": get_correlation_id(),
     }
+
+
+async def _map_key_columns(body: MapColumnsRequest, request: Request) -> tuple[list[str], str]:
+    """Map's rule-4 keys from the destination catalog, never the client's word alone."""
+    from services.map_key_columns import MAP_KEY_PROBE_TIMEOUT_S, resolve_map_key_columns
+
+    catalog = None
+    dest = body.destination
+    if dest is not None and dest.kind == "database" and (dest.table or dest.collection):
+        _assert_endpoint_connectors(request, read=(dest,))
+        from ..transfer.endpoint_intelligence import introspect_endpoint
+        from ..transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig.from_dict(dest.kind, dest.model_dump(by_alias=True))
+        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "destination"}
+        try:
+            catalog = await asyncio.wait_for(
+                asyncio.to_thread(introspect_endpoint, endpoint), MAP_KEY_PROBE_TIMEOUT_S
+            )
+        except Exception as exc:  # an unreadable catalog falls back to the checked list
+            logging.getLogger(__name__).warning(
+                "Map could not read the destination keys; using checked client keys: %s", exc
+            )
+            catalog = None
+    return resolve_map_key_columns(
+        body.target_key_columns, target_columns=body.target_columns, catalog=catalog
+    )
 
 
 class CreatePlanRequest(BaseModel):

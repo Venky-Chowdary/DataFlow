@@ -10,6 +10,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { ConnectorListStatus } from "../components/ConnectorListStatus";
+import { NO_DEST_KEYS, destKeyColumnsFor, destKeyColumnsFromProbe, type DestKeyColumns } from "../lib/destinationKeyColumns";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
@@ -547,8 +548,10 @@ export function TransferPage({
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
   const destSchemaIdentityRef = useRef("");
-  // Destination key columns from the last probe; sent to Map (rule 4, D369).
-  const destKeyColumnsRef = useRef<string[]>([]);
+  // Destination key columns from the last probe, with the table they were read
+  // from; sent to Map only for that same table (rule 4, D369).
+  const destKeyColumnsRef = useRef<DestKeyColumns>(NO_DEST_KEYS);
+  const currentDestKeyColumns = () => destKeyColumnsFor(destKeyColumnsRef.current, destSchemaIdentityRef.current);
   const inlineDestinationProbeRef = useRef<DestinationSchemaProbeController<void> | null>(null);
   /** Last destination identity whose probe failed — throttles automatic re-probes. */
   const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
@@ -1999,7 +2002,8 @@ export function TransferPage({
               source_schema: mapSourceSchema,
               target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
               target_schema: mapTargetSchema,
-              target_key_columns: destKeyColumnsRef.current,
+              target_key_columns: currentDestKeyColumns(),
+              destination: mapKeyDestination(),
               validation_mode: validationMode,
               file_format: parsed?.file_type
                 ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -2019,7 +2023,8 @@ export function TransferPage({
             source_schema: mapSourceSchema,
             target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
             target_schema: mapTargetSchema,
-            target_key_columns: destKeyColumnsRef.current,
+            target_key_columns: currentDestKeyColumns(),
+            destination: mapKeyDestination(),
             validation_mode: validationMode,
             file_format: parsed?.file_type
               ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -2159,7 +2164,8 @@ export function TransferPage({
           source_schema: sourceSchema,
           target_columns: targetCols,
           target_schema: targetSchema,
-          target_key_columns: destKeyColumnsRef.current,
+          target_key_columns: currentDestKeyColumns(),
+          destination: mapKeyDestination(),
           validation_mode: validationMode,
           file_format: sourceConnector?.type,
           use_llm: true,
@@ -2230,6 +2236,9 @@ export function TransferPage({
   };
 
   const currentDestinationEndpoint = buildDestinationEndpoint();
+  /** The table Map maps onto, so the server reads its keys from the catalog (D369). */
+  const mapKeyDestination = (): Record<string, unknown> | undefined =>
+    destKindMode === "database" && targetCollection.trim() ? { ...buildDestinationEndpoint() } : undefined;
   const currentDestinationProbeKey = destinationSchemaProbeKey(currentDestinationEndpoint, connectorId);
   destSchemaIdentityRef.current = currentDestinationProbeKey;
 
@@ -2314,6 +2323,7 @@ export function TransferPage({
       // No table typed yet — only refresh the picker list.
       if (!targetCollection.trim()) {
         commitDestSchema([], {});
+        destKeyColumnsRef.current = NO_DEST_KEYS;
         proveDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
         return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
@@ -2378,9 +2388,11 @@ export function TransferPage({
         : { key: tableKey, at: Date.now() };
       commitDestSchema(nextColumns, nextSchema);
       if (!keepPrior) {
-        destKeyColumnsRef.current = resolvedExists === false
-          ? []
-          : [...(destination.primary_key_columns ?? []), ...(destination.identity_columns ?? [])];
+        destKeyColumnsRef.current = destKeyColumnsFromProbe(tableKey, {
+          tableExists: resolvedExists,
+          primaryKey: destination.primary_key_columns,
+          identity: destination.identity_columns,
+        });
       }
       proveDestTableExists(resolvedExists);
       destSchemaTableKeyRef.current = tableKey;
@@ -2432,7 +2444,10 @@ export function TransferPage({
       // Re-setting an already-empty schema still hands Map a new object identity,
       // which re-ran Map, which re-probed — the loop that pinned the reload
       // control on "Reading destination…" for as long as the host stayed down.
-      if (!sameTable) commitDestSchema([], {});
+      if (!sameTable) {
+        commitDestSchema([], {});
+        destKeyColumnsRef.current = NO_DEST_KEYS;
+      }
       // Do not force "table missing" — unknown is safer than a false create promise.
       proveDestTableExists(null);
       const rawMsg = e instanceof Error ? e.message : "";
@@ -3363,7 +3378,8 @@ export function TransferPage({
           source_schema: data.schema ?? {},
           target_columns: destColumns.length ? destColumns : undefined,
           target_schema: destSchemaMap,
-          target_key_columns: destKeyColumnsRef.current,
+          target_key_columns: currentDestKeyColumns(),
+          destination: mapKeyDestination(),
           validation_mode: validationMode,
           file_format: data.file_type ?? sourceFileName?.split(".").pop(),
           use_llm: true,
