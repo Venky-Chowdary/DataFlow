@@ -68,7 +68,7 @@ export function ResendRow({ challengeId, initialCooldown, onRestart, onSignIn, a
       const refusal = resendRefusal(err instanceof SignupApiError ? err : {});
       setNotice(refusal.text);
       setEnded(refusal.restart);
-      toast({ title: refusal.restart ? "Signup expired" : "Code not resent", message: refusal.text, tone: "warning" });
+      toast({ title: "Resend unavailable", message: refusal.text, tone: "warning" });
       if (refusal.cooldownSec) setCooldown(refusal.cooldownSec);
     } finally {
       setResending(false);
