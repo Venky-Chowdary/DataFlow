@@ -339,6 +339,11 @@ class _MysqlHandback:
     def close(self) -> None:
         if not self._done:
             self._done = True
+            # End the read's transaction before the session idles in the
+            # scope (R10). An idle session that had read a table holds its
+            # metadata lock, and the writer's own ALTER (widen) then waited
+            # out lock_wait_timeout behind it.
+            _mysql_session_reset(self._conn)
             self._release()
 
     def __enter__(self) -> "_MysqlHandback":
@@ -417,3 +422,8 @@ def enable_autocommit(conn: Any) -> None:
         setter(True)
         return
     conn.autocommit = True
+            # End the read's transaction before the session idles in the
+            # scope (R10). An idle session that had read a table holds its
+            # metadata lock, and the writer's own ALTER (widen) then waited
+            # out lock_wait_timeout behind it.
+            _mysql_session_reset(self._conn)
