@@ -833,8 +833,20 @@ async def copilot_confirm(
         # owner key that can read unscoped rows still saw them (D380).
         if not str(payload.get("workspace_id") or "").strip():
             payload["workspace_id"] = str(peek.get("workspace_id") or staged_in or "")
+        from services.confirm_transfer_workspace import confirm_transfer_workspace
+
         try:
-            payload = _confirm_schedule_workspace(payload, http_request)
+            # The confirming caller's workspace, and an unscoped approval only
+            # for its stager or over that workspace's own connectors (D380).
+            payload = confirm_transfer_workspace(
+                payload,
+                staged_by=str(peek.get("staged_by") or ""),
+                http_request=http_request,
+            )
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        try:
             result = await _start_confirmed_transfer(payload)
         except DuplicateTransferSubmission:
             ledger.release_claim(ack_id)
