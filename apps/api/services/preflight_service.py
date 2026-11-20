@@ -2833,6 +2833,12 @@ def run_file_preflight(
     from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
 
     out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
+    from services.temporal_tick_disclosure import temporal_tick_warnings  # D372/R3
+
+    out.setdefault("warnings", []).extend(temporal_tick_warnings(
+        plan_mappings, sample_rows, source_types=column_types, dest_types=dest_types,
+        dest_db=destination_db_type, row_count=row_count, rows_are_population=rows_are_population,
+    ))
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(
