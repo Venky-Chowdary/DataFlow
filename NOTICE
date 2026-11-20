@@ -28,9 +28,6 @@ Components under copyleft, proprietary or otherwise conditional terms
 @fontsource/jetbrains-mono (npm) - OFL-1.1
   SIL Open Font License 1.1. Copyright The JetBrains Mono Project Authors. Licence text: https://openfontlicense.org
 
-@fontsource-variable/mona-sans (npm) - OFL-1.1
-  SIL Open Font License 1.1. Copyright 2022 The Mona Sans Project Authors (https://github.com/github/mona-sans), with Reserved Font Name "Mona". Licence text: https://openfontlicense.org
-
 @fontsource/plus-jakarta-sans (npm) - OFL-1.1
   SIL Open Font License 1.1. Copyright The Plus Jakarta Sans Project Authors. Licence text: https://openfontlicense.org
 
@@ -248,7 +245,6 @@ JavaScript (web bundle)
 -----------------------
 @fontsource/ibm-plex-mono: OFL-1.1
 @fontsource/ibm-plex-sans: OFL-1.1
-@fontsource-variable/mona-sans: OFL-1.1
 @fontsource/inter: OFL-1.1
 @fontsource/jetbrains-mono: OFL-1.1
 @fontsource/plus-jakarta-sans: OFL-1.1

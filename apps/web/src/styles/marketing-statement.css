@@ -4,7 +4,7 @@
  * Direction: security printing. A run's statement (read = landed + held +
  * skipped) is the brand object, set like a certificate: cool security paper,
  * intaglio ink, serial red only for held rows, a landed green, guilloché
- * line-work, and Mona Sans with its width axis doing the display work.
+ * line-work, set in the product's own typeface (IBM Plex Sans).
  * Product UI keeps a dark "screen" so a real interface reads as a screen.
  *
  * Loaded after marketing-system.css and overrides its tokens; no new hex
@@ -60,11 +60,11 @@
     0 24px 48px -16px color-mix(in srgb, var(--df-intaglio) 34%, transparent),
     0 64px 120px -40px color-mix(in srgb, var(--df-intaglio) 40%, transparent);
 
-  --mk-font: "Mona Sans Variable", var(--df-font-sans);
-  --lp-font-display: "Mona Sans Variable", var(--df-font-sans);
-  --mk-fs-h1: clamp(44px, 3.4vw + 22px, 72px);
-  --mk-fs-h2: clamp(32px, 1.2vw + 22px, 48px);
-  --mk-fs-h3: 21px;
+  --mk-font: var(--df-font-sans);
+  --lp-font-display: var(--df-font-sans);
+  --mk-fs-h1: clamp(36px, 2.2vw + 20px, 52px);
+  --mk-fs-h2: clamp(28px, 0.9vw + 19px, 36px);
+  --mk-fs-h3: 18px;
 
   font-family: var(--mk-font);
   font-optical-sizing: auto;
@@ -115,20 +115,17 @@ html[data-theme="dark"] .mk {
 }
 
 .mk h1 {
-  font-stretch: 116%;
   font-weight: 600;
   letter-spacing: -0.032em;
 }
 
 .mk h2 {
-  font-stretch: 110%;
   font-weight: 600;
   letter-spacing: -0.026em;
   line-height: 1.04;
 }
 
 .mk h3 {
-  font-stretch: 104%;
   font-weight: 600;
   letter-spacing: -0.012em;
 }
@@ -149,7 +146,6 @@ html[data-theme="dark"] .mk {
 
 .mk .mk-btn {
   border-radius: var(--df-radius-pill);
-  font-stretch: 106%;
   font-weight: 600;
   letter-spacing: -0.005em;
   transition:
@@ -197,7 +193,6 @@ html[data-theme="dark"] .mk {
 }
 
 .mk-header-brand {
-  font-stretch: 112%;
   letter-spacing: -0.02em;
 }
 
@@ -316,7 +311,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   max-width: 11ch;
   font-size: var(--mk-fs-h1);
   line-height: 0.98;
-  font-stretch: 118%;
   font-weight: 600;
 }
 
@@ -324,7 +318,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   max-width: 40em;
   margin-top: 28px;
   color: var(--mk-ink-2);
-  font-size: clamp(18px, 0.4vw + 16px, 21px);
+  font-size: 18px;
   line-height: 1.5;
 }
 
@@ -374,7 +368,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk-statement-title {
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 110%;
   font-weight: 620;
 }
 
@@ -415,14 +408,12 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   order: 2;
   color: var(--mk-ink-3);
   font-size: 15px;
-  font-stretch: 100%;
 }
 
 .mk-term dd {
   margin: 0;
   color: var(--mk-ink);
-  font-size: clamp(30px, 7vw, 44px);
-  font-stretch: 125%;
+  font-size: clamp(24px, 5.6vw, 35px);
   font-weight: 560;
   line-height: 1.05;
   letter-spacing: -0.03em;
@@ -455,7 +446,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
     display: block;
     grid-column: 1;
     color: var(--mk-ink-3);
-    font-size: clamp(24px, 5vw, 34px);
+    font-size: clamp(21px, 4.4vw, 30px);
     font-weight: 300;
     line-height: 1.3;
     text-align: center;
@@ -507,7 +498,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
     display: block;
     padding-top: 0.08em;
     color: var(--mk-ink-3);
-    font-size: clamp(36px, 4vw, 64px);
+    font-size: clamp(27px, 2.96vw, 47px);
     font-weight: 300;
     line-height: 1;
   }
@@ -519,7 +510,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   }
 
   .mk-term dd {
-    font-size: clamp(40px, 4.1vw, 76px);
+    font-size: clamp(30px, 3.03vw, 56px);
     line-height: 0.92;
     text-align: left;
   }
@@ -622,7 +613,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   background: var(--mk-sheet);
   color: var(--mk-ink-3);
   font-size: 13px;
-  font-stretch: 108%;
   font-weight: 640;
   transition: color 0.3s ease;
 }
@@ -670,7 +660,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   align-items: center;
   gap: 10px;
   color: var(--mk-ink);
-  font-stretch: 108%;
   font-weight: 620;
   white-space: nowrap;
 }
@@ -714,7 +703,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk-section-head > p {
   max-width: 38em;
   color: var(--mk-ink-2);
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.55;
 }
 
@@ -743,8 +732,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: clamp(28px, 1.4vw + 18px, 40px);
-  font-stretch: 120%;
+  font-size: clamp(22px, 1.12vw + 14px, 32px);
   font-weight: 600;
   letter-spacing: -0.03em;
 }
@@ -788,7 +776,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk-bin dd p {
   max-width: 34em;
   color: var(--mk-ink-2);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.6;
 }
 
@@ -851,7 +839,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   color: var(--mk-ink-3);
   font: inherit;
   font-size: 15px;
-  font-stretch: 106%;
   font-weight: 600;
   cursor: pointer;
 }
@@ -867,7 +854,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   background: var(--mk-band);
   color: var(--mk-ink-3);
   font-size: 15px;
-  font-stretch: 112%;
   font-variant-numeric: tabular-nums;
   transition:
     background-color 0.24s ease,
@@ -925,8 +911,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 
 .mk .mk-path-copy h3 {
   color: var(--df-on-tile);
-  font-size: clamp(24px, 1vw + 18px, 32px);
-  font-stretch: 112%;
+  font-size: clamp(21px, 0.88vw + 16px, 28px);
   line-height: 1.1;
   letter-spacing: -0.02em;
 }
@@ -934,7 +919,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk .mk-path-copy > p {
   margin-top: 14px;
   color: color-mix(in srgb, var(--df-on-tile) 78%, var(--mk-screen));
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.6;
 }
 
@@ -1029,8 +1014,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 
 .mk-scale-name {
   color: var(--mk-scale-ink);
-  font-size: 22px;
-  font-stretch: 116%;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -1044,7 +1028,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   background: var(--mk-verified-bg);
   color: var(--mk-landed);
   font-size: 13px;
-  font-stretch: 100%;
   font-weight: 600;
   letter-spacing: 0;
   vertical-align: 0.25em;
@@ -1112,7 +1095,6 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 }
 
 .mk-contrast-row dt {
-  font-stretch: 110%;
   font-weight: 620;
   letter-spacing: -0.015em;
 }
@@ -1148,8 +1130,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk .mk-closer h2 {
   max-width: 14em;
   color: var(--df-on-tile);
-  font-size: clamp(36px, 3vw + 18px, 68px);
-  font-stretch: 120%;
+  font-size: clamp(27px, 2.22vw + 13px, 50px);
   line-height: 0.98;
 }
 
@@ -1157,7 +1138,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   max-width: 36em;
   margin-top: 22px;
   color: color-mix(in srgb, var(--df-on-tile) 78%, var(--mk-screen));
-  font-size: 19px;
+  font-size: 16px;
   line-height: 1.55;
 }
 
@@ -1334,7 +1315,7 @@ html[data-theme="dark"] .mk .mk-header {
   }
 
   .mk-hero-statement .mk-term dd {
-    font-size: clamp(36px, 3.1vw, 54px);
+    font-size: clamp(29px, 2.48vw, 43px);
   }
 
   /* In the layered hero the seal stamps the card's lower edge, clear of
@@ -1380,7 +1361,6 @@ html[data-theme="dark"] .mk .mk-header {
   padding: 16px 0;
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 104%;
   font-weight: 560;
   line-height: 1.4;
   text-decoration: none;
@@ -1447,8 +1427,7 @@ html[data-theme="dark"] .mk .mk-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 24px;
-  font-stretch: 114%;
+  font-size: 21px;
 }
 
 .mk-bento-tile h3::before {
@@ -1490,7 +1469,6 @@ html[data-theme="dark"] .mk .mk-header {
   color: var(--app-ink);
   font-family: var(--df-font-sans);
   font-size: 13px;
-  font-stretch: 100%;
   line-height: 1.4;
 }
 
@@ -1581,7 +1559,7 @@ html[data-theme="dark"] .mk .mk-header {
 .mk-bento-big strong {
   margin-right: 6px;
   color: var(--app-ink);
-  font-size: 28px;
+  font-size: 25px;
 }
 
 .mk-bento-sum {
@@ -1669,7 +1647,6 @@ html[data-theme="dark"] .mk .mk-header {
 .mk-closer-role {
   color: var(--df-on-tile);
   font-size: 16px;
-  font-stretch: 106%;
   font-weight: 600;
 }
 
@@ -1794,7 +1771,6 @@ html[data-theme="dark"] .mk .mk-header {
 
 .mk-mega-text strong {
   font-size: 15px;
-  font-stretch: 104%;
 }
 
 .mk-mega-text span {

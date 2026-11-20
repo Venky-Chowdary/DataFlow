@@ -42,8 +42,7 @@
 .lp.mk .mk-sec-hero h1,
 .lp.mk .mk-int-hero h1 {
   margin: 0;
-  font-size: clamp(38px, 3.4vw + 14px, 72px);
-  font-stretch: 116%;
+  font-size: clamp(28px, 2.52vw + 10px, 53px);
   font-weight: 600;
   line-height: 1;
   letter-spacing: -0.034em;
@@ -65,7 +64,7 @@
   max-width: 34em;
   margin: 0;
   color: var(--mk-ink-2);
-  font-size: clamp(18px, 0.4vw + 16px, 21px);
+  font-size: 18px;
   line-height: 1.5;
 }
 
@@ -93,8 +92,7 @@
 
 .lp.mk .mk-pr-plan h2 {
   margin: 0;
-  font-size: 22px;
-  font-stretch: 112%;
+  font-size: 18px;
   font-weight: 640;
   letter-spacing: -0.02em;
 }
@@ -109,8 +107,7 @@
 
 .lp.mk .mk-pr-figure {
   color: var(--mk-ink);
-  font-size: clamp(48px, 3vw + 30px, 80px);
-  font-stretch: 125%;
+  font-size: clamp(36px, 2.22vw + 22px, 59px);
   font-weight: 560;
   line-height: 0.9;
   letter-spacing: -0.04em;
@@ -119,7 +116,6 @@
 .lp.mk .mk-pr-qual {
   color: var(--mk-ink-2);
   font-size: 16px;
-  font-stretch: 104%;
   font-weight: 560;
 }
 
@@ -142,7 +138,6 @@
   border-top: 1px solid var(--mk-rule);
   color: var(--mk-ink);
   font-size: 14px;
-  font-stretch: 106%;
   font-weight: 620;
 }
 
@@ -194,7 +189,7 @@
 
 .lp.mk .mk-pr-plan--team .mk-pr-figure,
 .lp.mk .mk-pr-plan--enterprise .mk-pr-figure {
-  font-size: clamp(40px, 2vw + 26px, 56px);
+  font-size: clamp(30px, 1.48vw + 19px, 41px);
 }
 
 @media (min-width: 1024px) {
@@ -276,7 +271,7 @@
   max-width: 36em;
   margin: 14px 0 0;
   color: color-mix(in srgb, var(--df-on-tile) 80%, var(--mk-screen));
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -349,8 +344,7 @@
   align-self: end;
   margin: 4px 0 0;
   color: var(--df-on-tile);
-  font-size: 22px;
-  font-stretch: 116%;
+  font-size: 18px;
   font-weight: 620;
   letter-spacing: -0.02em;
 }
@@ -408,7 +402,7 @@
   }
 
   .lp.mk .mk-pr-stop h3 {
-    font-size: 26px;
+    font-size: 23px;
   }
 }
 
@@ -441,7 +435,6 @@
   display: block;
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 110%;
   font-weight: 640;
 }
 
@@ -481,8 +474,7 @@
   padding: 32px 0 10px;
   border-bottom: 1px solid var(--mk-rule-strong);
   color: var(--mk-ink);
-  font-size: 17px;
-  font-stretch: 112%;
+  font-size: 16px;
   font-weight: 640;
   letter-spacing: -0.012em;
   text-align: left;
@@ -525,7 +517,6 @@
 
   .lp.mk .mk-pr-th-name {
     font-size: 13px;
-    font-stretch: 100%;
     letter-spacing: -0.01em;
   }
 }
@@ -574,8 +565,7 @@
 
 .lp.mk .mk-pr-stub h3 {
   margin: 0;
-  font-size: 24px;
-  font-stretch: 116%;
+  font-size: 21px;
 }
 
 .lp.mk .mk-pr-stub-plan {
@@ -626,7 +616,7 @@
   max-width: 30em;
   margin: 0;
   color: var(--mk-ink-2);
-  font-size: clamp(18px, 0.4vw + 16px, 20px);
+  font-size: 18px;
   line-height: 1.5;
 }
 
@@ -651,7 +641,6 @@
   margin-bottom: 16px;
   color: var(--mk-ink-2);
   font-size: 15px;
-  font-stretch: 106%;
   font-weight: 600;
 }
 
@@ -681,8 +670,7 @@
 
 .lp.mk .mk-ent-plate-head h2 {
   margin: 0;
-  font-size: clamp(28px, 1.4vw + 20px, 40px);
-  font-stretch: 120%;
+  font-size: clamp(22px, 1.12vw + 16px, 32px);
 }
 
 .lp.mk .mk-ent-plate-head p {
@@ -733,7 +721,6 @@
   background: var(--mk-sheet);
   color: var(--mk-ink);
   font-size: 14px;
-  font-stretch: 108%;
   font-weight: 640;
   line-height: 22px;
 }
@@ -790,7 +777,6 @@
   gap: 8px;
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 108%;
   font-weight: 640;
 }
 
@@ -913,7 +899,7 @@
   max-width: 36em;
   margin: 12px 0 0;
   color: var(--mk-ink-2);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -932,8 +918,7 @@
 .lp.mk .mk-ent-spec-group h3 {
   margin: 0;
   color: var(--mk-ink);
-  font-size: 18px;
-  font-stretch: 116%;
+  font-size: 16px;
 }
 
 .lp.mk .mk-ent-spec-group dl {
@@ -1017,7 +1002,7 @@
   max-width: 38em;
   margin: 14px 0 0;
   color: color-mix(in srgb, var(--df-on-tile) 80%, var(--mk-screen));
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -1050,8 +1035,7 @@
 .lp.mk .mk-ent-ladder h3 {
   margin: 8px 0 0;
   color: var(--df-on-tile);
-  font-size: 24px;
-  font-stretch: 118%;
+  font-size: 21px;
 }
 
 .lp.mk .mk-ent-ladder p {
@@ -1098,8 +1082,7 @@
 
 .lp.mk .mk-ent-buy-grid dt {
   color: var(--mk-ink);
-  font-size: 17px;
-  font-stretch: 108%;
+  font-size: 16px;
   font-weight: 620;
 }
 
@@ -1138,14 +1121,14 @@
 }
 
 .lp.mk .mk-proof-copy h1 {
-  font-size: clamp(40px, 2.6vw + 16px, 62px);
+  font-size: clamp(30px, 1.92vw + 12px, 46px);
 }
 
 .lp.mk .mk-proof-copy > p {
   max-width: 28em;
   margin: 20px 0 0;
   color: var(--mk-ink-2);
-  font-size: clamp(18px, 0.4vw + 16px, 20px);
+  font-size: 18px;
   line-height: 1.5;
 }
 
@@ -1239,7 +1222,6 @@
 .lp.mk .mk-proof-cert-title {
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 110%;
   font-weight: 640;
 }
 
@@ -1255,8 +1237,7 @@
 .lp.mk .mk-proof-cert-num {
   margin: 0;
   color: var(--mk-landed);
-  font-size: clamp(48px, 4.6vw + 24px, 96px);
-  font-stretch: 125%;
+  font-size: clamp(36px, 3.4vw + 18px, 71px);
   font-weight: 560;
   line-height: 0.95;
   letter-spacing: -0.035em;
@@ -1273,7 +1254,7 @@
   margin: 0;
   padding: 0 4px;
   color: var(--mk-ink);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -1368,7 +1349,6 @@
 .lp.mk .mk-proof-seal span {
   color: var(--mk-landed);
   font-size: 13px;
-  font-stretch: 106%;
   font-weight: 640;
   text-align: center;
 }
@@ -1419,8 +1399,7 @@
 .lp.mk .mk-proof-tab-count {
   grid-row: span 2;
   color: var(--mk-ink);
-  font-size: 30px;
-  font-stretch: 125%;
+  font-size: 26px;
   font-weight: 560;
   letter-spacing: -0.03em;
   text-align: right;
@@ -1500,8 +1479,7 @@
   grid-column: 2;
   margin: 0;
   color: var(--mk-ink);
-  font-size: clamp(40px, 6vw + 12px, 112px);
-  font-stretch: 125%;
+  font-size: clamp(30px, 4.44vw + 9px, 83px);
   font-weight: 560;
   line-height: 1.04;
   letter-spacing: -0.035em;
@@ -1529,7 +1507,7 @@
 .lp.mk .mk-proof-op {
   grid-column: 1;
   color: var(--mk-ink-3);
-  font-size: clamp(28px, 3vw + 12px, 56px);
+  font-size: clamp(21px, 2.22vw + 9px, 41px);
   font-weight: 300;
   text-align: center;
 }
@@ -1620,7 +1598,7 @@
   max-width: 32em;
   margin: 14px 0 0;
   color: color-mix(in srgb, var(--df-on-tile) 80%, var(--mk-screen));
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -1759,7 +1737,7 @@
   max-width: 26em;
   margin: 20px 0 0;
   color: var(--mk-ink-2);
-  font-size: clamp(18px, 0.4vw + 16px, 20px);
+  font-size: 18px;
   line-height: 1.5;
 }
 
@@ -1813,7 +1791,7 @@
   }
 
   .lp.mk .mk-sec-copy h1 {
-    font-size: clamp(40px, 2.4vw + 18px, 60px);
+    font-size: clamp(30px, 1.78vw + 13px, 44px);
   }
 }
 
@@ -1825,7 +1803,6 @@
 }
 
 .lp.mk .mk-sec-t--b {
-  font-stretch: 108%;
   font-weight: 640;
 }
 
@@ -2006,7 +1983,6 @@
 .lp.mk .mk-sec-ledger tbody th {
   color: var(--mk-ink);
   font-size: 16px;
-  font-stretch: 108%;
   font-weight: 620;
 }
 
@@ -2132,7 +2108,7 @@
   max-width: 28em;
   margin: 14px 0 0;
   color: color-mix(in srgb, var(--df-on-tile) 80%, var(--mk-screen));
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -2160,7 +2136,7 @@
 
 .lp.mk .mk-sec-letter h2 {
   margin: 0 0 18px;
-  font-size: clamp(28px, 1.4vw + 20px, 40px);
+  font-size: clamp(22px, 1.12vw + 16px, 32px);
 }
 
 .lp.mk .mk-sec-letter p {
@@ -2172,7 +2148,7 @@
 
 .lp.mk .mk-sec-letter .mk-sec-letter-lead {
   color: var(--mk-ink);
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .lp.mk .mk-sec-letter-list {
@@ -2218,8 +2194,7 @@
 
 .lp.mk .mk-int-big {
   color: var(--mk-landed);
-  font-size: clamp(112px, 12vw + 40px, 248px);
-  font-stretch: 125%;
+  font-size: clamp(83px, 8.88vw + 30px, 184px);
   font-weight: 560;
   line-height: 0.8;
   letter-spacing: -0.06em;
@@ -2233,8 +2208,7 @@
 
 .lp.mk .mk-int-of > span:first-child {
   color: var(--mk-ink);
-  font-size: clamp(28px, 1.8vw + 18px, 48px);
-  font-stretch: 122%;
+  font-size: clamp(22px, 1.44vw + 14px, 38px);
   font-weight: 560;
   line-height: 1;
   letter-spacing: -0.03em;
@@ -2266,7 +2240,7 @@
   }
 
   .lp.mk .mk-int-headline h1 {
-    font-size: clamp(40px, 2.6vw + 16px, 64px);
+    font-size: clamp(30px, 1.92vw + 12px, 47px);
   }
 }
 
@@ -2290,7 +2264,6 @@
   border-bottom: 2px solid var(--mk-ink);
   color: var(--mk-ink);
   font-size: 15px;
-  font-stretch: 108%;
   font-weight: 640;
 }
 
@@ -2300,7 +2273,6 @@
   gap: 8px 18px;
   color: var(--mk-ink-2);
   font-size: 13px;
-  font-stretch: 100%;
   font-weight: 500;
 }
 
@@ -2364,8 +2336,7 @@
   background: none;
   color: var(--mk-ink);
   font: inherit;
-  font-size: 17px;
-  font-stretch: 112%;
+  font-size: 16px;
   font-weight: 640;
   letter-spacing: -0.01em;
   text-align: left;
@@ -2396,8 +2367,7 @@
 
 .lp.mk .mk-int-fam-count strong {
   color: var(--mk-landed);
-  font-size: 22px;
-  font-stretch: 122%;
+  font-size: 18px;
   font-weight: 600;
 }
 
@@ -2931,8 +2901,7 @@
 
 .lp.mk .mk-int-path-copy dt {
   color: var(--df-on-tile);
-  font-size: 18px;
-  font-stretch: 112%;
+  font-size: 16px;
   font-weight: 620;
 }
 
@@ -2982,7 +2951,7 @@
 .lp.mk .mk-a-stage-head p {
   margin: 14px 0 0;
   color: color-mix(in srgb, var(--df-on-tile) 80%, var(--mk-screen));
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -3015,8 +2984,7 @@
 
 .lp.mk .mk-pr-frame-title {
   margin-bottom: 28px;
-  font-size: clamp(26px, 1.2vw + 18px, 36px);
-  font-stretch: 116%;
+  font-size: clamp(23px, 1.06vw + 16px, 32px);
 }
 
 .lp.mk .mk-proof-ledger {
@@ -3680,7 +3648,7 @@
 }
 
 .lp.mk .mk-sc-modal-head strong {
-  font-size: 17px;
+  font-size: 16px;
 }
 
 .lp.mk .mk-sc-modal-head p {
@@ -4033,8 +4001,7 @@
   padding: 0 16px 14px 0;
   border-bottom: 2px solid var(--mk-ink);
   color: var(--mk-ink);
-  font-size: 20px;
-  font-stretch: 112%;
+  font-size: 18px;
   font-weight: 600;
   text-align: left;
   vertical-align: bottom;
@@ -4045,7 +4012,6 @@
   margin-top: 2px;
   color: var(--mk-ink-2);
   font-size: 14px;
-  font-stretch: 100%;
   font-weight: 400;
 }
 

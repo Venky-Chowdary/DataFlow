@@ -82,11 +82,6 @@
       "licence": "OFL-1.1",
       "why": "Font, OFL-1.1.",
       "notice": "SIL Open Font License 1.1. Copyright The Plus Jakarta Sans Project Authors. Licence text: https://openfontlicense.org"
-    },
-    "npm:@fontsource-variable/mona-sans": {
-      "licence": "OFL-1.1",
-      "why": "Font, OFL-1.1 (public site face, marketing pass 4).",
-      "notice": "SIL Open Font License 1.1. Copyright 2022 The Mona Sans Project Authors (https://github.com/github/mona-sans), with Reserved Font Name \"Mona\". Licence text: https://openfontlicense.org"
     }
   }
 }

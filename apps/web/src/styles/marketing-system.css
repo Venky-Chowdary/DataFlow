@@ -47,9 +47,9 @@
   --mk-mono: var(--df-font-mono);
   --mk-fs-caption: 13px;
   --mk-fs-small: 15px;
-  --mk-fs-body: 17px;
-  --mk-fs-lead: 19px;
-  --mk-fs-h3: 20px;
+  --mk-fs-body: 16px;
+  --mk-fs-lead: 18px;
+  --mk-fs-h3: 18px;
   --mk-fs-h2: clamp(30px, 1.6vw + 16px, 44px);
   --mk-fs-h1: clamp(48px, 4.4vw + 14px, 84px);
 
