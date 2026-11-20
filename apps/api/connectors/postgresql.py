@@ -86,6 +86,7 @@ def test_postgresql(
                 schema_missing = cur.fetchone() is None
 
         conn.close()
+        conn = None  # handed back: the failure path must not close it again
         if schema_missing:
             from services.error_taxonomy import DatawrapError, classify
 
@@ -114,4 +115,8 @@ def test_postgresql(
             tables_total=total,
         )
     except Exception as exc:
+        # D305: a probe that failed midway ends its session's transaction now.
+        from connectors.write_resilience import close_quietly
+
+        close_quietly(locals().get("conn"))
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="psycopg2")

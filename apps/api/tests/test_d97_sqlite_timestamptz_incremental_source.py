@@ -151,3 +151,87 @@ def test_reflected_timestamptz_reads_as_text_under_its_own_token(tmp_path):
         assert row.tt == "10:00:00+02:00"
     finally:
         engine.dispose()
+
+
+def test_qa_pair_postgres_to_sqlite_then_incremental_upsert_back_to_postgres(tmp_path, isolated):
+    """QA's exact pair: PostgreSQL (int pk, text, timestamptz) -> SQLite by
+    overwrite (Datawrap creates the SQLite table), then incremental_upsert
+    SQLite -> PostgreSQL on ``updated_at``: run 1, a quiet run, and a delta
+    run with one new and one updated row. Preflight and execute agree (R8)."""
+    from tests.helpers.live_env import pg_creds, pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not configured")
+    import psycopg2
+
+    p = pg_creds()
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t = f"d97s_{token}", f"d97d_{token}"
+    pg = psycopg2.connect(host=p["host"], port=int(p["port"]), user=p["username"],
+                          password=p["password"], dbname=p["database"])
+    pg.autocommit = True
+
+    def pg_ep(table: str) -> EndpointConfig:
+        return EndpointConfig(kind="database", format="postgresql", host=str(p["host"]),
+                              port=int(p["port"]), database=str(p["database"]),
+                              username=str(p["username"]), password=str(p["password"]),
+                              table=table)
+
+    mid = tmp_path / "mid.sqlite"
+    sqlite_ep = EndpointConfig(kind="database", format="sqlite", database=str(mid), table="t")
+    contract = [{"name": "t", "cursor_field": "updated_at",
+                 "cursor_semantics": "modification_timestamp",
+                 "sync_mode": "incremental_upsert", "selected": True, "primary_key": ["id"]}]
+
+    def back() -> TransferRequest:
+        return TransferRequest(source=sqlite_ep, destination=pg_ep(dst_t),
+                               sync_mode="incremental_upsert", stream_contracts=contract,
+                               skip_preflight=False, validation_mode="strict")
+
+    def dest() -> list[tuple]:
+        with pg.cursor() as cur:
+            cur.execute(f"SELECT id, name FROM {dst_t} ORDER BY id")  # nosec B608
+            return [tuple(r) for r in cur.fetchall()]
+
+    try:
+        with pg.cursor() as cur:
+            cur.execute(f"CREATE TABLE {src_t} (id INT PRIMARY KEY, name TEXT, "
+                        "updated_at TIMESTAMPTZ NOT NULL)")
+            cur.execute(f"INSERT INTO {src_t} SELECT g, 'n' || g, "  # nosec B608
+                        "TIMESTAMPTZ '2024-01-01 10:00:00+00' + g * INTERVAL '1 hour' "
+                        "FROM generate_series(1, 5) g")
+        seeded = _run(isolated, TransferRequest(
+            source=pg_ep(src_t), destination=sqlite_ep, sync_mode="full_refresh_overwrite",
+            skip_preflight=True, validation_mode="strict"))
+        assert seeded.success, seeded.error
+        conn = sqlite3.connect(mid)
+        try:
+            kind = conn.execute("SELECT typeof(updated_at) FROM t LIMIT 1").fetchone()[0]
+        finally:
+            conn.close()
+        assert kind == "text", kind  # the TEXT timestamp QA's error came from
+
+        first = _run(isolated, back())
+        assert first.success, first.error  # D97: 'must be real number, not str'
+        assert dest() == [(i, f"n{i}") for i in range(1, 6)]
+        quiet = _run(isolated, back())
+        assert quiet.success, quiet.error
+        assert quiet.records_transferred == 0, quiet.records_transferred
+
+        conn = sqlite3.connect(mid)
+        with conn:
+            ts = conn.execute("SELECT updated_at FROM t WHERE id = 5").fetchone()[0]
+            later = ts.replace("2024-01-01", "2024-02-01")
+            conn.execute("INSERT INTO t (id, name, updated_at) VALUES (6, 'n6', ?)", (later,))
+            conn.execute("UPDATE t SET name = 'n2-edited', updated_at = ? WHERE id = 2", (later,))
+        conn.close()
+        delta = _run(isolated, back())
+        assert delta.success, delta.error
+        assert delta.records_transferred == 2, delta.records_transferred
+        got = dest()
+        assert got[1] == (2, "n2-edited") and got[-1] == (6, "n6") and len(got) == 6, got
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {src_t}")
+            cur.execute(f"DROP TABLE IF EXISTS {dst_t}")
+        pg.close()

@@ -2830,6 +2830,9 @@ def run_file_preflight(
 
     for _null_warning in null_dropping_warnings(source_filter):
         out.setdefault("warnings", []).append(_null_warning)
+    from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
+
+    out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(

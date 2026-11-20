@@ -33,6 +33,10 @@ _SOURCE_SNAPSHOT_META: contextvars.ContextVar[dict[str, Any] | None] = contextva
 
 
 def get_source_snapshot_conn() -> Any | None:
+    """The run's snapshot connection; ``TransferCancelled`` once a cancel ended it."""
+    watch = _ACTIVE_WATCH.get()
+    if watch is not None:
+        watch.raise_if_aborted()
     return _SOURCE_SNAPSHOT_CONN.get()
 
 
@@ -72,6 +76,11 @@ _ACTIVE_TOKEN: contextvars.ContextVar[contextvars.Token | None] = contextvars.Co
     "dataflow_source_snapshot_token",
     default=None,
 )
+#: D302: ends a held PostgreSQL snapshot as soon as the run is cancelled.
+_ACTIVE_WATCH: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "dataflow_source_snapshot_watch",
+    default=None,
+)
 
 
 def activate_snapshot(conn: Any, meta: dict[str, Any], end_fn: Any) -> None:
@@ -81,6 +90,12 @@ def activate_snapshot(conn: Any, meta: dict[str, Any], end_fn: Any) -> None:
     token = bind_source_snapshot(conn, meta)
     _ACTIVE_TOKEN.set(token)
     _ACTIVE_END.set((conn, end_fn))
+    if end_fn is end_postgresql_snapshot:
+        # The writers notice a cancel; a stalled destination write must not
+        # keep the customer's table locked and its xmin pinned meanwhile.
+        from services.source_read_cancel import start_watch
+
+        _ACTIVE_WATCH.set(start_watch(conn))
 
 
 def release_active_snapshot(*, commit: bool = True) -> dict[str, Any] | None:
@@ -88,8 +103,12 @@ def release_active_snapshot(*, commit: bool = True) -> dict[str, Any] | None:
     meta = get_source_snapshot_meta()
     pair = _ACTIVE_END.get()
     token = _ACTIVE_TOKEN.get()
+    watch = _ACTIVE_WATCH.get()
     _ACTIVE_END.set(None)
     _ACTIVE_TOKEN.set(None)
+    _ACTIVE_WATCH.set(None)
+    if watch is not None:
+        watch.stop()
     if pair is not None:
         conn, end_fn = pair
         try:
@@ -181,6 +200,9 @@ def end_postgresql_snapshot(conn: Any | None, *, commit: bool = True) -> None:
     if conn is None:
         return
     prev = _PG_PREV_AUTOCOMMIT.pop(id(conn), True)
+    if getattr(conn, "closed", 0):
+        # A cancel already closed it (D302): the server ended the transaction.
+        return
     try:
         if commit:
             conn.commit()
