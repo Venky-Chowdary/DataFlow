@@ -9602,6 +9602,39 @@ def rejection_explains_shortfall(proof: dict[str, Any], dest_summary: dict[str, 
     )
 
 
+def engine_copy_identity_alignment(
+    recon: dict[str, Any], dest_summary: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Identity alignment a verify-time population digest implies, or ``None``.
+
+    The row path aligns the write-pass fingerprint with the re-read. An engine
+    copy has no write pass in this process; both whole populations are re-read
+    and digested at verify time. When the destination holds only this run's
+    write (overwrite, or it was empty before) and the two digests match, the
+    destination this run wrote equals the source population re-read, which is
+    the alignment. Anything else (a mismatch, rows already there) is not
+    (D381, R9).
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    if recon.get("checksum_match") is not True:
+        return None
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    mode = str(summary.get("sync_mode") or summary.get("effective_sync_mode") or "")
+    before = recon.get("target_rows_before", summary.get("target_rows_before"))
+    replaced = is_overwrite_sync(mode) or (isinstance(before, int) and before == 0)
+    if not replaced:
+        return None
+    return {
+        "identity_hash_aligned": True,
+        "method": "verify_time_population_digest",
+        "reason": (
+            "the destination holds only this run's write and its whole-population "
+            "digest equals the source re-read"
+        ),
+    }
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -9823,6 +9856,21 @@ def run_reconciliation(
             recon["target_checksum"] = _l3_dst
             recon["checksum_match"] = _l3_src == _l3_dst
             recon["source_checksum_provenance"] = "independent_source_reread"
+            # D381: the evidence the certificate asks of an independent
+            # re-read, which the row path stamps and this route did not.
+            _alignment = engine_copy_identity_alignment(recon, dest_summary)
+            if _alignment:
+                recon["identity_alignment"] = _alignment
+                recon["identity_hash_aligned"] = True
+            if not isinstance(recon.get("connector_versions"), dict) or not recon.get(
+                "connector_versions"
+            ):
+                from services.connector_versions import capture_route_versions
+
+                recon["connector_versions"] = capture_route_versions(
+                    source_engine=str(getattr(source_endpoint, "format", "") or ""),
+                    dest_type=str(getattr(endpoint, "format", "") or ""),
+                )
             # full_checksum names the *matching* coverage — stamping it on a
             # proven mismatch lets a failed job read as verified (the verdict
             # field carries the failure; the label must not contradict it).
