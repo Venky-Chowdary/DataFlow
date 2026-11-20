@@ -1558,17 +1558,13 @@ def _attr_type_for_logical(logical: str) -> str:
 
 def _mapped_create_columns(mappings: list[dict] | None) -> list[str]:
     """Target names a create-new table can be built from, pending rows included."""
+    from services.mapping_constraints import is_intentional_omit
+
     cols: list[str] = []
     for raw in mappings or []:
-        if not isinstance(raw, dict):
+        # An omitted column is not created; a malformed row is not a column.
+        if not isinstance(raw, dict) or is_intentional_omit(raw):
             continue
-        try:
-            from services.mapping_constraints import is_intentional_omit
-
-            if is_intentional_omit(raw):
-                continue
-        except Exception:
-            pass
         name = str(raw.get("target") or raw.get("target_column") or "").strip()
         if name and name not in cols:
             cols.append(name)

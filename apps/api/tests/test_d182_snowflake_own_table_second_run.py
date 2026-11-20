@@ -150,6 +150,16 @@ def test_second_run_into_the_table_run_one_created(route, mode):
                 )
         plan = _call("plan_transfer", route, dest, mode)
         assert plan.success, (run, plan.error)
+        if run == 2:
+            # QA's run-2 refusals: JSONB -> VARIANT under the Map floor, and a
+            # demanded CREATE UNIQUE INDEX (Snowflake standard tables have none;
+            # its MERGE needs no index).
+            assert "UNIQUE INDEX" not in json.dumps(plan.output, default=str).upper()
+            doc = next(m for m in plan.output["engine_mappings"] if m["source"] == "doc")
+            assert doc["target"] == "DOC" and doc.get("dest_native_type") == "VARIANT", doc
+            assert doc.get("conversion_class") == "lossless" and not doc.get("requires_review"), doc
+            gates = {g["id"]: g["status"] for g in plan.output["preflight"]["gates"]}
+            assert gates["g4_mapping_confidence"] == "pass", gates
         staged = _call("start_transfer", route, dest, mode)
         assert staged.success, (run, staged.error)
         job = _job(staged.output["ack_id"])

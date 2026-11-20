@@ -549,6 +549,10 @@ def introspect_connector_table(
         auth_source=str(cfg.get("auth_source") or ""),
         # SaaS sources (Notion, Stripe, Airtable) authenticate with it (D311).
         api_key=str(cfg.get("api_key") or ""),
+        # BigQuery signs in with the connector's own key, exactly as Test and
+        # the engine reader do; without it plan refused a connector that
+        # tested and listed green (D314/D387).
+        service_account=str(cfg.get("service_account") or ""),
         # Object stores dial the connector's endpoint/port from it (D142).
         reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
         introspect_purpose=purpose,

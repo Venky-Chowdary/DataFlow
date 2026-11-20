@@ -611,11 +611,9 @@ def resolve_connector_config(
     # that caused Validate to AUTH against the wrong endpoint while Connectors Test
     # still passed via the URI. A saved host of localhost next to an Atlas URI
     # is the catalog default, not the dial target.
-    from services.dial_target import reconcile_dial_host
+    from services.dial_target import default_dial_host, reconcile_dial_host
 
     reconcile_dial_host(cfg)
-    from services.dial_target import default_dial_host
-
     cfg["host"] = default_dial_host(cfg, fmt)
     cfg["port"] = stored_listen_port(
         resolve_driver_type(str(cfg.get("type") or fmt or "")),

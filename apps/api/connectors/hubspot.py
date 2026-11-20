@@ -276,13 +276,60 @@ def read_object(
                 "(raise limit / page budget or stream via cursor resume)"
             )
 
+    native_types = property_carriers(props)
+    records = [_empty_typed_values_as_null(rec, native_types) for rec in records]
     batch = extract_records(records)
     # HubSpot list responses do not publish an authoritative total — never claim
     # the fetched page length is the CRM cardinality (stream early-stop trap).
     batch.total_rows = None
-    meta: dict[str, Any] = {}
+    # The Properties API declares each column's type (D313): the plan's
+    # introspection types from it, so the run types from it too, never from
+    # the sampled spelling ('100001' on a text property is text).
+    meta: dict[str, Any] = {"native_types": native_types} if native_types else {}
     if schema_warnings:
         meta["schema_warnings"] = schema_warnings
     if meta:
         batch.meta = {**(batch.meta or {}), **meta}
     return batch
+
+
+#: Carriers HubSpot's free-text properties map to: their ``""`` is a value (R2).
+_TEXT_CARRIER_PREFIXES = ("VARCHAR", "TEXT")
+
+
+def property_carriers(props: list[dict[str, Any]]) -> dict[str, str]:
+    """Column carriers from the Properties Describe, as introspection types them.
+
+    ``id`` is the record id (text); every described property takes the same
+    carrier ``_introspect_hubspot`` gives the plan (R8). A property whose type
+    has no carrier is left out, so it falls back to the reader's text default.
+    """
+    from connectors.hubspot_writer import hubspot_property_to_carrier
+
+    carriers: dict[str, str] = {"id": "VARCHAR(65536)"}
+    for prop in props:
+        name = str(prop.get("name") or "")
+        if not name or name == "id":
+            continue
+        carrier = hubspot_property_to_carrier(prop)
+        if carrier:
+            carriers[name] = carrier
+    return carriers
+
+
+def _empty_typed_values_as_null(rec: dict[str, Any], carriers: dict[str, str]) -> dict[str, Any]:
+    """``""`` on a typed property is HubSpot's "no value": SQL NULL (D313).
+
+    HubSpot returns every property value as a JSON string and clears a property
+    by setting it to ``""`` (https://developers.hubspot.com/docs/api/crm/properties).
+    A date, datetime, number, boolean or enumeration has no empty value, so
+    ``""`` there is NULL; a free-text property keeps ``""`` as the empty string.
+    """
+    out = dict(rec)
+    for name, value in rec.items():
+        if value != "":
+            continue
+        carrier = str(carriers.get(name) or "").upper()
+        if carrier and not carrier.startswith(_TEXT_CARRIER_PREFIXES):
+            out[name] = None
+    return out

@@ -184,6 +184,10 @@ _BATCH_SAMPLE_DRIVERS = frozenset({
     # SQL path and failed "SQLAlchemy dialect for 'sftp'" (D62 sibling).
     "sftp",
     "dynamodb",
+    # Sampled by its engine reader on the BigQuery API client test_connector
+    # and list use. The SQL path needs a SQLAlchemy dialect the image does not
+    # ship and failed "driver not installed" on a connector that tested (D314).
+    "bigquery",
 })
 
 
