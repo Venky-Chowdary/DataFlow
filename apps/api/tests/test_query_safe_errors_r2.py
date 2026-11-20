@@ -126,10 +126,15 @@ def test_query_execute_uses_safe_error_and_correlation_id(
     )
     assert response.status_code == 500
     body = _assert_safe(response, connector_logs, cid)
-    assert body == {
-        "detail": f"Query execution failed. Reference: {cid}",
-        "correlation_id": cid,
-    }
+    safe = f"Query execution failed. Reference: {cid}"
+    # U2: every REST error also carries the one-taxonomy envelope; it repeats
+    # the safe text and the reference and adds nothing from the failure.
+    envelope = body.pop("error")
+    assert body == {"detail": safe, "correlation_id": cid}
+    assert envelope["reference"] == cid
+    assert envelope["code"] == "platform.internal"
+    assert envelope["message"] == safe
+    assert envelope["object"] == {}
     _assert_error_event(connector_logs, event="query.execute.errored", cid=cid)
 
 
