@@ -1083,10 +1083,16 @@ def plan_transfer(
         return _tool_result(tool, success=False, error=not_a_source)
     # D345: a Planned connector whose driver is not installed here cannot be
     # planned or run; say so before the gates blame the destination or DDL.
-    from src.transfer.connector_capabilities import planned_driver_message
+    # D47: nor a Certified connector whose driver package this host lacks
+    # (Execute refuses it through endpoint_allowed_for_role; plan asks first).
+    from src.transfer.connector_capabilities import (
+        driver_environment_gap,
+        planned_driver_message,
+    )
 
     for conn in (dst_conn, src_conn):
-        if not_installed := planned_driver_message(str(conn.get("type") or conn.get("format") or "")):
+        kind = str(conn.get("type") or conn.get("format") or "")
+        if not_installed := planned_driver_message(kind) or driver_environment_gap(kind):
             return _tool_result(tool, success=False, error=not_installed)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason

@@ -1434,6 +1434,35 @@ def _driver_install_hint(driver: str) -> str:
     }.get(driver, f"install the runtime package for driver {driver!r}")
 
 
+def driver_environment_gap(catalog_id: str) -> str:
+    """Why a Certified connector cannot run *on this host*, or ``""``.
+
+    Certified duplex drivers with missing packages are not "Planned product" —
+    they are environment gaps (demo machines without pymssql/unixODBC, an image
+    without ``snowflake-sqlalchemy``). Execute refuses them through
+    ``endpoint_allowed_for_role``; plan asks this same question so a green plan
+    never meets that refusal at run time (D47, R8).
+    """
+    cid = (catalog_id or "").lower().strip()
+    if not cid or cid in _FILE_CAPS:
+        return ""
+    driver = resolve_driver_type(cid)
+    base_caps = _DRIVER_CAPS.get(driver)
+    if (
+        base_caps
+        and transfer_ready(base_caps)
+        and driver in TRANSFER_READY_CATALOG_IDS
+        and not driver_available(driver, cid)
+        and not _is_uncertified_driver_alias(cid, driver)
+    ):
+        return (
+            f"{cid} is Certified but its driver package is not loadable here — "
+            f"{_driver_install_hint(driver)}. "
+            "This is an environment gap, not a Planned connector."
+        )
+    return ""
+
+
 def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
     """Hard gate so Planned / wrong-role catalog IDs cannot run transfers.
 
@@ -1457,21 +1486,8 @@ def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
         return False, f"{cid} cannot be used as a transfer {role_norm}"
 
     driver = resolve_driver_type(cid)
-    # Certified duplex drivers with missing packages are not "Planned product" —
-    # they are environment gaps (demo machines without pymssql/unixODBC, etc.).
-    base_caps = _DRIVER_CAPS.get(driver)
-    if (
-        base_caps
-        and transfer_ready(base_caps)
-        and driver in TRANSFER_READY_CATALOG_IDS
-        and not driver_available(driver, cid)
-        and not _is_uncertified_driver_alias(cid, driver)
-    ):
-        return False, (
-            f"{cid} is Certified but its driver package is not loadable here — "
-            f"{_driver_install_hint(driver)}. "
-            "This is an environment gap, not a Planned connector."
-        )
+    if gap := driver_environment_gap(cid):
+        return False, gap
     # Object stores need a working pyexpat (botocore XML). Fail closed before Execute.
     if driver in {"s3", "gcs", "adls"}:
         try:
