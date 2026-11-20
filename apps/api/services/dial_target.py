@@ -70,3 +70,25 @@ def displayed_dial(host: str, connection_string: str = "", endpoint_url: str = "
     }
     dial = reconcile_dial_host(cfg)
     return dial, bool(dial) and is_loopback_host(dial)
+
+
+def default_dial_host(cfg: dict[str, Any], fmt: str = "") -> str:
+    """The host a connector with no connection string dials.
+
+    HTTP SDK sources take their endpoint from the manifest; a stamped
+    loopback host would replace it and fail as a non-URL base_url. BigQuery
+    with an empty host is the Google API: inventing ``localhost`` made list
+    and plan refuse a connector that already tested (D387). An explicit
+    (emulator) host is kept as the operator set it. Every other engine keeps
+    the historical ``localhost`` default for an empty host.
+    """
+    from connectors.sdk import get_sdk_connector
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    kind = str(cfg.get("type") or fmt or "").lower().strip()
+    host = str(cfg.get("host") or "")
+    if resolve_driver_type(kind) == "bigquery":
+        return host.strip()
+    if host:
+        return host
+    return "" if get_sdk_connector(kind) is not None else "localhost"
