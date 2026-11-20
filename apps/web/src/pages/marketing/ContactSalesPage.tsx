@@ -440,7 +440,7 @@ export function ContactSalesPage({
                   </p>
                 ) : null}
                 <button type="submit" className="mk-btn mk-btn--primary" disabled={!canSubmit || submitting}>
-                  {submitting ? "Sending…" : "Request pilot"}
+                  {submitting ? "Sending…" : "Request a pilot"}
                 </button>
               </div>
             </form>

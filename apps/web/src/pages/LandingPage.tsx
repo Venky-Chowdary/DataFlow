@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ConnectorFamilies } from "../components/marketing/ConnectorFamilies";
 import {
+  CoveragePanel,
   EvidencePanel,
   GatesPanel,
   PlanPanel,
   QuarantinePanel,
   ReconciliationLedger,
-  RunPanel,
   ScheduleTimeline,
   VerifyPanel,
 } from "../components/marketing/ProductPanels";
@@ -40,17 +39,17 @@ const STEPS: Step[] = [
     id: "validate",
     name: "Validate",
     title: "Check the plan before the first write",
-    body: "Nine core checks run on every route, plus the policy checks the route needs. Sample rows go through the real write path, so a value the destination cannot hold is a finding now, not a failed batch later.",
-    facts: ["Nine core checks on every route, plus the route's own", "Approving the plan records a hash of it", "Execute stays locked until the plan is approved"],
+    body: "The checks answer four questions: can we read and write, will every value fit, do the columns line up, and is it safe to write. Sample rows go through the real write path, so a value the destination cannot hold is a finding now, not a failed batch later.",
+    facts: ["Approving the plan records a hash of it", "Execute stays locked until the plan is approved"],
     panel: <GatesPanel />,
   },
   {
     id: "execute",
     name: "Execute",
     title: "Run the approved plan, and hold what fails",
-    body: "Rows are written in batches with bound parameters, by insert, merge, or a stored procedure. A row the destination rejects is held with its reason instead of stopping the load.",
-    facts: ["A run that drifts from the approved plan is refused", "The destination is counted before and after", "Held rows replay into the same table"],
-    panel: <RunPanel />,
+    body: "Rows are written in batches with bound parameters, by insert, merge, or a stored procedure. A row the destination rejects is held with its column, value, and reason instead of stopping the load. Fix the cause, then replay it into the same table.",
+    facts: ["A run that drifts from the approved plan is refused", "Accepting a known loss takes a signed risk record"],
+    panel: <QuarantinePanel />,
   },
   {
     id: "verify",
@@ -108,10 +107,9 @@ const VERDICTS: { name: string; tone: "proven" | "explained" | "bounded" | "open
 const CONTROLS: { term: string; detail: string }[] = [
   { term: "Single sign-on", detail: "OIDC and SAML, routed by email domain, with an idle timeout you set." },
   { term: "Provisioning", detail: "SCIM 2.0 maps identity-provider groups to workspace roles." },
-  { term: "Roles and keys", detail: "Viewer, operator, editor, and admin. An API key never holds more than the person who made it." },
+  { term: "Roles, keys, and isolation", detail: "Viewer, operator, editor, and admin, each scoped to its own workspace. An API key never holds more than the person who made it." },
   { term: "Your own keys", detail: "Connector secrets are encrypted at rest and can be wrapped with your key in AWS KMS." },
   { term: "Audit log", detail: "Tamper-evident: every entry is signed and linked to the one before, and the chain can be verified and exported." },
-  { term: "Isolation", detail: "Jobs, connectors, schedules, and agent tools are scoped to the workspace that owns them." },
 ];
 
 function RouteLink({
@@ -322,27 +320,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-q-section-title">
-        <div className="mk-wrap mk-split">
-          <header className="mk-section-head mk-section-head--stack">
-            <h2 id="mk-q-section-title">Rows that fail are held, then replayed</h2>
-            <p>
-              A row the destination refuses is quarantined on the job with its column, its value,
-              and the reason. The job finishes as completed with quarantine, so a partial load
-              never reads as a clean one.
-            </p>
-            <ul className="mk-facts">
-              <li>Fix the cause, then replay into the same table</li>
-              <li>Replay writes through the same writer as the original run</li>
-              <li>Accepting a known loss takes a signed risk record, not a checkbox</li>
-            </ul>
-          </header>
-          <div className="mk-split-visual">
-            <QuarantinePanel />
-          </div>
-        </div>
-      </section>
-
       <section className="mk-section mk-section--band" aria-labelledby="mk-sync-title">
         <div className="mk-wrap mk-split">
           <header className="mk-section-head mk-section-head--stack">
@@ -360,14 +337,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
                     ? `Proven in CI on ${cdcSourcesPhrase()}. Inserts, updates, and deletes apply by key.`
                     : "Reads the database log. Inserts, updates, and deletes apply by key."}
                 </dd>
-              </div>
-              <div>
-                <dt>Every run is a job</dt>
-                <dd>Each tick runs the same checks and the same read-back as a transfer started by hand.</dd>
-              </div>
-              <div>
-                <dt>Schema drift</dt>
-                <dd>A new or renamed source column waits in Map for review before the next run uses it.</dd>
               </div>
             </dl>
           </header>
@@ -412,19 +381,21 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
       </section>
 
       <section className="mk-section mk-section--band" aria-labelledby="mk-conn-title">
-        <div className="mk-wrap">
-          <header className="mk-section-head">
+        <div className="mk-wrap mk-split">
+          <header className="mk-section-head mk-section-head--stack">
             <h2 id="mk-conn-title">Connector coverage, stated by what CI proves</h2>
             <p>
               {catalogHonestyLead()} Every family goes through the same map, checks, and
               quarantine.
             </p>
+            <div className="mk-actions">
+              <RouteLink route="integrations" onNavigate={onNavigate} className="mk-btn mk-btn--secondary">
+                See every driver
+              </RouteLink>
+            </div>
           </header>
-          <ConnectorFamilies />
-          <div className="mk-actions">
-            <RouteLink route="integrations" onNavigate={onNavigate} className="mk-btn mk-btn--secondary">
-              See every connector
-            </RouteLink>
+          <div className="mk-split-visual">
+            <CoveragePanel />
           </div>
         </div>
       </section>

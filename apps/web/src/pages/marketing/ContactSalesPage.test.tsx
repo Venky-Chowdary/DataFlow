@@ -35,7 +35,7 @@ describe("contactSalesError", () => {
 describe("ContactSalesPage", () => {
   it("renders the form (not the success panel) before a submission", () => {
     const markup = renderToStaticMarkup(createElement(ContactSalesPage, { onNavigate: () => {} }));
-    assert.match(markup, /Request pilot/);
+    assert.match(markup, /Request a pilot/);
     assert.doesNotMatch(markup, /Request received/);
   });
 });

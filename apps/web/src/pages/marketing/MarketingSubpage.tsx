@@ -17,7 +17,9 @@ import {
   CONNECTOR_CLAIMS,
   EVIDENCE_AS_OF,
   EVIDENCE_RUN_ID,
-  PROVEN_EVIDENCE,
+  ALL_CONNECTORS,
+  CATALOG_TOTAL,
+  PROVEN_DRIVERS,
   catalogHonestyLead,
   cdcSourcesPhrase,
   provenDriversPhrase,
@@ -257,7 +259,7 @@ const PLANS: { tier: Tier; name: string; price: string; who: string; adds: strin
 
 function PricingPage({ onGetStarted, onNavigate }: Nav) {
   const start = { label: "Start free", onClick: onGetStarted };
-  const sales = { label: "Talk to sales", onClick: () => onNavigate("contact") };
+  const sales = { label: "Contact sales", onClick: () => onNavigate("contact") };
   return (
     <div className="mk-page mk-pricing">
       <MarketingHeroBand
@@ -265,6 +267,7 @@ function PricingPage({ onGetStarted, onNavigate }: Nav) {
         title="Start free. Talk to us when a team depends on it."
         lead="Every plan runs the same engine: the plan you review, the checks before the write, quarantine with replay, and the read-back after it. Verification is never an add-on."
         actions={<Actions primary={start} secondary={sales} />}
+        visual={<EveryPlanPanel />}
       />
 
       <section className="mk-section mk-section--tight" aria-labelledby="mk-plans-title">
@@ -368,6 +371,31 @@ function PricingPage({ onGetStarted, onNavigate }: Nav) {
         secondary={sales}
       />
     </div>
+  );
+}
+
+/** The load path, which every plan includes. */
+function EveryPlanPanel() {
+  const rows = PLAN_ROWS.filter((r) => r.in.length === TIERS.length);
+  return (
+    <figure className="mk-panel mk-everyplan" aria-labelledby="mk-everyplan-title">
+      <div className="mk-panel-head">
+        <div>
+          <p className="mk-panel-title" id="mk-everyplan-title">
+            Every plan includes
+          </p>
+          <p className="mk-panel-meta">Starter, Team, and Enterprise</p>
+        </div>
+      </div>
+      <ul className="mk-everyplan-list">
+        {rows.map((r) => (
+          <li key={r.feature}>
+            <StatusGlyph kind="landed" />
+            {r.feature}
+          </li>
+        ))}
+      </ul>
+    </figure>
   );
 }
 
@@ -495,7 +523,7 @@ function EnterprisePage({ onNavigate }: Nav) {
               title: "Commercial terms",
               body: (
                 <>
-                  Talk to sales: <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.
+                  Contact sales: <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.
                 </>
               ),
             },
@@ -515,13 +543,26 @@ function EnterprisePage({ onNavigate }: Nav) {
 
 /* -------------------------------------------------------------------- Proof */
 
-function engineId(name: string): string {
-  for (const family of CONNECTOR_CLAIMS.families) {
-    const hit = family.items.find((i) => i.name === name);
-    if (hit) return hit.driver;
+type CiGroup = { jobs: string[]; executed: number; engines: { driver: string; name: string }[] };
+
+/** Proven engines grouped by the CI jobs that proved them, each total once. */
+const CI_GROUPS: CiGroup[] = (() => {
+  const groups = new Map<string, CiGroup>();
+  for (const row of CONNECTOR_CLAIMS.proof_rows) {
+    const key = row.jobs.join(",");
+    const g = groups.get(key) ?? { jobs: row.jobs, executed: row.executed, engines: [] };
+    const members =
+      row.engine === "files"
+        ? ALL_CONNECTORS.filter((c) => c.family === "Files" && c.proven)
+        : ALL_CONNECTORS.filter((c) => c.driver === row.engine);
+    for (const m of members.length ? members : [{ driver: row.engine, name: row.name }]) {
+      g.engines.push({ driver: m.driver, name: m.name });
+    }
+    g.executed = Math.max(g.executed, row.executed);
+    groups.set(key, g);
   }
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
+  return [...groups.values()].sort((x, y) => y.engines.length - x.engines.length);
+})();
 
 function ProofPage({ onNavigate }: Nav) {
   const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
@@ -541,44 +582,40 @@ function ProofPage({ onNavigate }: Nav) {
           <header className="mk-section-head">
             <h2 id="mk-proof-ci">Connectors proven in CI</h2>
             <p>
-              An engine counts as proven only when its CI jobs ran green with no test skipped. This table is generated from
-              the evidence file, not typed by hand.
+              An engine counts as proven only when its CI jobs ran green with no test skipped. A CI job runs a whole
+              suite, so the engines it proves share its total: each group below is one set of jobs, with that total shown
+              once. Generated from the evidence file, not typed by hand.
             </p>
           </header>
-          <div className="mk-table-scroll" role="region" aria-labelledby="mk-proof-ci" tabIndex={0}>
-            <table className="mk-evidence">
-              <thead>
-                <tr>
-                  <th scope="col">Engine</th>
-                  <th scope="col">Tests executed</th>
-                  <th scope="col">Result</th>
-                  <th scope="col">CI jobs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {PROVEN_EVIDENCE.map((row) => (
-                  <tr key={row.engines}>
-                    <th scope="row">
+          <ul className="mk-ci-groups">
+            {CI_GROUPS.map((g) => (
+              <li key={g.jobs.join(",")}>
+                <p className="mk-ci-engines">
+                  {g.engines.map((e) => (
+                    <span key={e.driver}>
                       <span className="mk-conn-icon">
-                        <ConnectorIcon id={engineId(row.engines)} size={16} />
+                        <ConnectorIcon id={e.driver} size={16} />
                       </span>
-                      {row.engines}
-                    </th>
-                    <td className="mk-num">{row.cases}</td>
-                    <td>
-                      <span className="mk-yes">
-                        <StatusGlyph kind="landed" />
-                        Green, none skipped
-                      </span>
-                    </td>
-                    <td>
-                      <code>{row.artifact}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      {e.name}
+                    </span>
+                  ))}
+                </p>
+                <p className="mk-yes">
+                  <StatusGlyph kind="landed" />
+                  Green, none skipped
+                </p>
+                <p className="mk-ci-jobs">
+                  <span>{g.jobs.length === 1 ? "CI job" : "CI jobs"}</span>
+                  {g.jobs.map((j) => (
+                    <code key={j}>{j}</code>
+                  ))}
+                </p>
+                <p className="mk-ci-total">
+                  {g.executed.toLocaleString("en-US")} tests executed by {g.jobs.length === 1 ? "this job" : "these jobs"}
+                </p>
+              </li>
+            ))}
+          </ul>
           <p className="mk-caption">
             Recorded {EVIDENCE_AS_OF}, CI run {EVIDENCE_RUN_ID}.
           </p>
@@ -781,21 +818,13 @@ type ConnectorRow = {
   cdc: "proven" | "implemented" | null;
 };
 
-const CONNECTOR_ROWS: ConnectorRow[] = CONNECTOR_CLAIMS.families.flatMap((f) =>
-  f.items.map((i): ConnectorRow => {
-    const cdc = CONNECTOR_CLAIMS.cdc_sources.find((c) => c.driver === i.driver);
-    return {
-      name: i.name,
-      driver: i.driver,
-      family: f.family,
-      proven: i.proven,
-      cdc: cdc ? (cdc.proven ? "proven" : "implemented") : null,
-    };
-  }),
-);
+const CONNECTOR_ROWS: ConnectorRow[] = ALL_CONNECTORS.map((c): ConnectorRow => {
+  const cdc = CONNECTOR_CLAIMS.cdc_sources.find((x) => x.driver === c.driver);
+  return { ...c, cdc: cdc ? (cdc.proven ? "proven" : "implemented") : null };
+});
 
 function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
-  const families = useMemo(() => ["All", ...CONNECTOR_CLAIMS.families.map((f) => f.family)], []);
+  const families = useMemo(() => ["All", ...new Set(ALL_CONNECTORS.map((c) => c.family))], []);
   const [family, setFamily] = useState("All");
   const [query, setQuery] = useState("");
   const [provenOnly, setProvenOnly] = useState(false);
@@ -819,9 +848,10 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
       <section className="mk-section" aria-labelledby="mk-matrix-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
-            <h2 id="mk-matrix-title">Every connector</h2>
+            <h2 id="mk-matrix-title">Every driver, {PROVEN_DRIVERS} of {CATALOG_TOTAL} proven in CI</h2>
             <p>
-              Filter by family, search by name, or show only connectors with a green CI run behind them. Evidence recorded{" "}
+              Every driver the evidence file counts, each listed once. Filter by family, search by name, or show only the
+              drivers with a green CI run behind them. Evidence recorded{" "}
               {EVIDENCE_AS_OF}.
             </p>
           </header>
@@ -835,7 +865,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
             </div>
             <div className="mk-filter-row">
               <div className="mk-field">
-                <label htmlFor={searchId}>Search connectors</label>
+                <label htmlFor={searchId}>Search drivers</label>
                 <input
                   id={searchId}
                   type="search"
@@ -849,7 +879,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
                 <span>Proven in CI only</span>
               </label>
               <p className="mk-filter-count" role="status" aria-live="polite">
-                {rows.length} {rows.length === 1 ? "connector" : "connectors"}
+                {rows.length} of {CATALOG_TOTAL} drivers shown, {rows.filter((r) => r.proven).length} of them proven in CI
               </p>
             </div>
           </div>
@@ -857,7 +887,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
             <table className="mk-matrix">
               <thead>
                 <tr>
-                  <th scope="col">Connector</th>
+                  <th scope="col">Driver</th>
                   <th scope="col">Family</th>
                   <th scope="col">Status</th>
                   <th scope="col">Change data capture</th>
@@ -900,7 +930,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
                 {rows.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="mk-empty">
-                      No connector matches. Clear the search or choose All.
+                      No driver matches. Clear the search or choose All.
                     </td>
                   </tr>
                 ) : null}

@@ -17,7 +17,7 @@ import {
   catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
-import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
+import { WORKSPACE_SHOT, shotSize } from "../../lib/workspaceShots";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -294,7 +294,16 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
                 className="docs-category-card"
                 onClick={() => onNavigate(cat.docs[0])}
               >
-                <img src={shot} alt="" loading="lazy" />
+                <img
+                  src={shot}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  {...shotSize(shot)}
+                  onError={(e) => {
+                    e.currentTarget.hidden = true;
+                  }}
+                />
                 <span className="docs-category-card-body">
                   <strong>{cat.title}</strong>
                   <span>{first.title} · {cat.docs.length} guides</span>
@@ -374,7 +383,16 @@ function DocsAnnotatedFigure({ figure }: { figure: HelpDocFigure }) {
   return (
     <figure className="docs-figure docs-figure--live docs-figure--annotated">
       <div className="docs-figure-live">
-        <img src={docsShotUrl(figure.src)} alt={figure.alt} loading="lazy" />
+        <img
+          src={docsShotUrl(figure.src)}
+          alt={figure.alt}
+          loading="lazy"
+          decoding="async"
+          {...shotSize(figure.src)}
+          onError={(e) => {
+            e.currentTarget.closest("figure")?.setAttribute("hidden", "");
+          }}
+        />
         {figure.markers?.map((m) => (
           <span
             key={`${m.n}-${m.label}`}

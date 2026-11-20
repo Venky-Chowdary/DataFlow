@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  ALL_CONNECTORS,
+  CATALOG_TOTAL,
   CONNECTOR_CLAIMS,
   MARKETING_STACK,
   NOT_PROVEN,
@@ -104,6 +106,18 @@ test("catalog lead states the CI-proven driver count, never the tile count (CLM-
   assert.doesNotMatch(catalogHonestyLead(), /verifies the load/);
 });
 
+test("the catalog lists every driver the copy counts, once", () => {
+  // Headline, coverage panel, matrix total and badges share one unit (P1-2).
+  const drivers = ALL_CONNECTORS.map((c) => c.driver);
+  assert.equal(new Set(drivers).size, drivers.length);
+  assert.equal(CATALOG_TOTAL, PROVEN_DRIVERS + PENDING_DRIVERS);
+  assert.equal(ALL_CONNECTORS.filter((c) => c.proven).length, PROVEN_DRIVERS);
+  assert.equal(MARKETING_STACK.reduce((n, f) => n + f.total, 0), CATALOG_TOTAL);
+  assert.equal(MARKETING_STACK.reduce((n, f) => n + f.provenCount, 0), PROVEN_DRIVERS);
+  const unplaced = ALL_CONNECTORS.filter((c) => c.family === "Other").map((c) => c.driver);
+  assert.deepEqual(unplaced, [], "a counted driver has no family or name");
+});
+
 test("marketing stack badges are derived from CI evidence", () => {
   // Catalog status `planned` (see docs/reference/connectors.md). Naming one
   // of these on a public page would sell a tile as a live transfer.
@@ -111,10 +125,10 @@ test("marketing stack badges are derived from CI evidence", () => {
   assert.ok(MARKETING_STACK.length > 0);
   for (const row of MARKETING_STACK) {
     // The badge counts the family's CI-proven members (CLM-7).
-    const family = CONNECTOR_CLAIMS.families.find((f) => f.family === row.family);
-    assert.ok(family, row.family);
-    const proven = family.items.filter((i) => i.proven).length;
-    const expected = proven === family.items.length ? "Proven in CI" : proven > 0 ? "Partly proven in CI" : "Implemented";
+    const members = ALL_CONNECTORS.filter((c) => c.family === row.family);
+    assert.ok(members.length, row.family);
+    const proven = members.filter((i) => i.proven).length;
+    const expected = proven === members.length ? "Proven in CI" : proven > 0 ? "Partly proven in CI" : "Implemented";
     assert.equal(row.badge, expected, row.family);
     assert.doesNotMatch(row.items, planned, `${row.family} names a planned driver`);
     assert.doesNotMatch(row.note, planned, `${row.family} note names a planned driver`);

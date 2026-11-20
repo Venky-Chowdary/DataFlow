@@ -195,23 +195,78 @@ function familyBadge(proven: number, total: number): CatalogFamilyBadge {
 }
 
 /**
+ * Drivers the evidence file counts that its family list does not place. The
+ * file decides which drivers exist and which are proven; this table only
+ * names them and says where they belong.
+ */
+const UNPLACED_DRIVERS: Record<string, { name: string; family: string }> = {
+  tsv: { name: "TSV", family: "Files" },
+  jsonl: { name: "JSON Lines", family: "Files" },
+  ndjson: { name: "NDJSON", family: "Files" },
+  xml: { name: "XML", family: "Files" },
+  yaml: { name: "YAML", family: "Files" },
+  fixed_width: { name: "Fixed-width", family: "Files" },
+  docx: { name: "Word (DOCX)", family: "Files" },
+  html: { name: "HTML", family: "Files" },
+  pdf: { name: "PDF", family: "Files" },
+  sftp: { name: "SFTP", family: "Object storage" },
+  couchbase: { name: "Couchbase", family: "Databases" },
+  neo4j: { name: "Neo4j", family: "Databases" },
+  influxdb: { name: "InfluxDB", family: "Databases" },
+  generic_sql: { name: "Other SQL databases", family: "Databases" },
+  singer_tap: { name: "Singer taps", family: "Applications & APIs" },
+};
+
+export type CatalogConnector = { driver: string; name: string; family: string; proven: boolean };
+
+/**
+ * Every driver the evidence file counts (proven and implemented), each once,
+ * in its family. Its length is the catalog total the copy states.
+ */
+export const ALL_CONNECTORS: CatalogConnector[] = (() => {
+  const counted = [...CONNECTOR_CLAIMS.proven_drivers, ...CONNECTOR_CLAIMS.pending_drivers];
+  const proven = new Set(CONNECTOR_CLAIMS.proven_drivers);
+  const placed = CONNECTOR_CLAIMS.families.flatMap((f) =>
+    f.items.filter((i) => counted.includes(i.driver)).map((i) => ({ driver: i.driver, name: i.name, family: f.family, proven: proven.has(i.driver) })),
+  );
+  const seen = new Set(placed.map((c) => c.driver));
+  const rest = counted
+    .filter((d) => !seen.has(d))
+    .map((d) => ({ driver: d, name: UNPLACED_DRIVERS[d]?.name ?? d, family: UNPLACED_DRIVERS[d]?.family ?? "Other", proven: proven.has(d) }));
+  const order = CONNECTOR_CLAIMS.families.map((f) => f.family);
+  return [...placed, ...rest].sort((x, y) => {
+    const fx = order.indexOf(x.family);
+    const fy = order.indexOf(y.family);
+    return (fx < 0 ? 99 : fx) - (fy < 0 ? 99 : fy) || Number(y.proven) - Number(x.proven);
+  });
+})();
+
+/** Total drivers in the catalog: proven plus implemented. */
+export const CATALOG_TOTAL: number = ALL_CONNECTORS.length;
+
+/**
  * Public catalog families. Members, the proven subset, and the badge all come
- * from `CONNECTOR_CLAIMS`; only the family note is prose.
+ * from `ALL_CONNECTORS`; only the family note is prose.
  */
 export const MARKETING_STACK: ReadonlyArray<{
   family: string;
   items: string;
   proven: string;
+  provenCount: number;
+  total: number;
   badge: CatalogFamilyBadge;
   note: string;
-}> = CONNECTOR_CLAIMS.families.map((f) => {
-  const provenNames = f.items.filter((i) => i.proven).map((i) => i.name);
+}> = [...new Set(ALL_CONNECTORS.map((c) => c.family))].map((family) => {
+  const members = ALL_CONNECTORS.filter((c) => c.family === family);
+  const provenNames = members.filter((m) => m.proven).map((m) => m.name);
   return {
-    family: f.family,
-    items: f.items.map((i) => i.name).join(", "),
+    family,
+    items: members.map((m) => m.name).join(", "),
     proven: provenNames.join(", "),
-    badge: familyBadge(provenNames.length, f.items.length),
-    note: FAMILY_NOTES[f.family] ?? "",
+    provenCount: provenNames.length,
+    total: members.length,
+    badge: familyBadge(provenNames.length, members.length),
+    note: FAMILY_NOTES[family] ?? "",
   };
 });
 

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
 import { useInViewOnce } from "../../hooks/useInViewOnce";
-import { CONNECTOR_CLAIMS } from "../../lib/provenEvidence";
+import { ALL_CONNECTORS, CATALOG_TOTAL, MARKETING_STACK, PROVEN_DRIVERS } from "../../lib/provenEvidence";
 
 /**
  * Datawrap product surfaces rendered in code for the public site.
@@ -35,31 +35,54 @@ export const RECORDED_MAPPING: { col: string; from: string; to: string; transfor
   { col: "attributes", from: "JSONB", to: "VARIANT", transform: "Parse JSON" },
 ];
 
-/** Validate on the recorded route, gate by gate. */
-export const RECORDED_GATES: { id: string; name: string; state: "pass" | "na" }[] = [
-  { id: "G1", name: "Source readable", state: "pass" },
-  { id: "G2", name: "Destination write access", state: "pass" },
-  { id: "G3", name: "Schema contract", state: "pass" },
-  { id: "G3F", name: "Population fit", state: "pass" },
-  { id: "G4", name: "Column mappings", state: "pass" },
-  { id: "G5", name: "Sample dry-run", state: "pass" },
-  { id: "G6", name: "Target DDL", state: "pass" },
-  { id: "G6C", name: "Create destination table", state: "pass" },
-  { id: "G7", name: "Staging capacity", state: "pass" },
-  { id: "G8", name: "Sample reconciliation", state: "pass" },
-  { id: "G9", name: "Data integrity", state: "pass" },
-  { id: "G10", name: "Schema change policy", state: "pass" },
-  { id: "G11", name: "Validation posture", state: "pass" },
-  { id: "G12", name: "Sync contract", state: "pass" },
-  { id: "G12S", name: "Staging policy", state: "pass" },
-  { id: "G13", name: "Source column coverage", state: "pass" },
-  { id: "G14", name: "Destination required columns", state: "na" },
-  { id: "G15", name: "Dest-exists shape", state: "na" },
-  { id: "G16", name: "Field reduction governance", state: "pass" },
-  { id: "G19", name: "Destination schema replacement", state: "na" },
-  { id: "G20", name: "Code crosswalk coverage", state: "na" },
-  { id: "G21", name: "Control totals", state: "na" },
-  { id: "G22", name: "Destination referential integrity", state: "na" },
+/** Validate on the recorded route, in four plain-language groups. */
+export const RECORDED_CHECK_GROUPS: {
+  name: string;
+  checks: { name: string; does: string; state: "pass" | "na" }[];
+}[] = [
+  {
+    name: "Can we read it and write it",
+    checks: [
+      { name: "Source readable", does: "The saved connection can read the source.", state: "pass" },
+      { name: "Destination write access", does: "The destination accepts writes from its saved connection.", state: "pass" },
+      { name: "Staging capacity", does: "There is room to stage the load.", state: "pass" },
+      { name: "Staging policy", does: "Staging follows the route's rules.", state: "pass" },
+    ],
+  },
+  {
+    name: "Will every value fit",
+    checks: [
+      { name: "Population fit", does: "Source values fit their destination types.", state: "pass" },
+      { name: "Sample dry-run", does: "Sample rows go through the real write path.", state: "pass" },
+      { name: "Sample reconciliation", does: "The written sample reads back equal.", state: "pass" },
+      { name: "Data integrity", does: "Keys are unique and required values are present.", state: "pass" },
+      { name: "Target table definition", does: "The destination table definition is valid.", state: "pass" },
+      { name: "Create destination table", does: "The new table can be created as planned.", state: "pass" },
+    ],
+  },
+  {
+    name: "Do the columns line up",
+    checks: [
+      { name: "Schema contract", does: "The source schema is the one the plan expects.", state: "pass" },
+      { name: "Column mappings", does: "Every mapping is approved.", state: "pass" },
+      { name: "Source column coverage", does: "Every source column is mapped or declared dropped.", state: "pass" },
+      { name: "Dropped columns", does: "A dropped column carries its reason.", state: "pass" },
+      { name: "Required destination columns", does: "Only for an existing table.", state: "na" },
+      { name: "Existing table shape", does: "Only for an existing table.", state: "na" },
+      { name: "Schema replacement", does: "Only when a destination schema is replaced.", state: "na" },
+      { name: "Code crosswalks", does: "Only when code values are translated.", state: "na" },
+    ],
+  },
+  {
+    name: "Is it safe to write",
+    checks: [
+      { name: "Schema change policy", does: "Source changes follow your policy.", state: "pass" },
+      { name: "Validation mode", does: "The workspace's validation mode is met.", state: "pass" },
+      { name: "Sync contract", does: "The sync mode fits the destination's keys.", state: "pass" },
+      { name: "Control totals", does: "Only when control totals are declared.", state: "na" },
+      { name: "Destination foreign keys", does: "Only when the destination enforces them.", state: "na" },
+    ],
+  },
 ];
 
 function prefersReducedMotion(): boolean {
@@ -159,6 +182,24 @@ const LEDGER_ROWS: LedgerRow[] = [
   { key: "48207", region: "APAC", to: "landed" },
   { key: "48208", region: "AMER", to: "landed" },
 ];
+
+/** The one example run every panel shows: read = landed + held + skipped. */
+export const EXAMPLE_RUN = {
+  rows: LEDGER_ROWS,
+  read: LEDGER_ROWS.length,
+  landed: LEDGER_ROWS.filter((r) => r.to === "landed").length,
+  held: LEDGER_ROWS.filter((r) => r.to === "held"),
+  skipped: LEDGER_ROWS.filter((r) => r.to === "skipped"),
+};
+
+/** "8 read = 6 landed + 1 held + 1 skipped", from the example rows. */
+export function exampleIdentity(): string {
+  const r = EXAMPLE_RUN;
+  return `${r.read} read = ${r.landed} landed + ${r.held.length} held + ${r.skipped.length} skipped`;
+}
+
+const EXAMPLE_META = "Example rows, the same run as the home page";
+const EXAMPLE_SHARE: Share = { landed: EXAMPLE_RUN.landed, held: EXAMPLE_RUN.held.length, skipped: EXAMPLE_RUN.skipped.length };
 
 /**
  * The signature visual: rows leave the source and land, are held with a
@@ -380,32 +421,37 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
       <PanelHead
         title="Trust Report"
         titleId={titleId}
-        meta="Example, from a recorded run"
-        badge={<span className="mk-status mk-status--ok">Completed</span>}
+        meta={EXAMPLE_META}
+        badge={
+          <span className="mk-status mk-status--held">
+            <StatusGlyph kind="held" />
+            Completed with quarantine
+          </span>
+        }
       />
       <RouteLine />
       <div className="mk-verify-bars">
-        <IdentityBars share={{ landed: 1, held: 0, skipped: 0 }} legend={["landed"]} />
+        <IdentityBars share={EXAMPLE_SHARE} />
       </div>
       <table className="mk-panel-table mk-verify-table">
         <caption>Comparison after the write</caption>
         <thead>
           <tr>
             <th scope="col">Check</th>
-            <th scope="col">How</th>
+            <th scope="col">What was compared</th>
             <th scope="col">Result</th>
           </tr>
         </thead>
         <tbody>
           <tr style={stagger(0)}>
             <th scope="row">Row count</th>
-            <td>Source and {RECORDED_ROUTE.destEngine}, each by its own engine</td>
-            <td><span className="mk-dot mk-dot--ok" aria-hidden />Equal</td>
+            <td>The landed rows, counted by {RECORDED_ROUTE.destEngine}</td>
+            <td><StatusGlyph kind="landed" /> Equal</td>
           </tr>
           <tr style={stagger(1)}>
             <th scope="row">Checksum</th>
-            <td>Every row, order-independent</td>
-            <td><span className="mk-dot mk-dot--ok" aria-hidden />Match</td>
+            <td>Every landed row, order-independent</td>
+            <td><StatusGlyph kind="landed" /> Match</td>
           </tr>
           <tr style={stagger(2)}>
             <th scope="row">Column census</th>
@@ -418,15 +464,22 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
               </span>
             </td>
             <td>
-              <span className={`mk-dot ${done ? "mk-dot--ok" : "mk-dot--run"}`} aria-hidden />
-              {done ? "Every column" : "Comparing"}
+              <StatusGlyph kind={done ? "landed" : "pending"} /> {done ? "Every column" : "Comparing"}
             </td>
+          </tr>
+          <tr style={stagger(3)}>
+            <th scope="row">Not landed</th>
+            <td>
+              <code>{EXAMPLE_RUN.held[0].key}</code> held: {EXAMPLE_RUN.held[0].note}. <code>{EXAMPLE_RUN.skipped[0].key}</code>{" "}
+              skipped by the run&apos;s filter.
+            </td>
+            <td><StatusGlyph kind="held" /> Accounted for</td>
           </tr>
         </tbody>
       </table>
       <div className="mk-verify-verdict">
-        <span className="mk-verdict mk-verdict--proven">Proven</span>
-        <p>Every row was compared and none differs.</p>
+        <span className="mk-status mk-status--ok"><StatusGlyph kind="landed" />Balanced</span>
+        <p>{exampleIdentity()}. The landed rows match in full.</p>
       </div>
     </figure>
   );
@@ -464,6 +517,11 @@ export function PlanPanel() {
           ))}
         </tbody>
       </table>
+      <p className="mk-panel-foot mk-plan-more">
+        <span>
+          <StatusGlyph kind="landed" /> {RECORDED_MAPPING.length} columns, all mapped and safe
+        </span>
+      </p>
     </Panel>
   );
 }
@@ -530,14 +588,16 @@ export function MigrationMapPanel() {
 }
 
 /**
- * Validate: the route's own gates. Once in view they resolve one by one from
- * pending to their result, the way Validate fills in on screen.
+ * Validate, in plain language: four groups that resolve once in view, each
+ * opening to the checks inside it.
  */
 export function GatesPanel() {
   const { ref, inView } = useInViewOnce<HTMLElement>();
-  const total = RECORDED_GATES.length;
+  const total = RECORDED_CHECK_GROUPS.length;
   const [resolved, setResolved] = useState(0);
+  const [open, setOpen] = useState<number | null>(null);
   const titleId = useId();
+  const baseId = useId();
 
   useEffect(() => {
     if (!inView) return;
@@ -550,60 +610,89 @@ export function GatesPanel() {
       n += 1;
       setResolved(n);
       if (n >= total) window.clearInterval(id);
-    }, 55);
+    }, 240);
     return () => window.clearInterval(id);
   }, [inView, total]);
 
   const done = resolved >= total;
+  const all = RECORDED_CHECK_GROUPS.flatMap((g) => g.checks);
+  const passed = all.filter((c) => c.state === "pass").length;
   return (
-    <figure ref={ref} className="mk-panel" aria-labelledby={titleId}>
+    <figure ref={ref} className="mk-panel mk-checkgroups" aria-labelledby={titleId}>
       <PanelHead
         title="Validate"
         titleId={titleId}
-        meta="Example, from a recorded run. Core checks plus the route's policy checks"
+        meta="Example, from a recorded run"
         badge={
           <span className={`mk-status${done ? " mk-status--ok" : ""}`} aria-live="polite">
+            <StatusGlyph kind={done ? "landed" : "pending"} />
             {done ? "Approved" : "Validating"}
           </span>
         }
       />
-      <ul className="mk-gates">
-        {RECORDED_GATES.map((g, i) => {
-          const state = i < resolved ? g.state : "pending";
+      <ul className="mk-groups">
+        {RECORDED_CHECK_GROUPS.map((g, i) => {
+          const ready = i < resolved;
+          const pass = g.checks.filter((c) => c.state === "pass").length;
+          const na = g.checks.length - pass;
+          const isOpen = open === i;
+          const panelId = `${baseId}-g${i}`;
           return (
-            <li key={g.id} className={`is-${state}`}>
-              <span
-                className={`mk-dot ${state === "pass" ? "mk-dot--ok" : state === "na" ? "mk-dot--na" : "mk-dot--wait"}`}
-                aria-hidden
-              />
-              <span>{g.name}</span>
-              <em>{state === "pass" ? "Passed" : state === "na" ? "Not applicable" : "Pending"}</em>
+            <li key={g.name} className={ready ? "is-done" : "is-pending"}>
+              <button type="button" aria-expanded={isOpen} aria-controls={panelId} onClick={() => setOpen(isOpen ? null : i)}>
+                <StatusGlyph kind={ready ? "landed" : "pending"} />
+                <span className="mk-groups-name">{g.name}</span>
+                <span className="mk-groups-count">
+                  {ready ? `${pass} passed${na ? `, ${na} not applicable` : ""}` : "Checking"}
+                </span>
+                <i aria-hidden />
+              </button>
+              <ul id={panelId} className="mk-groups-detail" hidden={!isOpen}>
+                {g.checks.map((c) => (
+                  <li key={c.name} className={`is-${c.state}`}>
+                    <strong>{c.name}</strong>
+                    <span>{c.does}</span>
+                    <em>{c.state === "pass" ? "Passed" : "Not applicable"}</em>
+                  </li>
+                ))}
+              </ul>
             </li>
           );
         })}
       </ul>
       <p className="mk-panel-foot">
-        <span><span className="mk-dot mk-dot--ok" aria-hidden />Passed</span>
-        <span><span className="mk-dot mk-dot--na" aria-hidden />Not applicable</span>
+        <span>
+          {passed} passed, {all.length - passed} not applicable to this route
+        </span>
         <span>{done ? "Execute unlocked" : "Execute locked"}</span>
       </p>
     </figure>
   );
 }
 
-/** Run step: the destination is counted before and after the write. */
 export function RunPanel() {
-  const rows: [string, string][] = [
-    ["Mode", "Full append"],
-    ["Writes", "Batched, bound parameters"],
-    ["Rows written", "Equal to rows read"],
-    ["Held in quarantine", "None"],
-    [`${RECORDED_ROUTE.destEngine} count`, "Taken before and after the write"],
+  const held = EXAMPLE_RUN.held[0];
+  const skipped = EXAMPLE_RUN.skipped[0];
+  const rows: [string, ReactNode][] = [
+    ["Mode", "Full append, batched, bound parameters"],
+    ["Rows read", String(EXAMPLE_RUN.read)],
+    ["Landed", `${EXAMPLE_RUN.landed}, counted by ${RECORDED_ROUTE.destEngine} before and after the write`],
+    ["Held in quarantine", <><code>{held.key}</code>: {held.note}</>],
+    ["Skipped by a rule", <><code>{skipped.key}</code>: {skipped.note}</>],
   ];
   return (
-    <Panel title="Run" meta="Example, from a recorded run" badge={<span className="mk-status mk-status--ok">Completed</span>}>
-      <div className="mk-run-bar" aria-hidden>
-        <span />
+    <Panel
+      title="Run"
+      meta={EXAMPLE_META}
+      badge={
+        <span className="mk-status mk-status--held">
+          <StatusGlyph kind="held" />
+          Completed with quarantine
+        </span>
+      }
+    >
+      <div className="mk-verify-bars">
+        <IdentityBars share={EXAMPLE_SHARE} />
       </div>
       <dl className="mk-panel-dl">
         {rows.map(([k, v], i) => (
@@ -614,7 +703,7 @@ export function RunPanel() {
         ))}
       </dl>
       <p className="mk-panel-foot">
-        <span><span className="mk-dot mk-dot--ok" aria-hidden />Append delta balanced: count after, minus count before, equals rows written</span>
+        <span><StatusGlyph kind="landed" /> Balanced: {exampleIdentity()}</span>
       </p>
     </Panel>
   );
@@ -624,10 +713,11 @@ export function RunPanel() {
 export function EvidencePanel() {
   const roles = ["Engineering", "Data owner", "Compliance"];
   return (
-    <Panel title="Sign-off" meta="Example. The same report, signed by role">
+    <Panel title="Sign-off" meta={`${EXAMPLE_META}, signed by role`}>
       <dl className="mk-panel-dl">
         {[
-          ["Comparison on record", "Full checksum, independent re-read of the source"],
+          ["Accounting", exampleIdentity()],
+          ["Comparison on record", "Full checksum of the landed rows"],
           ["Proof pack", "Signed, verifiable through the API"],
           ["Audit log", "Tamper-evident, and exportable"],
         ].map(([k, v], i) => (
@@ -653,8 +743,6 @@ type Held = { key: string; col: string; value: string; reason: string };
 
 const EXAMPLE_HELD: Held[] = [
   { key: "48204", col: "status", value: "NULL", reason: "status is NULL; NOT NULL in the destination" },
-  { key: "48977", col: "ordered_at", value: "0000-00-00 00:00:00", reason: "Not a valid timestamp" },
-  { key: "50114", col: "attributes", value: "{\"gift\": true,}", reason: "Not valid JSON for VARIANT" },
 ];
 
 type ReplayState = "held" | "replaying" | "balanced";
@@ -683,7 +771,7 @@ export function QuarantinePanel() {
 
   const badge =
     state === "held" ? (
-      <span className="mk-status mk-status--held">Completed with quarantine</span>
+      <span className="mk-status mk-status--held"><StatusGlyph kind="held" />Completed with quarantine</span>
     ) : state === "replaying" ? (
       <span className="mk-status">Replaying</span>
     ) : (
@@ -692,9 +780,11 @@ export function QuarantinePanel() {
 
   return (
     <figure ref={ref} className={`mk-panel mk-quarantine mk-assemble${inView ? " is-in" : ""} is-${state}`} aria-labelledby={titleId}>
-      <PanelHead title="Quarantine" titleId={titleId} meta="Example data" badge={<span aria-live="polite">{badge}</span>} />
+      <PanelHead title="Quarantine" titleId={titleId} meta={EXAMPLE_META} badge={<span aria-live="polite">{badge}</span>} />
       <div className="mk-verify-bars">
-        <IdentityBars share={state === "balanced" ? { landed: 1, held: 0, skipped: 0 } : { landed: 14, held: 1, skipped: 0 }} legend={["landed", "held"]} />
+        <IdentityBars
+          share={state === "balanced" ? { ...EXAMPLE_SHARE, landed: EXAMPLE_SHARE.landed + EXAMPLE_SHARE.held, held: 0 } : EXAMPLE_SHARE}
+        />
       </div>
       <table className="mk-panel-table mk-q-table">
         <caption>Rows held on the job, with the reason for each</caption>
@@ -724,14 +814,14 @@ export function QuarantinePanel() {
           onClick={replay}
           disabled={state === "replaying"}
         >
-          {state === "held" ? "Replay the held rows" : state === "replaying" ? "Replaying" : "Show the held rows again"}
+          {state === "held" ? "Replay the held row" : state === "replaying" ? "Replaying" : "Show the held row again"}
         </button>
         <p>
           {state === "held"
             ? "Fix the cause at the source, then replay."
             : state === "replaying"
               ? "Same writer, same table."
-              : "Every row read is accounted for again."}
+              : `${EXAMPLE_RUN.read} read = ${EXAMPLE_RUN.landed + 1} landed + ${EXAMPLE_RUN.skipped.length} skipped. The status was fixed at the source first.`}
         </p>
       </div>
     </figure>
@@ -778,54 +868,54 @@ export function ScheduleTimeline() {
   );
 }
 
-const QUERY_ROWS: [string, string, string][] = [
-  ["EMEA", "Equal", "Equal"],
-  ["AMER", "Equal", "Equal"],
-  ["APAC", "Equal", "Equal"],
-  ["LATAM", "Equal", "Equal"],
-];
+/** Rows per region on each side of the example run, derived from its rows. */
+function regionCounts() {
+  const regions = [...new Set(EXAMPLE_RUN.rows.map((r) => r.region))].sort();
+  return regions.map((region) => {
+    const all = EXAMPLE_RUN.rows.filter((r) => r.region === region);
+    const landed = all.filter((r) => r.to === "landed");
+    return { region, source: all.length, dest: landed.length, missing: all.filter((r) => r.to !== "landed") };
+  });
+}
+
+const QUERY_SQL = (table: string) => `SELECT region, COUNT(*) AS orders\nFROM ${table}\nGROUP BY region\nORDER BY region;`;
 
 /**
- * Query: one read-only statement, asked of the copy and the source. "Try a
- * write" shows what happens to a statement that would change data.
+ * Query: one read-only statement on the copy. "Try a write" shows the
+ * refusal, before anything reaches the database.
  */
 export function QueryPanel() {
   const [tryWrite, setTryWrite] = useState(false);
+  const rows = regionCounts().filter((r) => r.dest > 0);
   return (
     <Panel
       title="Query"
-      meta="Example. Read-only, on Warehouse Snowflake (demo) and Orders Postgres (demo)"
+      meta={`Example rows. Read-only, on Warehouse ${RECORDED_ROUTE.destEngine} (demo)`}
       badge={<span className="mk-status">Read-only</span>}
       className="mk-query"
     >
       <pre className="mk-code" aria-label="SQL statement" tabIndex={0}>
-        <code>
-          {tryWrite
-            ? "DELETE FROM DW_DEMO.SALES_ORDERS_REPORTING\nWHERE region = 'TEST';"
-            : "SELECT region, COUNT(*) AS orders, SUM(order_total) AS revenue\nFROM DW_DEMO.SALES_ORDERS_REPORTING\nGROUP BY region;"}
-        </code>
+        <code>{tryWrite ? `DELETE FROM ${RECORDED_ROUTE.dest}\nWHERE region = 'APAC';` : QUERY_SQL(RECORDED_ROUTE.dest)}</code>
       </pre>
       {tryWrite ? (
         <p className="mk-query-refused" role="status">
-          <span className="mk-status mk-status--held">Refused</span>
+          <span className="mk-status mk-status--held"><StatusGlyph kind="held" />Refused</span>
           Only read and metadata statements run here. The statement never reached the database.
         </p>
       ) : (
         <table className="mk-panel-table">
-          <caption>The same aggregate on both sides</caption>
+          <caption>Orders by region in the copy</caption>
           <thead>
             <tr>
               <th scope="col">region</th>
-              <th scope="col">orders, Snowflake vs Postgres</th>
-              <th scope="col">revenue, Snowflake vs Postgres</th>
+              <th scope="col">orders</th>
             </tr>
           </thead>
           <tbody>
-            {QUERY_ROWS.map(([r, a, b], i) => (
-              <tr key={r} style={stagger(i)}>
-                <th scope="row"><code>{r}</code></th>
-                <td><span className="mk-dot mk-dot--ok" aria-hidden />{a}</td>
-                <td><span className="mk-dot mk-dot--ok" aria-hidden />{b}</td>
+            {rows.map((r, i) => (
+              <tr key={r.region} style={stagger(i)}>
+                <th scope="row"><code>{r.region}</code></th>
+                <td className="mk-num">{r.dest}</td>
               </tr>
             ))}
           </tbody>
@@ -835,8 +925,63 @@ export function QueryPanel() {
         <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => setTryWrite((w) => !w)} aria-pressed={tryWrite}>
           {tryWrite ? "Back to the read" : "Try a write"}
         </button>
-        <p>{tryWrite ? "Writes are refused before they run." : "Each region compared on the copy and the source."}</p>
+        <p>{tryWrite ? "Writes are refused before they run." : "Under your role, on a saved connection."}</p>
       </div>
+    </Panel>
+  );
+}
+
+/**
+ * Query, the page's own module: the same statement asked of the source and
+ * the copy, side by side, with every difference traced to the run.
+ */
+export function QueryDiffPanel() {
+  const rows = regionCounts();
+  return (
+    <Panel title="Same question, both sides" meta={EXAMPLE_META} className="mk-qdiff">
+      <div className="mk-qdiff-sql">
+        <pre className="mk-code" tabIndex={0} aria-label={`SQL on ${RECORDED_ROUTE.sourceEngine}`}>
+          <code>{QUERY_SQL(RECORDED_ROUTE.source)}</code>
+        </pre>
+        <pre className="mk-code" tabIndex={0} aria-label={`SQL on ${RECORDED_ROUTE.destEngine}`}>
+          <code>{QUERY_SQL(RECORDED_ROUTE.dest)}</code>
+        </pre>
+      </div>
+      <table className="mk-panel-table mk-qdiff-table">
+        <caption>Orders by region on each side</caption>
+        <thead>
+          <tr>
+            <th scope="col">region</th>
+            <th scope="col">{RECORDED_ROUTE.sourceEngine}</th>
+            <th scope="col">{RECORDED_ROUTE.destEngine}</th>
+            <th scope="col">Difference</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.region} style={stagger(i)} className={r.missing.length ? "is-diff" : undefined}>
+              <th scope="row"><code>{r.region}</code></th>
+              <td className="mk-num">{r.source}</td>
+              <td className="mk-num">{r.dest}</td>
+              <td>
+                {r.missing.length ? (
+                  r.missing.map((m) => (
+                    <span key={m.key} className="mk-qdiff-why">
+                      <StatusGlyph kind={m.to} />
+                      <code>{m.key}</code> {m.to === "held" ? "held in quarantine" : "skipped by the run's filter"}
+                    </span>
+                  ))
+                ) : (
+                  <span className="mk-yes"><StatusGlyph kind="landed" />Equal</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mk-panel-foot">
+        <span>Every difference is a row the Trust Report already names: {exampleIdentity()}</span>
+      </p>
     </Panel>
   );
 }
@@ -847,19 +992,27 @@ export function QueryPanel() {
  */
 export function PilotPanel() {
   const [confirmed, setConfirmed] = useState(false);
+  const rows = regionCounts().filter((r) => r.dest > 0);
   return (
-    <Panel title="Pilot" meta="Example conversation" className="mk-pilot">
+    <Panel title="Pilot" meta="Example conversation, on the example run's tables" className="mk-pilot">
       <ol className="mk-chat" aria-label="Conversation">
         <li className="mk-chat-you" style={stagger(0)}>
-          <span className="mk-sr-only">You: </span>Does the Snowflake copy of the orders still match Postgres?
+          <span className="mk-sr-only">You: </span>How many orders per region are in the Snowflake copy?
         </li>
         <li className="mk-chat-pilot" style={stagger(1)}>
           <span className="mk-sr-only">Pilot: </span>
           <p>
-            Yes. The latest run on this route is <strong>Proven</strong>: row counts are equal on both sides and the full
-            checksum matches. No difference has an open cause.
+            {rows.map((r, i) => (
+              <span key={r.region}>
+                {r.region} {r.dest}
+                {i < rows.length - 1 ? ", " : "."}
+              </span>
+            ))}
           </p>
-          <p className="mk-chat-meta">From the job's Trust Report. Tool: explain_parity</p>
+          <pre className="mk-code mk-chat-sql" tabIndex={0} aria-label="The SQL Pilot ran">
+            <code>{QUERY_SQL(RECORDED_ROUTE.dest)}</code>
+          </pre>
+          <p className="mk-chat-meta">Exact aggregate over the whole table, on Warehouse {RECORDED_ROUTE.destEngine} (demo)</p>
         </li>
         <li className="mk-chat-you" style={stagger(2)}>
           <span className="mk-sr-only">You: </span>Keep it in sync every hour.
@@ -892,6 +1045,36 @@ export function PilotPanel() {
           </div>
         </li>
       </ol>
+    </Panel>
+  );
+}
+
+/** Pilot, the page's own module: one answer, taken apart. */
+export function PilotAnswerPanel() {
+  const rows = regionCounts().filter((r) => r.dest > 0);
+  const parts: [string, ReactNode][] = [
+    ["Question", "How many orders per region are in the Snowflake copy?"],
+    ["Answer", rows.map((r) => `${r.region} ${r.dest}`).join(", ")],
+    [
+      "Statement it ran",
+      <pre key="sql" className="mk-code mk-anatomy-sql" tabIndex={0} aria-label="SQL statement">
+        <code>{QUERY_SQL(RECORDED_ROUTE.dest)}</code>
+      </pre>,
+    ],
+    ["Where it ran", `Warehouse ${RECORDED_ROUTE.destEngine} (demo), read-only, under your workspace role`],
+    ["What kind of number", "An exact aggregate over the whole table, run on the server, not a sample or a recollection"],
+    ["What happens next", "Nothing changes. A follow-up that would change data is staged for you to confirm"],
+  ];
+  return (
+    <Panel title="An answer, taken apart" meta={EXAMPLE_META} className="mk-anatomy">
+      <dl className="mk-panel-dl mk-anatomy-dl">
+        {parts.map(([k, v], i) => (
+          <div key={k} style={stagger(i)}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
     </Panel>
   );
 }
@@ -993,21 +1176,21 @@ export const ROLES: { name: string; does: string }[] = [
   { name: "Admin", does: "Deletes connectors, authorizes schedules, manages the workspace, and invites members." },
 ];
 
-/** Integrations: every family, each member marked proven in CI or implemented. */
+/** Connectors: every family, each driver marked proven in CI or implemented. */
 export function CoveragePanel() {
   return (
-    <Panel title="Connector coverage" meta="From the CI evidence file" className="mk-coverage">
+    <Panel title="Connector coverage" meta={`${PROVEN_DRIVERS} of ${CATALOG_TOTAL} drivers proven in CI`} className="mk-coverage">
       <ul className="mk-coverage-list">
-        {CONNECTOR_CLAIMS.families.map((f, i) => (
+        {MARKETING_STACK.map((f, i) => (
           <li key={f.family} style={stagger(i)}>
             <span className="mk-coverage-name">{f.family}</span>
             <span className="mk-coverage-dots" aria-hidden>
-              {f.items.map((item) => (
+              {ALL_CONNECTORS.filter((c) => c.family === f.family).map((item) => (
                 <i key={item.driver} className={item.proven ? "is-proven" : undefined} title={item.name} />
               ))}
             </span>
             <span className="mk-coverage-count">
-              {f.items.filter((x) => x.proven).length} of {f.items.length}
+              {f.provenCount} of {f.total}
               <span className="mk-sr-only"> proven in CI</span>
             </span>
           </li>
@@ -1016,6 +1199,146 @@ export function CoveragePanel() {
       <p className="mk-panel-foot">
         <span><i className="mk-coverage-key is-proven" aria-hidden />Proven in CI</span>
         <span><i className="mk-coverage-key" aria-hidden />Implemented</span>
+      </p>
+    </Panel>
+  );
+}
+
+/**
+ * Migrations, the page's own module: an example cutover plan from first
+ * profile to the morning after, each stage tied to what the product records.
+ */
+export function CutoverTimeline() {
+  const stages: { when: string; what: string; record: string }[] = [
+    { when: "Two weeks out", what: "Profile both schemas and review the map", record: "Approved map, with every renamed pair and its reason" },
+    { when: "One week out", what: "Clear the checks and load a subset", record: "Validate results and the subset's Trust Report" },
+    { when: "The day before", what: "Accept any known loss explicitly", record: "A signed risk record for each narrowing" },
+    { when: "Cutover", what: "Freeze writes, run the full load, read the destination back", record: "The run's accounting: read = landed + held + skipped" },
+    { when: "The morning after", what: "Sign the report, then point applications at the new system", record: "Sign-off by engineering, the data owner, and compliance" },
+  ];
+  return (
+    <figure className="mk-cutover" aria-labelledby="mk-cutover-title">
+      <figcaption id="mk-cutover-title" className="mk-cutover-head">
+        <span>An example cutover plan</span>
+      </figcaption>
+      <ol className="mk-cutover-line">
+        {stages.map((s) => (
+          <li key={s.when}>
+            <p className="mk-cutover-when">{s.when}</p>
+            <p className="mk-cutover-what">{s.what}</p>
+            <p className="mk-cutover-record">
+              <span className="mk-sr-only">Recorded: </span>
+              {s.record}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </figure>
+  );
+}
+
+/**
+ * MCP, the page's own module: the stage → confirm exchange between an agent
+ * and Datawrap, including the refused second confirm.
+ */
+export function StageConfirmSequence() {
+  const steps: { from: "agent" | "datawrap"; call: string; detail: string; tone?: "staged" | "done" | "refused" }[] = [
+    { from: "agent", call: "start_transfer", detail: "With the workspace API key. The key's role is Editor." },
+    { from: "datawrap", call: "Staged, ack_id returned", detail: "Permission job.run checked. Nothing has run.", tone: "staged" },
+    { from: "agent", call: "confirm_action(ack_id)", detail: "After a person has looked at the staged plan." },
+    { from: "datawrap", call: "Transfer queued", detail: "Permission checked again, ack_id spent. Same checks and read-back as Studio.", tone: "done" },
+    { from: "agent", call: "confirm_action(ack_id)", detail: "The same ack_id, a second time." },
+    { from: "datawrap", call: "Refused", detail: "An ack_id is used once.", tone: "refused" },
+  ];
+  return (
+    <figure className="mk-seq" aria-labelledby="mk-seq-title">
+      <figcaption id="mk-seq-title" className="mk-seq-head">
+        <span>Agent</span>
+        <span>Datawrap</span>
+      </figcaption>
+      <ol className="mk-seq-list">
+        {steps.map((s, i) => (
+          <li key={i} className={`is-${s.from}${s.tone ? ` is-${s.tone}` : ""}`}>
+            <span className="mk-sr-only">{s.from === "agent" ? "Agent: " : "Datawrap: "}</span>
+            <code>{s.call}</code>
+            <span>{s.detail}</span>
+          </li>
+        ))}
+      </ol>
+    </figure>
+  );
+}
+
+/** Schedules: one tick opened, as a coded panel. */
+export function TickDetailPanel() {
+  const rows: [string, ReactNode][] = [
+    ["Started", "12:07, the run after the reviewed column"],
+    ["Mode", "Incremental on ordered_at, deduplicated on order_id"],
+    ["Cursor", <><code>ordered_at</code> after the last run&apos;s high-water mark</>],
+    ["Map", "The version approved at 12:05, with coupon_code added"],
+    ["Checks", "Same Validate checks as the first run, all passed"],
+    ["Accounting", "Every row read landed; none held, none skipped"],
+  ];
+  return (
+    <Panel
+      title="Tick at 12:07"
+      meta="Example data. Orders feed, every 2 minutes"
+      badge={<span className="mk-status mk-status--ok"><StatusGlyph kind="landed" />Balanced</span>}
+    >
+      <div className="mk-verify-bars">
+        <IdentityBars share={{ landed: 1, held: 0, skipped: 0 }} legend={["landed"]} />
+      </div>
+      <dl className="mk-panel-dl">
+        {rows.map(([k, v], i) => (
+          <div key={k} style={stagger(i)}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mk-panel-foot">
+        <span>Opens the tick&apos;s own job and Trust Report</span>
+      </p>
+    </Panel>
+  );
+}
+
+/** Recurring sync, the page's own module: a delete at the source, carried to a mirror. */
+export function MirrorDeletePanel() {
+  const rows: { key: string; region: string; deleted: boolean }[] = [
+    { key: "48201", region: "EMEA", deleted: false },
+    { key: "48202", region: "APAC", deleted: true },
+    { key: "48203", region: "AMER", deleted: false },
+  ];
+  return (
+    <Panel title="Mirror, after a delete" meta="Example rows. CDC from PostgreSQL, mirror mode">
+      <p className="mk-mirror-event">
+        <span className="mk-status"><StatusGlyph kind="pending" />Change read from the log</span>
+        <code>DELETE order_id = 48202</code>
+      </p>
+      <table className="mk-panel-table">
+        <caption>The destination after the change is applied</caption>
+        <thead>
+          <tr>
+            <th scope="col">order_id</th>
+            <th scope="col">region</th>
+            <th scope="col">_deleted</th>
+            <th scope="col">_deleted_at</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.key} style={stagger(i)} className={r.deleted ? "is-deleted" : undefined}>
+              <th scope="row"><code>{r.key}</code></th>
+              <td><code>{r.region}</code></td>
+              <td><code>{r.deleted ? "true" : "false"}</code></td>
+              <td><code>{r.deleted ? "2026-10-30 12:09:14" : "NULL"}</code></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mk-panel-foot">
+        <span>Soft delete by default: the row is kept and flagged, so nothing disappears without a record</span>
       </p>
     </Panel>
   );

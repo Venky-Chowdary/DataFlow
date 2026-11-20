@@ -1,19 +1,25 @@
 import {
+  CutoverTimeline,
   EvidencePanel,
   GatesPanel,
   McpPanel,
   MigrationMapPanel,
+  MirrorDeletePanel,
+  PilotAnswerPanel,
   PilotPanel,
   PlanPanel,
   QuarantinePanel,
+  QueryDiffPanel,
   QueryPanel,
   RunPanel,
   ScheduleTimeline,
+  StageConfirmSequence,
+  TickDetailPanel,
   VerifyPanel,
 } from "../../components/marketing/ProductPanels";
 import { cdcSourcesPhrase } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
-import { DEMO_ROUTE, DEMO_SCHEDULE_ROUTE, WORKSPACE_SHOT } from "../../lib/workspaceShots";
+import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 import { StoryPage, type Story } from "./StoryPage";
 
 /*
@@ -24,8 +30,6 @@ import { StoryPage, type Story } from "./StoryPage";
 
 type Nav = (r: PublicRoute) => void;
 type PageProps = { onGetStarted: () => void; onNavigate: Nav };
-
-const DEMO_PAIR = { source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest };
 
 function closing(_p: PageProps, title: string, body: string): Story["closing"] {
   return { title, body };
@@ -49,25 +53,23 @@ export function TransferStudioPage(p: PageProps) {
       ],
     },
     how: {
-      title: "Four steps, in this order",
-      sequence: true,
+      title: "From a map to a write",
       points: [
-        { title: "Map by meaning", body: "Each pairing is scored on the column's role, qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person, with the reason on the row." },
-        { title: "Validate on the real write path", body: "Nine core checks run on every route, plus the policy checks the route needs. Sample rows go through the real write path, so a value the destination cannot hold is a finding." },
-        { title: "Approve the plan", body: "Approving records a hash of the plan. A run whose plan no longer matches the approved one is refused." },
-        { title: "Write, and hold what fails", body: "Rows are written in batches with bound parameters. A row the destination refuses is held with its column, value, and reason instead of stopping the load." },
+        { step: "Plan", title: "Map by meaning", body: "Each pairing is scored on the column's role, qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person, with the reason on the row." },
+        { step: "Validate", title: "Check on the real write path", body: "The checks run in four groups: can we read and write, will every value fit, do the columns line up, is it safe to write. Sample rows go through the real write path, so a value the destination cannot hold is a finding." },
+        { step: "Plan", title: "Approve the plan", body: "Approving records a hash of the plan. A run whose plan no longer matches the approved one is refused." },
+        { step: "Execute", title: "Write, and hold what fails", body: "Rows are written in batches with bound parameters. A row the destination refuses is held with its column, value, and reason instead of stopping the load." },
       ],
     },
     surface: {
       title: "The map a reviewer approves",
       body: "Every source column is mapped or declared dropped, with its destination type and the transform that gets it there. Open any row to see why it was paired.",
       visual: <PlanPanel />,
-      capture: { src: WORKSPACE_SHOT.transferMap, alt: "Transfer Studio Map step with every sales_orders column mapped to its Snowflake type, each marked safe", surface: "Transfer Studio, map step", route: DEMO_PAIR },
     },
     checks: {
       title: "Rules you can hold it to",
       items: [
-        { claim: "Nine core checks, G1 to G9, run on every route", where: "Validate step; Docs, Verification" },
+        { claim: "The same core checks run on every route, plus the ones the route needs", where: "Validate step; Docs, Verification" },
         { claim: "A source column must be mapped or declared omitted, or the run is refused", where: "Docs, Verification: dropping fields on purpose" },
         { claim: "Accepting a known loss takes a signed risk record, never a yes/no flag", where: "Docs, Verification: accepting a known loss" },
         { claim: "In strict mode, mappings below 0.85 confidence block until reviewed", where: "Docs, Verification: validation modes" },
@@ -94,11 +96,7 @@ export function JobTheaterPage(p: PageProps) {
     hero: <VerifyPanel />,
     problem: {
       title: "A green job is not proof",
-      body: "A job can finish without an error while the destination is short or a column was nulled. The writer's count says what it sent, not what the destination holds.",
-      failures: [
-        { title: "Counting what was sent", body: "An acknowledgement from the writer closes the books on rows the destination may never have kept." },
-        { title: "A sample called proof", body: "Comparing a sample can find a problem. It cannot show that every row is right." },
-      ],
+      body: "A job can finish without an error while the destination is short or a column was nulled. The writer's count says what it sent, not what the destination holds, and a sample can find a problem but cannot show that every row is right.",
     },
     how: {
       title: "How a run is checked",
@@ -113,10 +111,14 @@ export function JobTheaterPage(p: PageProps) {
       title: "Held rows stay on the job",
       body: "A row the destination refused is listed with its column, value, and reason. Fix the cause, replay it through the same writer, and the accounting closes.",
       visual: <QuarantinePanel />,
-      capture: { src: WORKSPACE_SHOT.jobTrustEvidence, alt: "Trust Report evidence for a run into Snowflake: reconciliation passed, full checksum assurance, and the sign-off and evidence pack", surface: "Job space, Trust Report", route: DEMO_PAIR },
     },
     checks: {
       title: "Evidence you can verify yourself",
+      capture: {
+        src: WORKSPACE_SHOT.jobsEvidenceCrop,
+        alt: "Trust Report in Job space: the evidence behind the report (reconciliation passed, full checksum, trust score) and the sign-off and evidence pack",
+        caption: "The evidence and sign-off cards of a Trust Report, as Job space shows them.",
+      },
       items: [
         { claim: "Export a signed proof pack for any job", where: "API: GET /api/v1/transfer/{job_id}/proof-pack" },
         { claim: "Verify a proof pack independently", where: "API: POST /api/v1/transfer/proof-pack/verify" },
@@ -147,7 +149,6 @@ export function PipelinesPage(p: PageProps) {
       title: "Recurring loads drift quietly",
       body: "The first load gets reviewed. The hundredth runs at night, against a source that has changed since.",
       failures: [
-        { title: "Changes an incremental cannot see", body: "A row changed without its cursor moving is missed, and incremental reads never see deletes." },
         { title: "Schema change that reaches the destination", body: "A new or renamed column flows into the destination before anyone has decided where it belongs." },
       ],
     },
@@ -161,9 +162,9 @@ export function PipelinesPage(p: PageProps) {
       ],
     },
     surface: {
-      title: "The run history, tick by tick",
-      body: "Each run links to its job and its evidence. A paused tick says why it paused and what it is waiting for.",
-      capture: { src: WORKSPACE_SHOT.schedulesHistory, alt: "Run history for the Orders feed schedule, each run linked to its job", surface: "Schedules, run history", route: { source: DEMO_SCHEDULE_ROUTE.source, dest: DEMO_SCHEDULE_ROUTE.dest } },
+      title: "Open any tick",
+      body: "Each tick is its own job: the map version it used, the checks it cleared, and its accounting. The tick after a drift pause runs on the map someone reviewed.",
+      visual: <TickDetailPanel />,
     },
     checks: {
       title: "Behaviour you can rely on",
@@ -212,11 +213,16 @@ export function QueryPlaygroundPage(p: PageProps) {
     },
     surface: {
       title: "The same question, asked of both sides",
-      body: "Run an aggregate on the copy, switch the connection, and run it on the source. A write is refused with the reason.",
-      capture: { src: WORKSPACE_SHOT.queryReadonly, alt: "Query refuses a DELETE statement: only read and metadata queries run in the playground", surface: "Query, read-only" },
+      body: "Run the aggregate on the source, switch the connection, and run it on the copy. Every difference points to a row the run already accounted for.",
+      visual: <QueryDiffPanel />,
     },
     checks: {
       title: "What Query will and will not do",
+      capture: {
+        src: WORKSPACE_SHOT.queryRefusalCrop,
+        alt: "Query editor with a DELETE statement, refused: only read and metadata queries run in the playground",
+        caption: "A write, refused in the editor before it reaches the database.",
+      },
       items: [
         { claim: "Statements that write are refused in the editor", where: "Query: try any INSERT, UPDATE, or DELETE" },
         { claim: "Server-side read-only transaction on PostgreSQL, MySQL, SQLite, and Oracle", where: "Query on a saved connection of those types" },
@@ -244,11 +250,7 @@ export function DataPilotPage(p: PageProps) {
     hero: <PilotPanel />,
     problem: {
       title: "Answers about data should not be guesses",
-      body: "An assistant that answers from memory, or acts on its own, is not something a data team can put in front of production systems.",
-      failures: [
-        { title: "A plausible number", body: "A model's recollection of a table is not a count of the table." },
-        { title: "An action nobody approved", body: "An assistant that can start a transfer on its own can start the wrong one." },
-      ],
+      body: "A model's recollection of a table is not a count of the table, and an assistant that can start a transfer on its own can start the wrong one. Neither belongs in front of production systems.",
     },
     how: {
       title: "How Pilot works",
@@ -261,7 +263,8 @@ export function DataPilotPage(p: PageProps) {
     },
     surface: {
       title: "The answer and the query behind it",
-      body: "Every number Pilot gives comes with the statement it ran and the connection it ran on.",
+      body: "Every number Pilot gives comes with the statement it ran, the connection it ran on, and what kind of number it is.",
+      visual: <PilotAnswerPanel />,
     },
     checks: {
       title: "Limits that are part of the design",
@@ -353,10 +356,20 @@ export function McpServerPage(p: PageProps) {
       title: "Every tool, with the permission it needs",
       body: "Read tools answer; plan tools propose; anything that changes data is staged for confirmation.",
       visual: <McpToolTable />,
-      capture: { src: WORKSPACE_SHOT.mcp, alt: "MCP Server page: server URL, client setup for Cursor, Claude Desktop, VS Code, and custom GPT", surface: "MCP server" },
+    },
+    signature: {
+      at: "afterHow",
+      title: "Stage, then confirm",
+      body: "What passes between an agent and Datawrap when the agent asks for a change.",
+      node: <StageConfirmSequence />,
     },
     checks: {
       title: "The confirmation model",
+      capture: {
+        src: WORKSPACE_SHOT.mcpSetupCrop,
+        alt: "MCP client setup in Datawrap: Cursor, Claude Desktop, VS Code, custom GPT, and other remote clients, with the server configuration",
+        caption: "Client setup in the MCP page: one endpoint and a workspace key for every client.",
+      },
       items: [
         { claim: "A staged action does nothing until confirm_action is called with its ack_id", where: "Docs, MCP: the confirmation model" },
         { claim: "An ack_id is used once; a second confirm is refused", where: "Docs, MCP" },
@@ -381,34 +394,31 @@ export function MigrationsSolutionPage(p: PageProps) {
     title: "Cross-schema cutover you can prove",
     lead: "Move between schemas that do not match name for name, with a map you can review, checks before the write, and a comparison of the destination before you cut over.",
     primary: { label: "Start free", onClick: p.onGetStarted },
-    secondary: { label: "Talk to an engineer", onClick: () => p.onNavigate("contact") },
+    secondary: { label: "Request a pilot", onClick: () => p.onNavigate("contact") },
     hero: <MigrationMapPanel />,
     problem: {
       title: "Cutover is a one-way door",
-      body: "Once applications point at the new system, a missing key or a truncated value becomes a production incident, and the old system is no longer the source of truth.",
-      failures: [
-        { title: "Identity that does not survive", body: "Sequences, foreign keys, and constraints that do not carry make the new schema accept rows the old one refused." },
-        { title: "A sign-off with nothing behind it", body: "Cutover approved on a spreadsheet of counts that nobody can reproduce." },
-      ],
+      body: "Once applications point at the new system, a missing key or a truncated value becomes a production incident, and the old system is no longer the source of truth. A sign-off on a spreadsheet of counts nobody can reproduce does not change that.",
     },
-    how: {
-      title: "A path from discovery to cutover",
-      sequence: true,
-      points: [
-        { title: "Profile both sides", body: "Datawrap profiles the source and the destination, then proposes a role-aware map instead of assuming names match." },
-        { title: "Review the map", body: "Confident pairs map themselves; ambiguous edges wait for a person and nothing is pinned until someone accepts it." },
-        { title: "Clear the checks", body: "Contracts, types, capacity, and a dry run must pass before the write. One blocking finding stops the load." },
-        { title: "Cut over with proof", body: "Run a subset first, then the full write, and sign the Trust Report before switching applications." },
-      ],
+    signature: {
+      at: "afterProblem",
+      band: true,
+      title: "From first profile to the morning after",
+      body: "Each stage leaves a record the next one depends on. Nothing is pinned until someone accepts it, and one blocking finding stops the load.",
+      node: <CutoverTimeline />,
     },
     surface: {
       title: "The report the cutover meeting signs",
       body: "The comparison that ran, the held rows, and the sign-offs by role, on one record.",
       visual: <EvidencePanel />,
-      capture: { src: WORKSPACE_SHOT.transferMapWhy, alt: "Map step showing JSONB attributes mapped to Snowflake VARIANT with Parse JSON, with its confidence and a sample", surface: "Transfer Studio, why a pair was made" },
     },
     checks: {
       title: "Details that survive real schemas",
+      capture: {
+        src: WORKSPACE_SHOT.transferWhyCrop,
+        alt: "Map step detail: JSONB attributes mapped to Snowflake VARIANT with Parse JSON, with the reason, confidence, source type, and a sample",
+        caption: "Why a pair was made: the reason, the confidence, and a sample, on the row a reviewer approves.",
+      },
       items: [
         { claim: "Sequences, foreign keys, CHECK constraints, and indexes carry on create-new, in dependency order", where: "Transfer Studio, Destination: create new table" },
         { claim: "Unicode text keeps its encoding; collation-aware key checks run in Validate", where: "Validate step" },
@@ -430,7 +440,7 @@ export function WarehouseSolutionPage(p: PageProps) {
   const story: Story = {
     steps: ["Execute", "Verify"],
     kicker: "Warehouse loading",
-    title: "Warehouse loads finance can archive",
+    title: "Warehouse loads that add up",
     lead: "Load Snowflake, BigQuery, Apache Iceberg, and S3, ADLS, or GCS with create-new tables and MERGE upserts, each load compared against the destination engine afterwards.",
     primary: { label: "Start free", onClick: p.onGetStarted },
     secondary: { label: "See Schedules", onClick: () => p.onNavigate("product-pipelines") },
@@ -445,12 +455,11 @@ export function WarehouseSolutionPage(p: PageProps) {
     },
     how: {
       title: "How a warehouse load runs",
-      sequence: true,
       points: [
-        { title: "Probe the destination", body: "Write rights, privileges, and capacity are checked in Validate before the load window opens." },
-        { title: "Map and check", body: "The same semantic map and checks as any route, with exact decimals and timestamps." },
-        { title: "Write in bulk", body: "Create new tables, append, overwrite, or MERGE by key wherever the destination's keys support it." },
-        { title: "Read it back", body: "The warehouse counts and checksums what landed, and the job records which comparison ran." },
+        { step: "Validate", title: "Probe the destination", body: "Write rights, privileges, and capacity are checked in Validate before the load window opens." },
+        { step: "Plan", title: "Map and check", body: "The same semantic map and checks as any route, with exact decimals and timestamps." },
+        { step: "Execute", title: "Write in bulk", body: "Create new tables, append, overwrite, or MERGE by key wherever the destination's keys support it." },
+        { step: "Verify", title: "Read it back", body: "The warehouse counts and checksums what landed, and the job records which comparison ran." },
       ],
     },
     surface: {
@@ -494,6 +503,12 @@ export function SyncSolutionPage(p: PageProps) {
         { title: "Retries that duplicate", body: "A retried batch appends the same rows twice when nothing keys them." },
       ],
     },
+    signature: {
+      at: "afterProblem",
+      title: "A delete at the source, carried to the copy",
+      body: "Change data capture reads the delete from the database log. Mirror mode keeps the row and flags it, so the copy shows what was removed and when.",
+      node: <MirrorDeletePanel />,
+    },
     how: {
       title: "How a sync stays honest",
       points: [
@@ -505,9 +520,7 @@ export function SyncSolutionPage(p: PageProps) {
     },
     surface: {
       title: "A history where every run has evidence",
-      body: "Each tick links to its job. A paused tick says what it is waiting for.",
-      visual: <QuarantinePanel />,
-      capture: { src: WORKSPACE_SHOT.schedulesDrawer, alt: "Orders feed schedule detail: every 2 minutes, incremental deduped on order_id", surface: "Schedules, detail", route: { source: DEMO_SCHEDULE_ROUTE.source, dest: DEMO_SCHEDULE_ROUTE.dest } },
+      body: "Each tick links to its job. A paused tick says what it is waiting for, and the tick after a review runs on the approved map.",
     },
     checks: {
       title: "Sync behaviour, stated plainly",

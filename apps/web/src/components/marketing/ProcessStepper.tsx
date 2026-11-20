@@ -7,9 +7,14 @@ export type ProcessStep = (typeof PROCESS_STEPS)[number];
  * about marked. Text carries the state; colour only reinforces it.
  */
 export function ProcessStepper({ current, label = "Where this fits" }: { current: ProcessStep[]; label?: string }) {
+  const idx = PROCESS_STEPS.map((s, i) => (current.includes(s) ? i + 1 : 0)).filter(Boolean);
+  const range = idx.length === 1 ? `Step ${idx[0]} of 5` : `Steps ${idx[0]}–${idx[idx.length - 1]} of 5`;
   return (
     <div className="mk-stepper">
       <p className="mk-stepper-label">{label}</p>
+      <p className="mk-stepper-compact" aria-hidden>
+        {range}: {current.join(" and ")}
+      </p>
       <ol aria-label="The five steps of every load">
         {PROCESS_STEPS.map((step, i) => {
           const on = current.includes(step);

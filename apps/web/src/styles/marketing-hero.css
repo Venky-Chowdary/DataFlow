@@ -111,46 +111,9 @@
   object-position: top left;
 }
 
-.lp-product-shot-route {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  margin: 12px 2px 0;
-  color: rgba(180, 199, 219, 0.82);
-  font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
-  font-size: 12.5px;
-  line-height: 1.4;
-}
-
-.lp-product-shot-route span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.lp-product-shot-route em {
-  flex: 0 0 auto;
-  color: #2dd4bf;
-  font-style: normal;
-  font-weight: 700;
-}
-
-.lp-product-shot-stack {
-  display: grid;
-  gap: 16px;
-  min-width: 0;
-}
-
 .lp .docs-shot-reel .docs-shot-reel-frame {
   object-fit: contain;
   object-position: top center;
-}
-
-/* Route chips never paint past the frame — long FQDNs ellipsis. */
-.lp .lp-product-shot-route {
-  overflow: hidden;
 }
 
 .docs-shot-reel-caption {
@@ -268,16 +231,9 @@
     width: 100%;
   }
 
-  .lp-product-shot-route {
-    flex-wrap: wrap;
-    align-items: flex-start;
-  }
+  
 
-  .lp-product-shot-route span {
-    white-space: normal;
-    overflow: visible;
-    text-overflow: unset;
-  }
+  
 
   
 

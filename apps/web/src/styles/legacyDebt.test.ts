@@ -18,7 +18,7 @@ function sheets(): Array<[string, string]> {
  * after the token migration — any new raw value fails the test.
  */
 const CEILINGS = {
-  rawHexUses: 2327,       // #[0-9a-f]{3,8} outside token definitions
+  rawHexUses: 2326,       // #[0-9a-f]{3,8} outside token definitions
   distinctHex: 240,
   important: 2162,        // !important declarations
   rawRadius: 1078,        // border-radius: <number>

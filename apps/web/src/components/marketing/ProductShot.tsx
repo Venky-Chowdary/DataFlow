@@ -1,64 +1,41 @@
-import { useRef, type ReactNode } from "react";
+import { useState } from "react";
+import { shotSize } from "../../lib/workspaceShots";
 
 /**
- * Product photography for public pages — the live workspace inside a
- * Datawrap chrome frame. Marketing must not invent a second UI; it shows
- * the operator surfaces operators already use.
+ * A crop of the live workspace, shown at half its 2x pixel size so text
+ * stays legible. No app chrome: only the region the page talks about, on a
+ * painted placeholder, with its intrinsic size reserved before it loads.
+ * If the file fails to load, the figure is removed rather than left empty.
  */
 export function ProductShot({
   src,
   alt,
-  surface,
-  route,
+  caption,
   className = "",
 }: {
   src: string;
   alt: string;
-  surface: string;
-  /** Optional source → dest chip. Tokens ellipsis; they never paint past the frame. */
-  route?: { source: string; dest: string };
+  /** One sentence about what this region shows. */
+  caption: string;
   className?: string;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
+  const [failed, setFailed] = useState(false);
+  const size = shotSize(src);
+  if (failed) return null;
   return (
-    <figure className={`lp-product-shot ${className}`.trim()}>
-      <div className="lp-product-shot-chrome">
-        <div className="lp-product-shot-bar">
-          <span className="lp-product-shot-surface">{surface}</span>
-          <button type="button" className="mk-shot-expand" onClick={() => dialog.current?.showModal()}>
-            View full size
-          </button>
-        </div>
-        <div className="lp-product-shot-viewport">
-          <img src={src} alt={alt} loading="lazy" decoding="async" />
-        </div>
+    <figure className={`mk-crop ${className}`.trim()} style={{ maxWidth: size.width / 2 }}>
+      <div className="mk-crop-frame" style={{ aspectRatio: `${size.width} / ${size.height}` }}>
+        <img
+          src={src}
+          alt={alt}
+          width={size.width}
+          height={size.height}
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
       </div>
-      <dialog ref={dialog} className="mk-shot-dialog" aria-label={surface} onClick={(e) => e.target === dialog.current && dialog.current?.close()}>
-        <div className="mk-shot-dialog-bar">
-          <p>{surface}</p>
-          <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => dialog.current?.close()}>
-            Close
-          </button>
-        </div>
-        <img src={src} alt={alt} loading="lazy" decoding="async" />
-      </dialog>
-      {route ? (
-        <figcaption className="lp-product-shot-route" title={`${route.source} → ${route.dest}`}>
-          <span>{route.source}</span>
-          <em aria-hidden>→</em>
-          <span>{route.dest}</span>
-        </figcaption>
-      ) : null}
+      <figcaption className="mk-caption">{caption}</figcaption>
     </figure>
   );
-}
-
-export function ProductShotStack({
-  children,
-  className = "",
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return <div className={`lp-product-shot-stack ${className}`.trim()}>{children}</div>;
 }

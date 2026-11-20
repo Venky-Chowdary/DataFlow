@@ -82,8 +82,8 @@ const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: strin
     links: [
       { route: "privacy", label: "Privacy" },
       { route: "terms", label: "Terms" },
-      { route: "dpa", label: "Data processing" },
-      { route: "subprocessors", label: "Subprocessors" },
+      { route: "dpa", label: "Data processing (on request)" },
+      { route: "subprocessors", label: "Subprocessors (on request)" },
     ],
   },
 ];
