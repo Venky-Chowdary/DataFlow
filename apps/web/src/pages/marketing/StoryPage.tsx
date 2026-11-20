@@ -1,6 +1,8 @@
 import type { MouseEvent, ReactNode } from "react";
-import { ArrowRight, type LucideIcon } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
+import { CodeCard, type CodeSnippet } from "../../components/marketing/kit/CodeCard";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
 import { hashForPublicRoute, type PublicRoute } from "../../lib/publicNavigation";
 
 export type StoryAction = { label: string; onClick: () => void };
@@ -26,7 +28,8 @@ export function StoryFrame({
   page: string;
   hero: ReactNode;
   children: ReactNode;
-  related: Related[];
+  /** Links to related pages. Omit when the page carries them as FeatureLinks under the hero. */
+  related?: Related[];
   closing: { title: string; body: string };
   actions: { primary: StoryAction; secondary: StoryAction };
   onNavigate: (r: PublicRoute) => void;
@@ -39,26 +42,25 @@ export function StoryFrame({
     <div className={`mk-page mk-sb mk-${page}`}>
       {hero}
       {children}
-      <nav className="mk-sb-related" aria-labelledby={`mk-${page}-related`}>
-        <div className="mk-wrap">
-          <p id={`mk-${page}-related`} className="mk-sb-related-title">
-            Related
-          </p>
-          <ul>
-            {related.map((r) => (
-              <li key={r.route}>
-                <a href={hashForPublicRoute(r.route)} onClick={go(r.route)}>
-                  <strong>
-                    {r.label}
-                    <ArrowRight size={16} aria-hidden />
-                  </strong>
-                  <span>{r.body}</span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </nav>
+      {related?.length ? (
+        <nav className="mk-sb-related" aria-labelledby={`mk-${page}-related`}>
+          <div className="mk-wrap">
+            <p id={`mk-${page}-related`} className="mk-sb-related-title">
+              Related
+            </p>
+            <ul>
+              {related.map((r) => (
+                <li key={r.route}>
+                  <a href={hashForPublicRoute(r.route)} onClick={go(r.route)}>
+                    <strong>{r.label}</strong>
+                    <span>{r.body}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </nav>
+      ) : null}
       <MarketingClosing title={closing.title} body={closing.body}>
         <StoryActions {...actions} />
       </MarketingClosing>
@@ -197,7 +199,6 @@ export function RowPoints({
             }}
           >
             {link.label}
-            <ArrowRight size={16} aria-hidden />
           </a>
         </p>
       ) : null}
@@ -212,7 +213,7 @@ export function FactGrid({ id, title, body, items, className = "" }: { id: strin
   return (
     <section className={`mk-sb-section mk-sb-facts ${className}`.trim()} aria-labelledby={id}>
       <div className="mk-wrap">
-        <SectionHead id={id} title={title} body={body} />
+        <SplitHead id={id} title={title} lead={body} />
         <ul className="mk-sb-facts-grid">
           {items.map(({ icon: Icon, title: t, body: b }) => (
             <li key={t}>
@@ -232,7 +233,7 @@ export function TableSection({ id, title, body, className = "", children }: { id
   return (
     <section className={`mk-sb-section mk-sb-tablesec ${className}`.trim()} aria-labelledby={id}>
       <div className="mk-wrap">
-        <SectionHead id={id} title={title} body={body} />
+        <SplitHead id={id} title={title} lead={body} />
         {children}
       </div>
     </section>
@@ -272,5 +273,44 @@ export function RulesTable({
         ))}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * A code section: the copy on one side (h2, one line, two or three plain
+ * points from the docs) and a dark CodeCard on the other. The page's one
+ * dark element besides the closing card; only for snippets in the docs.
+ */
+export function CodeBand({
+  id,
+  title,
+  body,
+  points,
+  snippets,
+  cardLabel,
+}: {
+  id: string;
+  title: ReactNode;
+  body: ReactNode;
+  points?: string[];
+  snippets: CodeSnippet[];
+  cardLabel: string;
+}) {
+  return (
+    <section className="mk-sb-section mk-codeband" aria-labelledby={id}>
+      <div className="mk-wrap mk-codeband-grid">
+        <div className="mk-codeband-copy">
+          <SectionHead id={id} title={title} body={body} />
+          {points?.length ? (
+            <ul className="mk-codeband-points">
+              {points.map((pt) => (
+                <li key={pt}>{pt}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        <CodeCard snippets={snippets} label={cardLabel} />
+      </div>
+    </section>
   );
 }

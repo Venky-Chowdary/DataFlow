@@ -15,11 +15,17 @@ import {
 } from "../components/marketing/app-frame/AppFrame";
 import {
   ALL_CONNECTORS,
+  EVIDENCE_AS_OF,
   PROVEN_CDC_SOURCES,
   PROVEN_DRIVERS,
 } from "../lib/provenEvidence";
+import { MarketingClosing } from "../components/marketing/MarketingClosing";
+import { RUN_HELD_KEYS } from "../components/marketing/StoryPanels";
+import { Bento, BentoTile } from "../components/marketing/kit/Bento";
+import { SplitHead } from "../components/marketing/kit/SplitHead";
+import { StatRow } from "../components/marketing/kit/StatRow";
+import { SYNC_MODES } from "../lib/transferConstants";
 import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
-import { SYNC_MODE_COUNT_WORD } from "../lib/syncModesPhrase";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -177,33 +183,20 @@ function ProductSwitcher() {
 
 const HERO_JOB = EXAMPLE_JOBS.find((j) => j.id === "6af912d7") ?? EXAMPLE_JOBS[1];
 
-const SIGNERS: { role: string; state: string; signed: boolean }[] = [
-  { role: "Engineering", state: "Signed today at 02:51", signed: true },
-  { role: "Data owner", state: "Waiting to sign", signed: false },
-  { role: "Compliance", state: "Waiting to sign", signed: false },
-];
-
-const HELD_ROWS: { key: string; value: string }[] = [
-  { key: "48204", value: "NULL" },
-  { key: "48977", value: "NULL" },
-  { key: "51310", value: "NULL" },
-  { key: "52046", value: "NULL" },
-  { key: "55813", value: "NULL" },
-  { key: "60129", value: "NULL" },
-  { key: "61402", value: "NULL" },
-  { key: "63318", value: "NULL" },
-  { key: "66751", value: "NULL" },
-  { key: "70264", value: "NULL" },
-];
+const HELD_ROWS: { key: string; value: string }[] = RUN_HELD_KEYS.map((key) => ({ key, value: "NULL" }));
 
 /** The rows the example's `region = 'TEST'` filter excluded. */
 const SKIPPED_ROWS: { key: string }[] = [{ key: "50017" }, { key: "57240" }];
 
 const fmtN = new Intl.NumberFormat("en-US");
 
+/** How many held rows the Held tile lists before "Showing n of 33". */
+const HELD_SHOWN = 3;
+
 /**
- * Where every row went, as product UI: the three places a row can land,
- * and the check that none is unaccounted. Every figure is the hero's run.
+ * Where every row went, built as the statement itself: landed + held +
+ * skipped, then the line that proves nothing is unaccounted. Each tile is a
+ * fragment of the product UI; every figure is the hero's run.
  */
 function RowBento() {
   const [replayed, setReplayed] = useState(false);
@@ -211,17 +204,23 @@ function RowBento() {
   const held = HERO_JOB.held ?? 0;
   const skipped = t.source - HERO_JOB.rows - held;
   const unaccounted = t.source - HERO_JOB.rows - held - skipped;
+  const shown = HELD_ROWS.slice(0, HELD_SHOWN);
   return (
-    <div className="mk-bento">
-      <article className="mk-bento-tile mk-bento-tile--landed">
-        <h3>Landed</h3>
-        <p>Written, then counted by the destination's own engine and compared with what was read.</p>
-        <div className="mk-app-surface mk-bento-ui">
-          <p className="mk-app-verdict">
+    <Bento className="mk-kit-bento--eq mk-rowbento" label="Where every row of the example run went">
+      <BentoTile
+        span={5}
+        tone="landed"
+        title="Landed"
+        figure={fmtN.format(HERO_JOB.rows)}
+        body="Written, then counted by the destination's own engine and compared with what was read."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <div className="mk-tui-head">
             <span className="mk-app-pill mk-app-pill--t-proven">Proven equal</span>
-            <span>Check: {t.check}</span>
-          </p>
-          <dl className="mk-app-counts mk-bento-counts">
+            <span className="mk-tui-muted">Check: {t.check}</span>
+          </div>
+          <dl className="mk-tui-counts mk-tui-counts--rows">
             <div>
               <dt>Read at the source</dt>
               <dd>{fmtN.format(t.source)}</dd>
@@ -236,19 +235,24 @@ function RowBento() {
             </div>
           </dl>
         </div>
-      </article>
+      </BentoTile>
 
-      <article className="mk-bento-tile mk-bento-tile--held">
-        <h3>Held</h3>
-        <p>Refused by the destination and kept with its value and reason, instead of stopping the load.</p>
-        <div className="mk-app-surface mk-bento-ui mk-bento-ui--fill">
-          <div className="mk-bento-held-head">
-            <span className="mk-app-pill mk-app-pill--v-explained">{held} held</span>
+      <BentoTile
+        span={4}
+        op="+"
+        tone="held"
+        title="Held"
+        figure={fmtN.format(held)}
+        body="Refused by the destination and kept with its value and reason, instead of stopping the load."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <div className="mk-tui-head">
             <code>status</code>
-            <span>is NOT NULL in the destination</span>
+            <span className="mk-tui-muted">is NOT NULL in the destination</span>
           </div>
-          <ul className="mk-bento-rows">
-            {HELD_ROWS.map((r) => (
+          <ul className="mk-tui-rows">
+            {shown.map((r) => (
               <li key={r.key} className={replayed ? "is-landed" : undefined}>
                 <code>order_id {r.key}</code>
                 <code>status = {replayed ? "'pending'" : r.value}</code>
@@ -256,7 +260,7 @@ function RowBento() {
               </li>
             ))}
           </ul>
-          <div className="mk-bento-actions">
+          <div className="mk-tui-actions">
             <button
               type="button"
               className="mk-app-tbtn mk-app-tbtn--primary"
@@ -265,49 +269,71 @@ function RowBento() {
             >
               {replayed ? "Undo the example replay" : `Replay ${held} rows after the fix`}
             </button>
-            <span className="mk-bento-note" aria-live="polite">
-              {replayed ? `${held} rows landed into the same table` : `Showing ${HELD_ROWS.length} of ${held}`}
+            <span className="mk-tui-muted" aria-live="polite">
+              {replayed ? `${held} rows landed into the same table` : `Showing ${shown.length} of ${held}`}
             </span>
           </div>
         </div>
-      </article>
+      </BentoTile>
 
-      <article className="mk-bento-tile mk-bento-tile--skipped">
-        <h3>Skipped</h3>
-        <p>Excluded by a rule you set, and named in the statement.</p>
-        <div className="mk-app-surface mk-bento-ui">
-          <span className="mk-bento-filter">
+      <BentoTile
+        span={3}
+        op="+"
+        tone="skipped"
+        title="Skipped"
+        figure={fmtN.format(skipped)}
+        body="Excluded by a rule you set, and named in the statement."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <p className="mk-tui-filter">
             Filter <code>region = 'TEST'</code>
-          </span>
-          <p className="mk-bento-big">
-            <strong>{skipped}</strong> rows skipped by this filter
           </p>
-          <ul className="mk-bento-rows mk-bento-rows--skipped">
+          <ul className="mk-tui-rows mk-tui-rows--skipped">
             {SKIPPED_ROWS.slice(0, skipped).map((r) => (
               <li key={r.key}>
-                <code>
-                  <span className="mk-bento-key-label">order_id </span>
-                  {r.key}
-                </code>
+                <code>order_id {r.key}</code>
                 <span>Skipped</span>
               </li>
             ))}
           </ul>
         </div>
-      </article>
+      </BentoTile>
 
-      <article className="mk-bento-tile mk-bento-tile--balance">
-        <h3>Unaccounted</h3>
-        <p>A row that is none of the three is reported as potential loss, and the statement does not balance.</p>
-        <div className="mk-app-surface mk-bento-ui mk-bento-sum">
-          <span>{fmtN.format(t.source)} read</span>
-          <span>− {fmtN.format(HERO_JOB.rows)} landed</span>
-          <span>− {held} held</span>
-          <span>− {skipped} skipped</span>
-          <strong>= {unaccounted} unaccounted</strong>
-        </div>
-      </article>
-    </div>
+      <BentoTile
+        span={12}
+        tone="balance"
+        className="mk-tile--sum"
+        title="Unaccounted"
+        body="A row that is none of the three is reported as potential loss, and the statement does not balance."
+      >
+        <dl
+          className="mk-sumline"
+          aria-label={`${fmtN.format(t.source)} read, minus ${fmtN.format(HERO_JOB.rows)} landed, ${held} held and ${skipped} skipped, leaves ${unaccounted} unaccounted`}
+        >
+          <div>
+            <dt>Read</dt>
+            <dd>{fmtN.format(t.source)}</dd>
+          </div>
+          <div data-op="−">
+            <dt>Landed</dt>
+            <dd>{fmtN.format(HERO_JOB.rows)}</dd>
+          </div>
+          <div className="is-held" data-op="−">
+            <dt>Held</dt>
+            <dd>{fmtN.format(held)}</dd>
+          </div>
+          <div data-op="−">
+            <dt>Skipped</dt>
+            <dd>{fmtN.format(skipped)}</dd>
+          </div>
+          <div className="is-result" data-op="=">
+            <dt>Unaccounted</dt>
+            <dd>{fmtN.format(unaccounted)}</dd>
+          </div>
+        </dl>
+      </BentoTile>
+    </Bento>
   );
 }
 
@@ -340,62 +366,64 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
 
       <ConnectorStrip />
 
-      <section className="mk-evidence" aria-label="What CI and the product prove">
+      <section className="mk-showcase mk-showcase--light" aria-labelledby="mk-showcase-title">
         <div className="mk-wrap">
-          <ul className="mk-evidence-list">
-            <li>
-              <RouteLink route="integrations" onNavigate={onNavigate} className="mk-evidence-item">
-                {`${PROVEN_DRIVERS} of ${ALL_CONNECTORS.length} drivers proven in CI`}
-              </RouteLink>
-            </li>
-            <li>
-              <RouteLink route="solution-sync" onNavigate={onNavigate} className="mk-evidence-item">
-                {`${SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)} sync modes, including CDC`}
-              </RouteLink>
-            </li>
-            <li>
-              <RouteLink route="product-pipelines" onNavigate={onNavigate} className="mk-evidence-item">
-                {PROVEN_CDC_SOURCES.length
-                  ? `CDC proven on ${PROVEN_CDC_SOURCES.length} databases`
-                  : "Change data capture from the log"}
-              </RouteLink>
-            </li>
-            <li>
-              <RouteLink route="customers" onNavigate={onNavigate} className="mk-evidence-item">
-                Signed statements you can verify
-              </RouteLink>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <section className="mk-showcase" aria-labelledby="mk-showcase-title">
-        <div className="mk-wrap">
-          <h2 id="mk-showcase-title">One workspace, from the plan to the proof</h2>
-          <p className="mk-showcase-lead">
-            Every screen below is the product, rendered in code with one example workspace. Choose a
-            part of the product to open it.
-          </p>
+          <SplitHead
+            id="mk-showcase-title"
+            title="One workspace, from the plan to the proof"
+            lead="Every screen below is the product, rendered in code with one example workspace. Choose a part of the product to open it."
+          />
           <ProductSwitcher />
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-bins-title">
+      <section className="mk-section mk-kit-sec" aria-labelledby="mk-bins-title">
         <div className="mk-wrap">
-          <header className="mk-section-head">
-            <h2 id="mk-bins-title">Where every row went</h2>
-            <p>Each run sorts every row it read into one of three places. The statement only balances when they add up.</p>
-          </header>
+          <SplitHead
+            id="mk-bins-title"
+            title="Where every row went"
+            lead="Each run sorts every row it read into one of three places. The statement only balances when they add up."
+          />
           <RowBento />
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-different-title">
+      <section className="mk-section mk-kit-sec mk-proven" aria-labelledby="mk-proven-title">
         <div className="mk-wrap">
-          <header className="mk-section-head">
-            <h2 id="mk-different-title">What a migration usually leaves to chance</h2>
-            <p>Four gaps that scripts and spreadsheets leave open, and what Datawrap does on every run instead.</p>
-          </header>
+          <SplitHead
+            id="mk-proven-title"
+            title="What CI has proven"
+            lead={EVIDENCE_AS_OF ? `Counted from the CI evidence behind the connectors page, ${EVIDENCE_AS_OF}.` : "Counted from the CI evidence behind the connectors page."}
+          />
+          <StatRow
+            label="What CI and the product prove"
+            onNavigate={onNavigate}
+            items={[
+              {
+                figure: (
+                  <>
+                    {PROVEN_DRIVERS} <span className="mk-statrow-rel">of</span> {ALL_CONNECTORS.length}
+                  </>
+                ),
+                text: "drivers proven in CI",
+                route: "integrations",
+              },
+              ...(PROVEN_CDC_SOURCES.length
+                ? [{ figure: PROVEN_CDC_SOURCES.length, text: "databases with change data capture proven", route: "product-pipelines" as const }]
+                : []),
+              { figure: SYNC_MODES.length, text: "sync modes, CDC included", route: "solution-sync" },
+            ]}
+          />
+        </div>
+      </section>
+
+      <section className="mk-section mk-kit-sec" aria-labelledby="mk-different-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-different-title"
+            title="What a migration usually leaves to chance"
+            lead="Four gaps that scripts and spreadsheets leave open, and what Datawrap does on every run instead."
+          />
           <dl className="mk-contrast">
             <div className="mk-contrast-head" aria-hidden>
               <span />
@@ -420,16 +448,13 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-section mk-section--band" aria-labelledby="mk-verdict-title">
+      <section className="mk-section mk-section--band mk-kit-sec" aria-labelledby="mk-verdict-title">
         <div className="mk-wrap">
-          <header className="mk-section-head">
-            <h2 id="mk-verdict-title">Five verdicts, and only one is called proven</h2>
-            <p>
-              Each table carries the comparison that actually ran: full checksum, key diff, sample, or
-              count. The Trust Report turns it into a verdict a reviewer can sign, or says there is
-              nothing to sign yet.
-            </p>
-          </header>
+          <SplitHead
+            id="mk-verdict-title"
+            title="Five verdicts, and only one is called proven"
+            lead="Each table carries the comparison that actually ran: full checksum, key diff, sample, or count. The Trust Report turns it into a verdict a reviewer can sign, or says there is nothing to sign yet."
+          />
           <ol className="mk-scale" aria-label="Trust Report verdicts, strongest first">
             {VERDICTS.map((v) => (
               <li key={v.name} className={`mk-scale-step mk-scale-step--${v.tone}`}>
@@ -441,44 +466,25 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-closer" aria-labelledby="mk-closing-title">
-        <div className="mk-wrap mk-closer-grid">
-          <div className="mk-closer-copy">
-            <h2 id="mk-closing-title">Run your first statement on your own data</h2>
-            <p className="mk-closer-lead">
-              Start with a free workspace and a table you know well, or ask for a scoped pilot on your
-              own sources with a solutions engineer.
-            </p>
-            <div className="mk-actions">
-              <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-                Start free
-              </button>
-              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
-                Request a pilot
-              </RouteLink>
-            </div>
-            <p className="mk-caption">
-              Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
-              <RouteLink route="demos" onNavigate={onNavigate}>
-                Watch recorded runs
-              </RouteLink>
-            </p>
-          </div>
-          <figure className="mk-closer-sheet" aria-labelledby="mk-closer-sheet-title">
-            <figcaption id="mk-closer-sheet-title">
-              Sign-off for <code>{HERO_JOB.name}</code>, an example
-            </figcaption>
-            <ol className="mk-closer-sign">
-              {SIGNERS.map((r) => (
-                <li key={r.role} className={r.signed ? "is-signed" : undefined}>
-                  <span className="mk-closer-role">{r.role}</span>
-                  <span className="mk-closer-state">{r.state}</span>
-                </li>
-              ))}
-            </ol>
-          </figure>
-        </div>
-      </section>
+      <MarketingClosing
+        title="Run your first statement on your own data"
+        body="Start with a free workspace and a table you know well, or ask for a scoped pilot on your own sources with a solutions engineer."
+        note={
+          <>
+            Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
+            <RouteLink route="demos" onNavigate={onNavigate}>
+              Watch recorded runs
+            </RouteLink>
+          </>
+        }
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+          Start free
+        </button>
+        <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+          Request a pilot
+        </RouteLink>
+      </MarketingClosing>
     </div>
   );
 }

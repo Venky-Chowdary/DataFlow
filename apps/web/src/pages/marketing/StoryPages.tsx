@@ -15,7 +15,6 @@ import {
   FileCode,
   FileSearch,
   FileSignature,
-  FileText,
   Gauge,
   GitCompareArrows,
   Hash,
@@ -47,7 +46,6 @@ import {
   CannotList,
   CdcSources,
   ConfirmChecks,
-  CoverageTable,
   CutoverTable,
   DriftReview,
   GreenVsCounted,
@@ -59,13 +57,11 @@ import {
   ModeSelector,
   PilotLoop,
   PrecisionSpecimen,
-  ProofPackApi,
   QueryCompare,
   RefusalPanel,
   RiskRecordPanel,
   RUN,
   SignoffPanel,
-  TransferSteps,
   TypeMapping,
   UpsertCheck,
   ValidateFindings,
@@ -73,7 +69,11 @@ import {
 import { SYNC_MODE_COUNT_WORD } from "../../lib/syncModesPhrase";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { JobsWithTrust, McpScene, PilotScene, QueryScene, SchedulesScene, SyncScene, TransferScene, WarehouseScene } from "../../components/marketing/StoryScenes";
-import { FactGrid, FeatureRow, RowPoints, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
+import { CodeBand, FactGrid, FeatureRow, RowPoints, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
+import { FeatureLinks } from "../../components/marketing/kit/FeatureLinks";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
+import { JobsBento, TransferBento } from "../../components/marketing/StoryBentos";
+import { JOBS_FOLLOW, JOBS_PROOF_PACK, JOBS_TRUST_REPORT, QUICKSTART_EXECUTE, QUICKSTART_LOGIN } from "./apiSnippets";
 
 /*
  * Product and solution pages. Every claim here is something the product does
@@ -117,13 +117,26 @@ export function TransferStudioPage(p: PageProps) {
           <TransferScene example="transfer" />
         </StoryHero>
       }
-      related={[
-        { route: "product-jobs", label: "Job space", body: "Open the finished run and its Trust Report" },
-        { route: "product-pipelines", label: "Schedules", body: "Run the approved plan on a cadence" },
-        { route: "solution-migrations", label: "Migrations", body: "Cut over between schemas with evidence" },
-      ]}
       closing={{ title: "Plan a transfer on your own data", body: "Start with a free workspace and approve your first plan." }}
     >
+      <FeatureLinks
+        label="Related to Transfer Studio"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "Transfer Studio guide", body: "Each step, as the docs describe it", route: "help-transfer-studio" },
+          { icon: Gauge, label: "Job space", body: "Open the finished run and its Trust Report", route: "product-jobs" },
+          { icon: CalendarClock, label: "Schedules", body: "Run the approved plan on a cadence", route: "product-pipelines" },
+          { icon: GitCompareArrows, label: "Migrations", body: "Cut over between schemas with evidence", route: "solution-migrations" },
+        ]}
+      />
+
+      <section className="mk-sb-section mk-kit-sec" aria-labelledby="mk-ts-how">
+        <div className="mk-wrap">
+          <SplitHead id="mk-ts-how" title="From a map to a write" lead="Each step has to pass before the next one unlocks." />
+          <TransferBento points={how} />
+        </div>
+      </section>
+
       <FeatureRow
         id="mk-ts-fail"
         title="Most loads fail at the write"
@@ -141,10 +154,6 @@ export function TransferStudioPage(p: PageProps) {
       >
         <ValidateFindings />
       </FeatureRow>
-
-      <TableSection id="mk-ts-how" title="From a map to a write" body="Each step has to pass before the next one unlocks.">
-        <TransferSteps points={how} />
-      </TableSection>
 
       <FeatureRow
         id="mk-ts-why"
@@ -164,6 +173,22 @@ export function TransferStudioPage(p: PageProps) {
       >
         <MappingDetail />
       </FeatureRow>
+
+      <CodeBand
+        id="mk-ts-api"
+        title="Run the approved plan from the API"
+        body="The plan routes mirror the Studio steps. A transfer started from the API is the same checked job, with the same Trust Report."
+        points={[
+          "State sync_mode explicitly. On this route the default is overwrite.",
+          "Take mappings from your plan's run payload. The empty list is a placeholder.",
+          "Idempotency-Key lets you repeat the request safely after a timeout.",
+        ]}
+        snippets={[
+          { label: "Run", code: QUICKSTART_EXECUTE, source: "Docs, quickstart: run (needs job.run)" },
+          { label: "Sign in", code: QUICKSTART_LOGIN, source: "Docs, quickstart: sign in" },
+        ]}
+        cardLabel="Transfer API examples from the docs"
+      />
 
       <TableSection id="mk-ts-rules" title="Rules you can hold it to" body="Each rule, and where it is written down.">
         <RulesTable
@@ -192,13 +217,30 @@ export function JobTheaterPage(p: PageProps) {
           <JobsWithTrust initial="6af912d7" caption="Example workspace: six runs, each with the comparison that ran. sales_orders is the home page's run." />
         </StoryHero>
       }
-      related={[
-        { route: "customers", label: "Proof", body: "CI evidence and proof packs you can verify" },
-        { route: "product-transfer", label: "Transfer Studio", body: "Where the plan is made and approved" },
-        { route: "security", label: "Security", body: "Audit chain, keys, and isolation" },
-      ]}
       closing={{ title: "Open a run you can sign", body: "Start a workspace and run a transfer; the Trust Report comes with every job." }}
     >
+      <FeatureLinks
+        label="Related to Job space"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "Job space guide", body: "Runs, Trust Reports and sign-off in the docs", route: "help-job-theater" },
+          { icon: FileSignature, label: "Proof", body: "CI evidence and proof packs you can verify", route: "customers" },
+          { icon: Workflow, label: "Transfer Studio", body: "Where the plan is made and approved", route: "product-transfer" },
+          { icon: ShieldCheck, label: "Security", body: "Audit chain, keys, and isolation", route: "security" },
+        ]}
+      />
+
+      <section className="mk-sb-section mk-kit-sec" aria-labelledby="mk-jobs-ladder">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-jobs-ladder"
+            title="What a finished run carries"
+            lead="The comparison that ran, the rows held back, and a verdict a reviewer can sign."
+          />
+          <JobsBento />
+        </div>
+      </section>
+
       <FeatureRow
         id="mk-jobs-green"
         title="A green job is not proof"
@@ -216,10 +258,6 @@ export function JobTheaterPage(p: PageProps) {
       >
         <GreenVsCounted />
       </FeatureRow>
-
-      <TableSection id="mk-jobs-ladder" title="Each table names the comparison that ran" body="Only a comparison of every row is called proven.">
-        <CoverageTable />
-      </TableSection>
 
       <FeatureRow
         id="mk-jobs-sign"
@@ -239,22 +277,22 @@ export function JobTheaterPage(p: PageProps) {
         <SignoffPanel title="Trust Report, sign-off" meta="Example rows, the home page's run" counts={RUN} />
       </FeatureRow>
 
-      <FeatureRow
+      <CodeBand
         id="mk-jobs-evid"
         title="Evidence you can verify yourself"
-        body="Download a run's proof pack and check it without trusting the screen."
-        more={
-          <RowPoints
-            items={[
-              { icon: FileSearch, lead: "A sampled pack", text: "can be exported, but refuses the migration proven claim." },
-              { icon: FileText, lead: "The Markdown report", text: "is rendered from the signed pack, approvals included." },
-              { icon: Info, lead: "Not an attestation:", text: "a pack is engineering evidence, not an audit." },
-            ]}
-          />
-        }
-      >
-        <ProofPackApi />
-      </FeatureRow>
+        body="Read a run's Trust Report and download its proof pack from the API, then check the pack without trusting the screen."
+        points={[
+          "A pack claims \u201cmigration proven\u201d only after a full checksum. A sampled pack can be exported, but refuses that claim.",
+          "The Markdown report is rendered from the signed pack, approvals included.",
+          "A pack is engineering evidence, not an attestation or an audit.",
+        ]}
+        snippets={[
+          { label: "Proof pack", code: JOBS_PROOF_PACK, source: "Docs, verification: proof pack (export needs job.read)" },
+          { label: "Trust Report", code: JOBS_TRUST_REPORT, source: "Docs, quickstart: read the verdict (needs job.read)" },
+          { label: "Follow the job", code: JOBS_FOLLOW, source: "Docs, quickstart: follow the job" },
+        ]}
+        cardLabel="Job space API examples from the docs"
+      />
     </StoryFrame>
   );
 }

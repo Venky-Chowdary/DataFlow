@@ -1,0 +1,1245 @@
+/**
+ * Marketing pass 7: the component kit (components/marketing/kit/).
+ *
+ * One bold element per page, the statement (read = landed + held +
+ * skipped, 0 unaccounted); everything around it stays quiet. Radii by
+ * hierarchy: the closing card 24, tiles and panels 16, mini UI 8, pills
+ * full. Hairline borders, no tile shadows, no hover on static tiles, no
+ * arrows appended to links. The only gradient is the glow in the closing
+ * card. Tokens only: no hex, no raw radius, no important flags.
+ *
+ * Loaded last from marketing-base.css, so equal-specificity rules here win
+ * over the earlier marketing sheets.
+ */
+
+.mk {
+  --mk-kit-radius-card: calc(var(--df-radius-2xl) * 1.5);
+  --mk-kit-radius-tile: var(--df-radius-2xl);
+  --mk-kit-radius-ui: var(--df-radius-md);
+  --mk-kit-gap: 16px;
+  --mk-kit-pad: 20px;
+  --mk-kit-op: 28px;
+  --mk-tile-bg: color-mix(in srgb, white 70%, var(--mk-page));
+}
+
+html[data-theme="dark"] .mk {
+  --mk-tile-bg: var(--mk-panel);
+}
+
+@media (min-width: 768px) {
+  .mk {
+    --mk-kit-pad: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .mk {
+    --mk-kit-gap: 24px;
+  }
+}
+
+/* ── SplitHead ──────────────────────────────────────────────────── */
+
+.mk .mk-split {
+  display: grid;
+  gap: 16px;
+  margin: 0 0 40px;
+}
+
+.lp.mk .mk-split h2 {
+  max-width: 20em;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lp.mk .mk-split .mk-split-lead {
+  max-width: 36em;
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-lead);
+  line-height: 1.55;
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-split {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: var(--mk-col-gap);
+    align-items: start;
+    margin-bottom: 48px;
+  }
+
+  .lp.mk .mk-split h2 {
+    grid-column: 1 / span 7;
+  }
+
+  .lp.mk .mk-split .mk-split-lead {
+    grid-column: 8 / span 5;
+    padding-top: 6px;
+  }
+}
+
+/* ── Bento ──────────────────────────────────────────────────────── */
+
+.mk .mk-kit-bento {
+  display: grid;
+  gap: var(--mk-kit-gap);
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-kit-bento {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .mk .mk-tile--3 { grid-column: span 3; }
+  .mk .mk-tile--4 { grid-column: span 4; }
+  .mk .mk-tile--5 { grid-column: span 5; }
+  .mk .mk-tile--6 { grid-column: span 6; }
+  .mk .mk-tile--7 { grid-column: span 7; }
+  .mk .mk-tile--8 { grid-column: span 8; }
+  .mk .mk-tile--9 { grid-column: span 9; }
+  .mk .mk-tile--12 { grid-column: 1 / -1; }
+}
+
+.mk .mk-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  padding: var(--mk-kit-pad);
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--mk-kit-radius-tile);
+  background: var(--mk-tile-bg);
+  box-shadow: none;
+}
+
+.lp.mk .mk-tile h3 {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-h3);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.mk .mk-tile-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+}
+
+.lp.mk .mk-tile-figure {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-stat);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.lp.mk .mk-tile-body {
+  max-width: 38em;
+  margin: 8px 0 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
+}
+
+/* A step of a real sequence: number in a hairline circle, then its name. */
+.lp.mk .mk-tile-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+}
+
+.mk .mk-tile-step-n {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  color: var(--mk-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The product fragment sits at the tile's foot. With `is-bleed` it runs
+   off the tile's bottom edge and is cropped there; its sides keep their
+   border, so the crop reads as deliberate rather than as a layout bug. */
+.mk .mk-tile-ui {
+  min-width: 0;
+  margin-top: auto;
+  overflow: hidden;
+  border-radius: var(--mk-kit-radius-ui);
+}
+
+.mk .mk-tile-ui.is-bleed {
+  margin-bottom: calc(-1 * var(--mk-kit-pad));
+  border-radius: var(--mk-kit-radius-ui) var(--mk-kit-radius-ui) 0 0;
+}
+
+.mk .mk-tile-ui.is-bleed > .mk-app-surface {
+  border-bottom: 0;
+  border-radius: var(--mk-kit-radius-ui) var(--mk-kit-radius-ui) 0 0;
+}
+
+/* ── Mini product UI inside a tile (12px floor, product sizes) ──── */
+
+.mk .mk-tui {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border-radius: var(--mk-kit-radius-ui);
+  font-size: 13px;
+}
+
+.mk .mk-tui code,
+.mk .mk-tui .mk-app-pill {
+  font-size: 12px;
+}
+
+.mk .mk-tui-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mk .mk-tui-head strong {
+  font-weight: 600;
+}
+
+.mk .mk-tui-muted {
+  color: var(--app-ink-2);
+}
+
+.mk .mk-tui-grow {
+  flex: 1;
+}
+
+.mk .mk-tui-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.mk .mk-tui-table th,
+.mk .mk-tui-table td {
+  padding: 8px 10px 8px 0;
+  border-top: 1px solid var(--app-rule);
+  font-weight: 400;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.mk .mk-tui-table thead th {
+  border-top: 0;
+  color: var(--app-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mk .mk-tui-table .is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.mk .mk-tui-table tr.is-review > * {
+  background: var(--app-muted);
+}
+
+.mk .mk-tui-table tr.is-held > * {
+  background: var(--df-warning-bg);
+}
+
+.mk .mk-tui-table tr.is-held td.is-num {
+  color: var(--df-warning-text);
+  font-weight: 600;
+}
+
+.mk .mk-tui-table--ladder td,
+.mk .mk-tui-table--held td {
+  white-space: normal;
+}
+
+.mk .mk-tui-proof {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--df-success-text);
+  font-weight: 600;
+}
+
+.mk .mk-tui-gates {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mk .mk-tui-gates li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.mk .mk-tui-gates svg {
+  color: var(--df-success-text);
+}
+
+.mk .mk-tui-gates small {
+  color: var(--df-success-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-tui-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--app-rule);
+  color: var(--app-ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mk .mk-tui-eq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.mk .mk-tui-eq div {
+  display: grid;
+  grid-template-areas: ". dt" "op dd";
+  column-gap: 14px;
+  row-gap: 2px;
+}
+
+.mk .mk-tui-eq dt {
+  grid-area: dt;
+  color: var(--app-ink-2);
+  font-size: 12px;
+}
+
+.mk .mk-tui-eq dd {
+  grid-area: dd;
+  margin: 0;
+  font-size: var(--mk-fs-h3);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mk .mk-tui-eq .is-landed dd {
+  color: var(--df-success-text);
+}
+
+.mk .mk-tui-eq .is-held dd {
+  color: var(--df-warning-text);
+}
+
+/* Operators are drawn from data-op, so the dl holds only dt/dd groups. */
+.mk :is(.mk-tui-eq, .mk-sumline, .mk-sb-eq) div[data-op]::before {
+  grid-area: op;
+  align-self: center;
+  color: var(--mk-ink-3);
+  font-size: var(--mk-fs-body);
+  font-weight: 400;
+  content: attr(data-op) / "";
+}
+
+.mk .mk-tui-eq div[data-op]::before {
+  color: var(--app-ink-3);
+}
+
+.mk :is(.mk-tui-eq, .mk-sb-eq) div:not([data-op]) {
+  grid-template-areas: "dt" "dd";
+}
+
+.mk .mk-sumline div:not([data-op]) {
+  grid-template-areas: "dd" "dt";
+}
+
+.mk .mk-tui-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.mk .mk-tui-counts div {
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--mk-kit-radius-ui);
+}
+
+.mk .mk-tui-counts dt {
+  color: var(--app-ink-2);
+  font-size: 12px;
+}
+
+.mk .mk-tui-counts dd {
+  margin: 2px 0 0;
+  font-size: var(--mk-fs-body);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Counts as a short ledger: label left, figure right, hairlines between. */
+.mk .mk-tui-counts--rows {
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+.mk .mk-tui-counts--rows div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-none);
+}
+
+.mk .mk-tui-counts--rows dt {
+  font-size: 13px;
+}
+
+.mk .mk-tui-counts--rows dd {
+  margin: 0;
+}
+
+.mk .mk-tui-rows {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--mk-kit-radius-ui);
+  list-style: none;
+}
+
+.mk .mk-tui-rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--app-rule);
+  transition: background-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-tui-rows li:last-child {
+  border-bottom: 0;
+}
+
+.mk .mk-tui-rows li code {
+  white-space: nowrap;
+}
+
+.mk .mk-tui-rows li span {
+  color: var(--df-warning-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mk .mk-tui-rows li.is-landed {
+  background: var(--df-success-bg);
+}
+
+.mk .mk-tui-rows li.is-landed span {
+  color: var(--df-success-text);
+}
+
+.mk .mk-tui-rows--skipped li {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.mk .mk-tui-rows--skipped li span {
+  color: var(--app-ink-2);
+}
+
+.mk .mk-tui-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 12px;
+}
+
+.mk .mk-tui-actions .mk-app-tbtn {
+  border-radius: var(--df-radius-pill);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lp.mk .mk-tui-filter {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px dashed var(--app-rule);
+  border-radius: var(--df-radius-pill);
+  color: var(--app-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mk .mk-tui-verdicts {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mk .mk-tui-verdicts li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.mk .mk-tui-verdicts li:first-child {
+  border-top: 0;
+}
+
+.lp.mk .mk-tui-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--mk-kit-radius-ui);
+  background: var(--app-bg);
+  color: var(--app-ink-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+@media (max-width: 639px) {
+  .mk .mk-tui-counts {
+    grid-template-columns: 1fr;
+  }
+
+  .mk .mk-tui-verdicts li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mk .mk-tui-verdicts li .mk-tui-muted {
+    display: none;
+  }
+}
+
+/* ── Home: where every row went, built as the equation ─────────── */
+
+/* The operator joining a tile to the one before it, centred in the gap. */
+.mk .mk-tile-op {
+  position: absolute;
+  top: calc(-0.5 * var(--mk-kit-gap) - 0.5 * var(--mk-kit-op));
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: var(--mk-kit-op);
+  height: var(--mk-kit-op);
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-page);
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-h3);
+  font-weight: 500;
+  line-height: 1;
+  transform: translateX(-50%);
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-tile:not(.mk-tile--12) > .mk-tile-op {
+    top: 22px;
+    left: calc(-0.5 * var(--mk-kit-gap) - 0.5 * var(--mk-kit-op) - 1px);
+    transform: none;
+  }
+}
+
+.lp.mk .mk-tile--landed .mk-tile-figure,
+.lp.mk .mk-tile--balance .mk-tile-figure {
+  color: var(--mk-landed);
+}
+
+.lp.mk .mk-tile--held .mk-tile-figure {
+  color: var(--mk-held);
+}
+
+.lp.mk .mk-tile--skipped .mk-tile-figure {
+  color: var(--mk-ink-2);
+}
+
+/* The sum: the statement's last line, across the whole row. */
+.mk .mk-tile--sum .mk-tile-ui {
+  margin-top: 0;
+  overflow: visible;
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-tile--sum {
+    display: grid;
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    column-gap: 48px;
+    align-items: center;
+  }
+}
+
+.mk .mk-sumline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.mk .mk-sumline div {
+  display: grid;
+  grid-template-areas: "op dd" ". dt";
+  column-gap: 16px;
+  row-gap: 4px;
+}
+
+.mk .mk-sumline dt {
+  grid-area: dt;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+}
+
+.mk .mk-sumline dd {
+  grid-area: dd;
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-stat);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.mk .mk-sumline div[data-op]::before {
+  font-size: var(--mk-fs-h3);
+}
+
+.mk .mk-sumline .is-held dd {
+  color: var(--mk-held);
+}
+
+.mk .mk-sumline .is-result dd {
+  color: var(--mk-landed);
+}
+
+@media (max-width: 767px) {
+  .mk .mk-sumline {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: normal;
+    gap: 0;
+  }
+
+  .mk .mk-sumline div,
+  .mk .mk-sumline div:not([data-op]) {
+    grid-template-areas: "dt op dd";
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: baseline;
+    column-gap: 8px;
+    padding: 8px 0;
+    border-top: 1px solid var(--mk-rule);
+  }
+
+  .mk .mk-sumline div:first-child {
+    border-top: 0;
+  }
+
+  .mk .mk-sumline dd {
+    font-size: var(--mk-fs-h3);
+  }
+
+  .mk .mk-sumline .is-result {
+    border-top: 2px solid var(--mk-ink);
+  }
+}
+
+/* Job space: the green-job panel's counts read as the equation. */
+.mk .mk-sb-eq div {
+  display: grid;
+  grid-template-areas: ". dt" "op dd";
+  column-gap: 16px;
+}
+
+.mk .mk-sb-eq dt {
+  grid-area: dt;
+}
+
+.mk .mk-sb-eq dd {
+  grid-area: dd;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 767px) {
+  .mk .mk-sb-eq div[data-op] {
+    grid-template-areas: "dt" "dd";
+  }
+
+  .mk .mk-sb-eq div[data-op]::before {
+    content: none;
+  }
+}
+
+@media (min-width: 768px) {
+  .mk .mk-sb-eq dd {
+    font-size: var(--mk-fs-stat);
+  }
+
+  .mk .mk-sb-eq {
+    gap: 14px 16px;
+  }
+}
+
+/* ── StatRow: figures set in their sentence, between hairlines ─── */
+
+.mk .mk-statrow {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-block: 1px solid var(--mk-rule);
+  list-style: none;
+}
+
+.mk .mk-statrow li + li {
+  border-top: 1px solid var(--mk-rule);
+}
+
+.mk .mk-statrow a,
+.mk .mk-statrow li > span {
+  display: block;
+  padding: 20px 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-body);
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.mk .mk-statrow-fig {
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-stat);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.mk .mk-statrow-rel {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-body);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.mk .mk-statrow a .mk-statrow-text {
+  color: var(--mk-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  transition: text-decoration-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-statrow a:hover .mk-statrow-text {
+  text-decoration-color: var(--mk-ink);
+}
+
+@media (min-width: 768px) {
+  .mk .mk-statrow {
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+  }
+
+  .mk .mk-statrow li + li {
+    border-top: 0;
+    border-left: 1px solid var(--mk-rule);
+  }
+
+  .mk .mk-statrow a,
+  .mk .mk-statrow li > span {
+    padding: 28px 24px;
+  }
+
+  .mk .mk-statrow li:first-child a,
+  .mk .mk-statrow li:first-child > span {
+    padding-left: 0;
+  }
+}
+
+/* ── FeatureLinks: under the hero frame, four quiet links ──────── */
+
+.mk .mk-sb-hero:has(+ .mk-flinks) {
+  padding-bottom: 40px;
+}
+
+.mk .mk-flinks {
+  background: var(--mk-page);
+}
+
+.mk .mk-flinks ul {
+  display: grid;
+  gap: 0 var(--mk-col-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mk .mk-flinks a {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-content: start;
+  gap: 4px 10px;
+  height: 100%;
+  padding: 16px 0 4px;
+  border-top: 1px solid var(--mk-rule);
+  color: var(--mk-ink);
+  text-decoration: none;
+  transition: border-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-flinks svg {
+  margin-top: 3px;
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-flinks-label {
+  font-size: var(--mk-fs-small);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  transition: text-decoration-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-flinks-body {
+  grid-column: 2;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.45;
+}
+
+.mk .mk-flinks a:hover {
+  border-top-color: var(--mk-ink);
+}
+
+.mk .mk-flinks a:hover .mk-flinks-label {
+  text-decoration-color: var(--mk-ink);
+}
+
+@media (min-width: 768px) {
+  .mk .mk-flinks ul {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-flinks ul {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* ── Code band and CodeCard ─────────────────────────────────────── */
+
+.mk .mk-codeband-grid {
+  display: grid;
+  gap: 32px;
+}
+
+.mk .mk-codeband .mk-sb-head {
+  margin-bottom: 0;
+}
+
+.lp.mk .mk-codeband-points {
+  display: grid;
+  margin: 28px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-codeband-points li {
+  max-width: 36em;
+  padding: 12px 0;
+  border-top: 1px solid var(--mk-rule);
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-codeband-grid {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    align-items: center;
+    gap: 64px;
+  }
+}
+
+.mk {
+  --mk-code-bg: color-mix(in srgb, var(--df-intaglio) 62%, black);
+  --mk-code-ink: color-mix(in srgb, var(--df-on-tile) 86%, var(--mk-code-bg));
+  --mk-code-ink-2: color-mix(in srgb, var(--df-on-tile) 68%, var(--mk-code-bg));
+  --mk-code-rule: color-mix(in srgb, var(--df-on-tile) 12%, var(--mk-code-bg));
+}
+
+html[data-theme="dark"] .mk {
+  --mk-code-bg: color-mix(in srgb, var(--df-intaglio) 72%, black);
+}
+
+.mk .mk-codecard {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--mk-code-rule);
+  border-radius: var(--mk-kit-radius-tile);
+  background: var(--mk-code-bg);
+  color: var(--mk-code-ink);
+}
+
+.mk .mk-codecard-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 8px 8px;
+  border-bottom: 1px solid var(--mk-code-rule);
+}
+
+.mk .mk-codecard-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mk .mk-codecard-tabs button,
+.mk .mk-codecard-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-pill);
+  background: transparent;
+  color: var(--mk-code-ink-2);
+  font: inherit;
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--df-dur-fast) var(--df-ease), color var(--df-dur-fast) var(--df-ease),
+    border-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-codecard-tabs button:hover {
+  color: var(--df-on-tile);
+}
+
+.mk .mk-codecard-tabs button.is-active {
+  background: var(--mk-code-rule);
+  color: var(--df-on-tile);
+}
+
+.mk .mk-codecard-copy {
+  border-color: var(--mk-code-rule);
+}
+
+.mk .mk-codecard-copy:hover {
+  border-color: var(--mk-code-ink-2);
+  color: var(--df-on-tile);
+}
+
+.lp.mk .mk-codecard-title {
+  margin: 0;
+  padding-left: 8px;
+  color: var(--df-on-tile);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+}
+
+.mk .mk-codecard :focus-visible {
+  outline: 2px solid var(--df-landed-light);
+  outline-offset: 2px;
+}
+
+.mk .mk-codecard-body {
+  min-height: calc(var(--mk-code-lines, 4) * 1.75 * var(--mk-fs-caption) + 44px + 16px);
+  overflow-x: auto;
+  padding: 20px 24px 24px;
+}
+
+.mk .mk-codecard-body:focus-visible {
+  outline-offset: -2px;
+}
+
+.mk .mk-codecard pre {
+  margin: 0;
+  background: transparent;
+}
+
+.lp.mk .mk-codecard code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--mk-code-ink);
+  font-family: var(--df-font-mono);
+  font-size: var(--mk-fs-caption);
+  line-height: 1.75;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.mk .mk-code-kw {
+  color: var(--df-logo-arrow);
+  font-weight: 600;
+}
+
+.mk .mk-code-flag {
+  color: var(--mk-code-ink-2);
+}
+
+.mk .mk-code-str {
+  color: var(--df-intaglio-light);
+}
+
+.mk .mk-code-var {
+  color: var(--df-landed-light);
+}
+
+.mk .mk-code-com {
+  color: var(--mk-code-ink-2);
+  font-style: italic;
+}
+
+.lp.mk .mk-codecard-source {
+  padding: 12px 24px;
+  border-top: 1px solid var(--mk-code-rule);
+  color: var(--mk-code-ink-2);
+  font-size: var(--mk-fs-caption);
+  line-height: 1.5;
+}
+
+/* ── CtaCard: the closing card on the logo tile ink ─────────────── */
+
+.mk .mk-cta {
+  padding-block: var(--mk-section-y);
+  background: var(--mk-page);
+}
+
+.mk .mk-cta-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding: 56px 20px;
+  border: 1px solid transparent;
+  border-radius: var(--mk-kit-radius-card);
+  background: var(--df-intaglio);
+  color: var(--df-on-tile);
+  text-align: center;
+}
+
+/* The page's one gradient: a soft brand glow in the top-right corner. */
+.mk .mk-cta-card::before {
+  position: absolute;
+  top: -55%;
+  right: -15%;
+  z-index: var(--df-z-under);
+  width: min(720px, 90%);
+  aspect-ratio: 1;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--df-logo-arrow) 26%, transparent), transparent);
+  content: "";
+  pointer-events: none;
+}
+
+html[data-theme="dark"] .mk .mk-cta-card {
+  border-color: color-mix(in srgb, var(--df-on-tile) 12%, transparent);
+}
+
+html .lp.mk .mk-cta h2 {
+  max-width: 22em;
+  margin: 0 auto;
+  color: var(--df-on-tile);
+  font-weight: 500;
+  text-wrap: balance;
+}
+
+.lp.mk .mk-cta .mk-cta-body {
+  max-width: 40em;
+  margin: 16px auto 0;
+  color: color-mix(in srgb, var(--df-on-tile) 84%, var(--df-intaglio));
+  font-size: var(--mk-fs-lead);
+  line-height: 1.55;
+}
+
+.mk .mk-cta .mk-cta-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+.mk .mk-cta .mk-btn {
+  border-radius: var(--df-radius-pill);
+}
+
+.mk .mk-cta .mk-btn--primary {
+  border-color: transparent;
+  background: var(--df-on-tile);
+  color: var(--df-intaglio);
+}
+
+.mk .mk-cta .mk-btn--primary:hover {
+  background: color-mix(in srgb, var(--df-on-tile) 86%, var(--df-landed-light));
+  color: var(--df-intaglio);
+}
+
+.mk .mk-cta .mk-btn--secondary {
+  border-color: color-mix(in srgb, var(--df-on-tile) 40%, var(--df-intaglio));
+  background: transparent;
+  color: var(--df-on-tile);
+}
+
+.mk .mk-cta .mk-btn--secondary:hover {
+  border-color: var(--df-on-tile);
+  background: color-mix(in srgb, var(--df-on-tile) 8%, var(--df-intaglio));
+  color: var(--df-on-tile);
+}
+
+.mk .mk-cta :focus-visible {
+  outline: 2px solid var(--df-on-tile);
+  outline-offset: 2px;
+}
+
+.lp.mk .mk-cta .mk-cta-note {
+  margin: 20px 0 0;
+  color: color-mix(in srgb, var(--df-on-tile) 80%, var(--df-intaglio));
+  font-size: var(--mk-fs-caption);
+  line-height: 1.5;
+}
+
+.lp.mk .mk-cta .mk-cta-note a {
+  color: var(--df-on-tile);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (min-width: 768px) {
+  .mk .mk-cta-card {
+    padding: 80px 48px;
+  }
+}
+
+/* ── Home: the product switcher on the page, not a dark stage ──── */
+
+.mk .mk-showcase--light {
+  padding-block: var(--mk-section-y);
+  background: var(--mk-page);
+  color: var(--mk-ink);
+  overflow: visible;
+}
+
+.mk .mk-showcase--light h2 {
+  color: var(--mk-ink);
+}
+
+.mk .mk-showcase--light .mk-switch {
+  margin-top: 0;
+}
+
+.mk .mk-showcase--light .mk-switch-tabs {
+  border-color: var(--mk-rule);
+  background: var(--mk-sunken);
+}
+
+.mk .mk-showcase--light .mk-switch-tabs button {
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-showcase--light .mk-switch-tabs button:hover {
+  color: var(--mk-ink);
+}
+
+.mk .mk-showcase--light .mk-switch-tabs button.is-active {
+  background: var(--mk-action);
+  color: var(--mk-on-action);
+}
+
+.mk .mk-showcase--light .mk-switch-tabs button:focus-visible,
+.mk .mk-showcase--light .mk-app-picker button:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 2px;
+}
+
+.mk .mk-showcase--light .mk-app-fit {
+  border-radius: var(--mk-kit-radius-tile);
+  box-shadow: 0 0 0 1px var(--mk-rule-strong);
+}
+
+.mk .mk-showcase--light .mk-app-caption {
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-showcase--light .mk-switch-notes li {
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-showcase--light .mk-switch-notes li::before {
+  border: 1px solid var(--mk-rule-strong);
+  background: transparent;
+  color: var(--mk-ink);
+}
+
+.mk .mk-showcase--light .mk-app-picker button {
+  border-color: var(--mk-rule-strong);
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-showcase--light .mk-app-picker button.is-active {
+  border-color: var(--mk-ink);
+  background: var(--mk-ink);
+  color: var(--mk-page);
+}
+
+/* ── Radii by hierarchy on the story pages' panels ──────────────── */
+
+.mk .mk-sb-row-frame .mk-panel,
+.mk .mk-sb-panel {
+  border-radius: var(--mk-kit-radius-tile);
+}

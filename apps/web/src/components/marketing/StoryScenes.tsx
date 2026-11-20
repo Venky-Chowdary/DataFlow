@@ -97,7 +97,7 @@ function cap(caption: string | undefined, fallback: string, show: boolean | unde
   return { text: caption ?? fallback, cls: show === false ? " mk-bsc-nocap" : "" };
 }
 
-type Side = { id: string; name: string; table: string };
+export type Side = { id: string; name: string; table: string };
 
 const SRC: Side = { id: "postgresql", name: "Orders Postgres (demo)", table: "public.sales_orders" };
 const DST: Side = { id: "snowflake", name: "Warehouse Snowflake (demo)", table: "DW_DEMO.SALES_ORDERS_REPORTING" };
@@ -173,7 +173,7 @@ const STUDIO_STEPS = ["Source", "Destination", "Transform", "Map", "Validate", "
 const REVIEW_COL = "ordered_at";
 type StudioStep = "Map" | "Validate" | "Run";
 
-type TransferExample = {
+export type TransferExample = {
   src: Side;
   dst: Side;
   rows: string;
@@ -185,7 +185,7 @@ type TransferExample = {
 };
 
 /** Each page's Transfer example. The default is the home page's run. */
-const TRANSFER_EXAMPLES: Record<"home" | "transfer" | "migration", TransferExample> = {
+export const TRANSFER_EXAMPLES: Record<"home" | "transfer" | "migration", TransferExample> = {
   home: {
     src: SRC,
     dst: DST,

@@ -18,6 +18,18 @@ import { SYNC_MODES } from "../../lib/transferConstants";
 /** The home page's example run. Shown on Home and on Job space only. */
 export const RUN = { read: 48_213_906, landed: 48_213_871, held: 33, skipped: 2 };
 
+/** The keys of the home run's held rows shown in examples (10 of RUN.held). */
+export const RUN_HELD_KEYS: readonly string[] = ["48204", "48977", "51310", "52046", "55813", "60129", "61402", "63318", "66751", "70264"];
+
+/** Which comparison ran, weakest to strongest, as the docs define it. */
+export const COVERAGE_RUNGS: { id: string; what: string; strength: string; proof?: boolean }[] = [
+  { id: "none", what: "Nothing compared", strength: "No evidence" },
+  { id: "count_only", what: "Only row counts", strength: "Says nothing about values" },
+  { id: "sampled", what: "Values on a sample of rows", strength: "An estimate with a stated bound" },
+  { id: "key_diff", what: "Every row, by key", strength: "Proof for the rows compared", proof: true },
+  { id: "full_checksum", what: "Every row, by checksum", strength: "Proof for the rows compared", proof: true },
+];
+
 /** Orders per region on each side of the home run; sums to RUN. */
 export const REGIONS: { region: string; source: number; held: number }[] = [
   { region: "APAC", source: 9_642_781, held: 0 },
@@ -285,15 +297,15 @@ export function GreenVsCounted() {
             <dt>Read</dt>
             <dd>{fmtN(RUN.read)}</dd>
           </div>
-          <div className="is-landed">
+          <div className="is-landed" data-op="=">
             <dt>Landed</dt>
             <dd>{fmtN(RUN.landed)}</dd>
           </div>
-          <div className="is-held">
+          <div className="is-held" data-op="+">
             <dt>Held</dt>
             <dd>{RUN.held}</dd>
           </div>
-          <div>
+          <div data-op="+">
             <dt>Skipped</dt>
             <dd>{RUN.skipped}</dd>
           </div>
@@ -308,13 +320,7 @@ export function GreenVsCounted() {
 
 /** Which comparison ran, weakest to strongest, as the docs define it. */
 export function CoverageTable() {
-  const rungs: { id: string; what: string; strength: string; proof?: boolean }[] = [
-    { id: "none", what: "Nothing compared", strength: "No evidence" },
-    { id: "count_only", what: "Only row counts", strength: "Says nothing about values" },
-    { id: "sampled", what: "Values on a sample of rows", strength: "An estimate with a stated bound" },
-    { id: "key_diff", what: "Every row, by key", strength: "Proof for the rows compared", proof: true },
-    { id: "full_checksum", what: "Every row, by checksum", strength: "Proof for the rows compared", proof: true },
-  ];
+  const rungs = COVERAGE_RUNGS;
   return (
     <table className="mk-sb-table mk-jobs-cov">
       <caption className="mk-sr-only">Which comparison ran, from weakest to strongest</caption>

@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
+import { CtaCard } from "./kit/CtaCard";
 
 /**
- * Closing band for a marketing page: the logo tile green, used once per page.
- * Children are the actions (one primary, one secondary).
+ * Closing section for a marketing page, used once per page. Renders the
+ * kit's CtaCard: a contained card on the logo tile ink. Children are the
+ * actions (one primary, one secondary).
  */
 export function MarketingClosing({
   title,
@@ -16,17 +18,8 @@ export function MarketingClosing({
   children: ReactNode;
 }) {
   return (
-    <section className="mk-closing" aria-label={title}>
-      <div className="mk-wrap mk-closing-grid">
-        <div>
-          <h2>{title}</h2>
-          <p>{body}</p>
-        </div>
-        <div className="mk-closing-actions">
-          <div className="mk-actions">{children}</div>
-          {note ? <p className="mk-caption">{note}</p> : null}
-        </div>
-      </div>
-    </section>
+    <CtaCard title={title} body={body} note={note}>
+      {children}
+    </CtaCard>
   );
 }
