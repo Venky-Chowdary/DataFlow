@@ -31,6 +31,7 @@ from connectors.column_widen_restore import (
 )
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
+from connectors.salvage_cancel import SalvageCancelGuard
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -2906,7 +2907,13 @@ def write_mapped_rows(
                                 insert = _build_insert()
                             # SAVEPOINT per row + single commit — avoids one RTT/commit
                             # per rejected cell (was the CDC/quarantine throughput cliff).
+                            # D299: a cancel during the salvage discards the chunk.
+                            salvage_cancel = SalvageCancelGuard(conn, cur)
                             for row_i, row in enumerate(batch):
+                                held_now = _held_overwrite()
+                                salvage_cancel.check(
+                                    written, held_overwrite=bool(held_now and held_now.active)
+                                )
                                 try:
                                     cur.execute("SAVEPOINT df_row_sp")
                                     write_rows = [row]

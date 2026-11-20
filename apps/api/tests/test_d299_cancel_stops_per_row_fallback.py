@@ -193,3 +193,60 @@ def test_mysql_per_row_fallback_stops_after_cancel(monkeypatch):
     finally:
         set_cancel_probe(None)
         drop("mysql", table)
+
+
+def test_postgresql_salvage_discards_its_chunk_after_cancel(monkeypatch):
+    """PostgreSQL salvages a failed chunk row by row under SAVEPOINTs and commits
+    once at the end of the chunk. A cancel pressed during that salvage must
+    discard the chunk: before the fix every salvaged row of the chunk was
+    committed after the job already said cancelled (a whole chunk late)."""
+    from tests.r13_mapping_harness import pg_cfg
+
+    cfg = pg_cfg()
+    import connectors.postgresql_writer as pw
+    from services.cancel_check import set_cancel_probe
+    from services.error_handling import TransferCancelled
+
+    table = f"d299_{token()}"
+    drop("postgresql", table)
+    run_sql(
+        "postgresql",
+        f'CREATE TABLE "{table}" (id INT PRIMARY KEY, name VARCHAR(100), '
+        "CHECK (id <> 1))",
+    )
+    salvaging: list[bool] = [False]
+    real_is_data_error = pw.is_sql_data_error
+
+    def spying_is_data_error(exc):
+        # The batch INSERT failed on row 1: the writer is about to salvage.
+        salvaging[0] = True
+        return real_is_data_error(exc)
+
+    def probe(rows_written=None):
+        if salvaging[0]:
+            raise TransferCancelled("cancelled", rows_written=rows_written)
+
+    monkeypatch.setattr(pw, "is_sql_data_error", spying_is_data_error)
+    set_cancel_probe(probe)
+    try:
+        with pytest.raises(TransferCancelled) as caught:
+            pw.write_mapped_rows(
+                host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                username=cfg["username"], password=cfg["password"], schema="public",
+                connection_string="", ssl=False, table_name=table,
+                headers=["id", "name"], data_rows=_rows(30), mappings=_mappings(),
+                column_types={"id": "INTEGER", "name": "VARCHAR(100)"},
+                create_table=False, write_mode="insert", error_policy="quarantine",
+            )
+        count = run_sql("postgresql", f'SELECT COUNT(*) FROM "{table}"')[0][0]  # nosec B608
+        assert count == 0, count
+        assert caught.value.rows_written == 0
+        # The cancelled chunk left no open transaction behind on the table.
+        assert run_sql(
+            "postgresql",
+            "SELECT COUNT(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+            f"WHERE c.relname = '{table}'",  # nosec B608 - generated test name
+        )[0][0] == 0
+    finally:
+        set_cancel_probe(None)
+        drop("postgresql", table)
