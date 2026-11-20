@@ -81,6 +81,12 @@ def test_unquoted_csv_empty_is_null_and_quoted_empty_stays_empty():
         validation_mode="balanced",
         empty_cells_as_null=True,
     )
+    # The probe must examine the column: a report of nothing proves nothing.
+    assert report["checked"] == 1, report
+    column = report["by_source"]["payload"]
+    # The SQL NULL and the '' (absence under empty_cells_as_null) both land NULL,
+    # exactly what the writer does; neither is a failure.
+    assert column["nulls"] == 2 and column["failed"] == 0
     assert report["has_blocking_failures"] is False
     assert "EMPTY_VALUE_NOT_NULLABLE" not in str(report)
 

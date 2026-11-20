@@ -207,24 +207,68 @@ def test_csv_file_to_postgres_transfer_keeps_a_quoted_crlf():
 # ── D297: a quoted "" on a JSON column ──────────────────────────────────────
 
 
-def test_sqlserver_nvarchar_json_keeps_a_quoted_empty_and_nulls_an_unquoted_one():
-    """SQL Server keeps a JSON column in NVARCHAR(MAX), which stores '' (R2):
-    the shared empty-cell bind used to land '' there as NULL. The plan does
-    not block either cell."""
-    from services.coercion_probe import analyze_coercion
-    from src.transfer.file_stream import file_empty_cell_bind
+def _json_into_nvarchar(empty_cells_as_null: bool):
+    """Plan (coercion probe) and execute (the writer's row mapper) on one column.
 
-    assert file_empty_cell_bind("", "NVARCHAR(MAX)") == ""
-    assert file_empty_cell_bind(None, "NVARCHAR(MAX)") is None
+    SQL Server keeps a JSON column in NVARCHAR(MAX). The ``json`` transform
+    does not accept '' (it is not JSON text), so the writer lands a quoted ''
+    as NULL when blank cells are absence (``empty_cells_as_null``) and refuses
+    the row otherwise. The plan must say the same thing (R8).
+    """
+    from connectors.writer_common import build_mapped_rows_with_details
+    from services.coercion_probe import analyze_coercion
+
+    mapping = {"source": "payload", "target": "payload", "source_type": "TEXT",
+               "target_type": "NVARCHAR(MAX)", "transform": "json", "create_new": True}
     report = analyze_coercion(
         sample_rows=[{"payload": None}, {"payload": ""}, {"payload": "{}"}],
-        mappings=[{"source": "payload", "target": "payload", "source_type": "TEXT",
-                   "target_type": "NVARCHAR(MAX)", "transform": "json", "create_new": True}],
+        mappings=[mapping],
         source_types={"payload": "TEXT"}, dest_types={"payload": "NVARCHAR(MAX)"},
         dest_db_type="sqlserver", table_exists=False, validation_mode="balanced",
-        empty_cells_as_null=True,
+        empty_cells_as_null=empty_cells_as_null,
     )
+    rows, errors = build_mapped_rows_with_details(
+        headers=["id", "payload"], data_rows=[["1", ""], ["2", None], ["3", "{}"]],
+        mappings=[{"source": "id", "target": "id"}, mapping],
+        target_cols=["id", "payload"], column_types={"id": "INTEGER", "payload": "TEXT"},
+        dest_types={"payload": "NVARCHAR(MAX)"}, dest_kind="sqlserver",
+        error_policy="fail", empty_cells_as_null=empty_cells_as_null,
+    )[:2]
+    return report, rows, errors
+
+
+def test_sqlserver_nvarchar_json_lands_a_quoted_empty_as_null_when_blanks_are_absence():
+    """D297/R8: a blank cell is absence under empty_cells_as_null, so the
+    writer stores NULL; the plan probes the column and predicts that NULL."""
+    from src.transfer.file_stream import file_empty_cell_bind
+
+    # Without a transform, the shared empty-cell bind keeps '' on NVARCHAR (R2).
+    assert file_empty_cell_bind("", "NVARCHAR(MAX)") == ""
+    assert file_empty_cell_bind(None, "NVARCHAR(MAX)") is None
+
+    report, rows, errors = _json_into_nvarchar(True)
+    assert report["checked"] == 1, report
+    column = report["by_source"]["payload"]
+    assert column["failed"] == 0
+    assert column["nulls"] == 2  # the SQL NULL and the '' the writer lands as NULL
+    assert column["ok"] == 1
     assert report["has_blocking_failures"] is False
+    assert errors == []
+    assert sorted(rows) == [(1, None), (2, None), (3, "{}")]
+
+
+def test_sqlserver_nvarchar_json_refuses_a_quoted_empty_at_plan_as_at_execute():
+    """Without empty_cells_as_null the writer refuses the '' row; the plan
+    must name that refusal rather than report nothing (R8)."""
+    report, rows, errors = _json_into_nvarchar(False)
+    assert report["checked"] == 1, report
+    column = report["by_source"]["payload"]
+    assert column["failed"] == 1
+    assert "Empty value cannot coerce to json" in str(column["sample_failures"])
+    assert column["severity"] == "block"
+    assert report["has_blocking_failures"] is True
+    assert errors and "Empty value cannot coerce to json" in errors[0]
+    assert (1, "") not in rows
 
 
 @pytest.mark.parametrize("pg_type", ["json", "jsonb"])
