@@ -250,3 +250,164 @@ def test_postgresql_salvage_discards_its_chunk_after_cancel(monkeypatch):
     finally:
         set_cancel_probe(None)
         drop("postgresql", table)
+
+
+def _pg_salvage_cancel_after(monkeypatch, salvaged_before_cancel: int, seen: dict):
+    """Cancel once the PostgreSQL salvage has released ``salvaged_before_cancel`` rows.
+
+    The guard polls before each salvaged row (throttled in production; every
+    row here), so poll ``n`` runs after rows ``1..n-1`` of the chunk were
+    tried. Rows already salvaged sit in the open chunk transaction.
+    """
+    import functools
+
+    import connectors.postgresql_writer as pw
+    from services.cancel_check import set_cancel_probe
+    from services.error_handling import TransferCancelled
+
+    monkeypatch.setattr(pw, "write_chunk_size", lambda *_a, **_kw: 10)
+    monkeypatch.setattr(pw, "SalvageCancelGuard", functools.partial(pw.SalvageCancelGuard, interval=0.0))
+    salvaging = [False]
+    polls = [0]
+    real_is_data_error = pw.is_sql_data_error
+
+    def spying_is_data_error(exc):
+        salvaging[0] = True
+        return real_is_data_error(exc)
+
+    def probe(rows_written=None):
+        if not salvaging[0]:
+            return
+        polls[0] += 1
+        # Poll n runs before the chunk's n-th row: rows 1..n-1 were tried.
+        if polls[0] == salvaged_before_cancel + 1:
+            seen["rows_written_at_cancel"] = rows_written
+            on_cancel = seen.get("on_cancel")
+            if on_cancel:
+                on_cancel()
+            raise TransferCancelled("cancelled", rows_written=rows_written)
+
+    monkeypatch.setattr(pw, "is_sql_data_error", spying_is_data_error)
+    set_cancel_probe(probe)
+
+
+def test_postgresql_salvage_rolls_back_rows_it_already_salvaged_on_cancel(monkeypatch):
+    """D299: chunk 1 (ids 1-10) commits; chunk 2 fails on id 15 and is salvaged
+    row by row. A cancel after ids 11-13 were released under their savepoints
+    must roll those back too: the table keeps exactly chunk 1, and the cancel
+    reports the 10 committed rows, not 13."""
+    import psycopg2
+
+    from tests.r13_mapping_harness import pg_cfg
+
+    cfg = pg_cfg()
+    import connectors.postgresql_writer as pw
+    from services.cancel_check import set_cancel_probe
+    from services.error_handling import TransferCancelled
+
+    table = f"d299_{token()}"
+    drop("postgresql", table)
+    run_sql("postgresql", f'CREATE TABLE "{table}" (id INT PRIMARY KEY, name VARCHAR(100), CHECK (id <> 15))')
+    conn = psycopg2.connect(
+        host=cfg["host"], port=cfg["port"], dbname=cfg["database"], user=cfg["username"], password=cfg["password"]
+    )
+    seen: dict = {}
+
+    def in_flight():
+        # The writer's own transaction, at the moment of the cancel.
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE id > 10')  # nosec B608 - generated test name
+            seen["salvaged_uncommitted"] = cur.fetchone()[0]
+
+    seen["on_cancel"] = in_flight
+    _pg_salvage_cancel_after(monkeypatch, 3, seen)
+    try:
+        with pytest.raises(TransferCancelled) as caught:
+            pw.write_mapped_rows(
+                host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                username=cfg["username"], password=cfg["password"], schema="public",
+                connection_string="", ssl=False, table_name=table,
+                headers=["id", "name"], data_rows=_rows(30), mappings=_mappings(),
+                column_types={"id": "INTEGER", "name": "VARCHAR(100)"},
+                create_table=False, write_mode="insert", error_policy="quarantine",
+                connection=conn, close_connection=False,
+            )
+        # Ids 11-13 really were salvaged into the open chunk when cancel came...
+        assert seen["salvaged_uncommitted"] == 3, seen
+        # ...and none of them committed afterwards.
+        ids = [r[0] for r in run_sql("postgresql", f'SELECT id FROM "{table}" ORDER BY id')]  # nosec B608
+        assert ids == list(range(1, 11)), ids
+        assert caught.value.rows_written == 10
+        assert seen["rows_written_at_cancel"] == 10
+        assert run_sql(
+            "postgresql",
+            "SELECT COUNT(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+            f"WHERE c.relname = '{table}'",  # nosec B608 - generated test name
+        )[0][0] == 0
+    finally:
+        set_cancel_probe(None)
+        conn.close()
+        drop("postgresql", table)
+
+
+def test_postgresql_salvage_cancel_in_a_held_overwrite_discards_only_its_chunk(monkeypatch):
+    """A full-refresh overwrite holds TRUNCATE and every chunk in one
+    transaction. A cancel mid-salvage rolls back to the chunk savepoint
+    (df_ow_chunk): the salvaged rows go, the transaction stays usable, and
+    the caller's rollback of the held overwrite leaves the old table intact."""
+    import psycopg2
+
+    from connectors.write_resilience import finish_held_overwrite
+    from tests.r13_mapping_harness import pg_cfg
+
+    cfg = pg_cfg()
+    import connectors.postgresql_writer as pw
+    from services.cancel_check import set_cancel_probe
+    from services.error_handling import TransferCancelled
+
+    table = f"d299_{token()}"
+    drop("postgresql", table)
+    run_sql("postgresql", f'CREATE TABLE "{table}" (id INT PRIMARY KEY, name VARCHAR(100), CHECK (id <> 15))')
+    run_sql("postgresql", f"INSERT INTO \"{table}\" (id, name) VALUES (100, 'old-a'), (101, 'old-b')")  # nosec B608
+    conn = psycopg2.connect(
+        host=cfg["host"], port=cfg["port"], dbname=cfg["database"], user=cfg["username"], password=cfg["password"]
+    )
+    conn.autocommit = False
+    seen: dict = {}
+
+    def in_flight():
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{table}" WHERE id > 10 AND id < 100')  # nosec B608
+            seen["salvaged_uncommitted"] = cur.fetchone()[0]
+
+    seen["on_cancel"] = in_flight
+    _pg_salvage_cancel_after(monkeypatch, 3, seen)
+    try:
+        with pytest.raises(TransferCancelled):
+            pw.write_mapped_rows(
+                host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                username=cfg["username"], password=cfg["password"], schema="public",
+                connection_string="", ssl=False, table_name=table,
+                headers=["id", "name"], data_rows=_rows(30), mappings=_mappings(),
+                column_types={"id": "INTEGER", "name": "VARCHAR(100)"},
+                create_table=False, write_mode="insert", error_policy="quarantine",
+                connection=conn, close_connection=False, pg_overwrite_in_transaction=True,
+            )
+        assert seen["salvaged_uncommitted"] == 3, seen
+        # Still inside the held overwrite: chunk 1 is there, the salvaged
+        # chunk-2 rows are gone, the old rows were truncated, and the
+        # transaction is not aborted (a full rollback would have dropped
+        # chunk 1 and the TRUNCATE too).
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id FROM "{table}" ORDER BY id')  # nosec B608
+            assert [r[0] for r in cur.fetchall()] == list(range(1, 11))
+        finish_held_overwrite(conn, success=False)
+        rows = run_sql("postgresql", f'SELECT id, name FROM "{table}" ORDER BY id')  # nosec B608
+        assert [tuple(r) for r in rows] == [(100, "old-a"), (101, "old-b")]
+    finally:
+        set_cancel_probe(None)
+        try:
+            conn.rollback()
+        finally:
+            conn.close()
+        drop("postgresql", table)
