@@ -176,6 +176,74 @@ def test_a_black_holed_oracle_host_is_a_connect_timeout_not_an_accepted_one() ->
     assert classify(error, engine="oracle").code == "network.connect_timeout", error
 
 
+def _sqlserver_on(driver: str, monkeypatch) -> None:
+    """Pin the SQL Server DBAPI the product picks (production ships pymssql)."""
+    from connectors import generic_sql
+    from services import engine_pool
+
+    if driver == "pymssql":
+        pytest.importorskip("pymssql")
+        monkeypatch.setattr(generic_sql, "_mssql_odbc_driver", lambda: None)
+    elif not generic_sql._mssql_odbc_driver():
+        pytest.skip("Microsoft ODBC Driver 17/18 for SQL Server is not installed here")
+    assert generic_sql._mssql_drivername() == f"mssql+{driver}"
+    engine_pool.dispose_all()
+
+
+@pytest.mark.parametrize("driver", ["pymssql", "pyodbc"])
+def test_a_silent_sqlserver_host_fails_at_the_connect_budget_on_every_driver(
+    driver, monkeypatch
+) -> None:
+    """D281 / R10 on the SQL Server leg CI runs (api-tests has no Microsoft driver).
+
+    FreeTDS's default protocol version is "auto": after the TDS 7.4 login
+    timed out it dialled the host again with a TDS 5.0 (Sybase ASE) login,
+    which no SQL Server speaks, and waited about twice more. A 15 s Test
+    took ~35 s on every pymssql host (PR #433 CI, api-tests 2/6).
+    """
+    from connectors.sqlserver import test_sqlserver
+
+    _sqlserver_on(driver, monkeypatch)
+    server, port, held = _silent()
+    started = time.monotonic()
+    try:
+        ok, error = test_sqlserver(
+            host="127.0.0.1", port=port, database="d", username="u", password="p",
+            schema="dbo", connection_string="", ssl=False, connect_timeout=4,
+        )
+    finally:
+        elapsed = time.monotonic() - started
+        server.close()
+    assert not ok and error, "a silent server must not log in"
+    assert elapsed < 4 + 2, (elapsed, error)
+    assert len(held) == 1, f"the login dialled the silent host {len(held)} times"
+
+
+def test_every_direct_pymssql_login_pins_the_sql_server_protocol() -> None:
+    """The product's own ``pymssql.connect`` calls get the same one-attempt login."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    unpinned = []
+    for folder in ("services", "connectors", "src"):
+        for path in (root / folder).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if "pymssql.connect(" not in text:
+                continue
+            for node in ast.walk(ast.parse(text)):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "connect"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "pymssql"
+                    and "tds_version" not in {kw.arg for kw in node.keywords}
+                ):
+                    unpinned.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not unpinned, unpinned
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     import services.config  # noqa: F401 - settings parse before the harness blanks env

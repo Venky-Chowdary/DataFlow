@@ -128,6 +128,7 @@ def _is_connect_failure(exc: BaseException) -> bool:
 
 def _pymssql_connect(cfg: dict[str, Any]) -> Any:
     import pymssql
+    from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
     conn = pymssql.connect(
         server=str(cfg.get("host") or "127.0.0.1"),
@@ -136,6 +137,7 @@ def _pymssql_connect(cfg: dict[str, Any]) -> Any:
         password=str(cfg.get("password") or ""),
         database=str(cfg.get("database") or ""),
         login_timeout=10,
+        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
         autocommit=False,
     )
     return conn

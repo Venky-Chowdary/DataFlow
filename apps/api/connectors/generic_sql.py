@@ -882,6 +882,11 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     if drivername.startswith("mssql"):
         drivername = _mssql_drivername()
         query = _mssql_connect_query(cfg, drivername)
+        if drivername == "mssql+pymssql":
+            from connectors.mssql_login import pymssql_tds_version
+
+            # One login attempt per login_timeout (D281): no Sybase 5.0 re-dial.
+            query = {**query, "tds_version": pymssql_tds_version(cfg)}
         if not query:
             query = None
 
