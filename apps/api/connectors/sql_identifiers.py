@@ -12,6 +12,11 @@ _IDENT_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
 _PLAIN_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: A Google Cloud project ID: 6-30 lowercase letters, digits and hyphens,
+#: starting with a letter and not ending with a hyphen, optionally under a
+#: legacy domain scope (``example.com:my-project``). See
+#: https://cloud.google.com/resource-manager/docs/creating-managing-projects
+_GCP_PROJECT_ID = re.compile(r"^(?:[a-z0-9][a-z0-9.-]{0,61}[a-z0-9]:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 
 
 def unsafe_sql_identifier_reason(name: str) -> str | None:
@@ -427,7 +432,16 @@ def quote_table_ref(
     if dialect in ("bigquery", "bq"):
         # BigQuery: `project.dataset.table` — sanitize each segment.
         parts: list[str] = []
-        for part in (project, dataset or schema, table):
+        if project and _GCP_PROJECT_ID.match(project):
+            # A valid project ID is kept as spelled: its hyphens are part of the
+            # name, and `my_proj` is another (invalid) project (D314). The
+            # grammar admits no backtick, dot-path or quote, so it is inert here.
+            parts.append(project)
+        elif project:
+            parts.append(
+                catalog_identifier(project, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
+        for part in (dataset or schema, table):
             if not part:
                 continue
             parts.append(

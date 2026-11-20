@@ -96,9 +96,17 @@ def test_quote_table_ref_bigquery() -> None:
         project="my-proj",
         dataset="raw",
     )
-    # hyphen in project is sanitized to underscore
-    assert ref == "`my_proj.raw.events`"
+    # A GCP project ID's hyphen is part of the name (lowercase letters, digits,
+    # hyphens: cloud.google.com/resource-manager/docs/creating-managing-projects);
+    # ``my_proj`` would be another, invalid project (D314).
+    assert ref == "`my-proj.raw.events`"
     assert "DROP" not in ref
+    # Anything that is not a project ID is still sanitized segment by segment.
+    hostile = quote_table_ref(
+        "events", dialect="bigquery", project="my-proj`; DROP TABLE x; --", dataset="raw"
+    )
+    assert hostile.count("`") == 2
+    assert ";" not in hostile and " " not in hostile
 
 
 def test_quote_table_ref_rejects_empty() -> None:
