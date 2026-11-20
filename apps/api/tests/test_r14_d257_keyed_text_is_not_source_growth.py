@@ -43,9 +43,12 @@ def test_text_onto_the_key_carrier_dataflow_sized_is_not_a_widen():
 
 def test_sqlserver_full_value_key_carrier_is_not_a_widen():
     # 900-byte key / 2 bytes per NVARCHAR character = NVARCHAR(450).
+    # The non-key widen stays in the national family (R3, D368): SQL Server
+    # TEXT is the deprecated code-page LOB, so NVARCHAR(50) -> TEXT would drop
+    # Unicode; NVARCHAR(MAX) is the documented replacement.
     for src in ("TEXT", "NVARCHAR(MAX)"):
         assert _props(["mid", "mnote"], [["mid"]], dest="sqlserver", src=src) == {
-            "mnote": "TEXT" if src == "TEXT" else "NVARCHAR(MAX)"
+            "mnote": "NVARCHAR(MAX)"
         }
 
 
