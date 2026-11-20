@@ -164,3 +164,107 @@ def test_an_unreadable_ddl_history_is_not_new_ddl_and_keeps_the_watermark(stores
     _run(catalog, "03")
     reviews = _open(rev)
     assert len(reviews) == 1 and reviews[0]["column_names"] == ["tier"]
+
+
+def _seed_pre_watermark_snapshot(stored, columns) -> None:
+    """A snapshot as builds before the ``ddl_lsn`` watermark stored it.
+
+    Same keys the reader wrote then: capture instance, row filter and the
+    captured columns (name, type, ordinal) - and no ``ddl_lsn``.
+    """
+    stored[(_reader().source_key, "dbo.orders")] = [
+        {
+            "version": 1,
+            "ddl": "cdc.capture_instance=dbo_orders",
+            "offset": "00",
+            "schema_snapshot": {
+                "capture_instance": "dbo_orders",
+                "row_filter": "",
+                "columns": [{"name": n, "type": t, "ordinal": o} for n, t, o in columns],
+            },
+        }
+    ]
+
+
+def test_a_snapshot_stored_before_the_watermark_takes_the_history_as_its_baseline(stores):
+    """After deploy, a DML-only poll must not re-raise DDL reviewed under the old build.
+
+    The table had ``ADD name`` long ago and the operator acknowledged it; the
+    stored snapshot predates ``ddl_lsn``. Its columns equal the current ones,
+    so the current ``cdc.ddl_history`` is the baseline (as on first sight).
+    The watermark must then be stored: SQL Server does not add a column to
+    the capture instance on ALTER TABLE ADD, so without it a later ALTER would
+    never be seen.
+    """
+    rev, stored = stores
+    catalog = _Catalog(COLS)
+    catalog.alter("ALTER TABLE dbo.orders ADD name nvarchar(40)", lsn=0x10)
+    _seed_pre_watermark_snapshot(stored, COLS)
+
+    _run(catalog, "01")  # first poll after deploy, DML only
+    assert _open(rev) == [], "already-reviewed history was raised again after deploy"
+    latest = stored[(_reader().source_key, "dbo.orders")][-1]["schema_snapshot"]
+    assert latest["ddl_lsn"] == (0x10).to_bytes(10, "big").hex()
+
+    for n in range(2, 5):
+        _run(catalog, f"0{n}")
+        assert _open(rev) == []
+
+    catalog.alter("ALTER TABLE dbo.orders ADD tier int NULL", lsn=0x2A)
+    _run(catalog, "05")
+    reviews = _open(rev)
+    assert len(reviews) == 1, reviews
+    assert reviews[0]["column_names"] == ["tier"]
+
+
+def test_a_pre_watermark_snapshot_whose_columns_differ_is_still_reviewed(stores):
+    rev, stored = stores
+    catalog = _Catalog(COLS)
+    catalog.alter("ALTER TABLE dbo.orders ADD name nvarchar(40)", lsn=0x10)
+    _seed_pre_watermark_snapshot(stored, COLS[:1])  # stored before ``name`` was captured
+
+    _run(catalog, "01")
+    reviews = _open(rev)
+    assert len(reviews) == 1, reviews
+    assert reviews[0]["reason"] == "cdc_schema_drift"
+    assert reviews[0]["column_names"] == ["name"]
+    latest = stored[(_reader().source_key, "dbo.orders")][-1]["schema_snapshot"]
+    assert latest["ddl_lsn"] == (0x10).to_bytes(10, "big").hex()
+
+
+def test_a_pre_watermark_snapshot_waits_for_a_readable_history_to_take_its_baseline(stores):
+    rev, stored = stores
+    catalog = _Catalog(COLS)
+    catalog.alter("ALTER TABLE dbo.orders ADD name nvarchar(40)", lsn=0x10)
+    _seed_pre_watermark_snapshot(stored, COLS)
+    catalog.fail_ddl_read = True
+
+    _run(catalog, "01")
+    assert _open(rev) == []
+    # No watermark was learned, so none is stored: an empty one would later
+    # read the whole history as new.
+    assert len(stored[(_reader().source_key, "dbo.orders")]) == 1
+
+    catalog.fail_ddl_read = False
+    _run(catalog, "02")
+    assert _open(rev) == []
+    latest = stored[(_reader().source_key, "dbo.orders")][-1]["schema_snapshot"]
+    assert latest["ddl_lsn"] == (0x10).to_bytes(10, "big").hex()
+
+
+def test_a_reviewed_change_under_an_unreadable_history_stores_no_empty_watermark(stores):
+    """An empty ``ddl_lsn`` means "history read, nothing in it"; it must not be guessed."""
+    rev, stored = stores
+    catalog = _Catalog(COLS)
+    catalog.alter("ALTER TABLE dbo.orders ADD name nvarchar(40)", lsn=0x10)
+    _seed_pre_watermark_snapshot(stored, COLS[:1])
+    catalog.fail_ddl_read = True
+    _run(catalog, "01")
+    reviews = _open(rev)
+    assert len(reviews) == 1 and reviews[0]["column_names"] == ["name"]
+    assert "ddl_lsn" not in stored[(_reader().source_key, "dbo.orders")][-1]["schema_snapshot"]
+    assert rev.acknowledge_review(reviews[0]["id"])["status"] == "acknowledged"
+
+    catalog.fail_ddl_read = False
+    _run(catalog, "02")
+    assert _open(rev) == [], "the acknowledged ADD was raised again from an empty watermark"
