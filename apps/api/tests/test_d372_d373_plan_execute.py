@@ -67,3 +67,22 @@ def test_rest_and_mcp_update_use_the_same_reversibility_block() -> None:
     }
     assert "q3_rev_out.note" in schedule_reversibility_block(payload)
     assert schedule_reversibility_block({**payload, "require_reversibility": False}) == ""
+
+
+def test_schedule_save_leaves_an_untyped_identity_column_to_execute() -> None:
+    """R8: save refuses what Execute refuses, no more (D388).
+
+    A saved mapping often carries no types. ``id -> id`` with no type is decided
+    by Execute from the catalogs, so save must not refuse it; a lossy transform
+    needs no type and is still refused, naming only that column.
+    """
+    assert reversibility_refusal([{"source": "id", "destination": "id"}], table="users") == ""
+    message = reversibility_refusal(
+        [
+            {"source": "id", "destination": "id"},
+            {"source": "note", "target": "note", "transform": "omit"},
+        ],
+        table="users",
+    )
+    assert "users.note" in message
+    assert "users.id" not in message
