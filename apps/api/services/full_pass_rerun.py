@@ -133,6 +133,26 @@ def run_read_scope(
     return out
 
 
+def _last_written_run_failed(sched: Any) -> bool:
+    """D296: did the schedule's last run that reached a job fail?
+
+    A pre-run refusal (source drift, a parked decision, a residency refusal) is
+    recorded as a failed run with no job: nothing was written, so there is no
+    stale row to repair and the watermark is where the last accepted run left
+    it (R1). Only a run whose job failed can have left the destination behind
+    the source. When the last recorded run had a job it decides; a refusal is
+    skipped to the run before it.
+    """
+    from services.job_status import is_completed
+
+    if str(getattr(sched, "last_job_id", "") or ""):
+        return True
+    for entry in reversed(list(getattr(sched, "run_history", None) or [])):
+        if isinstance(entry, dict) and str(entry.get("job_id") or ""):
+            return not is_completed(str(entry.get("status") or ""))
+    return False
+
+
 def apply_schedule_full_pass(xfer_req: Any, sched: Any, *, attempt: int) -> dict | None:
     """D210/D208: a schedule's retry, and its first run after a failed run, is a
     full pass of an incremental upsert.
@@ -146,7 +166,11 @@ def apply_schedule_full_pass(xfer_req: Any, sched: Any, *, attempt: int) -> dict
     from services.job_status import is_completed
 
     last_status = str(getattr(sched, "last_status", "") or "")
-    after_failure = attempt > 0 or (bool(last_status) and not is_completed(last_status))
+    after_failure = attempt > 0 or (
+        bool(last_status)
+        and not is_completed(last_status)
+        and _last_written_run_failed(sched)
+    )
     if not after_failure:
         return None
     parent: dict | None = None
