@@ -228,3 +228,38 @@ def apply_schedule_binding(
     payload["transform_recipe_version"] = bound.bound_version
     payload["transform_recipe_version_mode"] = mode
     return payload
+
+
+def compile_and_record_recipe(request: Any, job_id: str, store: Any) -> str:
+    """Compile a saved recipe into ``request`` and stamp it on the job (D400).
+
+    Returns the refusal text when the recipe cannot run as asked (a draft, a pin
+    drift, a second recipe, or a recipe the run would ignore), else ``""``. A
+    compiled recipe is written on the job record so Resume, replay and the
+    proof read the same shape the run used; a failure to store it is logged and
+    never turns a runnable transfer into a refusal.
+    """
+    import logging
+
+    try:
+        compiled = compile_transfer_recipe(request)
+    except ValueError as exc:
+        return str(exc)
+    refusal = recipe_ignored_failure(request)
+    if compiled and not refusal:
+        try:
+            store.update_job_fields(
+                job_id,
+                {
+                    "transfer_request.shape_recipe": request.shape_recipe,
+                    "transfer_request.transform_recipe_version": request.transform_recipe_version,
+                    "transfer_request.transform_recipe_version_mode": request.transform_recipe_version_mode,
+                    "transfer_request.approved_shape_recipe_hash": request.approved_shape_recipe_hash,
+                },
+                touch_updated_at=False,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not store the compiled recipe on %s", job_id
+            )
+    return refusal
