@@ -139,6 +139,11 @@ def column_is_protected_key(name: str, schema: dict | None = None) -> bool:
     return key in {"PRI", "PRIMARY", "IDENTITY"}
 
 
+_KEY_RULE_REASON = (
+    "destination key column takes only its own name, a source _id or an operator mapping (rule 4)"
+)
+
+
 def mapping_violates_key_rule(
     source: str,
     target: str,
@@ -1490,8 +1495,19 @@ def map_columns(
     mappings: list[dict] = []
 
     pair_scores: dict[tuple[str, str], tuple[float, str]] = {}
+    # Rule 4 (D369): a destination key, identity column, DynamoDB key or
+    # ``_id`` takes only its own name; every other pair scores zero here, so
+    # the Hungarian, greedy and near-form passes all agree.
+    tgt_by_name = {str(t.get("name") or ""): t for t in (target_schemas or []) if isinstance(t, dict)}
+
+    def _key_blocked(source: str, target: str) -> bool:
+        return mapping_violates_key_rule(source, target, tgt_by_name.get(target))
+
     for source in source_columns:
         for target in target_columns:
+            if _key_blocked(source, target):
+                pair_scores[(source, target)] = (0.0, _KEY_RULE_REASON)
+                continue
             score, reason = _score_pair(
                 source,
                 target,
@@ -1602,7 +1618,7 @@ def map_columns(
         best_score = 0.0
         best_reason = ""
         for target in target_columns:
-            if target in used_targets:
+            if target in used_targets or _key_blocked(source, target):
                 continue
             score, reason = _score_pair(
                 source,
@@ -1624,7 +1640,9 @@ def map_columns(
         # Prefer a near-matching existing destination over inventing a column
         # when abbreviation/form similarity is strong enough (ph_num → phone).
         # Never override a hard type/sample demotion (ObjectId → DECIMAL id).
-        near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
+        near_tgt, near_ratio = _near_target_by_form(
+            source, [t for t in target_columns if not _key_blocked(source, t)], used_targets=used_targets
+        )
         if near_tgt:
             near_tgt_type = _scored_dest_type(
                 src_type, tgt_types.get(near_tgt, "VARCHAR"), dest_db

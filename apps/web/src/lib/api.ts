@@ -2838,6 +2838,9 @@ export interface EndpointIntrospection {
   message: string;
   /** The taxonomy code of a failed or missing-object introspect (services/error_taxonomy.py). */
   error_code?: string;
+  /** Destination key columns; Map never proposes an unrelated source onto them (rule 4). */
+  primary_key_columns?: string[];
+  identity_columns?: string[];
 }
 
 export async function introspectTransferEndpoints(
@@ -3084,6 +3087,8 @@ export async function mapTransferColumns(payload: {
   source_schema?: Record<string, string>;
   target_columns?: string[];
   target_schema?: Record<string, string>;
+  /** Destination primary key / identity columns from the probe (rule 4). */
+  target_key_columns?: string[];
   validation_mode?: string;
   file_format?: string;
   use_llm?: boolean;

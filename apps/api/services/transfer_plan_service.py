@@ -93,17 +93,20 @@ def run_plan_mapping(
         }
         for c in plan.source_columns
     ]
-    target_schemas = [
-        {"name": c, "inferred_type": plan.target_schema.get(c, "VARCHAR"), "samples": []}
-        for c in plan.target_columns
-    ]
-
     from services.data_profiler import source_types_are_authoritative_for
+    from services.key_column_guard import with_key_flags
 
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
     src = plan.source if isinstance(plan.source, dict) else {}
     dest_extra = dest.get("extra") if isinstance(dest.get("extra"), dict) else {}
+    target_schemas = with_key_flags(
+        [
+            {"name": c, "inferred_type": plan.target_schema.get(c, "VARCHAR"), "samples": []}
+            for c in plan.target_columns
+        ],
+        {**dest, **dest_extra},
+    )
     # Prefer nested extra (Studio SSOT) then flat root (legacy plans).
     table_exists = dest_extra.get("table_exists", dest.get("table_exists"))
     if not isinstance(table_exists, bool):

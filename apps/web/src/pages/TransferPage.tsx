@@ -544,6 +544,8 @@ export function TransferPage({
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
   const destSchemaIdentityRef = useRef("");
+  // Destination key columns from the last probe; sent to Map (rule 4, D369).
+  const destKeyColumnsRef = useRef<string[]>([]);
   const inlineDestinationProbeRef = useRef<DestinationSchemaProbeController<void> | null>(null);
   /** Last destination identity whose probe failed — throttles automatic re-probes. */
   const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
@@ -1991,6 +1993,7 @@ export function TransferPage({
               source_schema: mapSourceSchema,
               target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
               target_schema: mapTargetSchema,
+              target_key_columns: destKeyColumnsRef.current,
               validation_mode: validationMode,
               file_format: parsed?.file_type
                 ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -2010,6 +2013,7 @@ export function TransferPage({
             source_schema: mapSourceSchema,
             target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
             target_schema: mapTargetSchema,
+            target_key_columns: destKeyColumnsRef.current,
             validation_mode: validationMode,
             file_format: parsed?.file_type
               ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -2149,6 +2153,7 @@ export function TransferPage({
           source_schema: sourceSchema,
           target_columns: targetCols,
           target_schema: targetSchema,
+          target_key_columns: destKeyColumnsRef.current,
           validation_mode: validationMode,
           file_format: sourceConnector?.type,
           use_llm: true,
@@ -2366,6 +2371,11 @@ export function TransferPage({
         ? null
         : { key: tableKey, at: Date.now() };
       commitDestSchema(nextColumns, nextSchema);
+      if (!keepPrior) {
+        destKeyColumnsRef.current = resolvedExists === false
+          ? []
+          : [...(destination.primary_key_columns ?? []), ...(destination.identity_columns ?? [])];
+      }
       proveDestTableExists(resolvedExists);
       destSchemaTableKeyRef.current = tableKey;
       if (keepPrior && resolvedExists === true && destColumns.length === 0) {
@@ -3347,6 +3357,7 @@ export function TransferPage({
           source_schema: data.schema ?? {},
           target_columns: destColumns.length ? destColumns : undefined,
           target_schema: destSchemaMap,
+          target_key_columns: destKeyColumnsRef.current,
           validation_mode: validationMode,
           file_format: data.file_type ?? sourceFileName?.split(".").pop(),
           use_llm: true,

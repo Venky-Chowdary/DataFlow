@@ -1356,7 +1356,10 @@ def plan_transfer(
             **(src_info.get("schema") or {}),
             **{r["name"]: r["inferred_type"] for r in src_rows},
         }
-    dst_rows = _schema_rows(dst_info.get("columns") or [])
+    from services.key_column_guard import with_key_flags
+
+    # Rule 4: the mapper protects the destination's keys only if it sees them.
+    dst_rows = with_key_flags(_schema_rows(dst_info.get("columns") or []), dst_info) or []
     # Document metadata keys are the source's own columns, not the physical
     # id/content/embedding/metadata columns of an existing document table.
     is_document = bool(pgvector_layout and pgvector_layout[0] == LAYOUT_DOCUMENT)

@@ -211,15 +211,21 @@ def _auto_map(
                 try:
                     from services.mapping_pipeline import run_mapping_pipeline
 
+                    from services.key_column_guard import with_key_flags
+
                     target_columns = list(target_schema.keys())
-                    target_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": target_schema.get(c, "string"),
-                            "samples": [],
-                        }
-                        for c in target_columns
-                    ]
+                    # The probe stamped the keys on destination.extra (rule 4).
+                    target_schemas = with_key_flags(
+                        [
+                            {
+                                "name": c,
+                                "inferred_type": target_schema.get(c, "string"),
+                                "samples": [],
+                            }
+                            for c in target_columns
+                        ],
+                        getattr(request.destination, "extra", None) or {},
+                    )
                     from services.data_profiler import source_types_are_authoritative_for
 
                     result = run_mapping_pipeline(
