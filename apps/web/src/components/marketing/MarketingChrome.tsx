@@ -3,7 +3,6 @@ import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
-import { provenDriversPhrase } from "../../lib/provenEvidence";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 
 /** Pages that open on a document header rather than the ink hero. */
@@ -28,6 +27,7 @@ const PRODUCT_LINKS: NavEntry[] = [
   { route: "product-query", label: "Query", note: "Read-only SQL on saved connections" },
   { route: "product-pilot", label: "Pilot", note: "Questions answered with the SQL shown" },
   { route: "product-mcp", label: "MCP server", note: "The same governed tools for agents" },
+  { route: "customers", label: "Proof", note: "CI evidence and proof packs you can verify" },
 ];
 
 const SOLUTION_LINKS: NavEntry[] = [
@@ -37,11 +37,11 @@ const SOLUTION_LINKS: NavEntry[] = [
   { route: "enterprise", label: "Enterprise", note: "SSO, SCIM, roles, keys, and audit" },
 ];
 
-const COMPANY_LINKS: NavEntry[] = [
-  { route: "customers", label: "Evidence", note: "" },
+const TOP_LINKS: NavEntry[] = [
+  { route: "integrations", label: "Connectors", note: "" },
   { route: "security", label: "Security", note: "" },
-  { route: "help", label: "Docs", note: "" },
   { route: "pricing", label: "Pricing", note: "" },
+  { route: "help", label: "Docs", note: "" },
 ];
 
 const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: string }[] }[] = [
@@ -54,7 +54,7 @@ const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: strin
       { route: "product-query", label: "Query" },
       { route: "product-pilot", label: "Pilot" },
       { route: "product-mcp", label: "MCP server" },
-      { route: "integrations", label: "Connectors" },
+      { route: "customers", label: "Proof" },
     ],
   },
   {
@@ -64,16 +64,16 @@ const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: strin
       { route: "solution-warehouse", label: "Warehouse loading" },
       { route: "solution-sync", label: "Recurring sync" },
       { route: "enterprise", label: "Enterprise" },
-      { route: "pricing", label: "Pricing" },
     ],
   },
   {
     title: "Resources",
     links: [
-      { route: "help", label: "Documentation" },
-      { route: "demos", label: "Recorded demos" },
-      { route: "customers", label: "Evidence" },
+      { route: "integrations", label: "Connectors" },
       { route: "security", label: "Security" },
+      { route: "pricing", label: "Pricing" },
+      { route: "help", label: "Docs" },
+      { route: "demos", label: "Video demos" },
       { route: "status", label: "Service status" },
     ],
   },
@@ -168,19 +168,14 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
             </li>
           ))}
         </ul>
-        {id === "product" ? (
-          <a className="mk-nav-menu-foot" href={href("integrations")} onClick={follow("integrations")}>
-            Connectors, with {provenDriversPhrase()}
-          </a>
-        ) : null}
       </div>
     </div>
   );
 
   const mobileGroups: { title: string; links: NavEntry[] }[] = [
-    { title: "Product", links: [...PRODUCT_LINKS, { route: "integrations", label: "Connectors", note: "" }] },
+    { title: "Product", links: PRODUCT_LINKS },
     { title: "Solutions", links: SOLUTION_LINKS },
-    { title: "Company", links: COMPANY_LINKS },
+    { title: "More", links: TOP_LINKS },
   ];
 
   return (
@@ -197,7 +192,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           <nav className="mk-nav" aria-label="Main">
             {menuGroup("product", "Product", PRODUCT_LINKS)}
             {menuGroup("solutions", "Solutions", SOLUTION_LINKS)}
-            {COMPANY_LINKS.map((l) => (
+            {TOP_LINKS.map((l) => (
               <a key={l.route} className="mk-nav-link" href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
                 {l.label}
               </a>

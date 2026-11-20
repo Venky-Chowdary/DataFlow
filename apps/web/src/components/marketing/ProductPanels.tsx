@@ -1,4 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
+import { useInViewOnce } from "../../hooks/useInViewOnce";
+import { CONNECTOR_CLAIMS } from "../../lib/provenEvidence";
 
 /**
  * Datawrap product surfaces rendered in code for the public site.
@@ -68,15 +70,25 @@ function prefersReducedMotion(): boolean {
   }
 }
 
-function PanelHead({ title, meta, badge }: { title: string; meta?: string; badge?: ReactNode }) {
+/** Status glyphs, so state never rests on colour alone. */
+export function StatusGlyph({ kind }: { kind: "landed" | "held" | "skipped" | "pending" }) {
   return (
-    <div className="mk-panel-head">
-      <div>
-        <p className="mk-panel-title">{title}</p>
-        {meta ? <p className="mk-panel-meta">{meta}</p> : null}
-      </div>
-      {badge}
-    </div>
+    <svg className={`mk-glyph is-${kind}`} viewBox="0 0 12 12" width="12" height="12" aria-hidden focusable="false">
+      {kind === "landed" ? <path d="M2.5 6.2 5 8.6l4.6-5.2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /> : null}
+      {kind === "held" ? (
+        <>
+          <rect x="3" y="2.5" width="2" height="7" rx="0.6" fill="currentColor" />
+          <rect x="7" y="2.5" width="2" height="7" rx="0.6" fill="currentColor" />
+        </>
+      ) : null}
+      {kind === "skipped" ? (
+        <>
+          <circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M3.2 8.8 8.8 3.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </>
+      ) : null}
+      {kind === "pending" ? <circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeDasharray="2 1.6" /> : null}
+    </svg>
   );
 }
 
@@ -97,7 +109,16 @@ type Share = { landed: number; held: number; skipped: number; pending?: number }
  * length, which is the whole point. No counts, so it reads the same at any
  * scale.
  */
-function IdentityBars({ share, settled = true }: { share: Share; settled?: boolean }) {
+function IdentityBars({
+  share,
+  settled = true,
+  legend = ["landed", "held", "skipped"],
+}: {
+  share: Share;
+  settled?: boolean;
+  /** Key entries, fixed per panel so the key never re-wraps while rows arrive. */
+  legend?: Array<"landed" | "held" | "skipped">;
+}) {
   const pending = share.pending ?? 0;
   const total = share.landed + share.held + share.skipped + pending;
   return (
@@ -118,9 +139,9 @@ function IdentityBars({ share, settled = true }: { share: Share; settled?: boole
         </span>
       </div>
       <p className="mk-bars-key" aria-hidden>
-        <span><i className="is-landed" />Landed</span>
-        {share.held ? <span><i className="is-held" />Held with a reason</span> : null}
-        {share.skipped ? <span><i className="is-skipped" />Skipped by a rule you set</span> : null}
+        {legend.includes("landed") ? <span><i className="is-landed" />Landed</span> : null}
+        {legend.includes("held") ? <span><i className="is-held" />Held with a reason</span> : null}
+        {legend.includes("skipped") ? <span><i className="is-skipped" />Skipped by a rule you set</span> : null}
       </p>
     </div>
   );
@@ -146,6 +167,7 @@ const LEDGER_ROWS: LedgerRow[] = [
  * reduced motion.
  */
 export function ReconciliationLedger() {
+  const titleId = useId();
   const total = LEDGER_ROWS.length;
   const [step, setStep] = useState(total);
   const [run, setRun] = useState(0);
@@ -183,10 +205,10 @@ export function ReconciliationLedger() {
   };
 
   return (
-    <figure className="mk-ledger2" aria-labelledby="mk-ledger2-title">
+    <figure className="mk-ledger2" aria-labelledby={titleId}>
       <div className="mk-ledger2-head">
         <div>
-          <p id="mk-ledger2-title" className="mk-ledger2-title">Trust Report, reconciliation</p>
+          <p id={titleId} className="mk-ledger2-title">Trust Report, reconciliation</p>
           <p className="mk-ledger2-meta">
             <code>{RECORDED_ROUTE.source}</code> to <code>{RECORDED_ROUTE.dest}</code>
           </p>
@@ -202,7 +224,8 @@ export function ReconciliationLedger() {
               <li key={r.key} className={`mk-ledger2-row mk-ledger2-src${i < step ? ` is-done is-${r.to}` : ""}`}>
                 <code>{r.key}</code>
                 <span>{r.region}</span>
-                <i aria-hidden />
+                <StatusGlyph kind={i < step ? r.to : "pending"} />
+                <span className="mk-sr-only">{i < step ? (r.to === "landed" ? "landed" : r.to === "held" ? "held" : "skipped") : "waiting"}</span>
               </li>
             ))}
           </ul>
@@ -214,17 +237,18 @@ export function ReconciliationLedger() {
 
         <div className="mk-ledger2-col mk-ledger2-lanes">
           <div className="mk-ledger2-lane is-landed">
-            <p className="mk-ledger2-colhead">Landed in {RECORDED_ROUTE.destEngine}, counted by its engine</p>
+            <p className="mk-ledger2-colhead"><StatusGlyph kind="landed" />Landed in {RECORDED_ROUTE.destEngine}, counted by its engine</p>
             <ul className="mk-ledger2-chips">
               {lane("landed").map((r) => (
                 <li key={r.key} className="mk-ledger2-chip">
                   <code>{r.key}</code>
                 </li>
               ))}
+              {lane("landed").length === 0 ? <li className="mk-ledger2-ghost" aria-hidden /> : null}
             </ul>
           </div>
           <div className="mk-ledger2-lane is-held">
-            <p className="mk-ledger2-colhead">Held in quarantine</p>
+            <p className="mk-ledger2-colhead"><StatusGlyph kind="held" />Held in quarantine, with the reason</p>
             <ul>
               {lane("held").map((r) => (
                 <li key={r.key} className="mk-ledger2-row">
@@ -232,10 +256,11 @@ export function ReconciliationLedger() {
                   <span>{r.note}</span>
                 </li>
               ))}
+              {lane("held").length === 0 ? <li className="mk-ledger2-ghost" aria-hidden /> : null}
             </ul>
           </div>
           <div className="mk-ledger2-lane is-skipped">
-            <p className="mk-ledger2-colhead">Skipped by a rule you set</p>
+            <p className="mk-ledger2-colhead"><StatusGlyph kind="skipped" />Skipped by a rule you set</p>
             <ul>
               {lane("skipped").map((r) => (
                 <li key={r.key} className="mk-ledger2-row">
@@ -243,6 +268,7 @@ export function ReconciliationLedger() {
                   <span>{r.note}</span>
                 </li>
               ))}
+              {lane("skipped").length === 0 ? <li className="mk-ledger2-ghost" aria-hidden /> : null}
             </ul>
           </div>
         </div>
@@ -250,15 +276,15 @@ export function ReconciliationLedger() {
 
       <div className="mk-ledger2-foot">
         <IdentityBars share={share} settled={done} />
-        <div className="mk-ledger2-verdict" aria-live="polite">
-          {done ? (
-            <>
-              <span className="mk-status mk-status--ok">Balanced</span>
-              <p>Every row read is landed, held with its reason, or skipped by a rule you set. Nothing is unaccounted for.</p>
-            </>
-          ) : (
-            <p>Reconciling as rows are written</p>
-          )}
+        <div className="mk-ledger2-verdict">
+          <span className={`mk-status${done ? " mk-status--ok" : ""}`} aria-live="polite">
+            <StatusGlyph kind={done ? "landed" : "pending"} />
+            {done ? "Balanced" : "Reconciling"}
+          </span>
+          <p className="mk-ledger2-equation" aria-hidden={done ? undefined : true}>
+            <span>{moved.length} read</span> = <span>{share.landed} landed</span> + <span>{share.held} held</span> +{" "}
+            <span>{share.skipped} skipped</span>
+          </p>
           <button
             type="button"
             className="mk-ledger2-replay"
@@ -273,16 +299,68 @@ export function ReconciliationLedger() {
   );
 }
 
+/** `--i` for a staggered entrance, as a typed style object. */
+function stagger(i: number): CSSProperties {
+  return { ["--i" as string]: i } as CSSProperties;
+}
+
+/**
+ * A panel frame that assembles once: its rows settle in a short stagger the
+ * first time it scrolls into view. Under reduced motion it renders settled.
+ */
+function Panel({
+  title,
+  meta,
+  badge,
+  className = "",
+  labelledBy,
+  children,
+}: {
+  title: string;
+  meta?: string;
+  badge?: ReactNode;
+  className?: string;
+  labelledBy?: string;
+  children: ReactNode;
+}) {
+  const { ref, inView } = useInViewOnce<HTMLElement>();
+  const ownId = useId();
+  return (
+    <figure
+      ref={ref}
+      className={`mk-panel mk-assemble${inView ? " is-in" : ""} ${className}`.trim()}
+      aria-labelledby={labelledBy ?? ownId}
+    >
+      <PanelHead title={title} meta={meta} badge={badge} titleId={labelledBy ? undefined : ownId} />
+      {children}
+    </figure>
+  );
+}
+
+function PanelHead({ title, meta, badge, titleId }: { title: string; meta?: string; badge?: ReactNode; titleId?: string }) {
+  return (
+    <div className="mk-panel-head">
+      <div>
+        <p className="mk-panel-title" id={titleId}>{title}</p>
+        {meta ? <p className="mk-panel-meta">{meta}</p> : null}
+      </div>
+      {badge}
+    </div>
+  );
+}
+
 /**
  * The Trust Report comparison, scale-free: what was compared and the result,
- * with the column census settling one column at a time on first paint.
+ * with the column census settling one column at a time once in view.
  */
 export function VerifyPanel({ animate = true }: { animate?: boolean }) {
   const total = RECORDED_MAPPING.length;
+  const { ref, inView } = useInViewOnce<HTMLElement>();
   const [checked, setChecked] = useState(animate ? 0 : total);
+  const titleId = useId();
 
   useEffect(() => {
-    if (!animate) return;
+    if (!animate || !inView) return;
     if (prefersReducedMotion()) {
       setChecked(total);
       return;
@@ -292,24 +370,25 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
       n += 1;
       setChecked(n);
       if (n >= total) window.clearInterval(id);
-    }, 110);
+    }, 90);
     return () => window.clearInterval(id);
-  }, [animate, total]);
+  }, [animate, inView, total]);
 
   const done = checked >= total;
   return (
-    <figure className="mk-panel mk-verify" aria-labelledby="mk-verify-title">
+    <figure ref={ref} className={`mk-panel mk-verify mk-assemble${inView ? " is-in" : ""}`} aria-labelledby={titleId}>
       <PanelHead
         title="Trust Report"
+        titleId={titleId}
         meta="Example, from a recorded run"
         badge={<span className="mk-status mk-status--ok">Completed</span>}
       />
       <RouteLine />
       <div className="mk-verify-bars">
-        <IdentityBars share={{ landed: 1, held: 0, skipped: 0 }} />
+        <IdentityBars share={{ landed: 1, held: 0, skipped: 0 }} legend={["landed"]} />
       </div>
       <table className="mk-panel-table mk-verify-table">
-        <caption id="mk-verify-title">Comparison after the write</caption>
+        <caption>Comparison after the write</caption>
         <thead>
           <tr>
             <th scope="col">Check</th>
@@ -318,17 +397,17 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
           </tr>
         </thead>
         <tbody>
-          <tr>
+          <tr style={stagger(0)}>
             <th scope="row">Row count</th>
             <td>Source and {RECORDED_ROUTE.destEngine}, each by its own engine</td>
             <td><span className="mk-dot mk-dot--ok" aria-hidden />Equal</td>
           </tr>
-          <tr>
+          <tr style={stagger(1)}>
             <th scope="row">Checksum</th>
             <td>Every row, order-independent</td>
             <td><span className="mk-dot mk-dot--ok" aria-hidden />Match</td>
           </tr>
-          <tr>
+          <tr style={stagger(2)}>
             <th scope="row">Column census</th>
             <td>
               <span className="mk-sr-only">{done ? "Every column compared" : "Comparing columns"}</span>
@@ -356,14 +435,13 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
 /** Map step: the plan a person approves. */
 export function PlanPanel() {
   return (
-    <figure className="mk-panel" aria-labelledby="mk-plan-title">
-      <PanelHead
-        title="Map"
-        meta="Example, from a recorded run. Every column mapped and ready to approve"
-        badge={<span className="mk-status">New table</span>}
-      />
+    <Panel
+      title="Map"
+      meta="Example, from a recorded run. Every column mapped and ready to approve"
+      badge={<span className="mk-status">New table</span>}
+    >
       <table className="mk-panel-table mk-plan-table">
-        <caption id="mk-plan-title">Column mapping</caption>
+        <caption>Column mapping</caption>
         <thead>
           <tr>
             <th scope="col">Source column</th>
@@ -373,8 +451,8 @@ export function PlanPanel() {
           </tr>
         </thead>
         <tbody>
-          {RECORDED_MAPPING.map((m) => (
-            <tr key={m.col}>
+          {RECORDED_MAPPING.map((m, i) => (
+            <tr key={m.col} style={stagger(i)}>
               <th scope="row"><code>{m.col}</code></th>
               <td><code>{m.from}</code></td>
               <td>
@@ -386,36 +464,128 @@ export function PlanPanel() {
           ))}
         </tbody>
       </table>
-    </figure>
+    </Panel>
   );
 }
 
-/** Validate: the route's own gates, before anything is written. */
-export function GatesPanel() {
+/**
+ * Migrations: a map between two schemas that do not match name for name.
+ * Renamed pairs map by meaning; an ambiguous pair waits for a person; a
+ * narrowing cannot be approved without a signed risk record.
+ */
+export function MigrationMapPanel() {
+  const rows: { from: string; to: string; state: "safe" | "review" | "risk"; note: string }[] = [
+    { from: "order_id bigint", to: "ORDER_ID NUMBER(19,0)", state: "safe", note: "Same name, wider type" },
+    { from: "cust_ref integer", to: "CUSTOMER_ID NUMBER(10,0)", state: "safe", note: "Renamed, matched by role" },
+    { from: "created timestamptz", to: "CREATED_AT TIMESTAMP_TZ", state: "safe", note: "Renamed, matched by role" },
+    { from: "amt numeric(12,2)", to: "AMOUNT_USD or AMOUNT_LOCAL", state: "review", note: "Two candidates, waiting for a person" },
+    { from: "note varchar(2000)", to: "NOTE VARCHAR(500)", state: "risk", note: "Narrowing: needs a signed risk record" },
+  ];
+  const label = { safe: "Safe", review: "Review", risk: "Risk record" } as const;
+  const glyph = { safe: "landed", review: "pending", risk: "held" } as const;
   return (
-    <figure className="mk-panel" aria-labelledby="mk-gates-title">
+    <Panel
+      title="Map"
+      meta="Example. Two schemas that do not match name for name"
+      badge={
+        <span className="mk-status mk-status--held">
+          <StatusGlyph kind="pending" />2 need a decision
+        </span>
+      }
+    >
+      <table className="mk-panel-table mk-migrate-table">
+        <caption>Column mapping between two schemas</caption>
+        <thead>
+          <tr>
+            <th scope="col">Source</th>
+            <th scope="col">Destination</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.from} style={stagger(i)} className={`is-${r.state}`}>
+              <th scope="row">
+                <code>{r.from}</code>
+              </th>
+              <td>
+                <code>{r.to}</code>
+                <span className="mk-panel-note">{r.note}</span>
+              </td>
+              <td>
+                <span className={`mk-map-state is-${r.state}`}>
+                  <StatusGlyph kind={glyph[r.state]} />
+                  {label[r.state]}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mk-panel-foot">
+        <span>Nothing is pinned until someone accepts it</span>
+      </p>
+    </Panel>
+  );
+}
+
+/**
+ * Validate: the route's own gates. Once in view they resolve one by one from
+ * pending to their result, the way Validate fills in on screen.
+ */
+export function GatesPanel() {
+  const { ref, inView } = useInViewOnce<HTMLElement>();
+  const total = RECORDED_GATES.length;
+  const [resolved, setResolved] = useState(0);
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!inView) return;
+    if (prefersReducedMotion()) {
+      setResolved(total);
+      return;
+    }
+    let n = 0;
+    const id = window.setInterval(() => {
+      n += 1;
+      setResolved(n);
+      if (n >= total) window.clearInterval(id);
+    }, 55);
+    return () => window.clearInterval(id);
+  }, [inView, total]);
+
+  const done = resolved >= total;
+  return (
+    <figure ref={ref} className="mk-panel" aria-labelledby={titleId}>
       <PanelHead
         title="Validate"
+        titleId={titleId}
         meta="Example, from a recorded run. Core checks plus the route's policy checks"
-        badge={<span className="mk-status mk-status--ok">Approved</span>}
+        badge={
+          <span className={`mk-status${done ? " mk-status--ok" : ""}`} aria-live="polite">
+            {done ? "Approved" : "Validating"}
+          </span>
+        }
       />
-      <p className="mk-sr-only" id="mk-gates-title">
-        Checks before the write, each passed or not applicable on this route.
-      </p>
       <ul className="mk-gates">
-        {RECORDED_GATES.map((g) => (
-          <li key={g.id} className={g.state === "pass" ? "is-pass" : "is-na"}>
-            <span className={`mk-dot ${g.state === "pass" ? "mk-dot--ok" : "mk-dot--na"}`} aria-hidden />
-            <code>{g.id}</code>
-            <span>{g.name}</span>
-            <em>{g.state === "pass" ? "Passed" : "Not applicable"}</em>
-          </li>
-        ))}
+        {RECORDED_GATES.map((g, i) => {
+          const state = i < resolved ? g.state : "pending";
+          return (
+            <li key={g.id} className={`is-${state}`}>
+              <span
+                className={`mk-dot ${state === "pass" ? "mk-dot--ok" : state === "na" ? "mk-dot--na" : "mk-dot--wait"}`}
+                aria-hidden
+              />
+              <span>{g.name}</span>
+              <em>{state === "pass" ? "Passed" : state === "na" ? "Not applicable" : "Pending"}</em>
+            </li>
+          );
+        })}
       </ul>
       <p className="mk-panel-foot">
         <span><span className="mk-dot mk-dot--ok" aria-hidden />Passed</span>
         <span><span className="mk-dot mk-dot--na" aria-hidden />Not applicable</span>
-        <span>Execute unlocked</span>
+        <span>{done ? "Execute unlocked" : "Execute locked"}</span>
       </p>
     </figure>
   );
@@ -431,14 +601,13 @@ export function RunPanel() {
     [`${RECORDED_ROUTE.destEngine} count`, "Taken before and after the write"],
   ];
   return (
-    <figure className="mk-panel" aria-labelledby="mk-run-title">
-      <PanelHead title="Run" meta="Example, from a recorded run" badge={<span className="mk-status mk-status--ok">Completed</span>} />
+    <Panel title="Run" meta="Example, from a recorded run" badge={<span className="mk-status mk-status--ok">Completed</span>}>
       <div className="mk-run-bar" aria-hidden>
-        <span style={{ width: "100%" }} />
+        <span />
       </div>
-      <dl className="mk-panel-dl" id="mk-run-title">
-        {rows.map(([k, v]) => (
-          <div key={k}>
+      <dl className="mk-panel-dl">
+        {rows.map(([k, v], i) => (
+          <div key={k} style={stagger(i)}>
             <dt>{k}</dt>
             <dd>{v}</dd>
           </div>
@@ -447,7 +616,7 @@ export function RunPanel() {
       <p className="mk-panel-foot">
         <span><span className="mk-dot mk-dot--ok" aria-hidden />Append delta balanced: count after, minus count before, equals rows written</span>
       </p>
-    </figure>
+    </Panel>
   );
 }
 
@@ -455,64 +624,80 @@ export function RunPanel() {
 export function EvidencePanel() {
   const roles = ["Engineering", "Data owner", "Compliance"];
   return (
-    <figure className="mk-panel" aria-labelledby="mk-evidence-title">
-      <PanelHead title="Sign-off" meta="Example. The same report, signed by role" />
-      <dl className="mk-panel-dl" id="mk-evidence-title">
-        <div>
-          <dt>Comparison on record</dt>
-          <dd>Full checksum, independent re-read of the source</dd>
-        </div>
-        <div>
-          <dt>Proof pack</dt>
-          <dd>Signed, verifiable through the API</dd>
-        </div>
-        <div>
-          <dt>Audit log</dt>
-          <dd>Hash-chained, exports as CSV, JSON, or CEF</dd>
-        </div>
+    <Panel title="Sign-off" meta="Example. The same report, signed by role">
+      <dl className="mk-panel-dl">
+        {[
+          ["Comparison on record", "Full checksum, independent re-read of the source"],
+          ["Proof pack", "Signed, verifiable through the API"],
+          ["Audit log", "Tamper-evident, and exportable"],
+        ].map(([k, v], i) => (
+          <div key={k} style={stagger(i)}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
       </dl>
       <ul className="mk-signoff">
-        {roles.map((r) => (
-          <li key={r}>
+        {roles.map((r, i) => (
+          <li key={r} style={stagger(i + 3)}>
             <span>{r}</span>
             <em>Awaiting signature</em>
           </li>
         ))}
       </ul>
-    </figure>
+    </Panel>
   );
 }
 
 type Held = { key: string; col: string; value: string; reason: string };
 
 const EXAMPLE_HELD: Held[] = [
-  { key: "48213", col: "status", value: "NULL", reason: "STATUS is NOT NULL in the destination" },
+  { key: "48204", col: "status", value: "NULL", reason: "status is NULL; NOT NULL in the destination" },
   { key: "48977", col: "ordered_at", value: "0000-00-00 00:00:00", reason: "Not a valid timestamp" },
-  { key: "50114", col: "attributes", value: "{\"gift\": tru", reason: "Not valid JSON for VARIANT" },
+  { key: "50114", col: "attributes", value: "{\"gift\": true,}", reason: "Not valid JSON for VARIANT" },
 ];
 
+type ReplayState = "held" | "replaying" | "balanced";
+
 /**
- * A run that finished with quarantine. "Replay" answers the visitor's click:
- * the held rows go back through the writer and the accounting closes.
+ * A run that finished with quarantine. Replay answers the visitor's click and
+ * walks the job through its states: held, replaying, balanced.
  */
 export function QuarantinePanel() {
-  const [replayed, setReplayed] = useState(false);
+  const [state, setState] = useState<ReplayState>("held");
+  const titleId = useId();
+  const { ref, inView } = useInViewOnce<HTMLElement>();
+
+  const replay = () => {
+    if (state !== "held") {
+      setState("held");
+      return;
+    }
+    if (prefersReducedMotion()) {
+      setState("balanced");
+      return;
+    }
+    setState("replaying");
+    window.setTimeout(() => setState("balanced"), 900);
+  };
+
+  const badge =
+    state === "held" ? (
+      <span className="mk-status mk-status--held">Completed with quarantine</span>
+    ) : state === "replaying" ? (
+      <span className="mk-status">Replaying</span>
+    ) : (
+      <span className="mk-status mk-status--ok">Balanced</span>
+    );
+
   return (
-    <figure className="mk-panel mk-quarantine" aria-labelledby="mk-q-title">
-      <PanelHead
-        title="Quarantine"
-        meta="Example data"
-        badge={
-          <span className={`mk-status ${replayed ? "mk-status--ok" : "mk-status--held"}`}>
-            {replayed ? "Completed" : "Completed with quarantine"}
-          </span>
-        }
-      />
-      <div className="mk-verify-bars" aria-live="polite">
-        <IdentityBars share={replayed ? { landed: 1, held: 0, skipped: 0 } : { landed: 14, held: 1, skipped: 0 }} />
+    <figure ref={ref} className={`mk-panel mk-quarantine mk-assemble${inView ? " is-in" : ""} is-${state}`} aria-labelledby={titleId}>
+      <PanelHead title="Quarantine" titleId={titleId} meta="Example data" badge={<span aria-live="polite">{badge}</span>} />
+      <div className="mk-verify-bars">
+        <IdentityBars share={state === "balanced" ? { landed: 1, held: 0, skipped: 0 } : { landed: 14, held: 1, skipped: 0 }} legend={["landed", "held"]} />
       </div>
       <table className="mk-panel-table mk-q-table">
-        <caption id="mk-q-title">Rows held on the job, with the reason for each</caption>
+        <caption>Rows held on the job, with the reason for each</caption>
         <thead>
           <tr>
             <th scope="col">order_id</th>
@@ -522,12 +707,12 @@ export function QuarantinePanel() {
           </tr>
         </thead>
         <tbody>
-          {EXAMPLE_HELD.map((h) => (
-            <tr key={h.key} className={replayed ? "is-replayed" : undefined}>
+          {EXAMPLE_HELD.map((h, i) => (
+            <tr key={h.key} style={stagger(i)} className={state === "held" ? undefined : "is-replayed"}>
               <th scope="row"><code>{h.key}</code></th>
               <td><code>{h.col}</code></td>
               <td><code className="mk-q-value">{h.value}</code></td>
-              <td>{replayed ? "Replayed after the source was fixed" : h.reason}</td>
+              <td>{state === "held" ? h.reason : state === "replaying" ? "Writing again" : "Replayed into the same table"}</td>
             </tr>
           ))}
         </tbody>
@@ -536,12 +721,18 @@ export function QuarantinePanel() {
         <button
           type="button"
           className="mk-btn mk-btn--secondary mk-btn--sm"
-          onClick={() => setReplayed((r) => !r)}
-          aria-pressed={replayed}
+          onClick={replay}
+          disabled={state === "replaying"}
         >
-          {replayed ? "Show the held rows again" : "Replay the held rows"}
+          {state === "held" ? "Replay the held rows" : state === "replaying" ? "Replaying" : "Show the held rows again"}
         </button>
-        <p>{replayed ? "Same writer, same table. The accounting closes." : "Fix the cause at the source, then replay."}</p>
+        <p>
+          {state === "held"
+            ? "Fix the cause at the source, then replay."
+            : state === "replaying"
+              ? "Same writer, same table."
+              : "Every row read is accounted for again."}
+        </p>
       </div>
     </figure>
   );
@@ -562,11 +753,10 @@ const EXAMPLE_TICKS: Tick[] = [
 /** A schedule's run history, including a drift pause. */
 export function ScheduleTimeline() {
   return (
-    <figure className="mk-panel" aria-labelledby="mk-sched-title">
-      <PanelHead title="Orders feed, every 2 minutes" meta="Example data. Incremental, deduplicated on order_id" />
-      <ol className="mk-ticks" id="mk-sched-title" aria-label="Run history">
-        {EXAMPLE_TICKS.map((t) => (
-          <li key={t.at} className={`is-${t.state}`}>
+    <Panel title="Orders feed, every 2 minutes" meta="Example data. Incremental, deduplicated on order_id">
+      <ol className="mk-ticks" aria-label="Run history">
+        {EXAMPLE_TICKS.map((t, i) => (
+          <li key={t.at} className={`is-${t.state}`} style={stagger(i)}>
             <time>{t.at}</time>
             <span className="mk-tick-mark" aria-hidden />
             {t.state === "ok" ? (
@@ -584,6 +774,249 @@ export function ScheduleTimeline() {
           </li>
         ))}
       </ol>
-    </figure>
+    </Panel>
+  );
+}
+
+const QUERY_ROWS: [string, string, string][] = [
+  ["EMEA", "Equal", "Equal"],
+  ["AMER", "Equal", "Equal"],
+  ["APAC", "Equal", "Equal"],
+  ["LATAM", "Equal", "Equal"],
+];
+
+/**
+ * Query: one read-only statement, asked of the copy and the source. "Try a
+ * write" shows what happens to a statement that would change data.
+ */
+export function QueryPanel() {
+  const [tryWrite, setTryWrite] = useState(false);
+  return (
+    <Panel
+      title="Query"
+      meta="Example. Read-only, on Warehouse Snowflake (demo) and Orders Postgres (demo)"
+      badge={<span className="mk-status">Read-only</span>}
+      className="mk-query"
+    >
+      <pre className="mk-code" aria-label="SQL statement" tabIndex={0}>
+        <code>
+          {tryWrite
+            ? "DELETE FROM DW_DEMO.SALES_ORDERS_REPORTING\nWHERE region = 'TEST';"
+            : "SELECT region, COUNT(*) AS orders, SUM(order_total) AS revenue\nFROM DW_DEMO.SALES_ORDERS_REPORTING\nGROUP BY region;"}
+        </code>
+      </pre>
+      {tryWrite ? (
+        <p className="mk-query-refused" role="status">
+          <span className="mk-status mk-status--held">Refused</span>
+          Only read and metadata statements run here. The statement never reached the database.
+        </p>
+      ) : (
+        <table className="mk-panel-table">
+          <caption>The same aggregate on both sides</caption>
+          <thead>
+            <tr>
+              <th scope="col">region</th>
+              <th scope="col">orders, Snowflake vs Postgres</th>
+              <th scope="col">revenue, Snowflake vs Postgres</th>
+            </tr>
+          </thead>
+          <tbody>
+            {QUERY_ROWS.map(([r, a, b], i) => (
+              <tr key={r} style={stagger(i)}>
+                <th scope="row"><code>{r}</code></th>
+                <td><span className="mk-dot mk-dot--ok" aria-hidden />{a}</td>
+                <td><span className="mk-dot mk-dot--ok" aria-hidden />{b}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="mk-panel-actions">
+        <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => setTryWrite((w) => !w)} aria-pressed={tryWrite}>
+          {tryWrite ? "Back to the read" : "Try a write"}
+        </button>
+        <p>{tryWrite ? "Writes are refused before they run." : "Each region compared on the copy and the source."}</p>
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * Pilot: a question answered by running a tool, with the SQL under the
+ * answer, and a change staged for the person to confirm.
+ */
+export function PilotPanel() {
+  const [confirmed, setConfirmed] = useState(false);
+  return (
+    <Panel title="Pilot" meta="Example conversation" className="mk-pilot">
+      <ol className="mk-chat" aria-label="Conversation">
+        <li className="mk-chat-you" style={stagger(0)}>
+          <span className="mk-sr-only">You: </span>Does the Snowflake copy of the orders still match Postgres?
+        </li>
+        <li className="mk-chat-pilot" style={stagger(1)}>
+          <span className="mk-sr-only">Pilot: </span>
+          <p>
+            Yes. The latest run on this route is <strong>Proven</strong>: row counts are equal on both sides and the full
+            checksum matches. No difference has an open cause.
+          </p>
+          <p className="mk-chat-meta">From the job's Trust Report. Tool: explain_parity</p>
+        </li>
+        <li className="mk-chat-you" style={stagger(2)}>
+          <span className="mk-sr-only">You: </span>Keep it in sync every hour.
+        </li>
+        <li className="mk-chat-pilot" style={stagger(3)}>
+          <span className="mk-sr-only">Pilot: </span>
+          <div className="mk-confirm">
+            <p>
+              <strong>Create schedule</strong> Orders Postgres to Warehouse Snowflake, hourly, incremental on{" "}
+              <code>ordered_at</code>
+            </p>
+            <p className="mk-chat-meta" aria-live="polite">
+              {confirmed ? "Confirmed. The schedule runs through the same checks as Studio." : "Staged. Nothing happens until you confirm."}
+            </p>
+            <div className="mk-confirm-actions">
+              <button
+                type="button"
+                className="mk-btn mk-btn--primary mk-btn--sm"
+                onClick={() => setConfirmed(true)}
+                disabled={confirmed}
+              >
+                {confirmed ? "Confirmed" : "Confirm"}
+              </button>
+              {confirmed ? (
+                <button type="button" className="mk-btn mk-btn--quiet mk-btn--sm" onClick={() => setConfirmed(false)}>
+                  Reset example
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </li>
+      </ol>
+    </Panel>
+  );
+}
+
+/** MCP: an agent's tool calls under a role-scoped key, with a staged action. */
+export function McpPanel() {
+  const calls: { tool: string; perm: string; result: string; tone: "ok" | "staged" | "done" }[] = [
+    { tool: "plan_transfer", perm: "job.plan", result: "Plan ready. Mapping attached, no blocking findings.", tone: "ok" },
+    { tool: "start_transfer", perm: "job.run", result: "Staged for confirmation. ack_id returned; nothing has run.", tone: "staged" },
+    { tool: "confirm_action", perm: "ack_id, used once", result: "Transfer queued. Same checks and read-back as Studio.", tone: "done" },
+  ];
+  return (
+    <Panel title="MCP session" meta="Example. Agent in Cursor, API key with the Editor role" className="mk-mcp">
+      <dl className="mk-mcp-key">
+        <div>
+          <dt>Credentials</dt>
+          <dd>Secret reference <code>conn_orders_pg</code>; the agent never sees a password</dd>
+        </div>
+        <div>
+          <dt>Scope</dt>
+          <dd>Capped at the grants of the person who created the key</dd>
+        </div>
+      </dl>
+      <ol className="mk-mcp-calls" aria-label="Tool calls">
+        {calls.map((c, i) => (
+          <li key={c.tool} className={`is-${c.tone}`} style={stagger(i)}>
+            <code>{c.tool}</code>
+            <span className="mk-mcp-perm">{c.perm}</span>
+            <p>{c.result}</p>
+          </li>
+        ))}
+      </ol>
+    </Panel>
+  );
+}
+
+/** Enterprise controls on one workspace. */
+export function ControlsPanel() {
+  const rows: [string, string][] = [
+    ["Sign-in", "OIDC or SAML, routed by email domain"],
+    ["Provisioning", "SCIM 2.0, identity-provider groups mapped to roles"],
+    ["Roles", ROLES.map((r) => r.name).join(", ")],
+    ["API keys", "Role and scopes capped at the creator's grants"],
+    ["Connector secrets", "Encrypted at rest, wrapped with your AWS KMS key"],
+    ["Data region", "Recorded on the workspace; other regions refused before a run"],
+    ["Audit", "Tamper-evident: each entry signed and linked to the one before"],
+  ];
+  return (
+    <Panel title="Workspace controls" meta="Example workspace settings" badge={<span className="mk-status mk-status--ok">Enforced on every run</span>}>
+      <dl className="mk-panel-dl">
+        {rows.map(([k, v], i) => (
+          <div key={k} style={stagger(i)}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </Panel>
+  );
+}
+
+/** Security: audit entries, each linked to the one before by its hash. */
+export function AuditChainPanel() {
+  const entries: { what: string; who: string; hash: string; prev: string }[] = [
+    { what: "Plan approved", who: "data.owner@example.com", hash: "9c02e1", prev: "4b7a30" },
+    { what: "Transfer started", who: "API key, Editor role", hash: "a41f8d", prev: "9c02e1" },
+    { what: "Rows held in quarantine", who: "Transfer engine", hash: "0de76b", prev: "a41f8d" },
+    { what: "Trust Report signed", who: "compliance@example.com", hash: "e5c913", prev: "0de76b" },
+  ];
+  return (
+    <Panel title="Audit log" meta="Example entries" badge={<span className="mk-status mk-status--ok">Chain verified</span>}>
+      <ol className="mk-chain" aria-label="Audit entries">
+        {entries.map((e, i) => (
+          <li key={e.hash} style={stagger(i)}>
+            <span className="mk-chain-link" aria-hidden />
+            <div>
+              <p className="mk-chain-what">{e.what}</p>
+              <p className="mk-chain-who">{e.who}</p>
+            </div>
+            <p className="mk-chain-hash">
+              <code>{e.hash}</code>
+              <span>links to <code>{e.prev}</code></span>
+            </p>
+          </li>
+        ))}
+      </ol>
+      <p className="mk-panel-foot">
+        <span>Every entry is signed with the chain's own key, named by a key id</span>
+      </p>
+    </Panel>
+  );
+}
+
+/** The four workspace roles, as docs/operate/security.md defines them. */
+export const ROLES: { name: string; does: string }[] = [
+  { name: "Viewer", does: "Reads jobs, connectors, schedules, and the audit log. Can ask Pilot and run read-only queries." },
+  { name: "Operator", does: "Runs and repairs pipelines but does not design them." },
+  { name: "Editor", does: "Plans transfers, saves connectors, and manages schedules." },
+  { name: "Admin", does: "Deletes connectors, authorizes schedules, manages the workspace, and invites members." },
+];
+
+/** Integrations: every family, each member marked proven in CI or implemented. */
+export function CoveragePanel() {
+  return (
+    <Panel title="Connector coverage" meta="From the CI evidence file" className="mk-coverage">
+      <ul className="mk-coverage-list">
+        {CONNECTOR_CLAIMS.families.map((f, i) => (
+          <li key={f.family} style={stagger(i)}>
+            <span className="mk-coverage-name">{f.family}</span>
+            <span className="mk-coverage-dots" aria-hidden>
+              {f.items.map((item) => (
+                <i key={item.driver} className={item.proven ? "is-proven" : undefined} title={item.name} />
+              ))}
+            </span>
+            <span className="mk-coverage-count">
+              {f.items.filter((x) => x.proven).length} of {f.items.length}
+              <span className="mk-sr-only"> proven in CI</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mk-panel-foot">
+        <span><i className="mk-coverage-key is-proven" aria-hidden />Proven in CI</span>
+        <span><i className="mk-coverage-key" aria-hidden />Implemented</span>
+      </p>
+    </Panel>
   );
 }

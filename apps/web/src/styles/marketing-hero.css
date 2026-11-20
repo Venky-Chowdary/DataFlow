@@ -31,11 +31,6 @@
  * at 1024 a split column gave the art ~466px, which set its smallest type near
  * 5px. Below this width the hero stacks and the drawing takes the whole shell.
  */
-@media (max-width: 1099px) {
-  .lp .lp-mkt-live-reel {
-    grid-template-columns: minmax(0, 1fr) !important;
-  }
-}
 
 /* ─── Product shot — live workspace, not a second invented UI ───── */
 
@@ -148,66 +143,14 @@
   min-width: 0;
 }
 
-.lp .lp-mkt-live-reel .lp-product-shot-chrome,
-.lp .docs-shot-reel--product .docs-shot-reel-stage,
-.lp .docs-shot-reel--hero .docs-shot-reel-stage {
-  overflow: hidden;
-  border-radius: var(--df-radius-none) var(--df-radius-none) var(--df-radius-2xl) var(--df-radius-2xl);
-}
-
-.lp .docs-shot-reel--product .docs-shot-reel-frame,
-.lp .docs-shot-reel--hero .docs-shot-reel-frame,
 .lp .docs-shot-reel .docs-shot-reel-frame {
   object-fit: contain;
   object-position: top center;
 }
 
-/* Product + Solutions post-hero reels share one frame width. */
-.lp .lp-mkt-page-rich .lp-mkt-body,
-.lp .lp-sol-v2 .lp-mkt-body,
-.lp .lp-wh-v3 .lp-mkt-body {
-  width: var(--lp-shell) !important;
-  max-width: 100% !important;
-  margin-inline: auto !important;
-}
-
-.lp .lp-mkt-live-reel {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.05fr);
-  gap: clamp(20px, 3vw, 40px);
-  align-items: start;
-  width: 100%;
-  max-width: min(1080px, 100%);
-  margin: 12px auto 36px;
-}
-
-.lp .lp-mkt-live-reel .docs-shot-reel {
-  margin: 0;
-}
-
-.lp .docs-shot-reel--product .docs-shot-reel-stage {
-  aspect-ratio: 16 / 10;
-  max-height: 420px;
-}
-
-.lp .lp-mkt-chapter .lp-product-shot-viewport {
-  aspect-ratio: 16 / 10;
-  max-height: 440px;
-}
-
-.lp .lp-mkt-chapter .lp-product-shot {
-  max-width: 880px;
-  margin-inline: auto;
-}
-
 /* Route chips never paint past the frame — long FQDNs ellipsis. */
 .lp .lp-product-shot-route {
   overflow: hidden;
-}
-
-.lp .lp-mkt-chapter .lp-product-shot-route,
-.lp .lp-proof-beside .lp-product-shot-route {
-  color: var(--df-text-secondary);
 }
 
 .docs-shot-reel-caption {
@@ -235,142 +178,12 @@
   --lp-fs-body: 15px;
 }
 
-.lp .lp-sol-section-head h2,
-.lp .lp-proof-beside-copy h2 {
-  font-size: var(--lp-fs-title);
-  font-weight: 650;
-  letter-spacing: -0.032em;
-  line-height: 1.12;
-}
-
-.lp .lp-sol-outcome h3,
-.lp .lp-sol-step h3,
-.lp .lp-sol-cap h3 {
-  font-size: 1.15rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.28;
-}
-
-/* Explanations that were a tall 50-character column now share the row. */
-.lp .lp-sol-section-head {
-  max-width: 68ch;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  row-gap: 8px;
-  align-items: start;
-  margin-bottom: 22px;
-}
-
-.lp .lp-sol-section-head h2 {
-  grid-column: 1;
-  grid-row: 2;
-  margin: 0;
-}
-
-.lp .lp-sol-section-head > p:last-child {
-  grid-column: 1;
-  grid-row: auto;
-  align-self: start;
-  max-width: 68ch;
-  margin: 0;
-  font-size: 14.5px;
-  line-height: 1.6;
-}
-
-.lp .lp-mkt-prose {
-  max-width: none;
-}
-
-@media (min-width: 840px) {
-  .lp .lp-mkt-prose:has(p + p) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    column-gap: 40px;
-    row-gap: 12px;
-  }
-}
-
-.lp .lp-mkt-prose p {
-  font-size: 14.5px;
-  line-height: 1.6;
-}
-
-@media (min-width: 1081px) {
-  .lp .lp-sol-steps {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .lp .lp-sol-step {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-  }
-}
-
-/* Portrait product UI: copy on the left, the panel on the right. */
-.lp-proof-beside {
-  width: var(--lp-shell);
-  max-width: 100%;
-  margin: 0 auto;
-  padding: clamp(28px, 4vh, 48px) 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
-  gap: clamp(24px, 4vw, 64px);
-  align-items: start;
-}
-
-.lp-proof-beside-copy h2 {
-  margin: 8px 0 12px;
-  color: var(--lp-ink);
-  font-family: var(--lp-font-display);
-}
-
-.lp-proof-beside-copy > p:last-child {
-  margin: 0;
-  color: var(--lp-muted);
-  font-size: 14.5px;
-  line-height: 1.6;
-}
-
-/* Quiet arrival. Cards follow the section, a few dozen milliseconds apart. */
-.lp .lp-reveal--in .lp-sol-outcome,
-.lp .lp-reveal--in .lp-sol-step,
-.lp .lp-reveal--in .lp-sol-cap {
-  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 70ms);
-}
-
-.lp .lp-reveal--in .lp-sol-outcome:nth-child(2),
-.lp .lp-reveal--in .lp-sol-step:nth-child(2),
-.lp .lp-reveal--in .lp-sol-cap:nth-child(2) { animation-delay: 60ms; }
-.lp .lp-reveal--in .lp-sol-outcome:nth-child(3),
-.lp .lp-reveal--in .lp-sol-step:nth-child(3),
-.lp .lp-reveal--in .lp-sol-cap:nth-child(3) { animation-delay: 120ms; }
-.lp .lp-reveal--in .lp-sol-outcome:nth-child(4),
-.lp .lp-reveal--in .lp-sol-step:nth-child(4) { animation-delay: 180ms; }
-
 .lp .lp-product-shot-chrome {
   transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@media (max-width: 839px) {
-  .lp .lp-sol-section-head,
-.lp-proof-beside {
-    grid-template-columns: 1fr;
-  }
-
-  .lp .lp-sol-section-head > p:last-child {
-    grid-column: 1;
-    grid-row: auto;
-  }
-
-  
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .lp .lp-reveal--in .lp-sol-outcome,
-.lp .lp-reveal--in .lp-sol-step,
-.lp .lp-reveal--in .lp-sol-cap,
-.lp .lp-product-shot-chrome {
+  .lp .lp-product-shot-chrome {
     animation: none;
     transition: none;
     transform: none;
@@ -411,8 +224,7 @@
 @media (max-width: 720px) {
   .lp-product-shot,
 .lp-product-shot-chrome,
-.lp-product-shot-viewport,
-.lp-proof-beside {
+.lp-product-shot-viewport {
     min-width: 0;
     max-width: 100%;
   }
@@ -431,25 +243,11 @@
 
   
 
-  .lp .lp-mkt-live-reel {
-    grid-template-columns: 1fr;
-  }
+  
 
-  .lp .docs-shot-reel--product .docs-shot-reel-stage,
-.lp .lp-mkt-chapter .lp-product-shot-viewport {
-    aspect-ratio: 16 / 10;
-    max-height: 320px;
-  }
+  
 
-  .lp .docs-shot-reel--product .docs-shot-reel-frame {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    max-height: none;
-    object-fit: contain;
-    object-position: center center;
-  }
+  
 
   .lp-product-shot-viewport img,
 .lp-product-shot.is-panel .lp-product-shot-viewport img {
@@ -492,66 +290,13 @@
     transform: none;
   }
 
-  .lp-pricing-v2-table,
-  .lp-pricing-v2-table tbody,
-  .lp-sales-table,
-  .lp-sales-table tbody {
-    display: block;
-    width: 100%;
-    min-width: 0;
-  }
+  
 
-  .lp-pricing-v2-table thead,
-  .lp-sales-table thead {
-    display: none;
-  }
+  
 
-  .lp-pricing-v2-table tr,
-  .lp-sales-table tr {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--lp-line);
-  }
+  
 
-  .lp-pricing-v2-table th,
-  .lp-pricing-v2-table td,
-  .lp-sales-table th,
-  .lp-sales-table td {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    width: auto;
-    min-width: 0;
-    padding: 2px 0;
-    border: 0;
-    text-align: right;
-  }
-
-  .lp-pricing-v2-table tbody th,
-  .lp-sales-table tbody th {
-    justify-content: flex-start;
-    text-align: left;
-  }
-
-  .lp-pricing-v2-table td::before,
-  .lp-sales-table td::before {
-    color: var(--df-text-secondary);
-    font-size: 11px;
-    font-weight: 650;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .lp-pricing-v2-table td:nth-child(2)::before { content: "Starter"; }
-  .lp-pricing-v2-table td:nth-child(3)::before { content: "Team"; }
-  .lp-pricing-v2-table td:nth-child(4)::before { content: "Enterprise"; }
-
-  .lp-sales-table td:nth-child(2)::before { content: "What you get"; }
-  .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
-  .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
+  
 
   
 
@@ -560,45 +305,14 @@
   
 
   
-}
 
-.lp-proof-beside .lp-product-shot,
-.lp .lp-mkt-chapter--band > .lp-product-shot,
-.lp-proof-beside .lp-product-shot-chrome,
-.lp .lp-mkt-chapter--band .lp-product-shot-chrome {
-  width: fit-content;
-  max-width: 100%;
-  margin-left: auto;
-}
+  
 
-.lp-proof-beside .lp-product-shot-viewport,
-.lp .lp-mkt-chapter--band .lp-product-shot-viewport {
-  aspect-ratio: auto;
-  width: auto;
-  max-height: none;
-  background: var(--df-surface);
-}
+  
 
-.lp-proof-beside .lp-product-shot-viewport img,
-.lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
-  width: auto;
-  height: auto;
-  max-width: min(680px, 100%);
-  max-height: 420px;
-  object-fit: contain;
-  object-position: center center;
-}
+  
 
-.lp .lp-wh-split-grid {
-  align-items: start;
-}
-
-.lp .lp-wh-rail-inner {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px 18px;
-  padding: 14px 0;
+  
 }
 
 /* One surface: hairline, soft lift, and a frame that keeps a row aligned.
@@ -630,302 +344,12 @@
   
 }
 
-/* One card material. Fivetran and Airbyte keep every tile on the same
-   surface; a dark first card, a mint second, an amber third, and a
-   dashed fourth read as a prototype. */
-.lp .lp-sol-outcome,
-.lp .lp-sec-layer-card,
-.lp .lp-int-family-card,
-.lp .lp-ent-capability,
-.lp .lp-sol-step,
-.lp .lp-sol-cap {
-  background: var(--df-surface);
-  border: 1px solid var(--lp-line);
-  border-style: solid;
-  color: var(--lp-ink);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-.lp .lp-sol-outcome h3,
-.lp .lp-sol-outcome > span,
-.lp .lp-sec-layer-card h3,
-.lp .lp-sec-layer-card em,
-.lp .lp-ent-capability h3,
-.lp .lp-ent-capability > span,
-.lp .lp-sol-step h3,
-.lp .lp-sol-cap h3 {
-  color: var(--lp-ink);
-}
-
-.lp .lp-sol-outcome p,
-.lp .lp-sec-layer-card p,
-.lp .lp-ent-capability p,
-.lp .lp-sol-step p,
-.lp .lp-sol-cap p,
-.lp .lp-int-family-card p {
-  color: var(--lp-muted);
-}
-
-.lp .lp-sol-outcome > span,
-.lp .lp-ent-capability > span {
-  background: transparent;
-  color: var(--df-brand-text);
-}
-
-/* Product bands: the claim on the left, one framed workspace on the right.
-   Same card as the homepage steps, so a proof row is not text floating
-   in a full-width void. */
-.lp-proof-beside {
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) auto;
-  width: min(var(--lp-shell), 100%);
-  margin: 16px auto;
-  padding: 28px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-  gap: 28px 48px;
-}
-
-.lp-proof-beside .lp-product-shot {
-  justify-self: end;
-}
-
-@media (min-width: 1100px) {
-  .lp .lp-mkt-chapter--band {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 24px 36px;
-    align-items: center;
-    margin-block: 16px;
-    padding: 28px;
-    border: 1px solid var(--lp-line);
-    border-radius: var(--df-radius-xl);
-    background: var(--df-surface);
-    box-shadow: var(--lp-shadow-soft);
-  }
-
-  .lp .lp-mkt-chapter--band > .lp-product-shot {
-    max-width: none;
-    margin: 0;
-  }
-}
-
-@media (max-width: 1099px) {
-  .lp .lp-mkt-chapter--band {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 20px;
-  }
-
-  .lp-proof-beside .lp-product-shot,
-.lp .lp-mkt-chapter--band > .lp-product-shot,
-.lp-proof-beside .lp-product-shot-chrome,
-.lp .lp-mkt-chapter--band .lp-product-shot-chrome,
-.lp-proof-beside .lp-product-shot-viewport,
-.lp .lp-mkt-chapter--band .lp-product-shot-viewport {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .lp-proof-beside .lp-product-shot-viewport img,
-.lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
-    width: 100%;
-    height: auto;
-    max-width: 100%;
-    max-height: none;
-  }
-}
-
-@media (max-width: 1099px) {
-  .lp-proof-beside {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.lp .lp-mkt-page-rich .lp-mkt-stats-item strong {
-  font-size: clamp(1.45rem, 1.1rem + 0.7vw, 1.85rem);
-  letter-spacing: -0.03em;
-}
-
-.lp .lp-proof-beside {
-  border: 0;
-  border-bottom: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-none);
-  background: transparent;
-  box-shadow: none;
-  padding: clamp(40px, 5vh, 64px) 0;
-}
-
-.lp .lp-proof-beside-copy h2 {
-  font-size: var(--lp-fs-title);
-  letter-spacing: -0.032em;
-  line-height: 1.12;
-}
-
-.lp-proof-beside,
-.lp .lp-mkt-chapter--band,
-.lp-sol-outcome,
-.lp-ent-capability,
-.lp-sec-layer-card {
-  transition:
-    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 320ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 320ms ease;
-}
-
-@media (hover: hover) {
-  .lp .lp-mkt-chapter--band:hover,
-.lp-sol-outcome:hover,
-.lp-ent-capability:hover,
-.lp-sec-layer-card:hover {
-    border-color: var(--df-teal-600);
-    box-shadow: var(--lp-shadow-editorial);
-  }
-
-  .lp .lp-mkt-chapter--band:hover,
-  .lp-sol-outcome:hover,
-  .lp-ent-capability:hover,
-  .lp-sec-layer-card:hover {
-    transform: translateY(-3px);
-  }
-
-  .lp-proof-beside:hover .lp-product-shot-chrome,
-.lp .lp-mkt-chapter--band:hover .lp-product-shot-chrome {
-    transform: translateY(-4px);
-  }
-}
-
 /* A screenshot's intrinsic width was taking the whole row, so the copy
    column computed to 0px and each letter wrapped onto its own line.
    Stack until both columns have room, the same point the hero stacks. */
 
 /* One frame width for all five steps. Intrinsic widths (580, 604, 674)
    left each screenshot on a different edge, so the card looked cut. */
-
-/* Chapter titles lost their scale when the copy moved into a wrapper.
-   Product pages use the same section size as the homepage scenes. */
-.lp .lp-mkt-chapter-copy > h2,
-.lp .lp-mkt-chapter > h2 {
-  margin: 0 0 10px;
-  font-size: var(--lp-fs-title);
-  letter-spacing: -0.032em;
-  line-height: 1.12;
-  color: var(--lp-ink);
-}
-
-.lp .lp-mkt-algo {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
-  margin-top: 22px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.lp .lp-mkt-algo-steps li {
-  padding: 14px 16px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-.lp .lp-reveal--in .lp-mkt-algo-steps li {
-  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--i, 0) * 70ms);
-}
-
-.lp .lp-mkt-scenario {
-  margin-top: 18px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.lp .lp-mkt-scenario ol {
-  list-style: none;
-  padding: 0;
-  gap: 10px;
-}
-
-.lp .lp-mkt-scenario li {
-  padding: 14px 16px 14px 18px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-.lp .lp-reveal--in .lp-mkt-scenario li {
-  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.lp .lp-reveal--in .lp-mkt-scenario li:nth-child(2) { animation-delay: 70ms; }
-.lp .lp-reveal--in .lp-mkt-scenario li:nth-child(3) { animation-delay: 140ms; }
-.lp .lp-reveal--in .lp-mkt-scenario li:nth-child(4) { animation-delay: 210ms; }
-.lp .lp-reveal--in .lp-mkt-scenario li:nth-child(5) { animation-delay: 280ms; }
-
-.lp .lp-mkt-gate-table {
-  margin-top: 20px;
-  border-color: var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-reveal--in .lp-mkt-algo-steps li,
-  .lp .lp-reveal--in .lp-mkt-scenario li,
-  .lp .lp-cust3-metrics-row > div,
-  .lp .lp-reveal--in .lp-int-family-card,
-  .lp .lp-reveal--in .lp-pricing-card,
-  .lp .lp-reveal--in .lp-mkt-evidence-card {
-    animation: none;
-  }
-}
-
-/* Customers and connectors: the plain divided strip becomes the same card
-   row as the homepage promises. Family cards share one height. */
-.lp .lp-cust3-metrics {
-  background: transparent;
-  border-bottom: 0;
-}
-
-.lp .lp-cust3-metrics-row {
-  gap: 14px;
-  padding-block: 28px 8px;
-}
-
-.lp .lp-cust3-metrics-row > div {
-  padding: 20px 18px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-  animation: lp-home-rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--i, 0) * 70ms);
-}
-
-.lp .lp-int-family-grid {
-  align-items: stretch;
-}
-
-.lp .lp-int-family-card {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.lp .lp-int-family-icons {
-  margin-top: auto;
-  padding-top: 16px;
-}
-
-.lp .lp-reveal--in .lp-int-family-card {
-  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 60ms);
-}
 
 /* Scene titles match the homepage. Plan names, legal copy, and doc
    sections keep their own size. */
@@ -942,18 +366,6 @@
   line-height: 1.3;
 }
 
-.lp.lp-subpage .lp-pricing-card h2 {
-  font-size: 1.15rem;
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.lp .lp-reveal--in .lp-pricing-card,
-.lp .lp-reveal--in .lp-mkt-evidence-card {
-  animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 80ms);
-}
-
 /* Airbyte's measured scroll reveal travels about 49px over 750ms, with
    items 70ms apart. Ours travels 36px over the same 750ms so a full
    card row does not jump. The easing is the same curve. */
@@ -966,15 +378,6 @@
 
 .lp .lp-reveal--in {
   transform: none;
-}
-
-.lp .lp-reveal--in .lp-mkt-algo-steps li,
-.lp .lp-reveal--in .lp-mkt-scenario li,
-.lp .lp-reveal--in .lp-int-family-card,
-.lp .lp-reveal--in .lp-pricing-card,
-.lp .lp-reveal--in .lp-mkt-evidence-card {
-  animation-duration: 750ms;
-  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1069,75 +472,6 @@
   text-transform: uppercase;
 }
 
-/* Full-width bands. Fivetran and Airbyte break a long page into scenes
-   instead of one continuous wash. Cards keep their hairline on the white. */
-.lp .lp-cust3-stories {
-  background: var(--df-surface);
-  border-block: 1px solid var(--lp-line);
-  padding-block: clamp(56px, 7vh, 88px);
-}
-
-/* The call list was a plain disc list. Each line is its own row. */
-.lp .lp-sales-follow {
-  padding: clamp(56px, 7vh, 88px) 0;
-}
-
-.lp .lp-sales-honesty ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 10px;
-}
-
-.lp .lp-sales-honesty li {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-12);
-  background: var(--df-surface);
-  color: var(--lp-ink);
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.lp .lp-sales-honesty li::before {
-  content: "";
-  flex: 0 0 8px;
-  width: 8px;
-  height: 8px;
-  margin-top: 0.45em;
-  border-radius: var(--df-radius-pill);
-  background: var(--df-teal-600);
-}
-
-@media (max-width: 960px) {
-  .lp .lp-sales-honesty .lp-sales-rail-links {
-    grid-column: 1;
-  }
-}
-
-/* Demos page player matches the homepage shell. A 920px player
-   under a 1280px catalog left a gap on both sides. */
-.lp .lp-demos-player .lp-video-frame,
-.lp .lp-demos-player .lp-video-facade,
-.lp .lp-demos-current {
-  max-width: none;
-}
-
-.lp .lp-demos-grid-section {
-  background: var(--df-surface);
-  border-block: 1px solid var(--lp-line);
-  padding-block: clamp(36px, 5vh, 64px);
-}
-
-.lp .lp-demos-filter {
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-
 /* Contact form. Fivetran's demo form gives each field room to type.
    The previous card was 16px of padding and 7px inputs. */
 .lp .lp-sales-form {
@@ -1226,60 +560,6 @@
   border-bottom: 0;
 }
 
-/* The control snapshot is a dark spec card. A later white-card rule
-   painted it white and left the heading in light teal. */
-.lp .lp-ent-engine .lp-ent-panel {
-  background-color: var(--df-logo-tile);
-  background-image: radial-gradient(ellipse 80% 60% at 100% 0%, rgba(45, 212, 191, 0.18), transparent 50%);
-  color: var(--df-success-bg);
-  border-color: transparent;
-  border-radius: var(--df-radius-2xl);
-}
-
-.lp .lp-ent-panel h3 {
-  color: var(--df-success-bg);
-}
-
-.lp .lp-ent-panel-row span,
-.lp .lp-ent-panel-row em {
-  color: var(--df-success-bg);
-}
-
-.lp .lp-ent-panel-row em {
-  opacity: 0.82;
-}
-
-.lp .lp-wh-flow-list {
-  gap: 16px;
-  border: 0;
-  background: transparent;
-  overflow: visible;
-}
-
-.lp .lp-wh-flow-list li,
-.lp .lp-wh-flow-list li:last-child {
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-/* Migration and sync steps used the same shared frame. */
-.lp .lp-sol-steps {
-  gap: 16px;
-  border: 0 !important;
-  background: transparent;
-  overflow: visible;
-}
-
-.lp .lp-sol-step,
-.lp .lp-sol-step:last-child {
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .lp .docs-featured-card {
     animation: none;
@@ -1294,16 +574,6 @@
   background-image: none;
 }
 
-.lp .lp-demos-grid-section,
-.lp .lp-cust3-stories,
-.lp .lp-cust3-sectors,
-.lp .lp-wh-split,
-.lp .lp-wh-split--alt,
-.lp .lp-wh-flow,
-.lp .lp-wh-rail,
-.lp .lp-sales-follow,
-.lp .lp-sales-compare,
-.lp .lp-int-honesty,
 .lp .lp-mkt-page > .lp-reveal:nth-child(even):not(
   :has(.lp-sol-footer, .lp-ent-cta-band, .lp-pricing-v2-cta, .lp-mkt-next-band, .lp-cust3-cta, .lp-int-cta, .lp-wh-cta)
 ) {
@@ -1312,113 +582,5 @@
   border-top: 0;
   border-bottom: 0;
   box-shadow: none !important;
-}
-
-/* One numbered card. Homepage promises, solution paths, warehouse
-   steps, enterprise controls, and security layers share it. */
-.lp .lp-pricing-card.lp-scene-card,
-.lp .lp-pricing-card.lp-scene-card.is-featured {
-  border-top: 2px solid var(--df-teal-600) !important;
-  transition:
-    transform 150ms ease,
-    box-shadow 150ms ease,
-    border-color 150ms ease;
-}
-
-.lp .lp-sol-outcome.lp-scene-card,
-.lp .lp-sol-step.lp-scene-card,
-.lp .lp-wh-flow-list li.lp-scene-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-  min-height: 100%;
-  padding: 26px 22px 28px;
-}
-
-.lp .lp-sol-outcome.lp-scene-card > span,
-.lp .lp-sol-step.lp-scene-card > span,
-.lp .lp-wh-flow-list li.lp-scene-card > span {
-  display: block;
-  width: auto;
-  height: auto;
-  margin: 0 0 16px;
-  padding: 0;
-  border-radius: var(--df-radius-none);
-  background: transparent;
-  color: var(--df-brand-text);
-  font-family: var(--lp-font-display);
-  font-size: 1.75rem;
-  font-weight: 650;
-  letter-spacing: -0.04em;
-  line-height: 1;
-}
-
-.lp .lp-sol-outcome.lp-scene-card h3,
-.lp .lp-sol-step.lp-scene-card h3,
-.lp .lp-wh-flow-list li.lp-scene-card strong {
-  margin: 0 0 8px;
-  font-size: 1.2rem;
-  font-weight: 650;
-  letter-spacing: -0.03em;
-  line-height: 1.25;
-  color: var(--lp-ink);
-}
-
-.lp .lp-sol-outcome:nth-child(1),
-.lp .lp-sol-outcome:nth-child(2),
-.lp .lp-sol-outcome:nth-child(3),
-.lp .lp-sol-outcome:nth-child(4) {
-  background: var(--df-surface);
-  border-style: solid;
-  color: var(--lp-ink);
-}
-
-.lp .lp-sol-outcome:nth-child(1) > span {
-  color: var(--df-brand-text);
-}
-
-.lp .lp-sol-outcome:nth-child(1) h3 {
-  color: var(--lp-ink);
-}
-
-.lp .lp-sol-outcome:nth-child(1) p {
-  color: var(--lp-muted);
-}
-
-@media (hover: hover) {
-  .lp .lp-scene-card:hover {
-    transform: translateY(-3px);
-    border-color: var(--df-teal-600);
-    box-shadow: var(--lp-shadow-editorial);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-scene-card,
-  .lp .lp-scene-card:hover {
-    transform: none;
-    transition: none;
-  }
-}
-
-/* 11px labels. The accent teal misses 4.5:1 on the canvas. Brand-strong
-   holds on the light field; ink heroes keep their own light label. */
-.lp .lp-mkt-packet-node.is-accent strong,
-.lp .lp-demos-tag {
-  color: var(--df-brand-strong);
-}
-
-.lp .lp-demos-filter.is-active {
-  background: var(--df-action-bg);
-  border-color: var(--df-action-bg);
-}
-
-/* One type ladder. Headlines share the display face; body copy is 15px. */
-.lp .lp-mkt-prose p {
-  font-family: var(--df-font-sans, "IBM Plex Sans", system-ui, sans-serif);
-  font-size: var(--lp-fs-body);
-  font-weight: 450;
-  line-height: 1.6;
 }
 

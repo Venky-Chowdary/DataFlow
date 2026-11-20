@@ -1,6 +1,5 @@
-import { useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { ConnectorIcon } from "../app/brand-icons";
-import { ProductShot } from "../components/marketing/ProductShot";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { ConnectorFamilies } from "../components/marketing/ConnectorFamilies";
 import {
   EvidencePanel,
   GatesPanel,
@@ -12,14 +11,11 @@ import {
   VerifyPanel,
 } from "../components/marketing/ProductPanels";
 import {
-  CONNECTOR_CLAIMS,
-  MARKETING_STACK,
   PROVEN_CDC_SOURCES,
   catalogHonestyLead,
   cdcSourcesPhrase,
 } from "../lib/provenEvidence";
 import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
-import { DEMO_ROUTE, WORKSPACE_SHOT } from "../lib/workspaceShots";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -29,9 +25,8 @@ export interface LandingHomeProps {
 
 type Step = { id: string; name: string; title: string; body: string; facts: string[]; panel: ReactNode };
 
-/* Every panel on this page is product UI rendered in code. The recorded-run
-   panels carry the figures of the run in WORKSPACE_SHOT; the quarantine and
-   schedule panels are labelled as example data. */
+/* Every panel on this page is product UI rendered in code, and each is
+   labelled as an example inside the panel. */
 const STEPS: Step[] = [
   {
     id: "plan",
@@ -63,37 +58,41 @@ const STEPS: Step[] = [
     title: "Read the destination back and compare",
     body: "After the write, Datawrap queries the destination itself and compares it with what was read, so verification is part of the run rather than a job someone schedules later.",
     facts: ["Row count, checksum, and a value census by key", "Each table records which comparison ran", "Only a full comparison is called proven"],
-    panel: <VerifyPanel animate={false} />,
+    panel: <VerifyPanel />,
   },
   {
     id: "evidence",
     name: "Evidence",
     title: "Hand the record to the people who sign it",
     body: "The job keeps the mapping decisions, every check result, the held rows, and the comparison. Engineering, the data owner, and compliance sign the same report.",
-    facts: ["Signed proof pack, verifiable through the API", "Sign-off by role", "Hash-chained audit log you can export"],
+    facts: ["Signed proof pack, verifiable through the API", "Sign-off by role", "Tamper-evident audit log you can export"],
     panel: <EvidencePanel />,
   },
 ];
 
-const DIFFERENT: { title: string; body: string; where: string }[] = [
+const DIFFERENT: { title: string; without: string; with: string; where: string }[] = [
   {
-    title: "Verification is part of the move",
-    body: "The run that writes the rows also counts the destination with the destination's own engine and compares it with the source. There is no separate reconciliation job to schedule, or to forget.",
+    title: "A green job is taken as proof",
+    without: "The job reports success, and nobody counts the destination until a report looks wrong.",
+    with: "The run that writes the rows also counts the destination with its own engine and compares it with the source.",
     where: "Job space, Trust Report",
   },
   {
-    title: "The plan predicts the run",
-    body: "Validate pushes sample rows through the real write path before anything is written. The approved plan is hashed, and a run that no longer matches it is refused.",
+    title: "Failures show up mid-write",
+    without: "A value the destination cannot hold fails a batch halfway through the night.",
+    with: "Validate pushes sample rows through the real write path first. The approved plan is hashed, and a run that drifts from it is refused.",
     where: "Transfer Studio, Validate",
   },
   {
-    title: "Nothing fails silently",
-    body: "A row that cannot land is held with its column, value, and reason, then replayed into the same table once fixed. A row that is not landed, held, or skipped by a rule you set is reported as potential loss.",
+    title: "Rejected rows go quiet",
+    without: "Rows the destination refuses end up in a log file, or nowhere.",
+    with: "A row that cannot land is held with its column, value, and reason, and replayed once fixed. A row not landed, held, or skipped is reported as potential loss.",
     where: "Job space, Quarantine",
   },
   {
-    title: "Evidence you can sign",
-    body: "The report names the comparison that ran, and only a full comparison is called proven. Proof packs are signed and verifiable through the API, and every action lands in a hash-chained audit log.",
+    title: "Sign-off lives in a spreadsheet",
+    without: "Approval is a tick in a sheet that nobody can re-check later.",
+    with: "The report names the comparison that ran, proof packs are signed and verifiable, and every action lands in a tamper-evident audit log.",
     where: "Job space, Sign-off",
   },
 ];
@@ -109,9 +108,9 @@ const VERDICTS: { name: string; tone: "proven" | "explained" | "bounded" | "open
 const CONTROLS: { term: string; detail: string }[] = [
   { term: "Single sign-on", detail: "OIDC and SAML, routed by email domain, with an idle timeout you set." },
   { term: "Provisioning", detail: "SCIM 2.0 maps identity-provider groups to workspace roles." },
-  { term: "Roles and keys", detail: "Viewer, Editor, and Admin. An API key never holds more than the person who made it." },
+  { term: "Roles and keys", detail: "Viewer, operator, editor, and admin. An API key never holds more than the person who made it." },
   { term: "Your own keys", detail: "Connector secrets are encrypted at rest and can be wrapped with your key in AWS KMS." },
-  { term: "Audit chain", detail: "Every action is hash-chained and signed, and exports as CSV, JSON, or CEF." },
+  { term: "Audit log", detail: "Tamper-evident: every entry is signed and linked to the one before, and the chain can be verified and exported." },
   { term: "Isolation", detail: "Jobs, connectors, schedules, and agent tools are scoped to the workspace that owns them." },
 ];
 
@@ -140,63 +139,108 @@ function RouteLink({
   );
 }
 
-function StepTabs() {
+function useWide(query = "(min-width: 1024px)") {
+  const [wide, setWide] = useState(() => {
+    try {
+      return window.matchMedia(query).matches;
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    let mq: MediaQueryList;
+    try {
+      mq = window.matchMedia(query);
+    } catch {
+      return;
+    }
+    const on = () => setWide(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [query]);
+  return wide;
+}
+
+/**
+ * The five steps as scrollytelling: the text scrolls on the left while one
+ * sticky panel on the right changes to the step crossing the middle of the
+ * viewport. A panel mounts the first time its step is reached, so its
+ * one-time motion plays where it can be seen. On phones each step is
+ * followed by its own panel, and nothing is pinned.
+ */
+function StepsScrolly() {
+  const wide = useWide();
   const [active, setActive] = useState(0);
-  const tabs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [seen, setSeen] = useState<Set<number>>(() => new Set([0]));
+  const items = useRef<Array<HTMLLIElement | null>>([]);
 
-  const onKey = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const last = STEPS.length - 1;
-    let next = -1;
-    if (e.key === "ArrowDown" || e.key === "ArrowRight") next = index === last ? 0 : index + 1;
-    if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = index === 0 ? last : index - 1;
-    if (e.key === "Home") next = 0;
-    if (e.key === "End") next = last;
-    if (next < 0) return;
-    e.preventDefault();
-    setActive(next);
-    tabs.current[next]?.focus();
-  };
+  useEffect(() => {
+    if (!wide || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const i = Number((entry.target as HTMLElement).dataset.step);
+          setActive(i);
+          setSeen((prev) => (prev.has(i) ? prev : new Set(prev).add(i)));
+        }
+      },
+      { rootMargin: "-45% 0px -45% 0px" },
+    );
+    for (const el of items.current) if (el) io.observe(el);
+    return () => io.disconnect();
+  }, [wide]);
 
-  const step = STEPS[active];
   return (
-    <div className="mk-steps">
-      <div className="mk-steps-list" role="tablist" aria-orientation="vertical" aria-label="Steps of a transfer">
+    <div className={`mk-scrolly${wide ? " is-wide" : ""}`}>
+      <ol className="mk-scrolly-steps">
         {STEPS.map((s, i) => (
-          <button
+          <li
             key={s.id}
             ref={(el) => {
-              tabs.current[i] = el;
+              items.current[i] = el;
             }}
-            type="button"
-            role="tab"
-            id={`mk-step-tab-${s.id}`}
-            aria-selected={i === active}
-            aria-controls="mk-step-panel"
-            tabIndex={i === active ? 0 : -1}
-            className="mk-step-tab"
-            onClick={() => setActive(i)}
-            onKeyDown={(e) => onKey(e, i)}
+            data-step={i}
+            className={wide && i === active ? "is-active" : undefined}
+            aria-current={wide && i === active ? "step" : undefined}
           >
-            <span className="mk-step-num">{i + 1}</span>
-            <span className="mk-step-name">{s.name}</span>
-            <span className="mk-step-title">{s.title}</span>
-          </button>
+            <p className="mk-scrolly-name">
+              <span className="mk-step-num" aria-hidden>
+                {i + 1}
+              </span>
+              {s.name}
+            </p>
+            <h3>{s.title}</h3>
+            <p>{s.body}</p>
+            <ul className="mk-facts">
+              {s.facts.map((fact) => (
+                <li key={fact}>{fact}</li>
+              ))}
+            </ul>
+            {!wide ? <div className="mk-scrolly-inline">{s.panel}</div> : null}
+          </li>
         ))}
-      </div>
-      <div className="mk-steps-panel" role="tabpanel" id="mk-step-panel" aria-labelledby={`mk-step-tab-${step.id}`}>
-        <div className="mk-steps-copy">
-          <h3>{step.title}</h3>
-          <p>{step.body}</p>
-          <ul className="mk-facts">
-            {step.facts.map((fact) => (
-              <li key={fact}>{fact}</li>
+      </ol>
+      {wide ? (
+        <div className="mk-scrolly-stage">
+          <p className="mk-scrolly-progress" aria-hidden>
+            Step {active + 1} of {STEPS.length}: {STEPS[active].name}
+          </p>
+          <div className="mk-scrolly-panels">
+            {STEPS.map((s, i) => (
+              <div
+                key={s.id}
+                className={`mk-scrolly-panel${i === active ? " is-active" : ""}`}
+                aria-hidden={i === active ? undefined : true}
+                inert={i === active ? undefined : true}
+              >
+                {seen.has(i) ? s.panel : null}
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
-        <div className="mk-steps-visual" key={step.id}>
-          {step.panel}
-        </div>
-      </div>
+      ) : null}
     </div>
   );
 }
@@ -207,6 +251,7 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
       <section className="mk-hero" aria-labelledby="mk-hero-title">
         <div className="mk-wrap mk-hero-grid">
           <div className="mk-hero-copy">
+            <p className="mk-hero-kicker">Data migration and sync</p>
             <h1 id="mk-hero-title">
               Every row,
               <br />
@@ -225,7 +270,7 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
                 Contact sales
               </RouteLink>
             </div>
-            <p className="mk-hero-note">Hosted, or in your own cloud.</p>
+            <p className="mk-hero-note">Hosted by default. Self-managed in your own cloud on the Enterprise plan.</p>
           </div>
           <div className="mk-hero-visual">
             <ReconciliationLedger />
@@ -236,18 +281,30 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
       <section className="mk-section mk-different" aria-labelledby="mk-different-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
-            <h2 id="mk-different-title">What makes Datawrap different</h2>
-            <p>Four things a migration usually leaves to scripts and spreadsheets, built into every run.</p>
+            <h2 id="mk-different-title">What goes wrong without it</h2>
+            <p>Four things a migration usually leaves to scripts and spreadsheets, and what Datawrap does instead on every run.</p>
           </header>
-          <div className="mk-different-grid">
+          <dl className="mk-contrast">
+            <div className="mk-contrast-head" aria-hidden>
+              <span />
+              <span>Without it</span>
+              <span>With Datawrap</span>
+            </div>
             {DIFFERENT.map((d) => (
-              <article key={d.title}>
-                <h3>{d.title}</h3>
-                <p>{d.body}</p>
-                <p className="mk-different-where">Where you see it: {d.where}</p>
-              </article>
+              <div key={d.title} className="mk-contrast-row">
+                <dt>{d.title}</dt>
+                <dd className="mk-contrast-without">
+                  <span className="mk-contrast-label">Without it: </span>
+                  {d.without}
+                </dd>
+                <dd className="mk-contrast-with">
+                  <span className="mk-contrast-label">With Datawrap: </span>
+                  {d.with}
+                  <span className="mk-different-where">Where you see it: {d.where}</span>
+                </dd>
+              </div>
             ))}
-          </div>
+          </dl>
         </div>
       </section>
 
@@ -261,7 +318,7 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               recorded run.
             </p>
           </header>
-          <StepTabs />
+          <StepsScrolly />
         </div>
       </section>
 
@@ -351,17 +408,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               </tbody>
             </table>
           </div>
-          <figure className="mk-shots">
-            <ProductShot
-              src={WORKSPACE_SHOT.transferMapStage}
-              alt="Transfer Studio map step: every column from public.sales_orders mapped to SALES_ORDERS_REPORTING, each marked safe"
-              surface="Transfer Studio, map step"
-              route={{ source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest }}
-            />
-            <figcaption className="mk-caption">
-              Transfer Studio as it ships: the map a reviewer approves before Validate runs.
-            </figcaption>
-          </figure>
         </div>
       </section>
 
@@ -374,42 +420,10 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               quarantine.
             </p>
           </header>
-          <table className="mk-families">
-            <caption>Connector families</caption>
-            <thead>
-              <tr>
-                <th scope="col">Family</th>
-                <th scope="col">Members</th>
-                <th scope="col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {MARKETING_STACK.map((row) => {
-                const family = CONNECTOR_CLAIMS.families.find((f) => f.family === row.family);
-                return (
-                  <tr key={row.family}>
-                    <th scope="row">{row.family}</th>
-                    <td>
-                      <ul className="mk-family-members">
-                        {(family?.items ?? []).map((item) => (
-                          <li key={item.driver} className={item.proven ? "is-proven" : undefined}>
-                            <ConnectorIcon id={item.driver} size={16} />
-                            {item.name}
-                            {item.proven ? <span className="mk-sr-only"> (proven in CI)</span> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    </td>
-                    <td>{row.badge}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <p className="mk-caption">Names in bold have a green CI run behind them; the others are implemented.</p>
+          <ConnectorFamilies />
           <div className="mk-actions">
             <RouteLink route="integrations" onNavigate={onNavigate} className="mk-btn mk-btn--secondary">
-              Browse the connector catalog
+              See every connector
             </RouteLink>
           </div>
         </div>
@@ -431,14 +445,14 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
           </dl>
           <div className="mk-deploy">
             <div>
-              <h3>Hosted workspace</h3>
-              <p>Sign up and run transfers in the hosted service. Connector credentials stay encrypted in your workspace.</p>
+              <h3>Hosted</h3>
+              <p>The default on every plan. Sign up and run transfers; connector credentials stay encrypted in your workspace.</p>
             </div>
             <div>
-              <h3>In your own cloud</h3>
+              <h3>Self-managed</h3>
               <p>
-                Two container images, an API and a web app, run with Docker Compose or the Helm
-                chart. Jobs, schedules, and audit events live in your own MongoDB.
+                An Enterprise plan option: your cloud or VPC, with Docker Compose or Helm. Jobs,
+                schedules, and audit events live in your own MongoDB.
               </p>
             </div>
           </div>
@@ -448,9 +462,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
             </RouteLink>
             <RouteLink route="enterprise" onNavigate={onNavigate}>
               Enterprise controls
-            </RouteLink>
-            <RouteLink route="subprocessors" onNavigate={onNavigate}>
-              Subprocessors
             </RouteLink>
           </p>
         </div>

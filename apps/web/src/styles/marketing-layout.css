@@ -41,21 +41,6 @@
   background: var(--lp-canvas) !important;
 }
 
-/*
- * Content shell ? NEVER apply to .lp-nav-shell.
- * Nav stays wider (1280) so Pricing / CTAs cannot collide.
- */
-.lp-mkt-page-rich .lp-mkt-body,
-.lp-mkt-stats-strip {
-  width: var(--lp-shell) !important;
-  max-width: 100% !important;
-  margin-left: auto !important;
-  margin-right: auto !important;
-  box-sizing: border-box;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-}
-
 /* When center links hide, keep actions pinned to the right edge */
 
 .docs-space {
@@ -68,15 +53,6 @@
   box-shadow: none !important;
   overflow: hidden;
   background: var(--df-surface);
-}
-
-.lp-mkt-body > h2,
-.lp-mkt-chapter > h2 {
-  margin: 0 0 8px !important;
-  font-size: var(--lp-fs-h2) !important;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  color: var(--lp-ink);
 }
 
 /* Prose: no jagged word breaks */
@@ -103,139 +79,6 @@
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
-}
-
-/* ??? Stats strip ? hairline rail (not card wall) ??? */
-.lp-mkt-stats-strip {
-  display: grid !important;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  gap: 0 !important;
-  padding: 22px 0 !important;
-  margin: 0 auto !important;
-  border-bottom: 1px solid var(--lp-line);
-  background: transparent;
-}
-
-.lp-mkt-stats-item {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 4px !important;
-  padding: 4px 16px 4px 0 !important;
-  border: 0 !important;
-  border-right: 1px solid var(--lp-line) !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  text-align: left !important;
-  box-shadow: none !important;
-}
-
-.lp-mkt-stats-item:last-child {
-  border-right: 0 !important;
-  padding-right: 0 !important;
-}
-
-.lp-mkt-stats-item::before {
-  display: none !important;
-}
-
-.lp-mkt-stats-item strong {
-  font-size: 1.2rem !important;
-  font-weight: 720 !important;
-  letter-spacing: -0.03em;
-  color: var(--lp-ink) !important;
-}
-
-.lp-mkt-page-rich .lp-mkt-stats-item strong {
-  color: var(--lp-ink) !important;
-}
-
-.lp-mkt-stats-item span {
-  font-size: 12.5px !important;
-  font-weight: 500 !important;
-  letter-spacing: 0 !important;
-  text-transform: none !important;
-  color: var(--lp-muted) !important;
-  line-height: 1.35;
-}
-
-.lp-cust-industry {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--df-brand-text); /* UX-16: AA at 11px */
-}
-
-/* ??? Product surfaces: packet flow + chapters ??? */
-.lp-mkt-page-rich .lp-mkt-body {
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-}
-
-.lp-mkt-surface .lp-mkt-chapter {
-  padding-top: var(--lp-section-y-sm) !important;
-  padding-bottom: var(--lp-section-y-sm) !important;
-  border-bottom: 0;
-}
-
-.lp-mkt-packet-flow {
-  display: grid !important;
-  grid-template-columns: repeat(auto-fit, minmax(0, 1fr)) !important;
-  gap: 0 !important;
-  align-items: stretch;
-  overflow: visible !important;
-  padding: 8px 0 4px;
-  border-top: 1px solid var(--lp-line);
-  border-bottom: 1px solid var(--lp-line);
-}
-
-.lp-mkt-packet-step {
-  display: grid !important;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  min-width: 0;
-}
-
-.lp-mkt-packet-node {
-  display: flex !important;
-  flex-direction: column;
-  gap: 2px;
-  padding: 12px 10px 12px 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  min-width: 0;
-}
-
-.lp-mkt-packet-node.is-accent {
-  background: transparent !important;
-}
-
-.lp-mkt-packet-node strong {
-  font-size: 13px !important;
-  color: var(--lp-ink);
-}
-
-.lp-mkt-packet-node.is-accent strong {
-  color: var(--lp-teal);
-}
-
-.lp-mkt-packet-node span {
-  font-size: 12px !important;
-  color: var(--lp-muted);
-  line-height: 1.35;
-}
-
-.lp-mkt-packet-wire {
-  width: 12px !important;
-  min-width: 12px;
-  position: relative;
-  opacity: 0.45;
-}
-
-.lp-mkt-packet-dot {
-  display: none !important;
 }
 
 /* Docs space ? editorial support layout */
@@ -376,299 +219,33 @@
 /* ??? Responsive ??? */
 @media (max-width: 960px) {
 
-  .lp-mkt-stats-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  }
+  
 
   .docs-space-algorithm-steps li {
     grid-template-columns: 1fr !important;
   }
 
-  .lp-mkt-stats-item {
-    border-right: 0 !important;
-    border-bottom: 1px solid var(--lp-line) !important;
-    padding: 12px 0 !important;
-  }
+  
+
+  
 
   
 
   
 
-  .lp-mkt-packet-flow {
-    grid-template-columns: 1fr 1fr !important;
-  }
-
   
-}
-
-@media (max-width: 640px) {
-  .lp-mkt-packet-flow {
-    grid-template-columns: 1fr !important;
-  }
 }
 
 /* ???????????????????????????????????????????????????????????????????
    Airbyte-class home composition (Datawrap tokens)
    ??????????????????????????????????????????????????????????????????? */
 
-.lp-sec-section,
-.lp-sec-agent,
-.lp-int-section,
-.lp-int-honesty,
-.lp-pricing-v2-plans,
-.lp-pricing-v2-compare,
-.lp-pricing-v2-principles,
-.lp-sol-section {
-  width: var(--lp-shell) !important;
-  max-width: 100% !important;
-  margin-left: auto !important;
-  margin-right: auto !important;
-  box-sizing: border-box;
-}
-
 /* ---------------------------------------------------------------
    Pricing v2 ? cinematic hero + plan grid + clean compare
    --------------------------------------------------------------- */
-
-.lp-pricing-v2 {
-  --lp-pricing-shell: var(--lp-shell);
-}
-
-/* Plan cards */
-.lp-pricing-v2-plans {
-  width: var(--lp-pricing-shell);
-  margin: clamp(-36px, -5vh, -24px) auto 0;
-  position: relative;
-  z-index: var(--df-z-canvas-stage);
-  padding-bottom: clamp(40px, 6vh, 64px);
-}
-
-.lp-pricing-v2-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
-  align-items: stretch;
-}
-
-.lp-pricing-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 28px 24px 24px;
-  border-radius: 20px;
-  background: var(--df-surface);
-  border: 1px solid var(--df-border);
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
-  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.35s ease;
-}
-
-.lp-pricing-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.1);
-}
-
-.lp-pricing-card.is-featured {
-  border-color: color-mix(in srgb, var(--df-brand) 55%, #e2e8f0);
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 42%);
-  box-shadow: 0 22px 50px rgba(15, 118, 110, 0.14);
-}
-
-.lp-pricing-card-flag {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: var(--df-fs-xs);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--df-brand-text);
-  background: rgba(15, 118, 110, 0.1);
-}
-
-.lp-pricing-card-head h2 {
-  margin: 0;
-  font-family: var(--df-font-display);
-  font-size: 1.35rem;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  color: var(--df-text-primary);
-}
-
-.lp-pricing-card-period {
-  margin: 4px 0 0;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--df-text-muted);
-}
-
-.lp-pricing-card-price strong {
-  font-family: var(--df-font-display);
-  font-size: clamp(2rem, 3vw, 2.4rem);
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  color: var(--df-text-primary);
-}
-
-.lp-pricing-card-blurb {
-  margin: 0;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--df-text-secondary);
-  min-height: 4.2em;
-}
-
-.lp-pricing-card-features {
-  list-style: none;
-  margin: 0 0 8px;
-  padding: 0;
-  display: grid;
-  gap: 10px;
-  flex: 1;
-}
-
-.lp-pricing-card-features li {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 0.92rem;
-  color: var(--df-text-primary);
-}
-
-.lp-pricing-card-features li svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--df-brand);
-}
 
 .lp-btn--block {
   width: 100%;
   justify-content: center;
 }
 
-/* Compare table */
-.lp-pricing-v2-compare {
-  width: var(--lp-pricing-shell);
-  margin: 0 auto;
-  padding: clamp(28px, 5vh, 48px) 0 clamp(40px, 6vh, 64px);
-}
-
-.lp-pricing-v2-compare-head {
-  max-width: 42rem;
-  margin-bottom: 28px;
-}
-
-.lp-pricing-v2-compare-head h2 {
-  margin: 8px 0 10px;
-  font-family: var(--df-font-display);
-  font-size: clamp(1.6rem, 3vw, 2.1rem);
-  letter-spacing: -0.03em;
-}
-
-.lp-pricing-v2-compare-head p {
-  margin: 0;
-  color: var(--df-text-secondary);
-  line-height: 1.55;
-}
-
-.lp-pricing-v2-table-wrap {
-  overflow-x: auto;
-  border: 1px solid var(--df-border);
-  border-radius: 16px;
-  background: var(--df-surface);
-}
-
-.lp-pricing-v2-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 640px;
-}
-
-.lp-pricing-v2-table th,
-.lp-pricing-v2-table td {
-  padding: 14px 18px;
-  text-align: left;
-  border-bottom: 1px solid var(--df-border);
-  font-size: 0.92rem;
-}
-
-.lp-pricing-v2-table thead th {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--df-text-muted);
-  background: var(--df-surface-muted);
-}
-
-.lp-pricing-v2-table tbody th {
-  font-weight: 600;
-  color: var(--df-text-primary);
-}
-
-.lp-pricing-v2-table .is-hot {
-  background: color-mix(in srgb, var(--df-brand) 6%, #fff);
-}
-
-.lp-pricing-yes {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  font-weight: 700;
-  color: var(--df-brand-text);
-  background: rgba(15, 118, 110, 0.1);
-}
-
-.lp-pricing-no {
-  color: var(--df-text-tertiary);
-}
-
-.lp-pricing-v2-principles {
-  width: var(--lp-pricing-shell);
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  padding-bottom: clamp(36px, 5vh, 56px);
-}
-
-.lp-pricing-principle {
-  padding: 20px 18px;
-  border-radius: 14px;
-  background: var(--df-surface-muted);
-  border: 1px solid var(--df-border);
-  display: grid;
-  gap: 6px;
-}
-
-.lp-pricing-principle strong {
-  font-family: var(--df-font-display);
-  font-size: 1rem;
-  letter-spacing: -0.02em;
-}
-
-.lp-pricing-principle span {
-  font-size: 0.9rem;
-  line-height: 1.45;
-  color: var(--df-text-secondary);
-}
-
-@media (max-width: 960px) {
-  .lp-pricing-v2-grid,
-  .lp-pricing-v2-principles {
-    grid-template-columns: 1fr;
-  }
-
-  
-
-  .lp-pricing-card.is-featured {
-    order: -1;
-  }
-}

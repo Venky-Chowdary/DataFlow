@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
-import { MarketingReveal } from "../../components/marketing/MarketingReveal";
+import { DocHeader } from "./LegalPages";
 import { API_BASE } from "../../lib/types";
 
 type ComponentState = "operational" | "degraded" | "outage";
@@ -50,146 +49,97 @@ export function StatusPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const overall: ComponentState = unreachable ? "outage" : data?.status ?? "operational";
+  const overall: ComponentState = data?.status ?? "operational";
   const headline = loading
     ? "Checking systems…"
     : unreachable
-      ? "Status API unreachable"
+      ? "Status unknown"
       : OVERALL_LABEL[overall];
 
+  const state: DisplayState = loading ? "checking" : unreachable ? "unknown" : overall;
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingInkHero
-        tone="doc"
+    <div className="mk-page mk-doc">
+      <DocHeader
         kicker="Status"
         title="Service status"
         meta={
           data?.checked_at && !unreachable
-            ? `Last checked ${new Date(data.checked_at).toLocaleString()} · refreshes every 30 seconds`
-            : "Live readiness of the hosted Datawrap service"
+            ? `Last checked ${new Date(data.checked_at).toLocaleString()}. Refreshes every 30 seconds.`
+            : "Live readiness of the hosted Datawrap service."
         }
-        lead="Read live from the same readiness checks that gate traffic to the API — not a manually updated page."
+        lead="Read from the same readiness checks that decide whether the API takes traffic."
       />
-      <MarketingReveal>
-        <section className="lp-mkt-body lp-status-body" aria-live="polite">
-          <div className={`lp-status-banner is-${loading ? "checking" : overall}`} role="status">
-            <span className="lp-status-dot" aria-hidden="true" />
+      <section className="mk-section mk-section--tight">
+        <div className="mk-wrap mk-doc-body">
+          <div className={`mk-status-banner is-${state}`} role="status" aria-live="polite">
+            <StateGlyph state={state} />
             <strong>{headline}</strong>
-            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => void load()}>
-              Refresh
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => void load()}>
+              Check again
             </button>
           </div>
-          {unreachable && (
-            <p className="lp-status-note">
-              The status endpoint did not answer. If this persists, the hosted API is likely down — email
-              {" "}<a href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
+          {unreachable ? (
+            <p className="mk-status-note">
+              Your browser could not reach the status service, so the current state is unknown. This can be your network
+              as well as ours. If the app is not working for you, email <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
             </p>
-          )}
-          <ul className="lp-status-list">
-            {(data?.components ?? []).map((c) => {
-              const state: ComponentState = unreachable ? "outage" : c.status;
-              return (
-                <li key={c.id} className={`lp-status-row is-${state}`}>
+          ) : null}
+          {!unreachable && data?.components?.length ? (
+            <ul className="mk-status-list">
+              {data.components.map((c) => (
+                <li key={c.id} className={`is-${c.status}`}>
                   <div>
                     <strong>{c.name}</strong>
-                    <small>{c.description}</small>
+                    <span>{c.description}</span>
                   </div>
-                  <span className="lp-status-pill">
-                    <span className="lp-status-dot" aria-hidden="true" />
-                    {STATE_LABEL[state]}
+                  <span className="mk-status-pill">
+                    <StateGlyph state={c.status} />
+                    {STATE_LABEL[c.status]}
                   </span>
                 </li>
-              );
-            })}
-          </ul>
-          <p className="lp-mkt-footnote">
-            Shows component state only — no hostnames or error details are published. Incident updates for
-            enterprise customers go to the contacts on their order form.
-          </p>
-        </section>
-      </MarketingReveal>
+              ))}
+            </ul>
+          ) : null}
+          <p className="mk-caption">Shows component state only. No hostnames or error details are published.</p>
+        </div>
+      </section>
     </div>
   );
 }
 
-const SUBPROCESSORS = [
-  // The hosting provider is a deployment fact, named in each customer's order
-  // form and DPA. The public bundle describes the role only: it never carries
-  // a hosting provider's name or hostname (bundle brand gate, QA r12 #4b).
-  {
-    name: "Cloud hosting provider (named in your order form and DPA)",
-    purpose: "Hosts the Datawrap web app, API, and transfer workers (control plane)",
-    data: "Account, workspace, job metadata; data in transit during transfers",
-    when: "All hosted workspaces",
-  },
-  {
-    name: "MongoDB (managed by the hosting provider, or MongoDB Atlas)",
-    purpose: "Control-plane database: jobs, schedules, audit chain, encrypted connector configs",
-    data: "Account, workspace, job metadata; encrypted credentials",
-    when: "All hosted workspaces",
-  },
-  {
-    name: "Resend",
-    purpose: "Transactional email: verification, password reset, job notifications",
-    data: "Recipient name and email address, message content",
-    when: "When email delivery is enabled",
-  },
-  {
-    name: "OpenAI and Anthropic",
-    purpose: "Optional cloud models for Pilot. Pilot runs on Datawrap's local engine by default",
-    data: "Prompts and the schema context sent with them",
-    when: "Only if a workspace admin enables a cloud model",
-  },
-  {
-    name: "Amazon Web Services",
-    purpose: "KMS key wrapping for customer-managed keys; optional object storage for uploads",
-    data: "Wrapped key material; uploaded files and proof artifacts",
-    when: "Enterprise BYOK or object storage enabled",
-  },
-];
+type DisplayState = ComponentState | "checking" | "unknown";
 
+/** A shape per state, so status never rests on colour alone. */
+function StateGlyph({ state }: { state: DisplayState }) {
+  return (
+    <svg className={`mk-state-glyph is-${state}`} viewBox="0 0 12 12" width="12" height="12" aria-hidden focusable="false">
+      {state === "operational" ? <circle cx="6" cy="6" r="4.5" fill="currentColor" /> : null}
+      {state === "degraded" ? <path d="M6 1.5 10.8 10H1.2Z" fill="currentColor" /> : null}
+      {state === "outage" ? <rect x="1.8" y="1.8" width="8.4" height="8.4" rx="1" fill="currentColor" /> : null}
+      {state === "unknown" || state === "checking" ? (
+        <circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2 1.6" />
+      ) : null}
+    </svg>
+  );
+}
+
+/** The subprocessor list is shared on request; the page is noindex and linked from the footer only. */
 export function SubprocessorsPage() {
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingInkHero
-        tone="doc"
+    <div className="mk-page mk-doc">
+      <DocHeader
         kicker="Legal"
         title="Subprocessors"
-        meta="Draft pending legal review · Last updated November 2026 · contact@datawrap.io"
         lead="Third parties that process personal data on Datawrap's behalf to run the hosted service."
       />
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <div className="lp-status-table-wrap" tabIndex={0} role="region" aria-label="Subprocessors">
-            <table className="lp-status-table">
-              <thead>
-                <tr>
-                  <th scope="col">Subprocessor</th>
-                  <th scope="col">Purpose</th>
-                  <th scope="col">Data processed</th>
-                  <th scope="col">Used when</th>
-                </tr>
-              </thead>
-              <tbody>
-                {SUBPROCESSORS.map((s) => (
-                  <tr key={s.name}>
-                    <th scope="row">{s.name}</th>
-                    <td>{s.purpose}</td>
-                    <td>{s.data}</td>
-                    <td>{s.when}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="lp-mkt-footnote">
-            Your connected sources and destinations, and your own identity provider, are not Datawrap
-            subprocessors — you choose and contract with them. Self-hosted deployments use none of the
-            services above unless you configure them. We give customers 30 days' notice before adding a
-            subprocessor; to subscribe or object, email contact@datawrap.io.
+      <section className="mk-section mk-section--tight">
+        <div className="mk-wrap mk-doc-body mk-prose">
+          <p>
+            Our current subprocessor list is available on request — email{" "}
+            <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
           </p>
-        </section>
-      </MarketingReveal>
+        </div>
+      </section>
     </div>
   );
 }

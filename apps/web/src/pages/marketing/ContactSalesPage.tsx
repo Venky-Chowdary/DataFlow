@@ -3,6 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
+import { DesignPartners } from "../../components/marketing/DesignPartners";
 import { catalogHonestyLead, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -30,46 +31,35 @@ const DESTINATIONS = [
 
 const NEXT_STEPS = [
   {
-    n: "1",
-    title: "A 30-minute discovery call",
-    body: "A solutions engineer goes through your source and destination, the sync mode, and your compliance constraints.",
+    title: "We reply",
+    body: "We usually reply within one business day, with a few questions about your source, destination, and constraints.",
   },
   {
-    n: "2",
-    title: "A scoped pilot on your stack",
-    body: "The production Transfer Studio path: semantic map, the nine core checks, and a write with quarantine and replay.",
+    title: "A call about your stack",
+    body: "Your source and destination, the sync mode, and what your security team will ask.",
   },
   {
-    n: "3",
-    title: "A signed proof pack you keep",
-    body: "A read-back of the destination: row counts, checksums, and a value and key census.",
+    title: "A scoped pilot",
+    body: "One load on your own data, on the production engine, ending with a signed proof pack you keep.",
   },
 ];
 
 const FAQS = [
   {
-    q: "How fast do you reply?",
-    a: "A solutions engineer replies within one business day. You can also write sales@datawrap.io now.",
-  },
-  {
     q: "Is the pilot the same engine as production?",
-    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Schedules, Pilot, and MCP use.",
+    a: "Yes. A pilot runs the same plan, checks, quarantine, and read-back as every load in Transfer Studio, on schedules, in Pilot, and over MCP.",
   },
   {
-    q: "How many connectors are live?",
+    q: "Which connectors can we use?",
     a: catalogHonestyLead(),
   },
   {
-    q: "Which change data capture engines do you support?",
-    a: `CDC is proven in CI on ${cdcSourcesPhrase()}. Each reads the database log (logical decoding, binlog, change streams, or SQL Server CDC), starts from a consistent snapshot, resumes from the log position, and carries deletes through.`,
+    q: "Which databases can we capture changes from?",
+    a: `Change data capture is proven in CI on ${cdcSourcesPhrase()}. Each reads the database log, starts from a consistent snapshot, resumes from the log position, and carries deletes through.`,
   },
   {
-    q: "What makes Datawrap different?",
-    a: "Semantic mapping you can review, preflight gates before every write (nine core gates plus the policy gates each route needs), quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
-  },
-  {
-    q: "What do you provide for security review?",
-    a: "A security questionnaire, a DPA, and a workspace audit export from a hash-chained, signed audit log your reviewers can verify. SSO (OIDC / SAML), SCIM, RBAC, and BYOK are available on Enterprise.",
+    q: "What can we give our security review?",
+    a: "The Security page, an export of the workspace's tamper-evident audit log, and, on request, our data processing addendum and subprocessor list.",
   },
 ];
 
@@ -242,30 +232,26 @@ export function ContactSalesPage({
   };
 
   return (
-    <div className="lp-mkt-page lp-sales">
+    <div className="mk-page mk-contact-page lp-sales">
       <section className="mk-subhero mk-contact" aria-label="Contact sales">
         <div className="mk-wrap mk-subhero-grid">
           <div className="mk-subhero-copy">
             <p className="mk-subhero-kicker">Contact sales</p>
-            <h1>Talk to a solutions engineer.</h1>
+            <h1>Tell us what you need to move.</h1>
             <p className="mk-subhero-lead">
-              Scope the map, the checks, quarantine, and the read-back on your stack. A solutions
-              engineer replies within one business day.
+              A migration, a recurring sync, or a pilot on your own data. We usually reply within one business day.
             </p>
-            <p className="lp-sales-hero-mail">
-              <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
-                sales@datawrap.io
-              </a>
+            <p className="mk-contact-mail">
+              <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
               <span>
-                One business day. General questions:{" "}
-                <a className="lp-sales-mail" href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
+                General questions: <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
               </span>
             </p>
             <h2 className="mk-contact-steps-title">What happens next</h2>
             <ol className="mk-contact-steps">
-              {NEXT_STEPS.map((s) => (
-                <li key={s.n}>
-                  <span>{s.n}</span>
+              {NEXT_STEPS.map((s, i) => (
+                <li key={s.title}>
+                  <span aria-hidden>{i + 1}</span>
                   <div>
                     <strong>{s.title}</strong>
                     <p>{s.body}</p>
@@ -282,7 +268,7 @@ export function ContactSalesPage({
               </div>
               <h2>Request received</h2>
               <p>
-                A solutions engineer will reply within one business day
+                We usually reply within one business day
                 {sources.length ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
                 {destinations.length ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
               </p>
@@ -462,85 +448,13 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="lp-sales-follow" aria-label="What you will see on the call">
-        <div className="lp-mkt-wrap lp-sales-honesty">
-          <div>
-            <p className="mk-kicker">On the call</p>
-            <h2>What you will see</h2>
-          </div>
-          <ul>
-            <li>Your source and destination, mapped by meaning</li>
-            <li>Every preflight gate, live, on your schema</li>
-            <li>A verified read-back from your destination</li>
-            <li>The enterprise controls your security team asks for</li>
-          </ul>
-          <div className="lp-sales-rail-links">
-            <button type="button" onClick={() => onNavigate("security")}>Security</button>
-            <button type="button" onClick={() => onNavigate("enterprise")}>Enterprise</button>
-            <button type="button" onClick={() => onNavigate("pricing")}>Pricing</button>
-          </div>
-        </div>
-      </section>
+      <DesignPartners headingId="mk-contact-partners" />
 
-      <section className="lp-sales-compare" aria-label="What the pilot proves">
-        <div className="lp-mkt-wrap">
-          <header>
-            <p className="mk-kicker">What the pilot proves</p>
-            <h2>What the pilot leaves you with</h2>
-            <p>
-              Mapping you can review, gates before the write, quarantine you can replay, destination
-              SQL you can bind, and a read-back you can archive.
-            </p>
+      <section className="mk-section mk-section--band" aria-labelledby="mk-contact-faq">
+        <div className="mk-wrap mk-story-grid">
+          <header className="mk-story-head">
+            <h2 id="mk-contact-faq">Questions people ask first</h2>
           </header>
-          <div className="lp-sales-table-wrap">
-            <table className="lp-sales-table">
-              <thead>
-                <tr>
-                  <th scope="col">Capability</th>
-                  <th scope="col">What Datawrap does</th>
-                  <th scope="col">What you keep</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <th scope="row">Column mapping</th>
-                  <td>Semantic role + confidence; extra source columns stay visible on Map</td>
-                  <td>Reviewed mapping decisions</td>
-                </tr>
-                <tr>
-                  <th scope="row">Preflight</th>
-                  <td>Nine core gates G1–G9 before every write, collation-aware key checks included</td>
-                  <td>Gate results per run</td>
-                </tr>
-                <tr>
-                  <th scope="row">Held-back rows</th>
-                  <td>Quarantine with column, value, and reason; replay once fixed</td>
-                  <td>A durable quarantine queue</td>
-                </tr>
-                <tr>
-                  <th scope="row">Destination SQL</th>
-                  <td>Destination INSERT/MERGE and stored-procedure writes, binds only, with quarantine</td>
-                  <td>Per-row outcomes</td>
-                </tr>
-                <tr>
-                  <th scope="row">Proof</th>
-                  <td>Read-back: destination row count, checksums, value and key census</td>
-                  <td>A signed proof pack</td>
-                </tr>
-                <tr>
-                  <th scope="row">CDC</th>
-                  <td>{cdcSourcesPhrase()}: snapshot, then stream from the log, and resume</td>
-                  <td>Idempotent upserts on your keys</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section className="lp-sales-faq" aria-label="Sales FAQ">
-        <div className="lp-mkt-wrap">
-          <h2>Questions procurement usually asks</h2>
           <MarketingFaq items={FAQS} />
         </div>
       </section>

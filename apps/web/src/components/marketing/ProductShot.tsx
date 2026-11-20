@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 
 /**
  * Product photography for public pages — the live workspace inside a
@@ -19,16 +19,29 @@ export function ProductShot({
   route?: { source: string; dest: string };
   className?: string;
 }) {
+  const dialog = useRef<HTMLDialogElement>(null);
   return (
     <figure className={`lp-product-shot ${className}`.trim()}>
       <div className="lp-product-shot-chrome">
         <div className="lp-product-shot-bar">
           <span className="lp-product-shot-surface">{surface}</span>
+          <button type="button" className="mk-shot-expand" onClick={() => dialog.current?.showModal()}>
+            View full size
+          </button>
         </div>
         <div className="lp-product-shot-viewport">
-          <img src={src} alt={alt} />
+          <img src={src} alt={alt} loading="lazy" decoding="async" />
         </div>
       </div>
+      <dialog ref={dialog} className="mk-shot-dialog" aria-label={surface} onClick={(e) => e.target === dialog.current && dialog.current?.close()}>
+        <div className="mk-shot-dialog-bar">
+          <p>{surface}</p>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => dialog.current?.close()}>
+            Close
+          </button>
+        </div>
+        <img src={src} alt={alt} loading="lazy" decoding="async" />
+      </dialog>
       {route ? (
         <figcaption className="lp-product-shot-route" title={`${route.source} → ${route.dest}`}>
           <span>{route.source}</span>

@@ -1,8 +1,7 @@
 import { useState } from "react";
 
-/** Privacy-first YouTube player: renders a thumbnail facade and only loads the
- * youtube-nocookie embed after the visitor clicks play — no Google tracker on
- * page load, standard practice on enterprise marketing sites. */
+/** Privacy-first YouTube player: a poster drawn in code, and the
+ * youtube-nocookie embed only after the visitor presses play. */
 
 export function videoThumb(id: string, quality: "maxres" | "hq" = "maxres"): string {
   return quality === "maxres"
@@ -17,16 +16,17 @@ export function videoEmbedUrl(id: string): string {
 export function VideoPlayer({
   videoId,
   title,
+  tag,
   poster = true,
 }: {
   videoId: string;
   title: string;
-  /** Show the thumbnail facade; false renders the iframe immediately. */
+  /** Category shown on the coded poster. */
+  tag?: string;
+  /** Show the poster; false renders the iframe immediately. */
   poster?: boolean;
 }) {
   const [playing, setPlaying] = useState(!poster);
-  const [thumbQuality, setThumbQuality] = useState<"maxres" | "hq">("maxres");
-  const [thumbFailed, setThumbFailed] = useState(false);
 
   if (playing) {
     return (
@@ -43,35 +43,20 @@ export function VideoPlayer({
     );
   }
 
+  // A poster drawn in code: nothing is requested from YouTube until the
+  // visitor presses play.
   return (
-    <button
-      type="button"
-      className="lp-video-facade"
-      onClick={() => setPlaying(true)}
-      aria-label={`Play video: ${title}`}
-    >
-      {thumbFailed ? (
-        // No thumbnail (blocked network or a removed upload): show the title
-        // on a quiet poster instead of an empty black frame.
-        <span className="lp-video-poster" aria-hidden="true">
-          {title}
-        </span>
-      ) : (
-        <img
-          src={videoThumb(videoId, thumbQuality)}
-          alt=""
-          loading="lazy"
-          onError={() => {
-            // maxresdefault 404s on lower-res uploads — fall back to hqdefault.
-            if (thumbQuality === "maxres") setThumbQuality("hq");
-            else setThumbFailed(true);
-          }}
-        />
-      )}
-      <span className="lp-video-play" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
+    <button type="button" className="lp-video-facade mk-poster" onClick={() => setPlaying(true)}>
+      <span className="mk-poster-art" aria-hidden="true">
+        {tag ? <span className="mk-poster-tag">{tag}</span> : null}
+        <span className="mk-poster-title">{title}</span>
+      </span>
+      <span className="mk-poster-play">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true" focusable="false">
           <path d="M8 5v14l11-7z" />
         </svg>
+        <span>Play video</span>
+        <span className="mk-sr-only">: {title}</span>
       </span>
     </button>
   );

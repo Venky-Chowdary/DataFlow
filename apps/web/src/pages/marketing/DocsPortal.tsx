@@ -1,6 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { DtIcon } from "../../components/DtIcon";
-import { DocsShotReel } from "../../components/docs/DocsShotReel";
 import {
   HELP_DOC_CATEGORIES,
   getHelpDoc,
@@ -248,8 +247,6 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         ) : null}
       </header>
 
-      <DocsShotReel frames={SPACE_FRAMES} className="docs-shot-reel--hero" surface="Operator workspace" />
-
       <section className="docs-space-start">
         <h2>Start here (recommended order)</h2>
         <p>
@@ -260,7 +257,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 0 }} onClick={() => onNavigate("help-installation")}>
             <span>01</span>
             <strong>Access your workspace</strong>
-            <em>Tenant URL, SSO sign-in, Viewer / Editor / Admin roles, admin checklist.</em>
+            <em>Tenant URL, SSO sign-in, the four workspace roles, admin checklist.</em>
           </button>
           <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 1 }} onClick={() => onNavigate("help-getting-started")}>
             <span>02</span>

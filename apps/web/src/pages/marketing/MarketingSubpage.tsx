@@ -1,24 +1,32 @@
-import { type CSSProperties } from "react";
-import { DtIcon } from "../../components/DtIcon";
+import { useId, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
-import { ProductShot } from "../../components/marketing/ProductShot";
-import { VerifyPanel } from "../../components/marketing/ProductPanels";
-import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
-import { MarketingReveal } from "../../components/marketing/MarketingReveal";
+import { MarketingFaq } from "../../components/marketing/MarketingFaq";
+import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
+import { DesignPartners } from "../../components/marketing/DesignPartners";
+import {
+  AuditChainPanel,
+  ControlsPanel,
+  CoveragePanel,
+  ROLES,
+  StatusGlyph,
+  VerifyPanel,
+} from "../../components/marketing/ProductPanels";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
-  MARKETING_PROOF_HIGHLIGHTS,
-  MARKETING_STACK,
-  provenDriversPhrase,
+  CONNECTOR_CLAIMS,
+  EVIDENCE_AS_OF,
+  EVIDENCE_RUN_ID,
+  PROVEN_EVIDENCE,
   catalogHonestyLead,
   cdcSourcesPhrase,
+  provenDriversPhrase,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
 import { ContactSalesPage } from "./ContactSalesPage";
 import { DemosPage } from "./DemosPage";
+import { LegalPage } from "./LegalPages";
 import { StatusPage, SubprocessorsPage } from "./TrustPages";
 import {
   DataPilotPage,
@@ -30,7 +38,7 @@ import {
   SyncSolutionPage,
   TransferStudioPage,
   WarehouseSolutionPage,
-} from "./ProductSurfaces";
+} from "./StoryPages";
 
 interface PageActions {
   onGetStarted: () => void;
@@ -38,24 +46,9 @@ interface PageActions {
   onNavigate: (route: PublicRoute) => void;
 }
 
-function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
-  return (
-    <div className="lp-mkt-stats-strip" role="list">
-      {items.map((item) => (
-        <div key={item.label} className="lp-mkt-stats-item" role="listitem">
-          <strong>{item.value}</strong>
-          <span>{item.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
+type Nav = Pick<PageActions, "onGetStarted" | "onNavigate">;
 
-/**
- * Control posture badges. Each label names a shipped control
- * (see docs/operate/security.md); certifications are not listed.
- */
-export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: { route: PublicRoute } & PageActions) {
+export function MarketingSubpage({ route, onGetStarted, onNavigate }: { route: PublicRoute } & PageActions) {
   if (route === "home") return null;
   if (isHelpDocRoute(route)) {
     return <DocArticlePage docId={route} onNavigate={onNavigate} onGetStarted={onGetStarted} />;
@@ -67,7 +60,7 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
     case "enterprise":
       return <EnterprisePage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "customers":
-      return <CustomersPage onNavigate={onNavigate} />;
+      return <ProofPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "contact":
       return <ContactSalesPage onNavigate={onNavigate} />;
     case "privacy":
@@ -81,7 +74,7 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
     case "status":
       return <StatusPage />;
     case "security":
-      return <SecurityPage onNavigate={onNavigate} />;
+      return <SecurityPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "help":
       return <DocsPortal onNavigate={onNavigate} onGetStarted={onGetStarted} />;
     case "product-transfer":
@@ -111,1011 +104,839 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
   }
 }
 
-function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const plans = [
-    {
-      name: "Starter",
-      price: "Free",
-      period: "forever",
-      blurb: "Ship a governed, verified transfer today on the full production engine.",
-      cta: "Start free",
-      action: onGetStarted,
-      tone: "starter" as const,
-      features: [
-        "Transfer Studio — table, destination query, stored procedure",
-        "G1–G9 preflight + quarantine with replay",
-        "Read-back with a value and key census",
-        provenDriversPhrase(),
-      ],
-    },
-    {
-      name: "Team",
-      price: "Custom",
-      period: "usage-aligned",
-      blurb: "Schedules, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
-      cta: "Contact sales",
-      action: () => onNavigate("contact"),
-      tone: "team" as const,
-      featured: true,
-      features: [
-        "Everything in Starter",
-        "Schedules, typed watermarks & native CDC",
-        "Datawrap Pilot on its own local engine",
-        "Shared connectors + email support",
-      ],
-    },
-    {
-      name: "Enterprise",
-      price: "Custom",
-      period: "security & scale",
-      blurb: "SSO, SCIM, BYOK, workspace isolation, MCP under policy, and a dedicated success engineer.",
-      cta: "Contact sales",
-      action: () => onNavigate("contact"),
-      tone: "enterprise" as const,
-      features: [
-        "Everything in Team",
-        "SSO (OIDC / SAML) + SCIM + BYOK",
-        "MCP for agents + tamper-evident audit",
-        "Dedicated success",
-      ],
-    },
-  ];
+type Action = { label: string; onClick: () => void };
 
-  const compareRows = [
-    { feature: "Transfer Studio (table / destination query / stored procedure)", starter: true, team: true, enterprise: true },
-    { feature: "G1–G9 preflight & quarantine with replay", starter: true, team: true, enterprise: true },
-    { feature: "Read-back: value and key census", starter: true, team: true, enterprise: true },
-    { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
-    { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
-    { feature: "Schedules & typed watermarks", starter: false, team: true, enterprise: true },
-    { feature: `Native CDC (${cdcSourcesPhrase()})`, starter: false, team: true, enterprise: true },
-    { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
-    { feature: "MCP for agents", starter: false, team: false, enterprise: true },
-    { feature: "SSO (OIDC / SAML) & SCIM", starter: false, team: false, enterprise: true },
-    { feature: "BYOK & custom domain", starter: false, team: false, enterprise: true },
-    { feature: "Tamper-evident audit chain & signed webhooks", starter: false, team: false, enterprise: true },
-  ];
-
+/** The page's two actions: one primary, one secondary. Used in the hero and the close. */
+function Actions({ primary, secondary }: { primary: Action; secondary: Action }) {
   return (
-    <div className="lp-mkt-page lp-page-pricing lp-pricing-v2">
-      <MarketingInkHero
+    <div className="lp-hero-cta">
+      <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={primary.onClick}>
+        {primary.label}
+      </button>
+      <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={secondary.onClick}>
+        {secondary.label}
+      </button>
+    </div>
+  );
+}
+
+function Closing({ title, body, primary, secondary }: { title: string; body: string; primary: Action; secondary: Action }) {
+  return (
+    <MarketingClosing title={title} body={body}>
+      <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={primary.onClick}>
+        {primary.label}
+      </button>
+      <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={secondary.onClick}>
+        {secondary.label}
+      </button>
+    </MarketingClosing>
+  );
+}
+
+/** A two-column section: a short head on the left, the content on the right. */
+function Block({
+  id,
+  title,
+  lead,
+  band,
+  children,
+}: {
+  id: string;
+  title: string;
+  lead?: string;
+  band?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`mk-section${band ? " mk-section--band" : ""}`} aria-labelledby={id}>
+      <div className="mk-wrap mk-story-grid">
+        <header className="mk-story-head">
+          <h2 id={id}>{title}</h2>
+          {lead ? <p className="mk-story-lede">{lead}</p> : null}
+        </header>
+        <div className="mk-story-body">{children}</div>
+      </div>
+    </section>
+  );
+}
+
+function Facts({ items }: { items: { title: string; body: ReactNode }[] }) {
+  return (
+    <dl className="mk-checks">
+      {items.map((c) => (
+        <div key={c.title}>
+          <dt>{c.title}</dt>
+          <dd>{c.body}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function Included() {
+  return (
+    <span className="mk-yes">
+      <StatusGlyph kind="landed" />
+      Included
+    </span>
+  );
+}
+
+function NotIncluded({ label = "Not included" }: { label?: string }) {
+  return (
+    <span className="mk-no">
+      <span aria-hidden>–</span>
+      <span className="mk-sr-only">{label}</span>
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ Pricing */
+
+type Tier = "starter" | "team" | "enterprise";
+const TIERS: Tier[] = ["starter", "team", "enterprise"];
+
+const PLAN_ROWS: { feature: string; in: Tier[] }[] = [
+  { feature: "Transfer Studio: tables, destination queries, stored procedures", in: TIERS },
+  { feature: "A plan you review before anything is written", in: TIERS },
+  { feature: "Checks on the real write path, before the write", in: TIERS },
+  { feature: "Quarantine with the reason, and replay", in: TIERS },
+  { feature: "Read-back of the destination, counted by its own engine", in: TIERS },
+  { feature: "Signed proof pack for every run", in: TIERS },
+  { feature: "Schedules with typed watermarks", in: ["team", "enterprise"] },
+  { feature: `Change data capture from ${cdcSourcesPhrase()}`, in: ["team", "enterprise"] },
+  { feature: "Datawrap Pilot", in: ["team", "enterprise"] },
+  { feature: "Shared workspace with four roles", in: ["team", "enterprise"] },
+  { feature: "Single sign-on (OIDC or SAML) and SCIM", in: ["enterprise"] },
+  { feature: "Connector secrets wrapped with your own key", in: ["enterprise"] },
+  { feature: "Data-region fence on the workspace", in: ["enterprise"] },
+  { feature: "Tamper-evident audit log and export", in: ["enterprise"] },
+  { feature: "MCP server for agents", in: ["enterprise"] },
+  { feature: "Self-managed deployment in your cloud or VPC", in: ["enterprise"] },
+];
+
+const PLANS: { tier: Tier; name: string; price: string; who: string; adds: string; highlights: string[] }[] = [
+  {
+    tier: "starter",
+    name: "Starter",
+    price: "Free while in early access",
+    who: "For one person or a small team moving data they need to trust.",
+    adds: "The whole load path",
+    highlights: [
+      "Plan, checks, quarantine, and read-back on every run",
+      "A signed proof pack you can verify",
+      `${provenDriversPhrase()}, more implemented`,
+    ],
+  },
+  {
+    tier: "team",
+    name: "Team",
+    price: "Talk to sales",
+    who: "For a data team that runs loads on a schedule.",
+    adds: "Everything in Starter, plus",
+    highlights: [
+      "Schedules and change data capture",
+      "Datawrap Pilot",
+      "A shared workspace with viewer, operator, editor, and admin roles",
+    ],
+  },
+  {
+    tier: "enterprise",
+    name: "Enterprise",
+    price: "Talk to sales",
+    who: "For organisations with identity, key, and residency requirements.",
+    adds: "Everything in Team, plus",
+    highlights: [
+      "SSO, SCIM, and your own key on connector secrets",
+      "A data-region fence and a tamper-evident audit log",
+      "MCP server for agents",
+      "Self-managed deployment: your cloud or VPC, with Docker Compose or Helm",
+    ],
+  },
+];
+
+function PricingPage({ onGetStarted, onNavigate }: Nav) {
+  const start = { label: "Start free", onClick: onGetStarted };
+  const sales = { label: "Talk to sales", onClick: () => onNavigate("contact") };
+  return (
+    <div className="mk-page mk-pricing">
+      <MarketingHeroBand
         kicker="Pricing"
-        title={<>Every plan includes the checks and the read-back.</>}
-        lead={
-          <>
-            Starter includes the whole proof path: a map you review, checks that stop a bad
-            write, quarantine with replay, and a value-by-value read of the destination. You pay
-            for cadence and security, not for knowing the rows arrived.
-          </>
-        }
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-              Start for free
-            </button>
-            <button
-              type="button"
-              className="mk-btn mk-btn--secondary mk-btn--lg"
-              onClick={() => onNavigate("contact")}
-            >
-              Contact sales
-            </button>
-          </div>
-        }
-        slas={[
-          { value: "Free", label: "Starter forever" },
-          { value: "Verified", label: "Every load, every plan" },
-          { value: "Custom", label: "Team & Enterprise" },
-        ]}
+        title="Start free. Talk to us when a team depends on it."
+        lead="Every plan runs the same engine: the plan you review, the checks before the write, quarantine with replay, and the read-back after it. Verification is never an add-on."
+        actions={<Actions primary={start} secondary={sales} />}
       />
 
-      <MarketingReveal>
-        <section className="lp-pricing-v2-plans" aria-label="Plans">
-          <div className="lp-pricing-v2-grid">
-            {plans.map((plan, i) => (
-              <article
-                key={plan.name}
-                className={`lp-pricing-card lp-scene-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
-                style={{ "--reveal-i": i } as CSSProperties}
-              >
-                {plan.featured ? <span className="lp-pricing-card-flag">Recommended</span> : null}
-                <header className="lp-pricing-card-head">
-                  <h2>{plan.name}</h2>
-                  <p className="lp-pricing-card-period">{plan.period}</p>
-                </header>
-                <p className="lp-pricing-card-price">
-                  <strong>{plan.price}</strong>
-                </p>
-                <p className="lp-pricing-card-blurb">{plan.blurb}</p>
-                <ul className="lp-pricing-card-features">
-                  {plan.features.map((f) => (
-                    <li key={f}>
-                      <DtIcon name="check" size={14} />
-                      {f}
-                    </li>
+      <section className="mk-section mk-section--tight" aria-labelledby="mk-plans-title">
+        <div className="mk-wrap">
+          <h2 id="mk-plans-title" className="mk-sr-only">
+            Plans
+          </h2>
+          <ol className="mk-plans">
+            {PLANS.map((plan) => (
+              <li key={plan.tier} className={`mk-plan mk-plan--${plan.tier}`}>
+                <h3>{plan.name}</h3>
+                <p className="mk-plan-price">{plan.price}</p>
+                <p className="mk-plan-who">{plan.who}</p>
+                <p className="mk-plan-adds">{plan.adds}</p>
+                <ul className="mk-facts">
+                  {plan.highlights.map((h) => (
+                    <li key={h}>{h}</li>
                   ))}
                 </ul>
                 <button
                   type="button"
-                  className={plan.featured ? "mk-btn mk-btn--primary mk-btn--block" : "mk-btn mk-btn--secondary mk-btn--block"}
-                  onClick={plan.action}
+                  className={`mk-btn mk-btn--block ${plan.tier === "starter" ? "mk-btn--primary" : "mk-btn--secondary"}`}
+                  onClick={plan.tier === "starter" ? start.onClick : sales.onClick}
                 >
-                  {plan.cta}
+                  {plan.tier === "starter" ? start.label : sales.label}
+                  <span className="mk-sr-only"> for {plan.name}</span>
                 </button>
-              </article>
+              </li>
             ))}
-          </div>
-        </section>
-      </MarketingReveal>
+          </ol>
+        </div>
+      </section>
 
-      <MarketingReveal>
-        <section className="lp-pricing-v2-compare" aria-label="Plan comparison">
-          <div className="lp-pricing-v2-compare-head">
-            <p className="mk-kicker">Compare</p>
-            <h2>One engine. Three unlock levels.</h2>
-            <p>
-              Verification ships in Starter. Schedules, CDC, and collaboration unlock in Team.
-              Identity, tenancy, audit, and agents unlock in Enterprise.
-            </p>
-          </div>
-          <div className="lp-pricing-v2-table-wrap">
-            <table className="lp-pricing-v2-table">
+      <section className="mk-section mk-section--band" aria-labelledby="mk-compare-title">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-compare-title">What each plan includes</h2>
+            <p>The first six rows are the load path itself. They are in every plan.</p>
+          </header>
+          <div className="mk-table-scroll" role="region" aria-labelledby="mk-compare-title" tabIndex={0}>
+            <table className="mk-compare">
               <thead>
                 <tr>
                   <th scope="col">Capability</th>
                   <th scope="col">Starter</th>
-                  <th scope="col" className="is-hot">Team</th>
+                  <th scope="col">Team</th>
                   <th scope="col">Enterprise</th>
                 </tr>
               </thead>
               <tbody>
-                {compareRows.map((row) => (
+                {PLAN_ROWS.map((row) => (
                   <tr key={row.feature}>
                     <th scope="row">{row.feature}</th>
-                    <td>{row.starter ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
-                    <td className="is-hot">{row.team ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
-                    <td>{row.enterprise ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
+                    {TIERS.map((t) => (
+                      <td key={t}>{row.in.includes(t) ? <Included /> : <NotIncluded />}</td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </section>
-      </MarketingReveal>
+        </div>
+      </section>
 
-      <MarketingReveal>
-        <section className="lp-pricing-v2-principles" aria-label="Pricing principles">
-          <div className="lp-pricing-principle lp-scene-card">
-            <strong>A real free tier</strong>
-            <span>The full Transfer Studio path, verification included.</span>
-          </div>
-          <div className="lp-pricing-principle lp-scene-card">
-            <strong>Quote when you scale</strong>
-            <span>Priced to connectors and cadence.</span>
-          </div>
-          <div className="lp-pricing-principle lp-scene-card">
-            <strong>One engine everywhere</strong>
-            <span>UI, Schedules, Pilot, and MCP share the same gates.</span>
-          </div>
-        </section>
-      </MarketingReveal>
+      <Block id="mk-pricing-deploy" title="Where it runs" lead="Hosted by Datawrap is the default on every plan.">
+        <DeploymentOptions />
+      </Block>
 
-      <section className="lp-sales-compare" aria-label="What every plan includes">
-        <div className="lp-mkt-wrap">
-          <header>
-            <p className="mk-kicker">In every plan</p>
-            <h2>Pay for cadence. Verification is always included.</h2>
+      <section className="mk-section mk-section--band" aria-labelledby="mk-pricing-faq">
+        <div className="mk-wrap mk-story-grid">
+          <header className="mk-story-head">
+            <h2 id="mk-pricing-faq">Questions about pricing</h2>
+          </header>
+          <MarketingFaq
+            items={[
+              {
+                q: "Why is there no price for Team or Enterprise?",
+                a: "Datawrap is in early access, and team plans are agreed with each customer. Tell us what you move and how often, and we will quote it.",
+              },
+              {
+                q: "Does Starter have usage limits?",
+                a: "No usage limits are enforced while Starter is free in early access.",
+              },
+              {
+                q: "Is verification part of every plan?",
+                a: "Yes. The checks before the write, quarantine with replay, and the read-back after it are how Datawrap moves data, so every plan has them.",
+              },
+              {
+                q: "Can we run Datawrap in our own cloud?",
+                a: "Yes, on the Enterprise plan: self-managed deployment in your cloud or VPC, with Docker Compose or Helm. Hosted is the default.",
+              },
+            ]}
+          />
+        </div>
+      </section>
+
+      <Closing
+        title="Run your first load today"
+        body="Starter is free while Datawrap is in early access. Team plans start with a conversation."
+        primary={start}
+        secondary={sales}
+      />
+    </div>
+  );
+}
+
+/** Hosted (default) and self-managed (Enterprise), side by side. */
+function DeploymentOptions() {
+  return (
+    <div className="mk-deploy-options">
+      <div>
+        <h3>Hosted</h3>
+        <p className="mk-plan-adds">Every plan. The default.</p>
+        <p>We run Datawrap for you. You connect your sources and destinations; there is nothing to install.</p>
+      </div>
+      <div>
+        <h3>Self-managed</h3>
+        <p className="mk-plan-adds">An Enterprise plan option</p>
+        <p>
+          Run Datawrap in your own cloud or VPC: two images, the API and the web app, deployed with Docker Compose or
+          Helm. Connector credentials, evidence, and the audit log stay in your account.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------- Enterprise */
+
+function EnterprisePage({ onNavigate }: Nav) {
+  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
+  const security = { label: "Security overview", onClick: () => onNavigate("security") };
+  return (
+    <div className="mk-page mk-enterprise">
+      <MarketingHeroBand
+        kicker="Enterprise"
+        title="Your identity provider, your keys, your region."
+        lead="Single sign-on, SCIM, four workspace roles, your own key on connector secrets, a data-region fence, and a tamper-evident audit log. They sit on the same engine as every load, so the plan, the checks, and the read-back do not change."
+        actions={<Actions primary={pilot} secondary={security} />}
+        visual={<ControlsPanel />}
+      />
+
+      <Block
+        id="mk-ent-controls"
+        title="Controls for the whole workspace"
+        lead="Switched on per workspace by an admin. Deployment-wide settings are reserved for platform admins."
+      >
+        <Facts
+          items={[
+            {
+              title: "Sign-in and provisioning",
+              body: "OIDC or SAML single sign-on, routed to the right identity provider by email domain. SCIM 2.0 provisions people and maps identity-provider groups to workspace roles.",
+            },
+            {
+              title: "Keys you own",
+              body: "Connector secrets are encrypted at rest. A workspace can bring its own key: secrets are then wrapped with it, and the platform key wraps the workspace key.",
+            },
+            {
+              title: "Data region",
+              body: "Record a region on the workspace, and a run is refused before it starts when the destination is elsewhere or shows no region.",
+            },
+            {
+              title: "Audit",
+              body: "Every action lands in a tamper-evident log: each entry is signed and linked to the one before, so a removed or altered entry is detected. Verify the chain and export it.",
+            },
+            {
+              title: "Workspace policy",
+              body: "Idle session timeout, signed webhooks with a secret per channel, and a job-history retention purge that runs a dry run first.",
+            },
+          ]}
+        />
+      </Block>
+
+      <Block
+        id="mk-ent-roles"
+        band
+        title="Four roles, checked on every request"
+        lead="Every API route is checked against one permission, in Transfer Studio, on schedules, in Pilot, and over MCP. An API key never carries more than the person who created it."
+      >
+        <table className="mk-roles">
+          <caption className="mk-sr-only">Workspace roles</caption>
+          <thead>
+            <tr>
+              <th scope="col">Role</th>
+              <th scope="col">What it can do</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ROLES.map((r) => (
+              <tr key={r.name}>
+                <th scope="row">{r.name}</th>
+                <td>{r.does}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Block>
+
+      <Block id="mk-ent-deploy" title="Hosted, or in your own cloud" lead="Self-managed deployment is an Enterprise plan option.">
+        <DeploymentOptions />
+      </Block>
+
+      <Block id="mk-ent-buy" band title="Buying Datawrap" lead="What procurement usually asks for, and how a pilot works.">
+        <Facts
+          items={[
+            {
+              title: "A pilot on your own data",
+              body: "One scoped load from your source to your destination, with the plan, the checks, quarantine, and a signed proof pack you keep.",
+            },
+            {
+              title: "Data processing agreement",
+              body: (
+                <>
+                  Available on request: <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
+                </>
+              ),
+            },
+            {
+              title: "Subprocessor list",
+              body: (
+                <>
+                  Available on request:{" "}
+                  <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
+                </>
+              ),
+            },
+            {
+              title: "Commercial terms",
+              body: (
+                <>
+                  Talk to sales: <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.
+                </>
+              ),
+            },
+          ]}
+        />
+      </Block>
+
+      <Closing
+        title="Run a pilot under your own policy"
+        body="Start on the engine your operators will use, and switch on SSO, SCIM, and your own key when security is ready."
+        primary={pilot}
+        secondary={security}
+      />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- Proof */
+
+function engineId(name: string): string {
+  for (const family of CONNECTOR_CLAIMS.families) {
+    const hit = family.items.find((i) => i.name === name);
+    if (hit) return hit.driver;
+  }
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function ProofPage({ onNavigate }: Nav) {
+  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
+  const connectors = { label: "See connectors", onClick: () => onNavigate("integrations") };
+  return (
+    <div className="mk-page mk-proof">
+      <MarketingHeroBand
+        kicker="Proof"
+        title="Evidence you can check yourself."
+        lead="Connector claims come from CI runs against the engines. Every load ends with a report counted by the destination's own engine and a signed proof pack. The audit log detects edits. You can re-run or verify each of these."
+        actions={<Actions primary={pilot} secondary={connectors} />}
+        visual={<VerifyPanel />}
+      />
+
+      <section className="mk-section" aria-labelledby="mk-proof-ci">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-proof-ci">Connectors proven in CI</h2>
             <p>
-              We quote connectors and schedule. The proof engine is the same in every plan — it is
-              how Datawrap moves data.
+              An engine counts as proven only when its CI jobs ran green with no test skipped. This table is generated from
+              the evidence file, not typed by hand.
             </p>
           </header>
-          <div className="lp-sales-table-wrap">
-            <table className="lp-sales-table">
+          <div className="mk-table-scroll" role="region" aria-labelledby="mk-proof-ci" tabIndex={0}>
+            <table className="mk-evidence">
               <thead>
                 <tr>
-                  <th scope="col">Dimension</th>
-                  <th scope="col">What you get</th>
-                  <th scope="col">How it works</th>
-                  <th scope="col">Plans</th>
+                  <th scope="col">Engine</th>
+                  <th scope="col">Tests executed</th>
+                  <th scope="col">Result</th>
+                  <th scope="col">CI jobs</th>
                 </tr>
               </thead>
               <tbody>
+                {PROVEN_EVIDENCE.map((row) => (
+                  <tr key={row.engines}>
+                    <th scope="row">
+                      <span className="mk-conn-icon">
+                        <ConnectorIcon id={engineId(row.engines)} size={16} />
+                      </span>
+                      {row.engines}
+                    </th>
+                    <td className="mk-num">{row.cases}</td>
+                    <td>
+                      <span className="mk-yes">
+                        <StatusGlyph kind="landed" />
+                        Green, none skipped
+                      </span>
+                    </td>
+                    <td>
+                      <code>{row.artifact}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mk-caption">
+            Recorded {EVIDENCE_AS_OF}, CI run {EVIDENCE_RUN_ID}.
+          </p>
+        </div>
+      </section>
+
+      <Block
+        id="mk-proof-pack"
+        band
+        title="Verify a proof pack"
+        lead="Every load can export a signed record of its checks and mapping. Anyone with access to the workspace can check it."
+      >
+        <ol className="mk-api-steps">
+          <li>
+            <p>Download the pack for a finished job.</p>
+            <code>GET /api/v1/transfer/{"{job_id}"}/proof-pack</code>
+          </li>
+          <li>
+            <p>Check its signature and content hash.</p>
+            <code>POST /api/v1/transfer/proof-pack/verify</code>
+          </li>
+          <li>
+            <p>Check that the audit log still holds the record it was filed with.</p>
+            <code>POST /api/v1/audit/verify-pack</code>
+          </li>
+        </ol>
+        <p className="mk-story-note">
+          A pack says “migration proven” only when the check after the write was a full checksum. A pack built from a sample
+          can be exported, and it refuses that claim.
+        </p>
+      </Block>
+
+      <DesignPartners headingId="mk-proof-partners" />
+
+      <Closing
+        title="Get the same evidence on your data"
+        body="A pilot is one scoped load on your own source and destination, ending with a proof pack you keep."
+        primary={pilot}
+        secondary={connectors}
+      />
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------- Security */
+
+function SecurityPage({ onNavigate }: Nav) {
+  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
+  const enterprise = { label: "Enterprise", onClick: () => onNavigate("enterprise") };
+  return (
+    <div className="mk-page mk-security">
+      <MarketingHeroBand
+        kicker="Security"
+        title="What protects your data while it moves."
+        lead="Workspace isolation, encrypted connector secrets, checked outbound connections, four roles, and a tamper-evident audit log. The same controls apply in Transfer Studio, on schedules, in Pilot, and over MCP."
+        actions={<Actions primary={pilot} secondary={enterprise} />}
+        visual={<AuditChainPanel />}
+      />
+
+      <Block
+        id="mk-sec-every"
+        title="On every transfer"
+        lead="Whoever or whatever starts the load: a person, a schedule, Pilot, or an agent over MCP."
+      >
+        <Facts
+          items={[
+            {
+              title: "Workspace isolation",
+              body: "Every read of jobs, connectors, schedules, notifications, and audit is scoped to the caller's workspace, Pilot and MCP tools included. Another workspace's id returns not found.",
+            },
+            {
+              title: "Secrets",
+              body: "Connector credentials are encrypted at rest, can be wrapped with your own key, and can be stored in AWS Secrets Manager. Error responses do not carry raw driver text.",
+            },
+            {
+              title: "Outbound connections",
+              body: "Every connection is checked where it is made. Cloud metadata addresses are always refused; private networks are refused unless the workspace lists them.",
+            },
+            {
+              title: "Roles",
+              body: "Viewer, operator, editor, and admin. Every API route is checked against one permission, and a route with no rule is refused.",
+            },
+            {
+              title: "Audit log",
+              body: "Tamper-evident: each entry is signed and linked to the one before. The chain head can be anchored in S3 with Object Lock, outside the application's reach.",
+            },
+          ]}
+        />
+      </Block>
+
+      <section className="mk-section mk-section--band" aria-labelledby="mk-sec-flow">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-sec-flow">Where your data goes</h2>
+            <p>Rows travel from your source through the engine to your destination. What the run keeps is what it needs to prove itself.</p>
+          </header>
+          <DataFlowDiagram />
+        </div>
+      </section>
+
+      <Block id="mk-sec-admin" title="Controls your admins switch on" lead="Per workspace, with deployment-wide settings reserved for platform admins.">
+        <Facts
+          items={[
+            {
+              title: "Data region",
+              body: "Once a workspace records its region, a destination elsewhere, or with no region, is refused before the run starts.",
+            },
+            {
+              title: "Single sign-on and SCIM",
+              body: "OIDC or SAML, routed by email domain. Groups from your identity provider map to workspace roles.",
+            },
+            {
+              title: "Signed webhooks",
+              body: "Each channel has its own secret, and every delivery carries a timestamped HMAC-SHA256 signature.",
+            },
+            {
+              title: "Retention",
+              body: "Purge finished jobs older than your window, after a dry run and a confirm token.",
+            },
+          ]}
+        />
+      </Block>
+
+      <section className="mk-section mk-section--band" id="vulnerability-disclosure" aria-labelledby="mk-sec-disclosure">
+        <div className="mk-wrap mk-story-grid">
+          <header className="mk-story-head">
+            <h2 id="mk-sec-disclosure">Report a vulnerability</h2>
+          </header>
+          <div className="mk-story-body mk-prose">
+            <p>
+              Email <a href="mailto:contact@datawrap.io?subject=Security%20report">contact@datawrap.io</a> with the subject
+              “Security report”, and please do not open a public issue. We acknowledge vulnerability reports within three
+              business days and keep you updated until resolved.
+            </p>
+            <p>
+              We will not pursue good-faith research that tests only accounts you own, stops at the first sign of another
+              customer’s data, avoids denial of service and social engineering, and gives us reasonable time to fix before
+              disclosure. Machine-readable contact: <a href="/.well-known/security.txt">/.well-known/security.txt</a>.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <Closing
+        title="Review it on your own data"
+        body="A pilot runs under your workspace policy, and its audit log and proof pack are yours to inspect."
+        primary={pilot}
+        secondary={enterprise}
+      />
+    </div>
+  );
+}
+
+/** Source, engine, destination, and what is kept along the way. */
+function DataFlowDiagram() {
+  const kept: { what: string; where: string }[] = [
+    { what: "Connector credentials", where: "Encrypted at rest, and wrapped with your key if you bring one." },
+    { what: "Held rows", where: "Kept in the job's quarantine with the reason, until you fix the cause and replay them." },
+    { what: "Evidence", where: "The plan, the checks, the report, and the proof pack, stored on the job." },
+    { what: "Audit log", where: "Signed entries, each linked to the one before, per workspace." },
+  ];
+  return (
+    <figure className="mk-flow">
+      <ol className="mk-flow-line" aria-label="The path of a row">
+        <li>
+          <strong>Your source</strong>
+          <span>Read with the credentials you saved</span>
+        </li>
+        <li className="is-engine">
+          <strong>Datawrap engine</strong>
+          <span>Checks, writes, holds, and reads back</span>
+        </li>
+        <li>
+          <strong>Your destination</strong>
+          <span>Counted by its own engine after the write</span>
+        </li>
+      </ol>
+      <dl className="mk-flow-kept">
+        {kept.map((k) => (
+          <div key={k.what}>
+            <dt>{k.what}</dt>
+            <dd>{k.where}</dd>
+          </div>
+        ))}
+      </dl>
+      <figcaption className="mk-caption">
+        Hosted, this runs in Datawrap's account. Self-managed, on the Enterprise plan, it runs in your cloud or VPC.
+      </figcaption>
+    </figure>
+  );
+}
+
+/* ------------------------------------------------------------- Connectors */
+
+type ConnectorRow = {
+  name: string;
+  driver: string;
+  family: string;
+  proven: boolean;
+  cdc: "proven" | "implemented" | null;
+};
+
+const CONNECTOR_ROWS: ConnectorRow[] = CONNECTOR_CLAIMS.families.flatMap((f) =>
+  f.items.map((i): ConnectorRow => {
+    const cdc = CONNECTOR_CLAIMS.cdc_sources.find((c) => c.driver === i.driver);
+    return {
+      name: i.name,
+      driver: i.driver,
+      family: f.family,
+      proven: i.proven,
+      cdc: cdc ? (cdc.proven ? "proven" : "implemented") : null,
+    };
+  }),
+);
+
+function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
+  const families = useMemo(() => ["All", ...CONNECTOR_CLAIMS.families.map((f) => f.family)], []);
+  const [family, setFamily] = useState("All");
+  const [query, setQuery] = useState("");
+  const [provenOnly, setProvenOnly] = useState(false);
+  const searchId = useId();
+  const q = query.trim().toLowerCase();
+  const rows = CONNECTOR_ROWS.filter(
+    (r) => (family === "All" || r.family === family) && (!provenOnly || r.proven) && (!q || r.name.toLowerCase().includes(q)),
+  );
+  const start = { label: "Start free", onClick: onGetStarted };
+  const docs = { label: "Read the docs", onClick: () => onNavigate("help") };
+  return (
+    <div className="mk-page mk-connectors">
+      <MarketingHeroBand
+        kicker="Connectors"
+        title="Connect what you run, and see what CI has proven."
+        lead={`${catalogHonestyLead()} Every one runs the same path: plan, checks, quarantine, and a read-back wherever the destination allows it.`}
+        actions={<Actions primary={start} secondary={docs} />}
+        visual={<CoveragePanel />}
+      />
+
+      <section className="mk-section" aria-labelledby="mk-matrix-title">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-matrix-title">Every connector</h2>
+            <p>
+              Filter by family, search by name, or show only connectors with a green CI run behind them. Evidence recorded{" "}
+              {EVIDENCE_AS_OF}.
+            </p>
+          </header>
+          <div className="mk-filter">
+            <div className="mk-chips" role="group" aria-label="Filter by family">
+              {families.map((f) => (
+                <button key={f} type="button" className="mk-chip" aria-pressed={family === f} onClick={() => setFamily(f)}>
+                  {f}
+                </button>
+              ))}
+            </div>
+            <div className="mk-filter-row">
+              <div className="mk-field">
+                <label htmlFor={searchId}>Search connectors</label>
+                <input
+                  id={searchId}
+                  type="search"
+                  value={query}
+                  autoComplete="off"
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+                />
+              </div>
+              <label className="mk-check">
+                <input type="checkbox" checked={provenOnly} onChange={(e) => setProvenOnly(e.target.checked)} />
+                <span>Proven in CI only</span>
+              </label>
+              <p className="mk-filter-count" role="status" aria-live="polite">
+                {rows.length} {rows.length === 1 ? "connector" : "connectors"}
+              </p>
+            </div>
+          </div>
+          <div className="mk-table-scroll" role="region" aria-labelledby="mk-matrix-title" tabIndex={0}>
+            <table className="mk-matrix">
+              <thead>
                 <tr>
-                  <th scope="row">Meter</th>
-                  <td>Cadence + security tier</td>
-                  <td>Quoted when you scale</td>
-                  <td>Team · Enterprise</td>
+                  <th scope="col">Connector</th>
+                  <th scope="col">Family</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Change data capture</th>
                 </tr>
-                <tr>
-                  <th scope="row">Proof</th>
-                  <td>Read-back after the write</td>
-                  <td>Row counts plus a value and key census from the destination</td>
-                  <td>All plans</td>
-                </tr>
-                <tr>
-                  <th scope="row">Held-back rows</th>
-                  <td>Quarantine + replay</td>
-                  <td>Column, value, and reason in a durable workspace queue</td>
-                  <td>All plans</td>
-                </tr>
-                <tr>
-                  <th scope="row">Destination SQL</th>
-                  <td>Query and stored procedure</td>
-                  <td>One INSERT/MERGE/UPDATE or CALL per row, binds only</td>
-                  <td>All plans</td>
-                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={`${r.family}-${r.driver}`}>
+                    <th scope="row">
+                      <span className="mk-conn-icon">
+                        <ConnectorIcon id={r.driver} size={18} />
+                      </span>
+                      {r.name}
+                    </th>
+                    <td>{r.family}</td>
+                    <td>
+                      {r.proven ? (
+                        <span className="mk-badge mk-badge--ci">
+                          <StatusGlyph kind="landed" />
+                          Proven in CI
+                        </span>
+                      ) : (
+                        <span className="mk-badge">Implemented</span>
+                      )}
+                    </td>
+                    <td>
+                      {r.cdc === "proven" ? (
+                        <span className="mk-yes">
+                          <StatusGlyph kind="landed" />
+                          Source, proven in CI
+                        </span>
+                      ) : r.cdc === "implemented" ? (
+                        "Source, implemented"
+                      ) : (
+                        <NotIncluded label="No" />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="mk-empty">
+                      No connector matches. Clear the search or choose All.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
         </div>
       </section>
 
-      <MarketingReveal>
-        <MarketingClosing
-          title="Procurement, MSA, or a security pack?"
-          body="Enterprise agreements come with a negotiated MSA and DPA, a completed security questionnaire, and a workspace audit export your reviewers can verify."
-        >
-          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
-          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("security")}>
-            Security overview
-          </button>
-        </MarketingClosing>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const capabilities = [
-    {
-      id: "identity",
-      kicker: "Identity",
-      title: "SSO and SCIM that gate every run",
-      body: "OIDC and SAML sign-in with email-domain routing to the right identity provider. SCIM 2.0 provisions users and maps groups to workspace roles; deactivating a user revokes their sessions and keys.",
-    },
-    {
-      id: "access",
-      kicker: "Access",
-      title: "RBAC with API keys that can't outrank you",
-      body: "Viewer, Editor, and Admin roles on every Studio job, Pilot session, and MCP call. An API key carries a role and scopes no higher than the person who created it, and the audit log names the key.",
-    },
-    {
-      id: "tenancy",
-      kicker: "Tenancy",
-      title: "Workspace isolation at the store layer",
-      body: "Every read of jobs, connectors, schedules, notifications, and audit is scoped to the caller's workspace — Pilot and MCP tools included. Custom domains and a per-workspace data region on top.",
-    },
-    {
-      id: "keys",
-      kicker: "Keys",
-      title: "BYOK on connector secrets",
-      body: "Connector secrets are encrypted at rest and can be wrapped with your own key: local, wrapped, or AWS KMS, with rotation. PII hashing uses a per-workspace key generated on first use.",
-    },
-    {
-      id: "audit",
-      kicker: "Audit",
-      title: "A tamper-evident audit chain",
-      body: "Every record is hash-chained and signed with the chain's own key, named by a key id. Verify the chain per workspace, filter by action, level, and time, and export CSV, JSON, NDJSON, or CEF.",
-    },
-    {
-      id: "operations",
-      kicker: "Operations",
-      title: "Policies you can turn on",
-      body: "Idle session timeout, signed webhooks (HMAC-SHA256 with per-channel secrets), job-history retention purge with a dry run first, and deployment settings reserved for platform admins.",
-    },
-  ];
-
-  return (
-    <div className="lp-mkt-page lp-mkt-enterprise-v2">
-      <MarketingInkHero
-        kicker="Enterprise"
-        title={<>Controls that travel with every load.</>}
-        lead={
-          <>
-            SSO, SCIM, role-capped keys, your own encryption key, and a signed audit chain ride
-            the same engine as every load. The checks before a write, and the read-back after it,
-            stay in place when security policy is added.
-          </>
-        }
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={onGetStarted}>
-              Request a pilot
-            </button>
-          </div>
-        }
-        slas={[
-          { value: "SSO", label: "OIDC / SAML" },
-          { value: "SCIM", label: "Group → role" },
-          { value: "BYOK", label: "Customer keys" },
-          { value: "Chained", label: "Signed audit log" },
-        ]}
-        aside={
-          <ProductShot
-            src={WORKSPACE_SHOT.settingsSso}
-            alt="Settings SSO tab with SAML 2.0, OpenID Connect, and Azure AD, SCIM provisioning, and group mappings"
-            surface="Settings, single sign-on"
-          />
-        }
-      />
-
-      <MarketingReveal>
-        <section className="lp-ent-capabilities">
-          <div className="lp-ent-section-head">
-            <p className="mk-kicker">Control plane</p>
-            <h2>Enterprise controls on every run</h2>
-            <p>
-              Identity, access, tenancy, keys, audit, and operations policies wrap the same
-              map → preflight → verify path that every load runs.
-            </p>
-          </div>
-          <div className="lp-ent-capability-grid">
-            {capabilities.map((cap) => (
-              <article key={cap.id} className="lp-ent-capability lp-scene-card">
-                <span>{cap.kicker}</span>
-                <h3>{cap.title}</h3>
-                <p>{cap.body}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-ent-engine">
-          <div className="lp-ent-engine-split">
-            <div>
-              <p className="mk-kicker">How it lands</p>
-              <h2>One engine. Enterprise controls on top.</h2>
-              <p>
-                Your teams map, preflight, quarantine, and verify the same way on every plan — with
-                identity, tenancy, and keys wrapping every run.
-              </p>
-              <ul className="lp-ent-checklist">
-                <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
-                <li>A workspace data region: once set, a run is refused before it starts when the destination&apos;s endpoint address or declared region is elsewhere, or shows no region</li>
-                <li>MCP and Datawrap Pilot run the same gates, with secret references instead of passwords</li>
-                <li>Signed proof packs and a verifiable audit export for every review</li>
-                <li>Security questionnaire and control-mapping pack for procurement kickoff</li>
-              </ul>
-            </div>
-            <aside className="lp-ent-panel" aria-label="Enterprise control snapshot">
-              <h3>Control snapshot</h3>
-              <div className="lp-ent-panel-row"><span>Identity</span><em>OIDC / SAML · SCIM</em></div>
-              <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
-              <div className="lp-ent-panel-row"><span>Preflight</span><em>G1–G9 + route policy</em></div>
-              <div className="lp-ent-panel-row"><span>Quarantine</span><em>replayable</em></div>
-              <div className="lp-ent-panel-row"><span>Verify</span><em>value &amp; key census</em></div>
-              <div className="lp-ent-panel-row"><span>Audit</span><em>hash-chained · key id</em></div>
-            </aside>
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <MarketingClosing
-          title="Run a pilot under your own policy"
-          body="Start on the same engine your operators will use. SSO, SCIM, your own keys, and audit policies can be switched on when security is ready, and the way people work does not change."
-        >
-          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
-          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("security")}>
-            Security overview
-          </button>
-        </MarketingClosing>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  return (
-    <div className="lp-mkt-page lp-cust-v3">
-      <MarketingInkHero
-        kicker="Evidence"
-        title={<>One run, counted on both sides.</>}
-        lead={
-          <>
-            The Trust Report beside this text comes from a recorded load, Postgres into Snowflake:
-            every column mapped, the destination counted by its own engine, a full checksum match.
-            A pilot produces the same record on your own sources and destinations.
-          </>
-        }
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-              Request a pilot
-            </button>
-            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("enterprise")}>
-              Enterprise overview
-            </button>
-          </div>
-        }
-        slas={[
-          { value: "Every row", label: "Landed, held, or skipped by a rule" },
-          { value: "Both sides", label: "Counted by their own engines" },
-          { value: "Signed", label: "Proof pack, verifiable through the API" },
-        ]}
-        aside={<VerifyPanel />}
-      />
-
-      <section className="lp-cust3-metrics" aria-label="Who this is for">
-        <div className="lp-shell lp-cust3-metrics-row">
-          {[
-            ["Migrations", "Database cutover with identity, FK, and Unicode carry"],
-            ["Warehouses", "Snowflake, BigQuery, Apache Iceberg — MERGE + verified"],
-            ["Lakes", "Amazon S3, ADLS, Google Cloud Storage — exact decimals"],
-            ["CDC", "Snapshot, stream from the database log, resume"],
-          ].map(([title, body], i) => (
-            <div key={title} style={{ ["--i" as string]: i }}>
-              <strong>{title}</strong>
-              <span>{body}</span>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <MarketingReveal>
-        <section className="lp-cust3-stories" aria-label="Why teams choose Datawrap">
-          <div className="lp-shell">
-            <div className="lp-cust3-section-head">
-              <p className="mk-kicker">Why Datawrap</p>
-              <h2>Built for operators who answer for every row</h2>
-            </div>
-            <div className="lp-mkt-evidence-grid">
-              {MARKETING_PROOF_HIGHLIGHTS.map((row, i) => (
-                <article key={row.title} className="lp-mkt-evidence-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
-                  <span className="lp-cust-industry">{row.stat}</span>
-                  <p><strong>{row.title}.</strong> {row.body}</p>
-                  <footer>
-                    <strong>{row.proof}</strong>
-                  </footer>
-                </article>
-              ))}
-            </div>
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-cust3-sectors" aria-label="Connect your stack">
-          <div className="lp-shell">
-            <div className="lp-cust3-section-head">
-              <p className="mk-kicker">Your stack</p>
-              <h2>Warehouses, lakes, databases, streams, vectors, and apps</h2>
-              <p>
-                {catalogHonestyLead()} Same map, same gates, same verification report on every
-                destination.
-              </p>
-            </div>
-            <div className="lp-mkt-evidence-grid">
-              {MARKETING_STACK.map((row) => (
-                <article key={row.family} className="lp-mkt-evidence-card lp-scene-card">
-                  <span className="lp-cust-industry">{row.family}</span>
-                  <p><strong>{row.items}.</strong> {row.note}</p>
-                </article>
-              ))}
-            </div>
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingClosing
-        title="Get the same evidence on your data"
-        body="A pilot is a scoped load on your own sources and destinations: mapping, preflight, quarantine, and a signed proof pack you keep."
+      <Block
+        id="mk-conn-path"
+        band
+        title="One path for every family"
+        lead="A warehouse, a lake, a database, a stream, a vector store, or an app: the load runs the same way."
       >
-        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-          Request a pilot
-        </button>
-        <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("pricing")}>
-          See pricing
-        </button>
-      </MarketingClosing>
-    </div>
-  );
-}
+        <Facts
+          items={[
+            { title: "Upsert and MERGE", body: "Wherever the destination's keys support them." },
+            {
+              title: "Incremental sync",
+              body: "Binds a typed watermark on the cursor column, so the next run starts where the last one ended.",
+            },
+            {
+              title: "Held rows",
+              body: "Quarantined with the column, the value, and the reason, and replayed into the same table once fixed.",
+            },
+          ]}
+        />
+      </Block>
 
-function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
-  const privacy = [
-    {
-      h: "Who we are",
-      p: "Datawrap, Inc. (“Datawrap”, “we”, “us”) provides a governed data-movement platform. This policy explains how we handle personal data when you visit datawrap.io, create a workspace, or use Transfer Studio, pipelines, Pilot, or MCP. For source and destination datasets you connect, you are the controller; Datawrap is the processor.",
-    },
-    {
-      h: "What we process",
-      p: "Account identity (name, email, role), workspace metadata, encrypted connector configurations, job logs, mapping decisions, quarantine summaries, audit events, and support correspondence. We do not sell personal data. We do not use connected source or destination records for advertising.",
-    },
-    {
-      h: "Credentials and secrets",
-      p: "Connector passwords, tokens, and keys are encrypted at rest and scoped to the workspace that stored them. Enterprise plans support customer-managed keys (BYOK) so your KMS wraps those secrets. Purpose keys stay bound to the job that needs them. Agents and MCP tools never receive raw destination passwords.",
-    },
-    {
-      h: "Job artifacts",
-      p: "Sample rows, mapping proofs, quarantine extracts, and reconcile reports stay inside your tenant boundary. Retention follows the workspace setting (default 90 days unless your agreement says otherwise). You can export or delete artifacts from Settings or by written request.",
-    },
-    {
-      h: "How we use data",
-      p: "We use workspace data to operate the service, authenticate users, enforce RBAC, run transfers you start, surface quarantine and reconcile proof, provide support, and improve reliability. We do not train public models on your connected datasets.",
-    },
-    {
-      h: "Legal bases",
-      p: "Where GDPR or UK GDPR applies, we process account data to perform the contract, to meet legal obligations, and — for product analytics on the marketing site — on legitimate interests or consent where required. Processing of records inside your sources and destinations is on your instructions as controller.",
-    },
-    {
-      h: "Sharing and subprocessors",
-      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. The current list is published on our Subprocessors page (datawrap.io/#/subprocessors).",
-    },
-    {
-      h: "International transfers",
-      p: "If we transfer personal data out of the EEA, UK, or Switzerland, we use an approved mechanism such as Standard Contractual Clauses and apply the same encryption and access controls described here.",
-    },
-    {
-      h: "Retention",
-      p: "Account records last for the life of the workspace plus a short wind-down after deletion. Job logs and samples follow your retention setting. Backup copies expire on the backup cycle. SSO-managed accounts follow your identity-provider lifecycle.",
-    },
-    {
-      h: "Your rights",
-      p: "You may request access, correction, export, or deletion of workspace personal data through your admin or contact@datawrap.io. You may object to or restrict certain processing where the law allows. You may lodge a complaint with your supervisory authority.",
-    },
-    {
-      h: "Cookies",
-      p: "The marketing site uses essential cookies to keep a session and remember consent. Optional analytics cookies load only after you accept. The signed-in product uses session cookies required to stay authenticated.",
-    },
-    {
-      h: "Security",
-      p: "We encrypt data in transit (TLS) and credentials at rest, isolate tenants, and record admin, mapping, and job actions in an audit trail. Enterprise customers receive a security questionnaire and a data-processing addendum with their order form.",
-    },
-    {
-      h: "Children",
-      p: "The service is for organizations. We do not knowingly collect personal data from children under 16.",
-    },
-    {
-      h: "Changes and contact",
-      p: "We will post material changes on this page and update the date below. Questions: contact@datawrap.io. Enterprise customers may attach a DPA to their order form.",
-    },
-  ];
-  const terms = [
-    {
-      h: "Agreement",
-      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, schedules, Job space, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
-    },
-    {
-      h: "The service",
-      p: "Datawrap moves data you authorize from sources to destinations with mapping, preflight, quarantine, and reconcile proof. Features vary by plan (Starter, Team, Enterprise). We may improve the product with notice when a change affects production behavior. Preview or beta features are labelled and are not warranted as generally available.",
-    },
-    {
-      h: "Accounts and access",
-      p: "You are responsible for users you invite, for SSO configuration, and for keeping credentials confidential. Workspace admins control roles for who can map, approve drift, and run production loads. You will promptly revoke access when a person leaves your organization.",
-    },
-    {
-      h: "Acceptable use",
-      p: "Use Datawrap only to move data you are authorized to access. Do not probe other tenants, attempt to bypass preflight or quarantine in production, mine the service for vulnerabilities outside a coordinated disclosure, or use the platform to violate export, privacy, or industry law.",
-    },
-    {
-      h: "Customer data",
-      p: "You retain all rights to source and destination data. You grant Datawrap a limited license to process that data solely to provide the service you request. You are the controller; Datawrap is the processor. You represent that you have a lawful basis to transfer the data you connect.",
-    },
-    {
-      h: "Connector credentials",
-      p: "You supply and control source and destination credentials. We store them encrypted and, on Enterprise, wrapped with your KMS key. You must use least-privilege accounts. Revoking a credential in the source system immediately stops new reads or writes that depend on it.",
-    },
-    {
-      h: "Proof and cutover",
-      p: "The platform provides preflight, quarantine, and checksum reports so you can accept or refuse a load. You decide when a route is ready for production. Recurring change delivery uses idempotent upserts so a retried batch cannot create duplicate business keys. Service levels, if any, are set in the order form.",
-    },
-    {
-      h: "Intellectual property",
-      p: "Datawrap and its licensors own the platform, documentation, and trademarks. You own your mappings, job artifacts, and connected data. Feedback you send may be used to improve the product without obligation.",
-    },
-    {
-      h: "Confidentiality",
-      p: "Each party will protect the other’s confidential information with reasonable care and use it only to perform under these Terms. Job samples and connector secrets are your confidential information.",
-    },
-    {
-      h: "Warranties",
-      p: "We warrant that we will provide the service with reasonable skill and care. Except as stated in an order form, THE SERVICE IS OTHERWISE PROVIDED AS IS. Preview and beta features are labelled and are not warranted as generally available.",
-    },
-    {
-      h: "Limitation of liability",
-      p: "Neither party is liable for indirect, incidental, special, or consequential damages. Except for confidentiality breaches, IP infringement, or payment obligations, each party’s aggregate liability in a twelve-month period is limited to the fees you paid for the service in that period. Use preflight and reconciliation before production cutovers. Signed enterprise agreements may set different caps.",
-    },
-    {
-      h: "Indemnity",
-      p: "You will defend Datawrap against claims arising from data you connect or from use that violates these Terms. We will defend you against claims that the unmodified platform infringes a third-party IP right, and we may replace or refund the affected service.",
-    },
-    {
-      h: "Term and termination",
-      p: "These Terms last while you have an active workspace or order. Either party may terminate for material breach not cured within 30 days. On termination we will disable access and, on request, export or delete workspace data within the retention window.",
-    },
-    {
-      h: "Governing law",
-      p: "Unless an order form says otherwise, these Terms are governed by the laws of the State of Delaware, excluding conflict-of-law rules. The courts of Delaware have exclusive jurisdiction, except that either party may seek injunctive relief in any court of competent jurisdiction.",
-    },
-    {
-      h: "Changes and contact",
-      p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: contact@datawrap.io.",
-    },
-  ];
-  const dpa = [
-    { h: "Status of this document", p: "This is Datawrap's standard data processing addendum, published as a draft pending counsel review. The executed version is attached to your order form or master agreement, and the executed version controls." },
-    { h: "Roles and scope", p: "You are the controller of personal data contained in the sources, destinations, and workspace you connect. Datawrap is your processor and processes that data only to provide the service. Where you act as a processor for your own customers, Datawrap is your subprocessor on the same terms." },
-    { h: "Processing details", p: "Subject matter: data movement, mapping, validation, quarantine, and verification you configure. Duration: the term of your agreement plus the deletion period below. Data subjects and categories: whatever your connected datasets contain, plus workspace users' name, email, role, and audit events. Special-category data is processed only if you choose to connect it." },
-    { h: "Your instructions", p: "Datawrap processes personal data only on your documented instructions — your agreement, your workspace configuration, and the transfers, schedules, and exports you run. We will tell you if we believe an instruction breaks data-protection law." },
-    { h: "Confidentiality", p: "Everyone at Datawrap with access to customer personal data is bound by written confidentiality obligations and has access only as needed to operate and support the service." },
-    { h: "Security measures", p: "TLS in transit; connector credentials encrypted at rest and optionally wrapped with your own KMS key; workspace isolation on every store read; role-based access with capped API keys; SSO and SCIM; a hash-chained, signed audit log; quarantine instead of silent drops; and post-write checksum verification. These measures are reviewed and may improve, but will not materially weaken during your term." },
-    { h: "Subprocessors", p: "You authorize the subprocessors on our Subprocessors page. We bind each to data-protection terms at least as protective as this addendum and remain responsible for them. We give 30 days' notice of a new subprocessor; you may object on reasonable data-protection grounds, and if we cannot address the objection you may terminate the affected service." },
-    { h: "Data subject requests", p: "We will promptly forward requests we receive about your data to you and, taking into account the nature of processing, help you respond through the workspace's export and deletion controls or by reasonable assistance." },
-    { h: "Personal data breach", p: "We will notify you without undue delay, and in any case within 72 hours, after becoming aware of a personal data breach affecting your data, with the information you need to meet your own notification duties, and we will keep you updated as we learn more." },
-    { h: "Assessments and audits", p: "We will provide information reasonably needed for your data-protection impact assessments and answer your security questionnaire. On reasonable written notice, no more than once a year unless required by a regulator or after a breach, we will support an audit of our compliance with this addendum." },
-    { h: "International transfers", p: "Where personal data leaves the EEA, UK, or Switzerland to a country without an adequacy decision, the Standard Contractual Clauses (and UK Addendum where relevant) apply and are incorporated by reference." },
-    { h: "Return and deletion", p: "At the end of the service you may export workspace data. We then delete customer personal data within 30 days, and from backups on their normal expiry cycle, unless the law requires us to keep it." },
-    { h: "Liability and order of precedence", p: "Liability under this addendum follows the limits in your agreement. If this addendum conflicts with the agreement on data protection, this addendum controls; the Standard Contractual Clauses control over both." },
-  ];
-  const blocks = kind === "privacy" ? privacy : kind === "dpa" ? dpa : terms;
-  const legalTitle = kind === "privacy" ? "Privacy policy" : kind === "dpa" ? "Data processing addendum" : "Terms of service";
-
-  return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingInkHero
-        tone="doc"
-        kicker={kind === "privacy" ? "Privacy" : kind === "dpa" ? "Legal" : "Terms"}
-        title={legalTitle}
-        meta={
-          kind === "privacy"
-            ? "Last updated August 2026 · contact@datawrap.io · You are the controller of connected data"
-            : kind === "dpa"
-              ? "Draft pending legal review · Last updated November 2026 · contact@datawrap.io"
-              : "Last updated August 2026 · contact@datawrap.io · A signed MSA supersedes where it conflicts"
-        }
-        lead={
-          kind === "privacy"
-            ? "How Datawrap handles workspace data, credentials, and audit logs — written for security and legal review."
-            : kind === "dpa"
-              ? "The processor terms that govern how Datawrap handles personal data in the workspaces and datasets you connect."
-              : "The agreement that governs use of Transfer Studio, pipelines, Pilot, and MCP."
-        }
+      <Closing
+        title="Pick a source and a destination"
+        body="Choose from the connectors your workspace can load today, on the same engine as production."
+        primary={start}
+        secondary={docs}
       />
-
-      <MarketingReveal>
-        <section className="lp-mkt-body lp-mkt-legal-layout">
-          <nav className="lp-mkt-legal-nav" aria-label="On this page">
-            <h2>On this page</h2>
-            <ul>
-              {blocks.map((b) => {
-                const id = b.h.toLowerCase().replace(/\s+/g, "-");
-                return (
-                  <li key={b.h}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-                      }}
-                    >
-                      {b.h}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </nav>
-          <div className="lp-mkt-legal-content">
-            {blocks.map((b) => (
-              <article key={b.h} id={b.h.toLowerCase().replace(/\s+/g, "-")} className="lp-mkt-legal-block">
-                <h2>{b.h}</h2>
-                <p>{b.p}</p>
-              </article>
-            ))}
-            <p className="lp-mkt-footnote">
-              {kind === "dpa"
-                ? "Draft pending legal review. The DPA executed with your order form controls."
-                : "Last updated August 2026. Enterprise customers receive a DPA and negotiated addenda with their order form."}
-            </p>
-          </div>
-        </section>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  const layers = [
-    {
-      phase: "01",
-      t: "Isolate",
-      tag: "Tenancy",
-      d: "Every store read is scoped to the caller's workspace — jobs, connectors, schedules, notifications, audit, and agent tools.",
-      pill: "Workspace isolated",
-    },
-    {
-      phase: "02",
-      t: "Encrypt",
-      tag: "Keys",
-      d: "TLS in transit. Connector secrets encrypted at rest and wrappable with your own key: local, wrapped, or AWS KMS.",
-      pill: "BYOK wrapped",
-    },
-    {
-      phase: "03",
-      t: "Authenticate",
-      tag: "Identity",
-      d: "OIDC and SAML SSO with email-domain routing, SCIM 2.0 group-to-role provisioning, and an idle session timeout.",
-      pill: "SSO · SCIM",
-    },
-    {
-      phase: "04",
-      t: "Prove",
-      tag: "Verify",
-      d: "Every load is read back and verified value by value. Every action lands in a hash-chained, signed audit log.",
-      pill: "Read back and compared",
-    },
-  ];
-  const controls = [
-    {
-      phase: "05",
-      t: "Least privilege",
-      tag: "RBAC",
-      d: "Viewer, Editor, and Admin roles. API keys carry a role and scopes capped at their creator's own grants.",
-      pill: "Key role capped",
-    },
-    {
-      phase: "06",
-      t: "Signed delivery",
-      tag: "Webhooks",
-      d: "Each webhook channel has its own secret; every delivery carries a timestamped HMAC-SHA256 signature.",
-      pill: "HMAC-SHA256",
-    },
-    {
-      phase: "07",
-      t: "Residency",
-      tag: "Regions",
-      d: "A workspace can record its data region. Once it has, a destination whose endpoint address or declared region is elsewhere, or shows no region, is refused before the run starts.",
-      pill: "Region checked",
-    },
-    {
-      phase: "08",
-      t: "Retention",
-      tag: "Lifecycle",
-      d: "Purge finished jobs older than your retention window, with a dry run and a confirm token first.",
-      pill: "Dry run first",
-    },
-  ];
-  return (
-    <div className="lp-mkt-page lp-sec-v2">
-      <MarketingInkHero
-        kicker="Security"
-        title={<>How Datawrap protects the data it moves</>}
-        lead={
-          <>
-            Workspace isolation, encrypted connector secrets, single sign-on, and a signed audit
-            chain. The same controls apply in Transfer Studio, on schedules, in Pilot, and over
-            MCP.
-          </>
-        }
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
-              Request security pack
-            </button>
-            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("enterprise")}>
-              Enterprise overview
-            </button>
-          </div>
-        }
-        slas={[
-          { value: "TLS", label: "In transit" },
-          { value: "BYOK", label: "Connector secrets" },
-          { value: "SCIM", label: "Group → role" },
-          { value: "RBAC", label: "Studio · Pilot · MCP" },
-        ]}
-      />
-
-
-      <MarketingReveal>
-        <section className="lp-sec-section">
-          <div className="lp-sec-section-head">
-            <p className="mk-kicker">Control plane</p>
-            <h2>Four layers between source and destination</h2>
-            <p>Every transfer passes through the same four controls, whoever or whatever starts it.</p>
-          </div>
-          <div className="lp-sec-layer-grid">
-            {layers.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
-                <h3>{layer.t}</h3>
-                <p>{layer.d}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-      </MarketingReveal>
-      <MarketingReveal>
-        <section className="lp-sec-section">
-          <div className="lp-sec-section-head">
-            <p className="mk-kicker">Workspace controls</p>
-            <h2>Controls your admins switch on</h2>
-            <p>
-              Least-privilege keys, signed webhooks, residency, and retention — set per workspace,
-              with deployment-wide settings reserved for platform admins.
-            </p>
-          </div>
-          <div className="lp-sec-layer-grid">
-            {controls.map((layer) => (
-              <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
-                <h3>{layer.t}</h3>
-                <p>{layer.d}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-sec-agent">
-          <div className="lp-sec-agent-copy">
-            <p className="mk-kicker">Runtime proof</p>
-            <h2>Agents inherit the same gates</h2>
-            <p>
-              MCP tools and Datawrap Pilot work through secret references, so agents act without
-              ever handling a destination password. Every agent action rides the same RBAC,
-              quarantine, and verification path as Transfer Studio.
-            </p>
-            <div className="lp-sec-agent-actions">
-              <button type="button" className="mk-btn mk-btn--primary" onClick={() => onNavigate("contact")}>
-                Request security pack
-              </button>
-              <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("enterprise")}>
-                Enterprise capabilities
-              </button>
-            </div>
-          </div>
-        </section>
-      </MarketingReveal>
-      <MarketingReveal>
-        <section className="lp-sec-section" id="vulnerability-disclosure" aria-labelledby="lp-sec-disclosure">
-          <div className="lp-sec-section-head">
-            <p className="mk-kicker">Vulnerability disclosure</p>
-            <h2 id="lp-sec-disclosure">Report a vulnerability</h2>
-            <p>
-              Email <a href="mailto:contact@datawrap.io?subject=Security%20report">contact@datawrap.io</a> with
-              the subject “Security report” — please don’t open a public issue. We acknowledge within 3 business
-              days, assess within 10, and update you at least every 14 days until the fix ships.
-            </p>
-            <p>
-              Safe harbor: we won’t pursue good-faith research that tests only accounts you own, stops at the first
-              sign of another customer’s data, avoids denial-of-service and social engineering, and gives us
-              reasonable time to fix before disclosure. Machine-readable contact:{" "}
-              <a href="/.well-known/security.txt">/.well-known/security.txt</a>.
-            </p>
-          </div>
-        </section>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-const INTEGRATION_FAMILY_ICONS: Record<string, string[]> = {
-  "Warehouses & lakehouse": ["snowflake", "bigquery", "iceberg"],
-  "Object storage": ["s3", "adls", "gcs"],
-  Databases: ["postgresql", "mysql", "sqlserver", "oracle", "mongodb"],
-  Streaming: ["kafka"],
-  "Vector databases": ["pgvector", "pinecone", "qdrant", "weaviate", "milvus"],
-  "Applications & APIs": ["salesforce", "hubspot", "stripe"],
-};
-
-function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-
-  return (
-    <div className="lp-mkt-page lp-int-v2">
-      <MarketingInkHero
-        kicker="Connection catalog"
-        title={<>Connect the systems you already run — {provenDriversPhrase()}.</>}
-        lead={
-          <>
-            Databases, warehouses, object storage, files, Kafka, vector stores, and apps. Every
-            load maps, clears preflight, quarantines held-back rows, and ends with a verification
-            report that reads the destination back wherever its engine allows.
-          </>
-        }
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-              Open connector catalog
-            </button>
-            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("help")}>
-              Driver docs
-            </button>
-          </div>
-        }
-        slas={[
-          { value: "Proven in CI", label: "Green runs, no skipped test" },
-          { value: "One path", label: "Map, checks, quarantine, read-back" },
-          { value: "Replay", label: "Held rows go back to the same table" },
-        ]}
-        aside={
-          <ProductShot
-            src={WORKSPACE_SHOT.connectorsWizard}
-            alt="Choose a connector dialog with category chips, readiness filters, and connector cards"
-            surface="Connectors, choose a connector"
-          />
-        }
-      />
-
-
-      <MarketingReveal>
-        <section className="lp-int-section">
-          <div className="lp-int-section-head">
-            <p className="mk-kicker">Catalog families</p>
-            <h2>What you can connect</h2>
-            <p>
-              Grouped the way teams plan loads — warehouses first, then lakes, databases, streams,
-              vector stores, and apps. Each family's badge counts the members its CI run proves.
-            </p>
-          </div>
-          <div className="lp-int-family-grid">
-            {MARKETING_STACK.map((f, i) => (
-              <article key={f.family} className="lp-int-family-card lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
-                <header>
-                  <h3>{f.family}</h3>
-                  <span>{f.badge}</span>
-                </header>
-                <p>{f.note}</p>
-                <div className="lp-int-family-icons">
-                  {(INTEGRATION_FAMILY_ICONS[f.family] || []).map((id) => (
-                    <span key={id} title={id}>
-                      <ConnectorIcon id={id} size={24} />
-                    </span>
-                  ))}
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-int-honesty">
-          <div>
-            <p className="mk-kicker">The bar</p>
-            <h2>One path for every family</h2>
-            <p>
-              Every destination runs the same path: introspect, map, preflight, write, and verify.
-              Warehouses, lakes, databases, streams, vectors, and apps share one engine and one
-              report.
-            </p>
-            <ul>
-              <li>Upsert and MERGE wherever the destination&apos;s keys support them</li>
-              <li>Incremental sync binds a typed watermark on the cursor column</li>
-              <li>Held-back rows quarantine with a reason and replay once fixed</li>
-            </ul>
-          </div>
-          <aside className="lp-int-honesty-panel">
-            <h3>Every route runs</h3>
-            <div><span>1</span><em>Semantic map</em></div>
-            <div><span>2</span><em>G1–G9 preflight</em></div>
-            <div><span>3</span><em>Quarantine write</em></div>
-            <div><span>4</span><em>Read the destination back</em></div>
-          </aside>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <MarketingClosing
-          title="Pick a source and a destination"
-          body="Open Transfer Studio and choose from the connectors your workspace can load today, on the same engine as production."
-        >
-          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-            Start free
-          </button>
-          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("product-transfer")}>
-            See Transfer Studio
-          </button>
-        </MarketingClosing>
-      </MarketingReveal>
     </div>
   );
 }

@@ -27,14 +27,12 @@ function helpDocFigureSources(): string[] {
 }
 
 describe("marketing product photography", () => {
-  it("home renders the product as UI in code, and shows the Studio map capture", () => {
+  it("home renders the product as UI in code, with no raster screenshots", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /ProductShot/);
     assert.match(home, /<ReconciliationLedger \/>/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMapStage\}/);
+    assert.doesNotMatch(home, /ProductShot|<img/);
     assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
     assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);
-    assert.match(home, /DEMO_ROUTE\.source/);
     assert.doesNotMatch(home, /ProofLoopArt/);
     assert.doesNotMatch(home, /Trust Report 92/);
     assert.equal(DEMO_ROUTE.source, "PostgreSQL · public.sales_orders");
@@ -46,20 +44,19 @@ describe("marketing product photography", () => {
     assert.match(css, /\.lp-product-shot-route span \{[\s\S]*?text-overflow:\s*ellipsis/);
     assert.match(css, /\.lp-product-shot-viewport \{[\s\S]*?overflow:\s*hidden/);
     assert.match(css, /\.lp-product-shot-viewport img \{[\s\S]*?object-fit:\s*contain/);
-    assert.match(css, /\.lp-sol-v2 \.lp-mkt-body[\s\S]*?1080px/);
   });
 
-  it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
+  it("home takes no image from outside WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /WORKSPACE_SHOT\./);
     assert.doesNotMatch(home, /\/docs\/screenshots\//);
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });
 
   it("product and solution heroes frame live workspace shots, not schematic SVGs", () => {
-    const surfaces = readFileSync(join(webRoot, "pages/marketing/ProductSurfaces.tsx"), "utf8");
-    assert.match(surfaces, /ProductShot/);
-    assert.match(surfaces, /WORKSPACE_SHOT\.jobTrust/);
+    const surfaces = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
+    const template = readFileSync(join(webRoot, "pages/marketing/StoryPage.tsx"), "utf8");
+    assert.match(template, /<ProductShot/);
+    assert.match(surfaces, /WORKSPACE_SHOT\.jobTrustEvidence/);
     assert.match(surfaces, /WORKSPACE_SHOT\.transferMap/);
     assert.match(surfaces, /WORKSPACE_SHOT\.schedulesHistory/);
     assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
@@ -71,9 +68,9 @@ describe("marketing product photography", () => {
     const reel = readFileSync(join(webRoot, "components/docs/DocsShotReel.tsx"), "utf8");
     assert.match(reel, /lp-product-shot-chrome/);
     assert.match(reel, /lp-product-shot-surface/);
-    const shared = readFileSync(join(webRoot, "pages/marketing/productPageShared.tsx"), "utf8");
-    assert.match(shared, /WORKSPACE_SHOT/);
-    assert.doesNotMatch(shared, /\/docs\/screenshots\//);
+    const stories = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
+    assert.match(stories, /WORKSPACE_SHOT/);
+    assert.doesNotMatch(stories, /\/docs\/screenshots\//);
   });
 
   it("every WORKSPACE_SHOT path is a WebP file that ships in public/", () => {
