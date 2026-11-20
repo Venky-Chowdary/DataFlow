@@ -405,3 +405,39 @@ def test_gitops_apply_strips_yaml_source_schema_so_drift_can_still_park(tmp_path
     assert reloaded.row_limit == 100
     assert reloaded.source_schema == {"id": "INTEGER", "email": "VARCHAR"}
     assert reloaded.source_schema_fingerprint == "fp-live"
+
+
+def test_gitops_apply_refuses_a_lossy_require_reversibility_schedule(tmp_path, monkeypatch):
+    """D373: GitOps apply runs the same g24 refusal as REST and MCP create (R8)."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    import services.schedule_store as ss
+
+    reload(pc)
+    reload(ss)
+    reload(gm)
+
+    spec = {
+        "name": "gitops-rev",
+        "source_connector_id": "s1",
+        "source_table": "q3_pg",
+        "dest_connector_id": "d1",
+        "dest_table": "q3_rev_out",
+        "interval": "daily",
+        "require_reversibility": True,
+        "mappings": [
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note", "transform": "mask_pii"},
+        ],
+    }
+    manifest = {
+        "apiVersion": "dataflow.space/v1",
+        "kind": "DatawrapManifest",
+        "resources": [{"apiVersion": "dataflow.space/v1", "kind": "PipelineSchedule",
+                       "metadata": {"name": "gitops-rev"}, "spec": spec}],
+    }
+    applied = gm.apply_manifest(manifest)
+    assert applied["failed"] == 1
+    assert "q3_rev_out.note" in applied["results"][0]["error"]
+    assert not any(s.name == "gitops-rev" for s in ss.list_schedules())

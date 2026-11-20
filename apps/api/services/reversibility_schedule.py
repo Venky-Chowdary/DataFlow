@@ -10,7 +10,31 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from services.reversibility import GATE_ID, analyze_table, build_report
+from services.reversibility import (
+    CONDITIONAL,
+    GATE_ID,
+    analyze_table,
+    build_report,
+    table_verdict,
+)
+
+
+def _decided_by_execute(column: Mapping[str, Any]) -> bool:
+    """A column whose fit needs a type the saved mapping does not carry.
+
+    Execute reads both catalogs and judges it there (or enforces it per row);
+    a schedule save has only the mapping. Refusing it here refused an identity
+    ``id -> id`` copy that Execute passes, so create disagreed with Execute
+    (R8, D388). A lossy transform (omit, mask_pii, hash_pii) needs no type and
+    is still refused at save.
+    """
+    check = column.get("check") or {}
+    return (
+        column.get("invertibility") == CONDITIONAL
+        and column.get("reason_code") == "type_unknown"
+        and check.get("status") == "not_checked"
+        and not check.get("enforcement")
+    )
 
 
 def schedule_reversibility_block(schedule: Any) -> str:
@@ -63,6 +87,13 @@ def reversibility_refusal(
         source_db=source_db,
         enforce="at_execute",
     )
+    columns = list(analysed.get("columns") or [])
+    decided = [c for c in columns if not _decided_by_execute(c)]
+    if len(decided) != len(columns):
+        if not decided:
+            return ""
+        verdict, reason = table_verdict(decided)
+        analysed = {**analysed, "columns": decided, "verdict": verdict, "reason": reason}
     report = build_report(
         [analysed],
         scope="schedule",

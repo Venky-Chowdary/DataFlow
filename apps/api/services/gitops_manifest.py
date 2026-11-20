@@ -581,6 +581,14 @@ def apply_manifest(
                     getattr(existing, "workspace_id", ""), bound_ws, workspace_filter
                 ):
                     raise WorkspaceScopeError("Schedule belongs to another workspace")
+                from services.reversibility_schedule import schedule_reversibility_block
+
+                # Same g24 refusal as REST and MCP create/update (D373, R8).
+                irreversible = schedule_reversibility_block(
+                    {**existing.to_dict(), **apply_spec} if existing else apply_spec
+                )
+                if irreversible:
+                    raise ValueError(irreversible)
                 if sid and existing:
                     updated = update_schedule(sid, apply_spec, refuse_unrunnable_mappings=True)
                     results.append({

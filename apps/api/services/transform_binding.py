@@ -154,6 +154,30 @@ def compile_transfer_recipe(request: Any) -> bool:
     return True
 
 
+def compile_preflight_recipe(body: Any) -> None:
+    """Validate judges the library recipe Execute will run (D400, R8).
+
+    ``body`` is a preflight request: its ``shape_recipe`` becomes the compiled
+    recipe, so the gates see the shaped image. A recipe that cannot compile
+    (a draft, a missing id, steps mixed with another recipe) raises
+    ValueError here, before Confirm, with the same text Execute would give.
+    """
+    from types import SimpleNamespace
+
+    probe = SimpleNamespace(
+        transform_recipe_id=str(getattr(body, "transform_recipe_id", "") or ""),
+        transform_recipe_version=int(getattr(body, "transform_recipe_version", 0) or 0),
+        transform_recipe_version_mode=str(getattr(body, "transform_recipe_version_mode", "") or "pin"),
+        transform_recipe_params=getattr(body, "transform_recipe_params", None),
+        mappings=getattr(body, "mappings", None),
+        workspace_id=str(getattr(body, "workspace_id", "") or ""),
+        shape_recipe=getattr(body, "shape_recipe", None),
+        approved_shape_recipe_hash="",
+    )
+    if compile_transfer_recipe(probe):
+        body.shape_recipe = probe.shape_recipe
+
+
 def recipe_ignored_failure(request: Any) -> str:
     """Why a run that named a library recipe must not be called verified.
 

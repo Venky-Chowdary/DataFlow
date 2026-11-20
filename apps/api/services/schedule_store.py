@@ -1771,7 +1771,14 @@ def create_schedule(
             patch["sync_mode"] = sync_mode
             patch["contract_id"] = contract_id
             patch["require_signed_contract"] = require_signed
-            # An omitted enabled flag keeps the paused schedule paused.
+            if "enabled" not in patch and (
+                schedule_is_enabled(target)
+                or str(target.enabled_note or "").startswith("Created disabled")
+            ):
+                # Create defaults to enabled. A draft parked only because it
+                # had no mappings goes live once they arrive; a schedule the
+                # operator paused stays paused (D379).
+                patch["enabled"] = True
             updated = update_schedule(
                 target.id, patch, refuse_unrunnable_mappings=refuse_unrunnable_mappings
             )
