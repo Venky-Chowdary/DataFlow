@@ -2270,10 +2270,11 @@ def _align_confirmed_preflight(payload: dict[str, Any]) -> None:
     if not run_id:
         return
     try:
+        from services.confirmed_transfer import transfer_request_from_ack
         from services.staged_preflight import align_staged_preflight
-        from src.transfer.models import transfer_request_from_dict
 
-        align_staged_preflight(run_id, transfer_request_from_dict(payload))
+        # The builder Confirm uses, so both sides hash the same request (D308).
+        align_staged_preflight(run_id, transfer_request_from_ack(payload))
     except Exception:
         _LOG.debug("staged preflight was not aligned to the confirm request", exc_info=True)
 

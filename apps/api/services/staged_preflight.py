@@ -344,9 +344,47 @@ def bounded_destination_schema_version(dest: Any) -> str:
         return "unread"
 
 
+def _resolved_view(endpoint: Any, workspace_id: str) -> Any:
+    """The endpoint as a run dials it now, whichever side is hashing.
+
+    Staging hashes the approval (a connector id and a table); Confirm hashes
+    the job's request after its saved connectors were resolved (host, port,
+    credentials, TLS, stamped extras). Hashing those two shapes never matched,
+    so a staged preflight was never reused (D308 AC-2). Both sides now hash the
+    saved connector's *current* resolution of the job's own choices (table,
+    schema, an explicit database override): ``refresh_saved_endpoint`` strips
+    what an earlier resolution filled in and resolves again. A connector edited
+    between staging and Confirm (host, credentials, TLS) resolves differently,
+    so the hash misses and the gates run. Secrets are HMAC-sealed, never kept.
+    A connector that cannot be resolved hashes as given, which never matches.
+    """
+    if endpoint is None or not str(getattr(endpoint, "connector_id", "") or "").strip():
+        return endpoint
+    try:
+        from src.transfer.adapters import refresh_saved_endpoint
+
+        return refresh_saved_endpoint(copy.deepcopy(endpoint), workspace_id=workspace_id or None)
+    except Exception:  # noqa: BLE001 - an unresolvable connector only means "no reuse"
+        logger.debug("staged preflight endpoint was not resolved", exc_info=True)
+        return endpoint
+
+
+def _requested_delivery(request: Any) -> str:
+    """The guarantee the operator asked for; an unpinned request is ``auto``.
+
+    The engine later replaces ``auto`` with the route's selected class, so the
+    selected value is not an input of the check staging ran.
+    """
+    from services.cdc_exactly_once import operator_pinned_delivery
+
+    raw = str(getattr(request, "delivery_guarantee", "") or "").strip().lower()
+    return raw if operator_pinned_delivery(raw) else "auto"
+
+
 def request_preflight_fingerprint(request: Any) -> str:
-    source = getattr(request, "source", None)
-    dest = getattr(request, "destination", None)
+    workspace = str(getattr(request, "workspace_id", "") or "")
+    source = _resolved_view(getattr(request, "source", None), workspace)
+    dest = _resolved_view(getattr(request, "destination", None), workspace)
     return preflight_input_fingerprint(
         source_connector_id=getattr(source, "connector_id", "") or "",
         source_table=getattr(source, "table", "") or getattr(source, "collection", "") or "",
@@ -405,7 +443,7 @@ def request_preflight_fingerprint(request: Any) -> str:
         date_locale=getattr(request, "date_locale", "") or "",
         number_locale=getattr(request, "number_locale", "") or "",
         number_locale_assumed=getattr(request, "number_locale_assumed", False),
-        delivery_guarantee=getattr(request, "delivery_guarantee", "") or "",
+        delivery_guarantee=_requested_delivery(request),
         limit=getattr(request, "limit", 0) or 0,
         workspace_id=getattr(request, "workspace_id", "") or "",
         approved_shape_recipe_hash=getattr(request, "approved_shape_recipe_hash", "") or "",
