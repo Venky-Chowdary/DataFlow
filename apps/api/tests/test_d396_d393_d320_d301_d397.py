@@ -133,16 +133,23 @@ def test_elasticsearch_preflight_accepts_a_mapped_id() -> None:
     assert result.status.value != "block" or "lack document identity" not in result.message
 
 
-def test_mongo_json_redact_and_hash_are_documents_other_text_refuses() -> None:
-    from connectors.mongodb_writer import bind_mongo_json_document
+def test_mongo_json_redact_and_hash_are_json_strings_other_text_refuses() -> None:
+    """The protection's token is a JSON string value, decided by the transform.
 
-    assert bind_mongo_json_document("<redacted>") == {"_datawrap_redacted": "<redacted>"}
+    The first version wrapped any text that looked like a token into an
+    invented ``{"_datawrap_redacted": ...}`` document; the live read-back then
+    failed every run (see tests/test_p2_d397_mongo_json_protection_route.py).
+    """
+    from connectors.mongodb_writer import bind_mongo_json_document, bind_mongo_json_field
+
+    assert bind_mongo_json_field("<redacted>", "redact") == "<redacted>"
     digest = "553cd7" + ("ab" * 13)
     assert len(digest) == 32
-    assert bind_mongo_json_document(digest) == {"_datawrap_hash": digest}
+    assert bind_mongo_json_field(digest, "hash_pii") == digest
     assert bind_mongo_json_document('{"a": 1}') == {"a": 1}
-    with pytest.raises(ValueError, match="refuse silent string invent"):
-        bind_mongo_json_document("not json")
+    for text in ("not json", "<redacted>", digest):
+        with pytest.raises(ValueError, match="refuse silent string invent"):
+            bind_mongo_json_document(text)
 
 
 def test_keyless_incremental_append_of_a_changed_key_is_not_a_block(tmp_path: Path, monkeypatch) -> None:

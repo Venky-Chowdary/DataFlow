@@ -49,34 +49,35 @@ logger = logging.getLogger(__name__)
 _field = writer_identifier("mongodb")
 
 
-def _mongo_protection_document(value: str) -> dict[str, str] | None:
-    """A redact token or hash_pii digest as a JSON document, or ``None``.
+#: Protections whose output is a fixed text token, never a document.
+_TOKEN_PROTECTIONS = frozenset({"redact", "hash_pii"})
 
-    ``<redacted>`` and a 32-hex HMAC are what those transforms write. They are
-    not JSON text, so a JSON/VARIANT field refused every row (D397). Wrapping
-    the token keeps the clear source out of the document. Any other non-JSON
-    string still refuses — this is not a silent string invent.
+
+def bind_mongo_json_field(value: Any, transform: str = "") -> Any:
+    """Bind a cell into a Mongo JSON/OBJECT/ARRAY/VARIANT field.
+
+    A column the mapping protects with ``redact`` or ``hash_pii`` carries the
+    redact token or the HMAC digest, which is text. It is stored as a JSON
+    string value (RFC 8259 allows a string as a JSON text): what the SQL JSON
+    destinations bind and what the read-back expects (D397). The decision is
+    the mapping's transform, shared with the coercion probe; a value that
+    merely looks like a token is judged as JSON like any other text.
     """
-    if value == "<redacted>":
-        return {"_datawrap_redacted": value}
-    if re.fullmatch(r"[0-9a-f]{32}", value):
-        return {"_datawrap_hash": value}
-    return None
+    if isinstance(value, str) and str(transform or "").strip().lower() in _TOKEN_PROTECTIONS:
+        return value
+    return bind_mongo_json_document(value)
 
 
 def bind_mongo_json_document(value: Any) -> Any:
     """Parse a Mongo JSON/OBJECT/ARRAY/VARIANT cell.
 
     Numbers match ``json_loads_exact``. Invalid text refuses — never store the
-    raw string as a silent invent. Non-finite constants refuse. A redact token
-    or hash_pii digest is a JSON document of that token, not the clear value.
+    raw string as a silent invent. Non-finite constants refuse. A protected
+    column's token is bound by :func:`bind_mongo_json_field`, by transform.
     """
     if isinstance(value, (dict, list)):
         return value
     if isinstance(value, str):
-        protected = _mongo_protection_document(value)
-        if protected is not None:
-            return protected
         def _reject(name: str) -> None:
             raise ValueError(f"non-finite JSON constant: {name}")
 
@@ -1206,7 +1207,7 @@ def write_mapped_rows(
                 refusal = json_number_refusal(value, engine="mongodb", ddl_type=upper)
                 if refusal:
                     raise ValueError(refusal)
-                return bind_mongo_json_document(value)
+                return bind_mongo_json_field(value, transform)
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
 
