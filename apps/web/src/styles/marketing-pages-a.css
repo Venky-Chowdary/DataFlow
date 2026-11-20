@@ -458,14 +458,45 @@ html[data-theme="dark"] .lp.mk .mk-a {
   list-style: none;
 }
 
+/* Plan cards at tile radius. Team, the recommended plan, is the one raised
+   card: an ink border and the primary button. */
 .lp.mk .mk-pr-plan {
   display: flex;
   flex-direction: column;
+  padding: var(--mk-kit-pad);
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--mk-kit-radius-tile);
+  background: var(--mk-tile-bg);
+}
+
+.lp.mk .mk-pr-plan.is-recommended {
+  border-color: var(--mk-ink);
+  box-shadow: inset 0 0 0 1px var(--mk-ink);
+}
+
+.lp.mk .mk-pr-plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
 }
 
 .lp.mk .mk-pr-plan h3 {
   margin: 0;
   color: var(--mk-ink);
+  font-size: var(--mk-fs-h3);
+}
+
+.lp.mk .mk-pr-badge {
+  margin: 0;
+  padding: 2px 10px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-ink);
+  color: var(--mk-page);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+  line-height: 1.6;
 }
 
 .lp.mk .mk-pr-who {
@@ -475,17 +506,16 @@ html[data-theme="dark"] .lp.mk .mk-a {
   line-height: 1.5;
 }
 
+/* The figure, then what it depends on on its own line, in every card. */
 .lp.mk .mk-pr-price {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
+  display: grid;
+  gap: 4px;
   margin: 24px 0 0;
 }
 
 .lp.mk .mk-pr-figure {
   color: var(--mk-ink);
-  font-size: 24px;
+  font-size: var(--mk-fs-stat);
   font-weight: 500;
   line-height: 1.1;
   letter-spacing: -0.02em;
@@ -493,13 +523,18 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 .lp.mk .mk-pr-qual {
   color: var(--mk-ink-2);
-  font-size: 14px;
+  font-size: var(--mk-fs-caption);
 }
 
+/* The action closes the card, so every card ends on its button. */
 .lp.mk .mk-pr-cta {
   justify-content: center;
   width: 100%;
-  margin-top: 24px;
+  margin-top: auto;
+}
+
+.lp.mk .mk-pr-plan .mk-a-checks {
+  margin-bottom: 28px;
 }
 
 .lp.mk .mk-pr-adds {
@@ -595,38 +630,16 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 /* ══ Enterprise ════════════════════════════════════════════════════ */
 
-.lp.mk .mk-ent-estates {
-  display: grid;
-  gap: 16px;
-}
-
-.lp.mk .mk-ent-estate h3 {
-  margin: 0;
-  color: var(--mk-ink);
-}
-
-.lp.mk .mk-ent-estate-plan {
-  margin: 4px 0 20px;
-  color: var(--mk-ink-2);
-  font-size: 15px;
-}
-
+/* Hosted and self-managed: a tile each (the kit bento lays them out). */
 @media (min-width: 768px) {
-  .lp.mk .mk-ent-estate .mk-a-dl > div {
+  .lp.mk .mk-ent-estate-dl > div {
     display: grid;
     grid-template-columns: 88px minmax(0, 1fr);
     gap: 16px;
   }
 
-  .lp.mk .mk-ent-estate .mk-a-dl dd {
+  .lp.mk .mk-ent-estate-dl dd {
     margin: 0;
-  }
-}
-
-@media (min-width: 1024px) {
-  .lp.mk .mk-ent-estates {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 24px;
   }
 }
 
@@ -696,9 +709,64 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 /* ══ Proof ═════════════════════════════════════════════════════════ */
 
+/* The CI job groups as a vertical tab list beside the evidence card. */
 .lp.mk .mk-proof-desk {
   display: grid;
   gap: 20px;
+  align-items: start;
+}
+
+.lp.mk .mk-proof-tabs {
+  display: grid;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-proof-tab {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 12px 12px 12px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--mk-rule);
+  background: none;
+  color: var(--mk-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--df-dur-fast) var(--df-ease);
+}
+
+.lp.mk .mk-proof-tab:hover {
+  background: var(--mk-wash);
+}
+
+.lp.mk .mk-proof-tab[aria-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--mk-ink);
+  background: var(--mk-wash);
+}
+
+.lp.mk .mk-proof-tab:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: -2px;
+}
+
+.lp.mk .mk-proof-tab-name {
+  font-size: var(--mk-fs-body);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.lp.mk .mk-proof-tab-meta {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-proof-desk {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    column-gap: var(--mk-col-gap);
+  }
 }
 
 .lp.mk .mk-proof-cert-head {
@@ -1247,24 +1315,44 @@ html[data-theme="dark"] .lp.mk .mk-a {
   gap: 8px;
 }
 
-/* Legend: 10px squares in the tile colours. */
+/* Legend: a small tile in each state, drawn as the tiles are drawn: the
+   border, the tint, and the check badge in the corner. */
 .lp.mk .mk-int-swatch {
+  position: relative;
   display: inline-block;
-  width: 10px;
-  height: 10px;
-  border: 1px solid var(--mk-rule-strong);
-  border-radius: var(--df-radius-none);
+  flex: none;
+  width: 22px;
+  height: 18px;
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--df-radius-sm);
   background: var(--mk-a-card-bg);
 }
 
 .lp.mk .mk-int-swatch.is-proven {
   border-color: var(--mk-landed);
-  background: var(--mk-landed);
 }
 
 .lp.mk .mk-int-swatch.is-emulated {
-  border-color: var(--mk-landed);
+  border-color: color-mix(in srgb, var(--mk-landed) 55%, var(--mk-rule));
   background: var(--mk-verified-bg);
+}
+
+.lp.mk .mk-int-swatch-mark {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-landed);
+}
+
+.lp.mk .mk-int-swatch-mark .mk-glyph {
+  width: 8px;
+  height: 8px;
+  color: var(--mk-a-card-bg);
 }
 
 .lp.mk .mk-int-rows {
@@ -1360,10 +1448,8 @@ html[data-theme="dark"] .lp.mk .mk-a {
   height: 30px;
 }
 
-.lp.mk .mk-int-tile.is-implemented .mk-int-tile-icon {
-  filter: grayscale(0.85);
-  opacity: 0.7;
-}
+/* Implemented drivers keep their colour: the state is the border and the
+   badge, never a greyed-out logo. */
 
 .lp.mk .mk-int-tile-name {
   max-width: 100%;
@@ -2473,4 +2559,97 @@ html[data-theme="dark"] .lp.mk .mk-a {
 .lp.mk .mk-a .mk-app-picker {
   padding-right: 24px;
   mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+}
+
+/* ══ Pass 7: kit tiles on these pages ══════════════════════════════ */
+
+/* Tiles hold the page's facts; their figures sit beside the title. */
+.lp.mk .mk-a .mk-tile {
+  background: var(--mk-tile-bg);
+}
+
+/* A chip row, as the app draws a route's systems. */
+.lp.mk .mk-a-tui-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-tui-more {
+  color: var(--app-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Rows of a chip and its state. */
+.lp.mk .mk-a-tui-rows {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-tui-rows li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-a-tui-rows li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* A short key and value list, as the app's detail panes set them. */
+.lp.mk .mk-a-tui-dl {
+  display: grid;
+  margin: 0;
+}
+
+.lp.mk .mk-a-tui-dl div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-a-tui-dl div:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.lp.mk .mk-a-tui-dl dt {
+  color: var(--app-ink-2);
+}
+
+.lp.mk .mk-a-tui-dl dd {
+  margin: 0;
+  color: var(--app-ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Enterprise: hosted and self-managed, a tile each. */
+.lp.mk .mk-ent-estate-dl {
+  margin: 0;
+}
+
+.lp.mk .mk-ent-estates .mk-tile-ui {
+  margin-top: 0;
+  overflow: visible;
+}
+
+/* FAQ questions start on the same edge as their answers. */
+.lp.mk .mk-a .lp-faq button {
+  padding-inline: 0;
 }

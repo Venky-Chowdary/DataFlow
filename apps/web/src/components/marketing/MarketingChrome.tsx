@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import * as NavigationMenu from "@radix-ui/react-navigation-menu";
 import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -22,7 +23,18 @@ import { EXAMPLE_READ, EXAMPLE_STATEMENT } from "./StatementHero";
 /** Pages that open on a document header rather than the ink hero. */
 const PAPER_ROUTES = new Set<string>(["privacy", "terms", "dpa", "subprocessors", "status", "help"]);
 
-type NavMenu = "product" | "solutions" | null;
+/** The two actions the chrome offers, worded the same everywhere it offers them. */
+export const PRIMARY_CTA_LABEL = "Start free";
+export const SALES_CTA_LABEL = "Request a pilot";
+
+type NavMenu = "product" | "solutions";
+
+/** Hover-intent delay before a menu opens under a mouse (Radix closes 150 ms after the pointer leaves). */
+const HOVER_OPEN_DELAY_MS = 150;
+/** A click this soon after a hover opened the menu keeps it open instead of toggling it shut. */
+const HOVER_CLICK_GRACE_MS = 700;
+/** The event a Radix Navigation Menu content listens for to close itself (navigationMenu.rootContentDismiss). */
+const RADIX_CONTENT_DISMISS = "navigationMenu.rootContentDismiss";
 
 export interface MarketingChromeProps {
   route: PublicRoute;
@@ -49,22 +61,27 @@ const NAV_ICON: Partial<Record<PublicRoute, ReactNode>> = {
   enterprise: <Building2 size={18} />,
 };
 
-/** The Product menu in two groups: what moves data, and what proves it. */
-const PRODUCT_GROUPS: { title: string; routes: PublicRoute[] }[] = [
-  { title: "Move", routes: ["product-transfer", "product-pipelines", "product-mcp"] },
-  { title: "Prove", routes: ["product-jobs", "product-query", "product-pilot", "customers"] },
-];
-
 const navFmt = new Intl.NumberFormat("en-US");
 
-const PRODUCT_LINKS: NavEntry[] = [
+/** In menu order: what moves data, what proves it landed, what answers questions about it. */
+export const PRODUCT_LINKS: NavEntry[] = [
   { route: "product-transfer", label: "Transfer Studio", note: "Map, check, write, and verify a load" },
-  { route: "product-jobs", label: "Job space", note: "Trust Report, quarantine, and sign-off per run" },
   { route: "product-pipelines", label: "Schedules", note: "Recurring loads, incremental and CDC" },
+  { route: "product-jobs", label: "Job space", note: "Trust Report, quarantine, and sign-off per run" },
+  { route: "customers", label: "Proof", note: "CI evidence and proof packs you can verify" },
   { route: "product-query", label: "Query", note: "Read-only SQL on saved connections" },
   { route: "product-pilot", label: "Pilot", note: "Questions answered with the SQL shown" },
-  { route: "product-mcp", label: "MCP server", note: "The same governed tools for agents" },
-  { route: "customers", label: "Proof", note: "CI evidence and proof packs you can verify" },
+  { route: "product-mcp", label: "MCP server", note: "Pilot's tools for Cursor, Claude, and VS Code" },
+];
+
+/**
+ * The Product menu grouped by what each part does: moves data, proves what
+ * landed, or answers questions about it (Pilot and its MCP tools included).
+ */
+export const PRODUCT_GROUPS: { title: string; routes: PublicRoute[] }[] = [
+  { title: "Move", routes: ["product-transfer", "product-pipelines"] },
+  { title: "Prove", routes: ["product-jobs", "customers"] },
+  { title: "Ask", routes: ["product-query", "product-pilot", "product-mcp"] },
 ];
 
 const SOLUTION_LINKS: NavEntry[] = [
@@ -82,27 +99,8 @@ const TOP_LINKS: NavEntry[] = [
 ];
 
 const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: string; note?: string }[] }[] = [
-  {
-    title: "Product",
-    links: [
-      { route: "product-transfer", label: "Transfer Studio" },
-      { route: "product-jobs", label: "Job space" },
-      { route: "product-pipelines", label: "Schedules" },
-      { route: "product-query", label: "Query" },
-      { route: "product-pilot", label: "Pilot" },
-      { route: "product-mcp", label: "MCP server" },
-      { route: "customers", label: "Proof" },
-    ],
-  },
-  {
-    title: "Solutions",
-    links: [
-      { route: "solution-migrations", label: "Migrations" },
-      { route: "solution-warehouse", label: "Warehouse loading" },
-      { route: "solution-sync", label: "Recurring sync" },
-      { route: "enterprise", label: "Enterprise" },
-    ],
-  },
+  { title: "Product", links: PRODUCT_LINKS.map(({ route, label }) => ({ route, label })) },
+  { title: "Solutions", links: SOLUTION_LINKS.map(({ route, label }) => ({ route, label })) },
   {
     title: "Resources",
     links: [
@@ -125,11 +123,26 @@ const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: strin
   },
 ];
 
+const MOBILE_GROUPS: { title: string; links: NavEntry[] }[] = [
+  { title: "Product", links: PRODUCT_LINKS },
+  { title: "Solutions", links: SOLUTION_LINKS },
+  { title: "Resources", links: TOP_LINKS },
+];
+
+/** A plain click: not a modified click that should open a new tab or window. */
+function isPlainClick(e: MouseEvent<HTMLAnchorElement>): boolean {
+  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
+
 export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, children }: MarketingChromeProps) {
   const [navOpen, setNavOpen] = useState(false);
-  const [menu, setMenu] = useState<NavMenu>(null);
+  const [menu, setMenu] = useState<NavMenu | "">("");
   const [scrolled, setScrolled] = useState(false);
-  const navRef = useRef<HTMLElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Partial<Record<NavMenu, HTMLLIElement | null>>>({});
+  const openedAt = useRef(0);
+  const pointerType = useRef("");
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -140,40 +153,83 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
   useEffect(() => {
     setNavOpen(false);
-    setMenu(null);
+    setMenu("");
     window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
   }, [route]);
 
+  // A desktop menu closes as soon as focus moves anywhere outside it,
+  // including the next item in the bar (Radix alone keeps it open there).
+  // The close goes through Radix's own dismiss event so its hover-intent
+  // timing resets as it does after any other close; setMenu is the fallback.
   useEffect(() => {
-    if (!menu && !navOpen) return;
+    if (!menu) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const item = itemRefs.current[menu];
+      const target = event.target as Node | null;
+      if (!item || !target || item.contains(target)) return;
+      item
+        .querySelector(".mk-nav-menu")
+        ?.dispatchEvent(new CustomEvent(RADIX_CONTENT_DISMISS, { bubbles: true, cancelable: true }));
+      setMenu("");
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [menu]);
+
+  // Radix puts an aria-hidden, tabbable focus proxy after an open trigger; it
+  // only hands focus on to the menu, so it does not need hiding from
+  // assistive tech, and a focusable aria-hidden node fails axe.
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const proxy = itemRefs.current[menu]?.querySelector(":scope > button + span[aria-hidden][tabindex]");
+    proxy?.removeAttribute("aria-hidden");
+  }, [menu]);
+
+  // The mobile sheet: Escape closes it and returns focus to the toggle;
+  // a tap outside the header, or focus leaving it, closes it.
+  useEffect(() => {
+    if (!navOpen) return;
+    const header = headerRef.current;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
-      if (target && navRef.current?.contains(target)) return;
-      setMenu(null);
+      if (target && header?.contains(target)) return;
       setNavOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMenu(null);
-        setNavOpen(false);
-      }
+      if (event.key !== "Escape") return;
+      setNavOpen(false);
+      toggleRef.current?.focus();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (target && header && !header.contains(target)) setNavOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
     };
-  }, [menu, navOpen]);
+  }, [navOpen]);
 
+  const onMenuChange = (next: string) => {
+    if (next) openedAt.current = Date.now();
+    setMenu(next === "product" || next === "solutions" ? next : "");
+  };
+
+  /** Leave the chrome for another page: close everything and start reading at its content. */
   const go = (next: PublicRoute) => {
-    setMenu(null);
+    setMenu("");
     setNavOpen(false);
     onNavigate(next);
+    window.requestAnimationFrame(() => document.getElementById("mk-main")?.focus({ preventScroll: true }));
   };
 
   const href = (next: PublicRoute) => hashForPublicRoute(next);
   const follow = (next: PublicRoute) => (e: MouseEvent<HTMLAnchorElement>) => {
+    if (!isPlainClick(e)) return;
     e.preventDefault();
     go(next);
   };
@@ -182,107 +238,153 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   const current = (r: PublicRoute) => (route === r ? "page" : undefined);
   const groupHolds = (links: NavEntry[]) => links.some((l) => l.route === route);
 
-  const entry = (l: NavEntry) => (
-    <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)} className="mk-mega-item">
-      {NAV_ICON[l.route] ? (
-        <span className="mk-mega-icon" aria-hidden>
-          {NAV_ICON[l.route]}
+  const menuLink = (l: NavEntry) => (
+    <NavigationMenu.Link asChild active={route === l.route}>
+      <a href={href(l.route)} onClick={follow(l.route)} className="mk-mega-item">
+        {NAV_ICON[l.route] ? (
+          <span className="mk-mega-icon" aria-hidden>
+            {NAV_ICON[l.route]}
+          </span>
+        ) : null}
+        <span className="mk-mega-text">
+          <strong>{l.label}</strong>
+          <span>{l.note}</span>
         </span>
-      ) : null}
-      <span className="mk-mega-text">
-        <strong>{l.label}</strong>
-        <span>{l.note}</span>
-      </span>
-    </a>
+      </a>
+    </NavigationMenu.Link>
   );
 
-  const menuGroup = (id: Exclude<NavMenu, null>, label: string, links: NavEntry[]) => (
-    <div className={`mk-nav-group${menu === id ? " is-open" : ""}`}>
-      <button
-        type="button"
+  const menuItem = (id: NavMenu, label: string, links: NavEntry[], body: ReactNode) => (
+    <NavigationMenu.Item
+      value={id}
+      className="mk-nav-group"
+      ref={(el: HTMLLIElement | null) => {
+        itemRefs.current[id] = el;
+      }}
+    >
+      <NavigationMenu.Trigger
         className={`mk-nav-link${groupHolds(links) ? " is-current" : ""}`}
-        aria-expanded={menu === id}
-        aria-controls={`mk-menu-${id}`}
-        onClick={() => setMenu((m) => (m === id ? null : id))}
+        onPointerDown={(e) => {
+          pointerType.current = e.pointerType;
+        }}
+        onKeyDown={() => {
+          pointerType.current = "";
+        }}
+        onClick={(e) => {
+          // A mouse that hovered the menu open and then clicks wants it to stay open.
+          const hoverOpened = menu === id && pointerType.current === "mouse";
+          if (hoverOpened && Date.now() - openedAt.current < HOVER_CLICK_GRACE_MS) e.preventDefault();
+        }}
       >
         {label}
         <DtIcon name="chevron-down" size={14} chrome="product" />
-      </button>
-      <div id={`mk-menu-${id}`} className={`mk-nav-menu mk-nav-menu--${id}`} hidden={menu !== id}>
-        {id === "product" ? (
-          <div className="mk-mega">
-            {PRODUCT_GROUPS.map((g) => (
-              <div key={g.title} className="mk-mega-group">
-                <p className="mk-mega-title">{g.title}</p>
-                <ul>
-                  {g.routes.map((r) => {
-                    const l = links.find((x) => x.route === r);
-                    return l ? <li key={l.route}>{entry(l)}</li> : null;
-                  })}
-                </ul>
-              </div>
-            ))}
-            <a className="mk-mega-feature" href={href("demos")} onClick={follow("demos")}>
-              <span className="mk-mega-feature-label">Example statement</span>
-              <span className="mk-mega-feature-sum">
-                {navFmt.format(EXAMPLE_READ)} read
-                <br />= {navFmt.format(EXAMPLE_STATEMENT.landed)} landed
-                <br />+ {EXAMPLE_STATEMENT.held} held + {EXAMPLE_STATEMENT.skipped} skipped
-              </span>
-              <strong>Watch a recorded run</strong>
-            </a>
-          </div>
-        ) : (
-          <ul>
-            {links.map((l) => (
-              <li key={l.route}>{entry(l)}</li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
+      </NavigationMenu.Trigger>
+      <NavigationMenu.Content className={`mk-nav-menu mk-nav-menu--${id}`}>{body}</NavigationMenu.Content>
+    </NavigationMenu.Item>
   );
 
-  const mobileGroups: { title: string; links: NavEntry[] }[] = [
-    { title: "Product", links: PRODUCT_LINKS },
-    { title: "Solutions", links: SOLUTION_LINKS },
-    { title: "More", links: TOP_LINKS },
-  ];
+  const productBody = (
+    <>
+      <div className="mk-mega">
+        {PRODUCT_GROUPS.map((g) => {
+          const titleId = `mk-mega-${g.title.toLowerCase()}`;
+          return (
+            <div key={g.title} className="mk-mega-group">
+              <p className="mk-mega-title" id={titleId}>
+                {g.title}
+              </p>
+              <ul aria-labelledby={titleId}>
+                {g.routes.map((r) => {
+                  const l = PRODUCT_LINKS.find((x) => x.route === r);
+                  return l ? <li key={l.route}>{menuLink(l)}</li> : null;
+                })}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mk-mega-foot">
+        <p className="mk-mega-foot-text">
+          <span className="mk-mega-foot-label">Example run</span>
+          <span className="mk-mega-run-sum">
+            {navFmt.format(EXAMPLE_READ)} read = {navFmt.format(EXAMPLE_STATEMENT.landed)} landed +{" "}
+            {EXAMPLE_STATEMENT.held} held + {EXAMPLE_STATEMENT.skipped} skipped
+          </span>
+        </p>
+        <NavigationMenu.Link asChild active={route === "demos"}>
+          <a className="mk-mega-foot-link" href={href("demos")} onClick={follow("demos")}>
+            Watch a recorded run
+          </a>
+        </NavigationMenu.Link>
+      </div>
+    </>
+  );
+
+  const solutionsBody = (
+    <>
+      <ul>
+        {SOLUTION_LINKS.map((l) => (
+          <li key={l.route}>{menuLink(l)}</li>
+        ))}
+      </ul>
+      <div className="mk-mega-foot">
+        <p className="mk-mega-foot-text">Planning a cutover or a first warehouse load?</p>
+        <NavigationMenu.Link asChild active={route === "contact"}>
+          <a className="mk-mega-foot-link" href={href("contact")} onClick={follow("contact")}>
+            {SALES_CTA_LABEL}
+          </a>
+        </NavigationMenu.Link>
+      </div>
+    </>
+  );
 
   return (
     <div className={`lp mk ${isHome ? "mk-home" : "lp-subpage"}${inkHero ? " has-ink-hero" : ""}`} data-lp-route={route}>
       <a className="mk-skip" href="#mk-main">
         Skip to content
       </a>
-      <header ref={navRef} className={`mk-header${scrolled ? " is-scrolled" : ""}${navOpen ? " is-open" : ""}`}>
+      <header ref={headerRef} className={`mk-header${scrolled ? " is-scrolled" : ""}${navOpen ? " is-open" : ""}`}>
         <div className="mk-header-bar">
           <a className="mk-header-brand" href={href("home")} aria-label="Datawrap home" onClick={follow("home")}>
             <BrandWordmark markSize={28} title="" />
           </a>
 
-          <nav className="mk-nav" aria-label="Main">
-            {menuGroup("product", "Product", PRODUCT_LINKS)}
-            {menuGroup("solutions", "Solutions", SOLUTION_LINKS)}
-            {TOP_LINKS.map((l) => (
-              <a key={l.route} className="mk-nav-link" href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
-                {l.label}
-              </a>
-            ))}
-          </nav>
+          <NavigationMenu.Root
+            className="mk-nav"
+            aria-label="Main"
+            value={menu}
+            onValueChange={onMenuChange}
+            delayDuration={HOVER_OPEN_DELAY_MS}
+          >
+            <NavigationMenu.List className="mk-nav-list">
+              {menuItem("product", "Product", PRODUCT_LINKS, productBody)}
+              {menuItem("solutions", "Solutions", SOLUTION_LINKS, solutionsBody)}
+              {TOP_LINKS.map((l) => (
+                <NavigationMenu.Item key={l.route}>
+                  <NavigationMenu.Link asChild active={route === l.route}>
+                    <a className="mk-nav-link" href={href(l.route)} onClick={follow(l.route)}>
+                      {l.label}
+                    </a>
+                  </NavigationMenu.Link>
+                </NavigationMenu.Item>
+              ))}
+            </NavigationMenu.List>
+          </NavigationMenu.Root>
 
           <div className="mk-header-actions">
             <button type="button" className="mk-text-btn" onClick={onLogin}>
               Log in
             </button>
             <a className="mk-text-btn" href={href("contact")} aria-current={current("contact")} onClick={follow("contact")}>
-              Contact sales
+              {SALES_CTA_LABEL}
             </a>
             <button type="button" className="mk-btn mk-btn--primary mk-btn--sm" onClick={onGetStarted}>
-              Start free
+              {PRIMARY_CTA_LABEL}
             </button>
           </div>
 
           <button
+            ref={toggleRef}
             type="button"
             className="mk-menu-toggle"
             aria-label={navOpen ? "Close menu" : "Open menu"}
@@ -294,35 +396,57 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </button>
         </div>
 
-        <div id="mk-mobile-menu" className="mk-mobile" hidden={!navOpen}>
+        <nav id="mk-mobile-menu" className="mk-mobile" aria-label="Main" hidden={!navOpen}>
           <div className="mk-mobile-groups">
-            {mobileGroups.map((group) => (
-              <div key={group.title} className="mk-mobile-group">
-                <h2>{group.title}</h2>
-                <ul>
-                  {group.links.map((l) => (
-                    <li key={l.route}>
-                      <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
-                        {l.label}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+            {MOBILE_GROUPS.map((group) => {
+              const titleId = `mk-mobile-${group.title.toLowerCase()}`;
+              return (
+                <div key={group.title} className="mk-mobile-group">
+                  <h2 id={titleId}>{group.title}</h2>
+                  <ul aria-labelledby={titleId}>
+                    {group.links.map((l) => (
+                      <li key={l.route}>
+                        <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                          {l.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
           </div>
           <div className="mk-mobile-actions">
-            <button type="button" className="mk-btn mk-btn--primary" onClick={() => { setNavOpen(false); onGetStarted(); }}>
-              Start free
+            <button
+              type="button"
+              className="mk-btn mk-btn--primary"
+              onClick={() => {
+                setNavOpen(false);
+                onGetStarted();
+              }}
+            >
+              {PRIMARY_CTA_LABEL}
             </button>
-            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => go("contact")}>
-              Contact sales
-            </button>
-            <button type="button" className="mk-btn mk-btn--quiet" onClick={() => { setNavOpen(false); onLogin(); }}>
+            <a
+              className="mk-btn mk-btn--secondary"
+              href={href("contact")}
+              aria-current={current("contact")}
+              onClick={follow("contact")}
+            >
+              {SALES_CTA_LABEL}
+            </a>
+            <button
+              type="button"
+              className="mk-btn mk-btn--quiet mk-mobile-login"
+              onClick={() => {
+                setNavOpen(false);
+                onLogin();
+              }}
+            >
               Log in
             </button>
           </div>
-        </div>
+        </nav>
       </header>
 
       <main id="mk-main" className="lp-main" tabIndex={-1}>
@@ -355,21 +479,24 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
             </dl>
           </div>
           <nav className="mk-footer-nav" aria-label="Footer">
-            {FOOTER_COLUMNS.map((col) => (
-              <div key={col.title}>
-                <h2>{col.title}</h2>
-                <ul>
-                  {col.links.map((l) => (
-                    <li key={l.route}>
-                      <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
-                        {l.label}
-                        {l.note ? <span className="mk-footer-tag">{l.note}</span> : null}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+            {FOOTER_COLUMNS.map((col) => {
+              const titleId = `mk-footer-${col.title.toLowerCase()}`;
+              return (
+                <div key={col.title}>
+                  <h2 id={titleId}>{col.title}</h2>
+                  <ul aria-labelledby={titleId}>
+                    {col.links.map((l) => (
+                      <li key={l.route}>
+                        <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                          {l.label}
+                          {l.note ? <span className="mk-footer-tag">{l.note}</span> : null}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
           </nav>
         </div>
         <div className="mk-footer-base">
@@ -379,8 +506,16 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               Log in
             </button>
             <button type="button" className="mk-text-btn mk-text-btn--small" onClick={onGetStarted}>
-              Create a workspace
+              {PRIMARY_CTA_LABEL}
             </button>
+            <a
+              className="mk-text-btn mk-text-btn--small"
+              href={href("contact")}
+              aria-current={current("contact")}
+              onClick={follow("contact")}
+            >
+              {SALES_CTA_LABEL}
+            </a>
           </p>
         </div>
       </footer>

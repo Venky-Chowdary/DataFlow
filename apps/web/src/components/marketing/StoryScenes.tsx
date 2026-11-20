@@ -8,7 +8,6 @@ import {
   Clock,
   Copy,
   Database,
-  FileCode2,
   Filter,
   OctagonX,
   Play,
@@ -23,7 +22,8 @@ import {
   X,
 } from "lucide-react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { AppWindow, PanelWindow } from "./app-frame/AppFrame";
+import { claudeMcpSnippet, cursorMcpSnippet, mcpHttpUrl, remoteMcpSnippet, vscodeMcpSnippet } from "../../lib/mcpClientConfig";
+import { APP_NARROW_QUERY, AppWindow, EXAMPLE_JOBS, PanelWindow, exampleStateLabel } from "./app-frame/AppFrame";
 import { RECORDED_CHECK_GROUPS, RECORDED_MAPPING } from "./ProductPanels";
 import { MIGRATION_RUN, QUERY_SEGMENTS, REGIONS, RUN, type RunCounts } from "./StoryPanels";
 
@@ -33,8 +33,9 @@ import { MIGRATION_RUN, QUERY_SEGMENTS, REGIONS, RUN, type RunCounts } from "./S
  * With no props a scene shows the home page's run
  * (48,213,906 read = 48,213,871 landed + 33 held + 2 skipped); the product
  * and solution pages pass `example` to show their own labelled example.
- * On phones each scene renders one panel in window chrome, which reflows at
- * full size (UI text 12px or larger) instead of shrinking the whole screen.
+ * On desktop each scene is a whole AppWindow at 1:1 (it reflows, and crops
+ * rather than shrinks). Below 1024px each scene renders one panel in window
+ * chrome, which reflows at full size (UI text 12px or larger).
  */
 
 const fmt = new Intl.NumberFormat("en-US");
@@ -62,9 +63,9 @@ export const SCENE_NOTES = {
     "The next action stays locked until the step is approved.",
   ],
   schedules: [
-    "A schedule paused on a schema change says what it is waiting for.",
-    "The paused schedule, flagged in the list.",
-    "Its run history: the paused tick, then runs on the reviewed map.",
+    "A schedule paused on a schema change says what it is waiting for. Approve the mapping to see what happens next.",
+    "The paused schedule, flagged in the list. Choose it to open its run history.",
+    "The tick that paused before writing. Runs resume only after the review.",
   ],
   query: [
     "Two tabs: the copy and the source. Try a write to see it refused.",
@@ -105,8 +106,8 @@ const DST: Side = { id: "snowflake", name: "Warehouse Snowflake (demo)", table: 
 /** Phone crops: designed at this width, so they reflow at full size on phones. */
 const PHONE_DESIGN = 460;
 
-/** True on phone-sized viewports. */
-function useNarrow(query = "(max-width: 767px)") {
+/** True on phones and tablets, where a scene shows one panel. */
+function useNarrow(query = APP_NARROW_QUERY) {
   const [narrow, setNarrow] = useState(() => {
     try {
       return window.matchMedia(query).matches;
@@ -136,6 +137,14 @@ function Conn({ id, name }: { id: string; name: string }) {
       {name}
     </span>
   );
+}
+
+/** The status of one of the workspace's example jobs, in the product's words. */
+function JobStatePill({ id }: { id: string }) {
+  const job = EXAMPLE_JOBS.find((j) => j.id === id);
+  if (!job) return null;
+  const tone = job.state === "completed_with_quarantine" ? "quarantine" : job.state;
+  return <span className={`mk-app-pill mk-app-pill--${tone}`}>{exampleStateLabel(job.state)}</span>;
 }
 
 function lastPart(table: string) {
@@ -467,7 +476,9 @@ function StudioRun({ ex }: { ex: TransferExample }) {
         <Pin n={2} />
         <div className="mk-bsc-card-head">
           <strong>Run complete</strong>
-          <span className="mk-app-pill mk-app-pill--completed">Completed with quarantine</span>
+          <span className={`mk-app-pill ${ex.run.held ? "mk-app-pill--quarantine" : "mk-app-pill--completed"}`}>
+            {exampleStateLabel(ex.run.held ? "completed_with_quarantine" : "completed")}
+          </span>
           <span className="mk-bsc-grow" />
           <span className="mk-bsc-muted">{ex.duration}</span>
         </div>
@@ -563,14 +574,14 @@ function TransferInner({
           value={step}
           onChange={setStep}
         />
-        <PanelWindow path={`transfer/${step.toLowerCase()}`} caption={c.text} designWidth={PHONE_DESIGN}>
+        <PanelWindow path={`transfer/${step.toLowerCase()}`} caption={c.text} designWidth={PHONE_DESIGN} fill>
           <div className={`mk-bsc-panel${c.cls}`}>{body}</div>
         </PanelWindow>
       </div>
     );
   }
   return (
-    <AppWindow path={`transfer/${step.toLowerCase()}`} active="transfer" caption={c.text} className={`mk-bsc-studio${c.cls}`}>
+    <AppWindow collapsedNav path={`transfer/${step.toLowerCase()}`} active="transfer" caption={c.text} className={`mk-bsc-studio${c.cls}`}>
       <div className="mk-bsc-studio-body">
         <StudioRail step={step} onStep={setStep} ex={ex} />
         <div className="mk-bsc-studio-view" key={step}>
@@ -584,35 +595,69 @@ function TransferInner({
 
 /* ══ Schedules ═════════════════════════════════════════════════════ */
 
-type Sched = { id: string; name: string; route: string; from: string; to: string; cadence: string; mode: string; last: "completed" | "paused" | "running"; status: "Active" | "Paused" };
+export type Sched = { id: string; name: string; route: string; from: string; to: string; cadence: string; mode: string; last: "completed" | "quarantine" | "paused" | "running"; status: "Active" | "Paused" };
 
-const SCHEDULES: Sched[] = [
+export const SCHEDULES_BASE: Sched[] = [
   { id: "orders-feed", name: "Orders feed, every 2 min", route: "Orders Postgres (demo) → Warehouse Snowflake (demo)", from: "postgresql", to: "snowflake", cadence: "Every 2 minutes", mode: "Incremental deduped", last: "paused", status: "Paused" },
-  { id: "sales-nightly", name: "sales_orders → SALES_ORDERS_REPORTING", route: "Orders Postgres (demo) → Warehouse Snowflake (demo)", from: "postgresql", to: "snowflake", cadence: "Daily 02:00 UTC", mode: "Full append", last: "completed", status: "Active" },
+  // Last run: the home page's run, 6af912d7, which finished with 33 rows held.
+  { id: "sales-nightly", name: "sales_orders → SALES_ORDERS_REPORTING", route: "Orders Postgres (demo) → Warehouse Snowflake (demo)", from: "postgresql", to: "snowflake", cadence: "Daily 02:00 UTC", mode: "Full append", last: "quarantine", status: "Active" },
   { id: "customers", name: "customers → DW_DEMO.CUSTOMERS", route: "Customers MySQL (demo) → Warehouse Snowflake (demo)", from: "mysql", to: "snowflake", cadence: "Hourly", mode: "Incremental deduped", last: "completed", status: "Active" },
   { id: "orders-live", name: "orders → ANALYTICS.ORDERS_LIVE", route: "Orders Postgres (demo) → Warehouse Snowflake (demo)", from: "postgresql", to: "snowflake", cadence: "Continuous", mode: "CDC", last: "running", status: "Active" },
 ];
 
-type HistoryRun = { at: string; state: "completed" | "paused"; delta: number; held: number; secs: string; job: string };
+/** The schedule list before and after the orders feed's mapping is approved. */
+const schedulesFor = (reviewed: boolean): Sched[] =>
+  reviewed ? SCHEDULES_BASE.map((s) => (s.id === "orders-feed" ? { ...s, last: "completed", status: "Active" } : s)) : SCHEDULES_BASE;
 
-const HISTORY: HistoryRun[] = [
-  { at: "Today 12:09", state: "completed", delta: 41, held: 0, secs: "52s", job: "6ae4f2c1" },
-  { at: "Today 12:07", state: "completed", delta: 3, held: 0, secs: "1m 3s", job: "6ae4e88b" },
+const LAST_RUN: Record<Sched["last"], [string, string]> = {
+  completed: ["mk-app-pill--completed", "Completed"],
+  quarantine: ["mk-app-pill--quarantine", "Quarantined"],
+  running: ["mk-app-pill--running", "Running"],
+  paused: ["mk-app-pill--v-not-run", "Needs review"],
+};
+
+export type HistoryRun = { at: string; state: "completed" | "paused" | "reviewed"; delta: number; held: number; secs: string; job: string };
+
+/**
+ * The orders feed, one story: runs every 2 minutes until 08:26, when a new
+ * source column pauses it before writing. Nothing runs until a person
+ * approves the mapping (12:05); the runs at 12:07 and 12:09 use that map.
+ * The later entries exist only once the review has happened.
+ */
+export const HISTORY_BEFORE: HistoryRun[] = [
   { at: "Today 08:26", state: "paused", delta: 0, held: 0, secs: "", job: "" },
   { at: "Today 08:24", state: "completed", delta: 0, held: 0, secs: "54s", job: "6ae45425" },
   { at: "Today 08:22", state: "completed", delta: 7, held: 0, secs: "53s", job: "6ae453ad" },
 ];
 
-function HistoryList() {
+export const HISTORY_AFTER: HistoryRun[] = [
+  { at: "Today 12:09", state: "completed", delta: 41, held: 0, secs: "52s", job: "6ae4f2c1" },
+  { at: "Today 12:07", state: "completed", delta: 3, held: 0, secs: "1m 3s", job: "6ae4e88b" },
+  { at: "Today 12:05", state: "reviewed", delta: 0, held: 0, secs: "", job: "" },
+];
+
+const historyFor = (reviewed: boolean) => (reviewed ? [...HISTORY_AFTER, ...HISTORY_BEFORE] : HISTORY_BEFORE);
+
+/** The schedule list as it stands while the orders feed is paused (08:26 onward). */
+export const SCHEDULES: Sched[] = SCHEDULES_BASE;
+
+/** The orders feed's full history once the review is done, newest first. */
+export const HISTORY: HistoryRun[] = historyFor(true);
+
+const HISTORY_PILL: Record<HistoryRun["state"], [string, string]> = {
+  completed: ["mk-app-pill--completed", "Completed"],
+  paused: ["mk-app-pill--v-not-run", "Paused before writing"],
+  reviewed: ["mk-app-pill--v-not-run", "Map reviewed"],
+};
+
+function HistoryList({ reviewed }: { reviewed: boolean }) {
   return (
     <ol className="mk-bsc-history" aria-label="Run history (example)">
-      {HISTORY.map((r) => (
-        <li key={r.at} className={`is-${r.state}`}>
+      {historyFor(reviewed).map((r) => (
+        <li key={r.at} className={`is-${r.state === "reviewed" ? "paused" : r.state}`}>
           {r.state === "paused" ? <Pin n={3} /> : null}
           <p className="mk-bsc-history-top">
-            <span className={`mk-app-pill ${r.state === "completed" ? "mk-app-pill--completed" : "mk-app-pill--v-not-run"}`}>
-              {r.state === "completed" ? "Completed" : "Paused before writing"}
-            </span>
+            <span className={`mk-app-pill ${HISTORY_PILL[r.state][0]}`}>{HISTORY_PILL[r.state][1]}</span>
             <span>{r.at}</span>
             <span className="mk-bsc-grow" />
             <span className="mk-bsc-muted">{r.secs}</span>
@@ -621,7 +666,15 @@ function HistoryList() {
             <p className="mk-bsc-history-note">
               <TriangleAlert size={13} aria-hidden />
               <span>
-                Column <code>coupon_code</code> appeared at the source. Waiting for review in Map; reviewed at 12:05.
+                Column <code>coupon_code</code> appeared at the source. Nothing was written.{" "}
+                {reviewed ? "Held until the review at 12:05." : "Waiting for review in Map."}
+              </span>
+            </p>
+          ) : r.state === "reviewed" ? (
+            <p className="mk-bsc-history-note">
+              <Check size={13} aria-hidden />
+              <span>
+                <code>coupon_code</code> mapped to <code>COUPON_CODE</code>. The schedule resumed on the reviewed map.
               </span>
             </p>
           ) : (
@@ -648,7 +701,8 @@ function HistoryList() {
   );
 }
 
-function ScheduleDrawer({ s, onClose }: { s: Sched; onClose: () => void }) {
+function ScheduleDrawer({ s, reviewed, onClose }: { s: Sched; reviewed: boolean; onClose: () => void }) {
+  const feed = s.id === "orders-feed";
   return (
     <aside className="mk-app-drawer mk-bsc-drawer" aria-label={`Run history for ${s.name} (example)`}>
       <div className="mk-app-drawer-head">
@@ -667,34 +721,85 @@ function ScheduleDrawer({ s, onClose }: { s: Sched; onClose: () => void }) {
           Schema <em>12</em>
         </span>
         <span className="is-active">
-          History <em>{HISTORY.length}</em>
+          History <em>{feed ? historyFor(reviewed).length : 0}</em>
         </span>
         <span>Config</span>
       </div>
       <div className="mk-app-drawer-body">
-        <HistoryList />
+        {feed ? <HistoryList reviewed={reviewed} /> : <p className="mk-bsc-muted">Open the Orders feed for the example run history.</p>}
       </div>
     </aside>
   );
 }
 
-function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: SceneOptions & { initial?: string | null } = {}) {
+/** The decision the paused schedule waits on, and the answer once given. */
+function DecisionCard({ reviewed, onReview }: { reviewed: boolean; onReview: (v: boolean) => void }) {
+  if (reviewed) {
+    return (
+      <div className="mk-bsc-decision">
+        <Pin n={1} />
+        <p className="mk-bsc-decision-head">
+          <strong>No decision waiting</strong>
+          <span className="mk-bsc-muted" aria-live="polite">
+            Mapping approved at 12:05. The runs at 12:07 and 12:09 used the reviewed map.
+          </span>
+        </p>
+        <button type="button" className="mk-bsc-btn mk-bsc-decision-btn" onClick={() => onReview(false)}>
+          Show the pause again
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mk-bsc-decision">
+      <Pin n={1} />
+      <p className="mk-bsc-decision-head">
+        <strong>Waiting on a decision</strong>
+        <span className="mk-bsc-muted">1 schedule paused on a schema change since 08:26, not retrying</span>
+      </p>
+      <div className="mk-bsc-decision-card">
+        <p>
+          <TriangleAlert size={14} aria-hidden />
+          <code>SCHEMA_DRIFT</code>
+          <strong>Orders feed, every 2 min</strong>
+        </p>
+        <p className="mk-bsc-muted">
+          A new column, <code>coupon_code</code>, appeared at the source. No run writes until it is mapped or declared dropped.
+        </p>
+        <button type="button" className="mk-bsc-btn mk-bsc-btn--primary" onClick={() => onReview(true)}>
+          <Check size={13} aria-hidden />
+          Approve the mapping
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SchedulesInner({ caption, showCaption, initial = null }: SceneOptions & { initial?: string | null } = {}) {
   const narrow = useNarrow();
   const c = cap(caption, "Example workspace. Run times and counts are illustrative.", showCaption);
   const [open, setOpen] = useState<string | null>(initial);
+  const [reviewed, setReviewed] = useState(false);
   const [tab, setTab] = useState<"all" | "active" | "paused">("all");
-  const shown = SCHEDULES.filter((s) => (tab === "all" ? true : tab === "active" ? s.status === "Active" : s.status === "Paused"));
-  const sched = SCHEDULES.find((s) => s.id === open) ?? null;
+  const schedules = schedulesFor(reviewed);
+  const inTab = (id: typeof tab) => (s: Sched) => (id === "all" ? true : id === "active" ? s.status === "Active" : s.status === "Paused");
+  const shown = schedules.filter(inTab(tab));
+  const sched = schedules.find((s) => s.id === open) ?? null;
 
   if (narrow) {
     return (
-      <PanelWindow path="schedules/orders-feed" caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path="schedules/orders-feed" caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>
           <p className="mk-bsc-panel-title">
             <strong>Orders feed, every 2 min</strong>
-            <span className="mk-app-pill mk-app-pill--v-not-run">Paused</span>
+            <span className={`mk-app-pill ${reviewed ? "mk-app-pill--completed" : "mk-app-pill--v-not-run"}`}>{reviewed ? "Active" : "Paused"}</span>
           </p>
-          <HistoryList />
+          <HistoryList reviewed={reviewed} />
+          <p className="mk-bsc-panel-actions">
+            <button type="button" className={`mk-bsc-btn${reviewed ? "" : " mk-bsc-btn--primary"}`} onClick={() => setReviewed((v) => !v)} aria-pressed={reviewed}>
+              {reviewed ? "Show the pause again" : "Approve the mapping"}
+            </button>
+          </p>
         </div>
       </PanelWindow>
     );
@@ -702,10 +807,11 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
 
   return (
     <AppWindow
-      path="schedules"
+      collapsedNav
+      path={sched ? `schedules/${sched.id}` : "schedules"}
       active="schedules"
       caption={c.text}
-      overlay={sched ? <ScheduleDrawer s={sched} onClose={() => setOpen(null)} /> : null}
+      overlay={sched ? <ScheduleDrawer s={sched} reviewed={reviewed} onClose={() => setOpen(null)} /> : null}
       className={`${sched ? "has-drawer" : ""}${c.cls}`}
     >
       <div className="mk-bsc-stack">
@@ -723,7 +829,7 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
               ] as const
             ).map(([id, label]) => (
               <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? "is-active" : undefined} onClick={() => setTab(id)}>
-                {label} <em>{SCHEDULES.filter((s) => (id === "all" ? true : id === "active" ? s.status === "Active" : s.status === "Paused")).length}</em>
+                {label} <em>{schedules.filter(inTab(id)).length}</em>
               </button>
             ))}
           </div>
@@ -737,26 +843,7 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
           </div>
         </div>
 
-        <div className="mk-bsc-decision">
-          <Pin n={1} />
-          <p className="mk-bsc-decision-head">
-            <strong>Waiting on a decision</strong>
-            <span className="mk-bsc-muted">1 schedule paused on a schema change, not retrying</span>
-          </p>
-          <div className="mk-bsc-decision-card">
-            <p>
-              <TriangleAlert size={14} aria-hidden />
-              <code>SCHEMA_DRIFT</code>
-              <strong>Orders feed, every 2 min</strong>
-            </p>
-            <p className="mk-bsc-muted">
-              A new column, <code>coupon_code</code>, appeared at the source. The next run waits until it is mapped or declared dropped.
-            </p>
-            <span className="mk-app-tbtn mk-app-tbtn--primary" aria-hidden>
-              Review in Map
-            </span>
-          </div>
-        </div>
+        <DecisionCard reviewed={reviewed} onReview={setReviewed} />
 
         <div className="mk-app-table mk-bsc-sched" role="table" aria-label="Schedules (example workspace)">
           <div className="mk-app-tr mk-app-th" role="row">
@@ -790,9 +877,7 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
                 {s.mode}
               </span>
               <span role="cell">
-                <span className={`mk-app-pill ${s.last === "completed" ? "mk-app-pill--completed" : s.last === "running" ? "mk-app-pill--running" : "mk-app-pill--v-not-run"}`}>
-                  {s.last === "completed" ? "Completed" : s.last === "running" ? "Running" : "Needs review"}
-                </span>
+                <span className={`mk-app-pill ${LAST_RUN[s.last][0]}`}>{LAST_RUN[s.last][1]}</span>
               </span>
               <span role="cell" className="mk-app-mode">
                 {s.status}
@@ -961,10 +1046,10 @@ function QueryInner({ caption, showCaption, example }: SceneOptions & { example?
       <Pin n={1} />
       <div className="mk-app-tabs" role="tablist" aria-label="Query tabs (example)">
         <button type="button" role="tab" aria-selected={side === "dest"} className={side === "dest" ? "is-active" : undefined} onClick={() => setSide("dest")}>
-          {lastPart(q.dst.table)}
+          Copy in {q.dst.engine}
         </button>
         <button type="button" role="tab" aria-selected={side === "source"} className={side === "source" ? "is-active" : undefined} onClick={() => setSide("source")}>
-          {lastPart(q.src.table)}
+          Source in {q.src.engine}
         </button>
       </div>
       <span className="mk-bsc-grow" />
@@ -976,7 +1061,7 @@ function QueryInner({ caption, showCaption, example }: SceneOptions & { example?
 
   if (narrow) {
     return (
-      <PanelWindow path="query" caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path="query" caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>
           {controls}
           <QueryEditor q={q} side={side} write={write} />
@@ -989,7 +1074,7 @@ function QueryInner({ caption, showCaption, example }: SceneOptions & { example?
   const tables = side === "dest" ? q.dst.tables : q.src.tables;
   const activeTable = lastPart(side === "dest" ? q.dst.table : q.src.table);
   return (
-    <AppWindow path="query" active="query" caption={c.text} className={`mk-bsc-query${c.cls}`}>
+    <AppWindow collapsedNav path="query" active="query" caption={c.text} className={`mk-bsc-query${c.cls}`}>
       <div className="mk-bsc-qwrap">
         {controls}
         <div className="mk-bsc-qconn">
@@ -1162,10 +1247,6 @@ function PilotChat({ p, confirmed, onConfirm }: { p: PilotExample; confirmed: bo
               <dt>Cadence</dt>
               <dd>{p.cadence}</dd>
             </div>
-            <div>
-              <dt>Approval</dt>
-              <dd>Expires 15 minutes after staging. Used once.</dd>
-            </div>
           </dl>
           <div className="mk-bsc-staged-actions">
             {confirmed ? (
@@ -1199,13 +1280,13 @@ function PilotInner({ caption, showCaption, example }: SceneOptions & { example?
   const chat = <PilotChat p={p} confirmed={confirmed} onConfirm={setConfirmed} />;
   if (narrow) {
     return (
-      <PanelWindow path="pilot" caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path="pilot" caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>{chat}</div>
       </PanelWindow>
     );
   }
   return (
-    <AppWindow path="pilot" active="pilot" caption={c.text} className={`mk-bsc-pilot${c.cls}`}>
+    <AppWindow collapsedNav path="pilot" active="pilot" caption={c.text} className={`mk-bsc-pilot${c.cls}`}>
       <div className="mk-bsc-pwrap">
         <aside className="mk-bsc-chats" aria-label="Recent chats (example)">
           <span className="mk-app-tbtn mk-app-tbtn--primary mk-bsc-newchat" aria-hidden>
@@ -1224,11 +1305,11 @@ function PilotInner({ caption, showCaption, example }: SceneOptions & { example?
         <div className="mk-bsc-pmain">
           <div className="mk-bsc-pbar">
             <span className="mk-app-chip">
-              JOB <code>{p.job}</code>
-              <Copy size={11} aria-hidden />
+              Job <code>{p.job}</code>
+              <Copy size={12} aria-hidden />
             </span>
             <span className="mk-bsc-muted">{p.bar}</span>
-            <span className="mk-app-pill mk-app-pill--completed">Completed</span>
+            <JobStatePill id={p.job} />
           </div>
           <div className="mk-bsc-pscroll">{chat}</div>
           <div className="mk-bsc-composer" aria-hidden>
@@ -1243,14 +1324,21 @@ function PilotInner({ caption, showCaption, example }: SceneOptions & { example?
 
 /* ══ MCP ═══════════════════════════════════════════════════════════ */
 
+/**
+ * The MCP URL is the origin the operator is signed into plus /api/v1/mcp, as
+ * the product builds it; the frame's address bar says app.datawrap.io, so the
+ * URL here does too. The snippets are the product's own (lib/mcpClientConfig).
+ */
+const MCP_URL = mcpHttpUrl("/api/v1", "https://app.datawrap.io");
+
 const CLIENTS: { name: string; how: string; config: string }[] = [
-  { name: "Cursor", how: "Settings → MCP. The URL is absolute; the workspace API key is the Bearer header.", config: `{"mcpServers": {"datawrap": {\n  "url": "https://www.datawrap.io/api/v1/mcp",\n  "headers": {"Authorization": "Bearer <workspace-api-key>"}\n}}}` },
-  { name: "Claude Desktop", how: "Remote HTTP MCP. Same endpoint and key as Cursor.", config: `Remote MCP server URL:\nhttps://www.datawrap.io/api/v1/mcp\nHeader: Authorization: Bearer <workspace-api-key>` },
-  { name: "VS Code", how: "MCP extension, HTTP transport, same endpoint.", config: `"mcp": {"servers": {"datawrap": {\n  "type": "http",\n  "url": "https://www.datawrap.io/api/v1/mcp"\n}}}` },
-  { name: "Other remote clients", how: "Any client that speaks MCP Streamable HTTP. Same endpoint and key.", config: `POST https://www.datawrap.io/api/v1/mcp\nAuthorization: Bearer <workspace-api-key>` },
+  { name: "Cursor", how: "Settings → MCP. The URL is absolute; the workspace API key is the Bearer header.", config: cursorMcpSnippet(MCP_URL) },
+  { name: "Claude Desktop", how: "Remote HTTP MCP. Same endpoint and key as Cursor.", config: claudeMcpSnippet(MCP_URL) },
+  { name: "VS Code", how: "MCP extension, HTTP transport, same endpoint.", config: vscodeMcpSnippet(MCP_URL) },
+  { name: "Other remote clients", how: "Any client that speaks MCP Streamable HTTP. Same endpoint and key.", config: remoteMcpSnippet(MCP_URL) },
 ];
 
-const CALLS: { t: string; tool: string; who: string; status: "ok" | "staged" | "queued" | "same"; ms: string }[] = [
+export const CALLS: { t: string; tool: string; who: string; status: "ok" | "staged" | "queued" | "same"; ms: string }[] = [
   { t: "09:41:02", tool: "list_connectors", who: "Cursor, Editor key", status: "ok", ms: "84 ms" },
   { t: "09:41:09", tool: "plan_transfer", who: "Cursor, Editor key", status: "ok", ms: "2.1 s" },
   { t: "09:41:31", tool: "start_transfer", who: "Cursor, Editor key", status: "staged", ms: "140 ms" },
@@ -1308,7 +1396,7 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
   const [open, setOpen] = useState<string | null>("Cursor");
   if (narrow) {
     return (
-      <PanelWindow path="mcp" caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path="mcp" caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>
           <McpActivity />
         </div>
@@ -1316,7 +1404,7 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
     );
   }
   return (
-    <AppWindow path="mcp" active="mcp" caption={c.text} className={`mk-bsc-mcp${c.cls}`}>
+    <AppWindow collapsedNav path="mcp" active="mcp" caption={c.text} className={`mk-bsc-mcp${c.cls}`}>
       <div className="mk-bsc-stack">
         <div className="mk-bsc-card mk-bsc-url">
           <Pin n={1} />
@@ -1325,9 +1413,10 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
               <small>MCP server URL</small>
               <span className="mk-app-pill mk-app-pill--completed">Online</span>
             </p>
-            <code className="mk-bsc-url-value">https://www.datawrap.io/api/v1/mcp</code>
+            <code className="mk-bsc-url-value">{MCP_URL}</code>
             <p className="mk-bsc-muted">
-              Add the workspace API key as Authorization: Bearer. start_transfer, create_connector and create_schedule return an ack_id; confirm_action finishes the change.
+              Send the workspace API key as <code>Authorization: Bearer</code>. <code>start_transfer</code>, <code>create_connector</code> and{" "}
+              <code>create_schedule</code> return an <code>ack_id</code>; <code>confirm_action</code> finishes the change.
             </p>
           </div>
           <span className="mk-app-tbtn mk-app-tbtn--primary" aria-hidden>
@@ -1347,7 +1436,7 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
                   <li key={cl.name}>
                     <div className="mk-bsc-client">
                       <span className="mk-bsc-client-icon" aria-hidden>
-                        <FileCode2 size={15} />
+                        <ConnectorIcon id={cl.name} size={20} />
                       </span>
                       <span>
                         <strong>{cl.name}</strong>
@@ -1383,7 +1472,7 @@ const WH = {
   duration: "11m 05s",
 };
 
-const WH_CHECKS = ["Destination write access", "Staging capacity", "Staging policy", "Population fit", "Target table definition"];
+export const WH_CHECKS = ["Destination write access", "Staging capacity", "Staging policy", "Population fit", "Target table definition"];
 
 function WarehouseCards() {
   return (
@@ -1439,7 +1528,9 @@ function WarehouseInner({ caption, showCaption }: SceneOptions = {}) {
     <div className="mk-bsc-card mk-bsc-runcard">
       <div className="mk-bsc-card-head">
         <strong>{WH.name}</strong>
-        <span className="mk-app-pill mk-app-pill--completed">Completed</span>
+        <span className={`mk-app-pill ${WH.run.held ? "mk-app-pill--quarantine" : "mk-app-pill--completed"}`}>
+          {exampleStateLabel(WH.run.held ? "completed_with_quarantine" : "completed")}
+        </span>
         <span className="mk-bsc-grow" />
         <span className="mk-bsc-muted">
           Full append, {WH.duration}, job <code>{WH.job}</code>
@@ -1459,7 +1550,7 @@ function WarehouseInner({ caption, showCaption }: SceneOptions = {}) {
   );
   if (narrow) {
     return (
-      <PanelWindow path={`jobs/${WH.job}`} caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path={`jobs/${WH.job}`} caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>
           {head}
           <WarehouseCards />
@@ -1468,7 +1559,7 @@ function WarehouseInner({ caption, showCaption }: SceneOptions = {}) {
     );
   }
   return (
-    <AppWindow path={`jobs/${WH.job}`} active="jobs" caption={c.text} className={`mk-bsc-wh${c.cls}`}>
+    <AppWindow collapsedNav path={`jobs/${WH.job}`} active="jobs" caption={c.text} className={`mk-bsc-wh${c.cls}`}>
       <div className="mk-bsc-stack">
         {head}
         <WarehouseCards />
@@ -1589,7 +1680,7 @@ function SyncInner({ caption, showCaption }: SceneOptions = {}) {
   );
   if (narrow) {
     return (
-      <PanelWindow path="schedules/customers" caption={c.text} designWidth={PHONE_DESIGN}>
+      <PanelWindow path="schedules/customers" caption={c.text} designWidth={PHONE_DESIGN} fill>
         <div className={`mk-bsc-panel${c.cls}`}>
           {head}
           <SyncTable compact />
@@ -1598,7 +1689,7 @@ function SyncInner({ caption, showCaption }: SceneOptions = {}) {
     );
   }
   return (
-    <AppWindow path="schedules/customers" active="schedules" caption={c.text} className={`mk-bsc-sync${c.cls}`}>
+    <AppWindow collapsedNav path="schedules/customers" active="schedules" caption={c.text} className={`mk-bsc-sync${c.cls}`}>
       <div className="mk-bsc-stack">
         <div className="mk-bsc-card">
           {head}

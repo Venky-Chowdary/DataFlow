@@ -2,6 +2,10 @@ import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "
 import { useInViewOnce } from "../../hooks/useInViewOnce";
 import { ALL_CONNECTORS, CATALOG_TOTAL, MARKETING_STACK, PROVEN_DRIVERS, provenBadge } from "../../lib/provenEvidence";
 import { EXAMPLE_READ, EXAMPLE_STATEMENT } from "./StatementHero";
+import { EXAMPLE_JOBS } from "./app-frame/AppFrame";
+
+/** The home page's run in the example workspace: its verdict and check come from there. */
+const HOME_JOB = EXAMPLE_JOBS.find((j) => j.id === "6af912d7") ?? EXAMPLE_JOBS[1];
 
 /**
  * Datawrap product surfaces rendered in code for the public site.
@@ -495,10 +499,10 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
         <div>
           <dt>Verdict</dt>
           <dd>
-            <span className="mk-verdict mk-verdict--explained">Explained</span>
+            <span className="mk-verdict mk-verdict--proven">{HOME_JOB.trust.verdict}</span>
             <span>
-              {RUN_TOTALS.held} rows differ and none is unexplained: each is held in quarantine, such as{" "}
-              <code>{EXAMPLE_RUN.held[0].key}</code>. The landed rows match in full.
+              Every landed row was compared and none differs. {RUN_TOTALS.held} rows never landed: each is held in quarantine
+              with its reason, such as <code>{EXAMPLE_RUN.held[0].key}</code>.
             </span>
           </dd>
         </div>
@@ -745,9 +749,9 @@ export function EvidencePanel() {
     <Panel title="Sign-off" meta={`${EXAMPLE_META}, signed by role`}>
       <dl className="mk-panel-dl">
         {[
-          ["Verdict", "Explained: the one row that differs is held in quarantine"],
+          ["Verdict", `${HOME_JOB.trust.verdict}: every landed row compared, none differs; ${RUN_TOTALS.held} held with a reason`],
           ["Accounting", `Balanced, ${exampleIdentity()}`],
-          ["Comparison on record", "Full checksum of the landed rows"],
+          ["Comparison on record", `${HOME_JOB.trust.check} of the landed rows`],
           ["Proof pack", "Signed, verifiable through the API"],
           ["Audit log", "Tamper-evident, and exportable"],
         ].map(([k, v], i) => (
@@ -1405,7 +1409,7 @@ export function RunEvidencePanel() {
               <th scope="row"><time>{t.at}</time></th>
               <td>
                 {t.state === "ok" ? (
-                  <span className="mk-verdict mk-verdict--proven">Proven</span>
+                  <span className="mk-verdict mk-verdict--proven">Proven equal</span>
                 ) : (
                   <span className="mk-status mk-status--held"><StatusGlyph kind="held" />Paused before writing</span>
                 )}

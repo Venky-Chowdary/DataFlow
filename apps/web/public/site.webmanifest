@@ -1,11 +1,11 @@
 {
-  "name": "Datawrap — Universal Data Platform",
+  "name": "Datawrap",
   "short_name": "Datawrap",
-  "description": "Move data between databases, files, and cloud systems with AI semantic mapping and 9 preflight gates.",
+  "description": "Datawrap moves data between databases, warehouses, files, and streams, and accounts for every row: landed and read back, held with a reason, or skipped by rule.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f6f7f8",
-  "theme_color": "#0f766e",
+  "background_color": "#F4F7F4",
+  "theme_color": "#0A3D3A",
   "lang": "en-US",
   "categories": ["business", "productivity", "utilities"],
   "icons": [

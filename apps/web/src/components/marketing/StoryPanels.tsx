@@ -412,13 +412,18 @@ export function ProofPackApi() {
 
 type Tick = { at: string; state: "ok" | "paused" | "review" };
 
-const FEED: Tick[] = [
+/** Ticks up to the pause. Nothing runs after 08:26 until someone decides. */
+const FEED_BEFORE: Tick[] = [
   { at: "08:16", state: "ok" },
   { at: "08:18", state: "ok" },
   { at: "08:20", state: "ok" },
   { at: "08:22", state: "ok" },
   { at: "08:24", state: "ok" },
   { at: "08:26", state: "paused" },
+];
+
+/** The review at 12:05, and the runs on the reviewed map. Shown once approved. */
+const FEED_AFTER: Tick[] = [
   { at: "12:05", state: "review" },
   { at: "12:07", state: "ok" },
   { at: "12:09", state: "ok" },
@@ -427,23 +432,31 @@ const FEED: Tick[] = [
 /** A schedule's recent ticks, one paused on drift, and the review that answers it. */
 export function DriftReview() {
   const [done, setDone] = useState(false);
+  const tick = (t: Tick) => (
+    <li key={t.at} className={`is-${t.state}`}>
+      <span className="mk-pipe-tick" aria-hidden />
+      <time>{t.at}</time>
+      <span className="mk-sr-only">
+        {t.state === "ok" ? "Run completed, destination read back equal" : t.state === "paused" ? "Paused before writing: a new column appeared at the source" : "New column reviewed in Map"}
+      </span>
+    </li>
+  );
   return (
     <Frame
       title="Orders feed, every 2 minutes"
       meta="Example data. Incremental, deduplicated on order_id"
-      badge={<span aria-live="polite">{done ? <Ok>Reviewed</Ok> : <Neutral>Paused at 08:26</Neutral>}</span>}
+      badge={<span aria-live="polite">{done ? <Ok>Reviewed at 12:05</Ok> : <Neutral>Paused since 08:26</Neutral>}</span>}
       className={`mk-pipe-drift${done ? " is-done" : ""}`}
     >
       <ol className="mk-pipe-ticks" aria-label="Recent ticks">
-        {FEED.map((t) => (
-          <li key={t.at} className={`is-${t.state}${t.state === "review" && !done ? " is-pending" : ""}`}>
-            <span className="mk-pipe-tick" aria-hidden />
-            <time>{t.at}</time>
-            <span className="mk-sr-only">
-              {t.state === "ok" ? "Run completed, destination read back equal" : t.state === "paused" ? "Paused: a new column appeared at the source" : "New column reviewed in Map"}
-            </span>
+        {FEED_BEFORE.map(tick)}
+        {done ? (
+          <li className="mk-pipe-gap">
+            <time>3 h 39 min</time>
+            <span className="mk-sr-only">No runs while the schedule waited for a decision</span>
           </li>
-        ))}
+        ) : null}
+        {done ? FEED_AFTER.map(tick) : null}
       </ol>
       <div className="mk-pipe-drift-row">
         <code>+ coupon_code TEXT</code>
@@ -454,7 +467,7 @@ export function DriftReview() {
         <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => setDone((d) => !d)} aria-pressed={done}>
           {done ? "Show the pause again" : "Approve the mapping"}
         </button>
-        <p>{done ? "The next run uses the reviewed map." : "No run writes until someone decides."}</p>
+        <p>{done ? "Runs resumed at 12:07, on the reviewed map." : "No run writes until someone decides."}</p>
       </div>
     </Frame>
   );

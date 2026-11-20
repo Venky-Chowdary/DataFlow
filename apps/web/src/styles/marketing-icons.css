@@ -1,0 +1,110 @@
+/**
+ * Connector marks on the public site (app/brand-icons.tsx).
+ *
+ * One treatment for every kind: real vendor marks, the monogram tile for
+ * vendors with no redistributable mark, and plain glyphs for things that are
+ * not vendors are all drawn in one neutral ink, the ink of the text beside
+ * them. That keeps contrast in both themes, inside the dark product frames,
+ * and keeps a missing mark from reading as a missing vendor.
+ *
+ * State (proven, emulated, implemented) is shown by the tile badge and tint,
+ * never by greying the mark.
+ */
+
+.mk .df-cicon {
+  flex: none;
+  color: var(--mk-ink);
+}
+
+.mk .df-cicon--mark path {
+  fill: currentColor;
+}
+
+.mk .df-cicon--tile rect {
+  fill: color-mix(in srgb, currentColor 8%, transparent);
+  stroke: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+.mk .df-cicon--tile text {
+  fill: currentColor;
+  font-family: var(--mk-font);
+}
+
+/* Inside the product mockups the ink follows the app frame's own tokens. */
+.mk :is(.mk-app-chip, .mk-app-route, .mk-bsc-client-icon, .mk-sc-icons) .df-cicon {
+  color: var(--app-ink, var(--mk-ink));
+}
+
+/* Connectors page and proof lists: no disc behind the mark. A fixed light
+   disc vanished against light ink in dark theme, and the grey filter made
+   unproven drivers read as disabled. */
+.lp.mk .mk-proof-icon,
+.lp.mk .mk-int-row-icon,
+.lp.mk .mk-int-tile-icon {
+  background: transparent;
+  box-shadow: none;
+}
+
+.lp.mk .mk-int-tile.is-implemented .mk-int-tile-icon {
+  filter: none;
+  opacity: 1;
+}
+
+/* One optical size per surface, whatever size the call site asked for. */
+.lp.mk .mk-int-tile-icon .df-cicon {
+  width: 28px;
+  height: 28px;
+}
+
+.lp.mk .mk-int-row-icon .df-cicon,
+.lp.mk .mk-proof-icon .df-cicon,
+.mk .mk-strip-item .df-cicon {
+  width: 22px;
+  height: 22px;
+}
+
+.mk .mk-app-chip .df-cicon,
+.mk .mk-app-route .df-cicon {
+  width: 16px;
+  height: 16px;
+}
+
+.lp.mk .mk-sc-icons i {
+  background: var(--app-surface, var(--mk-a-card-bg));
+}
+
+.lp.mk .mk-sc-icons .df-cicon {
+  width: 16px;
+  height: 16px;
+}
+
+.mk .mk-bsc-client-icon .df-cicon {
+  width: 20px;
+  height: 20px;
+}
+
+/* Home strip, reduced motion: the marquee stands still, so show one row of
+   whole items and no fade, instead of a label cut off under the mask. */
+@media (prefers-reduced-motion: reduce) {
+  .mk .mk-strip-viewport {
+    overflow: hidden;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .mk .mk-strip-track {
+    width: auto;
+  }
+
+  .mk .mk-strip-row {
+    flex-wrap: wrap;
+    row-gap: 16px;
+    max-height: 24px;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  .mk .mk-strip-row[aria-hidden="true"] {
+    display: none;
+  }
+}

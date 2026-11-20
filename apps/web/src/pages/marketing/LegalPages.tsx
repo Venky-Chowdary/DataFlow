@@ -1,4 +1,48 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { hashForPublicRoute } from "../../lib/publicNavigation";
+
+/** When Privacy and Terms last changed. */
+const LEGAL_UPDATED = "August 2026";
+
+/**
+ * Processing commitments the Privacy policy and Terms already make, each
+ * with the page that states it. The DPA page lists them; it does not quote
+ * the addendum, which is sent on request.
+ */
+const DPA_COMMITMENTS: { title: string; body: string; source: "privacy" | "terms" | "subprocessors" }[] = [
+  {
+    title: "Controller and processor",
+    body: "For the datasets you connect, you are the controller and Datawrap is the processor.",
+    source: "privacy",
+  },
+  {
+    title: "On your instructions",
+    body: "Records in your sources and destinations are processed only to provide the service you request.",
+    source: "terms",
+  },
+  {
+    title: "Subprocessors",
+    body: "Infrastructure that hosts the control plane, transactional email, and on Enterprise your identity provider and KMS.",
+    source: "subprocessors",
+  },
+  {
+    title: "International transfers",
+    body: "Standard Contractual Clauses or another approved mechanism when personal data leaves the EEA, the UK, or Switzerland.",
+    source: "privacy",
+  },
+  {
+    title: "Security",
+    body: "TLS in transit, credentials encrypted at rest, isolated tenants, and an audit trail of admin, mapping, and job actions.",
+    source: "privacy",
+  },
+  {
+    title: "Deletion",
+    body: "On termination, workspace data is exported or deleted on request within the retention window.",
+    source: "terms",
+  },
+];
+
+const SOURCE_LABEL = { privacy: "Privacy policy", terms: "Terms of service", subprocessors: "Subprocessors" };
 
 /** Privacy, Terms, and DPA: document pages with an on-page index. */
 export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
@@ -153,15 +197,42 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
           title="Data processing addendum"
           lead="The processor terms that govern how Datawrap handles personal data in the workspaces and datasets you connect."
         />
-        <section className="mk-legal-request" aria-label="Request the addendum">
-          <div className="mk-wrap">
-            <p>
-              Our data processing addendum is available on request — email{" "}
-              <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
-            </p>
-            <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=DPA%20request">
-              Request the addendum
-            </a>
+        <section className="mk-legal-request" aria-labelledby="mk-dpa-commit">
+          <div className="mk-wrap mk-trust-split">
+            <div>
+              <h2 className="mk-trust-ledger-title" id="mk-dpa-commit">
+                What our policies already commit to
+              </h2>
+              <p className="mk-trust-intro">
+                The addendum is the signed processor version of these commitments. Each one links to the page that
+                states it today.
+              </p>
+              <dl className="mk-trust-terms">
+                {DPA_COMMITMENTS.map((c) => (
+                  <div key={c.title}>
+                    <dt>{c.title}</dt>
+                    <dd>
+                      {c.body}{" "}
+                      <a href={hashForPublicRoute(c.source)}>{SOURCE_LABEL[c.source]}</a>
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+            <aside className="mk-trust-readout mk-trust-request" aria-labelledby="mk-dpa-get">
+              <h2 id="mk-dpa-get">Get the addendum</h2>
+              <p>
+                The addendum is available on request. Email{" "}
+                <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a> with the subject
+                “DPA request” and we send the current version for your review.
+              </p>
+              <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=DPA%20request">
+                Request the addendum
+              </a>
+              <p className="mk-trust-caption">
+                Need the named subprocessors too? <a href={hashForPublicRoute("subprocessors")}>See how to request them</a>.
+              </p>
+            </aside>
           </div>
         </section>
       </div>
@@ -210,8 +281,7 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
             : "The agreement that governs use of Transfer Studio, schedules, Pilot, and MCP. A signed master agreement controls where it conflicts."
         }
         meta={[
-          "Last updated August 2026",
-          `${blocks.length} sections`,
+          `Updated ${LEGAL_UPDATED}`,
           <>
             Questions: <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
           </>,
@@ -245,7 +315,7 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
 }
 
 /** The document header for Privacy, Terms, DPA, Subprocessors and Status:
- * the title, one sentence, and an optional meta line under it. */
+ * the title, one sentence, and optional meta lines under it, one fact each. */
 export function DocHeader({
   title,
   lead,
@@ -263,11 +333,11 @@ export function DocHeader({
         <h1 id={titleId}>{title}</h1>
         <p className="mk-legal-lead">{lead}</p>
         {meta?.length ? (
-          <p className="mk-legal-meta">
+          <div className="mk-legal-meta">
             {meta.map((item, i) => (
-              <span key={i}>{item}</span>
+              <p key={i}>{item}</p>
             ))}
-          </p>
+          </div>
         ) : null}
       </div>
     </header>

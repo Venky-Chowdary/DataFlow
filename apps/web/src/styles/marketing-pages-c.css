@@ -63,12 +63,12 @@
   letter-spacing: -0.005em;
 }
 
-/* The one card style. */
+/* The one card style, at tile radius. */
 .mk .mk-ct-card,
 .mk .mk-trust-readout {
   padding: 24px;
   border: 1px solid var(--mk-rule-strong);
-  border-radius: var(--df-radius-12);
+  border-radius: var(--mk-kit-radius-tile);
   background: var(--df-surface);
   box-shadow: none;
 }
@@ -358,6 +358,10 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   border-color: var(--mk-ink-3);
 }
 
+.lp.mk .mk-ct-card .mk-ct-f-input[aria-invalid="true"] {
+  border-color: var(--df-danger);
+}
+
 .lp.mk .mk-ct-card .mk-ct-f-input:focus-visible,
 .lp.mk .mk-ct-card .mk-ct-f-textarea:focus-visible {
   border-color: var(--mk-ink);
@@ -366,10 +370,10 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 }
 
 .lp.mk .mk-ct-card .mk-ct-f-more {
-  margin: 4px 0 16px;
+  margin: 4px 0 0;
   padding: 0;
   border: 0;
-  border-block: 1px solid var(--mk-rule);
+  border-top: 1px solid var(--mk-rule);
   border-radius: var(--df-radius-none);
   background: transparent;
 }
@@ -508,7 +512,7 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   color: var(--mk-ink);
 }
 
-/* Disabled until the four fields are filled: a quiet fill, not a faded teal. */
+/* Disabled only while sending: the form validates on submit instead. */
 .lp.mk .mk-ct-card .mk-ct-f-form-foot .mk-btn:disabled {
   border-color: var(--mk-rule);
   background: var(--mk-rule);
@@ -548,44 +552,99 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   margin-top: 8px;
 }
 
-/* What a pilot leaves you with: one feature row on the page ground. */
+/* What a pilot leaves you with: three tiles, each with its app fragment. */
 .mk .mk-ct-keep {
   border-top: 1px solid var(--mk-rule);
 }
 
-.mk .mk-ct-keep-grid {
+.lp.mk .mk-ct-tui-calls {
   display: grid;
-  gap: 32px;
-  align-items: start;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.lp.mk .mk-ct-keep-copy p {
-  max-width: 30em;
-  margin: 16px 0 0;
+.lp.mk .mk-ct-tui-calls li {
+  display: grid;
+  gap: 4px;
+}
+
+.lp.mk .mk-ct-tui-calls li + li {
+  padding-top: 10px;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-ct-tui-calls span {
+  color: var(--app-ink-2);
+  font-size: 12px;
+}
+
+/* The path wraps only after a slash (wbr in the markup), so nothing scrolls. */
+.lp.mk .mk-ct-tui-calls code {
+  white-space: normal;
+  overflow-wrap: normal;
+}
+
+.lp.mk .mk-ct-tui-chain {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-ct-tui-chain li {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-ct-tui-chain svg {
+  color: var(--df-success-text);
+}
+
+/* Design partner program: two tiles of terms. */
+.lp.mk .mk-ct-terms {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-ct-terms li {
+  position: relative;
+  padding-left: 20px;
   color: var(--mk-ink-2);
-  line-height: 1.55;
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
 }
 
-.mk .mk-ct-keep-visual {
-  min-width: 0;
+.lp.mk .mk-ct-terms li::before {
+  content: "";
+  position: absolute;
+  top: 0.7em;
+  left: 2px;
+  width: 8px;
+  height: 1px;
+  background: var(--mk-ink-3);
 }
 
-@media (min-width: 1024px) {
-  .mk .mk-ct-keep-grid {
-    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-    gap: 80px;
-  }
-
-  .mk .mk-ct-keep-grid > .mk-ct-keep-visual {
-    grid-column: 2;
-    width: 100%;
-    max-width: 680px;
-    justify-self: end;
-  }
-}
-
+.mk .mk-ct-partners,
 .mk .mk-ct-faq {
   border-top: 1px solid var(--mk-rule);
+}
+
+.mk .mk-ct-partners .mk-tile-ui {
+  margin-top: 0;
+}
+
+/* FAQ questions start on the same edge as their answers. */
+.lp.mk .mk-ct-faq .lp-faq button {
+  padding-inline: 0;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -607,6 +666,32 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 @media (min-width: 1024px) {
   .mk .mk-demo-hero {
     padding-block: 72px 40px;
+  }
+
+  /* Split head, as on the other subpages: headline left, lead and
+     actions right, top-aligned. */
+  .mk .mk-demo-hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    column-gap: 64px;
+    align-items: start;
+  }
+
+  .lp.mk .mk-demo-hero-grid h1 {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .lp.mk .mk-demo-hero-grid .mk-demo-lead {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 10px;
+  }
+
+  .mk .mk-demo-hero-grid .mk-actions {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 24px;
   }
 }
 
@@ -669,14 +754,16 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   display: none;
 }
 
-/* The facade is the button over the whole poster. */
+/* The facade is the button over the whole poster. Its label sits at the
+   bottom-left, over the sidebar, so it never covers the screen's data. */
 .lp.mk .mk-demo-screen .mk-poster-stage > .lp-video-facade.has-backdrop {
   position: absolute;
   inset: 0;
   z-index: var(--df-z-base);
   display: grid;
-  place-items: center;
-  padding: 0;
+  place-items: end start;
+  aspect-ratio: auto;
+  padding: 24px;
   border: 0;
   border-radius: var(--df-radius-none);
   background: transparent;
@@ -692,7 +779,6 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 }
 
 .mk .mk-demo-screen .mk-poster-play {
-  justify-self: center;
   min-height: 48px;
   padding: 0 22px 0 18px;
   background: var(--mk-ink);
@@ -708,9 +794,18 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 }
 
 @media (max-width: 767px) {
+  /* A taller poster on phones, so the pill sits below the screen's data. */
+  .mk .mk-demo-screen .mk-poster-stage {
+    aspect-ratio: 4 / 3;
+  }
+
   .lp.mk .mk-demo-screen .mk-poster-stage > .lp-video-facade.has-backdrop {
-    place-items: end start;
+    place-items: end;
     padding: 12px;
+  }
+
+  .mk .mk-demo-screen .mk-poster.has-backdrop .mk-poster-play {
+    justify-self: end;
   }
 
   .mk .mk-demo-screen .mk-poster-play {
@@ -778,12 +873,6 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   gap: 24px;
 }
 
-.lp.mk .mk-demo-catalogue-head p {
-  max-width: 40em;
-  margin: 12px 0 0;
-  color: var(--mk-ink-2);
-}
-
 .mk .mk-demo-filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -834,11 +923,19 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   color: var(--mk-ink-3);
 }
 
-.mk .mk-demo-group-title span {
-  margin-left: auto;
-  color: var(--mk-ink-3);
-  font-size: var(--mk-fs-small);
-  font-weight: 400;
+/* The topic name, then its count as its own line (not inside the h3). */
+.mk .mk-demo-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+}
+
+.lp.mk .mk-demo-group-count {
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
   font-variant-numeric: tabular-nums;
 }
 
@@ -917,19 +1014,20 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 }
 
 @media (min-width: 1024px) {
-  .mk .mk-demo-catalogue-head {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
-  }
-
   .mk .mk-demo-group {
     grid-template-columns: 240px minmax(0, 1fr);
     gap: 48px;
     align-items: start;
   }
 
-  .lp.mk .mk-demo-group-title {
+  .mk .mk-demo-group-head {
+    display: grid;
+    gap: 4px;
     padding-top: 16px;
+  }
+
+  .lp.mk .mk-demo-group-count {
+    padding-left: 26px;
   }
 
   .mk .mk-demo-row {
@@ -1438,8 +1536,68 @@ html[data-theme="dark"] .mk .mk-docs-search input {
 .mk .mk-docs-group {
   display: grid;
   gap: 8px;
-  padding-block: 32px;
+  padding-block: 48px;
   border-top: 1px solid var(--mk-rule);
+}
+
+/* The split head also renders in the signed-in Help (no .lp there). */
+.mk .mk-docs-group .mk-split {
+  margin-bottom: 24px;
+}
+
+.mk .mk-docs-group .mk-split h2 {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-h2);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.mk .mk-docs-group .mk-split-lead {
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-lead);
+  line-height: 1.55;
+}
+
+/* A guide tile: the title is the link; hover underlines it, nothing moves. */
+.mk .mk-docs-tile h3 {
+  margin: 0;
+  font-size: var(--mk-fs-h3);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.mk .mk-docs-tile-link {
+  color: var(--mk-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.mk .mk-docs-tile-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.mk .mk-docs-tile-link:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 2px;
+  border-radius: var(--df-radius-sm);
+}
+
+.mk .mk-docs-tile .mk-tile-body {
+  margin: 8px 0 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
+}
+
+.mk .mk-docs-tile-time {
+  margin: 0;
+  color: var(--mk-ink-3);
+  font-size: var(--mk-fs-caption);
+  font-variant-numeric: tabular-nums;
 }
 
 .mk .mk-docs-list {
@@ -1499,6 +1657,15 @@ html[data-theme="dark"] .mk .mk-docs-search input {
   line-height: 1.5;
 }
 
+/* Which app screens the step covers (the app's own stepper names). */
+.mk .mk-docs-step-app {
+  grid-column: 2;
+  margin: 0 0 4px;
+  color: var(--mk-ink-3);
+  font-size: var(--mk-fs-caption);
+  line-height: 1.5;
+}
+
 .mk .mk-docs-step ul {
   grid-column: 2;
   margin: 0;
@@ -1532,7 +1699,7 @@ html[data-theme="dark"] .mk .mk-docs-search input {
 
 @media (min-width: 1024px) {
   .mk .mk-docs-steps {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 32px;
     margin-top: 16px;
   }
@@ -1552,7 +1719,8 @@ html[data-theme="dark"] .mk .mk-docs-search input {
   }
 
   .mk .mk-docs-step ul,
-  .mk .mk-docs-step-none {
+  .mk .mk-docs-step-none,
+  .mk .mk-docs-step-app {
     grid-column: 1;
   }
 
@@ -1715,20 +1883,17 @@ html[data-theme="dark"] .lp.mk .docs-callout {
   max-width: 14em;
 }
 
-/* One meta line under the lead, not a plate. */
+/* Meta under the lead: one fact per line, no separators. */
 .lp.mk .mk-legal-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 0;
+  display: grid;
+  gap: 2px;
   margin: 20px 0 0;
-  color: var(--mk-ink-3);
+  color: var(--mk-ink-2);
   font-size: var(--mk-fs-small);
 }
 
-.lp.mk .mk-legal-meta > span + span::before {
-  content: "\00b7";
-  margin-inline: 10px;
-  color: var(--mk-ink-3);
+.lp.mk .mk-legal-meta > p {
+  margin: 0;
 }
 
 .lp.mk .mk-legal-meta a {
@@ -1906,7 +2071,7 @@ html[data-theme="dark"] .lp.mk .docs-callout {
   margin-top: 24px;
 }
 
-.lp.mk .mk-legal-request p {
+.lp.mk .mk-legal-request .mk-wrap > p {
   max-width: 68ch;
   margin: 0;
   color: var(--mk-ink);
@@ -1941,7 +2106,6 @@ html[data-theme="dark"] .lp.mk .docs-callout {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px 24px;
-  max-width: 880px;
 }
 
 .mk .mk-trust-readout.is-operational {
@@ -2066,6 +2230,112 @@ html[data-theme="dark"] .lp.mk .docs-callout {
   margin: 16px 0 0;
   color: var(--mk-ink-3);
   font-size: var(--mk-fs-small);
+}
+
+.mk .mk-trust-pill.is-muted {
+  color: var(--mk-ink-2);
+}
+
+.mk .mk-trust-pill.is-muted .mk-state-glyph {
+  color: var(--mk-ink-3);
+}
+
+/* DPA and Subprocessors: the facts on the left, how to get the document
+   in one card on the right. */
+.mk .mk-trust-split {
+  display: grid;
+  gap: 40px;
+  align-items: start;
+}
+
+.mk .mk-trust-split .mk-trust-ledger-title {
+  margin-top: 0;
+}
+
+.lp.mk .mk-trust-intro {
+  max-width: 40em;
+  margin: 12px 0 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.55;
+}
+
+.lp.mk .mk-trust-split a:not(.mk-btn) {
+  color: var(--mk-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.lp.mk .mk-trust-split a:not(.mk-btn):hover {
+  text-decoration-color: currentColor;
+}
+
+.lp.mk .mk-trust-terms {
+  display: grid;
+  margin: 24px 0 0;
+  border-top: 1px solid var(--mk-rule-strong);
+}
+
+.lp.mk .mk-trust-terms > div {
+  display: grid;
+  gap: 4px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-trust-terms dt {
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-body);
+  font-weight: 600;
+}
+
+.lp.mk .mk-trust-terms dd {
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.55;
+}
+
+.mk .mk-trust-readout.mk-trust-request {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 16px;
+  border-radius: var(--mk-kit-radius-tile);
+}
+
+.lp.mk .mk-trust-request h2 {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-h3);
+  font-weight: 600;
+}
+
+.lp.mk .mk-trust-request p {
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.55;
+}
+
+.lp.mk .mk-trust-request .mk-trust-caption {
+  padding-top: 16px;
+  border-top: 1px solid var(--mk-rule);
+  justify-self: stretch;
+}
+
+.mk .mk-trust-readout.mk-trust-request .mk-btn {
+  grid-column: 1;
+  grid-row: auto;
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-trust-split {
+    grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
+    column-gap: 64px;
+  }
 }
 
 @media (max-width: 639px) {

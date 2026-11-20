@@ -1,18 +1,14 @@
 import {
   Archive,
   Ban,
-  Bell,
   BookOpen,
   Braces,
+  Building2,
   CalendarClock,
-  CirclePause,
-  Clock,
   Code,
-  Copy,
   Database,
   Eye,
   EyeOff,
-  FileCode,
   FileSearch,
   FileSignature,
   Gauge,
@@ -24,6 +20,7 @@ import {
   ListChecks,
   ListFilter,
   Lock,
+  MessageSquare,
   Percent,
   Plug,
   Power,
@@ -35,16 +32,12 @@ import {
   Server,
   ShieldCheck,
   TableProperties,
-  Trash2,
   TriangleAlert,
-  Undo2,
   UserCheck,
   Workflow,
 } from "lucide-react";
-import { MirrorDeletePanel, TickDetailPanel } from "../../components/marketing/ProductPanels";
+import { MirrorDeletePanel } from "../../components/marketing/ProductPanels";
 import {
-  CannotList,
-  CdcSources,
   ConfirmChecks,
   CutoverTable,
   DriftReview,
@@ -58,31 +51,42 @@ import {
   PilotLoop,
   PrecisionSpecimen,
   QueryCompare,
-  RefusalPanel,
   RiskRecordPanel,
   RUN,
   SignoffPanel,
-  TypeMapping,
-  UpsertCheck,
   ValidateFindings,
 } from "../../components/marketing/StoryPanels";
 import { SYNC_MODE_COUNT_WORD } from "../../lib/syncModesPhrase";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { PRIMARY_CTA_LABEL, SALES_CTA_LABEL } from "../../components/marketing/MarketingChrome";
 import { JobsWithTrust, McpScene, PilotScene, QueryScene, SchedulesScene, SyncScene, TransferScene, WarehouseScene } from "../../components/marketing/StoryScenes";
-import { CodeBand, FactGrid, FeatureRow, RowPoints, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
+import { BentoSection, CodeBand, FeatureRow, RowPoints, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
 import { FeatureLinks } from "../../components/marketing/kit/FeatureLinks";
 import { SplitHead } from "../../components/marketing/kit/SplitHead";
-import { JobsBento, TransferBento } from "../../components/marketing/StoryBentos";
-import { JOBS_FOLLOW, JOBS_PROOF_PACK, JOBS_TRUST_REPORT, QUICKSTART_EXECUTE, QUICKSTART_LOGIN } from "./apiSnippets";
+import { JobsBento, McpBento, MigrationBento, PilotBento, QueryBento, SchedulesBento, SyncBento, TransferBento, WarehouseBento } from "../../components/marketing/StoryBentos";
+import {
+  JOBS_FOLLOW,
+  JOBS_PROOF_PACK,
+  JOBS_TRUST_REPORT,
+  MCP_CLIENT_CONFIG,
+  MCP_DISCOVER,
+  QUICKSTART_EXECUTE,
+  QUICKSTART_LOGIN,
+  SCHEDULE_EXPORT,
+  SCHEDULES_MANIFEST,
+} from "./apiSnippets";
 
 /*
  * Product and solution pages. Every claim here is something the product does
  * today; the rules tables say where a reader can confirm it. Frames are
  * examples, labelled as such inside the frame.
  *
- * Every page has the same structure: a left-aligned hero with one light
- * product frame, three to five sections (feature rows that alternate sides,
- * a grid of facts, or a table), related links, and the closing section.
+ * Every page has the same structure (pass 7): a hero with one product frame,
+ * FeatureLinks to related pages, a Bento whose tiles carry fragments of the
+ * product UI, feature rows that alternate sides, a code band only where the
+ * docs give a real snippet, a rules table where it carries facts found
+ * nowhere else on the page, and the closing card. Each claim is said once
+ * per page.
  * The home page's run (48,213,906 read) appears here on Job space only; the
  * five-step story appears on Transfer Studio only.
  */
@@ -91,7 +95,7 @@ type Nav = (r: PublicRoute) => void;
 type PageProps = { onGetStarted: () => void; onNavigate: Nav };
 
 function actions(p: PageProps, secondary: StoryAction) {
-  return { primary: { label: "Start free", onClick: p.onGetStarted }, secondary };
+  return { primary: { label: PRIMARY_CTA_LABEL, onClick: p.onGetStarted }, secondary };
 }
 
 export function TransferStudioPage(p: PageProps) {
@@ -298,7 +302,7 @@ export function JobTheaterPage(p: PageProps) {
 }
 
 export function PipelinesPage(p: PageProps) {
-  const act = actions(p, { label: "Recurring sync guide", onClick: () => p.onNavigate("solution-sync") });
+  const act = actions(p, { label: "See Recurring sync", onClick: () => p.onNavigate("solution-sync") });
   return (
     <StoryFrame
       page="pipe"
@@ -309,23 +313,32 @@ export function PipelinesPage(p: PageProps) {
           <SchedulesScene />
         </StoryHero>
       }
-      related={[
-        { route: "solution-sync", label: "Recurring sync", body: "Keep two systems in step" },
-        { route: "product-jobs", label: "Job space", body: "Every tick's evidence" },
-        { route: "product-mcp", label: "MCP server", body: "Agents can stage schedules for you to confirm" },
-      ]}
       closing={{ title: "Put a transfer on a schedule", body: "Approve a transfer once, then let it run on a cadence with the same checks." }}
     >
+      <FeatureLinks
+        label="Related to Schedules"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "Schedules guide", body: "Cadence, history and sync modes in the docs", route: "help-pipelines" },
+          { icon: Repeat, label: "Recurring sync", body: "Keep two systems in step", route: "solution-sync" },
+          { icon: Gauge, label: "Job space", body: "Every tick's run and Trust Report", route: "product-jobs" },
+          { icon: Server, label: "MCP server", body: "Agents stage schedules for you to confirm", route: "product-mcp" },
+        ]}
+      />
+
+      <BentoSection id="mk-pipe-what" title="What a schedule runs under" lead="The route, map and mode you approved, with the retries and alerts you set.">
+        <SchedulesBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-pipe-drift"
         title="The first run gets reviewed. So does the hundredth."
-        body="A new or renamed source column pauses the schedule until someone decides where it belongs."
+        body="A new or renamed source column parks the schedule with the reason, instead of retrying, until someone decides where it belongs."
         more={
           <RowPoints
             items={[
-              { icon: CirclePause, lead: "A failing gate", text: "parks the schedule with the reason instead of retrying." },
-              { icon: RotateCcw, lead: "Retries", text: "apply to transient failures only, with a backoff you set." },
               { icon: FileSignature, lead: "A required contract", text: "keeps unattended runs off a schema nobody signed." },
+              { icon: History, lead: "History", text: "shows rows read, written and rejected per run, with its job ID." },
             ]}
             link={{ label: "Read how schedules work", route: "help-pipelines", onNavigate: p.onNavigate }}
           />
@@ -352,29 +365,29 @@ export function PipelinesPage(p: PageProps) {
         <ModeSelector />
       </FeatureRow>
 
-      <FeatureRow
-        id="mk-pipe-tick"
-        title="Open any tick"
-        body="Its map version, the checks it cleared, and its statement."
-        more={
-          <RowPoints
-            items={[
-              { icon: History, lead: "History", text: "shows rows read, written and rejected per run, with its job ID." },
-              { icon: FileCode, lead: "Export YAML", text: "to keep cadence, route and sync mode in version control." },
-              { icon: Bell, lead: "Notifications", text: "go out on failure, on success, or both, per schedule." },
-            ]}
-          />
-        }
-      >
-        <TickDetailPanel />
-      </FeatureRow>
+      <CodeBand
+        id="mk-pipe-yaml"
+        title="Keep schedules in version control"
+        body="Export one schedule, or every schedule in the workspace, as YAML: the reviewable definition of cadence, route and sync mode."
+        points={[
+          "Import YAML from the Schedules toolbar to apply a reviewed definition.",
+          "Require signed refuses an imported schedule unless its contract is signed.",
+          "Both exports need schedule.read.",
+        ]}
+        snippets={[
+          { label: "One schedule", code: SCHEDULE_EXPORT, source: "Docs, Schedules: schedules as YAML (the drawer's Export YAML)" },
+          { label: "Whole workspace", code: SCHEDULES_MANIFEST, source: "Docs, Schedules: schedules as YAML (the toolbar's Export YAML)" },
+        ]}
+        cardLabel="Schedule export API examples"
+      />
 
       <TableSection id="mk-pipe-rules" title="Where each rule is written down" body="The rules a schedule runs under, and the docs page for each.">
         <RulesTable
           caption="Schedule rules, and the docs page for each"
           whereLabel="Docs"
+          onNavigate={p.onNavigate}
           items={[
-            { claim: "Mirror deletes are soft by default: the row is kept with _deleted and _deleted_at", where: "Sync modes: mirror" },
+            { claim: "Mirror deletes are soft by default: the row is kept with _deleted and _deleted_at", where: "Schedules guide: sync modes", route: "help-pipelines" },
             { claim: "Before an append, the destination must match the fingerprint left by the last run", where: "Sync modes: append" },
             { claim: "Keyed modes absorb redelivery: a second write updates the same row", where: "Sync modes" },
             { claim: "One job at a time reads a given replication slot or binlog position", where: "Sync modes: CDC" },
@@ -397,13 +410,23 @@ export function QueryPlaygroundPage(p: PageProps) {
           <QueryScene example="customers" />
         </StoryHero>
       }
-      related={[
-        { route: "product-pilot", label: "Pilot", body: "Ask in plain language instead" },
-        { route: "product-jobs", label: "Job space", body: "The comparison Datawrap already ran" },
-        { route: "integrations", label: "Connectors", body: "What you can connect" },
-      ]}
       closing={{ title: "Check a copy without a second console", body: "Start a workspace, save two connections, and ask the same question of both." }}
     >
+      <FeatureLinks
+        label="Related to Query"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "Query guide", body: "Read-only SQL, as the docs describe it", route: "help-query" },
+          { icon: MessageSquare, label: "Pilot", body: "Ask in plain language instead", route: "product-pilot" },
+          { icon: Gauge, label: "Job space", body: "The comparison Datawrap already ran", route: "product-jobs" },
+          { icon: Plug, label: "Connectors", body: "What you can connect", route: "integrations" },
+        ]}
+      />
+
+      <BentoSection id="mk-q-will" title="What Query will and will not do" lead="It reads. It never writes, and it runs as you.">
+        <QueryBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-q-both"
         title="Ask both sides the same question"
@@ -412,7 +435,6 @@ export function QueryPlaygroundPage(p: PageProps) {
           <RowPoints
             items={[
               { icon: Code, lead: "The editor", text: "knows each connection's SQL dialect." },
-              { icon: Copy, lead: "Results", text: "can be filtered and copied as CSV, JSON or Markdown." },
               { icon: Ban, lead: "Not queried here:", text: "Kafka topics and vector stores." },
             ]}
             link={{ label: "Read the Query guide", route: "help-query", onNavigate: p.onNavigate }}
@@ -426,47 +448,18 @@ export function QueryPlaygroundPage(p: PageProps) {
         id="mk-q-guards"
         flip
         title="Three guards between a statement and your data"
-        body="Pick a statement and see where it stops."
+        body="Pick a statement and see where it stops. A refused statement never reaches the database."
         more={
           <RowPoints
             items={[
               { icon: Code, lead: "One statement per run:", text: "a second one after a semicolon is refused." },
               { icon: Eye, lead: "A read-only head:", text: "it must start as a read, such as SELECT or WITH." },
-              { icon: ListFilter, lead: "1,000 rows by default:", text: "the row limit caps a result until you raise it." },
             ]}
           />
         }
       >
         <GuardLayers />
       </FeatureRow>
-
-      <FeatureRow
-        id="mk-q-refused"
-        title="A write never reaches the database"
-        body="Statements that write are refused in the editor, with the reason, before anything is sent."
-        more={
-          <RowPoints
-            items={[
-              { icon: Ban, lead: "Refused alike:", text: "DML, DDL, and CALL or EXEC." },
-              { icon: Workflow, lead: "To load a result,", text: "use the SELECT as the source in Transfer Studio." },
-              { icon: ListChecks, lead: "A query that worked here", text: "still goes through Validate before a load." },
-            ]}
-          />
-        }
-      >
-        <RefusalPanel />
-      </FeatureRow>
-
-      <FactGrid
-        id="mk-q-will"
-        title="What Query will and will not do"
-        body="It reads. It never writes, and it runs as you."
-        items={[
-          { icon: ShieldCheck, title: "Read-only on the server", body: "On PostgreSQL, MySQL, SQLite and Oracle, statements run in a read-only transaction." },
-          { icon: KeyRound, title: "Your role, saved connections", body: "Query runs under your workspace role, on saved connections. Credentials stay in the vault." },
-          { icon: ListFilter, title: "Capped by a row limit", body: "Results stop at the row limit unless you raise it, so a broad read stays small." },
-        ]}
-      />
     </StoryFrame>
   );
 }
@@ -483,13 +476,23 @@ export function DataPilotPage(p: PageProps) {
           <PilotScene example="users" />
         </StoryHero>
       }
-      related={[
-        { route: "product-mcp", label: "MCP server", body: "The same tools for Cursor and Claude" },
-        { route: "product-query", label: "Query", body: "Write the SQL yourself" },
-        { route: "product-jobs", label: "Job space", body: "The evidence Pilot reads from" },
-      ]}
       closing={{ title: "Ask your workspace a question", body: "Start free and ask Pilot about a saved connection or a finished job." }}
     >
+      <FeatureLinks
+        label="Related to Pilot"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "Pilot guide", body: "Tools, grounding and engines in the docs", route: "help-data-pilot" },
+          { icon: Server, label: "MCP server", body: "The same tools for Cursor and Claude", route: "product-mcp" },
+          { icon: Code, label: "Query", body: "Write the SQL yourself", route: "product-query" },
+          { icon: Gauge, label: "Job space", body: "The evidence Pilot reads from", route: "product-jobs" },
+        ]}
+      />
+
+      <BentoSection id="mk-pilot-ask" title="What you can ask about" lead="Pilot answers from your workspace, under your role.">
+        <PilotBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-pilot-loop"
         title="Answers come from tool results, not recollection"
@@ -498,8 +501,8 @@ export function DataPilotPage(p: PageProps) {
           <RowPoints
             items={[
               { icon: Info, lead: "An ungrounded answer", text: "is general guidance, not a fact about your workspace." },
+              { icon: FileSearch, lead: "For a number that matters,", text: "open the job, table or report it came from." },
               { icon: KeyRound, lead: "A viewer", text: "can ask questions but cannot reach a tool that changes anything." },
-              { icon: Server, lead: "With the local engine,", text: "no model provider is called." },
             ]}
             link={{ label: "Read the Pilot guide", route: "help-data-pilot", onNavigate: p.onNavigate }}
           />
@@ -508,60 +511,25 @@ export function DataPilotPage(p: PageProps) {
         <PilotLoop />
       </FeatureRow>
 
-      <FactGrid
-        id="mk-pilot-ask"
-        title="What you can ask about"
-        body="Pilot answers from your workspace, under your role."
-        items={[
-          { icon: Database, title: "A saved connection", body: "It runs a read-only query under your role, and shows you the SQL it ran." },
-          { icon: FileSearch, title: "A finished job", body: "It reads the run's statement and Trust Report, and answers from what they say." },
-          { icon: CalendarClock, title: "A change you want", body: "It stages a transfer or a schedule for you to confirm. Nothing runs before you do." },
-        ]}
-      />
-
       <FeatureRow
         id="mk-pilot-confirm"
         flip
         title="Nothing changes until you press Confirm"
-        body="A change is staged with a preview. Confirm checks your permission again and runs it once."
+        body="A change comes back staged, with a preview, and waits for you."
         more={
-          <dl className="mk-pilot-fig">
-            <div>
-              <dt>An approval expires after</dt>
-              <dd>15 minutes</dd>
-            </div>
-            <div>
-              <dt>and is good for</dt>
-              <dd>1 use</dd>
-            </div>
-          </dl>
+          <RowPoints
+            items={[
+              { icon: ListChecks, lead: "Staged changes", text: "come back in pending_actions until you confirm them." },
+              { icon: Workflow, lead: "A confirmed transfer", text: "passes Validate and appears in Job space like any other run." },
+            ]}
+          />
         }
       >
         <ConfirmChecks />
       </FeatureRow>
-
-      <TableSection id="mk-pilot-cannot" title="No tool exists for these" body="Pilot can word a result. It cannot change one.">
-        <CannotList />
-      </TableSection>
     </StoryFrame>
   );
 }
-
-const MCP_TOOLS: { tool: string; perm: string; effect: "read" | "plan" | "mutate" }[] = [
-  { tool: "list_connectors", perm: "connector.read", effect: "read" },
-  { tool: "explain_parity", perm: "job.read", effect: "read" },
-  { tool: "run_query", perm: "query.use", effect: "read" },
-  { tool: "plan_transfer", perm: "job.plan", effect: "plan" },
-  { tool: "start_transfer", perm: "job.run", effect: "mutate" },
-  { tool: "replay_quarantine", perm: "job.manage", effect: "mutate" },
-  { tool: "create_schedule", perm: "schedule.manage", effect: "mutate" },
-];
-
-const EFFECT: Record<"read" | "plan" | "mutate", { name: string; does: string }> = {
-  read: { name: "Read", does: "Reads workspace state. Changes nothing." },
-  plan: { name: "Plan", does: "Produces a proposal. Changes nothing." },
-  mutate: { name: "Staged", does: "Returns an ack_id and a preview. Does not act." },
-};
 
 export function McpServerPage(p: PageProps) {
   const act = actions(p, { label: "Security overview", onClick: () => p.onNavigate("security") });
@@ -575,13 +543,23 @@ export function McpServerPage(p: PageProps) {
           <McpScene />
         </StoryHero>
       }
-      related={[
-        { route: "product-pilot", label: "Pilot", body: "The same tools, inside the app" },
-        { route: "security", label: "Security", body: "Keys, roles, and the audit chain" },
-        { route: "enterprise", label: "Enterprise", body: "SSO, SCIM, and deployment options" },
-      ]}
       closing={{ title: "Connect an agent under a role", body: "Create a workspace API key with the role you choose, then add the server URL to your client." }}
     >
+      <FeatureLinks
+        label="Related to the MCP server"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: BookOpen, label: "MCP guide", body: "Connect a client, step by step", route: "help-mcp" },
+          { icon: MessageSquare, label: "Pilot", body: "The same tools, inside the app", route: "product-pilot" },
+          { icon: ShieldCheck, label: "Security", body: "Keys, roles and the audit chain", route: "security" },
+          { icon: Building2, label: "Enterprise", body: "SSO, SCIM and deployment options", route: "enterprise" },
+        ]}
+      />
+
+      <BentoSection id="mk-mcp-reach" title="What an agent can reach" lead="The tools Pilot uses, under the role on the agent's key.">
+        <McpBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-mcp-lanes"
         title="Stage, then confirm"
@@ -589,7 +567,6 @@ export function McpServerPage(p: PageProps) {
         more={
           <RowPoints
             items={[
-              { icon: Lock, lead: "Secrets stay on the server;", text: "the client gets only the ack_id and preview." },
               { icon: ListChecks, lead: "Confirmed transfers", text: "pass Validate and appear in Job space." },
               { icon: UserCheck, lead: "A client that confirms on its own", text: "takes the person out of the loop; give keys the lowest role." },
             ]}
@@ -600,36 +577,6 @@ export function McpServerPage(p: PageProps) {
         <McpLanes />
       </FeatureRow>
 
-      <TableSection id="mk-mcp-tools" title="Every tool needs the permission its API route needs" body="An excerpt of the tool list in the docs.">
-        <table className="mk-sb-table mk-mcp-tools">
-          <caption className="mk-sr-only">MCP tools, the permission each needs, and what it does (an excerpt)</caption>
-          <thead>
-            <tr>
-              <th scope="col">Tool</th>
-              <th scope="col">Permission</th>
-              <th scope="col">Kind</th>
-              <th scope="col">What it does</th>
-            </tr>
-          </thead>
-          <tbody>
-            {MCP_TOOLS.map((t) => (
-              <tr key={t.tool}>
-                <th scope="row">
-                  <code>{t.tool}</code>
-                </th>
-                <td>
-                  <code>{t.perm}</code>
-                </td>
-                <td>
-                  <span className="mk-status">{EFFECT[t.effect].name}</span>
-                </td>
-                <td>{EFFECT[t.effect].does}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </TableSection>
-
       <FeatureRow
         id="mk-mcp-key"
         flip
@@ -638,7 +585,6 @@ export function McpServerPage(p: PageProps) {
         more={
           <RowPoints
             items={[
-              { icon: KeyRound, lead: "Viewer keys", text: "get read tools; Operator keys can also run and cancel jobs." },
               { icon: Power, lead: "An admin", text: "can turn MCP off, or limit it to a list of tools." },
               { icon: Gauge, lead: "Calls are rate limited,", text: "and recent calls are listed on the MCP page." },
             ]}
@@ -648,23 +594,27 @@ export function McpServerPage(p: PageProps) {
         <McpKeyPanel />
       </FeatureRow>
 
-      <TableSection id="mk-mcp-setup" title="The confirmation model" body="Each rule, and where the docs state it.">
-        <RulesTable
-          caption="The MCP confirmation model, and where the docs state each rule"
-          items={[
-            { claim: "A staged action does nothing until confirm_action is called with its ack_id", where: "Docs, MCP: the confirmation model" },
-            { claim: "An approval expires 15 minutes after staging and is used once", where: "Docs, MCP" },
-            { claim: "At confirm time, the permission for that action is checked again", where: "Docs, MCP" },
-            { claim: "An API key never acts with more than the person who created it holds today", where: "Docs, MCP: permissions" },
-          ]}
-        />
-      </TableSection>
+      <CodeBand
+        id="mk-mcp-api"
+        title="Connect a client"
+        body="Add the server URL and a workspace API key to your MCP client. Discovery needs no key; running a tool does."
+        points={[
+          "Without a key, running a tool answers 401 with a WWW-Authenticate challenge.",
+          "Each tool's full JSON schema comes from GET /api/v1/mcp/tools.",
+          "OAuth resource metadata is published at /.well-known/oauth-protected-resource.",
+        ]}
+        snippets={[
+          { label: "Client config", code: MCP_CLIENT_CONFIG, source: "Docs, MCP guide: connect Cursor" },
+          { label: "Discover", code: MCP_DISCOVER, source: "Docs, MCP: connecting (no token needed)" },
+        ]}
+        cardLabel="MCP examples from the docs"
+      />
     </StoryFrame>
   );
 }
 
 export function MigrationsSolutionPage(p: PageProps) {
-  const act = actions(p, { label: "Request a pilot", onClick: () => p.onNavigate("contact") });
+  const act = actions(p, { label: SALES_CTA_LABEL, onClick: () => p.onNavigate("contact") });
   return (
     <StoryFrame
       page="mig"
@@ -675,21 +625,35 @@ export function MigrationsSolutionPage(p: PageProps) {
           <TransferScene migration initial="Map" example="migration" />
         </StoryHero>
       }
-      related={[
-        { route: "product-transfer", label: "Transfer Studio", body: "Plan and approve the move" },
-        { route: "product-jobs", label: "Job space", body: "The run's evidence" },
-        { route: "solution-warehouse", label: "Warehouse loading", body: "Bulk loads into Snowflake, BigQuery, and Iceberg" },
-      ]}
       closing={{ title: "Plan your cutover with evidence", body: "Start free with a subset of your data and review the plan before anything is written." }}
     >
+      <FeatureLinks
+        label="Related to migrations"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: Workflow, label: "Transfer Studio", body: "Plan and approve the move", route: "product-transfer" },
+          { icon: Gauge, label: "Job space", body: "The load's evidence and sign-off", route: "product-jobs" },
+          { icon: BookOpen, label: "Sign-off guide", body: "How a Trust Report is signed", route: "help-job-theater" },
+          { icon: Database, label: "Warehouse loading", body: "Bulk loads into Snowflake, BigQuery and Iceberg", route: "solution-warehouse" },
+        ]}
+      />
+
+      <BentoSection
+        id="mk-mig-rows"
+        title="Where every row of the cutover load went"
+        lead="Read equals landed plus held plus skipped, so no row leaves the old system unaccounted for."
+      >
+        <MigrationBento />
+      </BentoSection>
+
       <TableSection id="mk-mig-door" title="Cutover is a one-way door" body="Once applications point at the new system, a missing key is a production incident. Plan it so every step leaves a record.">
         <CutoverTable />
       </TableSection>
 
       <FeatureRow
         id="mk-mig-sign"
-        title="Sign the destination, not a spreadsheet of counts"
-        body="The cutover is signed on the Trust Report: the statement, the check that ran, and the verdict."
+        title="Sign the cutover on its Trust Report"
+        body="The statement, the check that ran and the verdict, signed by each role before applications move."
         more={
           <RowPoints
             items={[
@@ -726,11 +690,12 @@ export function MigrationsSolutionPage(p: PageProps) {
         <RulesTable
           caption="Migration details, and where to see each one"
           whereLabel="Where to see it"
+          onNavigate={p.onNavigate}
           items={[
             { claim: "Sequences, foreign keys, CHECK constraints, and indexes carry on create-new, in dependency order", where: "Transfer Studio, Destination: create new table" },
             { claim: "Unicode text keeps its encoding; collation-aware key checks run in Validate", where: "Validate step" },
             { claim: "Timestamps are compared at the precision the destination column holds", where: "Docs, Verification: known causes of a difference" },
-            { claim: "Held rows keep column, value, and reason, and replay into the same table", where: "Job space, Quarantine" },
+            { claim: "Held rows keep column, value, and reason, and replay into the same table", where: "Job space guide: fix and replay", route: "help-job-theater" },
           ]}
         />
       </TableSection>
@@ -750,13 +715,23 @@ export function WarehouseSolutionPage(p: PageProps) {
           <WarehouseScene />
         </StoryHero>
       }
-      related={[
-        { route: "solution-sync", label: "Recurring sync", body: "Keep the warehouse current" },
-        { route: "integrations", label: "Connectors", body: "Warehouses, lakes, and object storage" },
-        { route: "product-jobs", label: "Job space", body: "Each load's evidence" },
-      ]}
       closing={{ title: "Load a warehouse on your own data", body: "Start free on the same engine your production loads will use." }}
     >
+      <FeatureLinks
+        label="Related to warehouse loading"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: Plug, label: "Connectors", body: "Warehouses, lakes and object storage", route: "integrations" },
+          { icon: ListChecks, label: "Validate guide", body: "What is checked before a load", route: "help-preflight-gates" },
+          { icon: Repeat, label: "Recurring sync", body: "Keep the warehouse current", route: "solution-sync" },
+          { icon: Gauge, label: "Job space", body: "Each load's evidence", route: "product-jobs" },
+        ]}
+      />
+
+      <BentoSection id="mk-wh-checked" title="How a warehouse load is checked" lead="Before the load window on the real warehouse, and afterwards by the warehouse's own engine.">
+        <WarehouseBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-wh-prec"
         title="A load can succeed and still lose a cent"
@@ -766,47 +741,13 @@ export function WarehouseSolutionPage(p: PageProps) {
             items={[
               { icon: Ruler, lead: "Population fit", text: "checks DECIMAL(p,s) and VARCHAR(n) on this run's rows." },
               { icon: Braces, lead: "A JSON number", text: "the destination would store differently is refused first." },
+              { icon: TableProperties, lead: "A new table", text: "is created on first write, from DDL you approve in Validate." },
             ]}
             link={{ label: "Read what Validate checks", route: "help-preflight-gates", onNavigate: p.onNavigate }}
           />
         }
       >
         <PrecisionSpecimen />
-      </FeatureRow>
-
-      <FeatureRow
-        id="mk-wh-types"
-        flip
-        title="Exact types, the same map as any route"
-        body="Decimals and timestamps keep their precision, and JSON lands as a semi-structured column."
-        more={
-          <RowPoints
-            items={[
-              { icon: Clock, lead: "Timestamps", text: "are compared at the precision the destination column holds." },
-              { icon: TableProperties, lead: "A new table", text: "is created on first write, from DDL you approve in Validate." },
-              { icon: Undo2, lead: "Reversibility", text: "shows whether each column can give the source value back." },
-            ]}
-          />
-        }
-      >
-        <TypeMapping />
-      </FeatureRow>
-
-      <FeatureRow
-        id="mk-wh-upsert"
-        title="Upserts by key, checked first"
-        body="Duplicate keys already in the destination block an upsert at Validate, before the load window."
-        more={
-          <RowPoints
-            items={[
-              { icon: Database, lead: "Rows only in the destination", text: "are left alone." },
-              { icon: KeyRound, lead: "No key, no upsert:", text: "Validate refuses the mode when the stream names none." },
-              { icon: Repeat, lead: "A retried batch", text: "updates the same rows rather than adding them twice." },
-            ]}
-          />
-        }
-      >
-        <UpsertCheck />
       </FeatureRow>
 
       <TableSection id="mk-wh-rules" title="Warehouse specifics" body="How each warehouse connects and how upserts are written.">
@@ -817,7 +758,7 @@ export function WarehouseSolutionPage(p: PageProps) {
             { claim: "Snowflake connects with a password or key-pair authentication", where: "Connectors, Snowflake" },
             { claim: "Iceberg connects to a REST catalog or a filesystem warehouse", where: "Connectors, Apache Iceberg" },
             { claim: "Upserts use MERGE, or a keyed delete and insert, with no index created", where: "Docs, Sync modes: upsert" },
-            { claim: "Duplicate keys already in the destination block an upsert", where: "Docs, Sync modes: upsert" },
+            { claim: "Rows only in the destination are left alone by an upsert", where: "Docs, Sync modes: upsert" },
           ]}
         />
       </TableSection>
@@ -842,13 +783,19 @@ export function SyncSolutionPage(p: PageProps) {
           <SyncScene />
         </StoryHero>
       }
-      related={[
-        { route: "product-pipelines", label: "Schedules", body: "Cadence, history, and drift review" },
-        { route: "solution-warehouse", label: "Warehouse loading", body: "Bulk loads into a warehouse" },
-        { route: "product-jobs", label: "Job space", body: "Each run's evidence" },
-      ]}
       closing={{ title: "Keep a copy in step", body: "Start free with a schedule on your own connections." }}
     >
+      <FeatureLinks
+        label="Related to recurring sync"
+        onNavigate={p.onNavigate}
+        items={[
+          { icon: CalendarClock, label: "Schedules", body: "Cadence, history and drift review", route: "product-pipelines" },
+          { icon: BookOpen, label: "Sync modes guide", body: "Every mode and what it needs", route: "help-pipelines" },
+          { icon: Database, label: "Warehouse loading", body: "Bulk loads into a warehouse", route: "solution-warehouse" },
+          { icon: Gauge, label: "Job space", body: "Each run's evidence", route: "product-jobs" },
+        ]}
+      />
+
       <TableSection id="mk-sync-drift" title="Two systems that agree on Monday disagree by Friday" body="Three ways a copy drifts, and what keeps it in step.">
         <table className="mk-sb-table mk-sync-fixes">
           <caption className="mk-sr-only">How a copy drifts, and what keeps it in step</caption>
@@ -869,6 +816,10 @@ export function SyncSolutionPage(p: PageProps) {
         </table>
       </TableSection>
 
+      <BentoSection id="mk-sync-read" title="Choose how each run reads" lead="The mode is set once, in the approved transfer.">
+        <SyncBento />
+      </BentoSection>
+
       <FeatureRow
         id="mk-sync-delete"
         title="A delete at the source, carried to the copy"
@@ -887,19 +838,7 @@ export function SyncSolutionPage(p: PageProps) {
         <MirrorDeletePanel />
       </FeatureRow>
 
-      <FactGrid
-        id="mk-sync-read"
-        title="Choose how each run reads"
-        body="The mode is set once, in the approved transfer."
-        items={[
-          { icon: GitCompareArrows, title: "CDC", body: "Reads changes from the database log, deletes included, and applies them by key." },
-          { icon: ListFilter, title: "A typed cursor", body: "Reads new and changed rows past the last run's cursor, and updates them in place by key." },
-          { icon: Trash2, title: "Mirror", body: "Flags rows gone from the source with _deleted and _deleted_at, and keeps them." },
-        ]}
-      />
-
-      <TableSection id="mk-sync-cdc" title="CDC from the database log" body="A consistent snapshot first, then changes from the log, deletes included. Proven in CI on these sources:">
-        <CdcSources />
+      <TableSection id="mk-sync-cdc" title="What CDC refuses" body="A consistent snapshot first, then changes from the log. Where it cannot do that, it says so.">
         <RulesTable
           caption="What CDC refuses, and where the docs say so"
           ruleLabel="What CDC refuses"

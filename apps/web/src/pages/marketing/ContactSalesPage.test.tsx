@@ -35,8 +35,18 @@ describe("contactSalesError", () => {
 describe("ContactSalesPage", () => {
   it("renders the form (not the success panel) before a submission", () => {
     const markup = renderToStaticMarkup(createElement(ContactSalesPage, { onNavigate: () => {} }));
-    assert.match(markup, /Request a pilot/);
+    assert.match(markup, /Send request/);
     assert.doesNotMatch(markup, /Request received/);
+  });
+
+  it("keeps the submit button enabled so an incomplete form can say what is missing", () => {
+    const markup = renderToStaticMarkup(createElement(ContactSalesPage, { onNavigate: () => {} }));
+    assert.doesNotMatch(markup, /<button type="submit"[^>]*disabled/);
+  });
+
+  it("does not repeat the home page's example run (it belongs to Home and Job space)", () => {
+    const markup = renderToStaticMarkup(createElement(ContactSalesPage, { onNavigate: () => {} }));
+    assert.doesNotMatch(markup, /48,213,906/);
   });
 });
 

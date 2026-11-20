@@ -1,9 +1,10 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from "react";
-import { BadgeCheck, CircleDashed, FileCode2, FileText, FlaskConical, Handshake, ShieldCheck, type LucideIcon } from "lucide-react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
 import { QuarantinePanel, ROLES, StatusGlyph } from "../../components/marketing/ProductPanels";
+import { Bento, BentoTile, type TileSpan } from "../../components/marketing/kit/Bento";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
 import { ProofsShowcase, SettingsShowcase, SignOffShowcase } from "./MarketingSubpageScenes";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
@@ -24,7 +25,7 @@ import {
 } from "../../lib/provenEvidence";
 import { hashForPublicRoute, type PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
-import { ContactSalesPage } from "./ContactSalesPage";
+import { ContactSalesPage, SALES_ACTION_LABEL, START_ACTION_LABEL } from "./ContactSalesPage";
 import { DemosPage } from "./DemosPage";
 import { LegalPage } from "./LegalPages";
 import { StatusPage, SubprocessorsPage } from "./TrustPages";
@@ -62,7 +63,7 @@ export function MarketingSubpage({ route, onGetStarted, onNavigate }: { route: P
     case "customers":
       return <ProofPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "contact":
-      return <ContactSalesPage onNavigate={onNavigate} />;
+      return <ContactSalesPage onNavigate={onNavigate} onGetStarted={onGetStarted} />;
     case "privacy":
       return <LegalPage kind="privacy" />;
     case "terms":
@@ -76,7 +77,7 @@ export function MarketingSubpage({ route, onGetStarted, onNavigate }: { route: P
     case "security":
       return <SecurityPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "help":
-      return <DocsPortal onNavigate={onNavigate} onGetStarted={onGetStarted} />;
+      return <DocsPortal onNavigate={onNavigate} onGetStarted={onGetStarted} marketing />;
     case "product-transfer":
       return <TransferStudioPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "product-jobs":
@@ -92,7 +93,7 @@ export function MarketingSubpage({ route, onGetStarted, onNavigate }: { route: P
     case "integrations":
       return <IntegrationsPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "demos":
-      return <DemosPage onNavigate={onNavigate} />;
+      return <DemosPage onNavigate={onNavigate} onGetStarted={onGetStarted} />;
     case "solution-migrations":
       return <MigrationsSolutionPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "solution-warehouse":
@@ -106,10 +107,10 @@ export function MarketingSubpage({ route, onGetStarted, onNavigate }: { route: P
 
 /* ------------------------------------------------------------------ Shared */
 /*
- * Pricing, Enterprise, Proof, Security, and Connectors share one structure:
- * a left-aligned hero with one light frame under it, three or four body
- * sections (a feature row, a three-column grid of facts, or a table), and the
- * closing section. One card style, ink links, no dark bands.
+ * Pricing, Enterprise, Proof, Security, and Connectors share one structure
+ * (pass 7 kit): a split hero with one light frame under it, body sections
+ * headed by SplitHead (a feature row, a bento of tiles, or a table), and the
+ * CtaCard closer. Ink links, no dark bands.
  */
 
 type Action = { label: string; onClick: () => void };
@@ -185,7 +186,7 @@ function Hero({
   );
 }
 
-/** A body section: an h2, a one-line lead, then a grid of facts or a table. */
+/** A body section: a split head (h2 left, one line right), then tiles or a table. */
 function Section({
   id,
   title,
@@ -200,12 +201,9 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className={`mk-a-section ${className}`.trim()} aria-labelledby={id}>
+    <section className={`mk-a-section mk-kit-sec ${className}`.trim()} aria-labelledby={id}>
       <div className="mk-wrap">
-        <header className="mk-a-head">
-          <h2 id={id}>{title}</h2>
-          {lead ? <p>{lead}</p> : null}
-        </header>
+        <SplitHead id={id} title={title} lead={lead} />
         {children}
       </div>
     </section>
@@ -242,20 +240,44 @@ function RowSection({
   );
 }
 
-type Fact = { title: ReactNode; body: ReactNode; icon: LucideIcon; key: string };
+type Fact = {
+  key: string;
+  title: ReactNode;
+  body: ReactNode;
+  /** A fragment of the real product UI at the tile's foot, from repo data. */
+  ui?: ReactNode;
+  span?: TileSpan;
+  figure?: ReactNode;
+  op?: "+" | "=";
+};
 
-/** Three short facts: a 20px line icon, a 16px title, two lines of text. */
-function Facts({ items }: { items: Fact[] }) {
+/** Parallel facts as a bento: one tile each, its UI fragment at the foot. */
+function FactTiles({ label, items }: { label: string; items: Fact[] }) {
   return (
-    <ul className="mk-a-facts">
-      {items.map(({ key, title, body, icon: Icon }) => (
-        <li key={key}>
-          <Icon className="mk-a-fact-icon" size={20} strokeWidth={1.6} aria-hidden />
-          <h3>{title}</h3>
-          <p>{body}</p>
-        </li>
+    <Bento label={label}>
+      {items.map(({ key, title, body, ui, span = 4, figure, op }) => (
+        <BentoTile key={key} span={span} title={title} body={body} figure={figure} op={op}>
+          {ui}
+        </BentoTile>
       ))}
-    </ul>
+    </Bento>
+  );
+}
+
+/** A row of connector chips, as the app draws a route's systems. */
+function DriverChips({ drivers, more = 0, label }: { drivers: CatalogConnector[]; more?: number; label: string }) {
+  return (
+    <div className="mk-app-surface mk-tui">
+      <ul className="mk-a-tui-chips" aria-label={label}>
+        {drivers.map((d) => (
+          <li key={d.driver} className="mk-app-chip">
+            <ConnectorIcon id={d.driver} size={14} />
+            {d.name}
+          </li>
+        ))}
+        {more > 0 ? <li className="mk-a-tui-more">and {more} more</li> : null}
+      </ul>
+    </div>
   );
 }
 
@@ -308,6 +330,11 @@ const PLAN_GROUPS: { id: string; title: string; rows: typeof PLAN_ROWS }[] = [
   { id: "enterprise", title: "Added in Enterprise", rows: PLAN_ROWS.filter((r) => r.in.length === 1) },
 ];
 
+/**
+ * The three plans. No price is invented: Starter is free in early access,
+ * Team is quoted, Enterprise is agreed in an order form. Each card says who
+ * it is for and what it adds; Team is the one recommended card.
+ */
 const PLANS: {
   tier: Tier;
   name: string;
@@ -316,35 +343,40 @@ const PLANS: {
   who: string;
   adds: string;
   highlights: string[];
+  action: "start" | "sales" | "enterprise";
+  recommended?: string;
 }[] = [
   {
     tier: "starter",
     name: "Starter",
     figure: "Free",
     qualifier: "while in early access",
-    who: "For one person or a small team moving data they need to trust.",
+    who: "One person or a small team, trying the whole load path.",
     adds: "The whole load path",
     highlights: [
       "Plan, checks, quarantine, and read-back on every run",
       "A signed proof pack you can verify",
       `${provenDriversPhrase()}, more implemented`,
     ],
+    action: "start",
   },
   {
     tier: "team",
     name: "Team",
     figure: "Talk to us",
-    qualifier: "agreed with each customer",
-    who: "For a data team that runs loads on a schedule.",
+    qualifier: "quoted on what you move and how often",
+    who: "A data team that runs loads on a schedule.",
     adds: "Everything in Starter, plus",
     highlights: ["Schedules and change data capture", "Datawrap Pilot", "A shared workspace with four roles"],
+    action: "sales",
+    recommended: "Recommended for data teams",
   },
   {
     tier: "enterprise",
     name: "Enterprise",
-    figure: "Talk to us",
-    qualifier: "agreed with each customer",
-    who: "For organisations with identity, key, and residency requirements.",
+    figure: "Custom",
+    qualifier: "terms agreed in an order form",
+    who: "Organizations with identity, key, and residency requirements.",
     adds: "Everything in Team, plus",
     highlights: [
       "SSO, SCIM, and your own key on connector secrets",
@@ -352,15 +384,21 @@ const PLANS: {
       "MCP server for agents",
       "Self-managed deployment in your cloud or VPC",
     ],
+    action: "enterprise",
   },
 ];
 
 function PricingPage({ onGetStarted, onNavigate }: Nav) {
-  const start = { label: "Start free", onClick: onGetStarted };
-  const sales = { label: "Contact sales", onClick: () => onNavigate("contact") };
+  const start = { label: START_ACTION_LABEL, onClick: onGetStarted };
+  const sales = { label: SALES_ACTION_LABEL, onClick: () => onNavigate("contact") };
+  const actions: Record<(typeof PLANS)[number]["action"], Action> = {
+    start,
+    sales,
+    enterprise: { label: "See what Enterprise adds", onClick: () => onNavigate("enterprise") },
+  };
   return (
     <div className="mk-page mk-a mk-pr">
-      {/* The plan cards carry the two actions, so the hero has none of its own. */}
+      {/* The plan cards carry the actions, so the hero has none of its own. */}
       <Hero
         id="mk-pr-title"
         title="Start free. Talk to us when a team depends on it."
@@ -368,33 +406,43 @@ function PricingPage({ onGetStarted, onNavigate }: Nav) {
       >
         <h2 className="mk-sr-only">Plans</h2>
         <ol className="mk-pr-plans">
-          {PLANS.map((plan) => (
-            <li key={plan.tier} className="mk-a-card mk-pr-plan">
-              <h3>{plan.name}</h3>
-              <p className="mk-pr-who">{plan.who}</p>
-              <p className="mk-pr-price">
-                <span className="mk-pr-figure">{plan.figure}</span>
-                <span className="mk-pr-qual">{plan.qualifier}</span>
-              </p>
-              <button
-                type="button"
-                className={`mk-btn mk-btn--lg mk-pr-cta ${plan.tier === "starter" ? "mk-btn--primary" : "mk-btn--secondary"}`}
-                onClick={plan.tier === "starter" ? start.onClick : sales.onClick}
+          {PLANS.map((plan) => {
+            const act = actions[plan.action];
+            return (
+              <li
+                key={plan.tier}
+                className={`mk-pr-plan${plan.recommended ? " is-recommended" : ""}`}
+                aria-labelledby={`mk-pr-plan-${plan.tier}`}
               >
-                {plan.tier === "starter" ? start.label : sales.label}
-                <span className="mk-sr-only"> for {plan.name}</span>
-              </button>
-              <p className="mk-pr-adds">{plan.adds}</p>
-              <ul className="mk-a-checks">
-                {plan.highlights.map((h) => (
-                  <li key={h}>
-                    <StatusGlyph kind="landed" />
-                    {h}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
+                <div className="mk-pr-plan-head">
+                  <h3 id={`mk-pr-plan-${plan.tier}`}>{plan.name}</h3>
+                  {plan.recommended ? <p className="mk-pr-badge">{plan.recommended}</p> : null}
+                </div>
+                <p className="mk-pr-who">{plan.who}</p>
+                <p className="mk-pr-price">
+                  <span className="mk-pr-figure">{plan.figure}</span>
+                  <span className="mk-pr-qual">{plan.qualifier}</span>
+                </p>
+                <p className="mk-pr-adds">{plan.adds}</p>
+                <ul className="mk-a-checks">
+                  {plan.highlights.map((h) => (
+                    <li key={h}>
+                      <StatusGlyph kind="landed" />
+                      {h}
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className={`mk-btn mk-btn--lg mk-pr-cta ${plan.recommended ? "mk-btn--primary" : "mk-btn--secondary"}`}
+                  onClick={act.onClick}
+                >
+                  {act.label}
+                  <span className="mk-sr-only"> ({plan.name} plan)</span>
+                </button>
+              </li>
+            );
+          })}
         </ol>
       </Hero>
 
@@ -562,8 +610,8 @@ const SPEC: { group: string; rows: [string, string][] }[] = [
 ];
 
 function EnterprisePage({ onNavigate }: Nav) {
-  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
-  const security = { label: "Security overview", onClick: () => onNavigate("security") };
+  const pilot = { label: SALES_ACTION_LABEL, onClick: () => onNavigate("contact") };
+  const security = { label: "Read the security overview", onClick: () => onNavigate("security") };
   return (
     <div className="mk-page mk-a mk-ent">
       <Hero
@@ -580,12 +628,10 @@ function EnterprisePage({ onNavigate }: Nav) {
         title="Hosted or self-managed"
         lead="The same engine either way. What changes is where data, keys, and audit live."
       >
-        <div className="mk-ent-estates">
+        <Bento label="Hosted and self-managed deployment" className="mk-ent-estates">
           {ESTATES.map((e) => (
-            <article key={e.id} className="mk-a-card mk-ent-estate" aria-labelledby={`mk-ent-estate-${e.id}`}>
-              <h3 id={`mk-ent-estate-${e.id}`}>{e.name}</h3>
-              <p className="mk-ent-estate-plan">{e.plan}</p>
-              <dl className="mk-a-dl">
+            <BentoTile key={e.id} span={6} title={e.name} body={e.plan}>
+              <dl className="mk-a-dl mk-ent-estate-dl">
                 {e.rows.map(([k, v]) => (
                   <div key={k}>
                     <dt>{k}</dt>
@@ -593,9 +639,9 @@ function EnterprisePage({ onNavigate }: Nav) {
                   </div>
                 ))}
               </dl>
-            </article>
+            </BentoTile>
           ))}
-        </div>
+        </Bento>
       </Section>
 
       <Section
@@ -662,35 +708,33 @@ function EnterprisePage({ onNavigate }: Nav) {
       </Section>
 
       <Section id="mk-ent-buy-title" title="Buying Datawrap" lead="A pilot first, then the paperwork your procurement team asks for.">
-        <Facts
+        <FactTiles
+          label="Buying Datawrap"
           items={[
             {
               key: "pilot",
-              icon: FlaskConical,
               title: "A pilot on your own data",
               body: "One scoped load, your source to your destination, ending in a signed proof pack you keep.",
             },
             {
               key: "dpa",
-              icon: FileText,
               title: "DPA and subprocessor list",
               body: (
                 <>
-                  Both on request:{" "}
-                  <a className="mk-link" href="mailto:contact@datawrap.io?subject=DPA%20request">
-                    request the DPA
-                  </a>{" "}
-                  or{" "}
-                  <a className="mk-link" href="mailto:contact@datawrap.io?subject=Subprocessor%20list">
-                    the subprocessor list
-                  </a>{" "}
-                  from contact@datawrap.io.
+                  We email both on request. See what the{" "}
+                  <PageLink to="dpa" onNavigate={onNavigate}>
+                    data processing addendum
+                  </PageLink>{" "}
+                  covers and the{" "}
+                  <PageLink to="subprocessors" onNavigate={onNavigate}>
+                    subprocessor categories
+                  </PageLink>
+                  .
                 </>
               ),
             },
             {
               key: "terms",
-              icon: Handshake,
               title: "Commercial terms",
               body: (
                 <>
@@ -805,7 +849,7 @@ function ProofDesk() {
   if (!group) return null;
   return (
     <div className="mk-proof-desk">
-      <div className="mk-a-chips" role="tablist" aria-label="CI job groups" onKeyDown={onKey}>
+      <div className="mk-proof-tabs" role="tablist" aria-label="CI job groups" aria-orientation="vertical" onKeyDown={onKey}>
         {PROOF_GROUPS.map((g, i) => (
           <button
             key={`${g.jobs.join(",")}-${g.emulated}`}
@@ -818,10 +862,14 @@ function ProofDesk() {
             aria-selected={i === active}
             aria-controls="mk-proof-panel"
             tabIndex={i === active ? 0 : -1}
-            className="mk-a-chip"
+            className="mk-proof-tab"
             onClick={() => setActive(i)}
           >
-            {groupLabel(g)}
+            <span className="mk-proof-tab-name">{groupLabel(g)}</span>
+            <span className="mk-proof-tab-meta">
+              {g.drivers.length} {g.drivers.length === 1 ? "driver" : "drivers"}, {fmt.format(g.executed)} tests
+              {g.emulated ? ", on an emulator" : ""}
+            </span>
           </button>
         ))}
       </div>
@@ -832,59 +880,84 @@ function ProofDesk() {
   );
 }
 
+const LIVE_DRIVERS = ALL_CONNECTORS.filter((c) => c.proven && !c.emulated);
+const EMULATED_CONNECTORS = ALL_CONNECTORS.filter((c) => c.emulated);
+const IMPLEMENTED_DRIVERS = ALL_CONNECTORS.filter((c) => !c.proven);
+
+/*
+ * Proof (#/customers): Datawrap is in early access and no design partner has
+ * agreed to be named, so this page carries no logos or quotes. It shows the
+ * evidence a buyer can check instead, and says so in the lead.
+ */
 function ProofPage({ onNavigate }: Nav) {
-  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
+  const pilot = { label: SALES_ACTION_LABEL, onClick: () => onNavigate("contact") };
   const connectors = { label: "See connectors", onClick: () => onNavigate("integrations") };
   return (
     <div className="mk-page mk-a mk-proof">
       <Hero
         id="mk-proof-title"
-        title="Evidence you can check yourself."
-        lead="Every connector claim is generated from a CI run, not typed by hand."
+        title="Proof you can check yourself."
+        lead="Datawrap is in early access, so this page shows evidence rather than logos: every connector claim is generated from a CI run, not typed by hand."
         actions={<Actions primary={pilot} secondary={connectors} />}
       >
         <ProofsShowcase caption={`The Proofs screen, filled with this page's CI evidence, recorded ${EVIDENCE_AS_OF}.`} />
       </Hero>
 
-      <Section id="mk-proof-sum" title="The catalogue, accounted for" lead={`${CATALOG_TOTAL} drivers in the catalogue, each counted once.`}>
-        <Facts
+      <Section
+        id="mk-proof-sum"
+        title={`${CATALOG_TOTAL} drivers, each counted once`}
+        lead="Every driver in the catalog sits in exactly one of three states, and the three add up to the catalog."
+      >
+        <FactTiles
+          label={`${LIVE_PROVEN} + ${EMULATED_DRIVERS.length} + ${IMPLEMENTED} = ${CATALOG_TOTAL} drivers`}
           items={[
             {
               key: "live",
-              icon: ShieldCheck,
-              title: `${LIVE_PROVEN} proven against the live engine`,
+              figure: LIVE_PROVEN,
+              title: "Proven on the live engine",
               body: "Each ran green in CI, with no skipped test.",
+              ui: <DriverChips label="Some of the drivers proven on the live engine" drivers={LIVE_DRIVERS.slice(0, 5)} more={LIVE_DRIVERS.length - 5} />,
             },
             {
               key: "emulated",
-              icon: FlaskConical,
-              title: `${EMULATED_DRIVERS.length} proven on an emulator`,
-              body: `${EMULATED_DRIVERS.join(" and ")}. That proves the load, MERGE, and read-back logic, not a production account; a pilot proves that.`,
+              figure: EMULATED_DRIVERS.length,
+              op: "+",
+              title: "Proven on an emulator",
+              body: "An emulator proves the load, MERGE, and read-back logic, not a production account; a pilot proves that.",
+              ui: <DriverChips label="Drivers proven on an emulator" drivers={EMULATED_CONNECTORS} />,
             },
             {
               key: "implemented",
-              icon: CircleDashed,
-              title: `${IMPLEMENTED} implemented, proof running`,
-              body: "Implemented in the engine and running their CI proof. None is counted as proven yet.",
+              figure: IMPLEMENTED,
+              op: "+",
+              title: "Implemented, proof running",
+              body: "In the engine and running their CI proof. None is counted as proven yet.",
+              ui: (
+                <DriverChips
+                  label="Some of the implemented drivers"
+                  drivers={IMPLEMENTED_DRIVERS.slice(0, 3)}
+                  more={IMPLEMENTED_DRIVERS.length - 3}
+                />
+              ),
             },
           ]}
         />
       </Section>
 
-      <RowSection
+      <Section
         id="mk-proof-jobs"
         title="Read one CI job's evidence"
-        lead="Choose a job to see the drivers it proves and the tests behind them."
-        copy={
-          <p className="mk-a-row-note">
+        lead={
+          <>
             A CI job runs a whole suite, so the drivers it proves share its test total.{" "}
             <PageLink to="integrations" onNavigate={onNavigate}>
               Every driver, by family
             </PageLink>
-          </p>
+          </>
         }
-        visual={<ProofDesk />}
-      />
+      >
+        <ProofDesk />
+      </Section>
 
       <RowSection
         id="mk-proof-pack"
@@ -1032,12 +1105,12 @@ function ArchitectureWide({ mid }: { mid: string }) {
     ["An agent over MCP", 545, 150],
   ];
   return (
-    <svg className="mk-sec-svg mk-sec-svg--wide" viewBox="0 0 760 620" aria-hidden focusable="false">
+    <svg className="mk-sec-svg mk-sec-svg--wide" viewBox="-32 0 824 620" aria-hidden focusable="false">
       <Markers arrow={arrow} held={held} />
 
       {callers.map(([t, cx, w]) => (
         <g key={t} className="mk-sec-caller">
-          <path d={`M${cx} 36C${cx} 62 380 54 380 72`} className="mk-sec-line mk-sec-line--thin" />
+          <path d={`M${cx} 36C${cx} 50 380 42 380 52`} className="mk-sec-line mk-sec-line--thin" />
           <rect x={cx - w / 2} y={6} width={w} height={30} rx={15} />
           <text x={cx} y={26} textAnchor="middle" className="mk-sec-t mk-sec-t--s">
             {t}
@@ -1045,9 +1118,11 @@ function ArchitectureWide({ mid }: { mid: string }) {
         </g>
       ))}
 
+      {/* The identity check sits on its own row, above the boundary it guards. */}
+      <path d="M380 68V80" className="mk-sec-line mk-sec-line--thin" />
       <Frame x={130} y={80} w={500} h={470} name="Identity" note="SSO, SCIM, four roles" tone="identity" labelW={226} />
-      <circle cx={380} cy={80} r={8} className="mk-sec-gate" />
-      <path d="M376 80.5l3 3 5-6" className="mk-sec-gate-mark" />
+      <circle cx={380} cy={60} r={8} className="mk-sec-gate" />
+      <path d="M376 60.5l3 3 5-6" className="mk-sec-gate-mark" />
 
       <Frame x={160} y={120} w={440} h={398} name="Workspace" note="every read scoped to it" tone="workspace" labelW={240} />
 
@@ -1060,8 +1135,8 @@ function ArchitectureWide({ mid }: { mid: string }) {
 
       <path d="M120 234H278" className="mk-sec-line mk-sec-line--data" markerEnd={`url(#${arrow})`} />
       <path d="M480 234H638" className="mk-sec-line mk-sec-line--data" markerEnd={`url(#${arrow})`} />
-      <Box x={4} y={204} w={116} h={60} lines={["Your source"]} tone="is-ext" />
-      <Box x={640} y={204} w={116} h={60} lines={["Your destination"]} tone="is-ext" />
+      <Box x={-30} y={204} w={150} h={60} lines={["Your source"]} tone="is-ext" />
+      <Box x={640} y={204} w={150} h={60} lines={["Your destination"]} tone="is-ext" />
       <text x={212} y={224} className="mk-sec-t mk-sec-t--s mk-sec-t--muted">
         rows
       </text>
@@ -1257,18 +1332,9 @@ const SEC_CONTROLS: { control: string; boundary: string; does: string; always: b
   },
 ];
 
-const DEPLOY_ROWS: { what: string; hosted: string; self: string }[] = [
-  { what: "Where it runs", hosted: "Datawrap's account", self: "Your cloud or VPC" },
-  { what: "Where jobs and audit events live", hosted: "Your workspace, in Datawrap's account", self: "Your own MongoDB" },
-  { what: "Connector credentials and evidence", hosted: "Encrypted in your workspace", self: "Stay in your account" },
-  { what: "Deployment", hosted: "Nothing to install", self: "Two images, with Docker Compose or Helm" },
-  { what: "Your own KMS key on connector secrets", hosted: "Enterprise plan", self: "Enterprise plan" },
-  { what: "Plan", hosted: "Every plan", self: "Enterprise" },
-];
-
 function SecurityPage({ onNavigate }: Nav) {
-  const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
-  const enterprise = { label: "Enterprise", onClick: () => onNavigate("enterprise") };
+  const pilot = { label: SALES_ACTION_LABEL, onClick: () => onNavigate("contact") };
+  const enterprise = { label: "See Enterprise controls", onClick: () => onNavigate("enterprise") };
   return (
     <div className="mk-page mk-a mk-sec">
       <Hero
@@ -1280,7 +1346,20 @@ function SecurityPage({ onNavigate }: Nav) {
         <Architecture />
       </Hero>
 
-      <Section id="mk-sec-every" title="The controls, boundary by boundary" lead="Which boundary each control sits on, and whether it is always on.">
+      <Section
+        id="mk-sec-every"
+        title="The controls, boundary by boundary"
+        lead={
+          <>
+            Which boundary each control sits on, and whether it is always on. The same controls hold hosted or
+            self-managed;{" "}
+            <PageLink to="enterprise" onNavigate={onNavigate}>
+              compare the two deployments
+            </PageLink>
+            .
+          </>
+        }
+      >
         <table className="mk-a-table mk-sec-ledger">
           <caption className="mk-sr-only">Security controls</caption>
           <thead>
@@ -1315,32 +1394,6 @@ function SecurityPage({ onNavigate }: Nav) {
         </table>
       </Section>
 
-      <Section id="mk-sec-deploy-title" title="Hosted or self-managed" lead="Where the engine runs, and where your data, keys, and audit events live.">
-        <table className="mk-a-table mk-sec-deploy">
-          <caption className="mk-sr-only">Hosted and self-managed deployment compared</caption>
-          <thead>
-            <tr>
-              <td />
-              <th scope="col">
-                Hosted<small>The default</small>
-              </th>
-              <th scope="col">
-                Self-managed<small>An Enterprise option</small>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {DEPLOY_ROWS.map((r) => (
-              <tr key={r.what}>
-                <th scope="row">{r.what}</th>
-                <td data-label="Hosted">{r.hosted}</td>
-                <td data-label="Self-managed">{r.self}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Section>
-
       <RowSection
         id="mk-sec-audit-title"
         title="An audit log that checks itself"
@@ -1362,12 +1415,13 @@ function SecurityPage({ onNavigate }: Nav) {
         }
       />
 
-      <section className="mk-a-section mk-sec-disclose" id="vulnerability-disclosure" aria-labelledby="mk-sec-disclosure">
+      <section className="mk-a-section mk-kit-sec mk-sec-disclose" id="vulnerability-disclosure" aria-labelledby="mk-sec-disclosure">
         <div className="mk-wrap">
-          <header className="mk-a-head">
-            <h2 id="mk-sec-disclosure">Report a vulnerability</h2>
-            <p>Email us with the subject “Security report”, and please do not open a public issue.</p>
-          </header>
+          <SplitHead
+            id="mk-sec-disclosure"
+            title="Report a vulnerability"
+            lead="Email us with the subject “Security report”, and please do not open a public issue."
+          />
           <div className="mk-sec-disclose-grid">
             <div className="mk-sec-disclose-copy">
               <p>We will not pursue good-faith research that:</p>
@@ -1392,7 +1446,7 @@ function SecurityPage({ onNavigate }: Nav) {
                 <dd>Security report</dd>
               </div>
               <div>
-                <dt>Acknowledgement</dt>
+                <dt>Acknowledgment</dt>
                 <dd>Within three business days, with updates until it is resolved</dd>
               </div>
               <div>
@@ -1445,19 +1499,21 @@ function CoverageMatrix({ onPick }: { onPick: (family: string) => void }) {
     <figure className="mk-a-card mk-int-matrix" aria-labelledby="mk-int-matrix-cap">
       <figcaption className="mk-int-matrix-cap">
         <span id="mk-int-matrix-cap">Supported systems, by family</span>
+        {/* The key draws each state the way the tiles draw it: the border,
+            the tint, and the check badge in the corner. */}
         <span className="mk-int-key">
-          <span>
-            <i className="mk-int-swatch is-proven" aria-hidden />
-            Proven in CI
-          </span>
-          <span>
-            <i className="mk-int-swatch is-emulated" aria-hidden />
-            Proven on an emulator
-          </span>
-          <span>
-            <i className="mk-int-swatch is-implemented" aria-hidden />
-            Implemented
-          </span>
+          {(["proven", "emulated", "implemented"] as const).map((state) => (
+            <span key={state}>
+              <i className={`mk-int-swatch is-${state}`} aria-hidden>
+                {state === "implemented" ? null : (
+                  <b className="mk-int-swatch-mark">
+                    <StatusGlyph kind="landed" />
+                  </b>
+                )}
+              </i>
+              {state === "implemented" ? "Implemented" : proofLabel(state === "emulated")}
+            </span>
+          ))}
         </span>
       </figcaption>
       <ul className="mk-int-rows">
@@ -1514,7 +1570,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
   const rows = CONNECTOR_ROWS.filter(
     (r) => (family === "All" || r.family === family) && (!provenOnly || r.proven) && (!q || r.name.toLowerCase().includes(q)),
   );
-  const start = { label: "Start free", onClick: onGetStarted };
+  const start = { label: START_ACTION_LABEL, onClick: onGetStarted };
   const docs = { label: "Read the docs", onClick: () => onNavigate("help") };
 
   const pickFamily = (f: string) => {
@@ -1539,31 +1595,95 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
       </Hero>
 
       <Section id="mk-int-proven" title="What “proven in CI” means here" lead="A driver earns the label from a CI run, never from this page's copy.">
-        <Facts
+        <FactTiles
+          label="What proven in CI means"
           items={[
             {
               key: "green",
-              icon: BadgeCheck,
               title: "Green, with no skipped test",
               body: "A driver counts as proven only when its CI job ran green and skipped nothing.",
+              ui: (
+                <div className="mk-app-surface mk-tui">
+                  <table className="mk-tui-table">
+                    <caption className="mk-sr-only">CI evidence by driver group (excerpt)</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Drivers</th>
+                        <th scope="col" className="is-num">
+                          Tests
+                        </th>
+                        <th scope="col">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {PROOF_GROUPS.filter((g) => !g.emulated)
+                        .slice(0, 2)
+                        .map((g) => (
+                          <tr key={g.jobs.join(",")}>
+                            <th scope="row">{groupLabel(g)}</th>
+                            <td className="is-num">{fmt.format(g.executed)}</td>
+                            <td>
+                              <span className="mk-app-pill mk-app-pill--completed">None skipped</span>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              ),
             },
             {
               key: "emulated",
-              icon: FlaskConical,
               title: "Emulators, said in words",
               body: `${EMULATED_DRIVERS.join(" and ")} run against emulators, and every label for them says so.`,
+              ui: (
+                <div className="mk-app-surface mk-tui">
+                  <ul className="mk-a-tui-rows" aria-label="Drivers proven on an emulator">
+                    {EMULATED_CONNECTORS.map((c) => (
+                      <li key={c.driver}>
+                        <span className="mk-app-chip">
+                          <ConnectorIcon id={c.driver} size={14} />
+                          {c.name}
+                        </span>
+                        <span className="mk-app-pill mk-app-pill--completed">On an emulator</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ),
             },
             {
               key: "generated",
-              icon: FileCode2,
               title: "Generated, not typed",
               body: (
                 <>
-                  Every state on this page comes from the CI evidence file, recorded {EVIDENCE_AS_OF}.{" "}
+                  Every state on this page comes from the CI evidence file.{" "}
                   <PageLink to="customers" onNavigate={onNavigate}>
                     Read the evidence
                   </PageLink>
                 </>
+              ),
+              ui: (
+                <div className="mk-app-surface mk-tui">
+                  <dl className="mk-a-tui-dl">
+                    <div>
+                      <dt>CI run</dt>
+                      <dd>
+                        <code>{EVIDENCE_RUN_ID}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Recorded</dt>
+                      <dd>{EVIDENCE_AS_OF}</dd>
+                    </div>
+                    <div>
+                      <dt>Drivers counted</dt>
+                      <dd>
+                        {PROVEN_DRIVERS} proven of {CATALOG_TOTAL}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
               ),
             },
           ]}

@@ -241,19 +241,44 @@ export function TableSection({ id, title, body, className = "", children }: { id
 }
 
 /**
+ * A section of tiles: a SplitHead (h2 and one line) over a Bento. The tiles
+ * summarise what the page's product does, each with a fragment of its UI.
+ */
+export function BentoSection({ id, title, lead, children }: { id: string; title: ReactNode; lead?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="mk-sb-section mk-kit-sec" aria-labelledby={id}>
+      <div className="mk-wrap">
+        <SplitHead id={id} title={title} lead={lead} />
+        {children}
+      </div>
+    </section>
+  );
+}
+
+export type RuleItem = {
+  claim: string;
+  where: string;
+  /** The in-site docs article that states the rule; the cell becomes a link. */
+  route?: PublicRoute;
+};
+
+/**
  * Rules a reader can hold the product to, and where each one is written
- * down. A real two-column table, ruled like one and unboxed.
+ * down. A real two-column table, ruled like one and unboxed. A "where"
+ * cell links to the in-site article when the item names one.
  */
 export function RulesTable({
   caption,
   items,
   ruleLabel = "Rule",
   whereLabel = "Where to check",
+  onNavigate,
 }: {
   caption: string;
-  items: { claim: string; where: string }[];
+  items: RuleItem[];
   ruleLabel?: string;
   whereLabel?: string;
+  onNavigate?: (r: PublicRoute) => void;
 }) {
   return (
     <table className="mk-sb-table mk-sb-rules">
@@ -268,7 +293,21 @@ export function RulesTable({
         {items.map((c) => (
           <tr key={c.claim}>
             <th scope="row">{c.claim}</th>
-            <td>{c.where}</td>
+            <td>
+              {c.route && onNavigate ? (
+                <a
+                  href={hashForPublicRoute(c.route)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onNavigate(c.route as PublicRoute);
+                  }}
+                >
+                  {c.where}
+                </a>
+              ) : (
+                c.where
+              )}
+            </td>
           </tr>
         ))}
       </tbody>

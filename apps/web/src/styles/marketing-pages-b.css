@@ -253,6 +253,20 @@
   font-size: var(--mk-fs-body);
 }
 
+/* A "where to check" cell that names an in-site article links to it. */
+.mk .mk-sb-rules td a {
+  color: var(--mk-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  transition: text-decoration-color var(--df-dur-fast) var(--df-ease);
+}
+
+.mk .mk-sb-rules td a:hover {
+  text-decoration-color: var(--mk-ink);
+}
+
 @media (min-width: 768px) {
   .mk-sb-rules thead th:first-child {
     width: 60%;

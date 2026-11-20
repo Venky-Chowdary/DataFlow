@@ -87,6 +87,24 @@ export function GuillocheSeal({ drawn, label }: { drawn: boolean; label?: string
   );
 }
 
+/**
+ * An identifier that may wrap only after "." or "_" (DW_DEMO.SALES_ORDERS_
+ * REPORTING), never mid-word, on a narrow screen.
+ */
+export function Breakable({ id }: { id: string }) {
+  const parts = id.split(/(?<=[._])/);
+  return (
+    <>
+      {parts.map((p, i) => (
+        <span key={i}>
+          {p}
+          {i < parts.length - 1 ? <wbr /> : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
 export function StatementHero() {
   const t = useCountUp();
   const done = t >= 1;
@@ -103,7 +121,14 @@ export function StatementHero() {
           Example statement for one run
         </span>
         <span className="mk-statement-route">
-          <code>{s.source}</code> in {s.sourceEngine} into <code>{s.destination}</code> in {s.destinationEngine}
+          <code>
+            <Breakable id={s.source} />
+          </code>{" "}
+          in {s.sourceEngine} into{" "}
+          <code>
+            <Breakable id={s.destination} />
+          </code>{" "}
+          in {s.destinationEngine}
         </span>
       </figcaption>
 

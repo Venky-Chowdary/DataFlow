@@ -20,6 +20,7 @@ import {
   PROVEN_DRIVERS,
 } from "../lib/provenEvidence";
 import { MarketingClosing } from "../components/marketing/MarketingClosing";
+import { PRIMARY_CTA_LABEL, SALES_CTA_LABEL } from "../components/marketing/MarketingChrome";
 import { RUN_HELD_KEYS } from "../components/marketing/StoryPanels";
 import { Bento, BentoTile } from "../components/marketing/kit/Bento";
 import { SplitHead } from "../components/marketing/kit/SplitHead";
@@ -351,10 +352,10 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
             </p>
             <div className="mk-actions">
               <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-                Start free
+                {PRIMARY_CTA_LABEL}
               </button>
               <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
-                Talk to an engineer
+                {SALES_CTA_LABEL}
               </RouteLink>
             </div>
           </div>

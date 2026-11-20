@@ -25,7 +25,9 @@ import {
   X,
 } from "lucide-react";
 import { ConnectorIcon } from "../../../app/brand-icons";
+import { jobStatusLabel } from "../../../lib/uiUtils";
 import { DtLogo } from "../../DtLogo";
+import { Breakable } from "../StatementHero";
 
 /**
  * AppFrame: the Datawrap workspace, rendered in code for the public site.
@@ -35,8 +37,14 @@ import { DtLogo } from "../../DtLogo";
  * than a drawing of it. Every figure is example data from one workspace and
  * adds up; the caption under each frame says so.
  *
- * The window is laid out at a fixed design width and scaled to fit its
- * container, so it stays crisp and proportionate from phone to desktop.
+ * Product UI is never shrunk to fit. A desktop window renders at 1:1 and
+ * reflows to its container; below the narrowest width its layout holds, it
+ * crops at the right edge instead of scaling its text down. Phones get one
+ * panel at full size (PanelWindow). Nothing inside renders below 12px.
+ *
+ * Statuses and verdicts use the product's own words: job states from
+ * `jobStatusLabel` (lib/uiUtils), verdicts by their API names (proven,
+ * explained, no_difference_found, unexplained, unverifiable).
  */
 
 export type AppNavId =
@@ -203,6 +211,31 @@ function Topbar({ active }: { active: AppNavId }) {
   );
 }
 
+/** The widest container a marketing page gives a frame (--mk-measure). */
+const WIDEST_FRAME = 1200;
+
+/** The narrowest width the desktop scenes reflow to before they crop. */
+export const APP_MIN_LAYOUT = 960;
+
+/** True while the container is narrower than the layout's minimum width. */
+function useCropped(minWidth: number) {
+  const outer = useRef<HTMLDivElement | null>(null);
+  const [cropped, setCropped] = useState(false);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const o = outer.current;
+      if (!o) return;
+      setCropped(o.clientWidth > 0 && o.clientWidth < minWidth);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    if (outer.current) ro.observe(outer.current);
+    return () => ro.disconnect();
+  }, [minWidth]);
+  return { outer, cropped };
+}
+
 export interface AppWindowProps {
   /** URL path shown in the address bar, after app.datawrap.io/ */
   path: string;
@@ -210,7 +243,11 @@ export interface AppWindowProps {
   children: ReactNode;
   /** Caption under the frame; say that the data is an example. */
   caption: string;
-  /** Layout width before scaling. */
+  /**
+   * The narrowest width the layout reflows to. The window fills its container
+   * at 1:1; in a narrower container it keeps this width and crops at the right
+   * edge. Never scales text down. Capped at the widest page container (1200).
+   */
   designWidth?: number;
   /** Narrow icon sidebar for denser scenes. */
   collapsedNav?: boolean;
@@ -224,20 +261,17 @@ export function AppWindow({
   active,
   children,
   caption,
-  designWidth = 1360,
+  designWidth = APP_MIN_LAYOUT,
   collapsedNav,
   overlay,
   className = "",
 }: AppWindowProps) {
-  const { outer, inner, scale, height } = useFitScale(designWidth);
+  const minWidth = Math.min(designWidth, WIDEST_FRAME);
+  const { outer, cropped } = useCropped(minWidth);
   return (
-    <figure className={`mk-app-figure ${className}`.trim()}>
-      <div className="mk-app-fit" ref={outer} style={{ height: height || undefined }}>
-        <div
-          className="mk-app-window"
-          ref={inner}
-          style={{ width: designWidth, transform: `scale(${scale})` }}
-        >
+    <figure className={`mk-app-figure${cropped ? " is-cropped" : ""} ${className}`.trim()}>
+      <div className="mk-app-fit" ref={outer}>
+        <div className="mk-app-window mk-app-window--desk" style={{ minWidth }}>
           <WindowChrome path={path} />
           <div className={`mk-app-shell${collapsedNav ? " is-collapsed" : ""}`}>
             <Sidebar active={active} collapsed={collapsedNav} />
@@ -256,8 +290,30 @@ export function AppWindow({
 
 /* ── Example data: one workspace, figures that add up ───────────── */
 
-type JobState = "running" | "completed" | "failed";
-type Verify = "verified" | "explained" | "sampled" | "verifying" | "not-run";
+/** Job lifecycle states, as the API names them (lib/types JobStatus). */
+export type ExampleJobState = "running" | "completed" | "completed_with_quarantine" | "failed";
+
+/** Parity verdicts, as the API names them. */
+export type ExampleVerdict = "proven" | "explained" | "no_difference_found" | "unexplained" | "unverifiable";
+
+/** What the site calls each verdict (the home page's verdict scale). */
+export const VERDICT_NAME: Record<ExampleVerdict, string> = {
+  proven: "Proven equal",
+  explained: "Explained",
+  no_difference_found: "No difference found",
+  unexplained: "Unexplained",
+  unverifiable: "Unverifiable",
+};
+
+type Tone = "proven" | "explained" | "open" | "none";
+
+const VERDICT_TONE: Record<ExampleVerdict, Tone> = {
+  proven: "proven",
+  explained: "explained",
+  no_difference_found: "explained",
+  unexplained: "open",
+  unverifiable: "none",
+};
 
 export interface ExampleJob {
   id: string;
@@ -268,15 +324,25 @@ export interface ExampleJob {
   mode: string;
   rows: number;
   held?: number;
-  state: JobState;
-  verify: Verify;
+  state: ExampleJobState;
+  verdict: ExampleVerdict;
   duration: string;
   started: string;
-  /** Trust Report numbers for the drawer. */
-  trust: { source: number; destination: number; differ: number; check: string; verdict: string; tone: "proven" | "explained" | "open" | "none"; note: string };
+  /**
+   * Trust Report numbers for the drawer. `compared` is how many landed rows
+   * the check compared; `verdict` and `tone` are derived from the job's verdict.
+   */
+  trust: { source: number; destination: number; compared: number; differ: number; check: string; verdict: string; tone: Tone; note: string };
 }
 
-export const EXAMPLE_JOBS: ExampleJob[] = [
+type JobInput = Omit<ExampleJob, "trust"> & { trust: Omit<ExampleJob["trust"], "verdict" | "tone"> };
+
+const withVerdict = (j: JobInput): ExampleJob => ({
+  ...j,
+  trust: { ...j.trust, verdict: VERDICT_NAME[j.verdict], tone: VERDICT_TONE[j.verdict] },
+});
+
+export const EXAMPLE_JOBS: ExampleJob[] = ([
   {
     id: "7c41e9a2",
     name: "orders",
@@ -286,10 +352,10 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "CDC",
     rows: 1_204_880,
     state: "running",
-    verify: "verifying",
+    verdict: "unverifiable",
     duration: "12m 08s",
     started: "Today 09:12",
-    trust: { source: 1_204_880, destination: 1_204_880, differ: 0, check: "Running total", verdict: "Unverifiable yet", tone: "none", note: "The run is still applying changes. A verdict is given once it settles." },
+    trust: { source: 1_204_880, destination: 1_204_880, compared: 0, differ: 0, check: "Running total", note: "The run is still applying changes. Nothing is compared until it settles, so there is no verdict to sign yet." },
   },
   {
     id: "6af912d7",
@@ -300,11 +366,11 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "Full append",
     rows: 48_213_871,
     held: 33,
-    state: "completed",
-    verify: "verified",
+    state: "completed_with_quarantine",
+    verdict: "proven",
     duration: "41m 37s",
     started: "Today 02:03",
-    trust: { source: 48_213_906, destination: 48_213_871, differ: 0, check: "Full checksum", verdict: "Proven equal", tone: "proven", note: "Every landed row was compared and none differs. 33 rows are held with a reason and 2 were skipped by a filter." },
+    trust: { source: 48_213_906, destination: 48_213_871, compared: 48_213_871, differ: 0, check: "Full checksum", note: "Every landed row was compared and none differs. 33 rows are held in quarantine with a reason and 2 were skipped by a filter: 48,213,906 read = 48,213,871 landed + 33 held + 2 skipped." },
   },
   {
     id: "5d20b7c4",
@@ -315,10 +381,10 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "Incremental deduped",
     rows: 2_418_550,
     state: "completed",
-    verify: "explained",
+    verdict: "explained",
     duration: "6m 52s",
     started: "Today 01:40",
-    trust: { source: 2_418_550, destination: 2_418_550, differ: 1_912, check: "Key diff", verdict: "Explained", tone: "explained", note: "1,912 rows differ only in updated_at precision: microseconds in MySQL, milliseconds after the cast you approved." },
+    trust: { source: 2_418_550, destination: 2_418_550, compared: 2_418_550, differ: 1_912, check: "Key diff", note: "1,912 rows differ only in updated_at precision: microseconds in MySQL, milliseconds after the cast you approved." },
   },
   {
     id: "4b88c1f0",
@@ -329,10 +395,10 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "Full append",
     rows: 9_046_118,
     state: "completed",
-    verify: "sampled",
+    verdict: "no_difference_found",
     duration: "18m 03s",
     started: "Yesterday 23:10",
-    trust: { source: 9_046_118, destination: 9_046_118, differ: 0, check: "Random sample", verdict: "No difference found", tone: "explained", note: "Values were compared on a random sample of 40,000 rows. The report gives an upper bound on unexplained differences." },
+    trust: { source: 9_046_118, destination: 9_046_118, compared: 40_000, differ: 0, check: "Random sample", note: "Values were compared on a random sample of 40,000 rows. The report gives an upper bound on unexplained differences; a sample is not proof." },
   },
   {
     id: "3e71aa58",
@@ -343,10 +409,10 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "Full overwrite",
     rows: 0,
     state: "failed",
-    verify: "not-run",
+    verdict: "unverifiable",
     duration: "4s",
     started: "Yesterday 18:22",
-    trust: { source: 0, destination: 0, differ: 0, check: "None", verdict: "Unverifiable", tone: "none", note: "Validate refused the plan: amount is DECIMAL(12,2) at the source and INTEGER in finance.invoices. Nothing was written." },
+    trust: { source: 0, destination: 0, compared: 0, differ: 0, check: "None", note: "Validate refused the plan: amount is DECIMAL(12,2) at the source and INTEGER in finance.invoices. Nothing was written." },
   },
   {
     id: "2c09d6e3",
@@ -357,37 +423,84 @@ export const EXAMPLE_JOBS: ExampleJob[] = [
     mode: "Incremental append",
     rows: 912_004,
     state: "completed",
-    verify: "verified",
+    verdict: "proven",
     duration: "3m 11s",
     started: "Yesterday 14:05",
-    trust: { source: 912_004, destination: 912_004, differ: 0, check: "Full checksum", verdict: "Proven equal", tone: "proven", note: "Every row was compared and none differs." },
+    trust: { source: 912_004, destination: 912_004, compared: 912_004, differ: 0, check: "Full checksum", note: "Every row was compared and none differs." },
   },
-];
+] satisfies JobInput[]).map(withVerdict);
 
 const fmt = new Intl.NumberFormat("en-US");
 
-const STATE_LABEL: Record<JobState, string> = { running: "Running", completed: "Completed", failed: "Failed" };
-const VERIFY_LABEL: Record<Verify, string> = {
-  verified: "Verified",
-  explained: "Explained",
-  sampled: "Sampled",
-  verifying: "Verifying",
-  "not-run": "Not run",
+/** The product's own status label (lib/uiUtils), e.g. "Completed with quarantine". */
+export function exampleStateLabel(state: ExampleJobState): string {
+  return jobStatusLabel(state);
+}
+
+/** The grid's one-word status, as the product's Jobs grid shortens it. */
+function stateShort(state: ExampleJobState): string {
+  return state === "completed_with_quarantine" ? "Quarantined" : jobStatusLabel(state);
+}
+
+/** Pill colour per state: amber for a run that finished with rows held. */
+const STATE_PILL: Record<ExampleJobState, string> = {
+  running: "mk-app-pill--running",
+  completed: "mk-app-pill--completed",
+  completed_with_quarantine: "mk-app-pill--quarantine",
+  failed: "mk-app-pill--failed",
 };
+
+/** "Needs attention", by the product's rule: a failed run or a failed check. */
+const needsAttention = (j: ExampleJob) => j.state === "failed" || j.verdict === "unexplained";
+
+/** Finished runs, by the product's rule (completed with quarantine is a success). */
+const isFinished = (j: ExampleJob) => j.state === "completed" || j.state === "completed_with_quarantine";
+
+/** "1 explained, 1 sampled, 1 refused, 1 running": every run that is not proven. */
+function notProvenSummary(jobs: ExampleJob[]): string {
+  const n = (f: (j: ExampleJob) => boolean) => jobs.filter(f).length;
+  const parts: [number, string][] = [
+    [n((j) => j.verdict === "explained"), "explained"],
+    [n((j) => j.verdict === "no_difference_found"), "sampled"],
+    [n((j) => j.verdict === "unexplained"), "unexplained"],
+    [n((j) => j.verdict === "unverifiable" && j.state === "failed"), "refused"],
+    [n((j) => j.verdict === "unverifiable" && j.state === "running"), "running"],
+  ];
+  return parts
+    .filter(([c]) => c > 0)
+    .map(([c, w]) => `${c} ${w}`)
+    .join(", ");
+}
+
+/** The Jobs KPIs, computed from the example runs (never typed in). */
+export function exampleJobKpis(jobs: ExampleJob[] = EXAMPLE_JOBS) {
+  const running = jobs.filter((j) => j.state === "running");
+  const today = jobs.filter((j) => j.started.startsWith("Today") && isFinished(j));
+  const attention = jobs.filter(needsAttention);
+  return {
+    running,
+    proven: jobs.filter((j) => j.verdict === "proven").length,
+    total: jobs.length,
+    notProven: notProvenSummary(jobs),
+    writtenToday: today.reduce((s, j) => s + j.rows, 0),
+    finishedToday: today.length,
+    attention,
+  };
+}
 
 function Route({ job }: { job: ExampleJob }) {
   return (
     <span className="mk-app-route">
-      <span className="mk-app-chip">
+      <span className="mk-app-chip" title={job.from.label}>
         <ConnectorIcon id={job.from.id} size={14} />
-        {job.from.label}
+        <span className="mk-app-route-name">{job.from.label}</span>
       </span>
       <span aria-hidden className="mk-app-route-arrow">
         →
       </span>
-      <span className="mk-app-chip">
+      <span className="mk-app-chip" title={job.to.label}>
         <ConnectorIcon id={job.to.id} size={14} />
-        {job.to.label}
+        <span className="mk-app-route-name">{job.to.label}</span>
       </span>
     </span>
   );
@@ -407,46 +520,40 @@ export function JobsScene({
   openId?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("all");
-  const rows = EXAMPLE_JOBS.filter((j) =>
-    tab === "all"
-      ? true
-      : tab === "running"
-        ? j.state === "running"
-        : tab === "attention"
-          ? j.state === "failed" || (j.held ?? 0) > 0
-          : j.state === "completed",
-  );
-  const count = (t: Tab) =>
-    EXAMPLE_JOBS.filter((j) =>
-      t === "all" ? true : t === "running" ? j.state === "running" : t === "attention" ? j.state === "failed" || (j.held ?? 0) > 0 : j.state === "completed",
-    ).length;
-  const written = EXAMPLE_JOBS.filter((j) => j.started.startsWith("Today") && j.state !== "running").reduce(
-    (n, j) => n + j.rows,
-    0,
-  );
+  const inTab = (t: Tab) => (j: ExampleJob) =>
+    t === "all" ? true : t === "running" ? j.state === "running" : t === "attention" ? needsAttention(j) : isFinished(j);
+  const rows = EXAMPLE_JOBS.filter(inTab(tab));
+  const count = (t: Tab) => EXAMPLE_JOBS.filter(inTab(t)).length;
+  const k = exampleJobKpis();
+  const live = k.running[0];
+  const stuck = k.attention[0];
 
   return (
     <div className="mk-app-jobs">
       <div className="mk-app-kpis">
         <div className="mk-app-kpi">
           <small>Running now</small>
-          <strong>1</strong>
-          <span>orders, CDC into Snowflake</span>
+          <strong>{k.running.length}</strong>
+          <span>{live ? `${live.name}, ${live.mode} into ${live.to.label}` : "Nothing running"}</span>
         </div>
         <div className="mk-app-kpi">
-          <small>Verified, last 7 days</small>
-          <strong className="is-good">5 of 6</strong>
-          <span>1 refused before writing</span>
+          <small>Proven equal, last 7 days</small>
+          <strong className="is-good">
+            {k.proven} of {k.total}
+          </strong>
+          <span>{k.notProven}</span>
         </div>
         <div className="mk-app-kpi">
           <small>Rows written today</small>
-          <strong>{fmt.format(written)}</strong>
-          <span>across 2 completed runs</span>
+          <strong>{fmt.format(k.writtenToday)}</strong>
+          <span>across {k.finishedToday} finished runs</span>
         </div>
-        <div className="mk-app-kpi is-attention">
-          <small>Need attention</small>
-          <strong className="is-bad">2</strong>
-          <span>1 refused plan, 33 held rows</span>
+        <div className={`mk-app-kpi${k.attention.length ? " is-attention" : ""}`}>
+          <small>Needs attention</small>
+          <strong className={k.attention.length ? "is-bad" : undefined}>{k.attention.length}</strong>
+          <span>
+            {stuck ? `${stuck.name}, ${stuck.state === "failed" ? "refused before writing" : "a difference has no known cause"}` : "Nothing failed"}
+          </span>
         </div>
       </div>
 
@@ -493,12 +600,10 @@ export function JobsScene({
           <span role="columnheader">Status</span>
           <span role="columnheader">Job</span>
           <span role="columnheader">Route</span>
-          <span role="columnheader">Mode</span>
           <span role="columnheader" className="is-num">
-            Rows
+            Rows landed
           </span>
-          <span role="columnheader">Verification</span>
-          <span role="columnheader">Started</span>
+          <span role="columnheader">Verdict</span>
         </div>
         {rows.map((j) => (
           <button
@@ -510,29 +615,30 @@ export function JobsScene({
             aria-label={`Open the Trust Report for ${j.name} to ${j.dest}`}
           >
             <span role="cell">
-              <span className={`mk-app-pill mk-app-pill--${j.state}`}>{STATE_LABEL[j.state]}</span>
+              <span className={`mk-app-pill ${STATE_PILL[j.state]}`} title={exampleStateLabel(j.state)}>
+                {stateShort(j.state)}
+              </span>
             </span>
             <span role="cell" className="mk-app-job">
               <strong>
                 {j.name} → {j.dest}
               </strong>
-              <code>{j.id}</code>
+              <span className="mk-app-job-meta">
+                <code>{j.id}</code>
+                <span>
+                  {j.mode}, {j.started.toLowerCase()}
+                </span>
+              </span>
             </span>
             <span role="cell">
               <Route job={j} />
-            </span>
-            <span role="cell" className="mk-app-mode">
-              {j.mode}
             </span>
             <span role="cell" className="is-num">
               {fmt.format(j.rows)}
               {j.held ? <small className="mk-app-held">{j.held} held</small> : null}
             </span>
             <span role="cell">
-              <span className={`mk-app-pill mk-app-pill--v-${j.verify}`}>{VERIFY_LABEL[j.verify]}</span>
-            </span>
-            <span role="cell" className="mk-app-started">
-              {j.started}
+              <span className={`mk-app-pill mk-app-pill--t-${j.trust.tone}`}>{j.trust.verdict}</span>
             </span>
           </button>
         ))}
@@ -563,16 +669,22 @@ function Ring({ value, tone }: { value: number; tone: ExampleJob["trust"]["tone"
 /** The Trust Report drawer for one job, over the Jobs grid. */
 export function TrustDrawer({ job, onClose }: { job: ExampleJob; onClose?: () => void }) {
   const t = job.trust;
-  const pct = t.source === 0 ? 0 : Math.round(((t.destination - t.differ) / t.source) * 1000) / 10;
-  const shown = t.tone === "none" ? "—" : `${pct}%`;
+  // The ring is the share of landed rows the check compared and found equal
+  // (differences with a known cause excluded). A sample shows how little it
+  // covered; nothing compared shows no figure at all.
+  const equal = Math.max(0, t.compared - t.differ);
+  const pct = t.destination === 0 ? 0 : (equal / t.destination) * 100;
+  const shown = t.compared === 0 ? "—" : `${equal === t.destination ? "100" : pct.toFixed(1)}%`;
+  const ringLabel =
+    t.compared === 0 ? "not compared" : job.verdict === "no_difference_found" ? "rows sampled" : "rows equal";
   return (
     <aside className="mk-app-drawer" aria-label={`Trust Report for ${job.name} (example)`}>
       <div className="mk-app-drawer-head">
         <div>
           <strong>
-            {job.name} → {job.dest}
+            <Breakable id={job.name} /> → <Breakable id={job.dest} />
           </strong>
-          <span className={`mk-app-pill mk-app-pill--${job.state}`}>{STATE_LABEL[job.state]}</span>
+          <span className={`mk-app-pill ${STATE_PILL[job.state]}`}>{exampleStateLabel(job.state)}</span>
           <p>
             {job.from.label} to {job.to.label}, {job.mode.toLowerCase()}
           </p>
@@ -604,10 +716,10 @@ export function TrustDrawer({ job, onClose }: { job: ExampleJob; onClose?: () =>
         </p>
         <div className="mk-app-trust-grid">
           <div className="mk-app-ring-box">
-            <Ring value={t.tone === "none" ? 0 : pct} tone={t.tone} />
+            <Ring value={t.compared === 0 ? 0 : pct} tone={t.tone} />
             <span className="mk-app-ring-label">
               <strong>{shown}</strong>
-              rows proven equal
+              {ringLabel}
             </span>
           </div>
           <dl className="mk-app-counts">
@@ -616,8 +728,12 @@ export function TrustDrawer({ job, onClose }: { job: ExampleJob; onClose?: () =>
               <dd>{fmt.format(t.source)}</dd>
             </div>
             <div>
-              <dt>Rows in the destination</dt>
+              <dt>Rows landed in the destination</dt>
               <dd>{fmt.format(t.destination)}</dd>
+            </div>
+            <div>
+              <dt>Rows compared</dt>
+              <dd>{fmt.format(t.compared)}</dd>
             </div>
             <div>
               <dt>Rows that differ</dt>
@@ -641,7 +757,10 @@ export function TrustDrawer({ job, onClose }: { job: ExampleJob; onClose?: () =>
   );
 }
 
-/** True when the viewport is phone-sized. */
+/** Single-panel crops are laid out at this width and reflow below it. */
+const PANEL_DESIGN = 460;
+
+/** True when the viewport matches `query` (phone-sized by default). */
 function useNarrow(query = "(max-width: 767px)") {
   const [narrow, setNarrow] = useState(() => {
     try {
@@ -673,8 +792,9 @@ export function PanelWindow({
   path,
   caption,
   children,
-  designWidth = 460,
+  designWidth = PANEL_DESIGN,
   maxScale = 1,
+  fill,
 }: {
   path: string;
   /** Empty when a neighbouring element already labels the example. */
@@ -683,14 +803,16 @@ export function PanelWindow({
   designWidth?: number;
   /** Allow a small panel to grow to fill a wider slot (vector, so it stays crisp). */
   maxScale?: number;
+  /** Always reflow at 1:1 to the slot's width (phones and tablets); the slot caps it. */
+  fill?: boolean;
 }) {
   const { outer, inner, scale, height } = useFitScale(designWidth, maxScale);
   // Narrower than the design: reflow at full size instead of shrinking the
   // text below legibility (phones). Wider: scale to fill, as before.
-  const fluid = scale < 1;
+  const fluid = fill || scale < 1;
   return (
     <figure
-      className={`mk-app-figure mk-app-figure--panel${fluid ? " is-fluid" : ""}`}
+      className={`mk-app-figure mk-app-figure--panel${fluid ? " is-fluid" : ""}${fill ? " is-fill" : ""}`}
       aria-label={caption || "Example workspace panel"}
     >
       <div className="mk-app-fit" ref={outer} style={{ height: fluid ? undefined : height || undefined }}>
@@ -708,17 +830,23 @@ export function PanelWindow({
   );
 }
 
+/** The width below which scenes show one panel instead of the whole workspace. */
+export const APP_NARROW_QUERY = "(max-width: 1023px)";
+
 /**
- * Jobs grid with a live Trust Report drawer: choose any row. On phones the
- * frame crops to the Trust Report, with a run picker above it.
+ * Jobs grid with a live Trust Report drawer. On desktop the grid opens whole,
+ * with no drawer over it; choosing a row opens that run's Trust Report. On
+ * phones and tablets the frame shows one run's Trust Report at full size,
+ * with a run picker above it; `initial` is the run it starts on.
  */
 export function JobsWithTrust({ caption, initial = "6af912d7" }: { caption: string; initial?: string | null }) {
-  const narrow = useNarrow();
-  const [openId, setOpenId] = useState<string | null>(initial);
+  const narrow = useNarrow(APP_NARROW_QUERY);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [pickedId, setPickedId] = useState<string | null>(initial);
   const job = EXAMPLE_JOBS.find((j) => j.id === openId) ?? null;
 
   if (narrow) {
-    const shown = job ?? EXAMPLE_JOBS[1];
+    const shown = EXAMPLE_JOBS.find((j) => j.id === pickedId) ?? EXAMPLE_JOBS[1];
     return (
       <div className="mk-app-phone">
         <div className="mk-app-picker" role="tablist" aria-label="Choose an example run">
@@ -729,13 +857,13 @@ export function JobsWithTrust({ caption, initial = "6af912d7" }: { caption: stri
               role="tab"
               aria-selected={shown.id === j.id}
               className={shown.id === j.id ? "is-active" : undefined}
-              onClick={() => setOpenId(j.id)}
+              onClick={() => setPickedId(j.id)}
             >
               {j.name}
             </button>
           ))}
         </div>
-        <PanelWindow path={`jobs/${shown.id}`} caption={caption}>
+        <PanelWindow path={`jobs/${shown.id}`} caption={caption} designWidth={PANEL_DESIGN} fill>
           <TrustDrawer job={shown} />
         </PanelWindow>
       </div>
@@ -744,9 +872,10 @@ export function JobsWithTrust({ caption, initial = "6af912d7" }: { caption: stri
 
   return (
     <AppWindow
-      path="jobs"
+      path={job ? `jobs/${job.id}` : "jobs"}
       active="jobs"
       caption={caption}
+      collapsedNav
       overlay={job ? <TrustDrawer job={job} onClose={() => setOpenId(null)} /> : null}
       className={job ? "has-drawer" : undefined}
     >

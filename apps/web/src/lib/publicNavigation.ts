@@ -130,8 +130,8 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   customers: {
     title: "Proof",
-    description: "Evidence you can check yourself: connectors proven in CI, signed proof packs you can verify through the API, and the design partner programme.",
-    keywords: "Datawrap proof, CI evidence, proof pack verification, design partner programme",
+    description: "Proof you can check yourself: connectors proven in CI, and signed proof packs you can verify through the API.",
+    keywords: "Datawrap proof, CI evidence, proof pack verification",
     canonicalPath: "#/customers",
   },
   contact: {

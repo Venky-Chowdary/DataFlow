@@ -1,12 +1,26 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ShieldCheck } from "lucide-react";
 import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
-import { DesignPartners } from "../../components/marketing/DesignPartners";
-import { EvidencePanel } from "../../components/marketing/ProductPanels";
+import { Bento, BentoTile } from "../../components/marketing/kit/Bento";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
 import { catalogHonestyLead, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { AUDIT_EXAMPLE } from "./MarketingSubpageScenes";
+
+/**
+ * One label per action across the subpages, taken from the site header
+ * (MarketingChrome): the primary action starts a free workspace, the sales
+ * action opens this page's form.
+ */
+export {
+  PRIMARY_CTA_LABEL as START_ACTION_LABEL,
+  SALES_CTA_LABEL as SALES_ACTION_LABEL,
+} from "../../components/marketing/MarketingChrome";
+import { PRIMARY_CTA_LABEL as START_ACTION_LABEL } from "../../components/marketing/MarketingChrome";
 
 const SOURCES = [
   "PostgreSQL",
@@ -149,10 +163,65 @@ async function fetchContactSalesConfig(): Promise<ContactSalesConfig> {
   }
 }
 
+/** The four required fields, in form order, as the visitor reads them. */
+const REQUIRED_FIELDS = [
+  { key: "firstName", label: "first name" },
+  { key: "lastName", label: "last name" },
+  { key: "email", label: "work email" },
+  { key: "company", label: "company" },
+] as const;
+
+/** "first name, work email, and company" */
+function listPhrase(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return items.join(" and ");
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+/** The proof pack calls a pilot leaves you with (as on the Proof page). */
+const PACK_CALLS: [string, string][] = [
+  ["Download the pack", "GET /api/v1/transfer/{job_id}/proof-pack"],
+  ["Check its signature", "POST /api/v1/transfer/proof-pack/verify"],
+];
+
+/** An API path that may wrap on a phone, but only after a slash. */
+function breakAtSlashes(path: string) {
+  return path.split("/").map((part, i, all) => (
+    <span key={i}>
+      {part}
+      {i < all.length - 1 ? (
+        <>
+          /<wbr />
+        </>
+      ) : null}
+    </span>
+  ));
+}
+
+/** Design partner program: what partners get and what we ask. No partner is named. */
+const PARTNER_TERMS = [
+  {
+    key: "get",
+    title: "What partners get",
+    items: [
+      "Early access to new connectors and features",
+      "A direct line to the engineers who build Datawrap",
+      "Influence on the roadmap",
+    ],
+  },
+  {
+    key: "ask",
+    title: "What we ask",
+    items: ["A real migration or sync to run on Datawrap", "Regular, candid feedback on what works and what does not"],
+  },
+];
+
 export function ContactSalesPage({
   onNavigate,
+  onGetStarted,
 }: {
   onNavigate: (route: PublicRoute) => void;
+  onGetStarted?: () => void;
 }) {
   const [outcome, setOutcome] = useState<"" | "received" | "saved_unsent">("");
   const sent = outcome !== "";
@@ -180,12 +249,13 @@ export function ContactSalesPage({
     });
   }, []);
 
-  const canSubmit = Boolean(
-    firstName.trim() && lastName.trim() && email.trim() && company.trim()
-      && (!turnstileSiteKey || turnstileToken),
-  );
+  const fieldValues = { firstName, lastName, email, company };
+  const missing = REQUIRED_FIELDS.filter((f) => !fieldValues[f.key].trim());
+  const canSubmit = missing.length === 0 && (!turnstileSiteKey || Boolean(turnstileToken));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [showMissing, setShowMissing] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const postLead = async () =>
     fetch(`${API_BASE}/contact-sales`, {
@@ -216,7 +286,20 @@ export function ContactSalesPage({
       setOutcome("received");
       return;
     }
-    if (!canSubmit || submitting) return;
+    if (submitting) return;
+    // The button stays enabled; an incomplete form says what is missing and
+    // moves focus to the first empty field.
+    if (missing.length) {
+      setShowMissing(true);
+      setError(`Add your ${listPhrase(missing.map((f) => f.label))}.`);
+      formRef.current?.querySelector<HTMLInputElement>(`[name="${missing[0].key}"]`)?.focus();
+      return;
+    }
+    if (!canSubmit) {
+      setError("Complete the check above and send again, or email sales@datawrap.io.");
+      return;
+    }
+    setShowMissing(false);
     setSubmitting(true);
     setError("");
     try {
@@ -308,9 +391,9 @@ export function ContactSalesPage({
               </div>
             </div>
           ) : (
-            <form className="mk-ct-f-form" onSubmit={submit} noValidate>
+            <form className="mk-ct-f-form" onSubmit={submit} noValidate ref={formRef}>
               <header className="mk-ct-f-form-head">
-                <h2>Request a scoped pilot</h2>
+                <h2>Tell us about the load</h2>
                 <p>Name, work email, and company. Stack is optional.</p>
               </header>
 
@@ -319,9 +402,11 @@ export function ContactSalesPage({
                   First name
                   <input
                     className="mk-ct-f-input"
+                    name="firstName"
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                     required
+                    aria-invalid={showMissing && !firstName.trim() ? true : undefined}
                     autoComplete="given-name"
                   />
                 </label>
@@ -329,9 +414,11 @@ export function ContactSalesPage({
                   Last name
                   <input
                     className="mk-ct-f-input"
+                    name="lastName"
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                     required
+                    aria-invalid={showMissing && !lastName.trim() ? true : undefined}
                     autoComplete="family-name"
                   />
                 </label>
@@ -339,10 +426,12 @@ export function ContactSalesPage({
                   Work email
                   <input
                     className="mk-ct-f-input"
+                    name="email"
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
+                    aria-invalid={showMissing && !email.trim() ? true : undefined}
                     autoComplete="email"
                     placeholder="name@company.com"
                   />
@@ -351,9 +440,11 @@ export function ContactSalesPage({
                   Company
                   <input
                     className="mk-ct-f-input"
+                    name="company"
                     value={company}
                     onChange={(e) => setCompany(e.target.value)}
                     required
+                    aria-invalid={showMissing && !company.trim() ? true : undefined}
                     autoComplete="organization"
                   />
                 </label>
@@ -461,8 +552,8 @@ export function ContactSalesPage({
                     {error}
                   </p>
                 ) : null}
-                <button type="submit" className="mk-btn mk-btn--primary" disabled={!canSubmit || submitting}>
-                  {submitting ? "Sending…" : "Request a pilot"}
+                <button type="submit" className="mk-btn mk-btn--primary" disabled={submitting}>
+                  {submitting ? "Sending…" : "Send request"}
                 </button>
               </div>
             </form>
@@ -486,31 +577,128 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="mk-section mk-ct-keep" aria-labelledby="mk-ct-keep-title">
-        <div className="mk-wrap mk-ct-keep-grid">
-          <div className="mk-ct-keep-copy">
-            <h2 id="mk-ct-keep-title">What a pilot leaves you with</h2>
-            <p>
-              One load on your own data, on the production engine. Engineering, the data owner, and compliance sign
-              the same report, and you keep the signed proof pack.
-            </p>
-          </div>
-          <div className="mk-subhero-visual mk-ct-keep-visual">
-            <EvidencePanel />
-          </div>
+      {/* What a pilot leaves behind, without the home page's example figures
+          (those belong to Home and Job space only). */}
+      <section className="mk-section mk-kit-sec mk-ct-keep" aria-labelledby="mk-ct-keep-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-ct-keep-title"
+            title="What a pilot leaves you with"
+            lead="One load on your own data, on the production engine. You keep everything it produces."
+          />
+          <Bento label="What a pilot leaves you with">
+            <BentoTile
+              span={4}
+              title="A report signed by role"
+              body="Engineering, the data owner, and compliance sign the same Trust Report."
+              bleed
+            >
+              <div className="mk-app-surface mk-tui">
+                <div className="mk-tui-head">
+                  <strong>Sign-off</strong>
+                  <span className="mk-tui-muted">Example</span>
+                </div>
+                <ul className="mk-tui-verdicts" aria-label="Roles that sign (example)">
+                  {["Engineering", "Data owner", "Compliance"].map((role) => (
+                    <li key={role}>
+                      <span>{role}</span>
+                      <span className="mk-app-pill mk-app-pill--v-not-run">Waiting</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </BentoTile>
+            <BentoTile
+              span={4}
+              title="A proof pack you can verify"
+              body="A signed record of the checks and the mapping. Check it through the API."
+              bleed
+            >
+              <div className="mk-app-surface mk-tui">
+                <ul className="mk-ct-tui-calls" aria-label="Proof pack API calls">
+                  {PACK_CALLS.map(([what, call]) => (
+                    <li key={call}>
+                      <span>{what}</span>
+                      <code>{breakAtSlashes(call)}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </BentoTile>
+            <BentoTile
+              span={4}
+              title="An audit log you can export"
+              body="Every action is signed and linked to the one before, so a removed entry is detected."
+              bleed
+            >
+              <div className="mk-app-surface mk-tui">
+                <div className="mk-tui-head">
+                  <span className="mk-app-pill mk-app-pill--completed">Chain verified</span>
+                  <span className="mk-tui-muted">Example</span>
+                </div>
+                <ul className="mk-ct-tui-chain" aria-label="Audit log entries (example)">
+                  {AUDIT_EXAMPLE.slice(0, 3).map((e) => (
+                    <li key={e.hash}>
+                      <ShieldCheck size={13} aria-hidden />
+                      <span>{e.what}</span>
+                      <code>{e.hash}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </BentoTile>
+          </Bento>
         </div>
       </section>
 
-      <DesignPartners headingId="mk-contact-partners" />
+      <section className="mk-section mk-kit-sec mk-ct-partners" aria-labelledby="mk-contact-partners">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-contact-partners"
+            title="Design partner program"
+            lead={
+              <>
+                We work with a small number of data teams on real migrations and syncs, and partners shape what we
+                build next. Apply by email:{" "}
+                <a className="mk-link" href="mailto:sales@datawrap.io?subject=Design%20partner%20application">
+                  sales@datawrap.io
+                </a>
+                .
+              </>
+            }
+          />
+          <Bento label="Design partner program">
+            {PARTNER_TERMS.map((t) => (
+              <BentoTile key={t.key} span={6} title={t.title}>
+                <ul className="mk-ct-terms">
+                  {t.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </BentoTile>
+            ))}
+          </Bento>
+        </div>
+      </section>
 
-      <section className="mk-section mk-ct-faq" aria-labelledby="mk-contact-faq">
-        <div className="mk-wrap mk-story-grid">
-          <header className="mk-story-head">
-            <h2 id="mk-contact-faq">Questions people ask first</h2>
-          </header>
+      <section className="mk-section mk-kit-sec mk-ct-faq" aria-labelledby="mk-contact-faq">
+        <div className="mk-wrap">
+          <SplitHead id="mk-contact-faq" title="Questions people ask first" lead="The engine, the connectors, and your security review." />
           <MarketingFaq items={FAQS} />
         </div>
       </section>
+
+      <MarketingClosing
+        title="Rather try it first?"
+        body="Start a free workspace and run a load on the same engine a pilot uses."
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => (onGetStarted ? onGetStarted() : onNavigate("help"))}>
+          {START_ACTION_LABEL}
+        </button>
+        <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("help")}>
+          Read the docs
+        </button>
+      </MarketingClosing>
     </div>
   );
 }

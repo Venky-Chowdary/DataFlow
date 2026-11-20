@@ -15,6 +15,9 @@ import {
   type MarketingVideo,
 } from "../../lib/videoCatalog";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
+import { SALES_ACTION_LABEL, START_ACTION_LABEL } from "./ContactSalesPage";
 
 const TAGS = ["All", "Overview", "Sync & CDC", "Verification", "Sources & files", "Transforms & AI"] as const;
 
@@ -341,7 +344,25 @@ function TopicFrame({ tag }: { tag: MarketingVideo["tag"] }) {
   );
 }
 
-export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => void }) {
+/**
+ * The line under the player says something the title does not: a blurb that
+ * opens by repeating the title ("Title: rest") keeps only the rest.
+ */
+export function blurbAfterTitle(video: MarketingVideo): string {
+  const prefix = `${video.title}: `;
+  if (!video.blurb.startsWith(prefix)) return video.blurb;
+  const rest = video.blurb.slice(prefix.length);
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
+export function DemosPage({
+  onNavigate,
+  onGetStarted,
+}: {
+  onNavigate: (route: PublicRoute) => void;
+  onGetStarted?: () => void;
+}) {
+  const start = onGetStarted ?? (() => onNavigate("help"));
   const [current, setCurrent] = useState<MarketingVideo>(
     MARKETING_VIDEOS.find((v) => v.id === FEATURED_VIDEO_ID) ?? MARKETING_VIDEOS[0],
   );
@@ -362,15 +383,15 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
   return (
     <div className="mk-page mk-demos mk-demo-page">
       <header className="mk-demo-hero">
-        <div className="mk-wrap">
+        <div className="mk-wrap mk-demo-hero-grid">
           <h1>Watch a transfer prove itself.</h1>
           <p className="mk-demo-lead">Recorded runs on the production engine, from mapping to the read-back at the end.</p>
           <div className="mk-actions">
-            <a className="mk-btn mk-btn--primary" href={YOUTUBE_CHANNEL_URL} target="_blank" rel="noopener noreferrer">
-              Subscribe on YouTube
-            </a>
-            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("help")}>
-              Read the docs
+            <button type="button" className="mk-btn mk-btn--primary" onClick={start}>
+              {START_ACTION_LABEL}
+            </button>
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("contact")}>
+              {SALES_ACTION_LABEL}
             </button>
           </div>
         </div>
@@ -392,7 +413,7 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
           <div className="mk-demo-now" aria-live="polite">
             <div>
               <h2 id="mk-demo-current">{current.title}</h2>
-              <p className="mk-demo-now-blurb">{current.blurb}</p>
+              <p className="mk-demo-now-blurb">{blurbAfterTitle(current)}</p>
             </div>
             <p className="mk-demo-now-note">
               <span className="mk-demo-now-tag">
@@ -407,11 +428,22 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
 
       <section className="mk-section mk-demo-catalogue" aria-labelledby="mk-demos-all">
         <div className="mk-wrap">
-          <header className="mk-demo-catalogue-head">
-            <div>
-              <h2 id="mk-demos-all">All demos</h2>
-              <p>Pick a run to play it above. Each one is a real session on the production engine.</p>
-            </div>
+          <SplitHead
+            id="mk-demos-all"
+            title="All demos"
+            lead={
+              <>
+                Pick a run to play it above. Each one is a real session on the production engine, and every one is also
+                on{" "}
+                <a className="mk-link" href={YOUTUBE_CHANNEL_URL} target="_blank" rel="noopener noreferrer">
+                  our YouTube channel
+                  <span className="mk-sr-only"> (opens in a new tab)</span>
+                </a>
+                .
+              </>
+            }
+          />
+          <div className="mk-demo-catalogue-head">
             <div className="mk-demo-filter-row">
               <div className="mk-chips mk-demo-filter" role="group" aria-label="Filter demos by topic">
                 {TAGS.map((t) => (
@@ -424,15 +456,19 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
                 {shown} {shown === 1 ? "video" : "videos"}
               </p>
             </div>
-          </header>
+          </div>
           <div className="mk-demo-index">
             {groups.map((group) => (
               <section key={group.tag} className="mk-demo-group" aria-label={group.tag}>
-                <h3 className="mk-demo-group-title">
-                  <TopicGlyph tag={group.tag} />
-                  {group.tag}
-                  <span>{group.videos.length}</span>
-                </h3>
+                <div className="mk-demo-group-head">
+                  <h3 className="mk-demo-group-title">
+                    <TopicGlyph tag={group.tag} />
+                    {group.tag}
+                  </h3>
+                  <p className="mk-demo-group-count">
+                    {group.videos.length} {group.videos.length === 1 ? "video" : "videos"}
+                  </p>
+                </div>
                 <ul>
                   {group.videos.map((video) => {
                     const isCurrent = video.id === current.id;
@@ -446,7 +482,7 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
                         >
                           <span className="mk-demo-row-text">
                             <span className="mk-demo-row-title">{video.title}</span>
-                            <span className="mk-demo-row-blurb">{video.blurb}</span>
+                            <span className="mk-demo-row-blurb">{blurbAfterTitle(video)}</span>
                           </span>
                           <span className="mk-demo-row-act">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true" focusable="false">
@@ -464,6 +500,18 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
           </div>
         </div>
       </section>
+
+      <MarketingClosing
+        title="Run one on your own data"
+        body="Start a free workspace and watch your own load go from the plan to the read-back."
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={start}>
+          {START_ACTION_LABEL}
+        </button>
+        <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+          {SALES_ACTION_LABEL}
+        </button>
+      </MarketingClosing>
     </div>
   );
 }

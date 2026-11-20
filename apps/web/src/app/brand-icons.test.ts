@@ -4,7 +4,16 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectorBrandMark, connectorIconKey } from "./brand-icons";
+import {
+  connectorBrandMark,
+  connectorIconKey,
+  connectorIconKind,
+  connectorMarks,
+  connectorMonogram,
+  dolphinOnly,
+  markViewBox,
+} from "./brand-icons";
+import { ALL_CONNECTORS } from "../lib/provenEvidence";
 
 const appDir = dirname(fileURLToPath(import.meta.url));
 
@@ -112,4 +121,70 @@ test("web connector-catalog types never render the default File glyph", () => {
   assert.equal(connectorIconKey("sqlserver"), "sqlserver");
   assert.equal(connectorIconKey("oracle"), "oracle");
   assert.equal(connectorIconKey("s3"), "s3");
+});
+
+test("no hand-drawn vendor marks: the only path drawn is a Simple Icons path", () => {
+  const src = readFileSync(join(appDir, "brand-icons.tsx"), "utf8");
+  assert.equal((src.match(/<path\b/g) ?? []).length, 1, "a second <path> means a drawn mark");
+  assert.match(src, /<path d=\{mark\.path\}/);
+  for (const shape of ["<ellipse", "<circle", "<polygon", "<polyline", "<line "]) {
+    assert.ok(!src.includes(shape), `${shape} in brand-icons.tsx: draw no lookalikes`);
+  }
+  assert.ok(!/drawnMark|DrawnProduct/.test(src));
+});
+
+test("every connector on a public page is a real mark, a monogram or a non-vendor glyph", () => {
+  // Things that are not a vendor's product: they may use a plain glyph.
+  const generic = new Set(["generic_sql", "sftp", "csv", "tsv", "fixed_width", "pdf", "rest_api"]);
+  const wrong: string[] = [];
+  for (const c of ALL_CONNECTORS) {
+    const kind = connectorIconKind(c.driver);
+    if (generic.has(c.driver) ? kind !== "generic" : kind === "generic") wrong.push(`${c.driver} -> ${kind}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("public-page connectors use the Simple Icons mark wherever one exists", () => {
+  const cases: Array<[string, string]> = [
+    ["postgresql", "postgresql"], ["mysql", "mysql"], ["mongodb", "mongodb"], ["json", "json"],
+    ["jsonl", "json"], ["xml", "xml"], ["yaml", "yaml"], ["html", "html5"], ["parquet", "apacheparquet"],
+    ["rest_openapi", "openapiinitiative"], ["google_sheets", "googlesheets"], ["Cursor", "cursor"],
+    ["Claude Desktop", "claude"],
+  ];
+  for (const [id, slug] of cases) assert.equal(connectorBrandMark(id)?.slug, slug, id);
+  for (const id of ["sqlserver", "oracle", "s3", "salesforce", "dynamodb", "adls", "excel", "docx",
+    "iceberg", "pinecone", "weaviate", "redshift", "vertica", "athena", "singer_tap", "VS Code"]) {
+    assert.equal(connectorIconKind(id), "monogram", id);
+  }
+});
+
+test("monograms follow one rule", () => {
+  const cases: Array<[string, string]> = [
+    ["Oracle", "O"], ["SQL Server", "SQL"], ["Amazon S3", "S3"], ["Amazon DynamoDB", "D"],
+    ["Microsoft Azure", "A"], ["IBM Db2", "Db2"], ["Azure Cosmos DB", "CD"], ["VS Code", "VS"],
+    ["Apache Iceberg", "I"], ["Amazon EMR", "EMR"],
+  ];
+  for (const [title, mono] of cases) assert.equal(connectorMonogram(title), mono, title);
+});
+
+test("the MySQL mark is the dolphin alone, cut from the official path", () => {
+  const mysql = connectorBrandMark("mysql");
+  assert.ok(mysql);
+  assert.notEqual(mysql.path, "");
+  assert.ok(mysql.path.length < 2500, "the wordmark subpaths are gone");
+  assert.equal(mysql.path.split(/(?=M)/).length, 2, "eye and body");
+  assert.equal(dolphinOnly("M1 14h2v2z" + "m0-10h1v1z"), "M1 4h1v1z");
+});
+
+test("every mark has a measured box and one optical size", () => {
+  const src = readFileSync(join(appDir, "brand-icons.tsx"), "utf8");
+  for (const m of connectorMarks()) {
+    const row = new RegExp(`\\n  "?${m.slug}"?: \\[([^\\]]+)\\]`).exec(src);
+    assert.ok(row, `${m.slug} has no box: measure it`);
+    const [x, y, w, h] = row[1].split(",").map(Number);
+    assert.ok(x >= 0 && y >= 0 && x + w <= 24.01 && y + h <= 24.01 && w > 0 && h > 0, `${m.slug} box ${row[1]}`);
+  }
+  // A square glyph shows at 20 of 24 units; a tall one fills the height.
+  assert.equal(markViewBox([0, 0, 24, 24]), "-2.4 -2.4 28.8 28.8");
+  assert.equal(markViewBox([6.61, 0, 10.78, 24]), "0 0 24 24");
 });

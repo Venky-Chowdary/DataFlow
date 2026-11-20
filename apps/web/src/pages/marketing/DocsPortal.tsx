@@ -12,6 +12,10 @@ import {
 } from "../../lib/helpDocs";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { shotSize } from "../../lib/workspaceShots";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
+import { Bento, BentoTile } from "../../components/marketing/kit/Bento";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
+import { SALES_ACTION_LABEL, START_ACTION_LABEL } from "./ContactSalesPage";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -46,6 +50,8 @@ function DocParagraphs({ text }: { text: string }) {
 interface DocsPortalProps {
   onNavigate: (route: PublicRoute) => void;
   onGetStarted: () => void;
+  /** The public site (not the signed-in Help): adds the closing card. */
+  marketing?: boolean;
 }
 
 /** Bust browser cache when docs screenshots are recaptured at full desktop size. */
@@ -139,40 +145,46 @@ function DocsSpaceShell({
 
 
 type GuideEntry = { id: HelpDocId; label?: string; note?: string };
-type DocsStep = { name: string; line: string; guides: GuideEntry[] };
+/** `app` names the screens of the app the step happens on. */
+type DocsStep = { name: string; line: string; app: string; guides: GuideEntry[] };
 
 /** Guides you read once, before the first load. */
 const BEFORE_FIRST_LOAD: GuideEntry[] = [
   { id: "help-installation", label: "Access your workspace", note: "Tenant URL, SSO sign-in, and the four workspace roles." },
   { id: "help-getting-started", note: "The sidebar map and the governed transfer path." },
+  { id: "help-enterprise", note: "SSO, roles, your own key, and the data region, set by a workspace admin." },
 ];
 
-/** Every guide, grouped by the step of a load it belongs to. */
+/**
+ * Every guide, grouped by the step of a load it belongs to: the same four
+ * steps as the Transfer Studio page (Plan, Validate, Execute, Verify). Each
+ * step names the app screens it covers, so the docs map onto the app's
+ * stepper (Source, Destination, Transform, Map, Validate, Run).
+ */
 const DOCS_STEPS: DocsStep[] = [
   {
     name: "Plan",
     line: "Connect both systems and pair the columns.",
+    app: "Source, Destination, Transform, and Map",
     guides: [{ id: "help-connectors" }, { id: "help-transfer-studio" }, { id: "help-semantic-mapping" }],
   },
   {
     name: "Validate",
     line: "Check the plan before the first write.",
+    app: "Validate",
     guides: [{ id: "help-preflight-gates" }, { id: "help-contracts" }],
   },
   {
     name: "Execute",
     line: "Run it once or on a schedule.",
+    app: "Run, and Schedules",
     guides: [{ id: "help-pipelines" }, { id: "help-transforms" }],
   },
   {
     name: "Verify",
-    line: "Read the destination back and compare.",
-    guides: [{ id: "help-job-theater", label: "Job space and the Trust Report" }, { id: "help-query" }],
-  },
-  {
-    name: "Evidence",
-    line: "Sign the report and keep the record.",
-    guides: [{ id: "help-job-theater", label: "Sign off a run" }, { id: "help-enterprise" }],
+    line: "Read the destination back, compare, and sign the report.",
+    app: "Job space and its Trust Report",
+    guides: [{ id: "help-job-theater", label: "Job space, the Trust Report, and sign-off" }, { id: "help-query" }],
   },
 ];
 
@@ -214,9 +226,52 @@ function GuideLink({
   );
 }
 
+/** Guides that sit side by side: a tile each, the title as the link. */
+function GuideTiles({
+  entries,
+  label,
+  span,
+  onNavigate,
+}: {
+  entries: GuideEntry[];
+  label: string;
+  span: 3 | 4 | 6;
+  onNavigate: (route: PublicRoute) => void;
+}) {
+  return (
+    <Bento label={label} className="mk-docs-tiles">
+      {entries.map((entry) => {
+        const doc = getHelpDoc(entry.id);
+        return (
+          <BentoTile
+            key={entry.id}
+            span={span}
+            className="mk-docs-tile"
+            title={
+              <a
+                className="mk-docs-tile-link"
+                href={hashForHelpDoc(entry.id)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate(entry.id);
+                }}
+              >
+                {entry.label ?? doc.title}
+              </a>
+            }
+            body={entry.note ?? doc.description}
+          >
+            <p className="mk-docs-tile-time">{doc.readTime} read</p>
+          </BentoTile>
+        );
+      })}
+    </Bento>
+  );
+}
+
 /** Documentation home: one search over every guide, and the guides laid out
- * along the five steps of a load. */
-export function DocsPortal({ onNavigate }: DocsPortalProps) {
+ * along the four steps of a load. */
+export function DocsPortal({ onNavigate, onGetStarted, marketing = false }: DocsPortalProps) {
   const [query, setQuery] = useState("");
   const q = query.trim();
   const hits = useMemo(() => new Set(searchHelpDocs(q).map((d) => d.id)), [q]);
@@ -268,7 +323,7 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
               ? matched === 0
                 ? "No guide matches that search."
                 : `${matched} of ${GUIDE_COUNT} guides match. Press Enter to open the first.`
-              : `${GUIDE_COUNT} guides, grouped by the five steps of a load.`}
+              : `${GUIDE_COUNT} guides, grouped by the four steps of a load.`}
           </p>
         </div>
       </header>
@@ -276,20 +331,18 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
       <section className="mk-docs-map" aria-label="Guides">
         <div className="mk-wrap">
           {before.length ? (
-            <div className="mk-docs-group">
-              <h2 id="mk-docs-before">Before the first load</h2>
-              <ul className="mk-docs-list" aria-labelledby="mk-docs-before">
-                {before.map((g) => (
-                  <li key={g.id}>
-                    <GuideLink entry={g} onNavigate={onNavigate} showNote />
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <section className="mk-docs-group" aria-labelledby="mk-docs-before">
+              <SplitHead id="mk-docs-before" title="Before the first load" lead="Read once: how you sign in, how the app is laid out, and what an admin sets." />
+              <GuideTiles entries={before} label="Before the first load" span={4} onNavigate={onNavigate} />
+            </section>
           ) : null}
 
-          <div className="mk-docs-group mk-docs-group--steps">
-            <h2 id="mk-docs-map-title">Guides by step</h2>
+          <section className="mk-docs-group mk-docs-group--steps" aria-labelledby="mk-docs-map-title">
+            <SplitHead
+              id="mk-docs-map-title"
+              title="Guides by step"
+              lead="The four steps of a load, as Transfer Studio names them, with the app screens each one covers."
+            />
             <ol className="mk-docs-steps" aria-labelledby="mk-docs-map-title">
               {DOCS_STEPS.map((step, i) => {
                 const guides = step.guides.filter(keep);
@@ -300,6 +353,7 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
                     </span>
                     <h3>{step.name}</h3>
                     <p className="mk-docs-step-line">{step.line}</p>
+                    <p className="mk-docs-step-app">In the app: {step.app}</p>
                     {guides.length ? (
                       <ul>
                         {guides.map((g) => (
@@ -315,22 +369,27 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
                 );
               })}
             </ol>
-          </div>
+          </section>
 
           {around.length ? (
-            <div className="mk-docs-group">
-              <h2 id="mk-docs-around">Other ways in, and reference</h2>
-              <ul className="mk-docs-list" aria-labelledby="mk-docs-around">
-                {around.map((g) => (
-                  <li key={g.id}>
-                    <GuideLink entry={g} onNavigate={onNavigate} showNote />
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <section className="mk-docs-group" aria-labelledby="mk-docs-around">
+              <SplitHead id="mk-docs-around" title="Other ways in, and reference" lead="Pilot, MCP, and the API reach the same engine and the same checks." />
+              <GuideTiles entries={around} label="Other ways in, and reference" span={6} onNavigate={onNavigate} />
+            </section>
           ) : null}
         </div>
       </section>
+
+      {marketing ? (
+        <MarketingClosing title="Follow a guide on your own data" body="Start a free workspace and run the four steps on a load of your own.">
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+            {START_ACTION_LABEL}
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            {SALES_ACTION_LABEL}
+          </button>
+        </MarketingClosing>
+      ) : null}
     </div>
   );
 }
@@ -487,7 +546,7 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingC
           </button>
           {hideMarketingCta ? null : (
             <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("contact")}>
-              Contact sales
+              {SALES_ACTION_LABEL}
             </button>
           )}
         </div>

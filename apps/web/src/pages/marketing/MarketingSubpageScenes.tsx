@@ -150,9 +150,9 @@ function AdminBanner({ what }: { what: string }) {
 
 function SsoPane() {
   const providers = [
-    { name: "SAML 2.0", sub: "Okta, Azure AD, OneLogin", on: true },
+    { name: "SAML 2.0", sub: "Okta, Entra ID, OneLogin", on: true },
     { name: "OpenID Connect", sub: "Google Workspace, Auth0", on: false },
-    { name: "Azure AD", sub: "Microsoft Entra ID", on: false },
+    { name: "Microsoft Entra ID", sub: "Your Microsoft tenant", on: false },
   ];
   const groups: [string, string][] = [
     ["data-platform-admins", "Admin"],
@@ -180,7 +180,7 @@ function SsoPane() {
           ))}
         </div>
         <p className="mk-sc-fine">
-          Set the callback URL in your IdP to <code>https://www.datawrap.io/api/v1/auth/sso/&lt;type&gt;/callback</code>.
+          Set the callback URL in your IdP to <code>https://app.datawrap.io/api/v1/auth/sso/&lt;type&gt;/callback</code>.
           Enabled providers appear on the sign-in page.
         </p>
       </Card>
@@ -306,7 +306,8 @@ function EnterprisePane() {
   );
 }
 
-const AUDIT: { at: string; what: string; who: string; hash: string }[] = [
+/** The example audit chain (Settings, Audit log); Contact shows an excerpt. */
+export const AUDIT_EXAMPLE: { at: string; what: string; who: string; hash: string }[] = [
   { at: "09:12:04", what: "Plan approved", who: "Data owner, via SSO", hash: "9c02e1" },
   { at: "09:12:31", what: "Transfer started", who: "API key, Editor role", hash: "a41f8d" },
   { at: "09:53:08", what: "Rows held in quarantine", who: "Transfer engine", hash: "0de76b" },
@@ -344,14 +345,14 @@ function AuditPane() {
         </span>
         <span className="mk-sc-audit-state" role="status" aria-live="polite">
           {verified ? (
-            <span className="mk-app-pill mk-app-pill--completed">Chain verified: {AUDIT.length} of {AUDIT.length} entries linked</span>
+            <span className="mk-app-pill mk-app-pill--completed">Chain verified: {AUDIT_EXAMPLE.length} of {AUDIT_EXAMPLE.length} entries linked</span>
           ) : (
             <span className="mk-sc-muted">Checking each link</span>
           )}
         </span>
       </div>
       <ol className={`mk-sc-chain${verified ? " is-verified" : ""}`}>
-        {AUDIT.map((e, i) => (
+        {AUDIT_EXAMPLE.map((e, i) => (
           <li key={e.hash}>
             <span className="mk-sc-chain-time">{e.at}</span>
             <span className="mk-sc-chain-node" aria-hidden>
@@ -364,7 +365,7 @@ function AuditPane() {
             <span className="mk-sc-chain-hash">
               <code>{e.hash}</code>
               <small>
-                links to <code>{i === 0 ? "4b7a30" : AUDIT[i - 1].hash}</code>
+                links to <code>{i === 0 ? "4b7a30" : AUDIT_EXAMPLE[i - 1].hash}</code>
               </small>
             </span>
           </li>
@@ -494,12 +495,18 @@ function SignOff({ inPanel }: { inPanel?: boolean }) {
           <strong>
             {job.name} → {job.dest}
           </strong>
-          <span className="mk-app-pill mk-app-pill--completed">Completed</span>
+          {/* A run with held rows ends completed with quarantine, not plain completed. */}
+          {job.held ? (
+            <span className="mk-app-pill mk-app-pill--v-explained">Completed, {fmt.format(job.held)} held</span>
+          ) : (
+            <span className="mk-app-pill mk-app-pill--completed">Completed</span>
+          )}
           <p>
             {job.from.label} to {job.to.label}, {job.mode.toLowerCase()}. Check: {job.trust.check}, {job.trust.verdict.toLowerCase()}.
           </p>
         </div>
       </div>
+      {/* The same tab set as the Job space drawer; sign-off lives in the Trust Report tab. */}
       <div className="mk-app-drawer-tabs" aria-hidden>
         <span>Detail</span>
         <span>
@@ -510,6 +517,9 @@ function SignOff({ inPanel }: { inPanel?: boolean }) {
           Trust Report
         </span>
         <span>Reversibility</span>
+        <span>
+          Log <em>30</em>
+        </span>
       </div>
       <div className="mk-app-drawer-body">
         <ul className="mk-sc-signers">
@@ -583,7 +593,7 @@ export function SignOffShowcase({ caption, frame = "window" }: { caption: string
   if (narrow || frame === "panel") {
     return (
       <div className="mk-app-phone">
-        <PanelWindow path="jobs/6af912d7/sign-off" caption={caption} designWidth={narrow ? PHONE_WIDTH : 660}>
+        <PanelWindow path="jobs/6af912d7" caption={caption} designWidth={narrow ? PHONE_WIDTH : 660}>
           <SignOff inPanel />
         </PanelWindow>
       </div>
@@ -591,7 +601,7 @@ export function SignOffShowcase({ caption, frame = "window" }: { caption: string
   }
   return (
     <AppWindow
-      path="jobs/6af912d7/sign-off"
+      path="jobs/6af912d7"
       active="jobs"
       caption={caption}
       className="has-drawer mk-sc-signoff-window"
@@ -605,8 +615,11 @@ export function SignOffShowcase({ caption, frame = "window" }: { caption: string
 /** The Proofs screen, filled with this page's CI evidence. */
 function ProofsLedger({ compact }: { compact?: boolean }) {
   const jobs = new Set(PROOF_GROUPS.flatMap((g) => g.jobs));
+  // The first three KPIs add up to the catalog (live + emulator + implemented),
+  // so no figure reads as part of another.
+  const live = PROVEN_DRIVERS - EMULATED_DRIVERS.length;
   const kpis: [string, string, string][] = [
-    ["Drivers proven in CI", `${PROVEN_DRIVERS} of ${CATALOG_TOTAL}`, "Green, with no skipped test"],
+    ["Proven on the live engine", String(live), `Of ${CATALOG_TOTAL} drivers, no skipped test`],
     ["Proven on an emulator", String(EMULATED_DRIVERS.length), EMULATED_DRIVERS.join(" and ")],
     ["Implemented, proof running", String(CATALOG_TOTAL - PROVEN_DRIVERS), "Running their CI proof"],
     ["CI jobs behind the proof", String(jobs.size), `CI run ${EVIDENCE_RUN_ID}`],

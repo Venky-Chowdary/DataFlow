@@ -4,8 +4,10 @@
  *
  * The frame uses the product's own theme tokens (--df-*), not the
  * marketing ink, so it reads as the real application sitting on the page.
- * Laid out at a fixed design width and scaled to fit; sizes below are the
- * product's own (13-14px UI text).
+ * Desktop windows render at 1:1 and reflow to their container (cropping at
+ * the right edge below their minimum width); phone panels reflow at full
+ * size. Nothing is scaled down, so these sizes are what a visitor reads:
+ * 13-14px UI text, and 12px for the smallest labels (the legibility floor).
  */
 
 .mk-app-figure {
@@ -54,6 +56,17 @@
   overflow: hidden;
 }
 
+/* Desktop window: 1:1 and fluid; below its min-width the frame crops. */
+.mk-app-window.mk-app-window--desk {
+  position: relative;
+  width: 100%;
+}
+
+.mk-app-figure.is-cropped .mk-app-fit {
+  -webkit-mask-image: linear-gradient(90deg, black calc(100% - 56px), transparent);
+  mask-image: linear-gradient(90deg, black calc(100% - 56px), transparent);
+}
+
 .mk-app-surface {
   border: 1px solid var(--app-rule);
   border-radius: var(--df-radius-lg);
@@ -63,7 +76,13 @@
 .mk-app-window code,
 .mk-app-surface code {
   font-family: var(--df-font-mono);
-  font-size: 11px;
+  font-size: 12px;
+}
+
+/* A bare <small> would render at the browser's "smaller" (under 11px). */
+.mk-app-window small,
+.mk-app-surface small {
+  font-size: 12px;
 }
 
 /* Browser chrome. */
@@ -146,9 +165,8 @@
   margin: 0 0 4px;
   padding: 0 8px;
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
 }
 
 .mk-app-side ul {
@@ -180,7 +198,7 @@
   border-radius: var(--df-radius-pill);
   background: var(--app-brand-soft);
   color: var(--df-brand-hover);
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
   font-weight: 600;
 }
@@ -230,7 +248,7 @@
 
 .mk-app-side-who small {
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
 }
 
@@ -263,9 +281,8 @@
 
 .mk-app-crumb small {
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
 }
 
 .mk-app-crumb strong {
@@ -292,7 +309,7 @@
   border-radius: var(--df-radius-sm);
   background: var(--app-surface);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .mk-app-top-actions,
@@ -312,7 +329,7 @@
   border-radius: var(--df-radius-md);
   background: var(--app-surface);
   color: var(--app-ink);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -355,9 +372,8 @@
 
 .mk-app-kpi small {
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
 }
 
 .mk-app-kpi strong {
@@ -367,11 +383,12 @@
 }
 
 .mk-app-kpi strong.is-good {
-  color: var(--df-success);
+  color: var(--df-success-text);
 }
 
+/* Red as text: deepened toward the ink so it holds 4.5:1 in both themes. */
 .mk-app-kpi strong.is-bad {
-  color: var(--df-danger);
+  color: color-mix(in srgb, var(--df-danger) 60%, var(--app-ink));
 }
 
 .mk-app-kpi span {
@@ -434,7 +451,7 @@
 
 .mk-app-tr {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 256px 132px 112px 100px 104px;
+  grid-template-columns: 112px minmax(0, 1fr) 236px 120px 156px;
   align-items: center;
   gap: 12px;
   width: 100%;
@@ -470,9 +487,8 @@
   min-height: 36px;
   background: var(--app-muted);
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
 }
 
 .mk-app-tr .is-num {
@@ -495,6 +511,16 @@
 
 .mk-app-job code {
   color: var(--app-ink-3);
+}
+
+.mk-app-job-meta {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-ink-3);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .mk-app-route {
@@ -528,9 +554,10 @@
   color: var(--app-ink-2);
 }
 
+/* Held rows are accounted for, not an error: amber, as the product shows them. */
 .mk-app-held {
-  color: var(--df-danger);
-  font-size: 11px;
+  color: var(--df-warning-text);
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -541,7 +568,7 @@
   padding: 2px 8px;
   border: 1px solid transparent;
   border-radius: var(--df-radius-sm);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -569,12 +596,14 @@
   color: var(--df-info-text);
 }
 
-.mk-app-pill--failed {
+.mk-app-pill--failed,
+.mk-app-pill--t-open {
   border-color: color-mix(in srgb, var(--df-danger) 26%, transparent);
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: color-mix(in srgb, var(--df-danger) 60%, var(--app-ink));
 }
 
+.mk-app-pill--quarantine,
 .mk-app-pill--v-explained,
 .mk-app-pill--v-sampled,
 .mk-app-pill--t-explained {
@@ -584,8 +613,7 @@
 }
 
 .mk-app-pill--v-not-run,
-.mk-app-pill--t-none,
-.mk-app-pill--t-open {
+.mk-app-pill--t-none {
   border-color: var(--app-rule);
   background: var(--app-muted);
   color: var(--app-ink-2);
@@ -686,7 +714,7 @@
   padding: 0 5px;
   border-radius: var(--df-radius-pill);
   background: var(--app-surface);
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
 }
 
@@ -757,8 +785,10 @@
   position: absolute;
   display: grid;
   justify-items: center;
+  max-width: 120px;
   color: var(--app-ink-3);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.3;
   text-align: center;
 }
 
@@ -782,7 +812,7 @@
 
 .mk-app-counts dt {
   color: var(--app-ink-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .mk-app-counts dd {
@@ -801,7 +831,7 @@
   border-radius: var(--df-radius-lg);
   background: var(--app-bg);
   color: var(--app-ink-2);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -1077,4 +1107,151 @@
 .mk-app-figure--panel.is-fluid .mk-app-ring-label,
 .mk-app-figure--panel.is-fluid .mk-app-url {
   font-size: 12px;
+}
+
+/* The address stays on one line; a long path is cut at the chip's edge. */
+.mk-app-figure--panel.is-fluid .mk-app-url {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Panel tabs stay on one line and scroll sideways, with an edge fade. */
+.mk-app-figure--panel .mk-app-drawer-tabs span {
+  flex: none;
+  white-space: nowrap;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-drawer-tabs {
+  -webkit-mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+}
+
+/* Run pickers that scroll sideways fade at their right edge. */
+.mk-app-picker {
+  padding-right: 24px;
+  -webkit-mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+}
+
+/* Tablets: a one-panel crop fills the column up to a readable width. */
+@media (min-width: 768px) {
+  .mk-app-figure--panel.is-fill {
+    max-width: 640px;
+  }
+}
+
+/* ── Desktop window: reflow inside the window, never shrink ─────── */
+
+.mk-app-window--desk {
+  container-name: mk-win;
+  container-type: inline-size;
+}
+
+.mk-app-window--desk .mk-app-content {
+  container-name: mk-app;
+  container-type: inline-size;
+}
+
+.mk-app-search span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A window under 1100px folds its sidebar to icons, as the app does. */
+@container mk-win (max-width: 1100px) {
+  .mk-app-shell {
+    grid-template-columns: 56px 1fr;
+  }
+
+  .mk-app-side li {
+    justify-content: center;
+  }
+
+  .mk-app-side :is(.mk-app-brand span, .mk-app-side-label, li span, li em, .mk-app-side-foot) {
+    display: none;
+  }
+
+  .mk-app-top {
+    grid-template-columns: 120px minmax(0, 1fr) auto;
+  }
+}
+
+/* A narrower window shows each route as its two logos, so job names fit. */
+@container mk-app (max-width: 1000px) {
+  .mk-app-jobs .mk-app-tr {
+    grid-template-columns: 112px minmax(0, 1fr) 72px 120px 156px;
+  }
+
+  .mk-app-tr .mk-app-route-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .mk-app-tr .mk-app-route .mk-app-chip {
+    padding: 3px;
+  }
+}
+
+/* Scene labels that the scene sheet sets under 12px (11px literals and the
+   11px --df-fs-xs token): lifted to the floor, since frames render 1:1. */
+.mk-app-figure .mk-app-window :is(
+    .mk-bsc-rail-box,
+    .mk-bsc-gr small,
+    .mk-bsc-gh,
+    .mk-bsc-group li small,
+    .mk-bsc-eq dt,
+    .mk-bsc-editor-bar,
+    .mk-bsc-client small,
+    .mk-bsc-table th,
+    .mk-bsc-table th small,
+    .mk-bsc-table--calls td code,
+    .mk-bsc-sql small,
+    .mk-bsc-verdict-ring small,
+    .mk-bsc-history-dl dt,
+    .mk-bsc-qconn small,
+    .mk-bsc-chats-label,
+    .mk-bsc-url-label small,
+    .mk-bsc-sched .mk-app-job .mk-bsc-muted,
+    .mk-bsc-schema-head,
+    .mk-bsc-schema-foot
+  ) {
+  font-size: 12px;
+}
+
+/* Config and code blocks keep their lines whole and scroll sideways. */
+.mk-app-figure .mk-app-window pre.mk-bsc-sql,
+.mk-app-figure .mk-app-window pre.mk-bsc-sql code {
+  overflow-x: auto;
+  overflow-wrap: normal;
+  white-space: pre;
+  word-break: normal;
+}
+
+/* Schedules scene: the decision answered, and the phone panel's action. */
+.mk-app-window .mk-bsc-decision-btn {
+  margin-top: 10px;
+}
+
+.mk-app-window .mk-bsc-panel-actions {
+  margin: 12px 0 0;
+}
+
+/* Schedules feed: a break in the time axis where hours pass between ticks. */
+.mk-pipe-ticks .mk-pipe-gap {
+  justify-content: flex-start;
+  color: var(--mk-ink-3);
+}
+
+.mk-pipe-ticks .mk-pipe-gap::before {
+  content: "";
+  width: 0;
+  height: 28px;
+  border-left: 1px dashed var(--mk-rule-strong);
 }
