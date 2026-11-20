@@ -241,20 +241,6 @@ export function ContactSalesPage({
             <p className="mk-ct-lead">
               A migration, a recurring sync, or a pilot on your own data.
             </p>
-            <dl className="mk-ct-mail">
-              <div>
-                <dt>Sales</dt>
-                <dd>
-                  <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
-                </dd>
-              </div>
-              <div>
-                <dt>General questions</dt>
-                <dd>
-                  <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
-                </dd>
-              </div>
-            </dl>
             <h2 className="mk-ct-next-title" id="mk-ct-next">What happens next</h2>
             <ol className="mk-ct-next" aria-labelledby="mk-ct-next">
               {NEXT_STEPS.map((s, i) => (
@@ -269,6 +255,7 @@ export function ContactSalesPage({
             </ol>
           </div>
 
+          <div className="mk-ct-side">
           <div className="mk-ct-card">
           {sent ? (
             <div className="mk-ct-f-success" role="status">
@@ -454,6 +441,21 @@ export function ContactSalesPage({
               </div>
             </form>
           )}
+          </div>
+            <dl className="mk-ct-mail">
+              <div>
+                <dt>Sales</dt>
+                <dd>
+                  <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
+                </dd>
+              </div>
+              <div>
+                <dt>General questions</dt>
+                <dd>
+                  <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
+                </dd>
+              </div>
+            </dl>
           </div>
         </div>
       </section>

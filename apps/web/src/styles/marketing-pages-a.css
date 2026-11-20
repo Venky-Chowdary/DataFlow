@@ -241,9 +241,11 @@ html[data-theme="dark"] .lp.mk .mk-a {
   padding-right: 0;
 }
 
+/* Row labels at medium weight; only group headers are bold, so a long
+   table does not read as a wall of bold text. */
 .lp.mk .mk-a-table tbody th {
   color: var(--mk-ink);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .lp.mk .mk-a-table tbody td {
@@ -255,6 +257,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
   border-bottom-color: var(--mk-rule-strong);
   color: var(--mk-ink);
   font-size: 14px;
+  font-weight: 600;
 }
 
 /* ── Shared: the one card, lists, chips, tags, links ────────────── */

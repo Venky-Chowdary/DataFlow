@@ -222,7 +222,7 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 
 /* Phone and tablet: name, mail, the form, then the steps. */
 @media (max-width: 1023px) {
-  .mk .mk-ct-grid > .mk-ct-card {
+  .mk .mk-ct-grid > .mk-ct-side {
     order: 1;
   }
 
@@ -247,10 +247,21 @@ html[data-theme="dark"] .mk .mk-trust-readout {
     grid-column: 1;
   }
 
-  .mk .mk-ct-grid > .mk-ct-card {
+  /* The form and the two addresses share the right column, so neither
+     column ends far above the other. */
+  .mk .mk-ct-grid > .mk-ct-side {
     grid-column: 2;
     grid-row: 1 / span 5;
     margin-top: 0;
+  }
+
+  .mk .mk-ct-side > .mk-ct-card {
+    margin-top: 0;
+  }
+
+  .mk .mk-ct-side > .mk-ct-mail {
+    max-width: none;
+    margin-top: 40px;
   }
 }
 
@@ -325,7 +336,7 @@ html[data-theme="dark"] .mk .mk-trust-readout {
   padding: 0 12px;
   border: 1px solid var(--mk-rule-strong);
   border-radius: var(--df-radius-md);
-  background: var(--mk-page);
+  background: var(--df-surface);
   color: var(--mk-ink);
   font: inherit;
   font-size: var(--mk-fs-body);
@@ -545,7 +556,7 @@ html[data-theme="dark"] .mk .mk-trust-readout {
 .mk .mk-ct-keep-grid {
   display: grid;
   gap: 32px;
-  align-items: center;
+  align-items: start;
 }
 
 .lp.mk .mk-ct-keep-copy p {
