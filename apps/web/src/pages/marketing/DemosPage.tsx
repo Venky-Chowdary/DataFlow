@@ -63,25 +63,6 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
             </a>
           </div>
         }
-        aside={
-          <div className="lp-sales-hero-art lp-demos-hero-art" aria-hidden="true">
-            <div className="lp-demos-hero-feature">
-              <img src={videoThumb(FEATURED_VIDEO_ID, "hq")} alt="" loading="lazy" />
-              <span className="lp-video-play lp-video-play--sm">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              </span>
-            </div>
-            <div className="lp-demos-hero-strip">
-              {MARKETING_VIDEOS.filter((v) => v.id !== FEATURED_VIDEO_ID)
-                .slice(0, 3)
-                .map((v) => (
-                  <img key={v.id} src={videoThumb(v.id, "hq")} alt="" loading="lazy" />
-                ))}
-            </div>
-          </div>
-        }
       />
 
       <section className="lp-demos-player" aria-label="Featured demo" ref={playerRef}>

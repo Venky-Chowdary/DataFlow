@@ -16,280 +16,15 @@
 
 /* ─── The ink field ─────────────────────────────────────────────── */
 
-.lp .lp-mkt-hero-band--ink,
-.lp.lp-subpage .lp-mkt-hero-band.lp-mkt-hero-band--ink,
-.lp .lp-sol-hero--ink,
-.lp .lp-sales-hero--ink {
-  position: relative;
-  isolation: isolate;
-  overflow-x: clip;
-  overflow-y: visible;
-  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px) !important;
-  border-bottom: 1px solid var(--dw-hero-rule) !important;
-  background:
-    /* directional light — the source the drawings are lit against */
-    radial-gradient(1180px 520px at 12% -18%, var(--dw-hero-light), transparent 62%),
-    /* engineering grid, 32px, aligned to the art canvas rhythm */
-    linear-gradient(var(--dw-hero-grid) 1px, transparent 1px) 0 0 / 32px 32px,
-    linear-gradient(90deg, var(--dw-hero-grid) 1px, transparent 1px) 0 0 / 32px 32px,
-    linear-gradient(168deg, var(--dw-hero-field-1) 0%, var(--dw-hero-field-0) 100%) !important;
-}
-
-/* A single hairline horizon instead of floating blobs. */
-.lp .lp-mkt-hero-band--ink::after,
-.lp .lp-sol-hero--ink::after,
-.lp .lp-sales-hero--ink::after {
-  content: "";
-  position: absolute;
-  inset: auto 0 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.45), transparent);
-  pointer-events: none;
-}
-
 /* ─── Hero typography ──────────────────────────────────────────── */
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
-.lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
-.lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
-  max-width: 22ch;
-  margin: 10px 0 0;
-  font-family: var(--df-font-display);
-  font-size: var(--lp-fs-display);
-  font-weight: 650;
-  line-height: 1.08;
-  letter-spacing: -0.035em;
-  color: #f7fbff !important;
-  text-wrap: balance;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-lead,
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy p.lp-mkt-lead,
-.lp .lp-sol-hero--ink .lp-sol-hero-lead,
-.lp .lp-sales-hero--ink .lp-sales-hero-lead {
-  max-width: 62ch;
-  margin-top: 18px;
-  font-size: clamp(0.98rem, 0.92rem + 0.22vw, 1.12rem) !important;
-  line-height: 1.62;
-  color: rgba(203, 219, 236, 0.86) !important;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-kicker,
-.lp .lp-sol-hero--ink .lp-pricing-hero-kicker,
-.lp .lp-sales-hero--ink .lp-sales-kicker {
-  /* A grid/flex child would otherwise stretch the pill across the column. */
-  display: inline-flex;
-  align-self: start;
-  justify-self: start;
-  width: fit-content;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  border: 1px solid rgba(45, 212, 191, 0.32) !important;
-  border-radius: var(--df-radius-pill);
-  background: rgba(45, 212, 191, 0.1) !important;
-  color: #5eead4 !important;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-/**
- * A pill is a label, not a band: as a grid or flex child it would otherwise be
- * stretched to the full column width on every public surface.
- */
-.lp .lp-mkt-kicker,
-.lp .lp-pricing-hero-kicker,
-.lp .lp-sales-kicker {
-  align-self: start;
-  justify-self: start;
-  width: fit-content;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-hero-cta,
-.lp .lp-sol-hero--ink .lp-hero-cta,
-.lp .lp-sales-hero--ink .lp-hero-cta {
-  margin-top: clamp(16px, 2vw, 22px);
-}
-
-/*
- * Copy column and drawing share one baseline, and the hero shares the body's
- * content shell: one left edge and one right edge from the headline to the
- * footer. The wider hero band bought drawing width at the price of a 100px jog
- * under every hero, which is the misalignment a reader actually notices.
- */
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
-.lp .lp-sol-hero--ink .lp-sol-hero-inner,
-.lp .lp-sales-hero--ink .lp-sales-hero-inner {
-  width: var(--lp-shell) !important;
-  max-width: 100%;
-  margin-inline: auto;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-  /* Copy and the product share the row. The picture does not outgrow the headline. */
-  grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.9fr);
-  gap: clamp(28px, 4vw, 64px) !important;
-  align-items: center;
-}
-
-.lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
-.lp .lp-sol-hero--ink .lp-sol-hero-inner {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
-  gap: clamp(28px, 4vw, 64px) !important;
-  align-items: center;
-}
-
-.lp .lp-sol-hero--ink .lp-sol-hero-visual {
-  min-width: 0;
-}
 
 /* ─── The drawing frame ────────────────────────────────────────── */
 
-/*
- * The frame fills its column. `width: 100%` matters on the figure as well:
- * inside a flex column (the home hero stage) a figure would otherwise size to
- * the svg's intrinsic ratio and collapse the drawing to a fraction of the slot.
- */
-.dw-hero-art {
-  display: block;
-  margin: 0;
-  min-width: 0;
-  width: 100%;
-  flex: 1 1 auto;
-  align-self: stretch;
-  animation: dw-hero-arrive 0.7s ease both;
-}
-
-@keyframes dw-hero-arrive {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.dw-hero-art-svg {
-  display: block;
-  width: 100%;
-  height: auto;
-  border-radius: var(--df-radius-3xl);
-  background: transparent;
-  box-shadow:
-    0 1px 0 rgba(148, 197, 214, 0.16) inset,
-    0 26px 60px -30px rgba(3, 10, 20, 0.9);
-}
-
-/* Caption sits on whatever field the hero uses — dark heroes override below. */
-.dw-hero-art-caption {
-  margin: 14px 2px 0;
-  color: var(--lp-muted);
-  font-size: 13.5px;
-  line-height: 1.5;
-  letter-spacing: 0.01em;
-}
-
-.lp .lp-mkt-hero-band--ink .dw-hero-art-caption,
-.lp .lp-sol-hero--ink .dw-hero-art-caption,
-.lp .lp-sales-hero--ink .dw-hero-art-caption {
-  color: rgba(180, 199, 219, 0.78);
-}
-
-/* Motion: direction only, and it stops for reduced-motion. */
-.dw-hero-art-sweep {
-  animation: dw-hero-sweep 9s linear infinite;
-}
-
-@keyframes dw-hero-sweep {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dw-hero-art,
-  .dw-hero-art-sweep {
-    animation: none;
-  }
-
-  .dw-hero-art-packet {
-    display: none;
-  }
-}
-
 /* ─── Home hero: the same ink field, one mounted schematic ──────── */
-
-/* Sales-hero (Enterprise / Security / Integrations) art column */
-.lp .lp-sales-hero--split .lp-sales-hero-art {
-  min-width: 0;
-  width: 100%;
-}
-
-.lp .lp-sales-hero--ink .lp-sales-hero-inner {
-  align-items: center;
-}
 
 /* ─── Contact: the route runs the full band, under copy and form ── */
 
-/*
- * The route drawing is the argument the form is asking for, so it spans both
- * columns rather than competing with the form for the right column.
- */
-.lp .lp-sales-hero--ink .lp-sales-hero-route {
-  grid-column: 1 / -1;
-  min-width: 0;
-  margin-top: clamp(2px, 0.6vw, 10px);
-}
-
-/*
- * The wide band canvas would set its labels near 6px on a phone, so below the
- * hero's stacking width the same three steps are carried by the step list.
- */
-.lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
-  display: none;
-}
-
-.lp .lp-sales-hero--ink .lp-sales-hero-mail span,
-.lp .lp-sales-hero--ink .lp-sales-hero-steps p {
-  color: rgba(180, 199, 219, 0.78) !important;
-}
-
-.lp .lp-sales-hero--ink .lp-sales-hero-steps strong {
-  color: #f2f7fc !important;
-}
-
-.lp .lp-sales-hero--ink .lp-sales-hero-steps li > span {
-  border-color: rgba(45, 212, 191, 0.34) !important;
-  background: rgba(45, 212, 191, 0.1) !important;
-  color: #5eead4 !important;
-}
-
-@media (max-width: 960px) {
-  .lp .lp-sales-hero--ink .lp-sales-hero-route {
-    display: none;
-  }
-
-  .lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
-    display: grid;
-  }
-}
-
 /* ─── Responsive: art keeps its aspect, never its own breakpoints ─ */
-
-/*
- * Copy is set left, so its buttons are too. The shared CTA row centres itself,
- * which only reads as centred once the column widens — a stacked hero would
- * otherwise put the headline on the left edge and its actions in the middle.
- */
-.lp .lp-mkt-hero-band--ink .lp-hero-cta,
-.lp .lp-sol-hero--ink .lp-hero-cta,
-.lp .lp-sales-hero--ink .lp-hero-cta {
-  justify-content: flex-start !important;
-}
 
 /*
  * A tablet cannot hold a two-column hero and still leave the drawing readable:
@@ -297,48 +32,8 @@
  * 5px. Below this width the hero stacks and the drawing takes the whole shell.
  */
 @media (max-width: 1099px) {
-  .lp .lp-sol-hero--ink .lp-sol-hero-inner,
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
-.lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
-.lp .lp-sales-hero--split .lp-sales-hero-inner,
-.lp .lp-mkt-live-reel {
+  .lp .lp-mkt-live-reel {
     grid-template-columns: minmax(0, 1fr) !important;
-  }
-}
-
-@media (max-width: 960px) {
-  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
-  .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
-  .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
-    max-width: 18ch;
-    font-size: clamp(1.85rem, 7.2vw, 2.25rem);
-  }
-
-  
-
-  .dw-hero-art {
-    margin-top: 8px;
-  }
-}
-
-@media (max-width: 559px) {
-  .lp .lp-mkt-hero-band--ink,
-.lp .lp-sol-hero--ink,
-.lp .lp-sales-hero--ink {
-    padding: 32px 0 40px !important;
-    background-size:
-      auto,
-      24px 24px,
-      24px 24px,
-      auto !important;
-  }
-
-  .dw-hero-art-svg {
-    border-radius: var(--df-radius-xl);
-  }
-
-  .dw-hero-art-caption {
-    font-size: 12.5px;
   }
 }
 
@@ -495,7 +190,6 @@
   max-height: 420px;
 }
 
-.lp .lp-mkt-hero-visual .lp-product-shot-viewport,
 .lp .lp-mkt-chapter .lp-product-shot-viewport {
   aspect-ratio: 16 / 10;
   max-height: 440px;
@@ -504,26 +198,6 @@
 .lp .lp-mkt-chapter .lp-product-shot {
   max-width: 880px;
   margin-inline: auto;
-}
-
-.lp .lp-mkt-hero-visual .lp-product-shot,
-.lp .lp-sol-hero-visual .lp-product-shot {
-  width: 100%;
-  min-width: 0;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-product-shot-route,
-.lp .lp-sol-hero--ink .lp-product-shot-route {
-  color: rgba(180, 199, 219, 0.82);
-  flex-wrap: wrap;
-  align-items: flex-start;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-product-shot-route span,
-.lp .lp-sol-hero--ink .lp-product-shot-route span {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: unset;
 }
 
 /* Route chips never paint past the frame — long FQDNs ellipsis. */
@@ -546,11 +220,6 @@
   text-overflow: ellipsis;
 }
 
-.lp .lp-mkt-hero-band--ink .docs-shot-reel-caption,
-.lp .lp-sol-hero--ink .docs-shot-reel-caption {
-  color: rgba(180, 199, 219, 0.78);
-}
-
 /* ── Scene type ───────────────────────────────────────────────────
    Airbyte and Fivetran keep a section title close to the hero, not
    down in the low 30s. ~40px at desktop, ~30px on a phone. Loaded
@@ -567,9 +236,7 @@
 }
 
 .lp .lp-sol-section-head h2,
-.lp .lp-sol-footer-inner h2,
-.lp .lp-proof-beside-copy h2,
-.lp .lp-wh-cta h2 {
+.lp .lp-proof-beside-copy h2 {
   font-size: var(--lp-fs-title);
   font-weight: 650;
   letter-spacing: -0.032em;
@@ -593,12 +260,6 @@
   row-gap: 8px;
   align-items: start;
   margin-bottom: 22px;
-}
-
-.lp .lp-sol-section-head .lp-mkt-kicker {
-  grid-column: 1;
-  grid-row: 1;
-  margin-bottom: 0;
 }
 
 .lp .lp-sol-section-head h2 {
@@ -751,9 +412,7 @@
   .lp-product-shot,
 .lp-product-shot-chrome,
 .lp-product-shot-viewport,
-.lp-proof-beside,
-.lp-mkt-hero-visual,
-.lp-sol-hero-visual {
+.lp-proof-beside {
     min-width: 0;
     max-width: 100%;
   }
@@ -777,8 +436,7 @@
   }
 
   .lp .docs-shot-reel--product .docs-shot-reel-stage,
-  .lp .lp-mkt-hero-visual .lp-product-shot-viewport,
-  .lp .lp-mkt-chapter .lp-product-shot-viewport {
+.lp .lp-mkt-chapter .lp-product-shot-viewport {
     aspect-ratio: 16 / 10;
     max-height: 320px;
   }
@@ -991,7 +649,6 @@
 .lp .lp-sol-outcome h3,
 .lp .lp-sol-outcome > span,
 .lp .lp-sec-layer-card h3,
-.lp .lp-sec-layer-card .lp-sec-layer-num,
 .lp .lp-sec-layer-card em,
 .lp .lp-ent-capability h3,
 .lp .lp-ent-capability > span,
@@ -1007,12 +664,6 @@
 .lp .lp-sol-cap p,
 .lp .lp-int-family-card p {
   color: var(--lp-muted);
-}
-
-.lp .lp-sec-layer-card .lp-sec-layer-tag {
-  background: var(--df-success-bg);
-  color: var(--df-brand-text);
-  border-color: var(--lp-line);
 }
 
 .lp .lp-sol-outcome > span,
@@ -1093,96 +744,6 @@
   }
 }
 
-/* Warehouse and solution closes use the same panel as the homepage. */
-.lp .lp-wh-cta,
-.lp .lp-sol-footer,
-.lp .lp-cust3-cta,
-.lp .lp-pricing-v2-cta,
-.lp .lp-ent-cta-band {
-  background: transparent;
-  padding-block: var(--lp-section-y);
-}
-
-.lp .lp-wh-cta-inner,
-.lp .lp-sol-footer-inner,
-.lp .lp-cust3-cta-inner,
-.lp .lp-pricing-v2-cta-inner,
-.lp .lp-ent-cta-inner,
-.lp .lp-int-cta {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 28px 40px;
-  align-items: center;
-  width: min(var(--lp-shell), calc(100% - 32px));
-  margin-inline: auto;
-  padding: 36px 40px;
-  border-radius: var(--df-radius-3xl);
-  background:
-    radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
-    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
-}
-
-.lp .lp-wh-cta h2,
-.lp .lp-wh-cta p,
-.lp .lp-sol-footer h2,
-.lp .lp-sol-footer p,
-.lp .lp-cust3-cta h2,
-.lp .lp-cust3-cta p,
-.lp .lp-pricing-v2-cta h3,
-.lp .lp-pricing-v2-cta p,
-.lp .lp-ent-cta-band h2,
-.lp .lp-ent-cta-band p,
-.lp .lp-int-cta h2,
-.lp .lp-int-cta p {
-  max-width: 36rem;
-  margin-left: 0;
-  color: var(--df-success-bg);
-}
-
-.lp .lp-wh-cta p,
-.lp .lp-sol-footer p,
-.lp .lp-cust3-cta p,
-.lp .lp-pricing-v2-cta p,
-.lp .lp-ent-cta-band p,
-.lp .lp-int-cta p {
-  color: rgba(236, 253, 245, 0.78);
-}
-
-@media (max-width: 839px) {
-  .lp .lp-wh-cta-inner,
-  .lp .lp-sol-footer-inner,
-  .lp .lp-cust3-cta-inner,
-  .lp .lp-pricing-v2-cta-inner,
-  .lp .lp-ent-cta-inner,
-  .lp .lp-int-cta {
-    grid-template-columns: 1fr;
-    padding: 28px 22px;
-  }
-}
-
-.lp .lp-mkt-hero-visual,
-.lp .lp-sol-hero-visual {
-  animation: lp-home-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.14s both;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
-.lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
-.lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
-  animation: lp-home-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *:nth-child(2),
-.lp .lp-sol-hero--ink .lp-sol-hero-copy > *:nth-child(2),
-.lp .lp-sales-hero--ink .lp-sales-hero-copy > *:nth-child(2) { animation-delay: 70ms; }
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *:nth-child(3),
-.lp .lp-sol-hero--ink .lp-sol-hero-copy > *:nth-child(3),
-.lp .lp-sales-hero--ink .lp-sales-hero-copy > *:nth-child(3) { animation-delay: 140ms; }
-
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *:nth-child(4),
-.lp .lp-sol-hero--ink .lp-sol-hero-copy > *:nth-child(4),
-.lp .lp-sales-hero--ink .lp-sales-hero-copy > *:nth-child(4) { animation-delay: 210ms; }
-
 .lp .lp-mkt-page-rich .lp-mkt-stats-item strong {
   font-size: clamp(1.45rem, 1.1rem + 0.7vw, 1.85rem);
   letter-spacing: -0.03em;
@@ -1233,19 +794,6 @@
   .lp-proof-beside:hover .lp-product-shot-chrome,
 .lp .lp-mkt-chapter--band:hover .lp-product-shot-chrome {
     transform: translateY(-4px);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-mkt-hero-visual,
-.lp .lp-sol-hero-visual,
-.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
-.lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
-.lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
-    opacity: 1;
-    transform: none;
-    animation: none;
-    transition: none;
   }
 }
 
@@ -1856,7 +1404,6 @@
 
 /* 11px labels. The accent teal misses 4.5:1 on the canvas. Brand-strong
    holds on the light field; ink heroes keep their own light label. */
-.lp .lp-mkt-kicker,
 .lp .lp-mkt-packet-node.is-accent strong,
 .lp .lp-demos-tag {
   color: var(--df-brand-strong);
@@ -1868,20 +1415,10 @@
 }
 
 /* One type ladder. Headlines share the display face; body copy is 15px. */
-.lp .lp-mkt-lead,
 .lp .lp-mkt-prose p {
   font-family: var(--df-font-sans, "IBM Plex Sans", system-ui, sans-serif);
   font-size: var(--lp-fs-body);
   font-weight: 450;
   line-height: 1.6;
-}
-
-.lp .lp-mkt-kicker {
-  font-family: var(--lp-font-display);
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  line-height: 1.3;
-  text-transform: uppercase;
 }
 

@@ -950,44 +950,6 @@ html[data-theme="dark"] .mk {
 
 /* Spec rows: heading on the left, the detail on the right, hairlines between. */
 
-.mk-spec {
-  border-bottom: 1px solid var(--mk-rule);
-}
-
-.mk-spec-row {
-  display: grid;
-  gap: 12px;
-  padding-block: 32px;
-  border-top: 1px solid var(--mk-rule);
-}
-
-.mk-spec-row h3 {
-  max-width: 22ch;
-  font-size: var(--mk-fs-h3);
-  line-height: 1.3;
-}
-
-.mk-spec-row p {
-  max-width: 62ch;
-  color: var(--mk-ink-2);
-}
-
-@media (min-width: 1024px) {
-  .mk-spec-row {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    column-gap: var(--mk-col-gap);
-    padding-block: 40px;
-  }
-
-  .mk-spec-row > h3 {
-    grid-column: 1 / span 4;
-  }
-
-  .mk-spec-row > div {
-    grid-column: 5 / span 8;
-  }
-}
-
 .mk-verdicts,
 .mk-families {
   width: 100%;
@@ -1218,42 +1180,6 @@ html[data-theme="dark"] .mk {
 }
 
 /* Same engine */
-
-.mk-engine {
-  display: grid;
-  gap: 0 var(--mk-col-gap);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.mk-engine li {
-  padding-block: 20px;
-  border-top: 1px solid var(--mk-rule);
-}
-
-.mk-engine h3 {
-  font-size: 18px;
-}
-
-.mk-engine p {
-  margin-top: 6px;
-  color: var(--mk-ink-2);
-  font-size: var(--mk-fs-small);
-  line-height: 1.55;
-}
-
-@media (min-width: 768px) {
-  .mk-engine {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 1024px) {
-  .mk-engine {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
 
 /* Closing: the logo tile green, the one deep surface on the page. */
 
@@ -2479,4 +2405,55 @@ html[data-theme="dark"] .mk {
     clip-path: inset(50%);
   }
 
+}
+
+/* Video facades: when the thumbnail cannot load, the frame shows the
+   title on the brand tile instead of an empty black box. */
+.lp.mk .lp-demos-thumb,
+.lp.mk .lp-video-facade {
+  background: var(--mk-tile);
+}
+
+.lp-video-poster {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: end start;
+  padding: 24px;
+  color: var(--mk-on-tile);
+  font-family: var(--mk-font);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: left;
+}
+
+/* Integrations: the route summary reads as a panel, not a dark slab. */
+.lp.mk .lp-int-honesty-panel {
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--mk-radius-panel);
+  background: var(--mk-panel);
+  background-image: none;
+  box-shadow: none;
+  color: var(--mk-ink);
+}
+
+.lp.mk .lp-int-honesty-panel * {
+  color: inherit;
+}
+
+.lp.mk .lp-int-honesty-panel span {
+  color: var(--mk-verified);
+}
+
+/* Family status reads as text with a mark, not a dark pill. */
+.lp.mk .lp-int-family-card header > span {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+  letter-spacing: 0;
 }

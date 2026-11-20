@@ -26,6 +26,7 @@ export function VideoPlayer({
 }) {
   const [playing, setPlaying] = useState(!poster);
   const [thumbQuality, setThumbQuality] = useState<"maxres" | "hq">("maxres");
+  const [thumbFailed, setThumbFailed] = useState(false);
 
   if (playing) {
     return (
@@ -49,15 +50,24 @@ export function VideoPlayer({
       onClick={() => setPlaying(true)}
       aria-label={`Play video: ${title}`}
     >
-      <img
-        src={videoThumb(videoId, thumbQuality)}
-        alt=""
-        loading="lazy"
-        onError={() => {
-          // maxresdefault 404s on lower-res uploads — fall back to hqdefault.
-          if (thumbQuality === "maxres") setThumbQuality("hq");
-        }}
-      />
+      {thumbFailed ? (
+        // No thumbnail (blocked network or a removed upload): show the title
+        // on a quiet poster instead of an empty black frame.
+        <span className="lp-video-poster" aria-hidden="true">
+          {title}
+        </span>
+      ) : (
+        <img
+          src={videoThumb(videoId, thumbQuality)}
+          alt=""
+          loading="lazy"
+          onError={() => {
+            // maxresdefault 404s on lower-res uploads — fall back to hqdefault.
+            if (thumbQuality === "maxres") setThumbQuality("hq");
+            else setThumbFailed(true);
+          }}
+        />
+      )}
       <span className="lp-video-play" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
           <path d="M8 5v14l11-7z" />

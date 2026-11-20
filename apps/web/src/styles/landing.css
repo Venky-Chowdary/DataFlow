@@ -147,17 +147,6 @@ html:has(.lp) {
   border-color: var(--df-text-tertiary);
 }
 
-.lp-btn--ghost {
-  background: transparent;
-  color: var(--lp-muted);
-  border-color: transparent;
-}
-
-.lp-btn--ghost:hover {
-  background: rgba(15, 23, 42, 0.04);
-  color: var(--lp-ink);
-}
-
 /* AuthButton shared variants — every auth-surface control routes here. */
 .lp-btn--link {
   background: transparent;
@@ -245,31 +234,6 @@ html:has(.lp) {
   gap: 10px;
   justify-content: center;
   margin-top: 28px;
-}
-
-.lp-section-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  max-width: var(--lp-shell-max);
-  margin: 28px auto 0;
-  padding: 0 clamp(16px, 4vw, 40px);
-  text-align: center;
-}
-
-.lp-section-footer--start {
-  justify-content: flex-start;
-  text-align: left;
-}
-
-.lp-section-footer .lp-btn {
-  min-width: 0;
-}
-
-.lp-mkt-next-cta .lp-btn {
-  min-width: min(100%, 180px);
 }
 
 /* ─── Login (enterprise gate — full-bleed split) ─── */
@@ -938,23 +902,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 0 auto;
 }
 
-.lp-mkt-kicker {
-  margin: 0 0 10px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--lp-accent-ink);
-}
-
-.lp-mkt-lead {
-  margin: 0;
-  max-width: 58ch;
-  font-size: 17px;
-  line-height: 1.55;
-  color: var(--lp-muted);
-}
-
 .lp-mkt-body h2 {
   margin: 0 0 14px;
   font-size: 22px;
@@ -1031,36 +978,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 0;
 }
 
-.lp-mkt-hero-band {
-  padding: clamp(56px, 8vw, 88px) clamp(20px, 4vw, 48px) clamp(64px, 8vw, 96px);
-  background:
-    radial-gradient(900px 400px at 20% 0%, rgba(13, 148, 136, 0.14), transparent 55%),
-    radial-gradient(700px 320px at 90% 20%, rgba(15, 23, 42, 0.05), transparent 50%),
-    linear-gradient(180deg, #f0fdfa 0%, #fff 48%, #f8fafb 100%);
-  border-bottom: 1px solid var(--lp-line);
-}
-
-.lp-mkt-hero-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
-  gap: clamp(24px, 4vw, 48px);
-  align-items: center;
-  max-width: var(--lp-shell-max);
-  margin: 0 auto;
-}
-
-.lp-mkt-hero-copy h1 {
-  margin: 0 0 16px;
-  font-size: clamp(2.25rem, 3.4vw, 3.25rem);
-  font-weight: 720;
-  letter-spacing: -0.03em;
-  line-height: 1.08;
-}
-
-.lp-mkt-hero-visual {
-  min-width: 0;
-}
-
 .lp-mkt-page-rich .lp-mkt-body {
   max-width: min(1080px, calc(100% - clamp(28px, 5vw, 64px)));
   margin: 0 auto;
@@ -1073,36 +990,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--lp-ink);
-}
-
-.lp-mkt-hero-grid--solo {
-  grid-template-columns: minmax(0, 720px);
-  justify-content: center;
-  text-align: center;
-}
-
-.lp-mkt-hero-grid--solo .lp-mkt-hero-copy {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.lp-mkt-hero-grid--solo .lp-mkt-lead {
-  margin-inline: auto;
-}
-
-.lp-mkt-hero-grid--solo .lp-hero-cta {
-  justify-content: center;
-}
-
-@media (max-width: 960px) {
-  .lp-mkt-hero-grid {
-    grid-template-columns: 1fr;
-  }
-
-  
-
-  
 }
 
 /* ─── Subpages: flat cards, flush page — no inner frame or card shadows ─── */
@@ -1125,15 +1012,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp.lp-subpage .lp-mkt-list li {
   box-shadow: none !important;
   filter: none !important;
-}
-
-/* ─── Help page ─── */
-.lp-mkt-lead {
-  margin: -8px 0 20px;
-  font-size: 15px;
-  line-height: 1.55;
-  color: var(--lp-muted);
-  max-width: 62ch;
 }
 
 .lp-mkt-stats-strip {
@@ -1169,33 +1047,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   color: var(--lp-muted-soft);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.lp-mkt-compliance-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  max-width: var(--lp-shell-max);
-  margin: 0 auto;
-  padding: 20px clamp(16px, 4vw, 40px) 8px;
-}
-
-.lp-mkt-body .lp-mkt-compliance-badges {
-  padding: 0 0 20px;
-  margin: 0 0 8px;
-}
-
-.lp-mkt-compliance-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--lp-accent) 28%, var(--lp-line));
-  background: var(--lp-accent-soft);
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--lp-accent-ink);
 }
 
 .lp-mkt-legal-layout {
@@ -1265,8 +1116,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp.lp-subpage .lp-mkt-stats-item,
-.lp.lp-subpage .lp-mkt-legal-nav,
-.lp.lp-subpage .lp-mkt-compliance-badge {
+.lp.lp-subpage .lp-mkt-legal-nav {
   box-shadow: none !important;
 }
 
@@ -1329,11 +1179,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   scroll-behavior: smooth;
 }
 
-@keyframes lp-aurora {
-  0% { transform: translate3d(-1.5%, 0, 0) scale(1); opacity: 0.75; }
-  100% { transform: translate3d(1.5%, -1.5%, 0) scale(1.05); opacity: 1; }
-}
-
 /* ─── Reveal system — quiet rise, no jump ─── */
 .lp-reveal {
   opacity: 0.96;
@@ -1360,62 +1205,10 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* Section headings — a touch more presence, brand-tinted kickers */
-.lp-mkt-kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 /* ══════════════════════════════════════════════════════════════════════════
    SUBPAGE COHESION — restore restrained enterprise depth so subpages share
    the landing page's premium feel (they were previously flattened).
    ══════════════════════════════════════════════════════════════════════════ */
-
-/* Refined hero backdrop on subpages — depth wash + soft grid (enterprise) */
-.lp.lp-subpage .lp-mkt-hero-band {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(760px 320px at 18% -10%, rgba(13, 148, 136, 0.16), transparent 58%),
-    radial-gradient(560px 280px at 92% 0%, rgba(15, 23, 42, 0.06), transparent 60%),
-    linear-gradient(180deg, #eefbf8 0%, #ffffff 68%);
-  border-bottom: 1px solid var(--lp-line);
-}
-
-/* Ink must beat .lp.lp-subpage .lp-mkt-hero-band specificity */
-.lp.lp-subpage .lp-mkt-hero-band.lp-mkt-hero-band--ink {
-  color: #fff;
-  background:
-    radial-gradient(900px 420px at 18% -10%, rgba(20, 184, 166, 0.28), transparent 55%),
-    radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
-    linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
-  border-bottom: 0;
-}
-
-.lp.lp-subpage .lp-mkt-hero-band--ink h1 {
-  color: #fff;
-}
-
-.lp.lp-subpage .lp-mkt-hero-band--ink .lp-mkt-lead {
-  color: rgba(226, 232, 240, 0.78);
-}
-
-.lp.lp-subpage .lp-mkt-hero-band--ink .lp-mkt-kicker {
-  color: #5eead4;
-  background: rgba(45, 212, 191, 0.1);
-  border: 1px solid rgba(45, 212, 191, 0.28);
-}
-
-.lp-mkt-hero-band-glow {
-  position: absolute;
-  inset: -20% 10% auto;
-  height: 280px;
-  pointer-events: none;
-  background: radial-gradient(ellipse at center, rgba(13, 148, 136, 0.18), transparent 70%);
-  filter: blur(28px);
-  animation: lp-aurora 14s ease-in-out infinite alternate;
-}
 
 /* Restrained elevation for subpage cards + a shared hover language */
 .lp.lp-subpage .lp-mkt-stats-item {
@@ -1441,77 +1234,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   opacity: 0.85;
 }
 
-/* Figure frame — browser-style chrome + caption for embedded visuals */
-.lp-mkt-figure {
-  margin: 0;
-}
-
-.lp-mkt-figure-frame {
-  border: 1px solid var(--lp-line);
-  border-radius: var(--lp-radius-md);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-md);
-  overflow: hidden;
-}
-
-.lp-mkt-figure-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--lp-line);
-  background: var(--df-surface-muted);
-}
-
-.lp-mkt-figure-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 999px;
-  background: #e2e8f0;
-}
-
-.lp-mkt-figure-dot:nth-child(1) { background: #fca5a5; }
-.lp-mkt-figure-dot:nth-child(2) { background: #fcd34d; }
-.lp-mkt-figure-dot:nth-child(3) { background: #86efac; }
-
-.lp-mkt-figure-bar-label {
-  margin-left: 8px;
-  font-size: 11.5px;
-  font-weight: 650;
-  color: var(--lp-muted-soft);
-}
-
-.lp-mkt-figure-body {
-  padding: 16px;
-  background:
-    radial-gradient(600px 200px at 50% -30%, rgba(13, 148, 136, 0.06), transparent 60%),
-    #ffffff;
-}
-
-.lp-mkt-figure-caption {
-  margin: 10px 2px 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--lp-muted-soft);
-}
-
-.lp-mkt-figure-step {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 8px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--lp-accent-soft);
-  color: var(--lp-accent-ink);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.lp.lp-subpage .lp-mkt-figure-frame {
-  box-shadow: var(--lp-shadow-sm) !important;
-}
-
 .lp-login-alert {
   animation: lp-stagger-in 360ms var(--df-ease, ease) both;
 }
@@ -1535,86 +1257,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 /* ══════════════════════════════════════════════════════════════════════════
    HELP HUB — ink hero, concept cards, guide grid, FAQ (enterprise knowledge)
    ══════════════════════════════════════════════════════════════════════════ */
-
-.lp-mkt-hero-band--ink {
-  color: #fff;
-  background:
-    radial-gradient(900px 420px at 18% -10%, rgba(20, 184, 166, 0.28), transparent 55%),
-    radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
-    linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
-  border-bottom: 0;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-hero-band-glow {
-  opacity: 0.85;
-  background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.22), transparent 70%);
-}
-
-.lp-mkt-hero-band-mesh {
-  display: none;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-hero-band-mesh {
-  display: block;
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.22;
-  background-image:
-    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
-  background-size: 40px 40px;
-  mask-image: radial-gradient(ellipse at 40% 30%, #000 20%, transparent 70%);
-}
-
-.lp-mkt-breadcrumb {
-  margin: 0 0 12px;
-  font-size: 12.5px;
-  font-weight: 550;
-  letter-spacing: 0.01em;
-  color: var(--lp-muted-soft);
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-breadcrumb {
-  color: rgba(148, 163, 184, 0.9);
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-kicker {
-  color: #5eead4;
-  background: rgba(45, 212, 191, 0.1);
-  border: 1px solid rgba(45, 212, 191, 0.28);
-  display: inline-flex;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.lp-mkt-hero-band--ink h1 {
-  color: #fff;
-  margin: 0 0 18px;
-  font-size: clamp(2.5rem, 3.8vw, 3.75rem);
-  font-weight: 720;
-  letter-spacing: -0.03em;
-  line-height: 1.06;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-lead {
-  color: rgba(226, 232, 240, 0.78);
-}
-
-.lp-btn--on-ink {
-  background: rgba(255, 255, 255, 0.06) !important;
-  color: #fff !important;
-  border-color: rgba(255, 255, 255, 0.28) !important;
-}
-
-.lp-btn--on-ink:hover {
-  background: rgba(255, 255, 255, 0.12) !important;
-  border-color: rgba(255, 255, 255, 0.45) !important;
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
    PRODUCT SURFACES — unique pages (Studio, Theater, Pipelines, Query, …)
@@ -1773,20 +1415,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   line-height: 1.2;
 }
 
-.lp.lp-subpage .lp-mkt-lead {
-  font-size: 15px;
-  line-height: 1.6;
-  color: var(--lp-muted);
-  max-width: 62ch;
-}
-
-.lp.lp-subpage .lp-mkt-kicker {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .lp.lp-subpage .lp-mkt-list {
   font-size: 14px;
   line-height: 1.55;
@@ -1811,9 +1439,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
     transition: none !important;
   }
 
-  .lp-mkt-hero-band-glow {
-    animation: none !important;
-  }
+  
 
   
 }
@@ -1829,10 +1455,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 /* Stronger scroll-driven section entrance (Azure-like rise) */
-@supports (animation-timeline: view()) {
-
-  
-}
 
 .lp-reveal {
   opacity: 0 !important;
@@ -2061,59 +1683,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   overflow-x: clip;
 }
 
-/* Hero motion variants — not the same float everywhere */
-.lp-mkt-hero-band--pricing .lp-mkt-hero-band-glow {
-  animation: lp-price-sheen 8s ease-in-out infinite;
-  opacity: 0.55;
-}
-
-.lp-mkt-hero-band-ruler {
-  position: absolute;
-  inset: auto 0 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, rgba(20, 184, 166, 0.55), transparent);
-  pointer-events: none;
-}
-
-.lp-mkt-hero-band--contact .lp-mkt-hero-band-glow {
-  animation: lp-contact-aurora 7s ease-in-out infinite alternate;
-}
-
-.lp-mkt-hero-band-beams {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(ellipse 40% 60% at 85% 20%, rgba(20, 184, 166, 0.22), transparent 60%),
-    radial-gradient(ellipse 35% 50% at 10% 80%, rgba(15, 118, 110, 0.18), transparent 55%);
-  animation: lp-contact-beams 10s ease-in-out infinite alternate;
-}
-
-.lp-mkt-hero-band--customers .lp-mkt-hero-band-mesh {
-  opacity: 0.35;
-  animation: lp-cust-mesh 12s linear infinite;
-}
-
-@keyframes lp-price-sheen {
-  0%, 100% { transform: translateX(-6%) scale(1); opacity: 0.4; }
-  50% { transform: translateX(6%) scale(1.05); opacity: 0.7; }
-}
-
-@keyframes lp-contact-aurora {
-  from { transform: translate(-2%, -1%) scale(1); }
-  to { transform: translate(3%, 2%) scale(1.08); }
-}
-
-@keyframes lp-contact-beams {
-  from { opacity: 0.65; filter: hue-rotate(0deg); }
-  to { opacity: 1; filter: hue-rotate(12deg); }
-}
-
-@keyframes lp-cust-mesh {
-  from { background-position: 0 0; }
-  to { background-position: 120px 80px; }
-}
-
 /* ── Pricing layout · restrained enterprise craft (Stripe/Linear cadence) ──
    Charcoal + white + teal (--df-brand). No purple, no blue tier cards, no glow. */
 
@@ -2131,15 +1700,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-cust-industry {
   background: var(--df-brand-subtle);
   color: var(--df-brand-text); /* AA on the mint chip */
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp-mkt-hero-band--pricing .lp-mkt-hero-band-glow,
-.lp-mkt-hero-band--contact .lp-mkt-hero-band-glow,
-.lp-mkt-hero-band-beams,
-.lp-mkt-hero-band--customers .lp-mkt-hero-band-mesh {
-    animation: none !important;
-  }
 }
 
 /* =========================================================================
@@ -2174,117 +1734,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   background: var(--df-surface-muted);
 }
 
-.lp-sales-hero {
-  background:
-    radial-gradient(900px 420px at 18% -10%, rgba(20, 184, 166, 0.28), transparent 55%),
-    radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
-    linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
-  color: #fff;
-  padding: 28px 0 32px;
-}
-
-.lp-sales-hero-inner {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 24px;
-  align-items: start;
-}
-
-.lp-sales-hero--split .lp-sales-hero-inner {
-  grid-template-columns: minmax(0, 1.08fr) minmax(300px, 0.82fr);
-}
-
-.lp-sales-hero-copy {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-start;
-  min-width: 0;
-}
-
-.lp-sales-kicker {
-  margin: 0 0 12px;
-  display: inline-flex;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #5eead4;
-  background: rgba(45, 212, 191, 0.1);
-  border: 1px solid rgba(45, 212, 191, 0.28);
-}
-
-.lp-sales-kicker--ink {
-  color: var(--df-brand-text);
-  background: var(--df-brand-subtle);
-  border-color: color-mix(in srgb, var(--df-teal-500) 28%, #e4e8ee);
-}
-
-.lp-sales-hero h1 {
-  margin: 0 0 10px;
-  font-family: var(--lp-font-display);
-  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem));
-  font-weight: 720;
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-  color: #fff;
-}
-
-.lp-sales-hero-copy > p,
-.lp-sales-hero-lead {
-  margin: 0 0 14px;
-  max-width: 52ch;
-  font-size: var(--lp-fs-lead, 15px);
-  line-height: 1.55;
-  color: rgba(226, 232, 240, 0.82);
-}
-
-.lp-sales-hero-copy > p code {
-  font-size: 0.92em;
-  color: #5eead4;
-}
-
-.lp-sales-hero-copy .lp-hero-cta {
-  margin: 0 0 22px;
-  flex-wrap: wrap;
-}
-
 .lp-sales-form label em {
   font-weight: 500;
   color: var(--df-text-tertiary);
-}
-
-.lp-sales-hero-slas {
-  list-style: none;
-  margin: 16px 0 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  max-width: 640px;
-}
-
-.lp-sales-hero-slas li {
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(94, 234, 212, 0.18);
-  background: rgba(7, 17, 31, 0.28);
-}
-
-.lp-sales-hero-slas strong {
-  display: block;
-  font-size: 13.5px;
-  font-weight: 740;
-  color: #fff;
-}
-
-.lp-sales-hero-slas span {
-  display: block;
-  margin-top: 2px;
-  font-size: 11.5px;
-  line-height: 1.3;
-  color: rgba(167, 243, 208, 0.78);
 }
 
 .lp-sales-hero-mail {
@@ -2323,13 +1775,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 16px;
   box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
   color: var(--df-text-primary);
-}
-
-.lp-sales-hero--split .lp-sales-form,
-.lp-sales-hero--split .lp-sales-success {
-  height: auto;
-  display: flex;
-  flex-direction: column;
 }
 
 .lp-sales-form,
@@ -2606,15 +2051,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 @media (max-width: 960px) {
-  .lp-sales-hero-inner,
-.lp-sales-fields,
+  .lp-sales-fields,
 .lp-sales-fields--3 {
     grid-template-columns: 1fr;
-  }
-  .lp-sales-hero-slas,
-  .lp-sales-hero--page .lp-sales-hero-slas {
-    grid-template-columns: 1fr 1fr;
-    max-width: none;
   }
   .lp-sales-form-foot { flex-direction: column; align-items: stretch; }
 }
@@ -2870,43 +2309,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 /* ---- Demos hero aside — video wall panel ---- */
 
-.lp-demos-hero-art {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.lp-demos-hero-feature {
-  position: relative;
-  border-radius: var(--lp-radius-lg);
-  overflow: hidden;
-  border: 1px solid rgba(94, 234, 212, 0.35);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
-}
-
-.lp-demos-hero-feature img {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-}
-
-.lp-demos-hero-strip {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.lp-demos-hero-strip img {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  border-radius: var(--df-radius-md);
-  border: 1px solid rgba(94, 234, 212, 0.2);
-  opacity: 0.85;
-}
-
 /* ---- Richness pass: video surfaces + demos ---- */
 
 .lp-video-facade img {
@@ -2946,16 +2348,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   transform: scale(1.05);
 }
 
-.lp-demos-hero-feature img,
-.lp-demos-hero-strip img {
-  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease;
-}
-
-.lp-demos-hero-strip img:hover {
-  opacity: 1;
-  transform: translateY(-2px);
-}
-
 .lp-demos-filter {
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
@@ -2971,8 +2363,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   .lp-video-facade img,
 .lp-demos-card,
 .lp-demos-card img,
-.lp-demos-hero-feature img,
-.lp-demos-hero-strip img,
 .lp-demos-filter {
     transition: none;
   }

@@ -36,14 +36,6 @@
   max-width: 100%;
 }
 
-/* Ambient decoration off ? paint cost + visual noise */
-.lp-mkt-hero-band-glow,
-.lp-mkt-hero-band-mesh,
-.lp-mkt-hero-band-beams,
-.lp-mkt-hero-band-ruler {
-  display: none !important;
-}
-
 /* Soft page canvas ? no competing gradients fighting sections */
 .lp {
   background: var(--lp-canvas) !important;
@@ -53,10 +45,8 @@
  * Content shell ? NEVER apply to .lp-nav-shell.
  * Nav stays wider (1280) so Pricing / CTAs cannot collide.
  */
-.lp-mkt-hero-grid,
 .lp-mkt-page-rich .lp-mkt-body,
-.lp-mkt-stats-strip,
-.lp-mkt-compliance-badges {
+.lp-mkt-stats-strip {
   width: var(--lp-shell) !important;
   max-width: 100% !important;
   margin-left: auto !important;
@@ -89,23 +79,6 @@
   color: var(--lp-ink);
 }
 
-.lp-mkt-lead {
-  margin: 0;
-  color: var(--lp-muted);
-  line-height: 1.55;
-  max-width: 52ch;
-  font-size: 15px;
-}
-
-.lp-mkt-kicker {
-  margin: 0 0 8px !important;
-  font-size: 11px !important;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--lp-teal);
-}
-
 /* Prose: no jagged word breaks */
 .lp :where(h1, h2, h3, h4, p, li, span, strong, em, figcaption, td, th, button) {
   overflow-wrap: break-word;
@@ -130,66 +103,6 @@
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
-}
-
-/* Subpage hero ? light default */
-.lp-mkt-hero-band {
-  padding: clamp(40px, 6vh, 68px) 0 var(--lp-section-y-sm) !important;
-  background: var(--df-surface) !important;
-  border-bottom: 1px solid var(--lp-line);
-  color: var(--lp-ink);
-}
-
-/* Ink hero ? scoped contrast (wins over global teal kickers) */
-.lp-mkt-hero-band--ink {
-  background: linear-gradient(180deg, #0b1220 0%, #121a2b 100%) !important;
-  color: #f8fafc !important;
-  border-bottom-color: #1e293b !important;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-kicker {
-  color: #5eead4 !important;
-  background: rgba(45, 212, 191, 0.12) !important;
-  border: 1px solid rgba(45, 212, 191, 0.28) !important;
-  display: inline-flex;
-  padding: 5px 12px;
-  border-radius: var(--dt-radius-full);
-}
-
-.lp-mkt-hero-band--ink h1,
-.lp-mkt-hero-band--ink .lp-mkt-hero-copy h1 {
-  color: #f8fafc !important;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-lead,
-.lp-mkt-hero-band--ink .lp-mkt-hero-copy p.lp-mkt-lead {
-  color: var(--df-text-tertiary) !important;
-}
-
-.lp-mkt-hero-band--ink .lp-mkt-breadcrumb {
-  color: var(--df-text-tertiary) !important;
-}
-
-.lp-mkt-hero-copy h1 {
-  max-width: 22ch;
-  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem)) !important;
-  font-weight: 650;
-  letter-spacing: -0.022em;
-  line-height: 1.18;
-  color: var(--lp-ink);
-}
-
-.lp-mkt-hero-copy .lp-mkt-lead,
-.lp-mkt-hero-copy > p:not(.lp-mkt-kicker):not(.lp-mkt-breadcrumb) {
-  max-width: 44ch;
-  line-height: 1.55;
-  font-size: 15px;
-  color: var(--lp-muted);
-}
-
-.lp-mkt-hero-visual {
-  width: 100%;
-  min-width: 0;
 }
 
 /* ??? Stats strip ? hairline rail (not card wall) ??? */
@@ -232,7 +145,6 @@
   color: var(--lp-ink) !important;
 }
 
-.lp-mkt-hero-band--ink + * .lp-mkt-stats-item strong,
 .lp-mkt-page-rich .lp-mkt-stats-item strong {
   color: var(--lp-ink) !important;
 }
@@ -244,28 +156,6 @@
   text-transform: none !important;
   color: var(--lp-muted) !important;
   line-height: 1.35;
-}
-
-/* Compliance ? compact chips, dense wrap */
-.lp-mkt-compliance-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 16px 0 0 !important;
-  margin: 0 !important;
-}
-
-.lp-mkt-compliance-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px !important;
-  border: 1px solid var(--lp-line) !important;
-  border-radius: var(--lp-radius-sm) !important;
-  background: var(--df-surface) !important;
-  font-size: 12.5px !important;
-  font-weight: 600;
-  color: var(--lp-ink);
 }
 
 .lp-cust-industry {
@@ -366,8 +256,7 @@
 }
 
 .docs-space-page-head p,
-.docs-space-page-head .docs-article-lead,
-.docs-space-page-head .lp-mkt-lead {
+.docs-space-page-head .docs-article-lead {
   max-width: min(72ch, 100%) !important;
   white-space: normal !important;
   overflow: visible !important;
@@ -484,24 +373,6 @@
    Contact page ? light enterprise pilot wizard (kills cinema dark)
    ??????????????????????????????????????????????????????????? */
 
-/* Footer section footers */
-.lp-section-footer {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 20px;
-  padding-top: 0;
-  border-top: 0;
-}
-
-.lp-section-footer--start {
-  justify-content: flex-start;
-}
-
-.lp-section-footer--center {
-  justify-content: center;
-}
-
 /* ??? Responsive ??? */
 @media (max-width: 960px) {
 
@@ -540,18 +411,13 @@
    Airbyte-class home composition (Datawrap tokens)
    ??????????????????????????????????????????????????????????????????? */
 
-.lp-sec-badges,
 .lp-sec-section,
 .lp-sec-agent,
-.lp-int-strip,
 .lp-int-section,
 .lp-int-honesty,
-.lp-int-cta,
 .lp-pricing-v2-plans,
 .lp-pricing-v2-compare,
 .lp-pricing-v2-principles,
-.lp-pricing-v2-cta-inner,
-.lp-sol-hero-inner,
 .lp-sol-section {
   width: var(--lp-shell) !important;
   max-width: 100% !important;
@@ -566,36 +432,6 @@
 
 .lp-pricing-v2 {
   --lp-pricing-shell: var(--lp-shell);
-}
-
-.lp-pricing-hero-kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 16px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #5eead4;
-}
-
-.lp-pricing-hero-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #2dd4bf;
-  box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.18);
-  animation: lp-pricing-pulse 2.4s ease-in-out infinite;
-}
-
-@keyframes lp-pricing-pulse {
-  0%, 100% { box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.15); }
-  50% { box-shadow: 0 0 0 8px rgba(45, 212, 191, 0.05); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp-pricing-hero-dot { animation: none; }
 }
 
 /* Plan cards */
@@ -824,54 +660,13 @@
   color: var(--df-text-secondary);
 }
 
-.lp-pricing-v2-cta {
-  width: var(--lp-pricing-shell);
-  margin: 0 auto clamp(48px, 8vh, 80px);
-}
-
-.lp-pricing-v2-cta-inner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 28px 28px;
-  border-radius: 18px;
-  background: #0b1f1c;
-  color: #e2e8f0;
-}
-
-.lp-pricing-v2-cta-inner h3 {
-  margin: 0 0 8px;
-  font-family: var(--df-font-display);
-  font-size: 1.35rem;
-  letter-spacing: -0.02em;
-  color: #f8fafc;
-}
-
-.lp-pricing-v2-cta-inner p {
-  margin: 0;
-  max-width: 48ch;
-  line-height: 1.5;
-  color: var(--df-text-tertiary);
-}
-
-.lp-pricing-v2-cta-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
 @media (max-width: 960px) {
   .lp-pricing-v2-grid,
   .lp-pricing-v2-principles {
     grid-template-columns: 1fr;
   }
 
-  .lp-pricing-v2-cta-inner {
-    flex-direction: column;
-    align-items: stretch;
-  }
+  
 
   .lp-pricing-card.is-featured {
     order: -1;
