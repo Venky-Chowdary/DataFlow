@@ -158,8 +158,14 @@ def test_assume_timezone_and_ms_contract_lands_bson_dates(monkeypatch):
     assert result.ok is True, result.error
     assert result.rows_written == 2
     docs = captured["docs"]
-    stamped = docs[0]["ts"].astimezone(timezone.utc)
-    assert stamped == datetime(2024, 11, 3, 5, 37, 0, 123000, tzinfo=timezone.utc)
+    # The writer hands the driver the UTC instant; the BSON Date it stores is
+    # int64 milliseconds, so the encoded value is floored to .123 (the same
+    # contract test_document_instant_precision pins on the writer).
+    import bson
+
+    stored = bson.decode(bson.encode({"ts": docs[0]["ts"]}), codec_options=bson.CodecOptions(tz_aware=True))
+    assert stored["ts"] == datetime(2024, 11, 3, 5, 37, 0, 123000, tzinfo=timezone.utc)
+    assert docs[0]["ts"].utcoffset() == timezone.utc.utcoffset(None)
     assert docs[1]["ts"] is None
 
 

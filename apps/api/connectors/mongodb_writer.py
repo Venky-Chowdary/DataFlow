@@ -1176,13 +1176,6 @@ def write_mapped_rows(
                             "to a string, or accept the millisecond-truncation "
                             "risk on this column (refuse silent truncation)"
                         )
-                    if column in ms_ack_cols:
-                        # The contract accepted millisecond precision. Floor here
-                        # so the stored BSON date is that instant, not a value
-                        # the driver would cut without a record.
-                        from services.millisecond_fit import floor_to_millisecond
-
-                        coerced = floor_to_millisecond(coerced)
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
