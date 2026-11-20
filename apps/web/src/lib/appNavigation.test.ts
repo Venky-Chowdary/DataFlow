@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  emailedJobLinkUrl,
   focusFromHash,
   hashForScreen,
   inviteLinkToken,
@@ -126,5 +127,26 @@ describe("boot hash normalisation keeps a jobs deep link (fresh-load race)", () 
   it("navigating or switching screens drops the focus", () => {
     assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", false), "#/jobs");
     assert.equal(normalizedAppHash("dashboard", "#/jobs?jobId=older", true), "#/overview");
+  });
+});
+
+/** D339: notification e-mails link to https://<web origin>/jobs/<id>. nginx
+ *  serves the SPA for that path, but the app routes on the hash only, so the
+ *  link opened Overview and the job was nowhere: a dead end. */
+describe("emailedJobLinkUrl", () => {
+  it("turns /jobs/<id> into the Jobs screen focused on that job", () => {
+    assert.equal(emailedJobLinkUrl("/jobs/6afb747e5eafee38493e1030", "", ""), "/#/jobs?jobId=6afb747e5eafee38493e1030");
+    assert.equal(emailedJobLinkUrl("/jobs/job-9/", "", ""), "/#/jobs?jobId=job-9");
+    // The focus reads back through the existing deep-link parser.
+    const url = emailedJobLinkUrl("/jobs/job-9", "", "");
+    assert.deepEqual(focusFromHash(url.slice(1)), { screen: "jobs", jobId: "job-9", panel: undefined });
+  });
+
+  it("leaves every other path alone", () => {
+    for (const path of ["/", "/jobs", "/jobs/", "/jobs/a/b", "/reset-password", "/api/v1/jobs/x"]) {
+      assert.equal(emailedJobLinkUrl(path, "", ""), "", path);
+    }
+    // An id with characters a job id never has is not a job link.
+    assert.equal(emailedJobLinkUrl("/jobs/%3Cscript%3E", "", ""), "");
   });
 });

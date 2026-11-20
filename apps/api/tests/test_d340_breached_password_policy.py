@@ -208,3 +208,29 @@ def test_hibp_cache_holds_the_range_not_one_passwords_count(monkeypatch):
     assert hibp.pwned_count(clean, http_get=stub) == 0
     assert hibp.pwned_count(breached, http_get=stub) == 77
     assert len(calls) == 1  # the second answer came from the cached range
+
+
+# ── Route-level doors (round 8 review) ──────────────────────────────────────
+
+
+def test_admin_create_login_with_a_chosen_password_uses_the_same_policy(env):
+    """POST /team/users with ``password`` is a fifth door: the admin types the
+    new account's password. It only checked the 12-character minimum, so
+    ``password1234`` created a login the other four paths refuse."""
+    client, admin, _ws, _tmp = env
+    email = f"d340c-{uuid.uuid4().hex[:8]}@example.com"
+    res = client.post("/api/v1/team/users", headers=admin,
+                      json={"email": email, "password": VECTOR})
+    assert res.status_code == 400, res.text
+    assert res.json()["error"]["code"] == "pwned_password"
+    from services import user_store
+
+    assert user_store.get_user(email) is None  # nothing was created
+    ok = client.post("/api/v1/team/users", headers=admin,
+                     json={"email": email, "password": STRONG})
+    assert ok.status_code == 200, ok.text
+    # An issued one-time password is generated, not chosen: no policy call needed.
+    issued = client.post("/api/v1/team/users", headers=admin,
+                         json={"email": f"d340d-{uuid.uuid4().hex[:8]}@example.com"})
+    assert issued.status_code == 200, issued.text
+

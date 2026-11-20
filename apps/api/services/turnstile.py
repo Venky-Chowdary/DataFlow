@@ -53,6 +53,25 @@ def production_turnstile() -> bool:
     return is_production()
 
 
+#: ENV values that name a developer machine or a test run (unset counts too).
+_DEVELOPER_ENVS = frozenset({"", "development", "dev", "local", "test"})
+
+
+def local_tokens_allowed() -> bool:
+    """May a token minted on localhost pass? Only on a developer environment.
+
+    ``is_production()`` answers False for an unknown name such as ``staging``
+    off Railway, so keying this on it let a localhost token pass there. Fail
+    closed: anything but a developer ``ENV`` (or production) refuses (D322).
+    """
+    import os
+
+    if production_turnstile():
+        return False
+    env = (getenv_brand("ENV", os.getenv("ENVIRONMENT", "")) or "").strip().lower()
+    return env in _DEVELOPER_ENVS
+
+
 def _host_token(value: str) -> str:
     host = (value or "").strip().lower().rstrip(".")
     if host.startswith("[") and "]" in host:
@@ -99,7 +118,7 @@ def verify(token: str, *, remote_ip: str = "", expected_action: str = "",
     hostname = _host_token(str(data.get("hostname") or ""))
     action = str(data.get("action") or "")
     expected = _host_token(expected_hostname)
-    served = _PUBLIC_HOSTNAMES | (set() if production_turnstile() else _LOCAL_HOSTNAMES)
+    served = _PUBLIC_HOSTNAMES | (_LOCAL_HOSTNAMES if local_tokens_allowed() else set())
     # Apex and www are one site. A token minted on www.datawrap.io matches a
     # caller that names the apex, and the reverse, because both are served.
     if not hostname or hostname not in served:

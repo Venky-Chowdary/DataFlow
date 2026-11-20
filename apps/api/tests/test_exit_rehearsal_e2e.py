@@ -240,6 +240,11 @@ def bucket(world, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAWRAP_EXPORT_BUCKET", "exit-exports")
     monkeypatch.setenv("DATAWRAP_LOCAL_FILE_DESTINATIONS", "off")
+    # The fixture's source is a SQLite file. With local files off, SQLite
+    # follows (D276: hosted SQLite is refused before any path is opened, list
+    # and sample included), so keep it on explicitly: this test is about the
+    # export bucket, as on a self-hosted install with SQLITE_DESTINATION=on.
+    monkeypatch.setenv("DATAWRAP_SQLITE_DESTINATION", "on")
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket="exit-exports")

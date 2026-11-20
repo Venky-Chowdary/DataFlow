@@ -5,6 +5,7 @@ import {
   changeEmailRequestError,
   codeEntryError,
   mailSendError,
+  resendRefusal,
   signupRefusal,
 } from "./authFlowCopy.js";
 
@@ -105,5 +106,41 @@ describe("signupRefusal", () => {
   });
   it("keeps the quota and velocity copy", () => {
     assert.match(signupRefusal({ code: "signup_rate_limited", retryAfterSec: 120 }).text, /Too many attempts/);
+  });
+});
+
+/** D324: the backend's resend codes each get their own guidance. The UI only
+ *  knew "resend_limited", a code the API never sends, so every refusal read
+ *  "Couldn't resend the code". */
+describe("resendRefusal", () => {
+  it("names each backend code distinctly and honours retry_after_sec", () => {
+    const tooSoon = resendRefusal({ code: "resend_too_soon", retryAfterSec: 37 });
+    assert.equal(tooSoon.text, "Wait 37 seconds before requesting another code.");
+    assert.equal(tooSoon.cooldownSec, 37);
+    const limit = resendRefusal({ code: "resend_limit", retryAfterSec: 1800 });
+    assert.equal(limit.text, "You've requested the most codes allowed for now. Try again in 30 min.");
+    assert.equal(limit.cooldownSec, 1800);
+    const quota = resendRefusal({ code: "email_quota_exceeded", retryAfterSec: 300 });
+    assert.equal(quota.text, "Email sending is paused for a few minutes. Try again in 5 min.");
+    const failed = resendRefusal({ code: "email_send_failed" });
+    assert.equal(failed.text, "The email with your code didn't go out. Try again in a minute.");
+    assert.equal(failed.cooldownSec, 60);
+    const texts = [tooSoon, limit, quota, failed, resendRefusal({ code: "code_expired" })].map((r) => r.text);
+    assert.equal(new Set(texts).size, texts.length);
+  });
+
+  it("offers a way out when the signup can no longer be resent (410)", () => {
+    const expired = resendRefusal({ code: "code_expired" });
+    assert.equal(expired.restart, true);
+    assert.equal(expired.cooldownSec, 0);
+    assert.match(expired.text, /start again/i);
+    assert.match(expired.text, /sign in/i);
+  });
+
+  it("falls back for an unknown code without inventing a cause", () => {
+    const unknown = resendRefusal({ code: "something_new" });
+    assert.equal(unknown.text, "Couldn't resend the code. Try again shortly.");
+    assert.equal(unknown.restart, false);
+    assert.equal(resendRefusal({}).text, unknown.text);
   });
 });

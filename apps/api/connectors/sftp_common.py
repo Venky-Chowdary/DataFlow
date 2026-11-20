@@ -872,6 +872,9 @@ def test_sftp(
             host_key=host_key,
             known_hosts=known_hosts,
             host_key_policy=host_key_policy,
+            # A saved connector keeps its pin under extra; the probe must
+            # trust exactly what the transfer will (D375).
+            extra=_kwargs.get("extra") if isinstance(_kwargs.get("extra"), Mapping) else {},
         )
         if not cfg.host:
             return False, "SFTP host is required. Use an sftp:// URL or the host/port fields."

@@ -1587,7 +1587,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
       .map((raw: Record<string, unknown>) => normalize(raw))
       .filter(Boolean) as Connector[];
   }
-  return [];
+  // Neither list answered: that is a failure, not "no connectors" (D410).
+  throw new Error(`Could not load connections (HTTP ${savedRes.status})`);
 }
 
 /** Recent jobs plus the whole-history counts the operator-visible totals read. */

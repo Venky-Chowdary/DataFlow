@@ -335,6 +335,16 @@ def _introspect_endpoint_guarded(
 
     if endpoint.kind == "file" and sample_content:
         return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    # A SQLite connector saved before Cloud refused SQLite still listed "0
+    # tables": the list and sample opened a server path. One refusal, before
+    # any path is resolved (D276).
+    hosted = sqlite_hosted_refusal(
+        str(endpoint.format or endpoint.kind or ""), str(endpoint.connection_string or "")
+    )
+    if hosted:
+        return {"connected": False, "error": hosted, "message": hosted, "objects": [], "columns": []}
     scope_cfg = {
         "host": str(endpoint.host or ""),
         "connection_string": str(endpoint.connection_string or ""),

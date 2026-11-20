@@ -557,6 +557,16 @@ def probe_destination_privileges(
                 table_exists=table_exists,
             )
         if engine == "sftp":
+            from connectors.sftp_common import host_key_settings
+
+            # The pin a saved connector keeps under extra counts here as on
+            # the write path (D375); a top-level value still wins.
+            trust = host_key_settings({
+                "host_key": host_key, "known_hosts": known_hosts,
+                "host_key_policy": host_key_policy, "extra": extra or {},
+            })
+            host_key, known_hosts, host_key_policy = (
+                trust["host_key"], trust["known_hosts"], trust["host_key_policy"])
             return _probe_sftp(
                 host=host,
                 port=port or 22,

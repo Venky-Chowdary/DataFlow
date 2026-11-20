@@ -126,6 +126,16 @@ export function contactSalesError(status: number, data: { error?: string } | nul
   return "We could not send your request. Please email sales@datawrap.io directly.";
 }
 
+/** What the visitor is told after the API answered (D103). The lead is
+ *  stored before any mail, so "ok" with ``queued: false`` means it was kept
+ *  but the sales team was not alerted: promising a reply would be untrue. */
+export type ContactSalesOutcome = "received" | "saved_unsent" | "error";
+
+export function contactSalesOutcome(status: number, data: { ok?: boolean; queued?: boolean } | null): ContactSalesOutcome {
+  if (status < 200 || status >= 300 || !data?.ok) return "error";
+  return data.queued === false ? "saved_unsent" : "received";
+}
+
 interface ContactSalesConfig {
   siteKey: string;
   formToken: string;
@@ -154,7 +164,8 @@ export function ContactSalesPage({
 }: {
   onNavigate: (route: PublicRoute) => void;
 }) {
-  const [sent, setSent] = useState(false);
+  const [outcome, setOutcome] = useState<"" | "received" | "saved_unsent">("");
+  const sent = outcome !== "";
   const [sources, setSources] = useState<string[]>([]);
   const [destinations, setDestinations] = useState<string[]>([]);
   const [firstName, setFirstName] = useState("");
@@ -212,7 +223,7 @@ export function ContactSalesPage({
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (honeypot.trim()) {
-      setSent(true);
+      setOutcome("received");
       return;
     }
     if (!canSubmit || submitting) return;
@@ -220,7 +231,7 @@ export function ContactSalesPage({
     setError("");
     try {
       let res = await postLead();
-      let data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      let data = (await res.json().catch(() => null)) as { ok?: boolean; queued?: boolean; error?: string } | null;
       // A stale page (>1h) carries an expired/used token: refetch config and
       // retry once — the visitor never sees it.
       if (res.status === 400 && data?.error === "form_expired") {
@@ -228,13 +239,14 @@ export function ContactSalesPage({
         setTurnstileSiteKey(cfg.siteKey);
         formTokenRef.current = cfg.formToken;
         res = await postLead();
-        data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+        data = (await res.json().catch(() => null)) as { ok?: boolean; queued?: boolean; error?: string } | null;
       }
-      if (!res.ok || !data?.ok) {
+      const result = contactSalesOutcome(res.status, data);
+      if (result === "error") {
         setError(contactSalesError(res.status, data));
         return;
       }
-      setSent(true);
+      setOutcome(result);
     } catch {
       setError("We could not reach the server. Please email sales@datawrap.io directly.");
     } finally {
@@ -279,18 +291,34 @@ export function ContactSalesPage({
           {sent ? (
             <div className="lp-sales-success" role="status">
               <div className="lp-sales-success-mark" aria-hidden>
-                <DtIcon name="check" size={28} />
+                <DtIcon name={outcome === "saved_unsent" ? "alert" : "check"} size={28} />
               </div>
-              <h2>Request received</h2>
-              <p>
-                A solutions engineer will reply within one business day
-                {sources.length ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
-                {destinations.length ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
-              </p>
-              <p>
-                Or write now:{" "}
-                <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
-              </p>
+              {outcome === "saved_unsent" ? (
+                <>
+                  <h2>Request saved</h2>
+                  <p>We saved your request, but couldn&apos;t alert the sales team automatically.</p>
+                  <p>
+                    Email{" "}
+                    <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>{" "}
+                    so a solutions engineer sees it today.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h2>Request received</h2>
+                  <p>
+                    A solutions engineer will reply within one business day
+                    {sources.length ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
+                    {destinations.length ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
+                  </p>
+                </>
+              )}
+              {outcome === "received" && (
+                <p>
+                  Or write now:{" "}
+                  <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
+                </p>
+              )}
               <div className="lp-sales-success-actions">
                 <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
                   Browse docs

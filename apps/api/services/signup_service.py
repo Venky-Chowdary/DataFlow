@@ -4,8 +4,9 @@ Enumeration rules baked in here, not at the route:
 
 - ``request_signup`` returns the same 202 body for new, pending and existing
   emails; constant-work hashing runs on every path; the existing-account
-  path mails the owner a notice instead of a code and returns a decoy
-  challenge id.
+  path mails the owner a notice instead of a code and returns a stored
+  challenge whose code is never sent, so resend and verify answer exactly as
+  for a new address (D323); its resend mails the notice again.
 - Quota is consumed on every path *before* sending, so an over-quota error
   looks identical regardless of whether the address exists.
 - ``verify_email`` creates user + org + workspace + membership in one unit
@@ -581,8 +582,13 @@ def send_sales_lead(lead: dict[str, Any]) -> str:
     return row["id"]
 
 
-def _decoy_challenge() -> str:
-    return f"otc_{uuid.uuid4().hex}"
+#: Subject of the challenge a signup for an existing account stores (D323).
+#: No pending signup has this id, so the challenge can never create an account.
+_EXISTING_SUBJECT = "existing-account:"
+
+
+def existing_account_subject(canonical: str) -> str:
+    return f"{_EXISTING_SUBJECT}{canonical}"
 
 
 def request_signup(
@@ -691,8 +697,13 @@ def request_signup(
             "signup.requested", outcome="succeeded",
             details={"kind": "existing_account_notice", "ip": ip},
         )
+        # A stored challenge, not a bare decoy id: resend and verify must
+        # answer exactly as for a new address (an unstored id answered 410 to
+        # both, which told anyone the address has an account — D323). Its code
+        # is never mailed; a resend mails the owner the notice again.
+        challenge, _never_sent = otp_service.issue(existing_account_subject(canonical), "signup")
         return {
-            "challenge_id": _decoy_challenge(),
+            "challenge_id": challenge["id"],
             "resend_after_sec": RESEND_COOLDOWN_SEC,
             "expires_in_sec": int(otp_service.OTP_TTL.total_seconds()),
         }
@@ -909,6 +920,13 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
 
     # Find the recipient from the pending signup or the user store.
     recipient, ctx = _challenge_recipient(updated)
+    template = "reset_code" if updated["purpose"] == "reset" else "signup_code"
+    mail_ctx = {**ctx, "code": code,
+                "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)}
+    if subject.startswith(_EXISTING_SUBJECT):
+        # The address already has an account: the owner gets the sign-in
+        # notice again, never a code (D323). Same quota, same answer.
+        template, mail_ctx = "existing_account_notice", dict(ctx)
     try:
         consume_send_slot()
     except EmailQuotaExceeded as exc:
@@ -918,14 +936,14 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
     try:
         # The slot was consumed just above: "prepaid", or each resend counted
         # twice against the daily cap and shut every mail off early.
-        queue_mail(
-            "reset_code" if updated["purpose"] == "reset" else "signup_code",
-            recipient,
-            {**ctx, "code": code,
-             "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
-            idempotency_key=f"otp:{updated['id']}:{updated['sent_count']}",
-            quota="prepaid",
-        )
+        if recipient:
+            queue_mail(
+                template,
+                recipient,
+                mail_ctx,
+                idempotency_key=f"otp:{updated['id']}:{updated['sent_count']}",
+                quota="prepaid",
+            )
     except EmailSendError as exc:
         raise ApiError(503, "email_send_failed",
                        "we couldn't send your code right now — try again",
@@ -1289,6 +1307,11 @@ def complete_onboarding(*, user_email: str, org_name: str = "",
 def _challenge_recipient(challenge: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Resolve (to, template-context) for a challenge's subject."""
     subject = str(challenge.get("subject_id") or "")
+    if subject.startswith(_EXISTING_SUBJECT):
+        owner = user_store.find_by_canonical(subject[len(_EXISTING_SUBJECT):])
+        if owner is None:
+            return "", {"name": "there"}
+        return owner["email"], {"name": owner.get("name") or "there"}
     pending = signup_store.get_pending_signup(pending_id=subject)
     if pending:
         return pending["email"], {"name": pending.get("name") or "there"}

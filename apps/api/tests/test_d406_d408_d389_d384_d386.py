@@ -242,7 +242,9 @@ def test_cloud_extract_states_the_refusal(monkeypatch):
             {"name": "orders", "key_columns": ["id"]},
             object(),
         )
-    assert "File exports aren't available as a destination" in str(raised.value)
+    # The rehearsal's own refusal: its remedy is the export bucket, since a
+    # rehearsal cannot pick another destination (start() raises it first).
+    assert "export bucket" in str(raised.value)
     assert "see the server log" not in str(raised.value)
 
     job = {"status": "failed", "error": local_destination_message("file_export")}
