@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { resendRefusal } from "../lib/authFlowCopy";
 import { resendCode, SignupApiError } from "../lib/signupApi";
 import { AuthButton } from "./AuthButton";
 import { DtIcon } from "./DtIcon";
@@ -23,12 +24,21 @@ export function SpamFolderHint({ what = "email" }: { what?: string }) {
 
 /** Resend-with-cooldown row shared by verify + reset: muted while the
  *  countdown runs, aria-disabled, and the countdown + "New code sent"
- *  announce through an aria-live region. */
-export function ResendRow({ challengeId, initialCooldown }: { challengeId: string; initialCooldown: number }) {
+ *  announce through an aria-live region. A refused resend says why
+ *  (D324); a signup that can no longer be resent offers the way out. */
+export function ResendRow({ challengeId, initialCooldown, onRestart, onSignIn, accountMayExist = false }: {
+  challengeId: string;
+  initialCooldown: number;
+  /** Signup can't say whether the address has an account (enumeration). */
+  accountMayExist?: boolean;
+  onRestart?: () => void;
+  onSignIn?: () => void;
+}) {
   const [cooldown, setCooldown] = useState(initialCooldown);
   const [resending, setResending] = useState(false);
   const [sent, setSent] = useState(false);
   const [notice, setNotice] = useState("");
+  const [ended, setEnded] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -41,23 +51,25 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
     setResending(true);
     setSent(false);
     setNotice("");
+    setEnded(false);
     try {
       const r = await resendCode(challengeId);
       setCooldown(r.resendAfterSec || 60);
       setSent(true);
       // The server repeats the still-valid code, so either email works.
-      const msg = r.sameCode
+      const msg = accountMayExist
+        ? "Sent again. Check your inbox and spam folder. If this address already has an account, the email is a sign-in reminder, not a code."
+        : r.sameCode
         ? "Sent again. It's the same code, so the code in either email works. Check your spam folder too."
         : "New code sent. Use the code from the newest email, and check your spam folder too.";
       setNotice(msg);
       toast({ title: r.sameCode ? "Code sent again" : "New code sent", message: msg, tone: "info" });
     } catch (err) {
-      const msg = err instanceof SignupApiError && err.code === "resend_limited"
-        ? `Too many resends — wait ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`
-        : "Couldn't resend the code. Try again shortly.";
-      setNotice(msg);
-      toast({ title: "Resend unavailable", message: msg, tone: "warning" });
-      if (err instanceof SignupApiError && err.retryAfterSec) setCooldown(err.retryAfterSec);
+      const refusal = resendRefusal(err instanceof SignupApiError ? err : {});
+      setNotice(refusal.text);
+      setEnded(refusal.restart);
+      toast({ title: refusal.restart ? "Signup expired" : "Code not resent", message: refusal.text, tone: "warning" });
+      if (refusal.cooldownSec) setCooldown(refusal.cooldownSec);
     } finally {
       setResending(false);
     }
@@ -66,15 +78,24 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
   return (
     <div className="lp-login-resend">
       <SpamFolderHint what="code" />
-      <p className="lp-login-legal" aria-live="polite">
-        Didn't get it?{" "}
-        <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">
-          {cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}
-        </AuthButton>
-      </p>
+      {!ended && (
+        <p className="lp-login-legal" aria-live="polite">
+          Didn't get it?{" "}
+          <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">
+            {cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}
+          </AuthButton>
+        </p>
+      )}
       {notice && (
         <p className="lp-login-resend-status" aria-live="polite">
           {notice}
+        </p>
+      )}
+      {ended && (onRestart || onSignIn) && (
+        <p className="lp-login-legal">
+          {onRestart && <AuthButton variant="link" onClick={onRestart}>Start again</AuthButton>}
+          {onRestart && onSignIn && " or "}
+          {onSignIn && <AuthButton variant="link" onClick={onSignIn}>sign in</AuthButton>}
         </p>
       )}
     </div>

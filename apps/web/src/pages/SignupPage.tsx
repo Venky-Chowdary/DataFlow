@@ -59,8 +59,13 @@ function AuthShell({ title, sub, onBack, children }: { title: string; sub: strin
 
 export { turnstileRenderOptions } from "../components/TurnstileWidget";
 
-/** Six-digit code entry. */
-function CodeStep({
+/** Six-digit code entry.
+ *
+ *  Straight after a signup the API answers the same for a new address and one
+ *  that already has an account (no enumeration), so the screen can't know
+ *  which applies. It says what happened in both cases and offers sign-in,
+ *  instead of promising a code an account owner never receives (D323). */
+export function CodeStep({
   email,
   challengeId,
   resendAfterSec,
@@ -68,6 +73,9 @@ function CodeStep({
   busy,
   error,
   errorIsField,
+  accountMayExist = false,
+  onSignIn,
+  onChangeEmail,
 }: {
   email: string;
   challengeId: string;
@@ -76,6 +84,9 @@ function CodeStep({
   busy: boolean;
   error: string;
   errorIsField: boolean;
+  accountMayExist?: boolean;
+  onSignIn?: () => void;
+  onChangeEmail?: () => void;
 }) {
   const [code, setCode] = useState("");
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -86,9 +97,23 @@ function CodeStep({
       <div className="lp-login-auth-head">
         <p className="lp-login-auth-kicker">Check your inbox</p>
         <h2>Enter the 6-digit code</h2>
-        <p className="lp-login-auth-sub">
-          We sent a verification code to <strong>{email}</strong>. It expires in 10 minutes.
-        </p>
+        {accountMayExist ? (
+          <>
+            <p className="lp-login-auth-sub">
+              If <strong>{email}</strong> is new to Datawrap, we sent it a 6-digit code. It expires in 10 minutes.
+            </p>
+            <p className="lp-login-legal">
+              If it already has a Datawrap account, we sent a sign-in reminder instead of a code.{" "}
+              {onSignIn && <AuthButton variant="link" onClick={onSignIn}>Sign in</AuthButton>}
+              {onSignIn && onChangeEmail && " or "}
+              {onChangeEmail && <AuthButton variant="link" onClick={onChangeEmail}>Use a different email</AuthButton>}
+            </p>
+          </>
+        ) : (
+          <p className="lp-login-auth-sub">
+            We sent a 6-digit code to <strong>{email}</strong>. It expires in 10 minutes.
+          </p>
+        )}
       </div>
       {error && !errorIsField && (
         <div className="lp-login-alert lp-login-alert--warn" role="alert">
@@ -127,7 +152,13 @@ function CodeStep({
           trailingIcon={<DtIcon name="arrow-right" size={16} />}>
           Verify email
         </AuthButton>
-        <ResendRow challengeId={challengeId} initialCooldown={resendAfterSec} />
+        <ResendRow
+          challengeId={challengeId}
+          initialCooldown={resendAfterSec}
+          accountMayExist={accountMayExist}
+          onRestart={onChangeEmail}
+          onSignIn={onSignIn}
+        />
       </form>
     </div>
   );
@@ -150,6 +181,9 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [challenge, setChallenge] = useState({ id: initialChallengeId, resendAfterSec: 60 });
+  // A challenge from this form's own signup can belong to an existing account
+  // (the API won't say). One handed over by sign-in is a known pending signup.
+  const [accountMayExist, setAccountMayExist] = useState(false);
   const [ssoHint, setSsoHint] = useState<{ sso: string; startUrl: string } | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
@@ -196,6 +230,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
         turnstileToken: turnstileToken || undefined,
       });
       setChallenge({ id: r.challengeId, resendAfterSec: r.resendAfterSec });
+      setAccountMayExist(true);
       setStep("verify");
     } catch (err) {
       const refused = signupRefusal(err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" });
@@ -243,6 +278,13 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
           busy={busy}
           error={error}
           errorIsField={errorIsField}
+          accountMayExist={accountMayExist}
+          onSignIn={onSignIn}
+          onChangeEmail={() => {
+            setError("");
+            setErrorIsField(false);
+            setStep("details");
+          }}
         />
       </AuthShell>
     );
