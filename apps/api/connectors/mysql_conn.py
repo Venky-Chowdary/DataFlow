@@ -293,11 +293,12 @@ def get_connection(
         )
         # A login opened for a schema read has a 40s client timeout and may
         # not have STRICT. Reconcile and DDL re-apply their own limits and
-        # check that they stuck; a mismatch opens a new login (D308).
+        # check that they stuck; a mismatch opens a new login (D308). The
+        # client wait is the deadline-bounded one, never the purpose default.
         try:
             _retune_mysql_session(
                 shared,
-                io_timeout=io_timeout,
+                io_timeout=kwargs["read_timeout"],
                 lock_wait_s=lock_wait_s,
                 require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
             )
@@ -310,7 +311,7 @@ def get_connection(
             shared = _open()
             _retune_mysql_session(
                 shared,
-                io_timeout=io_timeout,
+                io_timeout=kwargs["read_timeout"],
                 lock_wait_s=lock_wait_s,
                 require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
             )
@@ -319,11 +320,15 @@ def get_connection(
             return _MysqlHandback(shared, release)
         return shared
     opened = _open()
-    _retune_mysql_session(
+    # A fresh login already has this purpose's client timeouts from connect;
+    # only its session limits are applied (no read-back: nothing to correct).
+    from connectors.write_resilience import apply_mysql_session_guards
+
+    apply_mysql_session_guards(
         opened,
+        lock_wait_seconds=lock_wait_s,
+        require_strict_sql_mode=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
         io_timeout=io_timeout,
-        lock_wait_s=lock_wait_s,
-        require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
     )
     return opened
 
