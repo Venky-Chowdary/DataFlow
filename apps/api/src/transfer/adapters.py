@@ -614,22 +614,9 @@ def resolve_connector_config(
     from services.dial_target import reconcile_dial_host
 
     reconcile_dial_host(cfg)
-    if not (cfg.get("connection_string") or "").strip():
-        # HTTP SDK sources take their endpoint from the manifest; a stamped
-        # loopback host would replace it and fail as a non-URL base_url.
-        # BigQuery with an empty host is the Google API. Inventing localhost
-        # makes list and plan refuse a connector that already tested (D387).
-        # An explicit emulator host is left as the operator set it.
-        from connectors.sdk import get_sdk_connector
+    from services.dial_target import default_dial_host
 
-        kind = str(cfg.get("type") or fmt or "").lower().strip()
-        sdk_source = get_sdk_connector(kind)
-        if resolve_driver_type(kind) == "bigquery":
-            cfg["host"] = str(cfg.get("host") or "").strip()
-        else:
-            cfg["host"] = cfg["host"] or ("" if sdk_source is not None else "localhost")
-    else:
-        cfg["host"] = cfg.get("host") or ""
+    cfg["host"] = default_dial_host(cfg, fmt)
     cfg["port"] = stored_listen_port(
         resolve_driver_type(str(cfg.get("type") or fmt or "")),
         cfg.get("port"),
