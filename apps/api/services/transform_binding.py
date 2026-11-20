@@ -161,8 +161,15 @@ def compile_preflight_recipe(body: Any) -> None:
     recipe, so the gates see the shaped image. A recipe that cannot compile
     (a draft, a missing id, steps mixed with another recipe) raises
     ValueError here, before Confirm, with the same text Execute would give.
+
+    The recipe is looked up in the caller's workspace, as Execute does: a
+    preflight body carries none, and an unscoped lookup compiled another
+    workspace's recipe (R11) that Execute then refused (R8). The body is never
+    asked for one, because the caller writes the body.
     """
     from types import SimpleNamespace
+
+    from services.workspace_filter import current_workspace_stamp
 
     probe = SimpleNamespace(
         transform_recipe_id=str(getattr(body, "transform_recipe_id", "") or ""),
@@ -170,7 +177,7 @@ def compile_preflight_recipe(body: Any) -> None:
         transform_recipe_version_mode=str(getattr(body, "transform_recipe_version_mode", "") or "pin"),
         transform_recipe_params=getattr(body, "transform_recipe_params", None),
         mappings=getattr(body, "mappings", None),
-        workspace_id=str(getattr(body, "workspace_id", "") or ""),
+        workspace_id=current_workspace_stamp(for_write=False) or "",
         shape_recipe=getattr(body, "shape_recipe", None),
         approved_shape_recipe_hash="",
     )
