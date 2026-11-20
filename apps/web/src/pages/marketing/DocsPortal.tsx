@@ -499,16 +499,16 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingC
           )}
           {next ? (
             <button type="button" className="docs-pager-next" onClick={() => onNavigate(next)}>
-              {getHelpDoc(next).title} →
+              {getHelpDoc(next).title}
             </button>
           ) : null}
         </div>
         <div className="docs-article-cta">
-          <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+          <button type="button" className="mk-btn mk-btn--primary" onClick={onGetStarted}>
             Try in Transfer Studio
           </button>
           {hideMarketingCta ? null : (
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("contact")}>
               Contact sales
             </button>
           )}

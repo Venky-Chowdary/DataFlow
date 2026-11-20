@@ -1,9 +1,10 @@
 import { Children, isValidElement, type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
-import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { ProductShot } from "../../components/marketing/ProductShot";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { PROVEN_CDC_SOURCES, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import {
   AlgoBlock,
   GateTable,
@@ -37,7 +38,7 @@ function ShotBand({
   return (
     <section className="lp-proof-beside" aria-label={title}>
       <div className="lp-proof-beside-copy">
-        <p className="lp-mkt-kicker">{kicker}</p>
+        <p className="mk-kicker">{kicker}</p>
         <h2>{title}</h2>
         <p>{lead}</p>
       </div>
@@ -127,10 +128,10 @@ function SurfaceShell({
         lead={lead}
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onPrimary}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onPrimary}>
               {ctaPrimary}
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onSecondary}>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={onSecondary}>
               {ctaSecondary}
             </button>
           </div>
@@ -142,16 +143,22 @@ function SurfaceShell({
       </MarketingReveal>
       {children}
       <MarketingReveal>
-        <section className="lp-mkt-next-band">
-          <MarketingSectionFooter align="center">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate(next)}>
-              Next: {nextLabel} →
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
-              Read the docs
-            </button>
-          </MarketingSectionFooter>
-        </section>
+        <MarketingClosing
+          title="Try it on your own data"
+          body="Start free with the full Transfer Studio path, or ask for a scoped pilot on your own sources."
+          note={
+            <>
+              Next: <button type="button" className="mk-text-btn mk-text-btn--inline" onClick={() => onNavigate(next)}>{nextLabel}</button>
+            </>
+          }
+        >
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onPrimary}>
+            {ctaPrimary}
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            Contact sales
+          </button>
+        </MarketingClosing>
       </MarketingReveal>
     </div>
   );
@@ -176,7 +183,7 @@ function Chapter({
     <MarketingReveal>
       <section id={id} className={`lp-mkt-body lp-mkt-chapter${band ? " lp-mkt-chapter--band" : ""}`}>
         <div className="lp-mkt-chapter-copy">
-          <p className="lp-mkt-kicker">{kicker}</p>
+          <p className="mk-kicker">{kicker}</p>
           <h2>{title}</h2>
           {copy}
         </div>
@@ -197,7 +204,7 @@ export function TransferStudioPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Transfer Studio"
+      kicker="Transfer Studio"
       title="Plan the load. Check it. Then write it."
       lead="Pick a source and a destination, review how every column will land, and clear preflight before a single row is written. After the load, Datawrap reads the destination back and compares it with the source. Every screenshot on this page is one real run: 5,100 orders from Postgres into a new Snowflake table."
       ctaPrimary="Open Transfer Studio"
@@ -208,7 +215,7 @@ export function TransferStudioPage({
         <ProductShot
           src={WORKSPACE_SHOT.transferMap}
           alt="Transfer Studio Map step: 11 of 11 sales_orders columns mapped to Snowflake types, all safe"
-          surface="Transfer Studio · Map"
+          surface="Transfer Studio, map"
           route={DEMO_ROUTE}
         />
       }
@@ -341,7 +348,7 @@ export function TransferStudioPage({
           lead="Open a row in Map. It shows the source type, the destination type, the confidence, and the reason the two columns were paired."
           src={WORKSPACE_SHOT.transferMapWhyStage}
           alt="Map row for the attributes column: JSONB to VARIANT through Parse JSON, with confidence and a sample"
-          surface="Transfer Studio · Map"
+          surface="Transfer Studio, map"
         />
       </MarketingReveal>
 
@@ -398,7 +405,7 @@ export function JobTheaterPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Job space"
+      kicker="Job space"
       title="Every row landed, and you can get it back"
       lead="Open a finished run in Job space. The Trust Report reads both sides: 5,100 rows in the source, 5,100 in Snowflake, full checksum match. Reversibility shows 11 of 11 columns round-trip. Both are ready for sign-off."
       ctaPrimary="Open the app"
@@ -409,7 +416,7 @@ export function JobTheaterPage({
         <ProductShot
           src={WORKSPACE_SHOT.jobTrust}
           alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
-          surface="Job space · Trust Report"
+          surface="Job space, trust Report"
           route={DEMO_ROUTE}
         />
       }
@@ -492,7 +499,7 @@ export function JobTheaterPage({
           lead="Job space reads the destination after the write and puts the counts next to the source. On this run, 5,100 and 5,100, full checksum match."
           src={WORKSPACE_SHOT.jobTrust}
           alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
-          surface="Job space · Trust Report"
+          surface="Job space, trust Report"
         />
       </MarketingReveal>
 
@@ -508,7 +515,7 @@ export function JobTheaterPage({
         <ProductShot
           src={WORKSPACE_SHOT.jobTrustEvidence}
           alt="Evidence behind the Trust Report: reconciliation passed, assurance full checksum, trust score 100"
-          surface="Job space · Evidence"
+          surface="Job space, evidence"
           route={DEMO_ROUTE}
         />
       </Chapter>
@@ -525,7 +532,7 @@ export function PipelinesPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Schedules"
+      kicker="Schedules"
       title="Recurring sync, with the same proof"
       lead="Run a route you have already approved every few minutes, hourly, daily, or on a cron. Each tick is a full job with the same gates and the same read-back as a load you start by hand."
       ctaPrimary="Create a schedule"
@@ -545,7 +552,7 @@ export function PipelinesPage({
       liveSurface="Schedules"
       stats={[
         { value: "7", label: "Sync modes, CDC included" },
-        { value: "4", label: "Native CDC engines" },
+        { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
         { value: "2 min", label: "Orders feed cadence" },
         { value: "Same", label: "Gates as Transfer Studio" },
       ]}
@@ -568,7 +575,7 @@ export function PipelinesPage({
             Choose watermark incremental for change data, upsert for slowly changing dimensions, append for events,
             overwrite for full refresh, or mirror to keep the destination in step — rows gone from the source are
             soft-deleted with <code>_deleted</code> and <code>_deleted_at</code>, and the physical row is kept. Native
-            CDC streams changes from SQL Server, PostgreSQL, MySQL, and Oracle. A new or renamed column waits
+            CDC streams changes from {cdcSourcesPhrase()}. A new or renamed column waits
             in Map until you approve it, and the next tick uses that map.
           </p>
         </div>
@@ -620,7 +627,7 @@ export function PipelinesPage({
           lead="Full refresh, incremental, CDC, slowly changing dimensions, or mirror. CDC is log-based change with a cursor and a key, on the same checks as every other mode."
           src={WORKSPACE_SHOT.transferSyncModesCard}
           alt="Advanced settings listing sync modes, including CDC: log-based changes with a cursor and a key"
-          surface="Transfer Studio · Sync mode"
+          surface="Transfer Studio, sync mode"
           beside
         />
       </MarketingReveal>
@@ -655,7 +662,7 @@ export function QueryPlaygroundPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Query Playground"
+      kicker="Query Playground"
       title="Look at the data on both sides"
       lead="Run read-only SQL against any saved connection. Check a source before you map it, then run the same query on the destination after the load and compare. Open a tab per system, see column types from the driver, and copy results as CSV, JSON, or Markdown."
       ctaPrimary="Open Query Playground"
@@ -666,7 +673,7 @@ export function QueryPlaygroundPage({
         <ProductShot
           src={WORKSPACE_SHOT.query}
           alt="Query on Snowflake: orders, units, revenue, and average discount by region from SALES_ORDERS_REPORTING"
-          surface="Query · Snowflake"
+          surface="Query, snowflake"
           route={DEMO_ROUTE}
         />
       }
@@ -765,7 +772,7 @@ export function DataPilotPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Datawrap Pilot"
+      kicker="Datawrap Pilot"
       title="Ask the workspace, see the SQL"
       lead="Ask how many rows a table holds, what a column adds up to by region, which tables a connection has, or what ran recently. Pilot answers from the live systems and your job records on Datawrap’s own local engine, with no cloud AI key, and shows the SQL behind every number. Anything that would change data waits for your Confirm."
       ctaPrimary="Try Datawrap Pilot"
@@ -846,7 +853,7 @@ export function McpServerPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · MCP Server"
+      kicker="MCP Server"
       title="Agents get governed tools and secret references"
       lead="Cursor, Claude, and VS Code call Datawrap MCP tools under workspace RBAC, with API keys capped at their creator’s role. Transfers map, preflight, quarantine, and verify — with audit entries naming the key behind every agent-initiated run."
       ctaPrimary="Connect an agent"
@@ -962,7 +969,7 @@ export function MigrationsSolutionPage({
 }) {
   return (
     <SolutionShell
-      kicker="Solution · Migrations"
+      kicker="Migrations"
       title="Cross-schema cutover you can prove"
       lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine preflight gates (G1–G9), and a verified read-back before cutover."
       ctaPrimary="Start a migration"
@@ -973,7 +980,7 @@ export function MigrationsSolutionPage({
         <ProductShot
           src={WORKSPACE_SHOT.transferValidate}
           alt="Validate approved: 17 gates passed, Execute unlocked for the Snowflake load"
-          surface="Migrations · Validate"
+          surface="Migrations, validate"
           route={DEMO_ROUTE}
         />
       }
@@ -1000,22 +1007,22 @@ export function MigrationsSolutionPage({
       ]}
       steps={[
         {
-          n: "01",
+          n: "1",
           title: "Discover both sides",
           body: "Profile source and destination. Datawrap proposes role-aware maps instead of assuming name equality.",
         },
         {
-          n: "02",
+          n: "2",
           title: "Review the map",
           body: "Operators confirm ambiguous edges. High-confidence matches pin; the rest wait for a human decision.",
         },
         {
-          n: "03",
+          n: "3",
           title: "Clear nine core gates",
           body: "Contracts, types, capacity, and dry-run must pass before write. One block stops the load.",
         },
         {
-          n: "04",
+          n: "4",
           title: "Cutover with proof",
           body: "The pilot run verifies, then the production write ships with quarantine visible and a signed proof pack.",
         },
@@ -1035,7 +1042,7 @@ export function MigrationsSolutionPage({
         },
         {
           title: "Identity, keys, constraints",
-          body: "Sequences, foreign keys, CHECK constraints, and secondary indexes carry on create-new, in dependency order, proven on PostgreSQL, MySQL, SQL Server, and Oracle.",
+          body: "Sequences, foreign keys, CHECK constraints, and secondary indexes carry on create-new, in dependency order.",
         },
         {
           title: "Quarantine you can act on",
@@ -1053,7 +1060,7 @@ export function MigrationsSolutionPage({
           lead="Confident pairs map themselves. A row that is ambiguous waits, and the reason stays on the column so the next person can see it."
           src={WORKSPACE_SHOT.transferMap}
           alt="Transfer Studio map: 11 of 11 columns from sales_orders mapped to SALES_ORDERS_REPORTING"
-          surface="Transfer Studio · Map"
+          surface="Transfer Studio, map"
         />
       }
       next="solution-warehouse"
@@ -1072,38 +1079,29 @@ export function WarehouseSolutionPage({
 }) {
   return (
     <div className="lp-mkt-page lp-wh-v3">
-      <section className="lp-sol-hero lp-sol-hero--ink" aria-label="Warehouse loading">
-        <div className="lp-sol-hero-inner">
-          <div className="lp-sol-hero-copy">
-            <p className="lp-pricing-hero-kicker">
-              <span className="lp-pricing-hero-dot" aria-hidden />
-              Solution · Warehouse loading
-            </p>
-            <h1>Bulk loads finance can archive</h1>
-            <p className="lp-sol-hero-lead">
-              Load Snowflake, BigQuery, Apache Iceberg, and S3, ADLS, or GCS with create-new tables,
-              MERGE upserts, and a read-back verification on every load. Every warehouse load maps,
-              gates, quarantines, and verifies against the destination engine.
-            </p>
-            <div className="lp-hero-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-                Load a warehouse
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("product-pipelines")}>
-                Explore Schedules
-              </button>
-            </div>
+      <MarketingHeroBand
+        kicker="Solution, warehouse loading"
+        title="Bulk loads finance can archive"
+        lead="Load Snowflake, BigQuery, Apache Iceberg, and S3, ADLS, or GCS with create-new tables and MERGE upserts. Each load maps, runs its checks, holds the rows it cannot write, and is compared against the destination engine afterwards."
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+              Load a warehouse
+            </button>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("product-pipelines")}>
+              Explore Schedules
+            </button>
           </div>
-          <div className="lp-sol-hero-visual">
-            <ProductShot
-              src={WORKSPACE_SHOT.transferRunComplete}
-              alt="Snowflake load finished: 5,100 appended, destination 0 before and 5,100 after, checksum recorded"
-              surface="Warehouse · Run"
-              route={DEMO_ROUTE}
-            />
-          </div>
-        </div>
-      </section>
+        }
+        visual={
+          <ProductShot
+            src={WORKSPACE_SHOT.transferRunComplete}
+            alt="Snowflake load finished: 5,100 appended, destination 0 before and 5,100 after, checksum recorded"
+            surface="Warehouse, run step"
+            route={DEMO_ROUTE}
+          />
+        }
+      />
 
       <section className="lp-wh-rail" aria-label="Destinations">
         <div className="lp-shell lp-wh-rail-inner">
@@ -1119,7 +1117,7 @@ export function WarehouseSolutionPage({
         <section className="lp-wh-split">
           <div className="lp-shell lp-wh-split-grid">
             <div>
-              <p className="lp-mkt-kicker">Before the bulk window</p>
+              <p className="mk-kicker">Before the bulk window</p>
               <h2>Probe the destination first</h2>
               <p>
                 Reachability, privileges, and warehouse capacity clear in preflight — so every load
@@ -1149,7 +1147,7 @@ export function WarehouseSolutionPage({
         <section className="lp-wh-split lp-wh-split--alt">
           <div className="lp-shell lp-wh-split-grid is-flip">
             <div>
-              <p className="lp-mkt-kicker">Write modes</p>
+              <p className="mk-kicker">Write modes</p>
               <h2>Upsert, append, or overwrite — validated</h2>
               <p>
                 Each driver offers the bulk modes it supports, with MERGE upserts on Snowflake and
@@ -1174,7 +1172,7 @@ export function WarehouseSolutionPage({
         <section className="lp-wh-flow">
           <div className="lp-shell">
             <div className="lp-wh-section-head">
-              <p className="lp-mkt-kicker">How it works</p>
+              <p className="mk-kicker">How it works</p>
               <h2>Four steps from a capacity check to proof</h2>
             </div>
             <ol className="lp-wh-flow-list">
@@ -1210,7 +1208,7 @@ export function WarehouseSolutionPage({
           lead="The engine hashes the mapped source rows, reads the destination back, and reports a match when the counts, the content, and the keys agree."
           src={WORKSPACE_SHOT.jobTrust}
           alt="Trust Report: 5,100 rows in the source, 5,100 in Snowflake, full checksum match"
-          surface="Job space · Trust Report"
+          surface="Job space, trust Report"
         />
       </MarketingReveal>
 
@@ -1221,11 +1219,11 @@ export function WarehouseSolutionPage({
             <p>Start free on the same engine — or talk to us about enterprise warehouse controls.</p>
           </div>
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
               Load a warehouse
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("solution-sync")}>
-              Next: Recurring sync →
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("solution-sync")}>
+              Next: Recurring sync
             </button>
           </div>
         </div>
@@ -1243,7 +1241,7 @@ export function SyncSolutionPage({
 }) {
   return (
     <SolutionShell
-      kicker="Solution · Recurring sync"
+      kicker="Recurring sync"
       title="Incremental schedules you can verify"
       lead="Keep systems aligned on a cadence — native CDC or typed watermarks, upsert, mirror with soft delete, schema-drift review, and Job space verification on every tick."
       ctaPrimary="Create a sync"
@@ -1254,7 +1252,7 @@ export function SyncSolutionPage({
         <ProductShot
           src={WORKSPACE_SHOT.schedulesHistory}
           alt="Run history for the Orders feed, each run linked to its job"
-          surface="Recurring sync · Schedules"
+          surface="Recurring sync, schedules"
           route={DEMO_SCHEDULE_ROUTE}
         />
       }
@@ -1281,22 +1279,22 @@ export function SyncSolutionPage({
       ]}
       steps={[
         {
-          n: "01",
+          n: "1",
           title: "Promote a proven plan",
           body: "Start from a Studio map that already cleared gates — sync inherits the same engine.",
         },
         {
-          n: "02",
+          n: "2",
           title: "Set cadence and mode",
           body: "Pick schedule, watermark or upsert mode, and destination write strategy operators trust.",
         },
         {
-          n: "03",
+          n: "3",
           title: "Run ticks under gates",
           body: "Each tick maps, preflights, writes with quarantine, and verifies — identical to interactive loads.",
         },
         {
-          n: "04",
+          n: "4",
           title: "Watch and correct",
           body: "Job space surfaces drift reviews and quarantine. Decide once; the next tick reuses the decision.",
         },
@@ -1304,7 +1302,7 @@ export function SyncSolutionPage({
       caps={[
         {
           title: "CDC snapshot, then stream",
-          body: "SQL Server, PostgreSQL, MySQL, and Oracle: a consistent snapshot backfills, then streaming upserts land on the primary key so redelivery is safe.",
+          body: `${cdcSourcesPhrase()}: a consistent snapshot backfills, then streaming upserts land on the primary key so redelivery is safe.`,
         },
         {
           title: "Idempotent upserts",
@@ -1334,7 +1332,7 @@ export function SyncSolutionPage({
           lead="The schedule runs the mode you pick. CDC sits next to incremental, mirror, and slowly changing dimensions, and it goes through the same checks."
           src={WORKSPACE_SHOT.transferSyncModesCard}
           alt="Sync mode list with CDC: log-based changes with a cursor and a key"
-          surface="Transfer Studio · Sync mode"
+          surface="Transfer Studio, sync mode"
           beside
         />
       }
@@ -1386,33 +1384,27 @@ function SolutionShell({
 }) {
   return (
     <div className="lp-mkt-page lp-sol-v2">
-      <section className="lp-sol-hero lp-sol-hero--ink" aria-label={kicker}>
-        <div className="lp-sol-hero-inner">
-          <div className="lp-sol-hero-copy">
-            <p className="lp-pricing-hero-kicker">
-              <span className="lp-pricing-hero-dot" aria-hidden />
-              {kicker}
-            </p>
-            <h1>{title}</h1>
-            <p className="lp-sol-hero-lead">{lead}</p>
-            <div className="lp-hero-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onPrimary}>
-                {ctaPrimary}
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onSecondary}>
-                {ctaSecondary}
-              </button>
-            </div>
+      <MarketingHeroBand
+        kicker={kicker}
+        title={title}
+        lead={lead}
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onPrimary}>
+              {ctaPrimary}
+            </button>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={onSecondary}>
+              {ctaSecondary}
+            </button>
           </div>
-          <div className="lp-sol-hero-visual">{heroVisual}</div>
-        </div>
-      </section>
+        }
+        visual={heroVisual}
+      />
 
       <MarketingReveal>
         <section className="lp-sol-outcomes" aria-label="What you get">
           {outcomes.map((item, i) => (
             <article key={item.title} className="lp-sol-outcome lp-scene-card" style={{ "--reveal-i": i } as CSSProperties}>
-              <span>{String(i + 1).padStart(2, "0")}</span>
               <h3>{item.title}</h3>
               <p>{item.body}</p>
             </article>
@@ -1423,7 +1415,7 @@ function SolutionShell({
       <MarketingReveal>
         <section className="lp-sol-section">
           <div className="lp-sol-section-head">
-            <p className="lp-mkt-kicker">How it works</p>
+            <p className="mk-kicker">How it works</p>
             <h2>A clear path from discovery to proof</h2>
             <p>The same governed engine at every step.</p>
           </div>
@@ -1446,7 +1438,7 @@ function SolutionShell({
       <MarketingReveal>
         <section className="lp-sol-section lp-sol-section--caps">
           <div className="lp-sol-section-head">
-            <p className="lp-mkt-kicker">Built for operators</p>
+            <p className="mk-kicker">Built for operators</p>
             <h2>Details that survive real schemas</h2>
           </div>
           <div className="lp-sol-caps">
@@ -1461,25 +1453,22 @@ function SolutionShell({
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-sol-footer">
-          <div className="lp-sol-footer-inner">
-            <div>
-              <h2>Ready to run this path?</h2>
-              <p>Start free on the same engine — or talk to us about enterprise controls.</p>
-            </div>
-            <div className="lp-sol-footer-actions">
-              <button type="button" className="lp-btn lp-btn--brand" onClick={onPrimary}>
-                {ctaPrimary}
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate(next)}>
-                Next: {nextLabel} →
-              </button>
-              <button type="button" className="lp-btn lp-btn--ghost lp-btn--on-ink" onClick={() => onNavigate("help")}>
-                Read the docs
-              </button>
-            </div>
-          </div>
-        </section>
+        <MarketingClosing
+          title="Run this on your own data"
+          body="Start free on the same engine, or talk to sales about a scoped pilot with enterprise controls."
+          note={
+            <>
+              Next: <button type="button" className="mk-text-btn mk-text-btn--inline" onClick={() => onNavigate(next)}>{nextLabel}</button>
+            </>
+          }
+        >
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onPrimary}>
+            {ctaPrimary}
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            Contact sales
+          </button>
+        </MarketingClosing>
       </MarketingReveal>
     </div>
   );

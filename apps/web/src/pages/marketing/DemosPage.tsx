@@ -48,13 +48,13 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
           <div className="lp-hero-cta">
             <button
               type="button"
-              className="lp-btn lp-btn--brand"
+              className="mk-btn mk-btn--primary"
               onClick={() => playerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
             >
               Watch the flagship demo
             </button>
             <a
-              className="lp-btn lp-btn--outline lp-btn--on-ink"
+              className="mk-btn mk-btn--secondary"
               href={YOUTUBE_CHANNEL_URL}
               target="_blank"
               rel="noopener noreferrer"
@@ -137,14 +137,14 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
           </div>
           <div className="lp-demos-foot">
             <a
-              className="lp-btn lp-btn--outline"
+              className="mk-btn mk-btn--secondary"
               href={YOUTUBE_CHANNEL_URL}
               target="_blank"
               rel="noopener noreferrer"
             >
               Subscribe on YouTube
             </a>
-            <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("help")}>
+            <button type="button" className="mk-btn mk-btn--quiet" onClick={() => onNavigate("help")}>
               Read the docs instead
             </button>
           </div>

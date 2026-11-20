@@ -19,8 +19,7 @@
 .lp .lp-mkt-hero-band--ink,
 .lp.lp-subpage .lp-mkt-hero-band.lp-mkt-hero-band--ink,
 .lp .lp-sol-hero--ink,
-.lp .lp-sales-hero--ink,
-.lp .lp-hero--home-ink {
+.lp .lp-sales-hero--ink {
   position: relative;
   isolation: isolate;
   overflow-x: clip;
@@ -39,8 +38,7 @@
 /* A single hairline horizon instead of floating blobs. */
 .lp .lp-mkt-hero-band--ink::after,
 .lp .lp-sol-hero--ink::after,
-.lp .lp-sales-hero--ink::after,
-.lp .lp-hero--home-ink::after {
+.lp .lp-sales-hero--ink::after {
   content: "";
   position: absolute;
   inset: auto 0 0;
@@ -225,67 +223,6 @@
 
 /* ─── Home hero: the same ink field, one mounted schematic ──────── */
 
-/* The grid comes from the shared ink field, so the decorative layer is idle. */
-.lp .lp-hero--home-ink .lp-hero-home-bg {
-  display: none;
-}
-
-.lp .lp-hero--home-ink .lp-hero-eyebrow {
-  border-color: rgba(45, 212, 191, 0.32) !important;
-  background: rgba(45, 212, 191, 0.1) !important;
-  color: #5eead4 !important;
-}
-
-.lp .lp-hero--home-ink .lp-hero-title-a {
-  color: #f7fbff !important;
-}
-
-.lp .lp-hero--home-ink .lp-hero-title-b {
-  color: #5eead4 !important;
-  -webkit-text-fill-color: #5eead4 !important;
-  background: none !important;
-}
-
-.lp .lp-hero--home-ink .lp-hero-sub {
-  color: rgba(203, 219, 236, 0.86) !important;
-}
-
-.lp .lp-hero--home-ink .lp-hero-meta {
-  color: rgba(160, 183, 205, 0.82) !important;
-}
-
-.lp .lp-hero--home .lp-hero-title,
-.lp .lp-hero.lp-hero--home .lp-hero-title {
-  font-size: var(--lp-fs-h1-home, clamp(2rem, 2.8vw, 2.625rem)) !important;
-  font-weight: 650 !important;
-  line-height: 1.16 !important;
-  letter-spacing: -0.024em !important;
-  max-width: 20ch !important;
-}
-
-.lp .lp-hero--home .lp-hero-sub {
-  max-width: 48ch !important;
-  font-size: var(--lp-fs-lead, 15px) !important;
-  line-height: 1.55 !important;
-}
-
-.lp .lp-hero--home .lp-hero-visual--stage {
-  box-shadow: none !important;
-  background: none !important;
-  border: 0 !important;
-  padding: 0 !important;
-  align-self: center;
-}
-
-.lp .lp-hero--home .lp-hero-home-grid {
-  width: var(--lp-shell) !important;
-  max-width: 100%;
-  margin-inline: auto;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) !important;
-  gap: clamp(28px, 4vw, 64px) !important;
-  align-items: center;
-}
-
 /* Sales-hero (Enterprise / Security / Integrations) art column */
 .lp .lp-sales-hero--split .lp-sales-hero-art {
   min-width: 0;
@@ -360,12 +297,11 @@
  * 5px. Below this width the hero stacks and the drawing takes the whole shell.
  */
 @media (max-width: 1099px) {
-  .lp .lp-hero--home .lp-hero-home-grid,
   .lp .lp-sol-hero--ink .lp-sol-hero-inner,
-  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
-  .lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
-  .lp .lp-sales-hero--split .lp-sales-hero-inner,
-  .lp .lp-mkt-live-reel {
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
+.lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
+.lp .lp-sales-hero--split .lp-sales-hero-inner,
+.lp .lp-mkt-live-reel {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
@@ -378,9 +314,7 @@
     font-size: clamp(1.85rem, 7.2vw, 2.25rem);
   }
 
-  .lp .lp-hero--home-ink {
-    padding-top: clamp(36px, 5vw, 64px) !important;
-  }
+  
 
   .dw-hero-art {
     margin-top: 8px;
@@ -389,9 +323,8 @@
 
 @media (max-width: 559px) {
   .lp .lp-mkt-hero-band--ink,
-  .lp .lp-sol-hero--ink,
-  .lp .lp-sales-hero--ink,
-  .lp .lp-hero--home-ink {
+.lp .lp-sol-hero--ink,
+.lp .lp-sales-hero--ink {
     padding: 32px 0 40px !important;
     background-size:
       auto,
@@ -488,14 +421,6 @@
   object-position: top left;
 }
 
-.lp-home-tour-stage .lp-product-shot-viewport {
-  background: var(--df-surface);
-}
-
-.lp-home-tour-stage .lp-product-shot-viewport img {
-  object-position: center center;
-}
-
 .lp-product-shot-route {
   display: flex;
   align-items: center;
@@ -526,10 +451,6 @@
   display: grid;
   gap: 16px;
   min-width: 0;
-}
-
-.lp .lp-hero--home .lp-product-shot {
-  max-width: 100%;
 }
 
 .lp .lp-mkt-live-reel .lp-product-shot-chrome,
@@ -645,12 +566,8 @@
   --lp-fs-body: 15px;
 }
 
-.lp .lp-home-run-head h2,
-.lp .lp-home-flow-copy h3,
-.lp .lp-home-section-head h2,
 .lp .lp-sol-section-head h2,
 .lp .lp-sol-footer-inner h2,
-.lp .lp-cinema-band-head h2,
 .lp .lp-proof-beside-copy h2,
 .lp .lp-wh-cta h2 {
   font-size: var(--lp-fs-title);
@@ -659,32 +576,16 @@
   line-height: 1.12;
 }
 
-.lp .lp-home-section-head {
-  max-width: 40rem;
-}
-
-.lp .lp-home-run-facts strong,
-.lp .lp-home-connectors-stats dt {
-  font-size: clamp(1.35rem, 1.6vw, 1.65rem);
-}
-
-.lp .lp-home-case h3,
 .lp .lp-sol-outcome h3,
 .lp .lp-sol-step h3,
-.lp .lp-sol-cap h3,
-.lp .lp-home-bento-copy h3 {
+.lp .lp-sol-cap h3 {
   font-size: 1.15rem;
   font-weight: 650;
   letter-spacing: -0.02em;
   line-height: 1.28;
 }
 
-.lp .lp-cust-hero-quote-mark {
-  font-size: 36px;
-}
-
 /* Explanations that were a tall 50-character column now share the row. */
-.lp .lp-cinema-band-head,
 .lp .lp-sol-section-head {
   max-width: 68ch;
   display: grid;
@@ -694,21 +595,18 @@
   margin-bottom: 22px;
 }
 
-.lp .lp-cinema-band-kicker,
 .lp .lp-sol-section-head .lp-mkt-kicker {
   grid-column: 1;
   grid-row: 1;
   margin-bottom: 0;
 }
 
-.lp .lp-cinema-band-head h2,
 .lp .lp-sol-section-head h2 {
   grid-column: 1;
   grid-row: 2;
   margin: 0;
 }
 
-.lp .lp-cinema-band-lead,
 .lp .lp-sol-section-head > p:last-child {
   grid-column: 1;
   grid-row: auto;
@@ -772,85 +670,46 @@
   line-height: 1.6;
 }
 
-.lp-proof-beside .lp-shot-band {
-  margin: 0;
-  max-width: none;
-}
-
-.lp-proof-beside .lp-shot-band img {
-  width: auto;
-  max-width: 100%;
-  max-height: 420px;
-  margin-left: auto;
-  object-fit: contain;
-}
-
-.lp-proof-beside .lp-shot-band figcaption {
-  color: var(--lp-muted);
-}
-
 /* Quiet arrival. Cards follow the section, a few dozen milliseconds apart. */
 .lp .lp-reveal--in .lp-sol-outcome,
 .lp .lp-reveal--in .lp-sol-step,
-.lp .lp-reveal--in .lp-sol-cap,
-.lp .lp-reveal--in .lp-home-bento-cell,
-.lp .lp-reveal--in .lp-home-case,
-.lp .lp-reveal--in .lp-home-questions-list article,
-.lp .lp-reveal--in .lp-home-connector-grid > span,
-.lp .lp-reveal--in .lp-home-run-facts > div {
+.lp .lp-reveal--in .lp-sol-cap {
   animation: lp-stagger-in 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: calc(var(--reveal-i, 0) * 70ms);
 }
 
 .lp .lp-reveal--in .lp-sol-outcome:nth-child(2),
 .lp .lp-reveal--in .lp-sol-step:nth-child(2),
-.lp .lp-reveal--in .lp-sol-cap:nth-child(2),
-.lp .lp-reveal--in .lp-home-case:nth-child(2) { animation-delay: 60ms; }
+.lp .lp-reveal--in .lp-sol-cap:nth-child(2) { animation-delay: 60ms; }
 .lp .lp-reveal--in .lp-sol-outcome:nth-child(3),
 .lp .lp-reveal--in .lp-sol-step:nth-child(3),
-.lp .lp-reveal--in .lp-sol-cap:nth-child(3),
-.lp .lp-reveal--in .lp-home-case:nth-child(3) { animation-delay: 120ms; }
+.lp .lp-reveal--in .lp-sol-cap:nth-child(3) { animation-delay: 120ms; }
 .lp .lp-reveal--in .lp-sol-outcome:nth-child(4),
 .lp .lp-reveal--in .lp-sol-step:nth-child(4) { animation-delay: 180ms; }
 
-.lp .lp-product-shot-chrome,
-.lp .lp-shot-band img {
+.lp .lp-product-shot-chrome {
   transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@media (hover: hover) {
-  .lp .lp-home-bento-cell:hover .lp-home-shot img,
-  .lp .lp-shot-band:hover img {
-    transform: translateY(-2px);
-  }
-}
-
 @media (max-width: 839px) {
-  .lp .lp-cinema-band-head,
   .lp .lp-sol-section-head,
-  .lp-proof-beside {
+.lp-proof-beside {
     grid-template-columns: 1fr;
   }
 
-  .lp .lp-cinema-band-lead,
   .lp .lp-sol-section-head > p:last-child {
     grid-column: 1;
     grid-row: auto;
   }
 
-  .lp-proof-beside .lp-shot-band img {
-    margin-inline: auto;
-  }
+  
 }
 
 @media (prefers-reduced-motion: reduce) {
   .lp .lp-reveal--in .lp-sol-outcome,
-  .lp .lp-reveal--in .lp-sol-step,
-  .lp .lp-reveal--in .lp-sol-cap,
-  .lp .lp-reveal--in .lp-home-bento-cell,
-  .lp .lp-reveal--in .lp-home-case,
-  .lp .lp-product-shot-chrome,
-  .lp .lp-shot-band img {
+.lp .lp-reveal--in .lp-sol-step,
+.lp .lp-reveal--in .lp-sol-cap,
+.lp .lp-product-shot-chrome {
     animation: none;
     transition: none;
     transform: none;
@@ -858,32 +717,6 @@
 }
 
 /* Facts sit beside the paragraph; the product image uses the full row. */
-@media (min-width: 840px) {
-  .lp-home-flow-copy {
-    display: grid;
-    grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.85fr);
-    column-gap: 36px;
-    align-items: end;
-  }
-
-  .lp-home-flow-num,
-  .lp-home-flow-copy h3,
-  .lp-home-flow-copy > p {
-    grid-column: 1;
-  }
-
-  .lp-home-flow-copy ul {
-    grid-column: 2;
-    grid-row: 1 / span 3;
-    align-self: center;
-  }
-}
-
-/* Trust Report crops are portrait panels. Keep them at reading size
-   instead of letterboxing them inside the wide workspace frame. */
-.lp-home-hero-stage .lp-product-shot-viewport {
-  background: var(--df-surface);
-}
 
 .lp-product-shot.is-panel {
   width: fit-content;
@@ -915,23 +748,16 @@
 /* Phone: every product image is the whole frame, at the width of the page.
    Plan tables become rows you can read without a clipped column. */
 @media (max-width: 720px) {
-  .lp-home-flow-visual,
   .lp-product-shot,
-  .lp-product-shot-chrome,
-  .lp-product-shot-viewport,
-  .lp-shot-band,
-  .lp-proof-beside,
-  .lp-mkt-hero-visual,
-  .lp-sol-hero-visual,
-  .lp-cinema-band-inner,
-  .lp-cinema-band-body,
-  .lp-cinema-band-stage,
-  .lp-cinema-band-body > * {
+.lp-product-shot-chrome,
+.lp-product-shot-viewport,
+.lp-proof-beside,
+.lp-mkt-hero-visual,
+.lp-sol-hero-visual {
     min-width: 0;
     max-width: 100%;
   }
 
-  .lp-shot-band,
   .lp-product-shot-viewport {
     width: 100%;
     overflow: hidden;
@@ -942,21 +768,9 @@
     background: var(--df-surface);
   }
 
-  /* The step tour keeps one frame so advancing a step does not jump the page.
-     The picture stays whole inside that frame. */
-  .lp-home-tour-stage .lp-product-shot-viewport {
-    aspect-ratio: 1400 / 880;
-  }
+  
 
-  .lp-home-tour-stage .lp-product-shot-viewport img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    max-height: none;
-    object-fit: contain;
-    object-position: center center;
-  }
+  
 
   .lp .lp-mkt-live-reel {
     grid-template-columns: 1fr;
@@ -980,9 +794,7 @@
   }
 
   .lp-product-shot-viewport img,
-  .lp-shot-band img,
-  .lp-proof-beside .lp-shot-band img,
-  .lp-product-shot.is-panel .lp-product-shot-viewport img {
+.lp-product-shot.is-panel .lp-product-shot-viewport img {
     display: block;
     width: 100%;
     max-width: 100%;
@@ -1000,37 +812,24 @@
     width: 100%;
   }
 
-  .lp-home-hero-route,
   .lp-product-shot-route {
     flex-wrap: wrap;
     align-items: flex-start;
   }
 
-  .lp-home-hero-route span,
   .lp-product-shot-route span {
     white-space: normal;
     overflow: visible;
     text-overflow: unset;
   }
 
-  .lp-home-connectors-marquee {
-    margin-left: 0;
-    margin-right: 0;
-  }
+  
 
-  .lp-conn-marquee {
-    overflow-x: auto;
-    mask-image: none;
-    -webkit-mask-image: none;
-  }
+  
 
-  .lp-conn-marquee-track {
-    animation: none;
-  }
+  
 
-  .lp .lp-product-shot-chrome,
-  .lp .lp-shot-band img,
-  .lp .lp-home-shot img {
+  .lp .lp-product-shot-chrome {
     transition: none;
     transform: none;
   }
@@ -1096,94 +895,17 @@
   .lp-sales-table td:nth-child(3)::before { content: "How it works"; }
   .lp-sales-table td:nth-child(4)::before { content: "Plans"; }
 
-  .lp-home-steps li,
-  .lp-home-steps li.is-flip {
-    grid-template-columns: 1fr;
-  }
+  
 
-  .lp-home-steps li.is-flip > :first-child {
-    order: 0;
-  }
+  
 
-  .lp .lp-home-final-panel {
-    grid-template-columns: 1fr;
-    padding: 28px 22px;
-  }
+  
 
-  .lp .lp-home-final-panel .lp-home-final-cta {
-    justify-content: flex-start;
-  }
+  
 }
 
-/* Closing band is a panel: sentence on the left, actions on the right.
-   A full-bleed field left a hole beside a short sentence. */
-.lp .lp-home-final {
-  background: transparent;
-  padding-block: var(--lp-section-y);
-  text-align: left;
-}
-
-.lp .lp-home-final-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 28px 40px;
-  align-items: center;
-  padding: 36px 40px;
-  border-radius: var(--df-radius-3xl);
-  background:
-    radial-gradient(ellipse 70% 80% at 100% 0%, rgba(45, 212, 191, 0.22), transparent 55%),
-    linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 62%, var(--df-brand-strong) 100%);
-}
-
-.lp .lp-home-final-panel h2,
-.lp .lp-home-final-panel p {
-  max-width: 36rem;
-  margin-left: 0;
-  margin-right: 0;
-  text-align: left;
-  color: var(--df-success-bg);
-}
-
-.lp .lp-home-final-panel p {
-  color: rgba(236, 253, 245, 0.78);
-  margin-bottom: 0;
-}
-
-.lp .lp-home-final-panel .lp-home-final-cta {
-  justify-content: flex-end;
-  margin: 0;
-}
-
-/* How a transfer runs: one idea per band, copy beside one frame.
-   The recorded demo stays in the video section. */
-.lp-home-steps {
-  list-style: none;
-  margin: 28px 0 8px;
-  padding: 0;
-  display: grid;
-  gap: 16px;
-}
-
-.lp-home-steps li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 28px 40px;
-  align-items: center;
-  padding: 28px;
-  border: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-}
-
-.lp-home-steps li.is-flip > :first-child {
-  order: 2;
-}
-
-.lp-home-steps .lp-product-shot,
 .lp-proof-beside .lp-product-shot,
 .lp .lp-mkt-chapter--band > .lp-product-shot,
-.lp-home-steps .lp-product-shot-chrome,
 .lp-proof-beside .lp-product-shot-chrome,
 .lp .lp-mkt-chapter--band .lp-product-shot-chrome {
   width: fit-content;
@@ -1191,7 +913,6 @@
   margin-left: auto;
 }
 
-.lp-home-steps .lp-product-shot-viewport,
 .lp-proof-beside .lp-product-shot-viewport,
 .lp .lp-mkt-chapter--band .lp-product-shot-viewport {
   aspect-ratio: auto;
@@ -1200,7 +921,6 @@
   background: var(--df-surface);
 }
 
-.lp-home-steps .lp-product-shot-viewport img,
 .lp-proof-beside .lp-product-shot-viewport img,
 .lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
   width: auto;
@@ -1209,41 +929,6 @@
   max-height: 420px;
   object-fit: contain;
   object-position: center center;
-}
-
-.lp-home-steps-name {
-  margin: 0 0 4px;
-  color: var(--df-teal-600);
-  font-size: 12px;
-  font-weight: 720;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.lp-home-steps h3 {
-  margin: 0 0 6px;
-  color: var(--lp-ink);
-  font-family: var(--lp-font-display);
-  font-size: 1.15rem;
-  font-weight: 680;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-}
-
-.lp-home-steps p {
-  margin: 0;
-  max-width: 68ch;
-  color: var(--lp-muted);
-  font-size: 15px;
-  line-height: 1.55;
-}
-
-/* The verdict is a strip and the Trust Report is a card. Keep them in one
-   narrow column so neither is stretched across the page. */
-.lp .lp-home-run-proofs {
-  grid-template-columns: minmax(0, 1fr);
-  max-width: 480px;
-  margin-inline: auto;
 }
 
 .lp .lp-wh-split-grid {
@@ -1261,22 +946,8 @@
 /* One surface: hairline, soft lift, and a frame that keeps a row aligned.
    Desktop only — a phone keeps the picture at its own height. */
 @media (min-width: 721px) {
-  .lp-home-flow,
-  .lp-home-features,
-  .lp-home-questions,
-  .lp-home-cases,
-  .lp-home-connectors,
-  .lp-home-videos {
-    padding-block: var(--lp-section-y);
-  }
 
-  .lp-home-bento-cell,
-  .lp-home-case,
-  .lp-home-questions-list article,
-  .lp-home-run-proofs figure,
-  .lp-conn-marquee-tile,
-  .lp .lp-product-shot-chrome,
-  .lp .lp-shot-band {
+  .lp .lp-product-shot-chrome {
     border: 1px solid var(--lp-line);
     border-radius: var(--df-radius-xl);
     box-shadow: var(--lp-shadow-soft);
@@ -1286,61 +957,25 @@
     box-shadow: var(--lp-shadow-editorial);
   }
 
-  .lp-home-bento {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
+  
 
-  .lp-home-bento-cell,
-  .lp-home-bento-cell.is-wide,
-  .lp-home-bento-cell.is-narrow,
-  .lp-home-bento-cell.is-third {
-    display: flex;
-    flex-direction: column;
-    grid-column: span 2;
-  }
+  
 
-  .lp-home-bento-copy {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-  }
+  
 
-  .lp-home-bento-copy .lp-home-link {
-    margin-top: auto;
-    padding-top: 18px;
-  }
+  
 
-  .lp-home-bento-cell:nth-child(4),
-  .lp-home-bento-cell:nth-child(5) {
-    grid-column: span 3;
-  }
+  
 
-  .lp-home-bento-cell .lp-home-shot,
-  .lp-home-bento-cell.is-wide .lp-home-shot {
-    aspect-ratio: 16 / 10;
-    display: grid;
-    place-items: center;
-    height: auto;
-    min-height: 0;
-    margin-top: 16px;
-    background: var(--df-surface);
-    overflow: hidden;
-  }
+  
 
-  .lp-home-bento-cell .lp-home-shot img,
-  .lp-home-bento-cell.is-wide .lp-home-shot img {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: center center;
-  }
+  
 }
 
 /* One card material. Fivetran and Airbyte keep every tile on the same
    surface; a dark first card, a mint second, an amber third, and a
    dashed fourth read as a prototype. */
 .lp .lp-sol-outcome,
-.lp .lp-home-trust-card,
 .lp .lp-sec-layer-card,
 .lp .lp-int-family-card,
 .lp .lp-ent-capability,
@@ -1355,8 +990,6 @@
 
 .lp .lp-sol-outcome h3,
 .lp .lp-sol-outcome > span,
-.lp .lp-home-trust-card h3,
-.lp .lp-home-trust-card .lp-home-trust-tag,
 .lp .lp-sec-layer-card h3,
 .lp .lp-sec-layer-card .lp-sec-layer-num,
 .lp .lp-sec-layer-card em,
@@ -1368,7 +1001,6 @@
 }
 
 .lp .lp-sol-outcome p,
-.lp .lp-home-trust-card p,
 .lp .lp-sec-layer-card p,
 .lp .lp-ent-capability p,
 .lp .lp-sol-step p,
@@ -1377,9 +1009,7 @@
   color: var(--lp-muted);
 }
 
-.lp .lp-home-trust-card .lp-home-trust-num,
-.lp .lp-sec-layer-card .lp-sec-layer-tag,
-.lp .lp-home-trust-card .lp-home-trust-pill {
+.lp .lp-sec-layer-card .lp-sec-layer-tag {
   background: var(--df-success-bg);
   color: var(--df-teal-600);
   border-color: var(--lp-line);
@@ -1438,22 +1068,18 @@
     gap: 20px;
   }
 
-  .lp-home-steps .lp-product-shot,
   .lp-proof-beside .lp-product-shot,
-  .lp .lp-mkt-chapter--band > .lp-product-shot,
-  .lp-home-steps .lp-product-shot-chrome,
-  .lp-proof-beside .lp-product-shot-chrome,
-  .lp .lp-mkt-chapter--band .lp-product-shot-chrome,
-  .lp-home-steps .lp-product-shot-viewport,
-  .lp-proof-beside .lp-product-shot-viewport,
-  .lp .lp-mkt-chapter--band .lp-product-shot-viewport {
+.lp .lp-mkt-chapter--band > .lp-product-shot,
+.lp-proof-beside .lp-product-shot-chrome,
+.lp .lp-mkt-chapter--band .lp-product-shot-chrome,
+.lp-proof-beside .lp-product-shot-viewport,
+.lp .lp-mkt-chapter--band .lp-product-shot-viewport {
     width: 100%;
     margin-left: 0;
   }
 
-  .lp-home-steps .lp-product-shot-viewport img,
   .lp-proof-beside .lp-product-shot-viewport img,
-  .lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
+.lp .lp-mkt-chapter--band .lp-product-shot-viewport img {
     width: 100%;
     height: auto;
     max-width: 100%;
@@ -1534,38 +1160,6 @@
   }
 }
 
-/* The row only rises. A sideways slide left the even steps 28px off
-   the column, so 02 and 04 sat past the content edge. */
-.lp .lp-home-steps > li.lp-reveal,
-.lp .lp-home-steps > li.is-flip.lp-reveal {
-  opacity: 0;
-  transform: translateY(18px);
-}
-
-.lp .lp-home-steps > li.lp-reveal--in,
-.lp .lp-home-steps > li.is-flip.lp-reveal--in {
-  opacity: 1;
-  transform: none;
-}
-
-.lp-home-steps li.lp-reveal .lp-product-shot {
-  opacity: 0;
-  transform: translateY(10px);
-}
-
-.lp-home-steps li.lp-reveal--in .lp-product-shot {
-  opacity: 1;
-  transform: none;
-  transition:
-    opacity 720ms cubic-bezier(0.22, 1, 0.36, 1) 90ms,
-    transform 720ms cubic-bezier(0.22, 1, 0.36, 1) 90ms;
-}
-
-.lp-home-stack-item {
-  animation: lp-home-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--i, 0) * 45ms);
-}
-
 .lp .lp-mkt-hero-visual,
 .lp .lp-sol-hero-visual {
   animation: lp-home-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.14s both;
@@ -1611,7 +1205,6 @@
 
 .lp-proof-beside,
 .lp .lp-mkt-chapter--band,
-.lp-home-bento-cell,
 .lp-sol-outcome,
 .lp-ent-capability,
 .lp-sec-layer-card {
@@ -1623,10 +1216,9 @@
 
 @media (hover: hover) {
   .lp .lp-mkt-chapter--band:hover,
-  .lp-home-bento-cell:hover,
-  .lp-sol-outcome:hover,
-  .lp-ent-capability:hover,
-  .lp-sec-layer-card:hover {
+.lp-sol-outcome:hover,
+.lp-ent-capability:hover,
+.lp-sec-layer-card:hover {
     border-color: var(--df-teal-600);
     box-shadow: var(--lp-shadow-editorial);
   }
@@ -1639,25 +1231,17 @@
   }
 
   .lp-proof-beside:hover .lp-product-shot-chrome,
-  .lp .lp-mkt-chapter--band:hover .lp-product-shot-chrome,
-  .lp-home-hero-stage:hover .lp-product-shot-chrome {
+.lp .lp-mkt-chapter--band:hover .lp-product-shot-chrome {
     transform: translateY(-4px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lp .lp-home-steps > li.lp-reveal,
-  .lp .lp-home-steps > li.is-flip.lp-reveal,
-  .lp .lp-home-steps > li.lp-reveal--in,
-  .lp .lp-home-steps > li.is-flip.lp-reveal--in,
-  .lp-home-steps li.lp-reveal .lp-product-shot,
-  .lp-home-steps li.lp-reveal--in .lp-product-shot,
-  .lp-home-stack-item,
   .lp .lp-mkt-hero-visual,
-  .lp .lp-sol-hero-visual,
-  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
-  .lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
-  .lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
+.lp .lp-sol-hero-visual,
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy > *,
+.lp .lp-sol-hero--ink .lp-sol-hero-copy > *,
+.lp .lp-sales-hero--ink .lp-sales-hero-copy > * {
     opacity: 1;
     transform: none;
     animation: none;
@@ -1665,226 +1249,12 @@
   }
 }
 
-/* Homepage type and pacing follow the Airbyte / Fivetran scene:
-   a large headline, three promises, then open product rows. */
-.lp .lp-home-hero h1 {
-  font-size: var(--lp-fs-display);
-  font-weight: 650;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  max-width: 16ch;
-}
-
-.lp .lp-home-promises {
-  padding-block: clamp(48px, 6vh, 80px);
-}
-
-.lp .lp-home-promises-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
-  align-items: stretch;
-}
-
-.lp .lp-home-promises-grid article {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  padding: 28px 26px 30px;
-  border: 1px solid var(--lp-line);
-  border-top: 2px solid var(--df-teal-600);
-  border-radius: var(--df-radius-xl);
-  background: var(--df-surface);
-  box-shadow: var(--lp-shadow-soft);
-  transition:
-    transform 150ms ease,
-    box-shadow 150ms ease,
-    border-color 150ms ease;
-}
-
-.lp .lp-home-promises-grid span {
-  display: block;
-  margin-bottom: 18px;
-  color: var(--df-teal-600);
-  font-family: var(--lp-font-display);
-  font-size: 1.75rem;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.04em;
-  line-height: 1;
-}
-
-.lp .lp-home-promises-grid h2 {
-  margin: 0 0 10px;
-  color: var(--lp-ink);
-  font-family: var(--lp-font-display);
-  font-size: 1.125rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-}
-
-.lp .lp-home-promises-grid p {
-  margin: 0;
-  color: var(--lp-muted);
-  font-size: 14.5px;
-  line-height: 1.55;
-}
-
-.lp .lp-reveal--in .lp-home-promises-grid article {
-  animation: lp-stagger-in 680ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 80ms);
-}
-
-.lp .lp-home-steps {
-  gap: 0;
-  margin-top: 8px;
-}
-
-.lp .lp-home-steps > li {
-  padding: clamp(36px, 5vh, 56px) 0;
-  border: 0;
-  border-bottom: 1px solid var(--lp-line);
-  border-radius: var(--df-radius-none);
-  background: transparent;
-  box-shadow: none;
-}
-
-.lp .lp-home-steps h3 {
-  font-size: var(--lp-fs-title);
-  font-weight: 650;
-  letter-spacing: -0.03em;
-  line-height: 1.25;
-}
-
-.lp .lp-home-steps p,
-.lp .lp-home-steps-facts li {
-  font-size: var(--lp-fs-body);
-  line-height: 1.6;
-}
-
-.lp-home-steps-facts {
-  list-style: none;
-  margin: 16px 0 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.lp-home-steps-facts li {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  padding: 0;
-  border: 0;
-  border-radius: var(--df-radius-none);
-  background: transparent;
-  box-shadow: none;
-  color: var(--lp-ink);
-  font-size: 14px;
-  line-height: 1.45;
-}
-
-.lp-home-steps-facts li::before {
-  content: "";
-  flex: 0 0 7px;
-  width: 7px;
-  height: 7px;
-  margin-top: 0.45em;
-  border-radius: var(--df-radius-pill);
-  background: var(--df-teal-600);
-}
-
 /* A screenshot's intrinsic width was taking the whole row, so the copy
    column computed to 0px and each letter wrapped onto its own line.
    Stack until both columns have room, the same point the hero stacks. */
-@media (max-width: 1099px) {
-  .lp .lp-home-steps > li,
-  .lp .lp-home-steps > li.is-flip {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .lp .lp-home-steps > li.is-flip > :first-child {
-    order: 0;
-  }
-
-  .lp .lp-home-steps > li > div {
-    min-width: 0;
-    max-width: 100%;
-  }
-}
 
 /* One frame width for all five steps. Intrinsic widths (580, 604, 674)
    left each screenshot on a different edge, so the card looked cut. */
-@media (min-width: 1100px) {
-  .lp .lp-home-steps > li,
-  .lp .lp-home-steps > li.is-flip {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 32px 48px;
-    align-items: center;
-  }
-
-  .lp .lp-home-steps .lp-product-shot,
-  .lp .lp-home-steps .lp-product-shot-chrome,
-  .lp .lp-home-steps .lp-product-shot-viewport {
-    width: 100%;
-    max-width: none;
-    margin-left: 0;
-  }
-
-  .lp .lp-home-steps .lp-product-shot-viewport {
-    aspect-ratio: auto;
-    height: auto;
-    background: var(--df-surface);
-  }
-
-  .lp .lp-home-steps .lp-product-shot-viewport img {
-    width: 100%;
-    height: auto;
-    max-width: 100%;
-    max-height: none;
-    object-fit: contain;
-    object-position: center top;
-  }
-}
-
-@media (max-width: 720px) {
-  .lp .lp-home-final-panel {
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: start;
-  }
-
-  .lp .lp-home-final-panel h2,
-  .lp .lp-home-final-panel p {
-    max-width: none;
-  }
-}
-
-@media (max-width: 839px) {
-  .lp .lp-home-promises-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .lp .lp-home-hero h1 {
-    max-width: 14ch;
-  }
-}
-
-@media (hover: hover) {
-  .lp .lp-home-promises-grid article:hover {
-    transform: translateY(-3px);
-    border-color: var(--df-teal-600);
-    box-shadow: var(--lp-shadow-editorial);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-reveal--in .lp-home-promises-grid article,
-  .lp .lp-home-promises-grid article:hover {
-    animation: none;
-    transform: none;
-  }
-}
 
 /* Chapter titles lost their scale when the copy moved into a wrapper.
    Product pages use the same section size as the homepage scenes. */
@@ -2050,82 +1420,19 @@
   transform: none;
 }
 
-.lp .lp-reveal--in .lp-home-promises-grid article,
 .lp .lp-reveal--in .lp-mkt-algo-steps li,
 .lp .lp-reveal--in .lp-mkt-scenario li,
 .lp .lp-reveal--in .lp-int-family-card,
 .lp .lp-reveal--in .lp-pricing-card,
-.lp .lp-reveal--in .lp-mkt-evidence-card,
-.lp .lp-reveal--in .lp-home-measured-grid > div {
+.lp .lp-reveal--in .lp-mkt-evidence-card {
   animation-duration: 750ms;
   animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.lp .lp-home-measured {
-  padding-block: clamp(28px, 4vh, 48px) clamp(8px, 2vh, 20px);
-}
-
-.lp .lp-home-measured-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 8px;
-  border: 0;
-}
-
-.lp .lp-home-measured-grid > div {
-  min-width: 0;
-  margin: 0;
-  padding: 18px 16px;
-  border: 1px solid rgba(94, 234, 212, 0.22);
-  border-radius: var(--df-radius-xl);
-  background: rgba(7, 17, 31, 0.45);
-  overflow: hidden;
-}
-
-.lp .lp-home-measured-grid strong {
-  display: block;
-  color: inherit;
-  font-family: var(--lp-font-display);
-  font-size: clamp(1.5rem, 1.2rem + 0.6vw, 1.85rem);
-  font-weight: 650;
-  letter-spacing: -0.04em;
-  line-height: 1;
-}
-
-.lp .lp-home-measured-grid span {
-  display: block;
-  margin-top: 8px;
-  max-width: 22ch;
-  color: rgba(167, 243, 208, 0.82);
-  font-size: 14px;
-  line-height: 1.4;
-}
-
-.lp .lp-reveal--in .lp-home-measured-grid > div {
-  animation: lp-stagger-in 750ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 70ms);
-}
-
-@media (max-width: 900px) {
-  .lp .lp-home-measured-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-@media (max-width: 559px) {
-  .lp .lp-home-measured-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .lp .lp-reveal,
-  .lp .lp-reveal--in,
-  .lp-home-steps li.lp-reveal,
-  .lp-home-steps li.lp-reveal--in,
-  .lp .lp-reveal--in .lp-home-measured-grid > div,
-  .lp .lp-faq-panel {
+.lp .lp-reveal--in,
+.lp .lp-faq-panel {
     transform: none;
     animation: none;
     transition: none;
@@ -2214,159 +1521,12 @@
   text-transform: uppercase;
 }
 
-/* Footer sits on every public page. Fivetran and Airbyte give the columns
-   room and move the link color in about 150ms. */
-.lp .lp-footer.lp-footer--compact .lp-footer-inner {
-  padding: 64px 0 28px;
-}
-
-.lp .lp-footer--compact .lp-footer-grid {
-  gap: 36px 48px;
-  padding-bottom: 36px;
-}
-
-.lp .lp-footer--compact h4,
-.lp .lp-footer--compact .lp-footer-grid h4 {
-  margin-bottom: 16px;
-}
-
-.lp .lp-footer--compact a,
-.lp .lp-footer--compact .lp-footer-link {
-  margin-bottom: 12px;
-  font-size: 14.5px;
-  line-height: 1.4;
-  transition: color 150ms ease;
-}
-
-.lp .lp-footer--compact .lp-footer-bottom {
-  margin-top: 8px;
-  padding-top: 20px;
-}
-
-@media (max-width: 960px) {
-  .lp .lp-footer.lp-footer--compact .lp-footer-inner {
-    padding: 40px 0 24px;
-  }
-}
-
 /* Full-width bands. Fivetran and Airbyte break a long page into scenes
    instead of one continuous wash. Cards keep their hairline on the white. */
-.lp .lp-home-features,
-.lp .lp-home-cases,
 .lp .lp-cust3-stories {
   background: var(--df-surface);
   border-block: 1px solid var(--lp-line);
   padding-block: clamp(56px, 7vh, 88px);
-}
-
-.lp .lp-home-questions {
-  background: transparent;
-  border: 0;
-}
-
-/* Trust row. Airbyte scrolls the logos under the hero; the edges fade
-   so the strip does not stop hard against the page. */
-.lp .lp-home-stack-marquee {
-  mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 7%, var(--lp-ink) 93%, transparent);
-  -webkit-mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 7%, var(--lp-ink) 93%, transparent);
-}
-
-.lp .lp-home-stack-track {
-  gap: 0;
-  animation-duration: 36s;
-}
-
-.lp .lp-home-stack-marquee:hover .lp-home-stack-track {
-  animation-play-state: paused;
-}
-
-.lp .lp-home-stack-marquee .lp-home-stack-row {
-  width: max-content;
-  justify-content: flex-start;
-  gap: 8px 36px;
-  flex: 0 0 auto;
-  padding-inline: 18px;
-}
-
-.lp .lp-home-stack-item {
-  flex: 0 0 auto;
-  min-width: 92px;
-  padding: 8px 4px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  animation: none;
-  transition: color 150ms ease;
-}
-
-.lp .lp-home-stack-item em,
-.lp .lp-home-stack-label {
-  color: var(--df-steel-400);
-}
-
-
-@media (max-width: 720px) {
-  .lp .lp-home-stack-marquee.lp-conn-marquee {
-    overflow: hidden;
-    mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 8%, var(--lp-ink) 92%, transparent);
-    -webkit-mask-image: linear-gradient(90deg, transparent, var(--lp-ink) 8%, var(--lp-ink) 92%, transparent);
-  }
-
-  .lp .lp-home-stack-track.lp-conn-marquee-track {
-    animation: lp-conn-marquee 36s linear infinite;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-home-stack-track {
-    animation: none;
-    flex-wrap: wrap;
-    justify-content: center;
-    width: min(100%, var(--lp-shell-max, 1200px));
-    margin-inline: auto;
-  }
-
-  .lp .lp-home-stack-row[aria-hidden="true"] {
-    display: none;
-  }
-
-  .lp .lp-home-stack-marquee .lp-home-stack-row {
-    width: auto;
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-
-  .lp .lp-home-bento-cell,
-  .lp .lp-home-bento-cell:hover {
-    transition: none;
-    transform: none;
-  }
-}
-
-/* Capability cards. A small mark gives each tile the same anchor
-   Fivetran uses on a feature card, without another screenshot. */
-.lp .lp-home-bento-mark {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 14px;
-  border-radius: var(--df-radius-lg);
-  background: var(--df-success-bg);
-  color: var(--df-teal-600);
-}
-
-.lp .lp-home-bento-cell {
-  transition:
-    transform 150ms ease,
-    box-shadow 150ms ease,
-    border-color 150ms ease;
-}
-
-@media (hover: hover) {
-  .lp .lp-home-bento-cell:hover {
-    transform: translateY(-3px);
-  }
 }
 
 /* The call list was a plain disc list. Each line is its own row. */
@@ -2409,42 +1569,6 @@
 @media (max-width: 960px) {
   .lp .lp-sales-honesty .lp-sales-rail-links {
     grid-column: 1;
-  }
-}
-
-.lp .lp-home-stack-item:hover {
-  border-color: transparent;
-  background: transparent;
-}
-
-.lp .lp-home-stack-item:hover em {
-  color: var(--df-teal-600);
-}
-
-/* Demo scene uses the full shell. Fivetran does not float a small player
-   in the middle of a wide page. */
-.lp .lp-home-videos {
-  background: var(--df-surface);
-  border-block: 1px solid var(--lp-line);
-}
-
-.lp .lp-home-videos-feature,
-.lp .lp-home-videos-row {
-  max-width: none;
-}
-
-.lp .lp-home-videos-row {
-  gap: 16px;
-}
-
-.lp .lp-reveal--in .lp-home-videos-card {
-  animation: lp-stagger-in 750ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--reveal-i, 0) * 70ms);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lp .lp-reveal--in .lp-home-videos-card {
-    animation: none;
   }
 }
 
@@ -2499,15 +1623,6 @@
 .lp .lp-sales-textarea:focus-visible {
   outline: 2px solid var(--df-teal-600);
   outline-offset: 1px;
-}
-
-/* Product menu. Seven links in one column covered the hero.
-   Airbyte and Fivetran use two columns so the menu stays a panel. */
-.lp .lp-nav-item.is-open .lp-nav-dropdown--wide {
-  grid-template-columns: 1fr 1fr;
-  min-width: 540px;
-  gap: 2px 4px;
-  padding: 10px;
 }
 
 /* Docs start path. Four guides in one row, the way Fivetran lines up
@@ -2586,27 +1701,6 @@
   opacity: 0.82;
 }
 
-/* Warehouse steps were one shared frame, so the rules ran into each other.
-   Four separate cards, 16px apart. */
-.lp .lp-home-connector-grid {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 16px;
-}
-
-.lp .lp-home-connector-grid .lp-conn-marquee-tile {
-  flex: 0 0 148px;
-  width: 148px;
-  min-height: 112px;
-  height: 112px;
-}
-
-.lp .lp-home-connector-grid .lp-conn-marquee-tile em {
-  text-align: center;
-  line-height: 1.25;
-}
-
 .lp .lp-wh-flow-list {
   gap: 16px;
   border: 0;
@@ -2652,14 +1746,6 @@
   background-image: none;
 }
 
-.lp .lp-home-stack,
-.lp .lp-home-features,
-.lp .lp-home-cases,
-.lp .lp-home-connectors,
-.lp .lp-home .lp-home-connectors,
-.lp .lp-home-videos,
-.lp .lp-home-trust,
-.lp .lp-home-questions,
 .lp .lp-demos-grid-section,
 .lp .lp-cust3-stories,
 .lp .lp-cust3-sectors,
@@ -2690,9 +1776,6 @@
 .lp .lp-pricing-card.lp-scene-card.is-featured,
 .lp .lp-int-family-card.lp-scene-card,
 .lp .lp-mkt-evidence-card.lp-scene-card,
-.lp .lp-home-bento-cell.lp-scene-card,
-.lp .lp-home-case.lp-scene-card,
-.lp .lp-home-case.lp-scene-card:first-child,
 .lp .lp-demos-card.lp-scene-card,
 .lp .lp-pricing-principle.lp-scene-card {
   border-top: 2px solid var(--df-teal-600) !important;
@@ -2793,22 +1876,15 @@
 }
 
 /* One type ladder. Headlines share the display face; body copy is 15px. */
-.lp .lp-home-hero-sub,
 .lp .lp-mkt-lead,
-.lp .lp-home-section-head p,
-.lp .lp-mkt-prose p,
-.lp .lp-home-steps p,
-.lp .lp-home-steps-facts li,
-.lp .lp-home-promises-grid p {
+.lp .lp-mkt-prose p {
   font-family: var(--df-font-sans, "IBM Plex Sans", system-ui, sans-serif);
   font-size: var(--lp-fs-body);
   font-weight: 450;
   line-height: 1.6;
 }
 
-.lp .lp-home-steps .lp-home-steps-name,
-.lp .lp-mkt-kicker,
-.lp .lp-section-kicker {
+.lp .lp-mkt-kicker {
   font-family: var(--lp-font-display);
   font-size: 12px;
   font-weight: 650;
@@ -2817,24 +1893,3 @@
   text-transform: uppercase;
 }
 
-/* The step row is a full-width band, not a card. A hover shadow on the
-   row drew a square through the rounded screenshot. Only the frame reacts. */
-.lp .lp-home-steps > li,
-.lp .lp-home-steps > li.lp-reveal--in {
-  overflow: visible;
-}
-
-@media (hover: hover) {
-  .lp .lp-home-steps > li:hover,
-  .lp .lp-home-steps > li.lp-reveal--in:hover {
-    border-color: transparent;
-    box-shadow: none;
-    background: transparent;
-    transform: none;
-  }
-
-  .lp .lp-home-steps > li:hover .lp-product-shot-chrome {
-    transform: none;
-    border-color: var(--df-teal-600);
-  }
-}

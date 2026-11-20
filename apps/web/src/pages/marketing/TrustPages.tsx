@@ -75,7 +75,7 @@ export function StatusPage() {
           <div className={`lp-status-banner is-${loading ? "checking" : overall}`} role="status">
             <span className="lp-status-dot" aria-hidden="true" />
             <strong>{headline}</strong>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => void load()}>
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => void load()}>
               Refresh
             </button>
           </div>

@@ -3,8 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
 import { MarketingFaq } from "../../components/marketing/MarketingFaq";
-import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
-import { catalogHonestyLead } from "../../lib/provenEvidence";
+import { catalogHonestyLead, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
 const SOURCES = [
@@ -31,18 +30,18 @@ const DESTINATIONS = [
 
 const NEXT_STEPS = [
   {
-    n: "01",
-    title: "Discovery call — 30 minutes",
-    body: "A solutions engineer walks your source → dest, sync mode, and compliance constraints.",
+    n: "1",
+    title: "A 30-minute discovery call",
+    body: "A solutions engineer goes through your source and destination, the sync mode, and your compliance constraints.",
   },
   {
-    n: "02",
-    title: "Scoped pilot on your stack",
-    body: "The production Transfer Studio path: semantic map, G1–G9, write with quarantine and replay.",
+    n: "2",
+    title: "A scoped pilot on your stack",
+    body: "The production Transfer Studio path: semantic map, the nine core checks, and a write with quarantine and replay.",
   },
   {
-    n: "03",
-    title: "Signed proof pack you keep",
+    n: "3",
+    title: "A signed proof pack you keep",
     body: "A read-back of the destination: row counts, checksums, and a value and key census.",
   },
 ];
@@ -62,7 +61,7 @@ const FAQS = [
   },
   {
     q: "Which change data capture engines do you support?",
-    a: "SQL Server native CDC, PostgreSQL logical decoding, MySQL binlog, and Oracle LogMiner — each with a consistent snapshot, resume from the log position, and deletes carried through.",
+    a: `CDC is proven in CI on ${cdcSourcesPhrase()}. Each reads the database log (logical decoding, binlog, change streams, or SQL Server CDC), starts from a consistent snapshot, resumes from the log position, and carries deletes through.`,
   },
   {
     q: "What makes Datawrap different?",
@@ -244,12 +243,12 @@ export function ContactSalesPage({
 
   return (
     <div className="lp-mkt-page lp-sales">
-      <section className="lp-sales-hero lp-sales-hero--split lp-sales-hero--ink" aria-label="Contact sales">
-        <div className="lp-mkt-wrap lp-sales-hero-inner">
-          <div className="lp-sales-hero-copy">
-            <p className="lp-sales-kicker">Contact sales</p>
+      <section className="mk-subhero mk-contact" aria-label="Contact sales">
+        <div className="mk-wrap mk-subhero-grid">
+          <div className="mk-subhero-copy">
+            <p className="mk-subhero-kicker">Contact sales</p>
             <h1>Talk to a solutions engineer.</h1>
-            <p className="lp-sales-hero-lead">
+            <p className="mk-subhero-lead">
               Scope the map, the checks, quarantine, and the read-back on your stack. A solutions
               engineer replies within one business day.
             </p>
@@ -262,8 +261,8 @@ export function ContactSalesPage({
                 <a className="lp-sales-mail" href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
               </span>
             </p>
-            {/* The drawing carries these three steps above 960px; below it, the list does. */}
-            <ol className="lp-sales-hero-steps lp-sales-hero-steps--narrow">
+            <h2 className="mk-contact-steps-title">What happens next</h2>
+            <ol className="mk-contact-steps">
               {NEXT_STEPS.map((s) => (
                 <li key={s.n}>
                   <span>{s.n}</span>
@@ -292,10 +291,10 @@ export function ContactSalesPage({
                 <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
               </p>
               <div className="lp-sales-success-actions">
-                <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
+                <button type="button" className="mk-btn mk-btn--primary" onClick={() => onNavigate("help")}>
                   Browse docs
                 </button>
-                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+                <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("product-transfer")}>
                   Transfer Studio
                 </button>
               </div>
@@ -454,23 +453,19 @@ export function ContactSalesPage({
                     {error}
                   </p>
                 ) : null}
-                <button type="submit" className="lp-btn lp-btn--brand" disabled={!canSubmit || submitting}>
+                <button type="submit" className="mk-btn mk-btn--primary" disabled={!canSubmit || submitting}>
                   {submitting ? "Sending…" : "Request pilot"}
                 </button>
               </div>
             </form>
           )}
-
-          <div className="lp-sales-hero-route">
-            <PilotRouteArt />
-          </div>
         </div>
       </section>
 
       <section className="lp-sales-follow" aria-label="What you will see on the call">
         <div className="lp-mkt-wrap lp-sales-honesty">
           <div>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">On the call</p>
+            <p className="mk-kicker">On the call</p>
             <h2>What you will see</h2>
           </div>
           <ul>
@@ -490,8 +485,8 @@ export function ContactSalesPage({
       <section className="lp-sales-compare" aria-label="What the pilot proves">
         <div className="lp-mkt-wrap">
           <header>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">What the pilot proves</p>
-            <h2>Every load verified, on your own stack.</h2>
+            <p className="mk-kicker">What the pilot proves</p>
+            <h2>What the pilot leaves you with</h2>
             <p>
               Mapping you can review, gates before the write, quarantine you can replay, destination
               SQL you can bind, and a read-back you can archive.
@@ -534,7 +529,7 @@ export function ContactSalesPage({
                 </tr>
                 <tr>
                   <th scope="row">CDC</th>
-                  <td>SQL Server, PostgreSQL, MySQL, and Oracle — snapshot, stream, resume</td>
+                  <td>{cdcSourcesPhrase()}: snapshot, then stream from the log, and resume</td>
                   <td>Idempotent upserts on your keys</td>
                 </tr>
               </tbody>

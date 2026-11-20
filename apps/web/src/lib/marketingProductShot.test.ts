@@ -30,7 +30,7 @@ describe("marketing product photography", () => {
   it("home hero stages the Studio map on the demo route, and the run screenshots stay off the homepage", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /ProductShot/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMapStage\}/);
+    assert.match(home, /shot: WORKSPACE_SHOT\.transferMapStage/);
     assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
     assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);
     assert.match(home, /DEMO_ROUTE\.source/);
@@ -40,9 +40,7 @@ describe("marketing product photography", () => {
     assert.equal(DEMO_ROUTE.dest, "Snowflake · DW_DEMO.SALES_ORDERS_REPORTING");
   });
 
-  it("typed chips clip to the plate so Snowflake.orders cannot paint past the border", () => {
-    const art = readFileSync(join(webRoot, "components/marketing/hero-art/HeroArtFrame.tsx"), "utf8");
-    assert.match(art, /clipPath/);
+  it("product shot captions and frames cannot paint past their border", () => {
     const css = readFileSync(join(webRoot, "styles/marketing-hero.css"), "utf8");
     assert.match(css, /\.lp-product-shot-route span \{[\s\S]*?text-overflow:\s*ellipsis/);
     assert.match(css, /\.lp-product-shot-viewport \{[\s\S]*?overflow:\s*hidden/);
@@ -53,7 +51,7 @@ describe("marketing product photography", () => {
   it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /shot: WORKSPACE_SHOT\.transferSource/);
-    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesHistory/);
+    assert.match(home, /src=\{WORKSPACE_SHOT\.schedulesHistory\}/);
     assert.doesNotMatch(home, /\/docs\/screenshots\//);
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });

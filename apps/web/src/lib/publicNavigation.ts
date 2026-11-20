@@ -109,7 +109,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move data between databases, warehouses, files, streams, and APIs. Semantic mapping, 9 preflight gates, native CDC, and every load verified value by value.",
+      "Move data between databases, warehouses, files, and streams. Datawrap maps columns by meaning, checks the plan before the first write, holds failed rows in quarantine, and reads the destination back to compare it with the source.",
     keywords:
       "Datawrap, data transfer platform, database migration, ETL, CDC, semantic mapping, preflight gates, data verification, PostgreSQL Snowflake SQL Server",
     canonicalPath: "#/",
@@ -127,8 +127,8 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/enterprise",
   },
   customers: {
-    title: "Customers",
-    description: "Measured on live engines: schema drift, identity and key carry, retry safety, and destination read-back — the proof you get on your own data.",
+    title: "Evidence",
+    description: "One recorded run counted on both sides, the connectors CI proves, and the evidence a pilot leaves on your own data.",
     keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
     canonicalPath: "#/customers",
   },

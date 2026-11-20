@@ -23,11 +23,6 @@ export function ProductShot({
     <figure className={`lp-product-shot ${className}`.trim()}>
       <div className="lp-product-shot-chrome">
         <div className="lp-product-shot-bar">
-          <span className="lp-product-shot-dots" aria-hidden>
-            <i />
-            <i />
-            <i />
-          </span>
           <span className="lp-product-shot-surface">{surface}</span>
         </div>
         <div className="lp-product-shot-viewport">

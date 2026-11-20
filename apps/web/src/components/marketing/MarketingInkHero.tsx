@@ -1,5 +1,9 @@
 import type { ReactNode } from "react";
 
+/**
+ * Hero for the sales, trust, and legal pages. `doc` is the quieter document
+ * header used by Privacy, Terms, DPA, and Subprocessors.
+ */
 export function MarketingInkHero({
   kicker,
   title,
@@ -16,40 +20,31 @@ export function MarketingInkHero({
   slas?: { value: string; label: string }[];
   actions?: ReactNode;
   aside?: ReactNode;
-  /** ink = dark product hero. doc = light document header (Privacy / Terms). */
+  /** ink = product page hero. doc = document header (Privacy / Terms). */
   tone?: "ink" | "doc";
   meta?: ReactNode;
 }) {
-  const slaList = slas?.length ? (
-    <ul className="lp-sales-hero-slas">
-      {slas.map((s) => (
-        <li key={s.label}>
-          <strong>{s.value}</strong>
-          <span>{s.label}</span>
-        </li>
-      ))}
-    </ul>
-  ) : null;
-
   return (
-    <section
-      className={[
-        "lp-sales-hero",
-        tone === "doc" ? "lp-sales-hero--doc" : "lp-sales-hero--ink",
-        aside ? "lp-sales-hero--split" : "lp-sales-hero--page",
-      ].join(" ")}
-      aria-label={kicker}
-    >
-      <div className="lp-mkt-wrap lp-sales-hero-inner">
-        <div className="lp-sales-hero-copy">
-          <p className="lp-sales-kicker">{kicker}</p>
+    <section className={`mk-subhero${tone === "doc" ? " mk-subhero--doc" : ""}`} aria-label={kicker}>
+      <div className={`mk-wrap mk-subhero-grid${aside ? "" : " is-solo"}`}>
+        <div className="mk-subhero-copy">
+          <p className="mk-subhero-kicker">{kicker}</p>
           <h1>{title}</h1>
-          {meta ? <p className="lp-sales-hero-meta">{meta}</p> : null}
-          <p className="lp-sales-hero-lead">{lead}</p>
+          {meta ? <p className="mk-subhero-meta">{meta}</p> : null}
+          <p className="mk-subhero-lead">{lead}</p>
           {actions}
-          {slaList}
+          {slas?.length ? (
+            <dl className="mk-subhero-facts">
+              {slas.map((s) => (
+                <div key={s.label}>
+                  <dt>{s.label}</dt>
+                  <dd>{s.value}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
         </div>
-        {aside}
+        {aside ? <div className="mk-subhero-visual">{aside}</div> : null}
       </div>
     </section>
   );

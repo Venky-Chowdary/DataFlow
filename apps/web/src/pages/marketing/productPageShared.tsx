@@ -222,7 +222,7 @@ export function AlgoBlock({
       <ol className="lp-mkt-algo-steps">
         {steps.map((s, i) => (
           <li key={s.name} style={{ ["--i" as string]: i }}>
-            <span className="lp-mkt-algo-num">{String(i + 1).padStart(2, "0")}</span>
+            <span className="lp-mkt-algo-num">{i + 1}</span>
             <div>
               <strong>{s.name}</strong>
               <p>{s.detail}</p>

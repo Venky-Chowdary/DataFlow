@@ -17,7 +17,6 @@ import {
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_DIRS = [
   path.join(SRC, "pages", "marketing"),
-  path.join(SRC, "components", "landing"),
   path.join(SRC, "components", "marketing"),
 ];
 
@@ -47,7 +46,6 @@ test("public pages publish no hand-typed evidence figure (CLM-5)", () => {
   const files = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
     path.join(SRC, "lib", "provenEvidence.ts"),
   ];
@@ -83,7 +81,6 @@ test("marketing pages never publish CI blockers as product gaps", () => {
   const marketingDirs = [
     path.join(SRC, "pages", "marketing"),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    path.join(SRC, "components", "landing"),
     path.join(SRC, "components", "marketing"),
   ];
   for (const dir of marketingDirs) {
@@ -134,7 +131,6 @@ test("public pages never name a planned connector or an unbuilt control", () => 
   const marketingFiles = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
   ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
   for (const file of marketingFiles) {
@@ -151,7 +147,6 @@ test("public pages carry no disclaimer copy", () => {
   const marketingFiles = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
   ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
   for (const file of marketingFiles) {
@@ -166,7 +161,6 @@ test("public pages do not sell the catalog as live or native MERGE", () => {
     path.join(SRC, "pages", "marketing"),
     path.join(SRC, "pages", "LandingPage.tsx"),
     path.join(SRC, "pages", "DocsPage.tsx"),
-    path.join(SRC, "components", "landing"),
     path.join(SRC, "components", "marketing"),
     path.join(SRC, "lib", "helpDocs.ts"),
   ];

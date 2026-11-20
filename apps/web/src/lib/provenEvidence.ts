@@ -77,6 +77,12 @@ export const PROVEN_CDC_SOURCES: string[] = CONNECTOR_CLAIMS.cdc_sources
   .filter((s) => s.proven)
   .map((s) => s.name);
 
+/** "PostgreSQL, MySQL, MongoDB, and SQL Server": the CDC sources a green CI run proves. */
+export function cdcSourcesPhrase(sources: string[] = PROVEN_CDC_SOURCES): string {
+  if (sources.length < 2) return sources.join("");
+  return `${sources.slice(0, -1).join(", ")}, and ${sources[sources.length - 1]}`;
+}
+
 /** "N drivers proven in CI" — the one public driver count. */
 export function provenDriversPhrase(count: number = PROVEN_DRIVERS): string {
   return `${count} ${count === 1 ? "driver" : "drivers"} proven in CI`;

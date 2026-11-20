@@ -2,17 +2,11 @@ import { type CSSProperties } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
-import {
-  EvidencePlatesArt,
-  PlanLadderArt,
-} from "../../components/marketing/hero-art/companyArt";
-import {
-  LatticeArt,
-  PerimeterArt,
-  VaultArt,
-} from "../../components/marketing/hero-art/enterpriseArt";
+import { ProductShot } from "../../components/marketing/ProductShot";
+import { RunLedger } from "../../components/marketing/RunLedger";
+import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
-import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
   MARKETING_PROOF_HIGHLIGHTS,
@@ -22,6 +16,7 @@ import {
   PROVEN_DRIVERS,
   provenDriversPhrase,
   catalogHonestyLead,
+  cdcSourcesPhrase,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
@@ -63,25 +58,6 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
  * Control posture badges. Each label names a shipped control
  * (see docs/operate/security.md); certifications are not listed.
  */
-function ComplianceBadges({ items }: { items: string[] }) {
-  return (
-    <div className="lp-mkt-compliance">
-      <div className="lp-mkt-compliance-badges" aria-label="Security controls">
-        {items.map((item) => (
-          <span key={item} className="lp-mkt-compliance-badge">
-            <DtIcon name="shield" size={14} />
-            {item}
-          </span>
-        ))}
-      </div>
-      <p className="lp-mkt-compliance-note">
-        Encryption, SSO, SCIM, customer-managed keys, and a tamper-evident audit log ship with
-        the product. Request the security questionnaire and DPA for procurement.
-      </p>
-    </div>
-  );
-}
-
 export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: { route: PublicRoute } & PageActions) {
   if (route === "home") return null;
   if (isHelpDocRoute(route)) {
@@ -195,7 +171,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
     { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
     { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
     { feature: "Schedules & typed watermarks", starter: false, team: true, enterprise: true },
-    { feature: "Native CDC (SQL Server, PostgreSQL, MySQL, Oracle)", starter: false, team: true, enterprise: true },
+    { feature: `Native CDC (${cdcSourcesPhrase()})`, starter: false, team: true, enterprise: true },
     { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
     { feature: "MCP for agents", starter: false, team: false, enterprise: true },
     { feature: "SSO (OIDC / SAML) & SCIM", starter: false, team: false, enterprise: true },
@@ -207,7 +183,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
     <div className="lp-mkt-page lp-page-pricing lp-pricing-v2">
       <MarketingInkHero
         kicker="Pricing"
-        title={<>Plans that scale with proof.</>}
+        title={<>Every plan includes the checks and the read-back.</>}
         lead={
           <>
             Starter includes the whole proof path: a map you review, checks that stop a bad
@@ -217,12 +193,12 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         }
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
               Start for free
             </button>
             <button
               type="button"
-              className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
+              className="mk-btn mk-btn--secondary mk-btn--lg"
               onClick={() => onNavigate("contact")}
             >
               Contact sales
@@ -235,11 +211,6 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           { value: String(PROVEN_DRIVERS), label: "Drivers proven in CI" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
-        aside={
-          <div className="lp-sales-hero-art">
-            <PlanLadderArt />
-          </div>
-        }
       />
 
       <MarketingReveal>
@@ -270,7 +241,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
                 </ul>
                 <button
                   type="button"
-                  className={plan.featured ? "lp-btn lp-btn--brand lp-btn--block" : "lp-btn lp-btn--outline lp-btn--block"}
+                  className={plan.featured ? "mk-btn mk-btn--primary mk-btn--block" : "mk-btn mk-btn--secondary mk-btn--block"}
                   onClick={plan.action}
                 >
                   {plan.cta}
@@ -284,7 +255,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       <MarketingReveal>
         <section className="lp-pricing-v2-compare" aria-label="Plan comparison">
           <div className="lp-pricing-v2-compare-head">
-            <p className="lp-mkt-kicker">Compare</p>
+            <p className="mk-kicker">Compare</p>
             <h2>One engine. Three unlock levels.</h2>
             <p>
               Verification ships in Starter. Schedules, CDC, and collaboration unlock in Team.
@@ -336,7 +307,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       <section className="lp-sales-compare" aria-label="What every plan includes">
         <div className="lp-mkt-wrap">
           <header>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">In every plan</p>
+            <p className="mk-kicker">In every plan</p>
             <h2>Pay for cadence. Verification is always included.</h2>
             <p>
               We quote connectors and schedule. The proof engine is the same in every plan — it is
@@ -385,25 +356,17 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       </section>
 
       <MarketingReveal>
-        <section className="lp-pricing-v2-cta">
-          <div className="lp-pricing-v2-cta-inner">
-            <div>
-              <h3>Procurement, MSA, or a security pack?</h3>
-              <p>
-                Enterprise deals ship with a negotiated MSA, DPA, a pre-populated security
-                questionnaire, and a workspace audit export your reviewers can verify.
-              </p>
-            </div>
-            <div className="lp-pricing-v2-cta-actions">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Contact sales
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
-                Security overview
-              </button>
-            </div>
-          </div>
-        </section>
+        <MarketingClosing
+          title="Procurement, MSA, or a security pack?"
+          body="Enterprise agreements come with a negotiated MSA and DPA, a completed security questionnaire, and a workspace audit export your reviewers can verify."
+        >
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            Contact sales
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("security")}>
+            Security overview
+          </button>
+        </MarketingClosing>
       </MarketingReveal>
     </div>
   );
@@ -413,37 +376,37 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
   const capabilities = [
     {
       id: "identity",
-      kicker: "01 · Identity",
+      kicker: "Identity",
       title: "SSO and SCIM that gate every run",
       body: "OIDC and SAML sign-in with email-domain routing to the right identity provider. SCIM 2.0 provisions users and maps groups to workspace roles; deactivating a user revokes their sessions and keys.",
     },
     {
       id: "access",
-      kicker: "02 · Access",
+      kicker: "Access",
       title: "RBAC with API keys that can't outrank you",
       body: "Viewer, Editor, and Admin roles on every Studio job, Pilot session, and MCP call. An API key carries a role and scopes no higher than the person who created it, and the audit log names the key.",
     },
     {
       id: "tenancy",
-      kicker: "03 · Tenancy",
+      kicker: "Tenancy",
       title: "Workspace isolation at the store layer",
       body: "Every read of jobs, connectors, schedules, notifications, and audit is scoped to the caller's workspace — Pilot and MCP tools included. Custom domains and a per-workspace data region on top.",
     },
     {
       id: "keys",
-      kicker: "04 · Keys",
+      kicker: "Keys",
       title: "BYOK on connector secrets",
       body: "Connector secrets are encrypted at rest and can be wrapped with your own key: local, wrapped, or AWS KMS, with rotation. PII hashing uses a per-workspace key generated on first use.",
     },
     {
       id: "audit",
-      kicker: "05 · Audit",
+      kicker: "Audit",
       title: "A tamper-evident audit chain",
       body: "Every record is hash-chained and signed with the chain's own key, named by a key id. Verify the chain per workspace, filter by action, level, and time, and export CSV, JSON, NDJSON, or CEF.",
     },
     {
       id: "operations",
-      kicker: "06 · Operations",
+      kicker: "Operations",
       title: "Policies you can turn on",
       body: "Idle session timeout, signed webhooks (HMAC-SHA256 with per-channel secrets), job-history retention purge with a dry run first, and deployment settings reserved for platform admins.",
     },
@@ -463,11 +426,11 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         }
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
               Contact sales
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
-              Start a pilot
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={onGetStarted}>
+              Request a pilot
             </button>
           </div>
         }
@@ -478,16 +441,18 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           { value: "Chained", label: "Signed audit log" },
         ]}
         aside={
-          <div className="lp-sales-hero-art">
-            <PerimeterArt />
-          </div>
+          <ProductShot
+            src={WORKSPACE_SHOT.settingsSso}
+            alt="Settings SSO tab with SAML 2.0, OpenID Connect, and Azure AD, SCIM provisioning, and group mappings"
+            surface="Settings, single sign-on"
+          />
         }
       />
 
       <MarketingReveal>
         <section className="lp-ent-capabilities">
           <div className="lp-ent-section-head">
-            <p className="lp-mkt-kicker">Control plane</p>
+            <p className="mk-kicker">Control plane</p>
             <h2>Enterprise controls on every run</h2>
             <p>
               Identity, access, tenancy, keys, audit, and operations policies wrap the same
@@ -510,7 +475,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         <section className="lp-ent-engine">
           <div className="lp-ent-engine-split">
             <div>
-              <p className="lp-mkt-kicker">How it lands</p>
+              <p className="mk-kicker">How it lands</p>
               <h2>One engine. Enterprise controls on top.</h2>
               <p>
                 Your teams map, preflight, quarantine, and verify the same way on every plan — with
@@ -538,27 +503,17 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-ent-cta-band">
-          <div className="lp-ent-cta-inner">
-            <div>
-              <p className="lp-mkt-kicker lp-mkt-kicker--on-ink">Ready when procurement is</p>
-              <h2>Ship governed transfers under enterprise policy</h2>
-              <p>
-                Start a pilot on the same engine. Add SSO, SCIM, BYOK, and audit policies when
-                security is ready — your operators keep working the same way.
-              </p>
-              <ComplianceBadges items={["Credentials encrypted at rest", "SSO / SAML / OIDC", "SCIM 2.0", "Customer-managed keys", "GDPR processing", "Workspace data region"]} />
-            </div>
-            <div className="lp-ent-cta-actions">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Contact sales
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
-                Security overview
-              </button>
-            </div>
-          </div>
-        </section>
+        <MarketingClosing
+          title="Run a pilot under your own policy"
+          body="Start on the same engine your operators will use. SSO, SCIM, your own keys, and audit policies can be switched on when security is ready, and the way people work does not change."
+        >
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            Contact sales
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("security")}>
+            Security overview
+          </button>
+        </MarketingClosing>
       </MarketingReveal>
     </div>
   );
@@ -568,21 +523,21 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   return (
     <div className="lp-mkt-page lp-cust-v3">
       <MarketingInkHero
-        kicker="Customers"
-        title={<>Every load leaves proof you can keep.</>}
+        kicker="Evidence"
+        title={<>One run, counted on both sides.</>}
         lead={
           <>
-            One finished run is on the page: 5,100 orders from Postgres into Snowflake, every
-            column mapped, full checksum match. Book a pilot and get the same
-            evidence on <em>your</em> sources and destinations.
+            The run summary beside this text is a recorded load: 5,100 orders from Postgres into
+            Snowflake, every column mapped, full checksum match. A pilot produces the same record
+            on your own sources and destinations.
           </>
         }
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Book a pilot
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
+              Request a pilot
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("enterprise")}>
               Enterprise overview
             </button>
           </div>
@@ -593,11 +548,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: String(PENDING_DRIVERS), label: "More implemented, in CI proof" },
           { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
         ]}
-        aside={
-          <div className="lp-sales-hero-art">
-            <EvidencePlatesArt />
-          </div>
-        }
+        aside={<RunLedger />}
       />
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
@@ -620,7 +571,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <section className="lp-cust3-stories" aria-label="Why teams choose Datawrap">
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
-              <p className="lp-mkt-kicker">Why Datawrap</p>
+              <p className="mk-kicker">Why Datawrap</p>
               <h2>Built for operators who answer for every row</h2>
             </div>
             <div className="lp-mkt-evidence-grid">
@@ -642,7 +593,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <section className="lp-cust3-sectors" aria-label="Connect your stack">
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
-              <p className="lp-mkt-kicker">Your stack</p>
+              <p className="mk-kicker">Your stack</p>
               <h2>Warehouses, lakes, databases, streams, vectors, and apps</h2>
               <p>
                 {catalogHonestyLead()} Same map, same gates, same verification report on every
@@ -661,25 +612,17 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         </section>
       </MarketingReveal>
 
-      <section className="lp-cust3-cta">
-        <div className="lp-shell lp-cust3-cta-inner">
-          <div>
-            <h2>Run a pilot on your data</h2>
-            <p>
-              Design partners get a scoped load on their own sources and destinations — mapping,
-              preflight, quarantine, and a signed proof pack you keep.
-            </p>
-          </div>
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
-              See pricing
-            </button>
-          </div>
-        </div>
-      </section>
+      <MarketingClosing
+        title="Get the same evidence on your data"
+        body="A pilot is a scoped load on your own sources and destinations: mapping, preflight, quarantine, and a signed proof pack you keep."
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
+          Request a pilot
+        </button>
+        <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("pricing")}>
+          See pricing
+        </button>
+      </MarketingClosing>
     </div>
   );
 }
@@ -951,19 +894,20 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
     <div className="lp-mkt-page lp-sec-v2">
       <MarketingInkHero
         kicker="Security"
-        title={<>Security that moves with the data.</>}
+        title={<>How Datawrap protects the data it moves</>}
         lead={
           <>
-            Isolation, encryption, identity, and verified loads — on the same path Transfer Studio
-            uses, inherited by Pilot and every MCP agent.
+            Workspace isolation, encrypted connector secrets, single sign-on, and a signed audit
+            chain. The same controls apply in Transfer Studio, on schedules, in Pilot, and over
+            MCP.
           </>
         }
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={() => onNavigate("contact")}>
               Request security pack
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("enterprise")}>
               Enterprise overview
             </button>
           </div>
@@ -974,47 +918,21 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: "SCIM", label: "Group → role" },
           { value: "RBAC", label: "Studio · Pilot · MCP" },
         ]}
-        aside={
-          <div className="lp-sales-hero-art">
-            <VaultArt />
-          </div>
-        }
       />
 
-      <MarketingReveal>
-        <section className="lp-sec-badges" aria-label="Compliance posture">
-          <ComplianceBadges
-            items={[
-              "Credentials encrypted at rest",
-              "SSO / SAML / OIDC",
-              "SCIM 2.0",
-              "Customer-managed keys",
-              "GDPR processing",
-              "Tamper-evident audit log",
-              "Signed webhooks",
-              "Workspace data region",
-            ]}
-          />
-        </section>
-      </MarketingReveal>
 
       <MarketingReveal>
         <section className="lp-sec-section">
           <div className="lp-sec-section-head">
-            <p className="lp-mkt-kicker">Control plane</p>
+            <p className="mk-kicker">Control plane</p>
             <h2>Four layers between source and destination</h2>
-            <p>A continuous security path that activates on every transfer.</p>
+            <p>Every transfer passes through the same four controls, whoever or whatever starts it.</p>
           </div>
           <div className="lp-sec-layer-grid">
             {layers.map((layer) => (
               <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
-                <div className="lp-sec-layer-top">
-                  <span className="lp-sec-layer-num">{layer.phase}</span>
-                  <span className="lp-sec-layer-tag">{layer.tag}</span>
-                </div>
                 <h3>{layer.t}</h3>
                 <p>{layer.d}</p>
-                <em>{layer.pill}</em>
               </article>
             ))}
           </div>
@@ -1023,7 +941,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       <MarketingReveal>
         <section className="lp-sec-section">
           <div className="lp-sec-section-head">
-            <p className="lp-mkt-kicker">Workspace controls</p>
+            <p className="mk-kicker">Workspace controls</p>
             <h2>Controls your admins switch on</h2>
             <p>
               Least-privilege keys, signed webhooks, residency, and retention — set per workspace,
@@ -1033,13 +951,8 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           <div className="lp-sec-layer-grid">
             {controls.map((layer) => (
               <article key={layer.phase} className="lp-sec-layer-card lp-scene-card">
-                <div className="lp-sec-layer-top">
-                  <span className="lp-sec-layer-num">{layer.phase}</span>
-                  <span className="lp-sec-layer-tag">{layer.tag}</span>
-                </div>
                 <h3>{layer.t}</h3>
                 <p>{layer.d}</p>
-                <em>{layer.pill}</em>
               </article>
             ))}
           </div>
@@ -1049,7 +962,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       <MarketingReveal>
         <section className="lp-sec-agent">
           <div className="lp-sec-agent-copy">
-            <p className="lp-mkt-kicker">Runtime proof</p>
+            <p className="mk-kicker">Runtime proof</p>
             <h2>Agents inherit the same gates</h2>
             <p>
               MCP tools and Datawrap Pilot work through secret references, so agents act without
@@ -1057,27 +970,20 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               quarantine, and verification path as Transfer Studio.
             </p>
             <div className="lp-sec-agent-actions">
-              <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
+              <button type="button" className="mk-btn mk-btn--primary" onClick={() => onNavigate("contact")}>
                 Request security pack
               </button>
-              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
+              <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("enterprise")}>
                 Enterprise capabilities
               </button>
             </div>
-          </div>
-          <div className="lp-sec-agent-visual" aria-hidden>
-            <div className="lp-sec-agent-chip">MCP call</div>
-            <div className="lp-sec-agent-path">
-              <span>Auth</span><i /><span>Map</span><i /><span>G1–G9</span><i /><span>Prove</span>
-            </div>
-            <div className="lp-sec-agent-chip is-ok">Secret references only</div>
           </div>
         </section>
       </MarketingReveal>
       <MarketingReveal>
         <section className="lp-sec-section" id="vulnerability-disclosure" aria-labelledby="lp-sec-disclosure">
           <div className="lp-sec-section-head">
-            <p className="lp-mkt-kicker">Vulnerability disclosure</p>
+            <p className="mk-kicker">Vulnerability disclosure</p>
             <h2 id="lp-sec-disclosure">Report a vulnerability</h2>
             <p>
               Email <a href="mailto:contact@datawrap.io?subject=Security%20report">contact@datawrap.io</a> with
@@ -1122,10 +1028,10 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         }
         actions={
           <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
               Open connector catalog
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
+            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("help")}>
               Driver docs
             </button>
           </div>
@@ -1137,25 +1043,19 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           { value: "DLQ", label: "Quarantine replay" },
         ]}
         aside={
-          <div className="lp-sales-hero-art">
-            <LatticeArt readyCount={PROVEN_DRIVERS} />
-          </div>
+          <ProductShot
+            src={WORKSPACE_SHOT.connectorsWizard}
+            alt="Choose a connector dialog with category chips, readiness filters, and connector cards"
+            surface="Connectors, choose a connector"
+          />
         }
       />
 
-      <MarketingReveal>
-        <section className="lp-int-strip" aria-label="Capability labels">
-          <div><strong>DLQ</strong><span>Quarantine replay</span></div>
-          <div><strong>CDC</strong><span>{PROVEN_CDC_SOURCES.join(" · ") || "Database log sources"}</span></div>
-          <div><strong>SQLA</strong><span>Generic SQL drivers</span></div>
-          <div><strong>Files</strong><span>CSV · JSON · Parquet · Avro · ORC · Excel</span></div>
-        </section>
-      </MarketingReveal>
 
       <MarketingReveal>
         <section className="lp-int-section">
           <div className="lp-int-section-head">
-            <p className="lp-mkt-kicker">Catalog families</p>
+            <p className="mk-kicker">Catalog families</p>
             <h2>What you can connect</h2>
             <p>
               Grouped the way teams plan loads — warehouses first, then lakes, databases, streams,
@@ -1186,8 +1086,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-honesty">
           <div>
-            <p className="lp-mkt-kicker">The bar</p>
-            <h2>Every load proves itself</h2>
+            <p className="mk-kicker">The bar</p>
+            <h2>One path for every family</h2>
             <p>
               Every destination runs the same path: introspect, map, preflight, write, and verify.
               Warehouses, lakes, databases, streams, vectors, and apps share one engine and one
@@ -1201,32 +1101,26 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           </div>
           <aside className="lp-int-honesty-panel">
             <h3>Every route runs</h3>
-            <div><span>01</span><em>Semantic map</em></div>
-            <div><span>02</span><em>G1–G9 preflight</em></div>
-            <div><span>03</span><em>Quarantine write</em></div>
-            <div><span>04</span><em>Read the destination back</em></div>
+            <div><span>1</span><em>Semantic map</em></div>
+            <div><span>2</span><em>G1–G9 preflight</em></div>
+            <div><span>3</span><em>Quarantine write</em></div>
+            <div><span>4</span><em>Read the destination back</em></div>
           </aside>
         </section>
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-int-cta">
-          <div>
-            <h2>Browse the connector catalog</h2>
-            <p>
-              Open Transfer Studio and pick a source and destination. The transfer-ready filter
-              shows every driver you can load today, on the same engine as production.
-            </p>
-          </div>
-          <div className="lp-int-cta-actions">
-            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
-              Open connector catalog
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--on-ink" onClick={() => onNavigate("product-transfer")}>
-              See Transfer Studio →
-            </button>
-          </div>
-        </section>
+        <MarketingClosing
+          title="Pick a source and a destination"
+          body="Open Transfer Studio and choose from the connectors your workspace can load today, on the same engine as production."
+        >
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+            Start free
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("product-transfer")}>
+            See Transfer Studio
+          </button>
+        </MarketingClosing>
       </MarketingReveal>
     </div>
   );

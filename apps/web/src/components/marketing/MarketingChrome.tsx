@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
 import { provenDriversPhrase } from "../../lib/provenEvidence";
 
-type NavMenu = "product" | "solutions" | "resources" | null;
+type NavMenu = "product" | "solutions" | null;
 
 export interface MarketingChromeProps {
   route: PublicRoute;
@@ -15,6 +15,75 @@ export interface MarketingChromeProps {
   children: ReactNode;
 }
 
+type NavEntry = { route: PublicRoute; label: string; note: string };
+
+const PRODUCT_LINKS: NavEntry[] = [
+  { route: "product-transfer", label: "Transfer Studio", note: "Map, check, write, and verify a load" },
+  { route: "product-jobs", label: "Job space", note: "Trust Report, quarantine, and sign-off per run" },
+  { route: "product-pipelines", label: "Schedules", note: "Recurring loads, incremental and CDC" },
+  { route: "product-query", label: "Query", note: "Read-only SQL on saved connections" },
+  { route: "product-pilot", label: "Pilot", note: "Questions answered with the SQL shown" },
+  { route: "product-mcp", label: "MCP server", note: "The same governed tools for agents" },
+];
+
+const SOLUTION_LINKS: NavEntry[] = [
+  { route: "solution-migrations", label: "Migrations", note: "Cut over between schemas with evidence" },
+  { route: "solution-warehouse", label: "Warehouse loading", note: "Snowflake, BigQuery, and Iceberg" },
+  { route: "solution-sync", label: "Recurring sync", note: "CDC and incremental schedules" },
+  { route: "enterprise", label: "Enterprise", note: "SSO, SCIM, roles, keys, and audit" },
+];
+
+const COMPANY_LINKS: NavEntry[] = [
+  { route: "customers", label: "Evidence", note: "" },
+  { route: "security", label: "Security", note: "" },
+  { route: "help", label: "Docs", note: "" },
+  { route: "pricing", label: "Pricing", note: "" },
+];
+
+const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: string }[] }[] = [
+  {
+    title: "Product",
+    links: [
+      { route: "product-transfer", label: "Transfer Studio" },
+      { route: "product-jobs", label: "Job space" },
+      { route: "product-pipelines", label: "Schedules" },
+      { route: "product-query", label: "Query" },
+      { route: "product-pilot", label: "Pilot" },
+      { route: "product-mcp", label: "MCP server" },
+      { route: "integrations", label: "Connectors" },
+    ],
+  },
+  {
+    title: "Solutions",
+    links: [
+      { route: "solution-migrations", label: "Migrations" },
+      { route: "solution-warehouse", label: "Warehouse loading" },
+      { route: "solution-sync", label: "Recurring sync" },
+      { route: "enterprise", label: "Enterprise" },
+      { route: "pricing", label: "Pricing" },
+    ],
+  },
+  {
+    title: "Resources",
+    links: [
+      { route: "help", label: "Documentation" },
+      { route: "demos", label: "Recorded demos" },
+      { route: "customers", label: "Evidence" },
+      { route: "security", label: "Security" },
+      { route: "status", label: "Service status" },
+    ],
+  },
+  {
+    title: "Legal",
+    links: [
+      { route: "privacy", label: "Privacy" },
+      { route: "terms", label: "Terms" },
+      { route: "dpa", label: "Data processing" },
+      { route: "subprocessors", label: "Subprocessors" },
+    ],
+  },
+];
+
 export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, children }: MarketingChromeProps) {
   const [navOpen, setNavOpen] = useState(false);
   const [menu, setMenu] = useState<NavMenu>(null);
@@ -22,10 +91,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   const navRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    const onScroll = () => {
-      // At rest: full bar + shadow. On scroll: compact oval pill.
-      setScrolled(window.scrollY > 28);
-    };
+    const onScroll = () => setScrolled(window.scrollY > 8);
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -65,302 +131,185 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
     onNavigate(next);
   };
 
-  const closeMenus = () => {
-    setMenu(null);
-    setNavOpen(false);
+  const href = (next: PublicRoute) => hashForPublicRoute(next);
+  const follow = (next: PublicRoute) => (e: MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    go(next);
   };
-
-  const link = (next: PublicRoute) => hashForPublicRoute(next);
   const isHome = route === "home";
+  const current = (r: PublicRoute) => (route === r ? "page" : undefined);
+  const groupHolds = (links: NavEntry[]) => links.some((l) => l.route === route);
+
+  const menuGroup = (id: Exclude<NavMenu, null>, label: string, links: NavEntry[]) => (
+    <div className={`mk-nav-group${menu === id ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className={`mk-nav-link${groupHolds(links) ? " is-current" : ""}`}
+        aria-expanded={menu === id}
+        aria-controls={`mk-menu-${id}`}
+        onClick={() => setMenu((m) => (m === id ? null : id))}
+      >
+        {label}
+        <DtIcon name="chevron-down" size={14} chrome="product" />
+      </button>
+      <div id={`mk-menu-${id}`} className={`mk-nav-menu mk-nav-menu--${id}`} hidden={menu !== id}>
+        <ul>
+          {links.map((l) => (
+            <li key={l.route}>
+              <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                <strong>{l.label}</strong>
+                <span>{l.note}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+        {id === "product" ? (
+          <a className="mk-nav-menu-foot" href={href("integrations")} onClick={follow("integrations")}>
+            Connectors, with {provenDriversPhrase()}
+          </a>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const mobileGroups: { title: string; links: NavEntry[] }[] = [
+    { title: "Product", links: [...PRODUCT_LINKS, { route: "integrations", label: "Connectors", note: "" }] },
+    { title: "Solutions", links: SOLUTION_LINKS },
+    { title: "Company", links: COMPANY_LINKS },
+  ];
 
   return (
-    <div
-      className={`lp ${isHome ? "lp-home" : "lp-subpage"} ${scrolled ? "is-page-scrolled" : ""}`}
-      data-lp-route={route}
-    >
-      {/* Quiet grid only — floating orbs read as AI decoration; remove everywhere. */}
-      <div className="lp-ambient lp-ambient--quiet" aria-hidden>
-        <span className="lp-ambient-grid" />
-      </div>
-
-      <a
-        className="lp-announce"
-        href={link("product-mcp")}
-        onClick={(e) => {
-          e.preventDefault();
-          go("product-mcp");
-        }}
-      >
-        <span className="lp-announce-tag">New</span>
-        MCP for agents — governed transfers from Cursor &amp; Claude. Same nine core gates.
-        <span className="lp-announce-cta" aria-hidden>
-          Learn more →
-        </span>
+    <div className={`lp mk ${isHome ? "mk-home" : "lp-subpage"}`} data-lp-route={route}>
+      <a className="mk-skip" href="#mk-main">
+        Skip to content
       </a>
+      <header ref={navRef} className={`mk-header${scrolled ? " is-scrolled" : ""}${navOpen ? " is-open" : ""}`}>
+        <div className="mk-header-bar">
+          <a className="mk-header-brand" href={href("home")} aria-label="Datawrap home" onClick={follow("home")}>
+            <BrandWordmark markSize={28} title="" />
+          </a>
 
-      <header
-        ref={navRef}
-        className={`lp-nav is-bar ${scrolled ? "is-scrolled" : "is-top"}`}
-        onMouseLeave={() => setMenu(null)}
-      >
-        <div className="lp-nav-shell">
-          <div className="lp-nav-surface lp-nav-bar">
-            <div className="lp-nav-start">
-              <a
-                className="lp-nav-brand"
-                href={link("home")}
-                aria-label="Datawrap"
-                onClick={(e) => {
-                  e.preventDefault();
-                  go("home");
-                }}
-              >
-                <BrandWordmark markSize={36} title="" />
+          <nav className="mk-nav" aria-label="Main">
+            {menuGroup("product", "Product", PRODUCT_LINKS)}
+            {menuGroup("solutions", "Solutions", SOLUTION_LINKS)}
+            {COMPANY_LINKS.map((l) => (
+              <a key={l.route} className="mk-nav-link" href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                {l.label}
               </a>
-            </div>
+            ))}
+          </nav>
 
-            <nav className={`lp-nav-links ${navOpen ? "is-open" : ""}`} aria-label="Site">
-              <div
-                className={`lp-nav-item ${menu === "product" ? "is-open" : ""}`}
-                onMouseEnter={() => setMenu("product")}
-              >
-                <button
-                  type="button"
-                  className="lp-nav-link"
-                  aria-expanded={menu === "product"}
-                  onClick={() => setMenu((m) => (m === "product" ? null : "product"))}
-                >
-                  Product <DtIcon name="chevron-down" size={12} />
-                </button>
-                <div className="lp-nav-dropdown lp-nav-dropdown--wide">
-                  <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>
-                    <strong>Transfer Studio</strong>
-                    <span>Map, preflight, and verify any→any loads</span>
-                  </a>
-                  <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>
-                    <strong>Job space</strong>
-                    <span>Trust Report, reversibility, and sign-off per run</span>
-                  </a>
-                  <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>
-                    <strong>Schedules</strong>
-                    <span>Recurring sync, incremental and CDC</span>
-                  </a>
-                  <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>
-                    <strong>Query Playground</strong>
-                    <span>Read-only SQL on saved connections</span>
-                  </a>
-                  <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
-                    <strong>Datawrap Pilot</strong>
-                    <span>Local-engine copilot for transfers</span>
-                  </a>
-                  <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>
-                    <strong>MCP Server</strong>
-                    <span>Governed transfers from Cursor &amp; Claude</span>
-                  </a>
-                  <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
-                    <strong>Connectors</strong>
-                    <span>{provenDriversPhrase()}</span>
-                  </a>
-                </div>
+          <div className="mk-header-actions">
+            <button type="button" className="mk-text-btn" onClick={onLogin}>
+              Log in
+            </button>
+            <a className="mk-text-btn" href={href("contact")} aria-current={current("contact")} onClick={follow("contact")}>
+              Contact sales
+            </a>
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--sm" onClick={onGetStarted}>
+              Start free
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className="mk-menu-toggle"
+            aria-label={navOpen ? "Close menu" : "Open menu"}
+            aria-expanded={navOpen}
+            aria-controls="mk-mobile-menu"
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            <DtIcon name={navOpen ? "x" : "menu"} size={20} chrome="product" />
+          </button>
+        </div>
+
+        <div id="mk-mobile-menu" className="mk-mobile" hidden={!navOpen}>
+          <div className="mk-mobile-groups">
+            {mobileGroups.map((group) => (
+              <div key={group.title} className="mk-mobile-group">
+                <h2>{group.title}</h2>
+                <ul>
+                  {group.links.map((l) => (
+                    <li key={l.route}>
+                      <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                        {l.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
               </div>
-
-              <div
-                className={`lp-nav-item ${menu === "solutions" ? "is-open" : ""}`}
-                onMouseEnter={() => setMenu("solutions")}
-              >
-                <button
-                  type="button"
-                  className="lp-nav-link"
-                  aria-expanded={menu === "solutions"}
-                  onClick={() => setMenu((m) => (m === "solutions" ? null : "solutions"))}
-                >
-                  Solutions <DtIcon name="chevron-down" size={12} />
-                </button>
-                <div className="lp-nav-dropdown">
-                  <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>
-                    <strong>Migrations</strong>
-                    <span>Cross-schema moves with proof</span>
-                  </a>
-                  <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>
-                    <strong>Warehouse loading</strong>
-                    <span>Warehouse loads, verified on read-back</span>
-                  </a>
-                  <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>
-                    <strong>Recurring sync</strong>
-                    <span>CDC and incremental pipelines</span>
-                  </a>
-                </div>
-              </div>
-
-              <a
-                href={link("customers")}
-                className="lp-nav-link"
-                onClick={(e) => {
-                  e.preventDefault();
-                  go("customers");
-                }}
-              >
-                Evidence
-              </a>
-
-              <div
-                className={`lp-nav-item ${menu === "resources" ? "is-open" : ""}`}
-                onMouseEnter={() => setMenu("resources")}
-              >
-                <button
-                  type="button"
-                  className="lp-nav-link"
-                  aria-expanded={menu === "resources"}
-                  onClick={() => setMenu((m) => (m === "resources" ? null : "resources"))}
-                >
-                  Resources <DtIcon name="chevron-down" size={12} />
-                </button>
-                <div className="lp-nav-dropdown">
-                  <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>
-                    <strong>Documentation</strong>
-                    <span>Screenshots, steps, and operations runbooks</span>
-                  </a>
-                  <a href={link("demos")} onClick={(e) => { e.preventDefault(); go("demos"); }}>
-                    <strong>Video demos</strong>
-                    <span>Watch real transfers prove themselves</span>
-                  </a>
-                  <a href={link("help-getting-started")} onClick={(e) => { e.preventDefault(); go("help-getting-started"); }}>
-                    <strong>Getting started</strong>
-                    <span>Connect → map → preflight → verify</span>
-                  </a>
-                  <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>
-                    <strong>Enterprise</strong>
-                    <span>SSO, SCIM, RBAC, audit chain</span>
-                  </a>
-                  <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>
-                    <strong>Security</strong>
-                    <span>Isolation, encryption, identity, audit</span>
-                  </a>
-                  <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
-                    <strong>Connector catalog</strong>
-                    <span>Warehouses, lakes, streams, vectors, apps</span>
-                  </a>
-                </div>
-              </div>
-
-              <a
-                href={link("pricing")}
-                className="lp-nav-link"
-                onClick={(e) => {
-                  e.preventDefault();
-                  go("pricing");
-                }}
-              >
-                Pricing
-              </a>
-
-              <div className="lp-nav-mobile-ctas">
-                <button type="button" className="lp-btn lp-btn--ghost lp-btn--block" onClick={() => { closeMenus(); go("contact"); }}>
-                  Contact sales
-                </button>
-                <button type="button" className="lp-btn lp-btn--outline lp-btn--block" onClick={() => { closeMenus(); onLogin(); }}>
-                  Log in
-                </button>
-                <button type="button" className="lp-btn lp-btn--brand lp-btn--block" onClick={() => { closeMenus(); onGetStarted(); }}>
-                  Get started
-                </button>
-              </div>
-            </nav>
-
-            <div className="lp-nav-end">
-              <div className="lp-nav-actions">
-                <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-login" onClick={onLogin}>
-                  Log in
-                </button>
-                <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
-                  Get started
-                </button>
-                <button type="button" className="lp-btn lp-btn--outline lp-nav-action-secondary" onClick={() => go("contact")}>
-                  Contact sales
-                </button>
-              </div>
-              <button
-                type="button"
-                className="lp-nav-toggle"
-                aria-label="Toggle menu"
-                aria-expanded={navOpen}
-                onClick={() => setNavOpen((o) => !o)}
-              >
-                <DtIcon name={navOpen ? "x" : "menu"} size={18} />
-              </button>
-            </div>
+            ))}
+          </div>
+          <div className="mk-mobile-actions">
+            <button type="button" className="mk-btn mk-btn--primary" onClick={() => { setNavOpen(false); onGetStarted(); }}>
+              Start free
+            </button>
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => go("contact")}>
+              Contact sales
+            </button>
+            <button type="button" className="mk-btn mk-btn--quiet" onClick={() => { setNavOpen(false); onLogin(); }}>
+              Log in
+            </button>
           </div>
         </div>
       </header>
 
-      <main className="lp-main">{children}</main>
+      <main id="mk-main" className="lp-main" tabIndex={-1}>
+        {children}
+      </main>
 
-      <footer className="lp-footer lp-footer--compact">
-        <div className="lp-footer-inner">
-          <div className="lp-footer-grid">
-            <div className="lp-footer-brand">
-              <a
-                className="lp-footer-brand-link"
-                href={link("home")}
-                aria-label="Datawrap"
-                onClick={(e) => {
-                  e.preventDefault();
-                  go("home");
-                }}
-              >
-                <BrandWordmark markSize={28} title="" size="sm" />
-              </a>
-              <p className="lp-footer-tagline">
-                Anywhere to anywhere — wrapped with proof.
-              </p>
-              <p className="lp-footer-proof">
-                Every load verified value by value — if anything doesn&apos;t match, Datawrap tells you.
-              </p>
-            </div>
-            <div>
-              <h4>Product</h4>
-              <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
-              <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job space</a>
-              <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Schedules</a>
-              <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>Query Playground</a>
-              <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
-            </div>
-            <div>
-              <h4>Solutions</h4>
-              <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>Migrations</a>
-              <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>Warehouses</a>
-              <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>Sync</a>
-              <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>Integrations</a>
-              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
-            </div>
-            <div>
-              <h4>Resources</h4>
-              <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Documentation</a>
-              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
-              <a href={link("status")} onClick={(e) => { e.preventDefault(); go("status"); }}>Status</a>
-              <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
-              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
-              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
-            </div>
-            <div>
-              <h4>Legal</h4>
-              <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
-              <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
-              <a href={link("dpa")} onClick={(e) => { e.preventDefault(); go("dpa"); }}>DPA</a>
-              <a href={link("subprocessors")} onClick={(e) => { e.preventDefault(); go("subprocessors"); }}>Subprocessors</a>
-              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
-            </div>
+      <footer className="mk-footer">
+        <div className="mk-footer-inner">
+          <div className="mk-footer-lead">
+            <a className="mk-footer-brand" href={href("home")} aria-label="Datawrap home" onClick={follow("home")}>
+              <BrandWordmark markSize={24} title="" size="sm" />
+            </a>
+            <p>
+              Datawrap moves data between databases, warehouses, files, and streams, and keeps a
+              record of what arrived.
+            </p>
+            <dl className="mk-footer-contacts">
+              <div>
+                <dt>Sales</dt>
+                <dd>
+                  <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>
+                </dd>
+              </div>
+              <div>
+                <dt>Everything else</dt>
+                <dd>
+                  <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
+                </dd>
+              </div>
+            </dl>
           </div>
-
-          <div className="lp-footer-bottom">
-            <span>© {new Date().getFullYear()} Datawrap</span>
-            <span className="lp-footer-legal">
-              <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
-              <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
-              <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
-              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
-            </span>
-          </div>
+          <nav className="mk-footer-nav" aria-label="Footer">
+            {FOOTER_COLUMNS.map((col) => (
+              <div key={col.title}>
+                <h2>{col.title}</h2>
+                <ul>
+                  {col.links.map((l) => (
+                    <li key={l.route}>
+                      <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
+                        {l.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+        </div>
+        <div className="mk-footer-base">
+          <p>© {new Date().getFullYear()} Datawrap</p>
+          <p className="mk-footer-base-links">
+            <button type="button" className="mk-text-btn mk-text-btn--small" onClick={onLogin}>
+              Log in
+            </button>
+            <button type="button" className="mk-text-btn mk-text-btn--small" onClick={onGetStarted}>
+              Create a workspace
+            </button>
+          </p>
         </div>
       </footer>
     </div>
