@@ -883,6 +883,15 @@ async def copilot_confirm(
     if kind == "create_connector":
         try:
             require_admin_connector_access(None, payload.get("type"))
+            if not str(payload.get("workspace_id") or "").strip():
+                # D363: an MCP-created connector lands where the approval was
+                # staged, else where this confirmer may create (the REST
+                # create's rule), never in the unscoped bucket.
+                from services.workspace_access import resolve_write_workspace
+
+                payload["workspace_id"] = staged_in or resolve_write_workspace(
+                    http_request, http_request.headers.get("X-Workspace-Id", "")
+                )
         except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise

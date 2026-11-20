@@ -2580,11 +2580,12 @@ class DataPilotTools:
             safe_preview["readable_objects"] = readable_objects
         if readable_warning:
             safe_preview["warning"] = readable_warning
-        from .ack_ledger import get_ack_ledger
+        from .ack_ledger import get_ack_ledger, stamp_caller_workspace
 
+        # D363: staged with the caller's workspace, like start_transfer.
         ack_id = get_ack_ledger().put(
             kind="create_connector",
-            payload=draft,
+            payload=stamp_caller_workspace(draft),
             preview=safe_preview,
         )
         return ToolResult(
