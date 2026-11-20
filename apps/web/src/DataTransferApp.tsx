@@ -36,7 +36,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash, writeJobsDeepLink, exitFocusFromHash, type ExitFocus } from "./lib/appNavigation";
+import { emailedJobLinkUrl, focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash, writeJobsDeepLink, exitFocusFromHash, type ExitFocus } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -1150,6 +1150,13 @@ export function DataTransferApp() {
 }
 
 function DataTransferAppInner() {
+  // Emailed job links (/jobs/<id>, D339) become the Jobs hash before any
+  // screen state reads the URL.
+  useState(() => {
+    const next = emailedJobLinkUrl(window.location.pathname, window.location.search, window.location.hash);
+    if (next) window.history.replaceState(null, "", next);
+    return next;
+  });
   const [signupSeed, setSignupSeed] = useState<{ challengeId: string; email: string } | null>(null);
   // Emailed reset links land on /reset-password#token=... — capture the
   // token once at boot; the page itself strips it from the URL.
