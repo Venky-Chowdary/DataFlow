@@ -190,7 +190,14 @@ const HELD_ROWS: { key: string; value: string }[] = [
   { key: "52046", value: "NULL" },
   { key: "55813", value: "NULL" },
   { key: "60129", value: "NULL" },
+  { key: "61402", value: "NULL" },
+  { key: "63318", value: "NULL" },
+  { key: "66751", value: "NULL" },
+  { key: "70264", value: "NULL" },
 ];
+
+/** The rows the example's `region = 'TEST'` filter excluded. */
+const SKIPPED_ROWS: { key: string }[] = [{ key: "50017" }, { key: "57240" }];
 
 const fmtN = new Intl.NumberFormat("en-US");
 
@@ -234,7 +241,7 @@ function RowBento() {
       <article className="mk-bento-tile mk-bento-tile--held">
         <h3>Held</h3>
         <p>Refused by the destination and kept with its value and reason, instead of stopping the load.</p>
-        <div className="mk-app-surface mk-bento-ui">
+        <div className="mk-app-surface mk-bento-ui mk-bento-ui--fill">
           <div className="mk-bento-held-head">
             <span className="mk-app-pill mk-app-pill--v-explained">{held} held</span>
             <code>status</code>
@@ -275,6 +282,17 @@ function RowBento() {
           <p className="mk-bento-big">
             <strong>{skipped}</strong> rows skipped by this filter
           </p>
+          <ul className="mk-bento-rows mk-bento-rows--skipped">
+            {SKIPPED_ROWS.slice(0, skipped).map((r) => (
+              <li key={r.key}>
+                <code>
+                  <span className="mk-bento-key-label">order_id </span>
+                  {r.key}
+                </code>
+                <span>Skipped</span>
+              </li>
+            ))}
+          </ul>
         </div>
       </article>
 

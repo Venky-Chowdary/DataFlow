@@ -1550,7 +1550,48 @@ html[data-theme="dark"] .mk .mk-header {
 .mk-bento-big strong {
   margin-right: 6px;
   color: var(--app-ink);
-  font-size: 25px;
+  font-size: var(--mk-fs-stat);
+}
+
+/* The held tile spans two rows: its surface fills the tile, rows at the
+   top and the replay action at the foot, so no blank band is left. */
+.mk-bento-ui--fill {
+  flex: 1;
+  grid-template-rows: auto auto 1fr;
+}
+
+.mk-bento-ui--fill .mk-bento-actions {
+  align-self: end;
+}
+
+.mk-bento-tile--skipped {
+  container-type: inline-size;
+}
+
+.mk-bento-rows--skipped li {
+  grid-template-columns: 1fr auto;
+}
+
+.mk-bento-rows--skipped code,
+.mk-bento-filter {
+  white-space: nowrap;
+}
+
+.mk-bento-rows .mk-bento-key-label {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* In a narrow tile the filter above already names the rows; keep the ids. */
+@container (max-width: 260px) {
+  .mk-bento-key-label {
+    display: none;
+  }
+}
+
+.mk-bento-rows--skipped li span {
+  color: var(--app-ink-3);
 }
 
 .mk-bento-sum {
