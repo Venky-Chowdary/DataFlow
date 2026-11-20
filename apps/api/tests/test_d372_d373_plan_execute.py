@@ -20,6 +20,7 @@ if str(_API) not in sys.path:
 
 from services.decision_kernel.type_invent import (  # noqa: E402
     temporal_precision_would_narrow,
+    temporal_tick_disclosure,
 )
 from services.reversibility_schedule import (  # noqa: E402
     reversibility_refusal,
@@ -38,9 +39,13 @@ def test_datetime2_7_into_6_digits_is_flagged_until_values_fit() -> None:
             "TIMESTAMP_NTZ(7)", carrier, dest_db=dest,
             population=["2026-01-01 00:00:00.1234560"],
         )
-        # Unmeasured: the dialect-default tick is the create-new carrier.
+        # Unmeasured: the dialect-default tick is the create-new carrier, so
+        # not a blocker - but R3 asks that the possible loss be disclosed.
         assert not temporal_precision_would_narrow(
             "TIMESTAMP_NTZ(7)", carrier, dest_db=dest
+        )
+        assert "a 7th fractional digit was not observed" in temporal_tick_disclosure(
+            "TIMESTAMP_NTZ(7)", carrier, dest_db=dest, column="dt"
         )
 
 
@@ -58,6 +63,72 @@ def test_plan_and_execute_grade_new_and_existing_targets_alike() -> None:
             for exists in (False, True)
         }
         assert verdicts == {True}, (dest, verdicts)
+
+
+def test_the_tick_disclosure_follows_what_was_measured() -> None:
+    """Observed 7th digit: lossy, no note. Every row read, none has one: nothing.
+    A sample or no measurement: disclosed, naming the column."""
+    sampled_fit = ["2026-01-01 00:00:00.1234560", None]
+    for dest, carrier in (("mysql", "DATETIME(6)"), ("postgresql", "TIMESTAMP(6)")):
+        seventh = ["2026-01-01 00:00:00.1234567"]
+        assert temporal_precision_would_narrow("datetime2(7)", carrier, dest_db=dest, population=seventh)
+        assert temporal_tick_disclosure(
+            "datetime2(7)", carrier, dest_db=dest, population=seventh, population_complete=True
+        ) == ""
+        assert temporal_tick_disclosure(
+            "datetime2(7)", carrier, dest_db=dest, population=sampled_fit, population_complete=True
+        ) == ""
+        sampled = temporal_tick_disclosure(
+            "datetime2(7)", carrier, dest_db=dest, population=sampled_fit, column="dt"
+        )
+        assert sampled.startswith(f"dt: datetime2(7) → {carrier} (microseconds): a 7th fractional digit")
+        assert sampled.endswith("any such digit would be truncated.")
+        # Only NULLs is unmeasured, even when it is every row.
+        assert temporal_tick_disclosure(
+            "datetime2(7)", carrier, dest_db=dest, population=[None], population_complete=True
+        )
+    # A destination that holds the digit, or a 6-digit source, says nothing.
+    assert temporal_tick_disclosure("datetime2(7)", "DATETIME2(7)", dest_db="sqlserver") == ""
+    assert temporal_tick_disclosure("datetime2(6)", "TIMESTAMP(6)", dest_db="postgresql") == ""
+
+
+def test_plan_and_execute_disclose_through_the_same_preflight() -> None:
+    """Validate, the copilot plan and Execute all call run_file_preflight.
+
+    A sample that does not show a 7th digit is disclosed for every target;
+    the same rows read whole (rows_are_population, row_count covered) are not.
+    """
+    from services.preflight_service import run_file_preflight
+
+    rows = [{"id": 1, "dt": "2026-01-01 00:00:00.1234560"}, {"id": 2, "dt": None}]
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 1.0, "target_type": "INTEGER"},
+        {"source": "dt", "target": "dt", "confidence": 1.0, "target_type": "TIMESTAMP(6)"},
+    ]
+
+    def warnings(**kw) -> list[dict]:
+        result = run_file_preflight(
+            columns=["id", "dt"],
+            column_types={"id": "int", "dt": "datetime2(7)"},
+            mappings=mappings,
+            destination_connected=True,
+            destination_column_types={"id": "INTEGER", "dt": "TIMESTAMP(6)"},
+            destination_db_type="postgresql",
+            estimated_bytes=4096,
+            sample_rows=rows,
+            source_kind="database",
+            **kw,
+        )
+        return [
+            w for w in result.get("warnings") or []
+            if isinstance(w, dict) and w.get("id") == "temporal_tick_unobserved"
+        ]
+
+    sampled = warnings(row_count=5000)
+    assert len(sampled) == 1
+    assert [c["column"] for c in sampled[0]["details"]["columns"]] == ["dt"]
+    assert "dt: datetime2(7) → TIMESTAMP(6) (microseconds)" in sampled[0]["message"]
+    assert warnings(row_count=2, rows_are_population=True) == []
 
 
 def test_schedule_reversibility_names_omit_and_mask() -> None:

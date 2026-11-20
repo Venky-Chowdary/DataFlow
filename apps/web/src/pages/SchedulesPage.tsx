@@ -60,8 +60,9 @@ import {
   ScheduleIntervals,
 } from "../lib/types";
 import type { JobsStudioIntent } from "./JobsPage";
+import { ConnectorListStatus, type ConnectorListStatusProps } from "../components/ConnectorListStatus";
 
-interface SchedulesPageProps {
+interface SchedulesPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
   onViewJobs?: () => void;
   onOpenJob?: (jobId: string) => void;
@@ -73,7 +74,16 @@ interface SchedulesPageProps {
 
 type ScheduleFilter = "all" | "active" | "paused";
 
-export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId, onStartTransfer }: SchedulesPageProps) {
+export function SchedulesPage({
+  connectors,
+  connectorsError = "",
+  onRetryConnectors,
+  onViewJobs,
+  onOpenJob,
+  onSchedulesChange,
+  highlightScheduleId,
+  onStartTransfer,
+}: SchedulesPageProps) {
   const { toast } = useToast();
   const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
@@ -691,6 +701,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         reason={scheduleManage.reason}
         what="Schedules are read-only for you."
       />
+      {/* D410: route names come from the connector list; say when it could not be read. */}
+      {connectorsError && connectors.length === 0 && (
+        <ConnectorListStatus compact connectorsError={connectorsError} onRetryConnectors={onRetryConnectors} />
+      )}
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}

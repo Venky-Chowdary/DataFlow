@@ -1,9 +1,13 @@
+import type { ConnectorListStatusProps } from "../../components/ConnectorListStatus";
 import type { Connector, PreflightResult } from "../../lib/types";
 
-export interface TransferPageProps {
+/**
+ * ``connectorsLoading`` is true while the first connectors fetch has not
+ * settled; ``connectorsError`` is set when every read failed with nothing
+ * loaded (D410). Either way ``connectors`` is not the workspace's list.
+ */
+export interface TransferPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
-  /** True while the first connectors fetch has not settled yet. */
-  connectorsLoading?: boolean;
   onTransferComplete: () => void;
   onOpenSchedules?: () => void;
   /** Jump to Contracts after Save as contract so the draft is visible immediately. */

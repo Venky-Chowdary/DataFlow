@@ -389,6 +389,25 @@ def pg_regclass_literal(schema: str | None, table: str) -> str:
     return _seg(tbl)
 
 
+_BIGQUERY_TABLE_NAME_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "Pd", "Zs"})
+
+
+def bigquery_table_name_is_legal(name: str) -> bool:
+    """BigQuery's table-naming rule: 1..1024 UTF-8 bytes of Unicode letters (L),
+    marks (M), numbers (N), connectors (Pc, e.g. ``_``), dashes (Pd, e.g. ``-``)
+    and spaces (Zs). cloud.google.com/bigquery/docs/tables#table_naming
+
+    Backticks, dots, quotes and control characters are outside every one of
+    those categories, so a legal name is inert inside a backtick-quoted path.
+    """
+    import unicodedata
+
+    text = str(name or "")
+    if not text or len(text.encode("utf-8")) > 1024:
+        return False
+    return all(unicodedata.category(ch) in _BIGQUERY_TABLE_NAME_CATEGORIES for ch in text)
+
+
 def quote_table_ref(
     table: str,
     schema: str | None = None,
@@ -441,11 +460,18 @@ def quote_table_ref(
             parts.append(
                 catalog_identifier(project, preserve_case=True, max_len=1024, sanitize=sanitize)
             )
-        for part in (dataset or schema, table):
-            if not part:
-                continue
+        if dataset or schema:
             parts.append(
-                catalog_identifier(part, preserve_case=True, max_len=1024, sanitize=sanitize)
+                catalog_identifier(dataset or schema, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
+        if table:
+            # A legal table name is kept as spelled (``daily-events`` is not
+            # ``daily_events``, which may be another table: D314); only a name
+            # BigQuery could not hold is sanitized.
+            parts.append(
+                table
+                if bigquery_table_name_is_legal(table)
+                else catalog_identifier(table, preserve_case=True, max_len=1024, sanitize=sanitize)
             )
         if not parts:
             raise ValueError("BigQuery table reference is empty")

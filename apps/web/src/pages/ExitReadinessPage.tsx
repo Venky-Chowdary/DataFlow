@@ -40,8 +40,9 @@ import {
 } from "../lib/exitReadiness";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import type { Connector } from "../lib/types";
+import type { ConnectorListStatusProps } from "../components/ConnectorListStatus";
 
-export interface ExitReadinessPageProps {
+export interface ExitReadinessPageProps extends ConnectorListStatusProps {
   active?: boolean;
   connectors?: Connector[];
   /** A deep link to open (copilot link, reload); `token` re-applies the same ids. */
@@ -56,7 +57,15 @@ function replaceExitHash(focus: ExitFocus): void {
   if (window.location.hash !== next) window.history.replaceState(null, "", next);
 }
 
-export function ExitReadinessPage({ active = true, connectors = [], focus = null, onOpenJob }: ExitReadinessPageProps) {
+export function ExitReadinessPage({
+  active = true,
+  connectors = [],
+  connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
+  focus = null,
+  onOpenJob,
+}: ExitReadinessPageProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   // Declaring a system configures recurring extracts of a saved connection: job.manage.
@@ -297,6 +306,9 @@ export function ExitReadinessPage({ active = true, connectors = [], focus = null
         open={form.open}
         system={form.system}
         connectors={connectors}
+        connectorsLoading={connectorsLoading}
+        connectorsError={connectorsError}
+        onRetryConnectors={onRetryConnectors}
         onClose={() => {
           // Cancelling an edit goes back to the system it came from.
           if (form.system) setSystemId(form.system.id);

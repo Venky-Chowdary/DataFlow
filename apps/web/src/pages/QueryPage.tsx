@@ -67,6 +67,7 @@ import {
   type QueryTab,
 } from "../lib/queryWorkspace";
 import { useActiveWorkspaceId } from "../lib/workspace";
+import { ConnectorListStatus, type ConnectorListStatusProps } from "../components/ConnectorListStatus";
 
 /**
  * Unified query workspace — one console for the queryable connector families the engine
@@ -78,9 +79,8 @@ import { useActiveWorkspaceId } from "../lib/workspace";
  * Map → Validate → Execute produces the proof artifacts.
  */
 
-interface QueryPageProps {
+interface QueryPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
-  connectorsLoading?: boolean;
 }
 
 const FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet"];
@@ -116,7 +116,7 @@ function RunElapsed({ startedAt }: { startedAt: number }) {
   return <span className="df2-qw-elapsed">{seconds < 60 ? `${seconds.toFixed(1)} s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`}</span>;
 }
 
-export function QueryPage({ connectors, connectorsLoading = false }: QueryPageProps) {
+export function QueryPage({ connectors, connectorsLoading = false, connectorsError = "", onRetryConnectors }: QueryPageProps) {
   const { toast } = useToast();
   const workspaceId = useActiveWorkspaceId();
 
@@ -712,6 +712,23 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       }}
     />
   );
+
+  // D410: a failed read is not "no connectors"; say so and offer Try again.
+  if (connectorsError && connectors.length === 0) {
+    return (
+      <PageShell
+        wide
+        className="df2-page-query"
+        title="Query"
+        kicker="Operations"
+        description="Read-only console for databases, warehouses, and files — schema-aware, type-honest, multi-tab. Kafka topics and vector stores are not queried here."
+      >
+        <PageFrame className="df2-query-page">
+          <ConnectorListStatus connectorsError={connectorsError} onRetryConnectors={onRetryConnectors} />
+        </PageFrame>
+      </PageShell>
+    );
+  }
 
   if (!connectorsLoading && connectors.length === 0) {
     return (

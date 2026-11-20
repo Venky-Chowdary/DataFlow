@@ -3087,8 +3087,10 @@ export async function mapTransferColumns(payload: {
   source_schema?: Record<string, string>;
   target_columns?: string[];
   target_schema?: Record<string, string>;
-  /** Destination primary key / identity columns from the probe (rule 4). */
+  /** Destination primary key / identity columns from the probe (rule 4); a hint only. */
   target_key_columns?: string[];
+  /** The destination table: the server reads its key columns from the catalog (D369). */
+  destination?: Record<string, unknown>;
   validation_mode?: string;
   file_format?: string;
   use_llm?: boolean;

@@ -919,14 +919,13 @@ class SqlServerNativeCdc:
             history = read_ddl_history(cur, self.capture_instance) if identity_only else DdlHistory()
             # cdc.ddl_history keeps every DDL row while the capture instance
             # lives. Only rows past the ddl_lsn stored with the last snapshot
-            # are new; on first sight the history is the baseline. A snapshot
-            # stored before the watermark existed reviews its history once.
-            if "ddl_lsn" in prior_snapshot:
-                watermark = str(prior_snapshot.get("ddl_lsn") or "")
-                new_commands = history.commands_after(watermark)
-            else:
-                watermark = ""
-                new_commands = history.commands_after("") if prior_names else []
+            # are new; on first sight the history is the baseline. So is it for
+            # a snapshot stored before the watermark existed: that history was
+            # reviewed under the old build, and a column change since then shows
+            # in the captured columns, which are still compared below (D392).
+            watermark = str(prior_snapshot.get("ddl_lsn") or "")
+            pre_watermark = bool(prior_names) and "ddl_lsn" not in prior_snapshot
+            new_commands = history.commands_after(watermark) if "ddl_lsn" in prior_snapshot else []
             # An unreadable history keeps the old watermark: what it missed is
             # read, and reviewed, on the next run.
             ddl_lsn = (history.latest_lsn or watermark) if history.readable else watermark
@@ -937,10 +936,13 @@ class SqlServerNativeCdc:
                 "capture_instance": self.capture_instance,
                 "row_filter": self.row_filter,
                 "columns": cols,
-                "ddl_lsn": ddl_lsn,
             }
+            if history.readable or "ddl_lsn" in prior_snapshot:
+                snapshot["ddl_lsn"] = ddl_lsn
             if identity_only and not new_commands and (unchanged or not prior_names):
-                if not prior_names:
+                # Store the baseline once it is known; an empty one stored for
+                # an unreadable history would later read it all as new.
+                if not prior_names or (pre_watermark and history.readable):
                     record_ddl(
                         self.source_key,
                         table_key,
@@ -952,10 +954,12 @@ class SqlServerNativeCdc:
                 return
             named = columns_in_ddl(new_commands if identity_only else [ddl])
             if identity_only:
-                change_ddl = (
-                    "; ".join(new_commands)
-                    if new_commands
-                    else ("ADD COLUMN " + ", ".join(added) if added else "")
+                change_ddl = "; ".join(
+                    new_commands
+                    or [
+                        *(["ADD COLUMN " + ", ".join(added)] if added else []),
+                        *(["DROP COLUMN " + ", ".join(removed)] if removed else []),
+                    ]
                 )
             else:
                 change_ddl = ddl

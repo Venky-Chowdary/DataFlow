@@ -295,31 +295,67 @@ def _connection_dropped(exc: BaseException) -> bool:
 _RECONNECT_ATTEMPTS = 2
 
 
-def _in_dest_transaction(engine: Any, work: Any) -> Any:
+def _in_dest_transaction(engine: Any, work: Any, *, reconcile: Any = None) -> Any:
     """Run ``work(conn)`` in one destination transaction.
 
     A dropped connection discards that transaction, and the batch is retried
     once on a fresh pooled connection. The retry reads the destination-owned
     watermark under lock, so a commit that landed before the drop is seen as
     already committed and is not applied twice (D406).
+
+    A drop can also come *after* the COMMIT reached the server (the
+    acknowledgement is lost). The attempt's own result is then known, but not
+    whether it landed. ``reconcile(previous, retried)`` decides what to report
+    from the retry's view of the watermark, so rows that did land are counted
+    once, never zero and never twice.
     """
     from sqlalchemy.exc import DBAPIError
 
+    unacknowledged: Any = None
     for attempt in range(1, _RECONNECT_ATTEMPTS + 1):
+        finished: list[Any] = []
         try:
             with engine.begin() as conn:
-                return work(conn)
+                finished.append(work(conn))
+            out = finished[0]
+            return reconcile(unacknowledged, out) if reconcile and unacknowledged is not None else out
         except DBAPIError as exc:
             if not _connection_dropped(exc) or attempt >= _RECONNECT_ATTEMPTS:
                 raise
+            # The work finished, so the drop hit the COMMIT: it may have landed.
+            unacknowledged = finished[0] if finished else None
             _logger.warning(
-                "cdc_eos: destination connection dropped during apply (attempt %d of %d); "
+                "cdc_eos: destination connection dropped during %s (attempt %d of %d); "
                 "retrying the batch on a new connection: %s",
+                "commit" if finished else "apply",
                 attempt,
                 _RECONNECT_ATTEMPTS,
                 type(exc.orig or exc).__name__,
             )
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _carry_landed_attempt(previous: EosApplyResult | None, retried: EosApplyResult) -> EosApplyResult:
+    """What a retried batch reports when the first attempt's COMMIT may have landed.
+
+    The retry found the batch already committed. If the watermark it locked is
+    exactly the one the first attempt wrote (same LSN, epoch, apply sequence
+    and checksum), that attempt's commit landed and its counts are the truth.
+    Any other watermark is a different writer's, and the retry is reported as
+    found (verify before claiming, R9).
+    """
+    if previous is None or retried.status != "already_committed":
+        return retried
+    if previous.status not in {"applied", "empty"}:
+        return retried
+    if (
+        previous.committed_lsn == retried.committed_lsn
+        and previous.epoch == retried.epoch
+        and previous.apply_seq == retried.apply_seq
+        and previous.apply_checksum == retried.apply_checksum
+    ):
+        return previous
+    return retried
 
 
 def _row_to_wm(locked: Any) -> DestWmView:
@@ -1249,7 +1285,8 @@ def apply_eos_sqlalchemy(
         )
         result = _in_dest_transaction(
             engine,
-            lambda conn: _sa_apply_member(
+            reconcile=_carry_landed_attempt,
+            work=lambda conn: _sa_apply_member(
                 conn,
                 dialect,
                 dest_table=dest_table,
@@ -1387,8 +1424,16 @@ def apply_eos_sa_bundle(
                 "after_watermark_before_commit",
             }:
                 raise EosCrash(crash_after)
+            return list(member_keys), list(members)
 
-        _in_dest_transaction(engine, _bundle)
+        def _reconcile_bundle(previous: Any, retried: Any) -> Any:
+            if previous[0] != retried[0]:
+                return retried
+            return retried[0], [_carry_landed_attempt(p, r) for p, r in zip(previous[1], retried[1])]
+
+        keys_out, members_out = _in_dest_transaction(engine, _bundle, reconcile=_reconcile_bundle)
+        member_keys[:] = keys_out
+        members[:] = members_out
     except EosCrash:
         raise
     finally:

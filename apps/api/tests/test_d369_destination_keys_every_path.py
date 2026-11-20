@@ -17,7 +17,6 @@ import socket
 import sys
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -389,4 +388,84 @@ def test_mcp_plan_maps_the_accented_source_onto_its_own_created_key(store) -> No
     finally:
         cur.execute(f'DROP TABLE IF EXISTS "{src_t}"')
         cur.execute(f'DROP TABLE IF EXISTS "{dst_t}"')
+
+
+def test_map_keys_come_from_the_catalog_not_the_client() -> None:
+    """Review r2 minor 2: the client's list was the only key source."""
+    from services.map_key_columns import resolve_map_key_columns
+
+    catalog = {"columns": ["id", "Code", "name"], "primary_key_columns": ["code"], "identity_columns": []}
+    # A stale list (the previous table's key) is ignored when the catalog was read.
+    assert resolve_map_key_columns(["id"], target_columns=["id", "Code", "name"], catalog=catalog) == (
+        ["Code"], "catalog",
+    )
+    # A table confirmed missing has no key, whatever the client says.
+    assert resolve_map_key_columns(["id"], target_columns=[], catalog={"table_exists": False}) == ([], "catalog")
+    # No catalog: only names that are columns of the mapped table survive.
+    assert resolve_map_key_columns(
+        ["ID", "ghost"], target_columns=["id", "name"], catalog=None
+    ) == (["id"], "client_checked")
+    assert resolve_map_key_columns(["ghost"], target_columns=["id"], catalog=None) == ([], "none")
+
+
+def test_studio_map_route_reads_the_keys_of_the_destination_it_names(tmp_path, monkeypatch) -> None:
+    """With the destination named, a stale key list cannot protect the wrong
+    column: the route reads the table's own primary key (``code``), so ``id``
+    is free again and ``code`` is protected."""
+    import psycopg2
+    from fastapi.testclient import TestClient
+
+    import services.config  # noqa: F401 - settings parse before the harness blanks env
+    from tests.helpers.live_env import pg_creds, pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not configured")
+    from tests import r4_route_harness as h
+
+    p = pg_creds()
+    table = f"d369m_{uuid.uuid4().hex[:8]}"
+    conn = psycopg2.connect(
+        host=p["host"], port=int(p["port"]), user=p["username"], password=p["password"], dbname=p["database"]
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE {table} (id INTEGER, code VARCHAR(20) PRIMARY KEY, name VARCHAR(40))")
+    h.isolate(tmp_path, monkeypatch)
+    from src.main import app
+
+    body = {
+        "source_columns": ["customer_id", "name"],
+        "source_schema": {"customer_id": "INTEGER", "name": "VARCHAR"},
+        "source_samples": {"customer_id": ["7", "8"], "name": ["ada", "beau"]},
+        "target_columns": ["id", "code", "name"],
+        "target_schema": {"id": "INTEGER", "code": "VARCHAR(20)", "name": "VARCHAR(40)"},
+        "target_key_columns": ["id"],  # the previous table's key
+        "destination_db_type": "postgresql",
+        "source_db_type": "postgresql",
+        "destination_table_exists": True,
+        "use_llm": False,
+        "destination": {
+            "kind": "database", "format": "postgresql", "host": str(p["host"]), "port": int(p["port"]),
+            "database": str(p["database"]), "username": str(p["username"]),
+            "password": str(p["password"]), "schema": "public", "table": table,
+        },
+    }
+    try:
+        with TestClient(app) as client:
+            named = client.post("/api/v1/transfer/map", json=body)
+            unnamed = client.post(
+                "/api/v1/transfer/map",
+                json={**{k: v for k, v in body.items() if k != "destination"}, "target_key_columns": ["id", "ghost"]},
+            )
+        assert named.status_code == 200, named.text
+        assert named.json()["target_key_columns"] == ["code"]
+        assert named.json()["target_key_columns_source"] == "catalog"
+        assert ("customer_id", "id") in _pairs(named.json()["mappings"])
+        assert unnamed.status_code == 200, unnamed.text
+        assert unnamed.json()["target_key_columns"] == ["id"]
+        assert unnamed.json()["target_key_columns_source"] == "client_checked"
+        assert ("customer_id", "id") not in _pairs(unnamed.json()["mappings"])
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
         conn.close()

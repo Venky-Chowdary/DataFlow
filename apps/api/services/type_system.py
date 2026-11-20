@@ -7350,6 +7350,12 @@ def temporal_precision_would_narrow(
     return _impl(source_type, target_type, dest_db=dest_db, population=population)
 
 
+def temporal_tick_disclosure(source_type: str, target_type: str, **kwargs: Any) -> str:
+    """Backward-compat shim — body in decision_kernel.type_invent."""
+    from services.decision_kernel.type_invent import temporal_tick_disclosure as _impl
+
+    return _impl(source_type, target_type, **kwargs)
+
 
 @lru_cache(maxsize=8192)
 def strip_identity_qualifier(inferred: str | None) -> str:
