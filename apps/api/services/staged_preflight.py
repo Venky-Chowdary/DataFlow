@@ -523,6 +523,11 @@ def _connector_endpoint(connector_id: str) -> dict[str, Any] | None:
     }
 
 
+_SNAPSHOT_KINDS = frozenset({
+    "postgresql", "postgres", "mysql", "mariadb", "sqlserver", "mssql", "azure_sql",
+})
+
+
 def _read_schema_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     """Columns, keys, indexes, foreign keys, checks, defaults and identity.
 
@@ -537,6 +542,11 @@ def _read_schema_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     kind = str(cfg.get("type") or "").lower()
     schema = str(cfg.get("schema") or "")
     table = str(cfg.get("table") or "")
+    if kind not in _SNAPSHOT_KINDS:
+        # No catalog read for this engine: never log in only to fail. A remote
+        # Snowflake login is the slowest step of a plan (D187); "unread" keeps
+        # the staged result from being reused.
+        raise RuntimeError(f"schema version is not read for {kind or 'this engine'}")
     engine = get_sqlalchemy_engine(cfg)
     try:
         with engine.connect() as conn:
