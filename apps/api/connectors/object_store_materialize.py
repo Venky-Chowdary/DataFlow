@@ -201,13 +201,13 @@ class ObjectStoreEncoder:
     def _ensure_csv(self) -> str:
         if self._csv is not None:
             return self._csv
-        from services.csv_codec import RECORD_TERMINATOR, format_csv_row
+        from services.csv_codec import format_csv_row
 
         delim = "\t" if self.key_l.endswith(".tsv") else ","
         self._text = _SpoolTextSink(self._spool)
         self._csv = delim
         header = [self._guard_text(c) for c in self.target_cols]
-        self._text.write(format_csv_row(header, delim) + RECORD_TERMINATOR)
+        self._text.write(format_csv_row(header, delim) + "\n")
         self._header_written = True
         return delim
 
@@ -220,7 +220,7 @@ class ObjectStoreEncoder:
 
     def _append_delimited(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
-        from services.csv_codec import RECORD_TERMINATOR, csv_cell_encode, format_csv_row
+        from services.csv_codec import csv_cell_encode, format_csv_row
 
         delim = self._ensure_csv()
         for record in iter_mapped_delimited_records(
@@ -242,7 +242,7 @@ class ObjectStoreEncoder:
                     delim,
                     null_marker=self._null_marker,
                 )
-                + RECORD_TERMINATOR
+                + "\n"
             )
         if self._text is not None:
             self._text.flush()
@@ -255,6 +255,7 @@ class ObjectStoreEncoder:
             self.target_cols,
             self.dest_types,
             exact_decimal=True,
+            omit_document_sql_null=True,
         ):
             if self._records_written or self._header_written:
                 self._spool.write(b"\n")
@@ -278,6 +279,7 @@ class ObjectStoreEncoder:
             self.target_cols,
             self.dest_types,
             exact_decimal=True,
+            omit_document_sql_null=True,
         )
         for record in records:
             if not self._header_written:

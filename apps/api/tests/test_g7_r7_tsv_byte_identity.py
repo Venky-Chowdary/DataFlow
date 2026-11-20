@@ -1,7 +1,14 @@
-"""TSV exports use the same quoting dialect as CSV (RFC 4180, D371).
+"""TSV exports use the same quoting dialect as CSV (D371, migration rule 9).
 
 A cell that contains a tab, a quote, CR or LF is quoted and quotes are
-doubled. ``''`` is ``""``. NULL is an empty unquoted field. Rows end CRLF.
+doubled. ``''`` is ``""``. NULL is an empty unquoted field. That is what the
+file_export TSV (PR 402) and the PostgreSQL to S3 ``COPY (FORMAT csv)`` TSV
+already wrote; the object-store row writer used to leave a mid-field quote raw
+and write ``''`` as NULL (G7 B1), so the same transfer produced different
+bytes depending on which path ran. Every product loader reads the quoted form
+exactly (MySQL ``LOAD DATA ... OPTIONALLY ENCLOSED BY '"'`` reads a doubled
+quote as one). Record terminators are unchanged: object-store and converter
+rows end LF, a file_export ends CRLF.
 """
 
 from __future__ import annotations
@@ -17,17 +24,17 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-# No tab / CR / LF / leading quote: these rows must be byte-identical to aacea0e05.
+# Rows with no tab / CR / LF: quotes and '' are the only cells quoted.
 ORDINARY = [
     ["1", '5" pipe', "a\\b", 'say "hi"'],
     ["2", "=1+1", "a,b", "x\"\"y"],
     ["3", "café", "", "-5"],
 ]
 ORDINARY_TSV = (
-    "id\tnote\tpath\tquote\r\n"
-    '1\t"5"" pipe"\ta\\b\t"say ""hi"""\r\n'
-    '2\t=1+1\ta,b\t"x""""y"\r\n'
-    '3\tcafé\t""\t-5\r\n'
+    "id\tnote\tpath\tquote\n"
+    '1\t"5"" pipe"\ta\\b\t"say ""hi"""\n'
+    '2\t=1+1\ta,b\t"x""""y"\n'
+    '3\tcafé\t""\t-5\n'
 ).encode("utf-8")
 COLS = ["id", "note", "path", "quote"]
 

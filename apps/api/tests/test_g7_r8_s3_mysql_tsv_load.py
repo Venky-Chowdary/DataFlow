@@ -75,9 +75,13 @@ def _object_store_tsv(rows: list[tuple[str, str]]) -> bytes:
 
 def test_tsv_load_is_quote_aware(monkeypatch, tmp_path):
     body = _object_store_tsv([("1", '5" pipe'), ("2", "a\tb"), ("3", '"lead'), ("4", "x\ny")])
-    # What lands in S3: mid-field quote raw, tab/LF/leading-quote cells quoted.
-    assert body.replace(b"\r\n", b"\n") == (
-        b'id\tnote\n1\t5" pipe\n2\t"a\tb"\n3\t"""lead"\n4\t"x\ny"\n'
+    # What lands in S3 (D371, one quoting rule for CSV and TSV): a cell holding
+    # a tab, quote, CR or LF is enclosed and its quotes doubled. MySQL reads
+    # that exactly with OPTIONALLY ENCLOSED BY: "occurrences of the ENCLOSED BY
+    # character within a field value can be doubled and are interpreted as a
+    # single instance" (https://dev.mysql.com/doc/refman/8.4/en/load-data.html).
+    assert body == (
+        b'id\tnote\n1\t"5"" pipe"\n2\t"a\tb"\n3\t"""lead"\n4\t"x\ny"\n'
     )
     path = tmp_path / "src.tsv"
     path.write_bytes(body)

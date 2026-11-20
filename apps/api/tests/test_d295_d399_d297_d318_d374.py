@@ -57,7 +57,10 @@ def test_unquoted_csv_empty_is_null_and_quoted_empty_stays_empty():
     assert file_empty_cell_bind("", "integer") is None
 
     assert apply_transform(None, "json") == (None, None)
-    assert apply_transform("", "json") == ("", None)
+    # '' is not JSON text: the transform reports it instead of inventing a value;
+    # the shared empty-cell bind decides per carrier (NVARCHAR keeps '', above).
+    value, error = apply_transform("", "json")
+    assert value is None and "Empty value cannot coerce to json" in str(error)
 
     report = analyze_coercion(
         sample_rows=[{"payload": None}, {"payload": ""}],

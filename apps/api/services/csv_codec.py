@@ -29,37 +29,20 @@ _QUOTE = '"'
 LEGACY_CSV_NULL = "\\N"
 
 
-def rewrite_record_terminators(body: bytes, terminator: bytes = b"\r\n") -> bytes:
-    """Replace record breaks that sit outside quotes. Quoted newlines stay.
+def rewrite_record_terminators(
+    body: bytes, terminator: bytes = b"\n", delimiter: str | bytes = ","
+) -> bytes:
+    """Replace record breaks that sit outside quoted fields. Quoted newlines stay.
 
-    A quoted field may hold LF or CRLF as data (RFC 4180). Rewriting every
+    A quoted field may hold LF, CR or CRLF as data (RFC 4180). Rewriting every
     ``\\n`` turns ``"a\\nb"`` into ``"a\\r\\nb"`` and corrupts the value (D376).
+    A quote opens a field only at the field's start, so a raw mid-field quote
+    in a TSV cell does not flip the quote state (see ``services.delimited_scan``).
     """
-    out = bytearray()
-    quoted = False
-    index = 0
-    size = len(body)
-    while index < size:
-        byte = body[index]
-        if byte == 0x22:
-            if quoted and index + 1 < size and body[index + 1] == 0x22:
-                out += b'""'
-                index += 2
-                continue
-            quoted = not quoted
-            out.append(byte)
-            index += 1
-            continue
-        if not quoted and byte in (0x0A, 0x0D):
-            if byte == 0x0D and index + 1 < size and body[index + 1] == 0x0A:
-                index += 2
-            else:
-                index += 1
-            out += terminator
-            continue
-        out.append(byte)
-        index += 1
-    return bytes(out)
+    from services.delimited_scan import rewrite_record_breaks
+
+    return rewrite_record_breaks(body, terminator, delimiter)
+
 
 # Internal marker the formatter turns into an empty unquoted cell while a real
 # empty string stays quoted ``""``. It is never written to the file.
@@ -222,17 +205,28 @@ def text_null_cell(cell: str, marker: str, quote: Callable[[str], str]) -> str:
     return quote(cell)
 
 
-#: RFC 4180 record separator. CSV and TSV exports end every row with CRLF.
-RECORD_TERMINATOR = "\r\n"
+#: Record terminator of the object-store CSV/TSV writers (S3, GCS, ADLS, SFTP,
+#: Email), the database-to-S3 fast paths (PostgreSQL ``COPY ... TO`` writes LF
+#: too), format conversion and file combine. LF is what those paths have always
+#: shipped and what downstream loaders already read; changing it would be a
+#: compatibility break with no data-correctness gain. A ``file_export``
+#: download and a query export end rows with CRLF (RFC 4180) as they have since
+#: PR 402. Every reader accepts both; an append keeps the existing file's own
+#: terminator (``connectors.object_store_incremental``). See docs/migration-rules.md rule 9.
+RECORD_TERMINATOR = "\n"
 
 
 def format_csv_row(cells: list[str], delimiter: str = ",", *, null_marker: str = "") -> str:
     """One encoded row as delimited text (no record separator).
 
-    CSV and TSV use one quoting rule (RFC 4180, migration rule 9): NULL is an
+    CSV and TSV use one quoting rule (D371, migration rule 9): NULL is an
     empty unquoted field, ``''`` is ``""``, and a field that contains the
-    delimiter, a quote, CR or LF is quoted with doubled quotes. ``null_marker``
-    (``\\N``) opts into :func:`text_null_cell`.
+    delimiter, a quote, CR or LF is quoted with doubled quotes. RFC 4180
+    specifies that rule for CSV only; IANA ``text/tab-separated-values`` has
+    no quoting, so for TSV it is a product choice: the one PostgreSQL
+    ``COPY (FORMAT csv, DELIMITER E'\\t')`` (the PostgreSQL to S3 fast path)
+    and the file_export TSV already wrote, and the one every product loader
+    reads back exactly. ``null_marker`` (``\\N``) opts into :func:`text_null_cell`.
     """
 
     def quote(cell: str) -> str:

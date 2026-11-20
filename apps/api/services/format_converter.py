@@ -152,20 +152,20 @@ def convert_rows(
 
     if tgt == "csv":
         # C04: one codec — NULL is an empty unquoted cell, '' is quoted "".
-        from services.csv_codec import RECORD_TERMINATOR, csv_cell_encode, format_csv_row
+        from services.csv_codec import csv_cell_encode, format_csv_row
 
         lines = [format_csv_row([str(h) for h in headers], ",")]
         for row in rows:
             lines.append(format_csv_row([csv_cell_encode(v) for v in row], ","))
-        return (RECORD_TERMINATOR.join(lines) + RECORD_TERMINATOR).encode("utf-8"), "text/csv"
+        return ("\n".join(lines) + "\n").encode("utf-8"), "text/csv"
 
     if tgt == "tsv":
-        from services.csv_codec import RECORD_TERMINATOR, csv_cell_encode, format_csv_row
+        from services.csv_codec import csv_cell_encode, format_csv_row
 
         lines = [format_csv_row([str(h) for h in headers], "\t")]
         for row in rows:
             lines.append(format_csv_row([csv_cell_encode(v) for v in row], "\t"))
-        return (RECORD_TERMINATOR.join(lines) + RECORD_TERMINATOR).encode("utf-8"), "text/tab-separated-values"
+        return ("\n".join(lines) + "\n").encode("utf-8"), "text/tab-separated-values"
 
     if tgt == "json":
         objects = _rows_to_objects(headers, rows)

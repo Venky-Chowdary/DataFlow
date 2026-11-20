@@ -75,16 +75,6 @@ def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:
     return f"{ident}{alias}"
 
 
-def _rewrite_copy_newlines_as_crlf(path: str) -> None:
-    """PostgreSQL COPY on Linux writes LF record breaks. Quoted newlines stay."""
-    from services.csv_codec import rewrite_record_terminators
-
-    with open(path, "rb") as handle:
-        body = handle.read()
-    with open(path, "wb") as handle:
-        handle.write(rewrite_record_terminators(body, b"\r\n"))
-
-
 def copy_postgres_to_s3(
     *,
     source_cfg: dict[str, Any],
@@ -185,7 +175,6 @@ def copy_postgres_to_s3(
             from services.cancel_check import copy_expert_keeping_cancel
 
             copy_expert_keeping_cancel(src_cur, copy_sql, handle)
-        _rewrite_copy_newlines_as_crlf(tmp_path)
         commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:

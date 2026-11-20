@@ -300,42 +300,17 @@ def s3_write_delimited(
     rows: Iterable[Sequence[object]],
     delimiter: str,
 ) -> int:
-    """Write HEADER plus data rows. Header is not a dest row.
-
-    New files use CRLF, the same record terminator as the product CSV/TSV
-    codec. ``newline=""`` so the csv module does not rewrite that terminator.
-    """
-    from services.csv_codec import RECORD_TERMINATOR
-
+    """Write HEADER plus data rows. Header is not a dest row."""
     written = 0
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write(s3_format_delimited_row(list(header), delimiter) + RECORD_TERMINATOR)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(s3_format_delimited_row(list(header), delimiter) + "\n")
         for row in rows:
             handle.write(
                 s3_format_delimited_row([s3_csv_cell(v) for v in row], delimiter)
-                + RECORD_TERMINATOR
+                + "\n"
             )
             written += 1
     return written
-
-
-def tsv_quotes_follow_product_dialect(path: str) -> bool:
-    """True when a TSV's quotes are the product's CSV-style quoting.
-
-    PostgreSQL ``COPY (FORMAT csv)`` reads that file. A raw mid-field quote
-    from the previous unquoted TSV dialect does not parse to a stable width.
-    """
-    import csv
-
-    with open(path, encoding="utf-8", newline="") as handle:
-        try:
-            rows = list(csv.reader(handle, delimiter="\t"))
-        except csv.Error:
-            return False
-    if not rows:
-        return True
-    width = len(rows[0])
-    return width > 0 and all(len(row) == width for row in rows)
 
 
 def s3_iter_fetchmany(cursor: Any, batch: int = 8192) -> Iterator[Any]:
@@ -376,8 +351,11 @@ class DelimitedFileScan:
 
     * ``backslash`` — any ``\\``: MySQL ``ESCAPED BY '\\\\'`` would rewrite it.
     * ``legacy_null`` — a ``\\N`` (the C04 legacy NULL spelling).
-    * ``quote`` — any ``"``: PostgreSQL ``COPY (FORMAT csv)`` reads a mid-field
-      quote as quoting.
+    * ``quote`` — any ``"``.
+    * ``bare_quote`` — a ``"`` that does not open or close a well-formed quoted
+      field (``5" pipe``, ``"a"b``, an unclosed quote). PostgreSQL
+      ``COPY (FORMAT csv)`` starts a quoted section at it: ``a"b"c`` loads as
+      ``abc`` and ``5" pipe`` swallows the next rows (``services.delimited_scan``).
     * ``unquoted_null`` — a field that is exactly ``NULL`` with no enclosing
       quotes: MySQL ``LOAD DATA ... ENCLOSED BY`` loads it as SQL NULL. The scan
       is conservative: ``NULL`` between separators inside a quoted multi-line
@@ -388,6 +366,7 @@ class DelimitedFileScan:
     backslash: bool = False
     legacy_null: bool = False
     quote: bool = False
+    bare_quote: bool = False
     unquoted_null: bool = False
     # "lf" (every line break is \n), "crlf" (every \r is followed by \n and
     # every \n preceded by \r) or "mixed" (anything else, bare \r included).
@@ -405,6 +384,9 @@ def scan_delimited_file(
     path: str, delimiter: str, *, chunk_size: int = 1 << 20
 ) -> DelimitedFileScan:
     """One read of ``path`` in ``chunk_size`` chunks; patterns may span chunks."""
+    from services.delimited_scan import QuoteScanner
+
+    quotes = QuoteScanner(delimiter)
     sep = re.escape(delimiter.encode("utf-8"))
     field_null = re.compile(rb"[" + sep + rb"\r\n]NULL(?=[" + sep + rb"\r\n])")
     null_at_end = re.compile(rb"[" + sep + rb"\r\n]NULL\Z")
@@ -424,6 +406,7 @@ def scan_delimited_file(
             backslash = backslash or b"\\" in chunk
             legacy_null = legacy_null or b"\\N" in window
             quote = quote or b'"' in chunk
+            quotes.feed(chunk)
             not_utf8 = not_utf8 or b"\x00" in chunk
             unquoted_null = unquoted_null or field_null.search(window) is not None
             lf += chunk.count(b"\n")
@@ -444,6 +427,7 @@ def scan_delimited_file(
         backslash=backslash,
         legacy_null=legacy_null,
         quote=quote,
+        bare_quote=quotes.finish(),
         unquoted_null=unquoted_null,
         line_ending=line_ending,
         not_utf8_text=not_utf8,
