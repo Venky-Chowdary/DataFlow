@@ -74,14 +74,14 @@
   --df-teal-400: #2dd4bf;
   --df-teal-500: #0d9488;
   --df-teal-600: #0f766e;
-  /* Public site (pass 4): security-print palette. Paper and intaglio ink,
-     with serial red for held rows and a landed green. Paper, serial and
-     landed reuse values already in the system; the night variants are
-     derived, so the palette adds one new hex (intaglio). */
+  /* Public site (pass 4): the brand's own palette, taken from the logo.
+     Ink is the logo tile's deep teal, landed is teal, held is the amber
+     of the logo strap (deepened for text contrast), on cool paper. Every
+     value reuses one already in the system; night variants are derived. */
   --df-paper: #f4f7f4;
-  --df-intaglio: #24205a;
-  --df-serial: #b91c1c;
-  --df-landed: #065f46;
+  --df-intaglio: var(--df-logo-tile);
+  --df-serial: #b45309;
+  --df-landed: #0f766e;
   --df-paper-night: color-mix(in srgb, var(--df-intaglio) 44%, black);
   --df-intaglio-light: color-mix(in srgb, var(--df-intaglio) 14%, white);
   --df-serial-light: color-mix(in srgb, var(--df-serial) 55%, white);
