@@ -63,7 +63,11 @@ def test_mysql_get_connection_ddl_uses_short_lock_wait():
 
     kwargs = connect.call_args.kwargs
     assert kwargs["connect_timeout"] == 10
-    assert kwargs["read_timeout"] == 45
+    # The handshake is part of connecting (R10, D281): it waits connect_timeout.
+    # The session keeps the purpose's socket wait for its statements.
+    assert kwargs["read_timeout"] == 10
+    assert fake_conn._read_timeout == 45
+    assert guards.call_args.kwargs["io_timeout"] == 45
     guards.assert_called_once()
     assert guards.call_args.kwargs["lock_wait_seconds"] == 30
 
@@ -92,7 +96,9 @@ def test_mysql_setup_on_proxy_keeps_short_lock_longer_io():
         )
 
     kwargs = connect.call_args.kwargs
-    assert kwargs["read_timeout"] == 180
+    assert kwargs["read_timeout"] == kwargs["connect_timeout"]  # handshake (R10, D281)
+    assert fake_conn._read_timeout == 180
+    assert guards.call_args.kwargs["io_timeout"] == 180
     assert guards.call_args.kwargs["lock_wait_seconds"] == 30
 
 
@@ -120,5 +126,7 @@ def test_mysql_get_connection_write_keeps_longer_proxy_io():
         )
 
     kwargs = connect.call_args.kwargs
-    assert kwargs["read_timeout"] == 300
+    assert kwargs["read_timeout"] == kwargs["connect_timeout"]  # handshake (R10, D281)
+    assert fake_conn._read_timeout == 300
+    assert guards.call_args.kwargs["io_timeout"] == 300
     assert guards.call_args.kwargs["lock_wait_seconds"] == 120
