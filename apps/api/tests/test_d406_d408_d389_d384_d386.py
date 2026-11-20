@@ -248,9 +248,17 @@ def test_cloud_extract_states_the_refusal(monkeypatch):
             {"name": "orders", "key_columns": ["id"]},
             object(),
         )
-    # The rehearsal's own refusal: its remedy is the export bucket, since a
-    # rehearsal cannot pick another destination (start() raises it first).
-    assert "export bucket" in str(raised.value)
+    # The rehearsal's own refusal (start() raises it first): it names why no
+    # table can be extracted and both remedies, since a rehearsal cannot pick
+    # another destination. The whole sentence, so a vaguer one fails.
+    assert str(raised.value) == (
+        "Exit rehearsals on Datawrap Cloud write each table's extract to this "
+        "deployment's private export bucket, and none is configured, so no table "
+        "can be extracted. An administrator can set the export bucket "
+        "(DATAWRAP_EXPORT_BUCKET and its DATAWRAP_EXPORT_S3_ settings), or run the "
+        "rehearsal on Datawrap self-hosted, where DATAWRAP_LOCAL_FILE_DESTINATIONS=on "
+        "keeps extracts on disk."
+    )
     assert "see the server log" not in str(raised.value)
 
     job = {"status": "failed", "error": local_destination_message("file_export")}
