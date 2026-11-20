@@ -202,21 +202,38 @@ def _keys(table: dict[str, Any], endpoint: Any) -> list[str]:
         return []
 
 
+def extract_destination_refusal() -> str:
+    """Why no extract can be written in this deployment, or ``""`` (D384).
+
+    Each table's extract is a file export. On Datawrap Cloud the servers share
+    no disk, so it lands in the deployment's export bucket; with none
+    configured nothing can be extracted, and the operator cannot choose
+    another destination for a rehearsal, so the remedy is the bucket (an
+    administrator's setting) or a self-hosted run.
+    """
+    from services.brand import PRODUCT_NAME
+    from services.export_object_store import exports_use_object_store
+    from services.local_file_policy import LOCAL_FILE_DESTINATIONS_FLAG, local_file_destinations_allowed
+
+    if local_file_destinations_allowed() or exports_use_object_store():
+        return ""
+    return (
+        f"Exit rehearsals on {PRODUCT_NAME} Cloud write each table's extract to this "
+        "deployment's private export bucket, and none is configured, so no table can be "
+        "extracted. An administrator can set the export bucket (DATAWRAP_EXPORT_BUCKET "
+        f"and its DATAWRAP_EXPORT_S3_ settings), or run the rehearsal on {PRODUCT_NAME} "
+        f"self-hosted, where {LOCAL_FILE_DESTINATIONS_FLAG}=on keeps extracts on disk."
+    )
+
+
 def extract_request(rehearsal: dict[str, Any], index: int, table: dict[str, Any], endpoint: Any) -> Any:
     """The extract job of one table: full read into a file export in the system's format."""
     from src.transfer.models import EndpointConfig, TransferRequest
 
-    from services.export_object_store import exports_use_object_store
-    from services.local_file_policy import (
-        local_destination_message,
-        local_file_destinations_allowed,
-    )
-
-    # Cloud has no shared disk. A file export lands in the export bucket when
-    # one is configured; otherwise the rehearsal stops here with that reason,
-    # before a child job fails and the verdict hides the sentence.
-    if not local_file_destinations_allowed() and not exports_use_object_store():
-        raise ExitInvalid(local_destination_message("file_export"))
+    # start() refuses first; kept here for any other caller of this builder.
+    refusal = extract_destination_refusal()
+    if refusal:
+        raise ExitInvalid(refusal)
     fmt = rehearsal["extract_format"]
     name = _SAFE.sub("_", table["name"])[:80] or "table"
     contracts = [{"name": table["name"], "selected": True, "sync_mode": "full_refresh_overwrite",
@@ -282,6 +299,11 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
+    # A refusal known before any work is a 422 with its reason, not a
+    # rehearsal record whose tables fail as "see the server log" (D384, R8).
+    refusal = extract_destination_refusal()
+    if refusal:
+        raise ExitInvalid(refusal)
     rid = f"exr_{uuid.uuid4().hex[:12]}"
     _claim_system(system["id"], rid)
     previous = rehearsals_of(system["id"])
