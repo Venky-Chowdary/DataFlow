@@ -2875,6 +2875,18 @@ def _transform_applied_proof(**kwargs: Any) -> Any:
         return _transform_applied_proof_impl(**kwargs)
 
 
+def _record_batch_blanks_are_null(source_endpoint: Any) -> bool:
+    """The buffered writer's blank-cell rule for this source (adapters, D1)."""
+    if source_endpoint is None:
+        return False
+    from services.preflight_source_kind import source_is_record_batch
+
+    return bool(source_is_record_batch(
+        getattr(source_endpoint, "kind", "") or "database",
+        getattr(source_endpoint, "format", "") or "",
+    ))
+
+
 def _compute_source_checksum_from_spool(
     source_spool: Any,
     columns: list[str],
@@ -2886,6 +2898,7 @@ def _compute_source_checksum_from_spool(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[str, str]:
     """Remap Gate-8 from the engine spool in bundles — never rebuild ``records``."""
     from connectors.engine_record_spill import iter_fingerprints_from_spool
@@ -2911,6 +2924,7 @@ def _compute_source_checksum_from_spool(
             dest_types=dest_types or {},
             error_policy=policy,
             destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
         )
     )
     return acc.digest(), SOURCE_DIGEST_REMAPPED_ROWS
@@ -2929,8 +2943,13 @@ def _compute_source_checksum(
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
     source_spool: Any = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[str, str]:
     """Return ``(digest, provenance)`` for the source side of Gate-8.
+
+    ``empty_cells_as_null`` is the writer's blank-cell rule for a file or
+    object source (an empty field into a typed column is SQL NULL); the remap
+    must apply it too, or every blank date reads as a digest difference.
 
     When source ``records`` or an engine ``source_spool`` are available, always
     remap and fingerprint them. Preferring the writer checksum first made
@@ -2955,6 +2974,7 @@ def _compute_source_checksum(
             dest_types=dest_types,
             validation_mode=validation_mode,
             destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
         )
     if not records:
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
@@ -2977,6 +2997,7 @@ def _compute_source_checksum(
         preserve_case=True,
         dest_kind=dest_db_type or "",
         destination_pk_columns=destination_pk_columns,
+        empty_cells_as_null=empty_cells_as_null,
     )
     return (
         checksum_rows(
@@ -7863,6 +7884,7 @@ def _run_reconciliation_impl(
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
             source_spool=source_spool,
+            empty_cells_as_null=_record_batch_blanks_are_null(source_endpoint),
         )
         digest_provenance["source"] = source_checksum_provenance
 

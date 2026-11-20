@@ -1497,14 +1497,10 @@ def plan_transfer(
             _endpoint_dict(src_info.get("endpoint")),
             callable_plan,
         )
-        # Only a declared dedupe_key collapses copies (R4). A primary_key or
-        # upsert_key on an overwrite names the identity; its in-file repeats
-        # still block on the duplicate-identity gate.
-        dedupe_named = (
-            str(row_rules.get("upsert_key") or dedupe_key or "").strip()
-            if str(dedupe_key or "").strip()
-            else ""
-        )
+        # Only a declared dedupe_key collapses copies, by that key (R4). A
+        # primary_key or upsert_key on an overwrite names the identity; its
+        # in-file repeats still block on the duplicate-identity gate.
+        dedupe_named = str(dedupe_key or "").strip()
         keep_last_file = file_overwrite_keep_last(
             source_kind="database",
             source_format=_engine_format(src_info),
@@ -1710,10 +1706,10 @@ def plan_transfer(
             **(
                 {
                     "in_file_dedupe": "keep_last",
-                    "dedupe_key": str(row_rules.get("upsert_key") or dedupe_key or ""),
+                    "dedupe_key": str(dedupe_key or "").strip(),
                     "in_file_dedupe_note": (
                         "Overwrite keeps the last row of each "
-                        f"{row_rules.get('upsert_key') or dedupe_key}. "
+                        f"{str(dedupe_key or '').strip()}. "
                         "Inside one file, last is the last row. Across a folder, "
                         "last is the file with the greatest modified time, then "
                         "the file name. Earlier copies of that key are not written."

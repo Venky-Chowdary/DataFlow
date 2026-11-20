@@ -168,6 +168,9 @@ def column_null_and_collation(existing: dict[str, Any]) -> tuple[bool | None, st
     return nullable, collation
 
 
+_SINGLE_ACTION_ALTER = frozenset({"duckdb", "motherduck", "redshift"})
+
+
 def restate_column_ddl(
     dialect: str,
     schema: str | None,
@@ -230,6 +233,12 @@ def restate_column_ddl(
                 ddl = f"{head} COLLATE {coll} USING {using}"
             else:
                 ddl = f"{ddl} COLLATE {coll}"
+        if name in _SINGLE_ACTION_ALTER:
+            # DuckDB rejects a second action ("Only one ALTER command per
+            # statement is supported") and Redshift cannot combine ALTER
+            # COLUMN TYPE with another clause. Both keep NOT NULL across a
+            # type change, so there is nothing to restate.
+            return ddl
         actions: list[str] = []
         if nullable is False:
             actions.append(f"ALTER COLUMN {col_q} SET NOT NULL")
