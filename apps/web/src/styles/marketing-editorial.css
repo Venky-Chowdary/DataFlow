@@ -952,7 +952,7 @@
   background: transparent;
   border-radius: var(--df-radius-md);
   padding: 9px 12px;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.35;
   color: var(--lp-muted);
   cursor: pointer;
@@ -1185,7 +1185,7 @@
 
 .docs-space-algorithm-steps strong {
   font-family: var(--lp-font-display);
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 720;
 }
 
@@ -1792,7 +1792,7 @@
 .lp-sales-input,
 .lp-sales-textarea {
   padding: 7px 10px !important;
-  font-size: 13.5px !important;
+  font-size: 14px !important;
 }
 
 /* ── Fluent surfaces — one shell, one card, no decorative drift ──
@@ -1845,7 +1845,7 @@
   background: none;
   padding: 4px 2px;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 650;
   color: var(--df-teal-600);
   white-space: nowrap;

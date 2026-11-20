@@ -42,16 +42,23 @@
   --mk-on-tile: var(--df-on-tile);
   --mk-focus: var(--df-focus-ring);
 
-  /* Type: IBM Plex Sans only, on a major-third scale from a 17px body. */
+  /* Type: IBM Plex Sans, one scale for every marketing page. Whole-pixel
+     steps only, set at the shared breakpoints (see the media queries
+     below), never fluid in-between values:
+       caption 13 · small 15 · body 16 · lead 16/17 · h3 18
+       stat 24/28 · h2 26/28/32 · h1 34/40/48
+     Headlines here are sentences, so h1/h2 sit at the 48/32 pair of the
+     sentence-headline top sites rather than the 64/48 of 3-word ones. */
   --mk-font: var(--df-font-sans);
   --mk-mono: var(--df-font-mono);
   --mk-fs-caption: 13px;
   --mk-fs-small: 15px;
   --mk-fs-body: 16px;
-  --mk-fs-lead: 18px;
+  --mk-fs-lead: 16px;
   --mk-fs-h3: 18px;
-  --mk-fs-h2: clamp(30px, 1.6vw + 16px, 44px);
-  --mk-fs-h1: clamp(48px, 4.4vw + 14px, 84px);
+  --mk-fs-stat: 24px;
+  --mk-fs-h2: 26px;
+  --mk-fs-h1: 34px;
 
   /* The ink hero: one deep surface in both themes, with inks and accents
      chosen for it. Everything is a --df-* primitive or a mix of one. */
@@ -78,6 +85,23 @@
 
   color: var(--mk-ink);
   font-family: var(--mk-font);
+}
+
+/* The type scale's larger steps (tokens are defined in the .mk block above). */
+@media (min-width: 768px) {
+  .mk {
+    --mk-fs-lead: 17px;
+    --mk-fs-stat: 28px;
+    --mk-fs-h2: 28px;
+    --mk-fs-h1: 40px;
+  }
+}
+
+@media (min-width: 1281px) {
+  .mk {
+    --mk-fs-h2: 32px;
+    --mk-fs-h1: 48px;
+  }
 }
 
 /* Legacy layout paints `.lp` with --lp-canvas (!important); point it here. */
@@ -164,9 +188,9 @@ html[data-theme="dark"] .mk {
 }
 
 .mk .mk-btn--lg {
-  min-height: 48px;
-  padding: 0 22px;
-  font-size: 16px;
+  min-height: 44px;
+  padding: 0 20px;
+  font-size: var(--mk-fs-small);
 }
 
 .mk .mk-btn--primary {
@@ -1557,7 +1581,7 @@ html[data-theme="dark"] .mk {
   .mk-closing-grid {
     grid-template-columns: repeat(12, minmax(0, 1fr));
     column-gap: var(--mk-col-gap);
-    align-items: end;
+    align-items: center;
   }
 
   .mk-closing-grid > div:first-child {
@@ -1667,7 +1691,7 @@ html[data-theme="dark"] .mk {
   max-width: 38em;
   margin: 20px 0 0;
   color: var(--mk-ink-2);
-  font-size: 18px;
+  font-size: var(--mk-fs-lead);
   line-height: 1.55;
 }
 
@@ -1923,7 +1947,7 @@ html[data-theme="dark"] .mk {
 .mk-panel-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 
 .mk-panel-table caption {
@@ -2135,7 +2159,7 @@ html[data-theme="dark"] .mk {
   align-items: baseline;
   column-gap: 10px;
   padding: 7px 18px;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 
 .mk-ticks li::before {
@@ -2234,7 +2258,7 @@ html[data-theme="dark"] .mk {
 }
 
 .mk-deploy h3 {
-  font-size: 18px;
+  font-size: var(--mk-fs-h3);
 }
 
 .mk-deploy p {
@@ -3098,18 +3122,18 @@ html[data-theme="dark"] .mk {
   border-bottom: 1px solid var(--mk-rule);
 }
 
-.mk-mcp-key > div {
+dl.mk-mcp-key > div {
   display: grid;
   grid-template-columns: 96px 1fr;
   gap: 10px;
   padding-block: 6px;
 }
 
-.mk-mcp-key dt {
+dl.mk-mcp-key dt {
   color: var(--mk-ink-2);
 }
 
-.mk-mcp-key dd {
+dl.mk-mcp-key dd {
   margin: 0;
 }
 

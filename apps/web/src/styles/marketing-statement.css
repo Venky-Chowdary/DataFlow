@@ -62,9 +62,6 @@
 
   --mk-font: var(--df-font-sans);
   --lp-font-display: var(--df-font-sans);
-  --mk-fs-h1: clamp(36px, 2.2vw + 20px, 52px);
-  --mk-fs-h2: clamp(28px, 0.9vw + 19px, 36px);
-  --mk-fs-h3: 18px;
 
   font-family: var(--mk-font);
   font-optical-sizing: auto;
@@ -155,22 +152,15 @@ html[data-theme="dark"] .mk {
     transform var(--df-dur) var(--df-ease);
 }
 
+/* Flat, as on the measured top sites: colour change on hover, no lift. */
 .mk .mk-btn--primary {
   background: var(--mk-action);
   color: var(--mk-on-action);
-  box-shadow:
-    0 1px 0 color-mix(in srgb, white 22%, transparent) inset,
-    0 1px 2px color-mix(in srgb, var(--df-intaglio) 30%, transparent),
-    0 8px 20px -8px color-mix(in srgb, var(--df-intaglio) 60%, transparent);
+  box-shadow: none;
 }
 
 .mk .mk-btn--primary:hover {
   background: var(--mk-action-hover);
-  transform: translateY(-1px);
-}
-
-.mk .mk-btn--primary:active {
-  transform: none;
 }
 
 .mk .mk-btn--secondary {
@@ -318,7 +308,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   max-width: 40em;
   margin-top: 28px;
   color: var(--mk-ink-2);
-  font-size: 18px;
+  font-size: var(--mk-fs-lead);
   line-height: 1.5;
 }
 
@@ -368,7 +358,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk-statement-title {
   color: var(--mk-ink);
   font-size: 15px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .mk-statement-route {
@@ -660,7 +650,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   align-items: center;
   gap: 10px;
   color: var(--mk-ink);
-  font-weight: 620;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -1014,8 +1004,8 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 
 .mk-scale-name {
   color: var(--mk-scale-ink);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 
@@ -1095,7 +1085,8 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 }
 
 .mk-contrast-row dt {
-  font-weight: 620;
+  font-size: var(--mk-fs-h3);
+  font-weight: 600;
   letter-spacing: -0.015em;
 }
 
@@ -1427,7 +1418,7 @@ html[data-theme="dark"] .mk .mk-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 21px;
+  font-size: var(--mk-fs-h3);
 }
 
 .mk-bento-tile h3::before {
@@ -1830,16 +1821,19 @@ html[data-theme="dark"] .mk .mk-header {
    ════════════════════════════════════════════════════════════════ */
 
 .mk {
-  --mk-fs-h1: clamp(40px, 2.4vw + 18px, 56px);
-  --mk-fs-h2: clamp(30px, 1vw + 22px, 40px);
-  --mk-fs-h3: 20px;
   --mk-band: var(--mk-page);
   --mk-radius-card: var(--df-radius-12);
 }
 
 @media (min-width: 768px) {
   .mk {
-    --mk-section-y: 80px;
+    --mk-section-y: 64px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .mk {
+    --mk-section-y: 72px;
   }
 }
 

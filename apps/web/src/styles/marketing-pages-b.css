@@ -45,11 +45,40 @@
 
 @media (min-width: 1024px) {
   .mk-sb-hero {
-    padding-block: 80px 96px;
+    padding-block: 64px var(--mk-section-y);
+  }
+
+  /* Split head: the headline takes the left seven columns; the lead and
+     actions sit on the right five, top-aligned with the headline's first
+     line. No empty half beside the copy, and the frame starts higher. */
+  .lp.mk .mk-sb-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    column-gap: 64px;
+    align-items: start;
+  }
+
+  .lp.mk .mk-sb-copy h1 {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    max-width: none;
+  }
+
+  .lp.mk .mk-sb-copy .mk-sb-lead {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: none;
+    margin: 10px 0 0;
+  }
+
+  .lp.mk .mk-sb-copy .mk-sb-actions {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 24px;
   }
 
   .mk-sb-hero-frame {
-    margin-top: 64px;
+    margin-top: 56px;
   }
 
   /* The hero frame alone keeps one soft shadow. */
@@ -69,7 +98,7 @@
 
 @media (min-width: 1024px) {
   .mk-sb-section {
-    padding-block: 96px;
+    padding-block: var(--mk-section-y);
   }
 }
 
@@ -113,10 +142,16 @@
 }
 
 @media (min-width: 1024px) {
+  /* Copy is top-aligned with its frame: a short heading centred beside
+     a tall panel floats in empty space. */
   .mk-sb-row-grid {
     grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-    align-items: center;
+    align-items: start;
     gap: 64px;
+  }
+
+  .mk-sb-row-copy {
+    padding-top: 24px;
   }
 
   .mk-sb-row.is-flip .mk-sb-row-grid {
@@ -499,7 +534,7 @@
 .mk-sb-eq dd {
   margin: 2px 0 0;
   color: var(--mk-ink);
-  font-size: 22px;
+  font-size: var(--mk-fs-h3);
   font-weight: 500;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -705,7 +740,7 @@
 .lp.mk .mk-jobs-vs-big {
   margin-top: 4px;
   color: var(--mk-ink);
-  font-size: 22px;
+  font-size: var(--mk-fs-h3);
   font-weight: 500;
 }
 
@@ -990,7 +1025,7 @@
 .mk-pilot-fig dd {
   margin: 4px 0 0;
   color: var(--mk-ink);
-  font-size: 28px;
+  font-size: var(--mk-fs-stat);
   font-weight: 500;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
@@ -1125,7 +1160,7 @@
 
 .mk-wh-spec-val {
   color: var(--mk-ink);
-  font-size: 22px;
+  font-size: var(--mk-fs-h3);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
@@ -1241,7 +1276,7 @@
 }
 
 .mk-bsc-card-head strong {
-  font-size: 13.5px;
+  font-size: 14px;
 }
 
 .mk-app-window .mk-bsc-card-body {
@@ -2374,44 +2409,6 @@
   font-size: 11.5px;
 }
 
-/* Pilot: what Confirm does. */
-.mk-pilot-confirm-list {
-  display: grid;
-  gap: 0;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.mk-pilot-confirm-list li {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  column-gap: 10px;
-  row-gap: 2px;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--mk-rule);
-}
-
-.mk-pilot-confirm-list li:last-child {
-  border-bottom: 0;
-}
-
-.mk-pilot-confirm-list .mk-glyph {
-  grid-row: span 2;
-  margin-top: 3px;
-  color: var(--mk-verified);
-}
-
-.mk-pilot-confirm-list strong {
-  color: var(--mk-ink);
-  font-size: 15px;
-}
-
-.mk-pilot-confirm-list span {
-  color: var(--mk-ink-2);
-  font-size: 14px;
-}
-
 /* Status chips on the precision sheet keep AA on the sheet ground. */
 .mk .mk-wh-spec .mk-status--ok {
   color: color-mix(in srgb, var(--mk-verified) 80%, var(--mk-ink));
@@ -2537,7 +2534,7 @@ html[data-theme="dark"] .mk-app-window .mk-app-pill.mk-bsc-risk {
 }
 
 .mk-bsc-panel .mk-bsc-eq dd {
-  font-size: 20px;
+  font-size: var(--mk-fs-h3);
 }
 
 .mk-bsc-panel .mk-bsc-eq > span {
@@ -2751,4 +2748,24 @@ html[data-theme="dark"] .mk-app-window .mk-app-pill.mk-bsc-risk {
 
 html[data-theme="dark"] .mk .mk-status--stop {
   color: color-mix(in srgb, var(--df-danger) 55%, var(--mk-ink));
+}
+
+/* ── Pass 6: hero frames are cropped, not shown whole ──────────────
+   The app's sidebar is taller than any one screen's content, which left
+   a band of empty canvas at the foot of every hero frame. Crop the frame
+   at a fixed height and fade its last rows into the page, as the
+   measured top sites crop their product shots. */
+@media (min-width: 1024px) {
+  .lp.mk :is(.mk-sb-hero-frame, .mk-a-hero-visual) .mk-app-fit {
+    max-height: 540px;
+  }
+
+  .lp.mk :is(.mk-sb-hero-frame, .mk-a-hero-visual) .mk-app-fit::after {
+    position: absolute;
+    inset: auto 0 0;
+    height: 120px;
+    background: linear-gradient(to bottom, transparent, var(--mk-page));
+    content: "";
+    pointer-events: none;
+  }
 }

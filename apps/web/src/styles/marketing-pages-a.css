@@ -23,7 +23,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 @media (min-width: 1024px) {
   .lp.mk .mk-a {
-    --mk-a-hero-top: 88px;
+    --mk-a-hero-top: 64px;
   }
 }
 
@@ -47,7 +47,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
   max-width: 36em;
   margin: 20px 0 0;
   color: var(--mk-ink-2);
-  font-size: 18px;
+  font-size: var(--mk-fs-lead);
   line-height: 1.5;
 }
 
@@ -62,7 +62,35 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 @media (min-width: 1024px) {
   .lp.mk .mk-a-hero-visual {
-    margin-top: 64px;
+    margin-top: 56px;
+  }
+
+  /* Split head, as on the product pages: headline left, lead (and any
+     actions) right, top-aligned. */
+  .lp.mk .mk-a-hero-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    column-gap: 64px;
+    align-items: start;
+    max-width: none;
+  }
+
+  .lp.mk .mk-a-hero-copy h1 {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .lp.mk .mk-a-hero-copy .mk-a-lead {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: none;
+    margin: 10px 0 0;
+  }
+
+  .lp.mk .mk-a-hero-copy .mk-actions {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 24px;
   }
 }
 
@@ -88,7 +116,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
   max-width: 38em;
   margin: 16px 0 0;
   color: var(--mk-ink-2);
-  font-size: 18px;
+  font-size: var(--mk-fs-lead);
   line-height: 1.5;
 }
 
@@ -454,7 +482,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 .lp.mk .mk-pr-figure {
   color: var(--mk-ink);
-  font-size: 32px;
+  font-size: 24px;
   font-weight: 500;
   line-height: 1.1;
   letter-spacing: -0.02em;
@@ -712,7 +740,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 .lp.mk .mk-proof-cert-num {
   color: var(--mk-ink);
-  font-size: 32px;
+  font-size: var(--mk-fs-stat);
   font-weight: 500;
   line-height: 1.1;
   letter-spacing: -0.02em;
@@ -917,7 +945,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
 
 .lp.mk .mk-sec-t--label {
   fill: var(--mk-ink-2);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
 .lp.mk .mk-sec-t--label .mk-sec-t--b {
@@ -1739,7 +1767,7 @@ html[data-theme="dark"] .lp.mk .mk-a {
 }
 
 .lp.mk .mk-sc-nav-item strong {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
 }
 
