@@ -137,15 +137,9 @@
   font-weight: 700;
 }
 
-.mk-app-logo {
-  width: 24px;
-  height: 24px;
+/* The mockup uses the real mark (DtLogo), never a CSS imitation of it. */
+.mk-app-brand .dt-brand-mark {
   flex: none;
-  border-radius: var(--df-radius-sm);
-  background:
-    linear-gradient(var(--df-logo-arrow), var(--df-logo-arrow)) center / 12px 2.5px no-repeat,
-    linear-gradient(var(--df-logo-strap), var(--df-logo-strap)) center / 2.5px 12px no-repeat,
-    var(--df-logo-tile);
 }
 
 .mk-app-side-label {

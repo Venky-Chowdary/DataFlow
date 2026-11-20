@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { ConnectorIcon } from "../../../app/brand-icons";
+import { DtLogo } from "../../DtLogo";
 
 /**
  * AppFrame: the Datawrap workspace, rendered in code for the public site.
@@ -139,7 +140,7 @@ function Sidebar({ active, collapsed }: { active: AppNavId; collapsed?: boolean 
   return (
     <nav className={`mk-app-side${collapsed ? " is-collapsed" : ""}`} aria-label="Workspace navigation (example)">
       <div className="mk-app-brand">
-        <span className="mk-app-logo" aria-hidden />
+        <DtLogo size={24} title="" />
         {!collapsed ? <span>Datawrap</span> : null}
       </div>
       {NAV.map((g) => (
