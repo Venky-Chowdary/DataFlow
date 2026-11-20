@@ -12,14 +12,17 @@ that text.
 Fixing each writer would miss the next one, so the job store applies this at
 its write sink (``update_job_status`` / ``update_job_fields`` on both
 backends) and the notification and lineage builders apply it too. Only the
-operator-facing text keys are touched (``error``, ``message``, ``raw`` …);
-quarantined row payloads are stored data, not messages, and are left alone.
+operator-facing text keys are touched (``error``, ``message``, ``raw``, any
+``*_error`` / ``*_message``, and strings in their lists); quarantined row
+payloads (``row``, ``record``, ``document`` …) are stored data, not messages,
+and are left alone whatever their columns are called.
 
 What is kept: the classified cause, driver error codes, column and key names
 and a key value named by a duplicate-key message (the "key range" the
 operator needs). What is withheld: the SQL text, its parameters, a failing
 row image, a refused document and the raw DB-Lib dump. The original text
-goes to the server log (statement and dump kept, row values still withheld)
+goes to the server log (statement shape and dump kept; parameters, row
+images and the statement's quoted literals withheld)
 under a reference that the stored message names.
 """
 
@@ -37,6 +40,15 @@ TEXT_KEYS = frozenset({
     "error", "message", "operator_error", "raw", "error_message", "reason",
     "detail", "note", "verification_message", "failure", "last_error",
 })
+#: Any key that names operator text by suffix (``conservation_error``) or as a list.
+_TEXT_SUFFIXES = ("_error", "_errors", "_message", "_messages")
+_TEXT_LISTS = frozenset({"errors", "messages", "warnings", "reasons"})
+#: Stored row payloads (a quarantined row, a refused document): data, never
+#: messages, whatever their columns are called (an error-log table has an
+#: ``error`` column). Their subtrees are not rewritten.
+_PAYLOAD_KEYS = frozenset({
+    "row", "rows", "record", "records", "document", "documents", "row_data", "sample_rows",
+})
 _MAX_DEPTH = 5
 _TRIGGERS = (
     "[SQL:", "[parameters:", "DB-Lib error", "Failing row contains",
@@ -50,6 +62,8 @@ _DBLIB_HEADER = re.compile(r"DB-Lib error message \d+, severity \d+:", re.S)
 _DBLIB_TAIL = re.compile(r"\s*DB-Lib error message \d+, severity \d+:.*", re.S)
 _TRAILING_HOST = re.compile(r"\s*\([^()\s]*\)\s*$")
 _REFERENCE = re.compile(r"\bReference [0-9a-zA-Z_-]{6,}")
+#: A quoted SQL literal ('' and backslash escapes inside) in a logged statement.
+_SQL_LITERAL = re.compile(r"'(?:[^'\\]|\\.|'')*'?")
 
 
 def _balanced_end(text: str, start: int) -> int:
@@ -155,14 +169,35 @@ def _withhold_after(text: str, marker: str, replacement: str) -> str:
 
 
 def _for_log(text: str) -> str:
-    """The restricted log copy: statement and dump kept, row values withheld."""
+    """The restricted log copy: statement shape and dump kept, row values withheld.
+
+    Built SQL inlines values (``WHERE email IN ('ada@...')``), so the quoted
+    literals of a logged statement are withheld too (review m2).
+    """
     out = _withhold_group(text, "[parameters:", "[parameters: withheld]", stop=("(Background",))
-    return _withhold_row_images(out)[:4000]
+    return _withhold_sql_literals(_withhold_row_images(out))[:4000]
+
+
+def _withhold_sql_literals(text: str) -> str:
+    out: list[str] = []
+    pos = 0
+    while (at := text.find("[SQL:", pos)) >= 0:
+        end = _balanced_end(text, at)
+        end = len(text) if end < 0 else end
+        out.append(text[pos:at])
+        out.append(_SQL_LITERAL.sub("'?'", text[at:end]))
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _is_text_key(field: str) -> bool:
+    return field in TEXT_KEYS or field in _TEXT_LISTS or field.endswith(_TEXT_SUFFIXES)
 
 
 def _redact(value: Any, depth: int, ref: list[str], field: str) -> Any:
     if isinstance(value, str):
-        if field not in TEXT_KEYS or not _needs_redaction(value):
+        if not _is_text_key(field) or not _needs_redaction(value):
             return value
         if not ref:
             ref.append(uuid.uuid4().hex[:12])
@@ -177,6 +212,8 @@ def _redact(value: Any, depth: int, ref: list[str], field: str) -> Any:
         out = None
         for key, item in value.items():
             name = str(key).rsplit(".", 1)[-1]
+            if name in _PAYLOAD_KEYS:
+                continue
             new = _redact(item, depth + 1, ref, name)
             if new is not item:
                 out = dict(value) if out is None else out
@@ -185,8 +222,9 @@ def _redact(value: Any, depth: int, ref: list[str], field: str) -> Any:
     if isinstance(value, list):
         items = None
         for i, item in enumerate(value):
-            if not isinstance(item, (dict, list)):
+            if not isinstance(item, (dict, list, str)):
                 continue
+            # A string in a list is judged by the list's own key (``errors``).
             new = _redact(item, depth + 1, ref, field)
             if new is not item:
                 items = list(value) if items is None else items

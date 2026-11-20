@@ -174,3 +174,46 @@ def test_lineage_run_failed_event_carries_no_rows():
                             error_details={"raw": SQLA_MSSQL})
     blob = repr(event)
     assert ROW_VALUE not in blob and "[parameters: [" not in blob
+
+
+def test_quarantined_row_cells_named_like_messages_are_stored_data():
+    """Review m1(a): a row of an error-log table keeps its ``error``/``message`` cells."""
+    cell = "(psycopg2.errors.UniqueViolation) dup [SQL: INSERT INTO t VALUES (1)] [parameters: {'a': 1}]"
+    dump = "DB-Lib error message 20009, severity 9:\\nx"
+    rows = [
+        {"row": {"id": 7, "error": cell, "message": dump}, "reason": "value too long"},
+        {"record": {"error": cell}, "document": {"message": dump}, "rows": [{"error": cell}]},
+    ]
+    out = redact_job_update({"dest_summary": {"rejected_details": rows}})
+    kept = out["dest_summary"]["rejected_details"]
+    assert kept[0]["row"] == {"id": 7, "error": cell, "message": dump}
+    assert kept[1] == rows[1]
+
+
+def test_text_in_lists_and_error_suffixed_keys_is_withheld():
+    """Review m1(b): ``errors`` lists and ``conservation_error`` kept the statement."""
+    out = redact_job_update({
+        "errors": [SQLA_MSSQL, "plain"],
+        "error": [SQLA_MSSQL],
+        "dest_summary": {"conservation_error": SQLA_MSSQL, "warnings": [PG_NOT_NULL]},
+    })
+    for text in (out["errors"][0], out["error"][0], out["dest_summary"]["conservation_error"],
+                 out["dest_summary"]["warnings"][0]):
+        _no_rows(text)
+        assert "Reference " in text
+    assert out["errors"][1] == "plain"
+
+
+def test_the_restricted_log_keeps_the_statement_shape_but_not_inline_literals(caplog):
+    """Review m2: a statement with inline literals put row values in the log."""
+    inline = (
+        "(psycopg2.errors.UndefinedColumn) column \"x\" does not exist\n"
+        "[SQL: SELECT id FROM customers WHERE email IN ('ada@example.com', 'it''s@example.com') "
+        "AND name = E'BIG_5121']\n(Background on this error at: https://sqlalche.me/e/20/f405)"
+    )
+    with caplog.at_level(logging.WARNING, logger="datawrap.restricted.job_errors"):
+        redact_job_update({"error": inline})
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SELECT id FROM customers WHERE email IN (" in logged
+    for value in ("ada@example.com", "it''s@example.com", "s@example.com", ROW_VALUE):
+        assert value not in logged, logged
