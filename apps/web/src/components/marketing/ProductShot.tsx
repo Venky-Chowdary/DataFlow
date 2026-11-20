@@ -1,56 +1,47 @@
-import type { ReactNode } from "react";
+import { useState } from "react";
+import { shotSize } from "../../lib/workspaceShots";
 
 /**
- * Product photography for public pages — the live workspace inside a
- * Datawrap chrome frame. Marketing must not invent a second UI; it shows
- * the operator surfaces operators already use.
+ * A crop of the live workspace, shown at half its 2x pixel size so text
+ * stays legible. No app chrome: only the region the page talks about, on a
+ * painted placeholder, with its intrinsic size reserved before it loads.
+ * If the file fails to load, the figure is removed rather than left empty.
  */
 export function ProductShot({
   src,
   alt,
-  surface,
-  route,
+  caption,
   className = "",
 }: {
   src: string;
   alt: string;
-  surface: string;
-  /** Optional source → dest chip. Tokens ellipsis; they never paint past the frame. */
-  route?: { source: string; dest: string };
+  /** One sentence about what this region shows. */
+  caption: string;
   className?: string;
 }) {
+  const [failed, setFailed] = useState(false);
+  const size = shotSize(src);
+  if (failed) return null;
+  // Wide crops take a full row from the first column at their natural size;
+  // narrow ones fill the right-hand column.
+  const wide = size.width / 2 > 600;
   return (
-    <figure className={`lp-product-shot ${className}`.trim()}>
-      <div className="lp-product-shot-chrome">
-        <div className="lp-product-shot-bar">
-          <span className="lp-product-shot-dots" aria-hidden>
-            <i />
-            <i />
-            <i />
-          </span>
-          <span className="lp-product-shot-surface">{surface}</span>
-        </div>
-        <div className="lp-product-shot-viewport">
-          <img src={src} alt={alt} />
-        </div>
+    <figure
+      className={`mk-crop ${wide ? "is-row" : "is-col"} ${className}`.trim()}
+      style={wide ? { maxWidth: size.width / 2 } : undefined}
+    >
+      <div className="mk-crop-frame" style={{ aspectRatio: `${size.width} / ${size.height}` }}>
+        <img
+          src={src}
+          alt={alt}
+          width={size.width}
+          height={size.height}
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
       </div>
-      {route ? (
-        <figcaption className="lp-product-shot-route" title={`${route.source} → ${route.dest}`}>
-          <span>{route.source}</span>
-          <em aria-hidden>→</em>
-          <span>{route.dest}</span>
-        </figcaption>
-      ) : null}
+      <figcaption className="mk-caption">{caption}</figcaption>
     </figure>
   );
-}
-
-export function ProductShotStack({
-  children,
-  className = "",
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return <div className={`lp-product-shot-stack ${className}`.trim()}>{children}</div>;
 }

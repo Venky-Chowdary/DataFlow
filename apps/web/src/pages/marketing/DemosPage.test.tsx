@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
-import { DemosPage } from "./DemosPage.js";
+import { DemosPage, blurbAfterTitle } from "./DemosPage.js";
 import { VideoPlayer, videoEmbedUrl, videoThumb } from "../../components/marketing/VideoPlayer.js";
 import { FEATURED_VIDEO_ID, MARKETING_VIDEOS, YOUTUBE_CHANNEL_URL } from "../../lib/videoCatalog.js";
 
@@ -50,7 +50,20 @@ describe("DemosPage", () => {
     for (const tag of ["Overview", "Sync &amp; CDC", "Verification", "Sources &amp; files", "Transforms &amp; AI"]) {
       assert.ok(markup.includes(tag), `missing filter ${tag}`);
     }
-    assert.match(markup, /Subscribe on YouTube/);
+    assert.ok(markup.includes(YOUTUBE_CHANNEL_URL), "links the channel");
+    assert.match(markup, /Start free/);
+  });
+
+  it("never repeats a video's title in the line under it", () => {
+    for (const v of MARKETING_VIDEOS) {
+      assert.ok(!blurbAfterTitle(v).startsWith(v.title), v.id);
+    }
+  });
+
+  it("keeps the topic count out of the topic heading", () => {
+    const markup = renderToStaticMarkup(createElement(DemosPage, { onNavigate: () => {} }));
+    assert.doesNotMatch(markup, /<h3 class="mk-demo-group-title">[^<]*(<svg[\s\S]*?<\/svg>)?[^<]*<span>\d/);
+    assert.match(markup, /mk-demo-group-count/);
   });
 
   it("points at the real channel, not a placeholder", () => {
