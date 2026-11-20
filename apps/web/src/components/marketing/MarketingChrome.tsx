@@ -4,6 +4,10 @@ import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
 import { provenDriversPhrase } from "../../lib/provenEvidence";
+import { isHelpDocRoute } from "../../lib/helpDocs";
+
+/** Pages that open on a document header rather than the ink hero. */
+const PAPER_ROUTES = new Set<string>(["privacy", "terms", "dpa", "subprocessors", "status", "help"]);
 
 type NavMenu = "product" | "solutions" | null;
 
@@ -137,6 +141,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
     go(next);
   };
   const isHome = route === "home";
+  const inkHero = !PAPER_ROUTES.has(route) && !isHelpDocRoute(route);
   const current = (r: PublicRoute) => (route === r ? "page" : undefined);
   const groupHolds = (links: NavEntry[]) => links.some((l) => l.route === route);
 
@@ -179,7 +184,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   ];
 
   return (
-    <div className={`lp mk ${isHome ? "mk-home" : "lp-subpage"}`} data-lp-route={route}>
+    <div className={`lp mk ${isHome ? "mk-home" : "lp-subpage"}${inkHero ? " has-ink-hero" : ""}`} data-lp-route={route}>
       <a className="mk-skip" href="#mk-main">
         Skip to content
       </a>

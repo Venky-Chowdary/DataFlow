@@ -11,9 +11,6 @@ import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
-  PENDING_DRIVERS,
-  PROVEN_CDC_SOURCES,
-  PROVEN_DRIVERS,
   provenDriversPhrase,
   catalogHonestyLead,
   cdcSourcesPhrase,
@@ -208,7 +205,6 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         slas={[
           { value: "Free", label: "Starter forever" },
           { value: "Verified", label: "Every load, every plan" },
-          { value: String(PROVEN_DRIVERS), label: "Drivers proven in CI" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
       />
@@ -527,9 +523,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         title={<>One run, counted on both sides.</>}
         lead={
           <>
-            The Trust Report beside this text is from a recorded load: 5,100 orders from Postgres into
-            Snowflake, every column mapped, full checksum match. A pilot produces the same record
-            on your own sources and destinations.
+            The Trust Report beside this text comes from a recorded load, Postgres into Snowflake:
+            every column mapped, the destination counted by its own engine, a full checksum match.
+            A pilot produces the same record on your own sources and destinations.
           </>
         }
         actions={
@@ -543,10 +539,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
         }
         slas={[
-          { value: "9", label: "Core preflight gates" },
-          { value: String(PROVEN_DRIVERS), label: "Drivers proven in CI" },
-          { value: String(PENDING_DRIVERS), label: "More implemented, in CI proof" },
-          { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
+          { value: "Every row", label: "Landed, held, or skipped by a rule" },
+          { value: "Both sides", label: "Counted by their own engines" },
+          { value: "Signed", label: "Proof pack, verifiable through the API" },
         ]}
         aside={<VerifyPanel />}
       />
@@ -1037,10 +1032,9 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           </div>
         }
         slas={[
-          { value: String(PROVEN_DRIVERS), label: "Proven in CI" },
-          { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
-          { value: "5", label: "Vector destinations" },
-          { value: "DLQ", label: "Quarantine replay" },
+          { value: "Proven in CI", label: "Green runs, no skipped test" },
+          { value: "One path", label: "Map, checks, quarantine, read-back" },
+          { value: "Replay", label: "Held rows go back to the same table" },
         ]}
         aside={
           <ProductShot

@@ -6,6 +6,7 @@ import {
   GatesPanel,
   PlanPanel,
   QuarantinePanel,
+  ReconciliationLedger,
   RunPanel,
   ScheduleTimeline,
   VerifyPanel,
@@ -37,7 +38,7 @@ const STEPS: Step[] = [
     name: "Plan",
     title: "Pair columns by meaning, and approve the plan",
     body: "Pick a table, a SQL query, or a stored procedure as the source. Each pairing is scored on the column's role, qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person, with the reason on the row.",
-    facts: ["11 of 11 columns mapped on the recorded run", "JSONB lands in Snowflake as VARIANT", "Pairs below the confidence floor wait for review"],
+    facts: ["Every pairing scored on role, qualifier, and type", "JSONB lands in Snowflake as VARIANT", "Pairs below the confidence floor wait for review"],
     panel: <PlanPanel />,
   },
   {
@@ -45,23 +46,23 @@ const STEPS: Step[] = [
     name: "Validate",
     title: "Check the plan before the first write",
     body: "Nine core checks run on every route, plus the policy checks the route needs. Sample rows go through the real write path, so a value the destination cannot hold is a finding now, not a failed batch later.",
-    facts: ["23 checks on this route: 17 passed, 6 not applicable", "Approving the plan records a hash of it", "Execute stays locked until the plan is approved"],
+    facts: ["Nine core checks on every route, plus the route's own", "Approving the plan records a hash of it", "Execute stays locked until the plan is approved"],
     panel: <GatesPanel />,
   },
   {
     id: "execute",
     name: "Execute",
     title: "Run the approved plan, and hold what fails",
-    body: "Rows are written in batches with bound parameters, by insert, merge, or a stored procedure. A run whose plan no longer matches the approved one is refused. A row the destination rejects is held with its reason instead of stopping the load.",
-    facts: ["5,100 rows read and 5,100 written", "The destination is counted before and after", "Held rows replay into the same table"],
+    body: "Rows are written in batches with bound parameters, by insert, merge, or a stored procedure. A row the destination rejects is held with its reason instead of stopping the load.",
+    facts: ["A run that drifts from the approved plan is refused", "The destination is counted before and after", "Held rows replay into the same table"],
     panel: <RunPanel />,
   },
   {
     id: "verify",
     name: "Verify",
     title: "Read the destination back and compare",
-    body: "After the write, Datawrap queries the destination itself and compares it with what was read: row counts, an order-independent checksum, and a value census by key. Each table records which comparison ran.",
-    facts: ["5,100 in the source and 5,100 in Snowflake", "Full checksum, every row compared", "Only a full comparison is called proven"],
+    body: "After the write, Datawrap queries the destination itself and compares it with what was read, so verification is part of the run rather than a job someone schedules later.",
+    facts: ["Row count, checksum, and a value census by key", "Each table records which comparison ran", "Only a full comparison is called proven"],
     panel: <VerifyPanel animate={false} />,
   },
   {
@@ -74,21 +75,26 @@ const STEPS: Step[] = [
   },
 ];
 
-const PROBLEMS: { title: string; problem: string; answer: string }[] = [
+const DIFFERENT: { title: string; body: string; where: string }[] = [
   {
-    title: "Rows go missing without an error",
-    problem: "A load finishes green and the destination is short. The writer counted what it sent, not what the destination holds.",
-    answer: "The destination is counted by its own engine after the write. Rows read must equal rows landed, plus rows held with a reason, plus rows skipped by rule.",
+    title: "Verification is part of the move",
+    body: "The run that writes the rows also counts the destination with the destination's own engine and compares it with the source. There is no separate reconciliation job to schedule, or to forget.",
+    where: "Job space, Trust Report",
   },
   {
-    title: "The run does something the plan did not",
-    problem: "Types that looked compatible truncate on the real write, or the target changed between review and cutover.",
-    answer: "Validate pushes sample rows through the real write path first. The approved plan is hashed, and a run that no longer matches it is refused.",
+    title: "The plan predicts the run",
+    body: "Validate pushes sample rows through the real write path before anything is written. The approved plan is hashed, and a run that no longer matches it is refused.",
+    where: "Transfer Studio, Validate",
   },
   {
-    title: "Nobody can show what was checked",
-    problem: "After cutover the evidence is a spreadsheet and a chat thread, and the audit asks which rows were compared, and how.",
-    answer: "Every job keeps its mapping decisions, check results, held rows, and comparison, with sign-offs and a hash-chained audit log.",
+    title: "Nothing fails silently",
+    body: "A row that cannot land is held with its column, value, and reason, then replayed into the same table once fixed. A row that is not landed, held, or skipped by a rule you set is reported as potential loss.",
+    where: "Job space, Quarantine",
+  },
+  {
+    title: "Evidence you can sign",
+    body: "The report names the comparison that ran, and only a full comparison is called proven. Proof packs are signed and verifiable through the API, and every action lands in a hash-chained audit log.",
+    where: "Job space, Sign-off",
   },
 ];
 
@@ -107,20 +113,6 @@ const CONTROLS: { term: string; detail: string }[] = [
   { term: "Your own keys", detail: "Connector secrets are encrypted at rest and can be wrapped with your key in AWS KMS." },
   { term: "Audit chain", detail: "Every action is hash-chained and signed, and exports as CSV, JSON, or CEF." },
   { term: "Isolation", detail: "Jobs, connectors, schedules, and agent tools are scoped to the workspace that owns them." },
-];
-
-const PRODUCT_SHOTS: { shot: string; alt: string; surface: string; route?: { source: string; dest: string } }[] = [
-  {
-    shot: WORKSPACE_SHOT.transferMapStage,
-    alt: "Transfer Studio map step: 11 of 11 columns from public.sales_orders mapped to SALES_ORDERS_REPORTING",
-    surface: "Transfer Studio, map step",
-    route: { source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest },
-  },
-  {
-    shot: WORKSPACE_SHOT.jobTrust,
-    alt: "Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match",
-    surface: "Job space, Trust Report",
-  },
 ];
 
 function RouteLink({
@@ -215,50 +207,44 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
       <section className="mk-hero" aria-labelledby="mk-hero-title">
         <div className="mk-wrap mk-hero-grid">
           <div className="mk-hero-copy">
-            <h1 id="mk-hero-title">Every row you move is accounted for.</h1>
+            <h1 id="mk-hero-title">
+              Every row,
+              <br />
+              accounted for.
+            </h1>
             <p className="mk-lead">
-              Datawrap counts what it read, what landed, and what it held back, then queries the
-              destination itself to check that the numbers agree. Every run ends with a report
-              that names the comparison it used.
+              Datawrap moves data between databases, warehouses, files, and streams, and shows
+              where every row went: landed and counted by the destination, held with a reason,
+              or skipped by a rule you set.
             </p>
             <div className="mk-actions">
               <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
                 Start free
               </button>
-              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--ghost-on-dark mk-btn--lg">
                 Contact sales
               </RouteLink>
             </div>
-            <p className="mk-hero-note">
-              Databases, warehouses, object storage, files, streams, and vector stores. Hosted, or
-              in your own cloud.
-            </p>
+            <p className="mk-hero-note">Hosted, or in your own cloud.</p>
           </div>
           <div className="mk-hero-visual">
-            <VerifyPanel />
-            <p className="mk-caption">
-              Rendered in code from a recorded run in the hosted workspace. The quarantine and
-              schedule panels further down use example data.
-            </p>
+            <ReconciliationLedger />
           </div>
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-problem-title">
+      <section className="mk-section mk-different" aria-labelledby="mk-different-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
-            <h2 id="mk-problem-title">Where data migrations go wrong</h2>
-            <p>Three failures that usually surface after cutover, and what Datawrap does about each one before it.</p>
+            <h2 id="mk-different-title">What makes Datawrap different</h2>
+            <p>Four things a migration usually leaves to scripts and spreadsheets, built into every run.</p>
           </header>
-          <div className="mk-problems">
-            {PROBLEMS.map((p) => (
-              <article key={p.title}>
-                <h3>{p.title}</h3>
-                <p>{p.problem}</p>
-                <p className="mk-problem-answer">
-                  <strong>With Datawrap</strong>
-                  {p.answer}
-                </p>
+          <div className="mk-different-grid">
+            {DIFFERENT.map((d) => (
+              <article key={d.title}>
+                <h3>{d.title}</h3>
+                <p>{d.body}</p>
+                <p className="mk-different-where">Where you see it: {d.where}</p>
               </article>
             ))}
           </div>
@@ -271,7 +257,8 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
             <h2 id="mk-steps-title">Plan, validate, execute, verify, keep the evidence</h2>
             <p>
               The same path runs whether a person starts the load in Transfer Studio, a schedule
-              fires, or an agent calls it through MCP. Each panel shows the recorded run.
+              fires, or an agent calls it through MCP. The panels are examples built from a
+              recorded run.
             </p>
           </header>
           <StepTabs />
@@ -364,14 +351,17 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               </tbody>
             </table>
           </div>
-          <div className="mk-shots">
-            <h3 className="mk-shots-title">The recorded run, in the product</h3>
-            <div className="mk-shots-grid">
-              {PRODUCT_SHOTS.map((s) => (
-                <ProductShot key={s.surface} src={s.shot} alt={s.alt} surface={s.surface} route={s.route} />
-              ))}
-            </div>
-          </div>
+          <figure className="mk-shots">
+            <ProductShot
+              src={WORKSPACE_SHOT.transferMapStage}
+              alt="Transfer Studio map step: every column from public.sales_orders mapped to SALES_ORDERS_REPORTING, each marked safe"
+              surface="Transfer Studio, map step"
+              route={{ source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest }}
+            />
+            <figcaption className="mk-caption">
+              Transfer Studio as it ships: the map a reviewer approves before Validate runs.
+            </figcaption>
+          </figure>
         </div>
       </section>
 

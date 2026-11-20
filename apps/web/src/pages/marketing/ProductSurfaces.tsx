@@ -207,7 +207,7 @@ export function TransferStudioPage({
     <SurfaceShell
       kicker="Transfer Studio"
       title="Plan the load. Check it. Then write it."
-      lead="Pick a source and a destination, review how every column will land, and clear preflight before a single row is written. After the load, Datawrap reads the destination back and compares it with the source. Every screenshot on this page is one real run: 5,100 orders from Postgres into a new Snowflake table."
+      lead="Pick a source and a destination, review how every column will land, and clear preflight before a single row is written. After the load, Datawrap reads the destination back and compares it with the source. The panels and screenshots on this page come from one recorded run, Postgres into a new Snowflake table."
       ctaPrimary="Open Transfer Studio"
       ctaSecondary="See Job space"
       onPrimary={onGetStarted}
@@ -217,10 +217,10 @@ export function TransferStudioPage({
       liveTitle="One load, step by step"
       liveSurface="Transfer Studio"
       stats={[
-        { value: "11 / 11", label: "Columns mapped, none flagged" },
-        { value: "23", label: "Gates checked before the write" },
-        { value: "5,100", label: "Rows written on the Snowflake run" },
-        { value: "5,100 = 5,100", label: "Source and Snowflake, read back" },
+        { value: "Every column", label: "Paired by meaning, with its reason" },
+        { value: "Before the write", label: "Core checks plus the route's own" },
+        { value: "Every row", label: "Landed, held, or skipped by a rule" },
+        { value: "Read back", label: "Counted by the destination's engine" },
       ]}
       next="product-jobs"
       nextLabel="Job space"
@@ -298,8 +298,7 @@ export function TransferStudioPage({
           <p>
             G1 to G9 run on every route. Validate adds policy gates for the route in front of it: a
             new table adds <em>Create destination table</em>, a sync mode with keys adds{" "}
-            <em>Sync contract</em>, a dropped column adds <em>Field reduction governance</em>. The
-            Snowflake load on this page checked 23 gates in 107.7 seconds.
+            <em>Sync contract</em>, a dropped column adds <em>Field reduction governance</em>.
           </p>
           <p>
             On this route Validate approved the plan, including the <code>CREATE TABLE</code> for{" "}
@@ -312,7 +311,7 @@ export function TransferStudioPage({
       <Chapter id="ts-write" kicker="Execute" title="Write path: land the rows, then prove them">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After the checks pass, the engine chunks rows, applies mapped transforms, and writes with the chosen mode. On this run the read-back is 5,100 and 5,100."
+          lead="After the checks pass, the engine chunks rows, applies mapped transforms, and writes with the chosen mode."
           steps={[
             {
               name: "Chunk + transform",
@@ -350,22 +349,22 @@ export function TransferStudioPage({
         <div className="lp-mkt-scenario">
           <ol>
             <li>
-              Source: <code>public.sales_orders</code> on Orders Postgres, 5,100 rows and 11 columns, including{" "}
+              Source: <code>public.sales_orders</code> on Orders Postgres, including{" "}
               <code>DECIMAL(10,2)</code> prices, a <code>TIMESTAMPTZ</code>, and a <code>JSONB</code> attributes column.
             </li>
             <li>
               Destination: a new <code>DW_DEMO.SALES_ORDERS_REPORTING</code> table in Snowflake, full append.
             </li>
             <li>
-              Map: all 11 columns pair by name and type. <code>TIMESTAMPTZ</code> becomes <code>TIMESTAMP_LTZ</code>,{" "}
+              Map: every column pairs by name and type. <code>TIMESTAMPTZ</code> becomes <code>TIMESTAMP_LTZ</code>,{" "}
               <code>JSONB</code> becomes <code>VARIANT</code> through Parse JSON (93% confidence, sample-validated).
             </li>
             <li>
-              Validate: approved. 17 gates passed, and 6 were not part of this route.
+              Validate: approved. Every gate that applies to the route passed.
             </li>
             <li>
-              Run: 5,100 read, 5,100 written, destination count 0 before and 5,100 after. Proof scope is a full
-              checksum with an independent re-read of the source.
+              Run: rows written equal rows read, and the destination count moved by exactly that much. Proof
+              scope is a full checksum with an independent re-read of the source.
             </li>
           </ol>
         </div>
@@ -374,8 +373,8 @@ export function TransferStudioPage({
       <Chapter id="ts-contract" kicker="Contracts" title="Keep the plan you approved">
         <div className="lp-mkt-prose">
           <p>
-            <em>Save contract</em> on Validate stores the approved shape as a versioned contract: 11 columns, 11
-            mappings, and the 23 gate results behind them. Once signed, a schedule can refuse to run when the
+            <em>Save contract</em> on Validate stores the approved shape as a versioned contract: the columns, the
+            mappings, and the gate results behind them. Once signed, a schedule can refuse to run when the
             source or destination no longer matches it.
           </p>
         </div>
@@ -401,7 +400,7 @@ export function JobTheaterPage({
     <SurfaceShell
       kicker="Job space"
       title="Every row landed, and you can get it back"
-      lead="Open a finished run in Job space. The Trust Report reads both sides: 5,100 rows in the source, 5,100 in Snowflake, full checksum match. Reversibility shows 11 of 11 columns round-trip. Both are ready for sign-off."
+      lead="Open a finished run in Job space. The Trust Report reads both sides: rows in the source, rows in the destination, and a full checksum. Reversibility says, column by column, whether the destination can give the source back. Both are ready for sign-off."
       ctaPrimary="Open the app"
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
@@ -411,10 +410,10 @@ export function JobTheaterPage({
       liveTitle="The Snowflake run, read back"
       liveSurface="Job space"
       stats={[
-        { value: "5,100", label: "Rows in source and in Snowflake" },
-        { value: "Match", label: "Full checksum on every table" },
-        { value: "11 / 11", label: "Columns that round-trip" },
-        { value: "3", label: "Roles that sign the report" },
+        { value: "Both sides", label: "Counted by their own engines" },
+        { value: "Checksum", label: "Every row, order-independent" },
+        { value: "Per column", label: "Can the destination give it back" },
+        { value: "By role", label: "Engineering, data owner, compliance" },
       ]}
       next="product-pipelines"
       nextLabel="Schedules"
@@ -424,12 +423,12 @@ export function JobTheaterPage({
         <div className="lp-mkt-prose">
           <p>
             Transfer Studio plans a load; Job space is where you check it. The Trust Report reads both systems:
-            rows in the source, rows in the destination, and a full checksum per table. On the Snowflake run both
-            sides are 5,100, and every table matches.
+            rows in the source, rows in the destination, and a full checksum per table, with the comparison that
+            ran named on each table.
           </p>
           <p>
-            Reversibility answers the cutover question: the destination can give the source data back. On this
-            run all 11 columns round-trip, so a restore reads them from the destination.
+            Reversibility answers the cutover question column by column: can the destination give the source
+            value back? When every column round-trips, a restore reads from the destination.
           </p>
         </div>
         <PacketFlow
@@ -463,7 +462,7 @@ export function JobTheaterPage({
             },
             {
               name: "Compare",
-              detail: "Row counts, checksums, and the census agree. On this run, 5,100 and 5,100.",
+              detail: "Row counts, checksums, and the census agree, or the report names the column and the row that differ.",
             },
             {
               name: "Surface in Job space",
@@ -474,7 +473,8 @@ export function JobTheaterPage({
         <ProofCallout>
           <strong>Every row accounted for.</strong>
           <p>
-            The Snowflake run read 5,100 and wrote 5,100. The destination count and the checksum are on the job.
+            Rows read equal rows landed, plus rows held with a reason, plus rows skipped by a rule. The destination
+            count and the checksum are on the job.
           </p>
         </ProofCallout>
       </Chapter>
@@ -483,7 +483,7 @@ export function JobTheaterPage({
         <ShotBand
           kicker="Proof"
           title="The read-back sits on the job"
-          lead="Job space reads the destination after the write and puts the counts next to the source. On this run, 5,100 and 5,100, full checksum match."
+          lead="Job space reads the destination after the write and puts the counts next to the source, with the checksum result for every table."
           src={WORKSPACE_SHOT.jobTrust}
           alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
           surface="Job space, trust Report"
@@ -661,9 +661,9 @@ export function QueryPlaygroundPage({
       liveTitle="The same question, asked of both systems"
       liveSurface="Query"
       stats={[
-        { value: "5 / 5", label: "Regions identical on both sides" },
-        { value: "3.1 s", label: "Snowflake aggregate, 5,100 rows" },
-        { value: "1,000", label: "Default row limit" },
+        { value: "Both sides", label: "The same question, source and copy" },
+        { value: "Schema", label: "Browser on every saved connection" },
+        { value: "Row limit", label: "On by default" },
         { value: "Read-only", label: "DML refused before it runs" },
       ]}
       next="product-pilot"
@@ -770,7 +770,7 @@ export function DataPilotPage({
       liveTitle="Exact answers from the live tables"
       liveSurface="Datawrap Pilot"
       stats={[
-        { value: "5,100", label: "Rows counted server-side, not sampled" },
+        { value: "Exact", label: "Counted server-side, not sampled" },
         { value: "SQL", label: "Shown under every number" },
         { value: "Local", label: "Engine, no cloud AI key" },
         { value: "Confirm", label: "Before anything changes" },
@@ -783,9 +783,9 @@ export function DataPilotPage({
         <div className="lp-mkt-prose">
           <p>
             Pilot turns a question into a query against the right connection and says what it ran. Asked how many
-            rows <code>sales_orders</code> holds, it answered 5,100, marked the result as an exact server-side
+            rows <code>sales_orders</code> holds, it answered with an exact server-side count, marked it as an
             aggregate rather than a sample, and printed the <code>COUNT(*)</code>. Asked for order totals by region,
-            it returned all five regions with the <code>GROUP BY</code> underneath.
+            it returned every region with the <code>GROUP BY</code> underneath.
           </p>
           <p>
             Its own local engine runs in the workspace. Connecting a third-party model in Settings is optional and
@@ -1103,7 +1103,7 @@ export function WarehouseSolutionPage({
               <div><span>Destination write access</span><em>passed</em></div>
               <div><span>Create destination table</span><em>approved DDL</em></div>
               <div><span>Staging capacity</span><em>passed</em></div>
-              <div><span>Gates</span><em>17 passed · Execute unlocked</em></div>
+              <div><span>Gates</span><em>passed, Execute unlocked</em></div>
             </aside>
           </div>
         </section>
@@ -1117,7 +1117,7 @@ export function WarehouseSolutionPage({
               <h2>Upsert, append, or overwrite — validated</h2>
               <p>
                 Each driver offers the bulk modes it supports, with MERGE upserts on Snowflake and
-                BigQuery. The Snowflake run wrote 5,100 of 5,100.
+                BigQuery.
               </p>
               <ul className="lp-wh-list">
                 <li>Driver-aware load jobs with quarantine samples</li>

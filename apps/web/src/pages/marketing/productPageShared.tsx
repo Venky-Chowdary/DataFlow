@@ -197,7 +197,7 @@ export function LiveProductReel({
       <div className="lp-mkt-live-reel-head">
         <span className="lp-mkt-live-pill">Live workspace</span>
         <h3>{title}</h3>
-        <p>Captured in the hosted workspace on a real Postgres → Snowflake load of 5,100 orders.</p>
+        <p>Captured in the hosted workspace on a recorded Postgres to Snowflake load.</p>
       </div>
       <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" surface={surface} />
     </div>

@@ -21,7 +21,7 @@ const CEILINGS = {
   rawHexUses: 2401,       // #[0-9a-f]{3,8} outside token definitions
   distinctHex: 242,
   important: 2336,        // !important declarations
-  rawRadius: 1139,        // border-radius: <number>
+  rawRadius: 1128,        // border-radius: <number>
 };
 
 const HEX = /#[0-9a-fA-F]{3,8}\b/g;
