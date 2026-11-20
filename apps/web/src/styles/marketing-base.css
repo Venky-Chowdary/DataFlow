@@ -8,6 +8,7 @@
 @import "./landing.css";
 @import "./marketing-layout.css";
 @import "./marketing-system.css";
+@import "./marketing-statement.css";
 
 /* Shared marketing rules. The design system for the public site lives in
    marketing-system.css; the legacy subpage sheets load around it. */

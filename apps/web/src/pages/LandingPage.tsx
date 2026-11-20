@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import {
   CoveragePanel,
   EvidencePanel,
   GatesPanel,
   PlanPanel,
   QuarantinePanel,
-  ReconciliationLedger,
-  ScheduleTimeline,
   VerifyPanel,
 } from "../components/marketing/ProductPanels";
+import { StatementHero } from "../components/marketing/StatementHero";
 import {
   PROVEN_CDC_SOURCES,
   catalogHonestyLead,
@@ -138,168 +137,134 @@ function RouteLink({
   );
 }
 
-function useWide(query = "(min-width: 1024px)") {
-  const [wide, setWide] = useState(() => {
-    try {
-      return window.matchMedia(query).matches;
-    } catch {
-      return true;
-    }
-  });
-  useEffect(() => {
-    let mq: MediaQueryList;
-    try {
-      mq = window.matchMedia(query);
-    } catch {
-      return;
-    }
-    const on = () => setWide(mq.matches);
-    on();
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, [query]);
-  return wide;
-}
-
 /**
- * The five steps as scrollytelling: the text scrolls on the left while one
- * sticky panel on the right changes to the step crossing the middle of the
- * viewport. A panel mounts the first time its step is reached, so its
- * one-time motion plays where it can be seen. On phones each step is
- * followed by its own panel, and nothing is pinned.
+ * The path every load takes, as a selector: choosing a step swaps in that
+ * step's product panel. Motion here only answers the click.
  */
-function StepsScrolly() {
-  const wide = useWide();
+function PathSelector() {
   const [active, setActive] = useState(0);
-  const [seen, setSeen] = useState<Set<number>>(() => new Set([0]));
-  const items = useRef<Array<HTMLLIElement | null>>([]);
+  const tabs = useRef<Array<HTMLButtonElement | null>>([]);
+  const step = STEPS[active];
 
-  useEffect(() => {
-    if (!wide || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const i = Number((entry.target as HTMLElement).dataset.step);
-          setActive(i);
-          setSeen((prev) => (prev.has(i) ? prev : new Set(prev).add(i)));
-        }
-      },
-      { rootMargin: "-45% 0px -45% 0px" },
-    );
-    for (const el of items.current) if (el) io.observe(el);
-    return () => io.disconnect();
-  }, [wide]);
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const last = STEPS.length - 1;
+    let next = active;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = active === last ? 0 : active + 1;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = active === 0 ? last : active - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else return;
+    e.preventDefault();
+    setActive(next);
+    tabs.current[next]?.focus();
+  };
 
   return (
-    <div className={`mk-scrolly${wide ? " is-wide" : ""}`}>
-      <ol className="mk-scrolly-steps">
+    <div className="mk-path">
+      <div className="mk-path-track" role="tablist" aria-label="The five steps of a load" onKeyDown={onKey}>
         {STEPS.map((s, i) => (
-          <li
+          <button
             key={s.id}
             ref={(el) => {
-              items.current[i] = el;
+              tabs.current[i] = el;
             }}
-            data-step={i}
-            className={wide && i === active ? "is-active" : undefined}
-            aria-current={wide && i === active ? "step" : undefined}
+            type="button"
+            role="tab"
+            id={`mk-path-tab-${s.id}`}
+            aria-selected={i === active}
+            aria-controls={`mk-path-panel-${s.id}`}
+            tabIndex={i === active ? 0 : -1}
+            className={`mk-path-stop${i === active ? " is-active" : ""}${i < active ? " is-past" : ""}`}
+            onClick={() => setActive(i)}
           >
-            <p className="mk-scrolly-name">
-              <span className="mk-step-num" aria-hidden>
-                {i + 1}
-              </span>
-              {s.name}
-            </p>
-            <h3>{s.title}</h3>
-            <p>{s.body}</p>
-            <ul className="mk-facts">
-              {s.facts.map((fact) => (
-                <li key={fact}>{fact}</li>
-              ))}
-            </ul>
-            {!wide ? <div className="mk-scrolly-inline">{s.panel}</div> : null}
-          </li>
+            <span className="mk-path-num" aria-hidden>
+              {i + 1}
+            </span>
+            <span className="mk-path-name">{s.name}</span>
+          </button>
         ))}
-      </ol>
-      {wide ? (
-        <div className="mk-scrolly-stage">
-          <p className="mk-scrolly-progress" aria-hidden>
-            Step {active + 1} of {STEPS.length}: {STEPS[active].name}
-          </p>
-          <div className="mk-scrolly-panels">
-            {STEPS.map((s, i) => (
-              <div
-                key={s.id}
-                className={`mk-scrolly-panel${i === active ? " is-active" : ""}`}
-                aria-hidden={i === active ? undefined : true}
-                inert={i === active ? undefined : true}
-              >
-                {seen.has(i) ? s.panel : null}
-              </div>
+      </div>
+      <div
+        className="mk-path-body"
+        role="tabpanel"
+        id={`mk-path-panel-${step.id}`}
+        aria-labelledby={`mk-path-tab-${step.id}`}
+        key={step.id}
+      >
+        <div className="mk-path-copy">
+          <h3>{step.title}</h3>
+          <p>{step.body}</p>
+          <ul className="mk-facts">
+            {step.facts.map((fact) => (
+              <li key={fact}>{fact}</li>
             ))}
-          </div>
+          </ul>
         </div>
-      ) : null}
+        <div className="mk-path-panel">{step.panel}</div>
+      </div>
     </div>
   );
 }
 
+const BINS: { id: "landed" | "held" | "skipped"; name: string; what: string; where: string }[] = [
+  {
+    id: "landed",
+    name: "Landed",
+    what: "Written, then counted by the destination's own engine and compared with what was read. Only a full comparison is called proven.",
+    where: "Trust Report",
+  },
+  {
+    id: "held",
+    name: "Held",
+    what: "A row the destination refused, kept with its column, value, and reason instead of stopping the load. Fix the cause and replay it into the same table.",
+    where: "Quarantine",
+  },
+  {
+    id: "skipped",
+    name: "Skipped",
+    what: "Excluded by a rule you set, such as a filter or a dedupe key, and named in the statement. A row that is none of the three is reported as potential loss.",
+    where: "Run summary",
+  },
+];
+
 export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
   return (
-    <div className="mk-page">
-      <section className="mk-hero" aria-labelledby="mk-hero-title">
-        <div className="mk-wrap mk-hero-grid">
+    <div className="mk-page mk-home">
+      <section className="mk-hero mk-hero--statement" aria-labelledby="mk-hero-title">
+        <div className="mk-wrap">
           <div className="mk-hero-copy">
-            <p className="mk-hero-kicker">Data migration and sync</p>
-            <h1 id="mk-hero-title">
-              Every row,
-              <br />
-              accounted for.
-            </h1>
+            <h1 id="mk-hero-title">Every row, accounted for.</h1>
             <p className="mk-lead">
-              Datawrap moves data between databases, warehouses, files, and streams, and shows
-              where every row went: landed and counted by the destination, held with a reason,
-              or skipped by a rule you set.
+              Datawrap moves data between databases, warehouses, files, and streams, and gives you a
+              statement for every run: what was read, what landed, what was held and why, and what a
+              rule skipped.
             </p>
             <div className="mk-actions">
               <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
                 Start free
               </button>
-              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--ghost-on-dark mk-btn--lg">
-                Contact sales
+              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+                Talk to an engineer
               </RouteLink>
             </div>
-            <p className="mk-hero-note">Hosted by default. Self-managed in your own cloud on the Enterprise plan.</p>
           </div>
-          <div className="mk-hero-visual">
-            <ReconciliationLedger />
-          </div>
+          <StatementHero />
         </div>
       </section>
 
-      <section className="mk-section mk-different" aria-labelledby="mk-different-title">
+      <section className="mk-section" aria-labelledby="mk-bins-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
-            <h2 id="mk-different-title">What goes wrong without it</h2>
-            <p>Four things a migration usually leaves to scripts and spreadsheets, and what Datawrap does instead on every run.</p>
+            <h2 id="mk-bins-title">Where every row went</h2>
+            <p>Each run sorts every row it read into one of three places. The statement only balances when they add up.</p>
           </header>
-          <dl className="mk-contrast">
-            <div className="mk-contrast-head" aria-hidden>
-              <span />
-              <span>Without it</span>
-              <span>With Datawrap</span>
-            </div>
-            {DIFFERENT.map((d) => (
-              <div key={d.title} className="mk-contrast-row">
-                <dt>{d.title}</dt>
-                <dd className="mk-contrast-without">
-                  <span className="mk-contrast-label">Without it: </span>
-                  {d.without}
-                </dd>
-                <dd className="mk-contrast-with">
-                  <span className="mk-contrast-label">With Datawrap: </span>
-                  {d.with}
-                  <span className="mk-different-where">Where you see it: {d.where}</span>
+          <dl className="mk-bins">
+            {BINS.map((b) => (
+              <div key={b.id} className={`mk-bin mk-bin--${b.id}`}>
+                <dt>{b.name}</dt>
+                <dd>
+                  <p>{b.what}</p>
+                  <p className="mk-bin-where">You see it in {b.where}</p>
                 </dd>
               </div>
             ))}
@@ -310,27 +275,80 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
       <section className="mk-section mk-section--band" aria-labelledby="mk-steps-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
-            <h2 id="mk-steps-title">Plan, validate, execute, verify, keep the evidence</h2>
+            <h2 id="mk-steps-title">The path every load takes</h2>
             <p>
-              The same path runs whether a person starts the load in Transfer Studio, a schedule
-              fires, or an agent calls it through MCP. The panels are examples built from a
-              recorded run.
+              The same five steps run whether a person starts the load in Transfer Studio, a schedule
+              fires, or an agent calls it through MCP. Each panel is an example built from a recorded run.
             </p>
           </header>
-          <StepsScrolly />
+          <PathSelector />
         </div>
       </section>
 
-      <section className="mk-section mk-section--band" aria-labelledby="mk-sync-title">
+      <section className="mk-section" aria-labelledby="mk-different-title">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-different-title">What a migration usually leaves to chance</h2>
+            <p>Four gaps that scripts and spreadsheets leave open, and what Datawrap does on every run instead.</p>
+          </header>
+          <dl className="mk-contrast">
+            <div className="mk-contrast-head" aria-hidden>
+              <span />
+              <span>Usually</span>
+              <span>With Datawrap</span>
+            </div>
+            {DIFFERENT.map((d) => (
+              <div key={d.title} className="mk-contrast-row">
+                <dt>{d.title}</dt>
+                <dd className="mk-contrast-without">
+                  <span className="mk-contrast-label">Usually: </span>
+                  {d.without}
+                </dd>
+                <dd className="mk-contrast-with">
+                  <span className="mk-contrast-label">With Datawrap: </span>
+                  {d.with}
+                  <span className="mk-different-where">You see it in {d.where}</span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
+
+      <section className="mk-section mk-section--band" aria-labelledby="mk-verdict-title">
+        <div className="mk-wrap">
+          <header className="mk-section-head">
+            <h2 id="mk-verdict-title">Five verdicts, and only one is called proven</h2>
+            <p>
+              Each table carries the comparison that actually ran: full checksum, key diff, sample, or
+              count. The Trust Report turns it into a verdict a reviewer can sign, or says there is
+              nothing to sign yet.
+            </p>
+          </header>
+          <ol className="mk-scale" aria-label="Trust Report verdicts, strongest first">
+            {VERDICTS.map((v) => (
+              <li key={v.name} className={`mk-scale-step mk-scale-step--${v.tone}`}>
+                <span className="mk-scale-name">{v.name}</span>
+                <span className="mk-scale-meaning">{v.meaning}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </section>
+
+      <section className="mk-section" aria-labelledby="mk-conn-title">
         <div className="mk-wrap mk-split">
           <header className="mk-section-head mk-section-head--stack">
-            <h2 id="mk-sync-title">Keep two systems in step</h2>
-            <p>Put an approved transfer on a schedule. Each run is held to the standard of the first.</p>
+            <h2 id="mk-conn-title">Coverage, stated by what CI proves</h2>
+            <p>
+              {catalogHonestyLead()} Every family goes through the same map, checks, and quarantine.
+            </p>
             <dl className="mk-terms">
               <div>
                 <dt>Sync modes</dt>
                 <dd>
                   {SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)}: {syncModesList()}.
+                  Each scheduled run is held to the standard of the first.
                 </dd>
               </div>
               <div>
@@ -342,55 +360,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
                 </dd>
               </div>
             </dl>
-          </header>
-          <div className="mk-split-visual">
-            <ScheduleTimeline />
-          </div>
-        </div>
-      </section>
-
-      <section className="mk-section" aria-labelledby="mk-verdict-title">
-        <div className="mk-wrap">
-          <div className="mk-split">
-            <header className="mk-section-head mk-section-head--stack">
-              <h2 id="mk-verdict-title">Five verdicts, and only one is called proven</h2>
-              <p>
-                Each table carries the comparison that actually ran: full checksum, key diff,
-                sample, or count. The Trust Report turns it into a verdict a reviewer can sign, or
-                says there is nothing to sign yet.
-              </p>
-            </header>
-            <table className="mk-verdicts">
-              <caption>Trust Report verdicts</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Verdict</th>
-                  <th scope="col">What it means</th>
-                </tr>
-              </thead>
-              <tbody>
-                {VERDICTS.map((v) => (
-                  <tr key={v.name}>
-                    <th scope="row">
-                      <span className={`mk-verdict mk-verdict--${v.tone}`}>{v.name}</span>
-                    </th>
-                    <td>{v.meaning}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section className="mk-section mk-section--band" aria-labelledby="mk-conn-title">
-        <div className="mk-wrap mk-split">
-          <header className="mk-section-head mk-section-head--stack">
-            <h2 id="mk-conn-title">Connector coverage, stated by what CI proves</h2>
-            <p>
-              {catalogHonestyLead()} Every family goes through the same map, checks, and
-              quarantine.
-            </p>
             <div className="mk-actions">
               <RouteLink route="integrations" onNavigate={onNavigate} className="mk-btn mk-btn--secondary">
                 See every driver
@@ -403,7 +372,7 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-controls-title">
+      <section className="mk-section mk-section--band" aria-labelledby="mk-controls-title">
         <div className="mk-wrap">
           <header className="mk-section-head">
             <h2 id="mk-controls-title">Security and deployment</h2>
@@ -441,31 +410,41 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-closing" aria-labelledby="mk-closing-title">
-        <div className="mk-wrap mk-closing-grid">
-          <div>
-            <h2 id="mk-closing-title">Run a transfer on your own data</h2>
-            <p>
-              Start with a free workspace and a table you know well, or ask for a scoped pilot on
-              your own sources with a solutions engineer.
-            </p>
+      <section className="mk-signoff" aria-labelledby="mk-closing-title">
+        <div className="mk-wrap">
+          <h2 id="mk-closing-title">Run your first statement on your own data</h2>
+          <p className="mk-signoff-lead">
+            Start with a free workspace and a table you know well, or ask for a scoped pilot on your
+            own sources with a solutions engineer.
+          </p>
+          <ul className="mk-signoff-lines" aria-label="Who signs a Datawrap report">
+            <li>
+              <span className="mk-signoff-rule" aria-hidden />
+              Engineering
+            </li>
+            <li>
+              <span className="mk-signoff-rule" aria-hidden />
+              Data owner
+            </li>
+            <li>
+              <span className="mk-signoff-rule" aria-hidden />
+              Compliance
+            </li>
+          </ul>
+          <div className="mk-actions">
+            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+              Start free
+            </button>
+            <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+              Request a pilot
+            </RouteLink>
           </div>
-          <div className="mk-closing-actions">
-            <div className="mk-actions">
-              <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-                Start free
-              </button>
-              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
-                Request a pilot
-              </RouteLink>
-            </div>
-            <p className="mk-caption">
-              Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
-              <RouteLink route="demos" onNavigate={onNavigate}>
-                Watch recorded runs
-              </RouteLink>
-            </p>
-          </div>
+          <p className="mk-caption">
+            Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
+            <RouteLink route="demos" onNavigate={onNavigate}>
+              Watch recorded runs
+            </RouteLink>
+          </p>
         </div>
       </section>
     </div>

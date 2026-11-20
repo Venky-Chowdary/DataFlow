@@ -29,7 +29,7 @@ function helpDocFigureSources(): string[] {
 describe("marketing product photography", () => {
   it("home renders the product as UI in code, with no raster screenshots", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /<ReconciliationLedger \/>/);
+    assert.match(home, /<StatementHero \/>/);
     assert.doesNotMatch(home, /ProductShot|<img/);
     assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
     assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);

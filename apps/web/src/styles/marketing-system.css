@@ -3015,19 +3015,9 @@ html[data-theme="dark"] .mk {
   }
 }
 
-/* ── Panels assemble once: rows settle in a short stagger ───────── */
-
-@media (prefers-reduced-motion: no-preference) {
-  .mk-assemble [style*="--i"] {
-    transition: opacity 0.34s ease, transform 0.34s ease;
-    transition-delay: calc(var(--i, 0) * 40ms);
-  }
-
-  .mk-assemble:not(.is-in) [style*="--i"] {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-}
+/* Panels used to hide their rows until scrolled into view; a fast scroll
+   or a full-page capture showed empty frames (pass 4 audit). Panel content
+   is now always visible. */
 
 /* ── New panels ─────────────────────────────────────────────────── */
 
