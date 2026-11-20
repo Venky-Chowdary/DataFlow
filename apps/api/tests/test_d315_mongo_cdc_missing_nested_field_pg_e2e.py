@@ -136,10 +136,6 @@ def test_first_cdc_copy_lands_missing_nested_fields_as_null(isolated, semantics)
         job = isolated.get_job(job_id)
         assert int(job.get("rejected_rows") or 0) == 0, job.get("rejected_rows")
         assert _landed(name) == {d["_id"]: _expected(d) for d in docs}
-        if semantics:
-            # A second exactly-once run on this route fails on base already
-            # ("redelivery checksum mismatch"), independent of missing fields.
-            return
 
         # Change tracking keeps applying documents that lack the field.
         coll.insert_one({"_id": 31, "name": "n31"})

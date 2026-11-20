@@ -36,6 +36,8 @@ class LogCaptureProbe:
     reader: str = ""
     cause: str = ""
     detail: str = ""
+    #: The run-time remedy when the reader itself classified the refusal.
+    remedy: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,11 +62,25 @@ def is_postgres_log_source(kind: str) -> bool:
     return engine_flavour(kind) in {"postgresql", "cockroachdb"} or kind in _POSTGRES_GRAMMAR
 
 
-def _try_reader(cls: Any, cfg: dict[str, Any], **kwargs: Any) -> tuple[bool | None, Any]:
+def _try_reader(
+    cls: Any,
+    cfg: dict[str, Any],
+    *,
+    on_available: Any = None,
+    **kwargs: Any,
+) -> tuple[bool | None, Any]:
+    """Open the run's reader and ask whether it attaches.
+
+    ``on_available`` runs on the open reader (before it is closed) when it
+    attaches, for checks that need the reader's own session.
+    """
     reader = None
     try:
         reader = cls({**cfg, "job_id": "", "lease_holder_id": ""}, **kwargs)
-        return bool(reader.is_available()), reader
+        ok = bool(reader.is_available())
+        if ok and on_available is not None:
+            on_available(reader)
+        return ok, reader
     except Exception as exc:  # noqa: BLE001
         _logger.debug("CDC log-capture probe %s failed: %s", cls.__name__, exc)
         return None, exc
@@ -145,13 +161,21 @@ def probe_log_capture(
             return LogCaptureProbe(dialect="mongodb", available=None)
         from connectors.mongodb_change_stream import MongodbChangeStreamCdc
 
+        refusal: list[Any] = []
         ok, _reader = _try_reader(
             MongodbChangeStreamCdc,
             cfg,
             collection=table,
             primary_key=primary_key or "_id",
             batch_size=1,
+            on_available=lambda reader: refusal.append(reader.delete_keying_refusal()),
         )
+        if ok and refusal and refusal[0] is not None:
+            # A business key without pre-images: Execute refuses at attach (D316).
+            found = refusal[0]
+            return LogCaptureProbe(
+                "mongodb", False, "change_stream", found.cause, found.detail, found.remedy
+            )
         if ok:
             return LogCaptureProbe("mongodb", True, "change_stream")
         if ok is False:
@@ -303,7 +327,12 @@ def build_log_capture_gate(
             "details": probe.to_dict(),
         }
     if probe.cause and probe.cause != CAUSE_SERVER_NOT_CONFIGURED:
-        refusal = classify_log_capture_failure(probe.dialect, probe.detail)
+        # A refusal the reader classified itself keeps Execute's exact text.
+        refusal = (
+            LogCaptureRefusal(probe.cause, probe.detail, probe.remedy)
+            if probe.remedy
+            else classify_log_capture_failure(probe.dialect, probe.detail)
+        )
         return {
             "id": "g9c_cdc_log_capture",
             "status": block_status,
