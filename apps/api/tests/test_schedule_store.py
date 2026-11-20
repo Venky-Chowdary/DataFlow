@@ -254,3 +254,29 @@ def test_fidelity_campaign_survives_reload(temp_store):
     assert reloaded is not None
     assert reloaded.fidelity_campaign["verdict"] == "in_progress"
     assert reloaded.fidelity_campaign["history"][0]["passed"] is True
+
+
+def test_recreate_keeps_an_operator_pause(temp_store):
+    """Only a draft parked for missing mappings is enabled by a later create."""
+    body = {
+        "name": "Nightly paused",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    }
+    live = store.create_schedule(dict(body))
+    assert live.enabled is True
+    paused = store.update_schedule(live.id, {"enabled": False})
+    assert paused.enabled is False
+    again = store.create_schedule(dict(body, replay_schedule_id=live.id))
+    assert again.id == live.id
+    assert again.enabled is False
+    draft = store.create_schedule(dict(body, name="Explicit draft", dest_table="d2",
+                                       mappings=[], enabled=False))
+    assert draft.enabled is False
+    mapped = store.create_schedule(dict(body, name="Explicit draft", dest_table="d2"))
+    assert mapped.id == draft.id
+    assert mapped.enabled is False
