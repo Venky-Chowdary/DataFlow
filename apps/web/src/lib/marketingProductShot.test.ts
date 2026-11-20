@@ -27,10 +27,12 @@ function helpDocFigureSources(): string[] {
 }
 
 describe("marketing product photography", () => {
-  it("home hero stages the Studio map on the demo route, and the run screenshots stay off the homepage", () => {
+  it("home renders the recorded run as product UI, and shows the Studio map and Trust Report captures", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /ProductShot/);
+    assert.match(home, /<VerifyPanel \/>/);
     assert.match(home, /shot: WORKSPACE_SHOT\.transferMapStage/);
+    assert.match(home, /shot: WORKSPACE_SHOT\.jobTrust/);
     assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
     assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);
     assert.match(home, /DEMO_ROUTE\.source/);
@@ -50,8 +52,7 @@ describe("marketing product photography", () => {
 
   it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /shot: WORKSPACE_SHOT\.transferSource/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.schedulesHistory\}/);
+    assert.match(home, /src=\{s\.shot\}/);
     assert.doesNotMatch(home, /\/docs\/screenshots\//);
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });

@@ -3,7 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import { ProductShot } from "../../components/marketing/ProductShot";
-import { RunLedger } from "../../components/marketing/RunLedger";
+import { VerifyPanel } from "../../components/marketing/ProductPanels";
 import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
@@ -527,7 +527,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         title={<>One run, counted on both sides.</>}
         lead={
           <>
-            The run summary beside this text is a recorded load: 5,100 orders from Postgres into
+            The Trust Report beside this text is from a recorded load: 5,100 orders from Postgres into
             Snowflake, every column mapped, full checksum match. A pilot produces the same record
             on your own sources and destinations.
           </>
@@ -548,7 +548,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: String(PENDING_DRIVERS), label: "More implemented, in CI proof" },
           { value: String(PROVEN_CDC_SOURCES.length), label: "CDC sources proven in CI" },
         ]}
-        aside={<RunLedger />}
+        aside={<VerifyPanel />}
       />
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
