@@ -298,3 +298,95 @@ def test_mcp_plan_never_proposes_a_foreign_key_onto_the_destination_primary_key(
         cur.execute(f'DROP TABLE IF EXISTS "{src_t}"')
         cur.execute(f'DROP TABLE IF EXISTS "{dst_t}"')
         conn.close()
+
+
+#: Run 1 created these keys from accented source names through the product's
+#: own sanitiser (D55); run 2 flags them as the destination primary key.
+_OWN_KEYS = [
+    ("Número", "numero"),
+    ("Código Cliente", "codigo_cliente"),
+    ("Straße_id", "strasse_id"),
+]
+
+
+@pytest.mark.parametrize("source, key", _OWN_KEYS)
+def test_run_two_keeps_the_key_datawrap_created_from_an_accented_source(source, key) -> None:
+    """Review M2: the key guard dropped the key mapping onto Datawrap's own PK.
+
+    ``map_columns`` proposed ``Número -> numero`` (D55 transliterates), but the
+    key-rule post-filter compared untransliterated names and removed it, so a
+    run-2 upsert lost its key and an append wrote NULL into the PK.
+    """
+    from services.mapping_pipeline import run_mapping_pipeline
+    from services.semantic_mapper import mapping_violates_key_rule
+
+    assert not mapping_violates_key_rule(source, key, {"primary_key": True})
+    result = run_mapping_pipeline(
+        [source, "name"],
+        [key, "name"],
+        source_schemas=_src(source, "name"),
+        target_schemas=with_key_flags(_tgt(key, "name"), {"primary_key_columns": [key]}),
+        destination_db_type="postgresql",
+        source_db_type="postgresql",
+        sync_mode="incremental_upsert",
+        destination_table_exists=True,
+        validation_mode="balanced",
+        use_llm=False,
+    )
+    assert {(source, key), ("name", "name")} <= _pairs(result["mappings"]), result["mappings"]
+
+
+def test_the_sanitised_name_rule_still_refuses_an_unrelated_key() -> None:
+    from services.semantic_mapper import mapping_violates_key_rule
+
+    flag = {"primary_key": True}
+    assert mapping_violates_key_rule("customer_id", "id", flag)
+    assert mapping_violates_key_rule("Número", "numero_id", flag)
+    assert mapping_violates_key_rule("id", "_id")
+
+
+def test_mcp_plan_maps_the_accented_source_onto_its_own_created_key(store) -> None:
+    """Live: run 2 of ``("Número", "Código Cliente", name)`` into the table run 1 made."""
+    if not _up(5432) or not os.environ.get("PGPASSWORD"):
+        pytest.skip("PostgreSQL not configured")
+    import psycopg2
+
+    from src.ai.copilot import transfer_tools
+
+    src_t = "d369as_" + uuid.uuid4().hex[:8]
+    dst_t = "d369ad_" + uuid.uuid4().hex[:8]
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow",
+        password=os.environ["PGPASSWORD"],
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute(f'CREATE TABLE "{src_t}" ("Número" integer, "Código Cliente" text, name text)')
+        cur.execute(f'INSERT INTO "{src_t}" VALUES (7, %s, %s), (8, %s, %s)', ("c7", "ada", "c8", "beau"))
+        cur.execute(
+            f'CREATE TABLE "{dst_t}" (numero integer, codigo_cliente text, name text, '
+            "PRIMARY KEY (numero, codigo_cliente))"
+        )
+        common = dict(
+            type="postgresql", host="127.0.0.1", port=5432, database="dataflow",
+            username="dataflow", password=os.environ["PGPASSWORD"], ssl=False, workspace_id="",
+        )
+        source = store.create_connector({"name": "d369a-src-" + src_t, "role": "source", **common})
+        dest = store.create_connector({"name": "d369a-dst-" + dst_t, "role": "destination", **common})
+        result = transfer_tools.plan_transfer(
+            source_connector_id=str(source.id),
+            source_table=src_t,
+            dest_connector_id=str(dest.id),
+            dest_table=dst_t,
+            sync_mode="full_refresh_overwrite",
+        )
+        assert result.success, result.error
+        mappings = result.output.get("engine_mappings") or result.output.get("mappings") or []
+        assert {("Número", "numero"), ("Código Cliente", "codigo_cliente"), ("name", "name")} <= _pairs(
+            mappings
+        ), mappings
+    finally:
+        cur.execute(f'DROP TABLE IF EXISTS "{src_t}"')
+        cur.execute(f'DROP TABLE IF EXISTS "{dst_t}"')
+        conn.close()

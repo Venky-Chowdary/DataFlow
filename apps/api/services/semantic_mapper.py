@@ -154,7 +154,9 @@ def mapping_violates_key_rule(
     """Rule 4. Unlocked fuzzy or model pairs do not land on ``_id`` or a key.
 
     An operator-locked mapping is the declared key, including ``id`` onto
-    ``_id``. A name-identical source may also land on a primary key.
+    ``_id``. A name-identical source may also land on a primary key, and
+    "identical" is :func:`name_identical`: the key Datawrap created from
+    ``Número`` is ``numero`` (D55), so run 2 must map it (review M2).
     """
     if operator_locked:
         return False
@@ -162,7 +164,7 @@ def mapping_violates_key_rule(
         return True
     if not column_is_protected_key(target, schema):
         return False
-    return _folded_ident(source).lower() != _folded_ident(target).lower()
+    return not name_identical(source, target)
 
 
 def _folded_ident(name: str) -> str:
