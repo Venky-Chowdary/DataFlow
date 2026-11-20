@@ -878,8 +878,13 @@ def _score_pair(
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
 
-    src_norm = _normalize(source)
-    tgt_norm = _normalize(target)
+    from connectors.sql_identifiers import transliterate_identifier
+
+    # An accented letter is its transliteration, as Datawrap's own sanitiser
+    # writes it: ``naïve col`` onto the ``naive_col`` it created is the exact
+    # name, not a one-token overlap (D55).
+    src_norm = _normalize(transliterate_identifier(source))
+    tgt_norm = _normalize(transliterate_identifier(target))
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
     if is_reserved_document_key(target) and not name_identical(source, target):
