@@ -24,6 +24,7 @@ import { clearSession, readSession, sessionDisplayName, writeSession } from "./l
 import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
+import { connectorListFailed, connectorListLoaded, connectorListPatched, connectorListStarted, connectorListView, initialConnectorList } from "./lib/connectorListLoad";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -156,13 +157,17 @@ function AppShell({
   const [helpArticle, setHelpArticle] = useState<ReturnType<typeof signedInHelpArticleFromHash>>(
     () => signedInHelpArticleFromHash(window.location.hash),
   );
-  const [connectors, setConnectors] = useState<Connector[]>([]);
+  // One source of truth for the list, its loading/error state and the nav badge (D410).
+  const [connectorList, setConnectorList] = useState(initialConnectorList<Connector>);
+  const connectors = connectorList.rows;
+  const connectorView = connectorListView(connectorList);
   const [jobHistory, setJobHistory] = useState<JobHistory>(EMPTY_JOB_HISTORY);
   const jobs = jobHistory.jobs;
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
-  /** False until the first connectors fetch settles — prevents false “no connectors” empty states. */
-  const [connectorsReady, setConnectorsReady] = useState(false);
+  /** False while no list has loaded and a request may still answer — never a false “no connectors”. */
+  const connectorsReady = connectorView.kind !== "loading";
+  const connectorsError = connectorView.kind === "error" ? connectorView.message : "";
   const [apiOnline, setApiOnline] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState("");
@@ -292,22 +297,24 @@ function AppShell({
   }, []);
 
   const patchConnector = useCallback((id: string, patch: Partial<Connector>) => {
-    setConnectors((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    );
+    setConnectorList((state) => connectorListPatched(state, id, patch));
   }, []);
 
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     const gen = ++connectorsGen.current;
+    // Tagged with the workspace it is for: an answer for another workspace is
+    // never shown, and an older success is kept when a newer request fails.
+    const workspaceId = getActiveWorkspaceId();
+    setConnectorList((state) => connectorListStarted(state, { gen, workspaceId }));
     try {
       const rows = await fetchConnectors();
-      if (isStaleGeneration(gen, connectorsGen.current)) return;
-      setConnectors(rows);
+      setConnectorList((state) => connectorListLoaded(state, { gen, workspaceId, rows }));
       noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
-      if (isStaleGeneration(gen, connectorsGen.current)) return;
       const msg = err instanceof Error ? err.message : "";
+      setConnectorList((state) => connectorListFailed(state, { gen, workspaceId, message: msg }));
+      if (isStaleGeneration(gen, connectorsGen.current)) return;
       const authOnly = /authentication required|sign in|401/i.test(msg);
       const timedOut = /timed out|abort/i.test(msg);
       // 401/session is not an outage — Railway /health can still be green.
@@ -340,8 +347,6 @@ function AppShell({
         }
       }
       // Below threshold: keep previous online state (no flicker).
-    } finally {
-      if (!isStaleGeneration(gen, connectorsGen.current)) setConnectorsReady(true);
     }
   }, [toast]);
 
@@ -942,6 +947,7 @@ function AppShell({
                   <ConnectorsPage
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
+                    connectorsError={connectorsError}
                     jobs={jobs}
                     schedules={schedules}
                     onAdd={openModal}
