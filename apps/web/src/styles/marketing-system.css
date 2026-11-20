@@ -2382,3 +2382,78 @@ html[data-theme="dark"] .mk {
 .lp.mk .docs-space-nav-mobile summary em {
   color: var(--df-brand-text);
 }
+
+/* Legacy subpage blocks drawn as cards become hairline-ruled items: the
+   rule carries the grouping, the page surface stays one plane. */
+.lp.mk .lp-scene-card,
+.lp.mk .lp-mkt-algo-steps li,
+.lp.mk .lp-mkt-scenario li,
+.lp.mk .lp-sales-honesty li {
+  border: 0;
+  border-top: 1px solid var(--mk-rule-strong);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.lp.mk .lp-scene-card {
+  padding: 20px 0 4px;
+}
+
+.lp.mk .lp-scene-card::before,
+.lp.mk .lp-scene-card::after {
+  content: none;
+}
+
+.lp.mk .lp-mkt-proof-callout {
+  border: 0;
+  border-left: 2px solid var(--mk-verified);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Enterprise control snapshot: a product-style panel, not a dark slab. */
+.lp.mk .lp-ent-panel,
+.lp.mk .lp-ent-engine .lp-ent-panel {
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--mk-radius-panel);
+  background: var(--mk-panel);
+  background-image: none;
+  box-shadow: none;
+  color: var(--mk-ink);
+}
+
+.lp.mk .lp-ent-panel * {
+  color: inherit;
+}
+
+.lp.mk .lp-ent-panel-row {
+  border-color: var(--mk-rule);
+}
+
+.lp.mk .lp-ent-panel-row em {
+  color: var(--mk-ink-2);
+  font-style: normal;
+}
+
+/* Security: the agents block sits on the page, not on a gradient wash. */
+.lp.mk .lp-sec-agent {
+  border: 0;
+  border-top: 1px solid var(--mk-rule-strong);
+  border-radius: 0;
+  background: transparent;
+  background-image: none;
+  box-shadow: none;
+  padding-inline: 0;
+}
+
+/* Pricing: the recommended column is marked by a tint that follows the theme. */
+.lp.mk .lp-pricing-v2-table .is-hot {
+  background: var(--mk-verified-bg);
+}
+
+.lp.mk #vulnerability-disclosure p + p,
+.lp.mk .lp-mkt-prose p + p {
+  margin-top: 12px;
+}

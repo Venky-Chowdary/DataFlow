@@ -3,6 +3,7 @@ import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand"
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { ProductShot } from "../../components/marketing/ProductShot";
+import { GatesPanel, PlanPanel, RunPanel, ScheduleTimeline, VerifyPanel } from "../../components/marketing/ProductPanels";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { PROVEN_CDC_SOURCES, cdcSourcesPhrase } from "../../lib/provenEvidence";
 import {
@@ -211,14 +212,7 @@ export function TransferStudioPage({
       ctaSecondary="See Job space"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
-      heroVisual={
-        <ProductShot
-          src={WORKSPACE_SHOT.transferMap}
-          alt="Transfer Studio Map step: 11 of 11 sales_orders columns mapped to Snowflake types, all safe"
-          surface="Transfer Studio, map"
-          route={DEMO_ROUTE}
-        />
-      }
+      heroVisual={<GatesPanel />}
       liveFrames={PRODUCT_FRAMES.transfer}
       liveTitle="One load, step by step"
       liveSurface="Transfer Studio"
@@ -412,14 +406,7 @@ export function JobTheaterPage({
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={
-        <ProductShot
-          src={WORKSPACE_SHOT.jobTrust}
-          alt="Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match"
-          surface="Job space, trust Report"
-          route={DEMO_ROUTE}
-        />
-      }
+      heroVisual={<VerifyPanel />}
       liveFrames={PRODUCT_FRAMES.jobs}
       liveTitle="The Snowflake run, read back"
       liveSurface="Job space"
@@ -539,14 +526,7 @@ export function PipelinesPage({
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
-      heroVisual={
-        <ProductShot
-          src={WORKSPACE_SHOT.schedulesDrawer}
-          alt="Orders feed schedule: every 2 minutes, incremental deduped on order_id"
-          surface="Schedules"
-          route={DEMO_SCHEDULE_ROUTE}
-        />
-      }
+      heroVisual={<ScheduleTimeline />}
       liveFrames={PRODUCT_FRAMES.pipelines}
       liveTitle="Schedules, including the one that refused to run"
       liveSurface="Schedules"
@@ -976,14 +956,7 @@ export function MigrationsSolutionPage({
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={
-        <ProductShot
-          src={WORKSPACE_SHOT.transferValidate}
-          alt="Validate approved: 17 gates passed, Execute unlocked for the Snowflake load"
-          surface="Migrations, validate"
-          route={DEMO_ROUTE}
-        />
-      }
+      heroVisual={<PlanPanel />}
       liveFrames={SOLUTION_FRAMES.migrations}
       liveTitle="The same Transfer Studio path that proves a cutover"
       liveSurface="Transfer Studio"
@@ -1093,14 +1066,7 @@ export function WarehouseSolutionPage({
             </button>
           </div>
         }
-        visual={
-          <ProductShot
-            src={WORKSPACE_SHOT.transferRunComplete}
-            alt="Snowflake load finished: 5,100 appended, destination 0 before and 5,100 after, checksum recorded"
-            surface="Warehouse, run step"
-            route={DEMO_ROUTE}
-          />
-        }
+        visual={<RunPanel />}
       />
 
       <section className="lp-wh-rail" aria-label="Destinations">
@@ -1212,22 +1178,22 @@ export function WarehouseSolutionPage({
         />
       </MarketingReveal>
 
-      <section className="lp-wh-cta">
-        <div className="lp-shell lp-wh-cta-inner">
-          <div>
-            <h2>Ready to load with proof?</h2>
-            <p>Start free on the same engine — or talk to us about enterprise warehouse controls.</p>
-          </div>
-          <div className="lp-hero-cta">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-              Load a warehouse
-            </button>
-            <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("solution-sync")}>
-              Next: Recurring sync
-            </button>
-          </div>
-        </div>
-      </section>
+      <MarketingClosing
+        title="Load a warehouse on your own data"
+        body="Start free on the same engine, or talk to sales about enterprise warehouse controls."
+        note={
+          <>
+            Next: <button type="button" className="mk-text-btn mk-text-btn--inline" onClick={() => onNavigate("solution-sync")}>Recurring sync</button>
+          </>
+        }
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+          Load a warehouse
+        </button>
+        <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+          Contact sales
+        </button>
+      </MarketingClosing>
     </div>
   );
 }
