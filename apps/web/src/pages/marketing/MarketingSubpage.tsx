@@ -233,7 +233,7 @@ const PLANS: { tier: Tier; name: string; price: string; who: string; adds: strin
   {
     tier: "team",
     name: "Team",
-    price: "Talk to sales",
+    price: "Custom pricing",
     who: "For a data team that runs loads on a schedule.",
     adds: "Everything in Starter, plus",
     highlights: [
@@ -245,7 +245,7 @@ const PLANS: { tier: Tier; name: string; price: string; who: string; adds: strin
   {
     tier: "enterprise",
     name: "Enterprise",
-    price: "Talk to sales",
+    price: "Custom pricing",
     who: "For organisations with identity, key, and residency requirements.",
     adds: "Everything in Team, plus",
     highlights: [
