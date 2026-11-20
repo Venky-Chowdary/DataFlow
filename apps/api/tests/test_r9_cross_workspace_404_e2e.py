@@ -26,6 +26,8 @@ if str(_TESTS) not in sys.path:
 
 from r9_workspace_world import r9  # noqa: E402,F401
 
+from tests.helpers.error_bodies import assert_indistinguishable  # noqa: E402
+
 MISSING_JOB = "0123456789abcdef01234567"
 
 
@@ -63,6 +65,7 @@ def _same_404(foreign, missing, detail: str) -> None:
     assert foreign.json()["detail"] == missing.json()["detail"] == detail
     assert foreign.json()["error"]["reference"]
     assert _public_error(foreign.json()) == _public_error(missing.json())
+    assert_indistinguishable(foreign, missing)  # U2 / R11: the whole body
 
 
 def test_quarantine_routes_404_another_workspaces_job(r9):

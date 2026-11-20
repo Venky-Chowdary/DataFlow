@@ -7,21 +7,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.helpers.error_bodies import assert_indistinguishable, without_references
+
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
-
-
-def _without_reference(response) -> dict:
-    """The 404 body minus its per-response ``error.reference`` (U2).
-
-    Every error carries a fresh reference for support, so two 404s never have
-    the same one. Everything else must be identical, and both must carry one.
-    """
-    body = response.json()
-    error = dict(body.get("error") or {})
-    assert error.pop("reference", None), body
-    return {**body, "error": error}
 
 
 @pytest.fixture
@@ -128,7 +118,7 @@ def test_foreign_project_lifecycle_is_indistinguishable_from_missing(transform_s
         if (
             foreign.status_code != 404
             or missing.status_code != 404
-            or _without_reference(foreign) != _without_reference(missing)
+            or without_references(foreign) != without_references(missing)
         ):
             failures.append(
                 {
@@ -191,8 +181,8 @@ def test_legacy_project_lifecycle_is_indistinguishable_from_missing(transform_sc
         missing = client.request(
             method, path.replace("{id}", "f" * 24), json=body
         )
-        assert foreign.status_code == missing.status_code == 404
-        assert _without_reference(foreign) == _without_reference(missing)
+        assert foreign.status_code == 404
+        assert_indistinguishable(foreign, missing)
     unchanged = context["store"].get(legacy.id)
     assert unchanged is not None and unchanged.name == "Legacy project"
 
@@ -411,16 +401,16 @@ def test_live_mongo_transform_lookup_hides_foreign_workspace_project(
         missing = transform_scope["member"].get(
             f"/api/v1/transforms/{'f' * 24}"
         )
-        assert foreign.status_code == missing.status_code == 404
-        assert _without_reference(foreign) == _without_reference(missing)
+        assert foreign.status_code == 404
+        assert_indistinguishable(foreign, missing)
         legacy_foreign = transform_scope["member"].get(
             f"/api/v1/transforms/{legacy.id}"
         )
         legacy_missing = transform_scope["member"].get(
             f"/api/v1/transforms/{'e' * 24}"
         )
-        assert legacy_foreign.status_code == legacy_missing.status_code == 404
-        assert _without_reference(legacy_foreign) == _without_reference(legacy_missing)
+        assert legacy_foreign.status_code == 404
+        assert_indistinguishable(legacy_foreign, legacy_missing)
     finally:
         client.drop_database(database.name)
         client.close()
