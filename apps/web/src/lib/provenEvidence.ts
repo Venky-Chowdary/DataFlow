@@ -55,11 +55,21 @@ export const EVIDENCE_AS_OF = monthYear(CONNECTOR_CLAIMS.evidence_generated_at);
 /** The CI run the evidence came from (its GitHub Actions run id). */
 export const EVIDENCE_RUN_ID: string = CONNECTOR_CLAIMS.evidence_run_id;
 
+/** What a proof row claims, live or against an emulator. */
+export function proofClaim(emulated: boolean): string {
+  return emulated
+    ? "Proving CI jobs ran green against the engine's emulator, with no skipped test"
+    : "Proving CI jobs ran green against the live engine, with no skipped test";
+}
+
+/** The badge a proven driver carries: emulator-backed proof says so. */
+export function provenBadge(emulated: boolean): string {
+  return emulated ? "Proven in CI · emulator" : "Proven in CI";
+}
+
 /** One row per engine a CI run proved: green, nothing skipped. */
 export const PROVEN_EVIDENCE: EvidenceRow[] = CONNECTOR_CLAIMS.proof_rows.map((row) => ({
-  claim: row.emulated
-    ? "Proving CI jobs ran green against the engine's emulator, with no skipped test"
-    : "Proving CI jobs ran green against the live engine, with no skipped test",
+  claim: proofClaim(row.emulated),
   engines: row.name,
   cases: row.executed,
   result: "green",
@@ -217,7 +227,7 @@ const UNPLACED_DRIVERS: Record<string, { name: string; family: string }> = {
   singer_tap: { name: "Singer taps", family: "Applications & APIs" },
 };
 
-export type CatalogConnector = { driver: string; name: string; family: string; proven: boolean };
+export type CatalogConnector = { driver: string; name: string; family: string; proven: boolean; emulated: boolean };
 
 /**
  * Every driver the evidence file counts (proven and implemented), each once,
@@ -227,12 +237,20 @@ export const ALL_CONNECTORS: CatalogConnector[] = (() => {
   const counted = [...CONNECTOR_CLAIMS.proven_drivers, ...CONNECTOR_CLAIMS.pending_drivers];
   const proven = new Set(CONNECTOR_CLAIMS.proven_drivers);
   const placed = CONNECTOR_CLAIMS.families.flatMap((f) =>
-    f.items.filter((i) => counted.includes(i.driver)).map((i) => ({ driver: i.driver, name: i.name, family: f.family, proven: proven.has(i.driver) })),
+    f.items
+      .filter((i) => counted.includes(i.driver))
+      .map((i) => ({ driver: i.driver, name: i.name, family: f.family, proven: proven.has(i.driver), emulated: proven.has(i.driver) && i.emulated })),
   );
   const seen = new Set(placed.map((c) => c.driver));
   const rest = counted
     .filter((d) => !seen.has(d))
-    .map((d) => ({ driver: d, name: UNPLACED_DRIVERS[d]?.name ?? d, family: UNPLACED_DRIVERS[d]?.family ?? "Other", proven: proven.has(d) }));
+    .map((d) => ({
+      driver: d,
+      name: UNPLACED_DRIVERS[d]?.name ?? d,
+      family: UNPLACED_DRIVERS[d]?.family ?? "Other",
+      proven: proven.has(d),
+      emulated: proven.has(d) && Boolean(CONNECTOR_CLAIMS.proof_rows.find((r) => r.engine === d)?.emulated),
+    }));
   const order = CONNECTOR_CLAIMS.families.map((f) => f.family);
   return [...placed, ...rest].sort((x, y) => {
     const fx = order.indexOf(x.family);
@@ -240,6 +258,47 @@ export const ALL_CONNECTORS: CatalogConnector[] = (() => {
     return (fx < 0 ? 99 : fx) - (fy < 0 ? 99 : fy) || Number(y.proven) - Number(x.proven);
   });
 })();
+
+/**
+ * Proven drivers that no proof row names directly, and the engine whose CI
+ * jobs prove them. File formats are proven by the `files` engine.
+ */
+const PROVED_BY_ENGINE: Record<string, string> = { pgvector: "postgresql" };
+
+function provingEngine(c: CatalogConnector): string {
+  if (PROVED_BY_ENGINE[c.driver]) return PROVED_BY_ENGINE[c.driver];
+  if (CONNECTOR_CLAIMS.proof_rows.some((r) => r.engine === c.driver)) return c.driver;
+  return c.family === "Files" ? "files" : c.driver;
+}
+
+export type ProofGroup = {
+  jobs: string[];
+  executed: number;
+  emulated: boolean;
+  drivers: CatalogConnector[];
+};
+
+/**
+ * Proven drivers grouped by the CI jobs that proved them. A CI job runs a
+ * whole suite, so every driver it proves shares the job's test total; each
+ * group shows that total once. Every proven driver appears in one group.
+ */
+export const PROOF_GROUPS: ProofGroup[] = (() => {
+  const groups = new Map<string, ProofGroup>();
+  for (const c of ALL_CONNECTORS.filter((x) => x.proven)) {
+    const row = CONNECTOR_CLAIMS.proof_rows.find((r) => r.engine === provingEngine(c));
+    if (!row) continue;
+    const key = `${row.jobs.join(",")}|${row.emulated}`;
+    const g = groups.get(key) ?? { jobs: row.jobs, executed: row.executed, emulated: row.emulated, drivers: [] };
+    g.executed = Math.max(g.executed, row.executed);
+    g.drivers.push(c);
+    groups.set(key, g);
+  }
+  return [...groups.values()].sort((x, y) => y.drivers.length - x.drivers.length);
+})();
+
+/** Drivers proven against an emulator rather than a live engine. */
+export const EMULATED_DRIVERS: string[] = ALL_CONNECTORS.filter((c) => c.emulated).map((c) => c.name);
 
 /** Total drivers in the catalog: proven plus implemented. */
 export const CATALOG_TOTAL: number = ALL_CONNECTORS.length;

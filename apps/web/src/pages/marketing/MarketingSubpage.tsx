@@ -19,7 +19,11 @@ import {
   EVIDENCE_RUN_ID,
   ALL_CONNECTORS,
   CATALOG_TOTAL,
+  EMULATED_DRIVERS,
+  PROOF_GROUPS,
   PROVEN_DRIVERS,
+  proofClaim,
+  provenBadge,
   catalogHonestyLead,
   cdcSourcesPhrase,
   provenDriversPhrase,
@@ -543,27 +547,6 @@ function EnterprisePage({ onNavigate }: Nav) {
 
 /* -------------------------------------------------------------------- Proof */
 
-type CiGroup = { jobs: string[]; executed: number; engines: { driver: string; name: string }[] };
-
-/** Proven engines grouped by the CI jobs that proved them, each total once. */
-const CI_GROUPS: CiGroup[] = (() => {
-  const groups = new Map<string, CiGroup>();
-  for (const row of CONNECTOR_CLAIMS.proof_rows) {
-    const key = row.jobs.join(",");
-    const g = groups.get(key) ?? { jobs: row.jobs, executed: row.executed, engines: [] };
-    const members =
-      row.engine === "files"
-        ? ALL_CONNECTORS.filter((c) => c.family === "Files" && c.proven)
-        : ALL_CONNECTORS.filter((c) => c.driver === row.engine);
-    for (const m of members.length ? members : [{ driver: row.engine, name: row.name }]) {
-      g.engines.push({ driver: m.driver, name: m.name });
-    }
-    g.executed = Math.max(g.executed, row.executed);
-    groups.set(key, g);
-  }
-  return [...groups.values()].sort((x, y) => y.engines.length - x.engines.length);
-})();
-
 function ProofPage({ onNavigate }: Nav) {
   const pilot = { label: "Request a pilot", onClick: () => onNavigate("contact") };
   const connectors = { label: "See connectors", onClick: () => onNavigate("integrations") };
@@ -572,7 +555,7 @@ function ProofPage({ onNavigate }: Nav) {
       <MarketingHeroBand
         kicker="Proof"
         title="Evidence you can check yourself."
-        lead="Connector claims come from CI runs against the engines. Every load ends with a report counted by the destination's own engine and a signed proof pack. The audit log detects edits. You can re-run or verify each of these."
+        lead={`Connector claims come from CI runs. ${EMULATED_DRIVERS.join(" and ")} run against emulators, which prove the load, MERGE, and read-back logic but not a production account; a pilot proves that.`}
         actions={<Actions primary={pilot} secondary={connectors} />}
         visual={<VerifyPanel />}
       />
@@ -588,10 +571,10 @@ function ProofPage({ onNavigate }: Nav) {
             </p>
           </header>
           <ul className="mk-ci-groups">
-            {CI_GROUPS.map((g) => (
-              <li key={g.jobs.join(",")}>
+            {PROOF_GROUPS.map((g) => (
+              <li key={`${g.jobs.join(",")}-${g.emulated}`}>
                 <p className="mk-ci-engines">
-                  {g.engines.map((e) => (
+                  {g.drivers.map((e) => (
                     <span key={e.driver}>
                       <span className="mk-conn-icon">
                         <ConnectorIcon id={e.driver} size={16} />
@@ -602,8 +585,9 @@ function ProofPage({ onNavigate }: Nav) {
                 </p>
                 <p className="mk-yes">
                   <StatusGlyph kind="landed" />
-                  Green, none skipped
+                  {provenBadge(g.emulated)}
                 </p>
+                <p className="mk-ci-claim">{proofClaim(g.emulated)}.</p>
                 <p className="mk-ci-jobs">
                   <span>{g.jobs.length === 1 ? "CI job" : "CI jobs"}</span>
                   {g.jobs.map((j) => (
@@ -815,6 +799,7 @@ type ConnectorRow = {
   driver: string;
   family: string;
   proven: boolean;
+  emulated: boolean;
   cdc: "proven" | "implemented" | null;
 };
 
@@ -907,11 +892,16 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Nav) {
                       {r.proven ? (
                         <span className="mk-badge mk-badge--ci">
                           <StatusGlyph kind="landed" />
-                          Proven in CI
+                          {provenBadge(r.emulated)}
                         </span>
                       ) : (
                         <span className="mk-badge">Implemented</span>
                       )}
+                      {r.cdc ? (
+                        <span className="mk-matrix-cdc-inline">
+                          CDC source, {r.cdc === "proven" ? "proven in CI" : "implemented"}
+                        </span>
+                      ) : null}
                     </td>
                     <td>
                       {r.cdc === "proven" ? (

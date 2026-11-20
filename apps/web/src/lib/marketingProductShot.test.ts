@@ -68,6 +68,18 @@ describe("marketing product photography", () => {
     assert.doesNotMatch(surfaces, /Job Theater/);
   });
 
+  it("step labels on each story page follow the five steps, once each", () => {
+    const order = ["Plan", "Validate", "Execute", "Verify", "Evidence"];
+    const surfaces = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
+    for (const page of surfaces.split("export function ").slice(1)) {
+      const labels = [...page.matchAll(/\{ step: "(\w+)"/g)].map((m) => m[1]);
+      const idx = labels.map((l) => order.indexOf(l));
+      assert.ok(idx.every((v) => v >= 0), page.slice(0, 30));
+      assert.equal(new Set(labels).size, labels.length, `${page.slice(0, 30)} repeats a step`);
+      assert.deepEqual([...idx].sort((a, b) => a - b), idx, `${page.slice(0, 30)} is out of order`);
+    }
+  });
+
   it("every screenshot's recorded size matches its WebP header", () => {
     for (const [name, [w, h]] of Object.entries(SHOT_PIXELS)) {
       const buf = readFileSync(join(shotDir, name));

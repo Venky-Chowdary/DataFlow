@@ -2304,11 +2304,6 @@ html[data-theme="dark"] .mk {
 
   
 
-  .mk-panel-table code.mk-q-value {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-
   .mk-census span {
     width: 10px;
     height: 10px;
@@ -4272,7 +4267,6 @@ html[data-theme="dark"] .mk .mk-crop-frame img {
 
 .mk-story-checks > .mk-checks-shot {
   grid-column: 1 / -1;
-  justify-self: end;
 }
 
 /* Phones: a crop would shrink below legible; the coded panels carry it. */
@@ -4826,4 +4820,232 @@ html[data-theme="dark"] .mk .mk-crop-frame img {
 
 html[data-theme="dark"] .mk .mk-seq-list .is-refused code {
   color: color-mix(in srgb, var(--df-danger) 60%, var(--df-on-tile));
+}
+
+/* ══ Pass 3c ═════════════════════════════════════════════════════════ */
+
+/* Trust Report: the verdict and the accounting, side by side. */
+.mk-verify-verdict--two {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.mk-verify-verdict--two > div {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.mk-verify-verdict--two dt {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+}
+
+.mk-verify-verdict--two dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: 13px;
+}
+
+/* Emulator-backed proof: a half-filled mark, never the same as live. */
+.mk-coverage-dots i.is-emulated,
+.mk-coverage-key.is-emulated {
+  background: linear-gradient(135deg, var(--mk-verified) 50%, transparent 50%);
+}
+
+/* Matrix on phones: the CDC column folds under the status badge. */
+.mk-matrix-cdc-inline {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .mk-matrix th:nth-child(4),
+  .mk-matrix td:nth-child(4) {
+    display: none;
+  }
+
+  .mk-matrix-cdc-inline {
+    display: block;
+    margin-top: 6px;
+    color: var(--mk-ink-2);
+    font-size: 12.5px;
+  }
+}
+
+.mk-q-value,
+.mk-panel-table td > code {
+  white-space: nowrap;
+}
+
+/* Footer: "on request" as a small tag under the link name. */
+.mk-footer-tag {
+  display: block;
+  color: var(--mk-ink-3);
+  font-size: 12px;
+}
+
+/* Crops sit on the grid: narrow ones in the right column, wide ones on a
+   full row from the first column. */
+.mk-story-checks > .mk-checks-shot {
+  justify-self: stretch;
+}
+
+@media (min-width: 1024px) {
+  .mk-story-checks > .mk-checks-shot.is-col {
+    grid-column: 7 / span 6;
+  }
+
+  .mk-story-checks > .mk-checks-shot.is-row {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Home security terms: a fifth item never leaves a hole. */
+@media (min-width: 1024px) {
+  .mk-terms--grid > div:last-child:nth-child(3n + 2) {
+    grid-column: span 2;
+  }
+}
+
+.mk-ci-claim {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+}
+
+/* Demo posters: topic, title, and a mark drawn from the video id. */
+.mk .mk-demo-poster {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  align-items: start;
+  gap: 8px;
+  position: relative;
+  padding: 14px 16px;
+}
+
+.mk-demo-poster-tag,
+.mk-poster-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mk-hero-accent);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+}
+
+.mk .mk-demo-poster > strong {
+  color: var(--mk-hero-ink);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.mk-demo-poster-bars {
+  display: grid;
+  gap: 4px;
+  width: 60%;
+}
+
+.mk-demo-poster-bars i {
+  display: block;
+  height: 3px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-hero-rule-strong);
+}
+
+.mk-demo-poster-play {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  color: var(--mk-hero-ink);
+}
+
+.mk-demo-card > span:last-child {
+  margin-top: 2px;
+}
+
+/* Docs landing: category tiles drawn in code, not window screenshots. */
+.mk .docs-category-tile {
+  display: grid;
+  gap: 10px;
+  aspect-ratio: 16 / 9;
+  align-content: start;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--mk-rule);
+  background: var(--mk-hero-bg);
+  color: var(--mk-hero-ink);
+}
+
+.mk .docs-category-tile-head {
+  color: var(--mk-hero-accent);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+}
+
+.mk .docs-category-tile-list {
+  display: grid;
+  gap: 6px;
+}
+
+.mk .docs-category-tile-list > span {
+  padding-left: 12px;
+  border-left: 2px solid var(--mk-hero-rule-strong);
+  color: var(--mk-hero-ink-2);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+@media (max-width: 767px) {
+  .mk-contrast-with .mk-different-where {
+    display: none;
+  }
+
+  .mk .mk-scrolly-steps {
+    gap: 32px;
+  }
+}
+
+.lp.mk .mk-q-value {
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+/* Matrix on phones: each driver is a card, status and CDC under the name. */
+@media (max-width: 767px) {
+  .mk-matrix,
+  .mk-matrix tbody {
+    display: block;
+    min-width: 0;
+  }
+
+  .mk-matrix thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .mk-matrix tbody tr {
+    display: grid;
+    gap: 6px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--mk-rule);
+  }
+
+  .mk-matrix tbody th,
+  .mk-matrix tbody td {
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .mk-matrix tbody td.mk-empty {
+    padding: 16px 0;
+  }
 }

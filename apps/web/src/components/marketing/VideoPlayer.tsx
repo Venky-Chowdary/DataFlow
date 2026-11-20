@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 /** Privacy-first YouTube player: a poster drawn in code, and the
  * youtube-nocookie embed only after the visitor presses play. */
@@ -17,12 +17,18 @@ export function VideoPlayer({
   videoId,
   title,
   tag,
+  glyph,
+  showTitle = true,
   poster = true,
 }: {
   videoId: string;
   title: string;
   /** Category shown on the coded poster. */
   tag?: string;
+  /** A small coded mark for the topic. */
+  glyph?: ReactNode;
+  /** The featured player shows its title beside the poster instead. */
+  showTitle?: boolean;
   /** Show the poster; false renders the iframe immediately. */
   poster?: boolean;
 }) {
@@ -48,8 +54,13 @@ export function VideoPlayer({
   return (
     <button type="button" className="lp-video-facade mk-poster" onClick={() => setPlaying(true)}>
       <span className="mk-poster-art" aria-hidden="true">
-        {tag ? <span className="mk-poster-tag">{tag}</span> : null}
-        <span className="mk-poster-title">{title}</span>
+        {tag ? (
+          <span className="mk-poster-tag">
+            {glyph}
+            {tag}
+          </span>
+        ) : null}
+        {showTitle ? <span className="mk-poster-title">{title}</span> : null}
       </span>
       <span className="mk-poster-play">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true" focusable="false">

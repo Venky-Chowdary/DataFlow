@@ -6,6 +6,8 @@ import test from "node:test";
 
 import {
   ALL_CONNECTORS,
+  PROOF_GROUPS,
+  provenBadge,
   CATALOG_TOTAL,
   CONNECTOR_CLAIMS,
   MARKETING_STACK,
@@ -116,6 +118,23 @@ test("the catalog lists every driver the copy counts, once", () => {
   assert.equal(MARKETING_STACK.reduce((n, f) => n + f.provenCount, 0), PROVEN_DRIVERS);
   const unplaced = ALL_CONNECTORS.filter((c) => c.family === "Other").map((c) => c.driver);
   assert.deepEqual(unplaced, [], "a counted driver has no family or name");
+});
+
+test("the Proof page's groups hold every proven driver, once", () => {
+  const listed = PROOF_GROUPS.flatMap((g) => g.drivers.map((d) => d.driver));
+  assert.equal(new Set(listed).size, listed.length);
+  assert.equal(listed.length, PROVEN_DRIVERS);
+  assert.equal(listed.length, ALL_CONNECTORS.filter((c) => c.proven).length);
+  assert.ok(listed.includes("pgvector"));
+});
+
+test("emulator-backed proof is labelled as such", () => {
+  for (const row of CONNECTOR_CLAIMS.proof_rows.filter((r) => r.emulated)) {
+    const c = ALL_CONNECTORS.find((x) => x.driver === row.engine);
+    assert.ok(c?.emulated, `${row.engine} is emulated in the evidence`);
+    assert.equal(provenBadge(true), "Proven in CI · emulator");
+  }
+  for (const g of PROOF_GROUPS) for (const d of g.drivers) assert.equal(d.emulated, g.emulated, d.driver);
 });
 
 test("marketing stack badges are derived from CI evidence", () => {

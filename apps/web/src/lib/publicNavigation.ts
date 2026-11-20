@@ -109,9 +109,9 @@ export type PublicPageMeta = {
 
 export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
-    title: "Universal Data Transfer Platform",
+    title: "Data migration and sync, every row accounted for",
     description:
-      "Move data between databases, warehouses, files, and streams. Datawrap maps columns by meaning, checks the plan before the first write, holds failed rows in quarantine, and reads the destination back to compare it with the source.",
+      "Datawrap moves data between databases, warehouses, files, and streams, and accounts for every row: landed and read back, held with a reason, or skipped by rule.",
     keywords:
       "Datawrap, data transfer platform, database migration, ETL, CDC, semantic mapping, preflight gates, data verification, PostgreSQL Snowflake SQL Server",
     canonicalPath: "#/",
@@ -191,7 +191,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/product/transfer",
   },
   "product-pilot": {
-    title: "Datawrap Pilot",
+    title: "Pilot",
     description: "A copilot on Datawrap's own local engine — no cloud AI key needed. Triage transfers, jobs, and schemas; Confirm before anything moves.",
     keywords: "Datawrap Pilot, AI data agent, natural language ETL, schema inspection chat",
     canonicalPath: "#/product/pilot",
@@ -215,7 +215,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/product/pipelines",
   },
   "product-query": {
-    title: "Query Playground",
+    title: "Query",
     description: "Read-only SQL against saved connections — check source and destination side by side before and after a load.",
     keywords: "Query Playground, SQL against connectors, MongoDB query, data export",
     canonicalPath: "#/product/query",

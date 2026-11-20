@@ -13,7 +13,7 @@ export function ProcessStepper({ current, label = "Where this fits" }: { current
     <div className="mk-stepper">
       <p className="mk-stepper-label">{label}</p>
       <p className="mk-stepper-compact" aria-hidden>
-        {range}: {current.join(" and ")}
+        {range}: {PROCESS_STEPS.filter((s) => current.includes(s)).join(" and ")}
       </p>
       <ol aria-label="The five steps of every load">
         {PROCESS_STEPS.map((step, i) => {

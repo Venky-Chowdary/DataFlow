@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
 import { useInViewOnce } from "../../hooks/useInViewOnce";
-import { ALL_CONNECTORS, CATALOG_TOTAL, MARKETING_STACK, PROVEN_DRIVERS } from "../../lib/provenEvidence";
+import { ALL_CONNECTORS, CATALOG_TOTAL, MARKETING_STACK, PROVEN_DRIVERS, provenBadge } from "../../lib/provenEvidence";
 
 /**
  * Datawrap product surfaces rendered in code for the public site.
@@ -198,7 +198,7 @@ export function exampleIdentity(): string {
   return `${r.read} read = ${r.landed} landed + ${r.held.length} held + ${r.skipped.length} skipped`;
 }
 
-const EXAMPLE_META = "Example rows, the same run as the home page";
+const EXAMPLE_META = "Example rows";
 const EXAMPLE_SHARE: Share = { landed: EXAMPLE_RUN.landed, held: EXAMPLE_RUN.held.length, skipped: EXAMPLE_RUN.skipped.length };
 
 /**
@@ -278,7 +278,7 @@ export function ReconciliationLedger() {
 
         <div className="mk-ledger2-col mk-ledger2-lanes">
           <div className="mk-ledger2-lane is-landed">
-            <p className="mk-ledger2-colhead"><StatusGlyph kind="landed" />Landed in {RECORDED_ROUTE.destEngine}, counted by its engine</p>
+            <p className="mk-ledger2-colhead"><StatusGlyph kind="landed" />Landed in {RECORDED_ROUTE.destEngine}</p>
             <ul className="mk-ledger2-chips">
               {lane("landed").map((r) => (
                 <li key={r.key} className="mk-ledger2-chip">
@@ -477,10 +477,25 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
           </tr>
         </tbody>
       </table>
-      <div className="mk-verify-verdict">
-        <span className="mk-status mk-status--ok"><StatusGlyph kind="landed" />Balanced</span>
-        <p>{exampleIdentity()}. The landed rows match in full.</p>
-      </div>
+      <dl className="mk-verify-verdict mk-verify-verdict--two">
+        <div>
+          <dt>Verdict</dt>
+          <dd>
+            <span className="mk-verdict mk-verdict--explained">Explained</span>
+            <span>
+              1 row differs and none is unexplained: <code>{EXAMPLE_RUN.held[0].key}</code> is held in quarantine. The landed
+              rows match in full.
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>Accounting</dt>
+          <dd>
+            <span className="mk-status mk-status--ok"><StatusGlyph kind="landed" />Balanced</span>
+            <span>{exampleIdentity()}</span>
+          </dd>
+        </div>
+      </dl>
     </figure>
   );
 }
@@ -716,7 +731,8 @@ export function EvidencePanel() {
     <Panel title="Sign-off" meta={`${EXAMPLE_META}, signed by role`}>
       <dl className="mk-panel-dl">
         {[
-          ["Accounting", exampleIdentity()],
+          ["Verdict", "Explained: the one row that differs is held in quarantine"],
+          ["Accounting", `Balanced, ${exampleIdentity()}`],
           ["Comparison on record", "Full checksum of the landed rows"],
           ["Proof pack", "Signed, verifiable through the API"],
           ["Audit log", "Tamper-evident, and exportable"],
@@ -1186,18 +1202,29 @@ export function CoveragePanel() {
             <span className="mk-coverage-name">{f.family}</span>
             <span className="mk-coverage-dots" aria-hidden>
               {ALL_CONNECTORS.filter((c) => c.family === f.family).map((item) => (
-                <i key={item.driver} className={item.proven ? "is-proven" : undefined} title={item.name} />
+                <i
+                  key={item.driver}
+                  className={item.proven ? (item.emulated ? "is-proven is-emulated" : "is-proven") : undefined}
+                  title={`${item.name}: ${item.proven ? provenBadge(item.emulated) : "Implemented"}`}
+                />
               ))}
             </span>
             <span className="mk-coverage-count">
               {f.provenCount} of {f.total}
-              <span className="mk-sr-only"> proven in CI</span>
+              <span className="mk-sr-only">
+                {" "}
+                proven in CI
+                {ALL_CONNECTORS.some((c) => c.family === f.family && c.emulated)
+                  ? `, ${ALL_CONNECTORS.filter((c) => c.family === f.family && c.emulated).map((c) => c.name).join(" and ")} against an emulator`
+                  : ""}
+              </span>
             </span>
           </li>
         ))}
       </ul>
       <p className="mk-panel-foot">
         <span><i className="mk-coverage-key is-proven" aria-hidden />Proven in CI</span>
+        <span><i className="mk-coverage-key is-proven is-emulated" aria-hidden />{provenBadge(true)}</span>
         <span><i className="mk-coverage-key" aria-hidden />Implemented</span>
       </p>
     </Panel>
@@ -1340,6 +1367,42 @@ export function MirrorDeletePanel() {
       <p className="mk-panel-foot">
         <span>Soft delete by default: the row is kept and flagged, so nothing disappears without a record</span>
       </p>
+    </Panel>
+  );
+}
+
+/** Recurring sync: the run history, each run with the evidence it left. */
+export function RunEvidencePanel() {
+  const runs = EXAMPLE_TICKS.filter((t) => t.state !== "review").slice(-5);
+  return (
+    <Panel title="Run history, with evidence" meta="Example data. Orders feed, every 2 minutes">
+      <table className="mk-panel-table mk-runs-table">
+        <caption>Each run and the evidence it left</caption>
+        <thead>
+          <tr>
+            <th scope="col">Run</th>
+            <th scope="col">Verdict</th>
+            <th scope="col">Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((t, i) => (
+            <tr key={t.at} style={stagger(i)} className={t.state === "paused" ? "is-paused" : undefined}>
+              <th scope="row"><time>{t.at}</time></th>
+              <td>
+                {t.state === "ok" ? (
+                  <span className="mk-verdict mk-verdict--proven">Proven</span>
+                ) : (
+                  <span className="mk-status mk-status--held"><StatusGlyph kind="held" />Paused before writing</span>
+                )}
+              </td>
+              <td>
+                {t.state === "ok" ? "Trust Report and proof pack on the run's job" : "Waiting for a person to review the new column in Map"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </Panel>
   );
 }

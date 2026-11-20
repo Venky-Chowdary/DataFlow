@@ -15,6 +15,7 @@ import {
   cdcSourcesPhrase,
 } from "../lib/provenEvidence";
 import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
+import { SYNC_MODE_COUNT_WORD, syncModesList } from "../lib/syncModesPhrase";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -328,7 +329,9 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
             <dl className="mk-terms">
               <div>
                 <dt>Sync modes</dt>
-                <dd>Full refresh, append, upsert, mirror, incremental by a typed cursor, SCD Type 2, and CDC.</dd>
+                <dd>
+                  {SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)}: {syncModesList()}.
+                </dd>
               </div>
               <div>
                 <dt>Change data capture</dt>

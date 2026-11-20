@@ -11,6 +11,7 @@ import {
   QuarantinePanel,
   QueryDiffPanel,
   QueryPanel,
+  RunEvidencePanel,
   RunPanel,
   ScheduleTimeline,
   StageConfirmSequence,
@@ -18,6 +19,7 @@ import {
   VerifyPanel,
 } from "../../components/marketing/ProductPanels";
 import { cdcSourcesPhrase } from "../../lib/provenEvidence";
+import { SYNC_MODE_COUNT_WORD, syncModesList } from "../../lib/syncModesPhrase";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
 import { StoryPage, type Story } from "./StoryPage";
@@ -56,8 +58,7 @@ export function TransferStudioPage(p: PageProps) {
       title: "From a map to a write",
       points: [
         { step: "Plan", title: "Map by meaning", body: "Each pairing is scored on the column's role, qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person, with the reason on the row." },
-        { step: "Validate", title: "Check on the real write path", body: "The checks run in four groups: can we read and write, will every value fit, do the columns line up, is it safe to write. Sample rows go through the real write path, so a value the destination cannot hold is a finding." },
-        { step: "Plan", title: "Approve the plan", body: "Approving records a hash of the plan. A run whose plan no longer matches the approved one is refused." },
+        { step: "Validate", title: "Check on the real write path, then approve", body: "The checks answer four questions: can we read and write, will every value fit, do the columns line up, is it safe to write. Sample rows go through the real write path. Approving records a hash of the plan, and a run whose plan no longer matches it is refused." },
         { step: "Execute", title: "Write, and hold what fails", body: "Rows are written in batches with bound parameters. A row the destination refuses is held with its column, value, and reason instead of stopping the load." },
       ],
     },
@@ -116,8 +117,8 @@ export function JobTheaterPage(p: PageProps) {
       title: "Evidence you can verify yourself",
       capture: {
         src: WORKSPACE_SHOT.jobsEvidenceCrop,
-        alt: "Trust Report in Job space: the evidence behind the report (reconciliation passed, full checksum, trust score) and the sign-off and evidence pack",
-        caption: "The evidence and sign-off cards of a Trust Report, as Job space shows them.",
+        alt: "Trust Report in Job space: reconciliation passed, full checksum assurance, trust score, and the sign-off and evidence pack",
+        caption: "A Trust Report's evidence and sign-off, as Job space shows them.",
       },
       items: [
         { claim: "Export a signed proof pack for any job", where: "API: GET /api/v1/transfer/{job_id}/proof-pack" },
@@ -156,7 +157,7 @@ export function PipelinesPage(p: PageProps) {
       title: "What every tick does",
       points: [
         { title: "Runs as a job", body: "Each tick has its own Trust Report, with the same checks and read-back as a run started by hand." },
-        { title: "Uses the mode you chose", body: "Full refresh, append, upsert, mirror, incremental by a typed cursor, SCD Type 2, or CDC. Unknown mode names are refused." },
+        { title: "Uses the mode you chose", body: `One of ${SYNC_MODE_COUNT_WORD} modes: ${syncModesList()}. Unknown mode names are refused.` },
         { title: "Reads the log for CDC", body: `CDC is proven in CI on ${cdcSourcesPhrase()}. Inserts, updates, and deletes apply by key.` },
         { title: "Waits for review on drift", body: "A new or renamed source column waits in Map for review before the next run uses it." },
       ],
@@ -167,7 +168,7 @@ export function PipelinesPage(p: PageProps) {
       visual: <TickDetailPanel />,
     },
     checks: {
-      title: "Behaviour you can rely on",
+      title: "Where each rule is written down",
       items: [
         { claim: "Mirror deletes are soft by default: the row is kept with _deleted and _deleted_at", where: "Docs, Sync modes: mirror" },
         { claim: "Before an append, the destination must match the fingerprint left by the last run", where: "Docs, Sync modes: append and continuity" },
@@ -195,12 +196,8 @@ export function QueryPlaygroundPage(p: PageProps) {
     secondary: { label: "See Pilot", onClick: () => p.onNavigate("product-pilot") },
     hero: <QueryPanel />,
     problem: {
-      title: "Checking a copy is a risk of its own",
-      body: "Spot-checking a migration usually means two database consoles, two credentials, and a terminal that can write.",
-      failures: [
-        { title: "Credentials spread around", body: "Every person who checks a copy needs their own way into both systems." },
-        { title: "A stray write", body: "An UPDATE typed into the wrong tab changes the data you were trying to check." },
-      ],
+      title: "Checking a copy should not need two consoles",
+      body: "Spot-checking a migration usually means two database consoles, a credential for each, and a terminal that can write: an UPDATE typed into the wrong tab changes the data you were trying to check.",
     },
     how: {
       title: "How Query keeps it safe",
@@ -267,7 +264,7 @@ export function DataPilotPage(p: PageProps) {
       visual: <PilotAnswerPanel />,
     },
     checks: {
-      title: "Limits that are part of the design",
+      title: "What Pilot will not do",
       items: [
         { claim: "Nothing changes until you press Confirm", where: "Docs, Pilot: what Pilot cannot do" },
         { claim: "Approvals expire after 15 minutes and are used once", where: "Docs, Pilot" },
@@ -367,8 +364,8 @@ export function McpServerPage(p: PageProps) {
       title: "The confirmation model",
       capture: {
         src: WORKSPACE_SHOT.mcpSetupCrop,
-        alt: "MCP client setup in Datawrap: Cursor, Claude Desktop, VS Code, custom GPT, and other remote clients, with the server configuration",
-        caption: "Client setup in the MCP page: one endpoint and a workspace key for every client.",
+        alt: "MCP page in Datawrap: the server URL, what each role's key may do, and client setup for Cursor, Claude Desktop, VS Code, custom GPT, and other remote clients",
+        caption: "The MCP page: one server URL, a key whose role sets what the agent may do, and setup for each client.",
       },
       items: [
         { claim: "A staged action does nothing until confirm_action is called with its ack_id", where: "Docs, MCP: the confirmation model" },
@@ -389,7 +386,7 @@ export function McpServerPage(p: PageProps) {
 
 export function MigrationsSolutionPage(p: PageProps) {
   const story: Story = {
-    steps: ["Plan", "Validate"],
+    steps: ["Verify", "Evidence"],
     kicker: "Migrations",
     title: "Cross-schema cutover you can prove",
     lead: "Move between schemas that do not match name for name, with a map you can review, checks before the write, and a comparison of the destination before you cut over.",
@@ -450,14 +447,13 @@ export function WarehouseSolutionPage(p: PageProps) {
       body: "A warehouse load reports success when the bulk job finishes, not when every row is queryable with the right type.",
       failures: [
         { title: "Precision lost in the cast", body: "Decimals and timestamps that land in a narrower type look fine until a total is off." },
-        { title: "Capacity found the hard way", body: "A load window that fails halfway because the destination could not take the volume." },
       ],
     },
     how: {
       title: "How a warehouse load runs",
       points: [
-        { step: "Validate", title: "Probe the destination", body: "Write rights, privileges, and capacity are checked in Validate before the load window opens." },
-        { step: "Plan", title: "Map and check", body: "The same semantic map and checks as any route, with exact decimals and timestamps." },
+        { step: "Plan", title: "Map by meaning", body: "The same semantic map as any route, with exact decimals and timestamps." },
+        { step: "Validate", title: "Probe the destination", body: "Write rights, privileges, and capacity are checked with the rest of Validate, before the load window opens." },
         { step: "Execute", title: "Write in bulk", body: "Create new tables, append, overwrite, or MERGE by key wherever the destination's keys support it." },
         { step: "Verify", title: "Read it back", body: "The warehouse counts and checksums what landed, and the job records which comparison ran." },
       ],
@@ -521,9 +517,10 @@ export function SyncSolutionPage(p: PageProps) {
     surface: {
       title: "A history where every run has evidence",
       body: "Each tick links to its job. A paused tick says what it is waiting for, and the tick after a review runs on the approved map.",
+      visual: <RunEvidencePanel />,
     },
     checks: {
-      title: "Sync behaviour, stated plainly",
+      title: "What CDC refuses, and why",
       items: [
         { claim: "CDC refuses sources it does not support at Validate", where: "Docs, Sync modes: CDC" },
         { claim: "If capture cannot attach to a log the server emits, the run fails with the remedy rather than polling", where: "Docs, Sync modes: CDC" },

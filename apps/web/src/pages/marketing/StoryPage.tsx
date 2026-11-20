@@ -1,7 +1,7 @@
 import type { MouseEvent, ReactNode } from "react";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
-import { ProcessStepper, type ProcessStep } from "../../components/marketing/ProcessStepper";
+import { PROCESS_STEPS, ProcessStepper, type ProcessStep } from "../../components/marketing/ProcessStepper";
 import { ProductShot } from "../../components/marketing/ProductShot";
 import { hashForPublicRoute, type PublicRoute } from "../../lib/publicNavigation";
 
@@ -31,6 +31,12 @@ export type Story = {
   related: { route: PublicRoute; label: string; body: string }[];
   closing: { title: string; body: string };
 };
+
+/** The steps a "how" section covers: its points' labels in stepper order, else the page's. */
+function howSteps(story: Story): ProcessStep[] {
+  const labelled = new Set((story.how?.points ?? []).map((p) => p.step).filter(Boolean) as ProcessStep[]);
+  return labelled.size ? PROCESS_STEPS.filter((s) => labelled.has(s)) : story.steps;
+}
 
 /**
  * One story per product or solution page. The frame is shared (hero,
@@ -117,7 +123,7 @@ export function StoryPage({ story, onNavigate }: { story: Story; onNavigate: (r:
                 <h2 id="mk-story-how">{story.how.title}</h2>
                 {story.how.lead ? <p>{story.how.lead}</p> : null}
               </div>
-              <ProcessStepper current={story.steps} />
+              <ProcessStepper current={howSteps(story)} />
             </header>
             <ul className="mk-story-points">
               {story.how.points.map((p) => (

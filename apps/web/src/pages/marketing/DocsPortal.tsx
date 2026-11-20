@@ -17,7 +17,7 @@ import {
   catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
-import { WORKSPACE_SHOT, shotSize } from "../../lib/workspaceShots";
+import { shotSize } from "../../lib/workspaceShots";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -61,58 +61,6 @@ function docsShotUrl(src: string): string {
   return `${src}${sep}v=${DOCS_SHOT_V}`;
 }
 
-const SPACE_FRAMES = [
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.jobTrust),
-    alt: "Job space Trust Report: 5,100 rows in source and destination, full checksum match",
-    caption: "1 · Job space: Trust Report for the sales_orders load into Snowflake",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.connectors),
-    alt: "Connectors page with the saved demo connections",
-    caption: "2 · Connectors: saved connections that Studio, Query, and Schedules share",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferSource),
-    alt: "Transfer Studio Source step with Orders Postgres (demo) selected",
-    caption: "3 · Transfer Studio: pick the source table",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferDest),
-    alt: "Transfer Studio Destination step with Warehouse Snowflake (demo)",
-    caption: "4 · Destination: a saved warehouse and the target table",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferMap),
-    alt: "Transfer Studio Map: 11 of 11 columns mapped",
-    caption: "5 · Map: every column, its destination type, and a status",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferValidate),
-    alt: "Transfer Studio Validate: 17 gates passed, Execute unlocked",
-    caption: "6 · Validate: the gates are clear and Run is unlocked",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.schedulesHistory),
-    alt: "Run history for the Orders feed, each run linked to its job",
-    caption: "7 · Schedules: cadence, mode, and a job for every tick",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.query),
-    alt: "Query: revenue by region on Warehouse Snowflake (demo)",
-    caption: "8 · Query: read-only SQL on a saved connection",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.mcp),
-    alt: "MCP Server page",
-    caption: "9 · MCP: connect Cursor, Claude, VS Code, or any MCP client",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.pilot),
-    alt: "Pilot answering a row count with the SQL it ran",
-    caption: "10 · Pilot: questions answered with the SQL shown",
-  },
-];
 
 function DocsSpaceSidebar({
   activeId,
@@ -195,14 +143,6 @@ function DocsSpaceShell({
   );
 }
 
-const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl(WORKSPACE_SHOT.overview),
-  transfer: docsShotUrl(WORKSPACE_SHOT.transferMap),
-  connect: docsShotUrl(WORKSPACE_SHOT.connectors),
-  ai: docsShotUrl(WORKSPACE_SHOT.mcp),
-  ops: docsShotUrl(WORKSPACE_SHOT.jobs),
-  enterprise: docsShotUrl(WORKSPACE_SHOT.settingsSso),
-};
 
 /** Confluence-style space home — left nav + product-first start page. */
 export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
@@ -286,7 +226,6 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <div className="docs-category-grid">
           {HELP_DOC_CATEGORIES.map((cat) => {
             const first = getHelpDoc(cat.docs[0]);
-            const shot = CATEGORY_SHOTS[cat.id] ?? SPACE_FRAMES[0].src;
             return (
               <button
                 key={cat.id}
@@ -294,16 +233,14 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
                 className="docs-category-card"
                 onClick={() => onNavigate(cat.docs[0])}
               >
-                <img
-                  src={shot}
-                  alt=""
-                  loading="lazy"
-                  decoding="async"
-                  {...shotSize(shot)}
-                  onError={(e) => {
-                    e.currentTarget.hidden = true;
-                  }}
-                />
+                <span className="docs-category-tile" aria-hidden="true">
+                  <span className="docs-category-tile-head">{cat.title}</span>
+                  <span className="docs-category-tile-list">
+                    {cat.docs.slice(0, 4).map((id) => (
+                      <span key={id}>{getHelpDoc(id).title}</span>
+                    ))}
+                  </span>
+                </span>
                 <span className="docs-category-card-body">
                   <strong>{cat.title}</strong>
                   <span>{first.title} · {cat.docs.length} guides</span>

@@ -44,7 +44,7 @@ const TOP_LINKS: NavEntry[] = [
   { route: "help", label: "Docs", note: "" },
 ];
 
-const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: string }[] }[] = [
+const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: string; note?: string }[] }[] = [
   {
     title: "Product",
     links: [
@@ -82,8 +82,8 @@ const FOOTER_COLUMNS: { title: string; links: { route: PublicRoute; label: strin
     links: [
       { route: "privacy", label: "Privacy" },
       { route: "terms", label: "Terms" },
-      { route: "dpa", label: "Data processing (on request)" },
-      { route: "subprocessors", label: "Subprocessors (on request)" },
+      { route: "dpa", label: "Data processing", note: "On request" },
+      { route: "subprocessors", label: "Subprocessors", note: "On request" },
     ],
   },
 ];
@@ -292,6 +292,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <li key={l.route}>
                       <a href={href(l.route)} aria-current={current(l.route)} onClick={follow(l.route)}>
                         {l.label}
+                        {l.note ? <span className="mk-footer-tag">{l.note}</span> : null}
                       </a>
                     </li>
                   ))}

@@ -1,3 +1,5 @@
+import { SYNC_MODE_COUNT_WORD } from "./syncModesPhrase";
+
 /** Datawrap YouTube demos (@DatawrapCompany) — one source of truth for the
  * marketing video player. IDs are the YouTube watch ids; thumbnails and the
  * privacy-first embed derive from them. */
@@ -23,7 +25,7 @@ export const MARKETING_VIDEOS: MarketingVideo[] = [
   {
     id: "SQnksXWvnvo",
     title: "How Datawrap is different",
-    blurb: "The one-minute pitch: every transfer gated, verified, and proven — not just moved.",
+    blurb: "In one minute: every transfer is checked before the write and compared with the destination after it.",
     tag: "Overview",
   },
   {
@@ -59,7 +61,7 @@ export const MARKETING_VIDEOS: MarketingVideo[] = [
   {
     id: "gg620aIK_yo",
     title: "Sync modes: append, overwrite, and incremental upsert",
-    blurb: "The three sync modes and when to pick each one.",
+    blurb: `Full append, full overwrite, and incremental upsert: three of the ${SYNC_MODE_COUNT_WORD} sync modes, and when to pick each.`,
     tag: "Sync & CDC",
   },
   {
