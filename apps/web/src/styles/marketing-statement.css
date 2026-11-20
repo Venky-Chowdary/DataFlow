@@ -20,7 +20,7 @@
   --mk-sunken: color-mix(in srgb, var(--df-intaglio) 6%, var(--df-paper));
   --mk-ink: var(--df-intaglio);
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio) 80%, var(--df-paper));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 62%, var(--df-paper));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 74%, var(--df-paper));
   --mk-rule: color-mix(in srgb, var(--df-intaglio) 14%, var(--df-paper));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio) 30%, var(--df-paper));
   --mk-action: var(--df-intaglio);
@@ -38,7 +38,7 @@
 
   --mk-landed: var(--df-landed);
   --mk-serial: var(--df-serial);
-  --mk-graphite: color-mix(in srgb, var(--df-intaglio) 46%, var(--df-paper));
+  --mk-graphite: color-mix(in srgb, var(--df-intaglio) 62%, var(--df-paper));
   --mk-wash: color-mix(in srgb, var(--df-intaglio) 9%, var(--df-paper));
   --mk-sheet: color-mix(in srgb, white 82%, var(--df-paper));
 
@@ -77,7 +77,7 @@ html[data-theme="dark"] .mk {
   --mk-sunken: color-mix(in srgb, var(--df-intaglio-light) 8%, var(--df-paper-night));
   --mk-ink: var(--df-intaglio-light);
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio-light) 80%, var(--df-paper-night));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 62%, var(--df-paper-night));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 74%, var(--df-paper-night));
   --mk-rule: color-mix(in srgb, var(--df-intaglio-light) 14%, var(--df-paper-night));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio-light) 30%, var(--df-paper-night));
   --mk-action: var(--df-intaglio-light);
@@ -92,7 +92,7 @@ html[data-theme="dark"] .mk {
   --mk-focus: var(--df-intaglio-light);
   --mk-landed: var(--df-landed-light);
   --mk-serial: var(--df-serial-light);
-  --mk-graphite: color-mix(in srgb, var(--df-intaglio-light) 50%, var(--df-paper-night));
+  --mk-graphite: color-mix(in srgb, var(--df-intaglio-light) 64%, var(--df-paper-night));
   --mk-wash: color-mix(in srgb, var(--df-intaglio-light) 8%, var(--df-paper-night));
   --mk-sheet: color-mix(in srgb, var(--df-intaglio-light) 5%, var(--df-paper-night));
   --mk-screen: color-mix(in srgb, var(--df-intaglio) 40%, black);
@@ -214,7 +214,7 @@ html[data-theme="dark"] .mk {
 .mk .mk-hero,
 .mk .mk-subhero:not(.mk-subhero--doc) {
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio) 80%, var(--df-paper));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 62%, var(--df-paper));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 74%, var(--df-paper));
   --mk-rule: color-mix(in srgb, var(--df-intaglio) 14%, var(--df-paper));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio) 30%, var(--df-paper));
   --mk-page: var(--df-paper);
@@ -233,7 +233,7 @@ html[data-theme="dark"] .mk .mk-hero,
 html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
   --mk-ink: var(--df-intaglio-light);
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio-light) 80%, var(--df-paper-night));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 62%, var(--df-paper-night));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 74%, var(--df-paper-night));
   --mk-rule: color-mix(in srgb, var(--df-intaglio-light) 14%, var(--df-paper-night));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio-light) 30%, var(--df-paper-night));
   --mk-page: var(--df-paper-night);
@@ -703,7 +703,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 }
 
 .mk-line--skipped .mk-line-count {
-  color: var(--mk-graphite);
+  color: var(--mk-ink-3);
 }
 
 .mk-line--landed .mk-line-count {
@@ -1283,7 +1283,7 @@ html[data-theme="dark"] .mk .mk-subhero:not(.mk-subhero--doc) {
 .mk .mk-header {
   --mk-ink: var(--df-intaglio);
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio) 80%, var(--df-paper));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 62%, var(--df-paper));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio) 74%, var(--df-paper));
   --mk-sunken: color-mix(in srgb, var(--df-intaglio) 6%, var(--df-paper));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio) 30%, var(--df-paper));
   --mk-panel: color-mix(in srgb, white 72%, var(--df-paper));
@@ -1297,7 +1297,7 @@ html[data-theme="dark"] .mk.has-ink-hero .mk-header:not(.is-scrolled):not(.is-op
 html[data-theme="dark"] .mk .mk-header {
   --mk-ink: var(--df-intaglio-light);
   --mk-ink-2: color-mix(in srgb, var(--df-intaglio-light) 80%, var(--df-paper-night));
-  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 62%, var(--df-paper-night));
+  --mk-ink-3: color-mix(in srgb, var(--df-intaglio-light) 74%, var(--df-paper-night));
   --mk-sunken: color-mix(in srgb, var(--df-intaglio-light) 8%, var(--df-paper-night));
   --mk-rule-strong: color-mix(in srgb, var(--df-intaglio-light) 30%, var(--df-paper-night));
   --mk-panel: color-mix(in srgb, var(--df-intaglio-light) 6%, var(--df-paper-night));
