@@ -126,6 +126,20 @@ def stamp_incremental_no_op(dest_summary: dict[str, Any]) -> None:
     dest_summary["source_row_count_source"] = "incremental_watermark_empty"
 
 
+def incremental_pass_empty(tally: Any) -> bool:
+    """True when an incremental pass wrote nothing and kept no stored key.
+
+    A skip_duplicates tick that read every row and kept each one as stored
+    also writes 0, but it read them. Stamping it 'no new source rows' zeroed
+    the source count under rows_skipped N, and the trust report then counted
+    the stored rows twice as rows this run did not write (D376 a).
+    """
+    if int(getattr(tally, "written", 0) or 0):
+        return False
+    summary = getattr(tally, "dest_summary", None)
+    return not (isinstance(summary, dict) and summary.get("skipped_identity_keys"))
+
+
 def _raw_page_marked(batch: Any) -> bool:
     """True when this page already recorded how the source handed it over.
 
