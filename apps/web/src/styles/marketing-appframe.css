@@ -1020,8 +1020,8 @@
   width: 26px;
   height: 26px;
   border-radius: var(--df-radius-pill);
-  background: var(--df-serial);
-  color: var(--df-on-tile);
+  background: var(--df-on-tile);
+  color: var(--mk-screen);
   font-size: 13px;
   font-weight: 700;
 }
@@ -1031,4 +1031,56 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 24px;
   }
+}
+
+/* Phones: a panel frame reflows at full size (no shrunken text). */
+.mk-app-figure--panel.is-fluid .mk-app-window {
+  position: relative;
+  width: 100%;
+  transform: none;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-trust-grid {
+  grid-template-columns: 1fr;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-ring-box {
+  padding: 18px;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-url {
+  min-width: 0;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-chrome {
+  grid-template-columns: 56px 1fr 0;
+}
+
+.mk-app-figure--panel.is-fluid .mk-app-drawer-tabs {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+/* Switcher tabs on phones: scroll with snap and an edge fade. */
+@media (max-width: 767px) {
+  .mk-switch-tabs {
+    scroll-snap-type: x mandatory;
+    -webkit-mask-image: linear-gradient(90deg, black 85%, transparent);
+    mask-image: linear-gradient(90deg, black 85%, transparent);
+  }
+
+  .mk .mk-switch-tabs button {
+    scroll-snap-align: start;
+  }
+}
+
+/* Phone crops: UI labels at the 12px legibility floor. */
+.mk-app-figure--panel.is-fluid .mk-app-pill,
+.mk-app-figure--panel.is-fluid .mk-app-drawer-tabs span,
+.mk-app-figure--panel.is-fluid .mk-app-drawer-head p,
+.mk-app-figure--panel.is-fluid .mk-app-verdict,
+.mk-app-figure--panel.is-fluid .mk-app-counts dt,
+.mk-app-figure--panel.is-fluid .mk-app-ring-label,
+.mk-app-figure--panel.is-fluid .mk-app-url {
+  font-size: 12px;
 }

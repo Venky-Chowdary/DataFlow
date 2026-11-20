@@ -275,16 +275,28 @@ function useNarrowViewport(query = "(max-width: 767px)") {
   return narrow;
 }
 
-/** The product frame for a topic: a full window on desktop, a panel crop on phones. */
+/** The product frame for a topic: a full window on desktop, a panel crop on
+ * phones. It fills the poster edge to edge; the poster is the only frame. */
 function TopicFrame({ tag }: { tag: MarketingVideo["tag"] }) {
   const narrow = useNarrowViewport();
-  const sales = EXAMPLE_JOBS[1];
 
   if (tag === "Verification") {
-    return (
-      <PanelWindow path={`jobs/${sales.id}`} caption={FRAME_NOTE} designWidth={narrow ? 460 : 560}>
-        <TrustDrawer job={sales} />
+    // A finished run and its Trust Report, on the users job (not the
+    // sales_orders figures, which belong to Home and Job space).
+    const users = EXAMPLE_JOBS[5];
+    return narrow ? (
+      <PanelWindow path={`jobs/${users.id}`} caption={FRAME_NOTE} designWidth={460}>
+        <div className="mk-demo-scene-verify">
+          <TrustDrawer job={users} />
+        </div>
       </PanelWindow>
+    ) : (
+      <AppWindow path={`jobs/${users.id}`} active="transfer" caption={FRAME_NOTE} designWidth={1200}>
+        <TransferStepper at="Run" job={users} />
+        <div className="mk-demo-scene-verify">
+          <TrustDrawer job={users} />
+        </div>
+      </AppWindow>
     );
   }
 
@@ -329,12 +341,6 @@ function TopicFrame({ tag }: { tag: MarketingVideo["tag"] }) {
   );
 }
 
-/** The next few videos after the current one, wrapping round the catalogue. */
-function upNext(current: MarketingVideo, count: number): MarketingVideo[] {
-  const at = MARKETING_VIDEOS.findIndex((v) => v.id === current.id);
-  return Array.from({ length: count }, (_, i) => MARKETING_VIDEOS[(at + 1 + i) % MARKETING_VIDEOS.length]);
-}
-
 export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => void }) {
   const [current, setCurrent] = useState<MarketingVideo>(
     MARKETING_VIDEOS.find((v) => v.id === FEATURED_VIDEO_ID) ?? MARKETING_VIDEOS[0],
@@ -355,46 +361,46 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
 
   return (
     <div className="mk-page mk-demos mk-demo-page">
+      <header className="mk-demo-hero">
+        <div className="mk-wrap">
+          <h1>Watch a transfer prove itself.</h1>
+          <p className="mk-demo-lead">Recorded runs on the production engine, from mapping to the read-back at the end.</p>
+          <div className="mk-actions">
+            <a className="mk-btn mk-btn--primary" href={YOUTUBE_CHANNEL_URL} target="_blank" rel="noopener noreferrer">
+              Subscribe on YouTube
+            </a>
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("help")}>
+              Read the docs
+            </button>
+          </div>
+        </div>
+      </header>
+
       <section className="mk-demo-stage" aria-label="Video demos" ref={playerRef}>
         <div className="mk-wrap">
-          <header className="mk-demo-stage-head">
-            <h1>Watch a transfer prove itself.</h1>
-            <p>Recorded runs on the production engine, from mapping to the read-back at the end.</p>
-          </header>
-          <div className="mk-demo-stage-grid">
-            <div className="mk-demo-screen">
-              <VideoPlayer
-                key={current.id}
-                videoId={current.id}
-                title={current.title}
-                tag={current.tag}
-                glyph={<TopicGlyph tag={current.tag} />}
-                showTitle={false}
-                backdrop={<TopicFrame tag={current.tag} />}
-              />
-            </div>
-            <aside className="mk-demo-now" aria-labelledby="mk-demo-current">
-              <p className="mk-demo-now-tag">
-                <TopicGlyph tag={current.tag} />
-                {current.tag}
-              </p>
+          <div className="mk-demo-screen">
+            <VideoPlayer
+              key={current.id}
+              videoId={current.id}
+              title={current.title}
+              tag={current.tag}
+              glyph={<TopicGlyph tag={current.tag} />}
+              showTitle={false}
+              backdrop={<TopicFrame tag={current.tag} />}
+            />
+          </div>
+          <div className="mk-demo-now" aria-live="polite">
+            <div>
               <h2 id="mk-demo-current">{current.title}</h2>
               <p className="mk-demo-now-blurb">{current.blurb}</p>
-              <h3 className="mk-demo-next-title">Up next</h3>
-              <ul className="mk-demo-next">
-                {upNext(current, 3).map((video) => (
-                  <li key={video.id}>
-                    <button type="button" onClick={() => setCurrent(video)}>
-                      <TopicGlyph tag={video.tag} />
-                      <span>{video.title}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <a className="mk-btn mk-btn--secondary mk-demo-subscribe" href={YOUTUBE_CHANNEL_URL} target="_blank" rel="noopener noreferrer">
-                Subscribe on YouTube
-              </a>
-            </aside>
+            </div>
+            <p className="mk-demo-now-note">
+              <span className="mk-demo-now-tag">
+                <TopicGlyph tag={current.tag} />
+                {current.tag}
+              </span>
+              <span>Poster: {FRAME_NOTE.charAt(0).toLowerCase() + FRAME_NOTE.slice(1)}</span>
+            </p>
           </div>
         </div>
       </section>
@@ -402,17 +408,22 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
       <section className="mk-section mk-demo-catalogue" aria-labelledby="mk-demos-all">
         <div className="mk-wrap">
           <header className="mk-demo-catalogue-head">
-            <h2 id="mk-demos-all">All demos</h2>
-            <div className="mk-chips mk-demo-filter" role="group" aria-label="Filter demos by topic">
-              {TAGS.map((t) => (
-                <button key={t} type="button" className="mk-chip" aria-pressed={tag === t} onClick={() => setTag(t)}>
-                  {t}
-                </button>
-              ))}
+            <div>
+              <h2 id="mk-demos-all">All demos</h2>
+              <p>Pick a run to play it above. Each one is a real session on the production engine.</p>
             </div>
-            <p className="mk-demo-count" aria-live="polite">
-              {shown} {shown === 1 ? "video" : "videos"}
-            </p>
+            <div className="mk-demo-filter-row">
+              <div className="mk-chips mk-demo-filter" role="group" aria-label="Filter demos by topic">
+                {TAGS.map((t) => (
+                  <button key={t} type="button" className="mk-chip" aria-pressed={tag === t} onClick={() => setTag(t)}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <p className="mk-demo-count" aria-live="polite">
+                {shown} {shown === 1 ? "video" : "videos"}
+              </p>
+            </div>
           </header>
           <div className="mk-demo-index">
             {groups.map((group) => (
@@ -433,13 +444,15 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
                           aria-current={isCurrent ? "true" : undefined}
                           onClick={() => choose(video)}
                         >
-                          <span className="mk-demo-row-title">{video.title}</span>
-                          <span className="mk-demo-row-blurb">{video.blurb}</span>
+                          <span className="mk-demo-row-text">
+                            <span className="mk-demo-row-title">{video.title}</span>
+                            <span className="mk-demo-row-blurb">{video.blurb}</span>
+                          </span>
                           <span className="mk-demo-row-act">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true" focusable="false">
                               <path d="M8 5v14l11-7z" />
                             </svg>
-                            {isCurrent ? "On the stage" : "Watch"}
+                            {isCurrent ? "In the player" : "Watch"}
                           </span>
                         </button>
                       </li>
@@ -449,11 +462,6 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
               </section>
             ))}
           </div>
-          <p className="mk-demo-foot">
-            <button type="button" className="mk-text-btn" onClick={() => onNavigate("help")}>
-              Prefer reading? Open the docs.
-            </button>
-          </p>
         </div>
       </section>
     </div>

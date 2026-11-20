@@ -61,34 +61,31 @@ export function StatusPage() {
     data?.checked_at && !unreachable ? new Date(data.checked_at).toLocaleString() : "";
   return (
     <div className="mk-page mk-doc mk-trust">
-      <section className="mk-trust-hero" aria-labelledby="mk-trust-title">
-        <div className="mk-wrap mk-trust-hero-grid">
-          <div className="mk-trust-hero-copy">
-            <h1 id="mk-trust-title">Service status</h1>
-            <p className="mk-trust-lead">
-              Read from the same readiness checks that decide whether the API takes traffic.
-            </p>
-          </div>
+      <DocHeader
+        title="Service status"
+        titleId="mk-trust-title"
+        lead="Read from the same readiness checks that decide whether the API takes traffic."
+      />
+      <section className="mk-trust-body" aria-label="Components">
+        <div className="mk-wrap">
           <div className={`mk-trust-readout is-${state}`} role="status" aria-live="polite">
-            <StateGlyph state={state} />
-            <strong className="mk-trust-state">{headline}</strong>
+            <p className="mk-trust-line">
+              <StateGlyph state={state} />
+              <strong className="mk-trust-state">{headline}</strong>
+            </p>
             <p className="mk-trust-checked">
               {checked ? `Last checked ${checked}. Refreshes every 30 seconds.` : "Live readiness of the hosted Datawrap service."}
             </p>
             <button type="button" className="mk-btn mk-btn--secondary mk-btn--sm" onClick={() => void load()}>
               Check again
             </button>
+            {unreachable ? (
+              <p className="mk-trust-note">
+                Your browser could not reach the status service, so the current state is unknown. This can be your network
+                as well as ours. If the app is not working for you, email <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
+              </p>
+            ) : null}
           </div>
-        </div>
-      </section>
-      <section className="mk-trust-body" aria-label="Components">
-        <div className="mk-wrap">
-          {unreachable ? (
-            <p className="mk-trust-note">
-              Your browser could not reach the status service, so the current state is unknown. This can be your network
-              as well as ours. If the app is not working for you, email <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
-            </p>
-          ) : null}
           {!unreachable && data?.components?.length ? (
             <table className="mk-trust-ledger">
               <caption className="mk-sr-only">Component state</caption>
@@ -153,23 +150,16 @@ export function SubprocessorsPage() {
       <DocHeader
         title="Subprocessors"
         lead="Third parties that process personal data on Datawrap's behalf to run the hosted service."
-        plate={[
-          ["Document", "Subprocessor list"],
-          ["Availability", "On request"],
-          ["Request from", <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>],
-        ]}
       />
       <section className="mk-legal-request" aria-labelledby="mk-sub-ledger">
         <div className="mk-wrap">
-          <div className="mk-legal-request-sheet">
-            <p>
-              Our current subprocessor list is available on request — email{" "}
-              <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
-            </p>
-            <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=Subprocessor%20list">
-              Request the list
-            </a>
-          </div>
+          <p>
+            Our current subprocessor list is available on request — email{" "}
+            <a href="mailto:contact@datawrap.io?subject=Subprocessor%20list">contact@datawrap.io</a>.
+          </p>
+          <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=Subprocessor%20list">
+            Request the list
+          </a>
           <h2 className="mk-trust-ledger-title" id="mk-sub-ledger">
             What is shared, and with whom
           </h2>

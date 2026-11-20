@@ -10,16 +10,8 @@ import {
   type HelpDocId,
   type HelpDocWorkflowStep,
 } from "../../lib/helpDocs";
-import {
-  EVIDENCE_AS_OF,
-  EVIDENCE_RUN_ID,
-  MARKETING_STACK,
-  PROVEN_EVIDENCE,
-  catalogHonestyLead,
-} from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { shotSize } from "../../lib/workspaceShots";
-import { AppWindow } from "../../components/marketing/app-frame/AppFrame";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -222,33 +214,6 @@ function GuideLink({
   );
 }
 
-const WORKSPACE_CAPTION =
-  "An example workspace. Help opens these same guides inside the product, and the numbers mark where each step lives: 1 Plan in Connectors and Transfer, 2 Validate in Transfer and Contracts, 3 Execute in Transfer, Schedules and Transforms, 4 Verify in Jobs and Query, 5 Evidence in Jobs and Settings.";
-
-/** Help inside the example workspace: the same guides, by step. */
-function WorkspaceHelpScene() {
-  return (
-    <div className="mk-docs-scene">
-      <strong className="mk-docs-scene-title">Datawrap documentation</strong>
-      <span className="mk-docs-scene-search">
-        <DtIcon name="search" size={14} />
-        Search the guides
-      </span>
-      <ol className="mk-docs-scene-steps">
-        {DOCS_STEPS.map((step, i) => (
-          <li key={step.name}>
-            <span className="mk-docs-scene-num">{i + 1}</span>
-            <strong>{step.name}</strong>
-            {step.guides.map((g) => (
-              <span key={`${g.id}-${g.label ?? ""}`}>{g.label ?? getHelpDoc(g.id).title}</span>
-            ))}
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
 /** Documentation home: one search over every guide, and the guides laid out
  * along the five steps of a load. */
 export function DocsPortal({ onNavigate }: DocsPortalProps) {
@@ -308,27 +273,12 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
         </div>
       </header>
 
-      <section className="mk-docs-app" aria-label="Where the guides live in the workspace">
+      <section className="mk-docs-map" aria-label="Guides">
         <div className="mk-wrap">
-          <div className="mk-docs-app-crop">
-            <AppWindow path="help" active="help" caption={WORKSPACE_CAPTION} designWidth={1240}>
-              <WorkspaceHelpScene />
-            </AppWindow>
-          </div>
-          <p className="mk-docs-app-note">{WORKSPACE_CAPTION}</p>
-        </div>
-      </section>
-
-      <section className="mk-docs-map" aria-labelledby="mk-docs-map-title">
-        <div className="mk-wrap">
-          <h2 className="mk-sr-only" id="mk-docs-map-title">
-            Guides by step
-          </h2>
-
           {before.length ? (
-            <div className="mk-docs-before">
-              <h3>Before the first load</h3>
-              <ul>
+            <div className="mk-docs-group">
+              <h2 id="mk-docs-before">Before the first load</h2>
+              <ul className="mk-docs-list" aria-labelledby="mk-docs-before">
                 {before.map((g) => (
                   <li key={g.id}>
                     <GuideLink entry={g} onNavigate={onNavigate} showNote />
@@ -338,36 +288,39 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
             </div>
           ) : null}
 
-          <ol className="mk-docs-steps">
-            {DOCS_STEPS.map((step, i) => {
-              const guides = step.guides.filter(keep);
-              return (
-                <li key={step.name} className={`mk-docs-step${q && !guides.length ? " is-empty" : ""}`}>
-                  <span className="mk-docs-step-num" aria-hidden="true">
-                    {i + 1}
-                  </span>
-                  <h3>{step.name}</h3>
-                  <p className="mk-docs-step-line">{step.line}</p>
-                  {guides.length ? (
-                    <ul>
-                      {guides.map((g) => (
-                        <li key={`${g.id}-${g.label ?? ""}`}>
-                          <GuideLink entry={g} onNavigate={onNavigate} />
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mk-docs-step-none">No match in this step.</p>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
+          <div className="mk-docs-group mk-docs-group--steps">
+            <h2 id="mk-docs-map-title">Guides by step</h2>
+            <ol className="mk-docs-steps" aria-labelledby="mk-docs-map-title">
+              {DOCS_STEPS.map((step, i) => {
+                const guides = step.guides.filter(keep);
+                return (
+                  <li key={step.name} className={`mk-docs-step${q && !guides.length ? " is-empty" : ""}`}>
+                    <span className="mk-docs-step-num" aria-hidden="true">
+                      {i + 1}
+                    </span>
+                    <h3>{step.name}</h3>
+                    <p className="mk-docs-step-line">{step.line}</p>
+                    {guides.length ? (
+                      <ul>
+                        {guides.map((g) => (
+                          <li key={`${g.id}-${g.label ?? ""}`}>
+                            <GuideLink entry={g} onNavigate={onNavigate} />
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mk-docs-step-none">No match in this step.</p>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
 
           {around.length ? (
-            <div className="mk-docs-around">
-              <h3>Other ways in, and reference</h3>
-              <ul>
+            <div className="mk-docs-group">
+              <h2 id="mk-docs-around">Other ways in, and reference</h2>
+              <ul className="mk-docs-list" aria-labelledby="mk-docs-around">
                 {around.map((g) => (
                   <li key={g.id}>
                     <GuideLink entry={g} onNavigate={onNavigate} showNote />
@@ -376,61 +329,6 @@ export function DocsPortal({ onNavigate }: DocsPortalProps) {
               </ul>
             </div>
           ) : null}
-        </div>
-      </section>
-
-      <section className="mk-docs-ledgers" aria-label="Evidence and catalog">
-        <div className="mk-wrap mk-docs-ledgers-grid">
-          <div className="mk-docs-ledger">
-            <h2>Proven in CI{EVIDENCE_AS_OF ? `, ${EVIDENCE_AS_OF}` : ""}</h2>
-            <p>
-              Engines whose proving CI jobs ran green with no skipped test.
-              {EVIDENCE_RUN_ID ? ` Recorded from CI run ${EVIDENCE_RUN_ID}.` : ""}
-            </p>
-            <div className="mk-docs-table-wrap" tabIndex={0} role="region" aria-label="Proven in CI, by engine (scrolls sideways)">
-            <table className="mk-docs-table">
-              <thead>
-                <tr>
-                  <th scope="col">Engine</th>
-                  <th scope="col">Proven against</th>
-                  <th scope="col" className="is-num">Tests</th>
-                  <th scope="col">CI jobs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {PROVEN_EVIDENCE.map((row) => (
-                  <tr key={row.engines}>
-                    <th scope="row">{row.engines}</th>
-                    <td>{/emulator/i.test(row.claim) ? "Emulator" : "Live engine"}</td>
-                    <td className="is-num">{row.cases.toLocaleString("en-US")}</td>
-                    <td>
-                      <code>{row.artifact}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            </div>
-          </div>
-          <div className="mk-docs-ledger">
-            <h2>Catalog families</h2>
-            <p>{catalogHonestyLead()}</p>
-            <ul className="mk-docs-families">
-              {MARKETING_STACK.map((row) => (
-                <li key={row.family}>
-                  <span className="mk-docs-family-name">{row.family}</span>
-                  <span className="mk-docs-family-count">
-                    {row.provenCount} of {row.total} proven
-                  </span>
-                  <span
-                    className="mk-docs-family-bar"
-                    aria-hidden="true"
-                    style={{ ["--mk-docs-share" as string]: `${Math.round((row.provenCount / Math.max(row.total, 1)) * 100)}%` }}
-                  />
-                </li>
-              ))}
-            </ul>
-          </div>
         </div>
       </section>
     </div>

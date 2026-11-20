@@ -684,10 +684,20 @@ export function PanelWindow({
   maxScale?: number;
 }) {
   const { outer, inner, scale, height } = useFitScale(designWidth, maxScale);
+  // Narrower than the design: reflow at full size instead of shrinking the
+  // text below legibility (phones). Wider: scale to fill, as before.
+  const fluid = scale < 1;
   return (
-    <figure className="mk-app-figure mk-app-figure--panel" aria-label={caption || "Example workspace panel"}>
-      <div className="mk-app-fit" ref={outer} style={{ height: height || undefined }}>
-        <div className="mk-app-window" ref={inner} style={{ width: designWidth, transform: `scale(${scale})` }}>
+    <figure
+      className={`mk-app-figure mk-app-figure--panel${fluid ? " is-fluid" : ""}`}
+      aria-label={caption || "Example workspace panel"}
+    >
+      <div className="mk-app-fit" ref={outer} style={{ height: fluid ? undefined : height || undefined }}>
+        <div
+          className="mk-app-window"
+          ref={inner}
+          style={fluid ? undefined : { width: designWidth, transform: `scale(${scale})` }}
+        >
           <WindowChrome path={path} />
           {children}
         </div>

@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
 import { useInViewOnce } from "../../hooks/useInViewOnce";
 import { ALL_CONNECTORS, CATALOG_TOTAL, MARKETING_STACK, PROVEN_DRIVERS, provenBadge } from "../../lib/provenEvidence";
+import { EXAMPLE_READ, EXAMPLE_STATEMENT } from "./StatementHero";
 
 /**
  * Datawrap product surfaces rendered in code for the public site.
@@ -192,10 +193,23 @@ export const EXAMPLE_RUN = {
   skipped: LEDGER_ROWS.filter((r) => r.to === "skipped"),
 };
 
-/** "8 read = 6 landed + 1 held + 1 skipped", from the example rows. */
+const runFmt = new Intl.NumberFormat("en-US");
+
+/**
+ * The example run's totals, the same run the home statement shows. The
+ * ledger rows above are a sample of that run, not its size.
+ */
+export const RUN_TOTALS = {
+  read: EXAMPLE_READ,
+  landed: EXAMPLE_STATEMENT.landed,
+  held: EXAMPLE_STATEMENT.held,
+  skipped: EXAMPLE_STATEMENT.skipped,
+};
+
+/** "48,213,906 read = 48,213,871 landed + 33 held + 2 skipped". */
 export function exampleIdentity(): string {
-  const r = EXAMPLE_RUN;
-  return `${r.read} read = ${r.landed} landed + ${r.held.length} held + ${r.skipped.length} skipped`;
+  const r = RUN_TOTALS;
+  return `${runFmt.format(r.read)} read = ${runFmt.format(r.landed)} landed + ${r.held} held + ${r.skipped} skipped`;
 }
 
 const EXAMPLE_META = "Example rows";
@@ -483,8 +497,8 @@ export function VerifyPanel({ animate = true }: { animate?: boolean }) {
           <dd>
             <span className="mk-verdict mk-verdict--explained">Explained</span>
             <span>
-              1 row differs and none is unexplained: <code>{EXAMPLE_RUN.held[0].key}</code> is held in quarantine. The landed
-              rows match in full.
+              {RUN_TOTALS.held} rows differ and none is unexplained: each is held in quarantine, such as{" "}
+              <code>{EXAMPLE_RUN.held[0].key}</code>. The landed rows match in full.
             </span>
           </dd>
         </div>
@@ -690,10 +704,10 @@ export function RunPanel() {
   const skipped = EXAMPLE_RUN.skipped[0];
   const rows: [string, ReactNode][] = [
     ["Mode", "Full append, batched, bound parameters"],
-    ["Rows read", String(EXAMPLE_RUN.read)],
-    ["Landed", `${EXAMPLE_RUN.landed}, counted by ${RECORDED_ROUTE.destEngine} before and after the write`],
-    ["Held in quarantine", <><code>{held.key}</code>: {held.note}</>],
-    ["Skipped by a rule", <><code>{skipped.key}</code>: {skipped.note}</>],
+    ["Rows read", runFmt.format(RUN_TOTALS.read)],
+    ["Landed", `${runFmt.format(RUN_TOTALS.landed)}, counted by ${RECORDED_ROUTE.destEngine} before and after the write`],
+    ["Held in quarantine", <>{RUN_TOTALS.held} rows, such as <code>{held.key}</code>: {held.note}</>],
+    ["Skipped by a rule", <>{RUN_TOTALS.skipped} rows, such as <code>{skipped.key}</code>: {skipped.note}</>],
   ];
   return (
     <Panel
@@ -837,7 +851,7 @@ export function QuarantinePanel() {
             ? "Fix the cause at the source, then replay."
             : state === "replaying"
               ? "Same writer, same table."
-              : `${EXAMPLE_RUN.read} read = ${EXAMPLE_RUN.landed + 1} landed + ${EXAMPLE_RUN.skipped.length} skipped. The status was fixed at the source first.`}
+              : `${runFmt.format(RUN_TOTALS.read)} read = ${runFmt.format(RUN_TOTALS.landed + RUN_TOTALS.held)} landed + ${RUN_TOTALS.skipped} skipped. The status was fixed at the source first.`}
         </p>
       </div>
     </figure>

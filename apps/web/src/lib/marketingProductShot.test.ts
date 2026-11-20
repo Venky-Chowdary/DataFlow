@@ -56,13 +56,21 @@ describe("marketing product photography", () => {
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });
 
-  it("product and solution pages show only cropped regions of the workspace", () => {
+  it("product and solution pages draw the product in code, with no raster crops among the frames", () => {
+    // Pass 5: a bitmap between coded frames read as a cut-off screenshot
+    // ("ign-off and evidence pack"), so these pages show the product only as
+    // UI rendered in code, the same as home.
+    const files = [
+      "pages/marketing/StoryPages.tsx",
+      "pages/marketing/StoryPage.tsx",
+      "components/marketing/StoryPanels.tsx",
+      "components/marketing/StoryScenes.tsx",
+    ];
+    for (const file of files) {
+      const src = readFileSync(join(webRoot, file), "utf8");
+      assert.doesNotMatch(src, /ProductShot|<img|WORKSPACE_SHOT|\/docs\/screenshots\//, file);
+    }
     const surfaces = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
-    const template = readFileSync(join(webRoot, "pages/marketing/StoryPage.tsx"), "utf8");
-    assert.match(template, /<ProductShot/);
-    const used = [...surfaces.matchAll(/WORKSPACE_SHOT\.(\w+)/g)].map((m) => m[1]);
-    assert.ok(used.length >= 3, "expected the story pages to carry crops");
-    for (const key of used) assert.match(key, /Crop$/, `${key} is a full-window capture`);
     assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
     assert.doesNotMatch(surfaces, /MappingCinema|ProofCinema|CdcCinema/);
     assert.doesNotMatch(surfaces, /Job Theater/);
@@ -107,7 +115,6 @@ describe("marketing product photography", () => {
     assert.match(reel, /lp-product-shot-chrome/);
     assert.match(reel, /lp-product-shot-surface/);
     const stories = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
-    assert.match(stories, /WORKSPACE_SHOT/);
     assert.doesNotMatch(stories, /\/docs\/screenshots\//);
   });
 

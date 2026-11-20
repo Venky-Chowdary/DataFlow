@@ -1,19 +1,17 @@
 import type { MouseEvent, ReactNode } from "react";
+import { ArrowRight, type LucideIcon } from "lucide-react";
 import { MarketingClosing } from "../../components/marketing/MarketingClosing";
-import { ProductShot } from "../../components/marketing/ProductShot";
 import { hashForPublicRoute, type PublicRoute } from "../../lib/publicNavigation";
 
 export type StoryAction = { label: string; onClick: () => void };
 
-export type Capture = { src: string; alt: string; caption: string };
-
 export type Related = { route: PublicRoute; label: string; body: string };
 
 /**
- * The kit every product and solution page is built from. The frame is only
- * the chrome around a page (related links and the closing band); each page
- * composes its own hero and body from the parts below, so no two pages share
- * a layout.
+ * The one structure every product and solution page follows (pass 5):
+ * a left-aligned hero with one light product frame under it, three to five
+ * body sections (feature rows that alternate sides, a grid of facts, or a
+ * table), related links, and the closing section on the page background.
  */
 export function StoryFrame({
   page,
@@ -41,13 +39,19 @@ export function StoryFrame({
     <div className={`mk-page mk-sb mk-${page}`}>
       {hero}
       {children}
-      <nav className="mk-sb-related" aria-label="Related pages">
+      <nav className="mk-sb-related" aria-labelledby={`mk-${page}-related`}>
         <div className="mk-wrap">
+          <p id={`mk-${page}-related`} className="mk-sb-related-title">
+            Related
+          </p>
           <ul>
             {related.map((r) => (
               <li key={r.route}>
                 <a href={hashForPublicRoute(r.route)} onClick={go(r.route)}>
-                  <strong>{r.label}</strong>
+                  <strong>
+                    {r.label}
+                    <ArrowRight size={16} aria-hidden />
+                  </strong>
                   <span>{r.body}</span>
                 </a>
               </li>
@@ -75,37 +79,37 @@ export function StoryActions({ primary, secondary }: { primary: StoryAction; sec
   );
 }
 
-/** Title, one sentence, and the two actions. Layout belongs to the page. */
-export function HeroCopy({
+/**
+ * The hero: the h1, one lead and two actions, left-aligned; then one light
+ * product frame at full content width. Scenes crop to a single panel on
+ * phones, so nothing in the frame is cut off.
+ */
+export function StoryHero({
   id,
   title,
   lead,
   actions,
-  className = "",
+  children,
 }: {
   id: string;
   title: ReactNode;
   lead: ReactNode;
   actions: { primary: StoryAction; secondary: StoryAction };
-  className?: string;
+  children: ReactNode;
 }) {
   return (
-    <div className={`mk-sb-copy ${className}`.trim()}>
-      <h1 id={id}>{title}</h1>
-      <p className="mk-sb-lead">{lead}</p>
-      <div className="mk-sb-actions">
-        <StoryActions {...actions} />
+    <section className="mk-sb-hero" aria-labelledby={id}>
+      <div className="mk-wrap">
+        <div className="mk-sb-copy">
+          <h1 id={id}>{title}</h1>
+          <p className="mk-sb-lead">{lead}</p>
+          <div className="mk-sb-actions">
+            <StoryActions {...actions} />
+          </div>
+        </div>
+        <div className="mk-sb-hero-frame">{children}</div>
       </div>
-    </div>
-  );
-}
-
-/** Product UI sits on the dark screen: this wrapper carries its variables. */
-export function Screen({ className = "", children, label }: { className?: string; children: ReactNode; label?: string }) {
-  return (
-    <div className={`mk-sb-screen ${className}`.trim()} role={label ? "group" : undefined} aria-label={label}>
-      {children}
-    </div>
+    </section>
   );
 }
 
@@ -120,96 +124,106 @@ export function SectionHead({ id, title, body, className = "" }: { id: string; t
 }
 
 /**
- * A full product screen (an AppWindow scene) on its own stage, with one
- * line of action under it. The scene's caption says the data is an example.
+ * A feature row: short text on one side, one light product frame on the
+ * other. Rows alternate sides down the page (`flip` puts the frame first).
  */
-export function FrameSection({
+export function FeatureRow({
   id,
   title,
   body,
-  tone,
-  cta,
-  notes,
+  flip = false,
+  more,
   className = "",
   children,
 }: {
   id: string;
   title: ReactNode;
-  body?: ReactNode;
-  tone: "dark" | "band" | "paper";
-  cta: StoryAction;
-  /** What the scene's numbered pins point at, in order. */
-  notes?: readonly string[];
+  body: ReactNode;
+  flip?: boolean;
+  /** A short line or list under the lead, kept small. */
+  more?: ReactNode;
   className?: string;
   children: ReactNode;
 }) {
   return (
-    <section className={`mk-sb-frame is-${tone}${tone === "dark" ? " mk-sb-dark" : ""} ${className}`.trim()} aria-labelledby={id}>
-      <div className="mk-wrap">
-        <SectionHead id={id} title={title} body={body} />
-        {children}
-        {notes?.length ? (
-          <ol className="mk-sb-notes" aria-label="What the numbers in the frame point at">
-            {notes.map((n) => (
-              <li key={n}>{n}</li>
-            ))}
-          </ol>
-        ) : null}
-        <p className="mk-sb-frame-cta">
-          <button type="button" className="mk-btn mk-btn--secondary" onClick={cta.onClick}>
-            {cta.label}
-          </button>
-        </p>
+    <section className={`mk-sb-section mk-sb-row${flip ? " is-flip" : ""} ${className}`.trim()} aria-labelledby={id}>
+      <div className="mk-wrap mk-sb-row-grid">
+        <div className="mk-sb-row-copy">
+          <SectionHead id={id} title={title} body={body} />
+          {more}
+        </div>
+        <div className="mk-sb-row-frame">{children}</div>
       </div>
     </section>
   );
 }
 
-/** A crop of the live workspace, mounted on a sheet. */
-export function StoryCapture({ capture, className = "" }: { capture: Capture; className?: string }) {
+export type Fact = { icon: LucideIcon; title: string; body: ReactNode };
+
+/** Three columns of short facts: a line icon, a title and two lines. */
+export function FactGrid({ id, title, body, items, className = "" }: { id: string; title: ReactNode; body?: ReactNode; items: Fact[]; className?: string }) {
   return (
-    <div className={`mk-sb-capture ${className}`.trim()}>
-      <ProductShot {...capture} />
-    </div>
+    <section className={`mk-sb-section mk-sb-facts ${className}`.trim()} aria-labelledby={id}>
+      <div className="mk-wrap">
+        <SectionHead id={id} title={title} body={body} />
+        <ul className="mk-sb-facts-grid">
+          {items.map(({ icon: Icon, title: t, body: b }) => (
+            <li key={t}>
+              <Icon size={20} strokeWidth={1.75} aria-hidden />
+              <h3>{t}</h3>
+              <p>{b}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+/** A section whose body is a table. */
+export function TableSection({ id, title, body, className = "", children }: { id: string; title: ReactNode; body?: ReactNode; className?: string; children: ReactNode }) {
+  return (
+    <section className={`mk-sb-section mk-sb-tablesec ${className}`.trim()} aria-labelledby={id}>
+      <div className="mk-wrap">
+        <SectionHead id={id} title={title} body={body} />
+        {children}
+      </div>
+    </section>
   );
 }
 
 /**
  * Rules a reader can hold the product to, and where each one is written
- * down. This is a real two-column table, so it is ruled like one.
+ * down. A real two-column table, ruled like one and unboxed.
  */
-export function RulesLedger({
-  id,
-  title,
+export function RulesTable({
+  caption,
   items,
+  ruleLabel = "Rule",
   whereLabel = "Where to check",
-  className = "",
 }: {
-  id: string;
-  title: string;
+  caption: string;
   items: { claim: string; where: string }[];
+  ruleLabel?: string;
   whereLabel?: string;
-  className?: string;
 }) {
   return (
-    <div className={`mk-sb-rules ${className}`.trim()}>
-      <h3 id={id}>{title}</h3>
-      <table aria-labelledby={id}>
-        <thead>
-          <tr>
-            <th scope="col">Rule</th>
-            <th scope="col">{whereLabel}</th>
+    <table className="mk-sb-table mk-sb-rules">
+      <caption className="mk-sr-only">{caption}</caption>
+      <thead>
+        <tr>
+          <th scope="col">{ruleLabel}</th>
+          <th scope="col">{whereLabel}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((c) => (
+          <tr key={c.claim}>
+            <th scope="row">{c.claim}</th>
+            <td>{c.where}</td>
           </tr>
-        </thead>
-        <tbody>
-          {items.map((c) => (
-            <tr key={c.claim}>
-              <th scope="row">{c.claim}</th>
-              <td>{c.where}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+        ))}
+      </tbody>
+    </table>
   );
 }

@@ -152,23 +152,16 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
         <DocHeader
           title="Data processing addendum"
           lead="The processor terms that govern how Datawrap handles personal data in the workspaces and datasets you connect."
-          plate={[
-            ["Document", "Data processing addendum"],
-            ["Availability", "On request"],
-            ["Request from", <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>],
-          ]}
         />
         <section className="mk-legal-request" aria-label="Request the addendum">
           <div className="mk-wrap">
-            <div className="mk-legal-request-sheet">
-              <p>
-                Our data processing addendum is available on request — email{" "}
-                <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
-              </p>
-              <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=DPA%20request">
-                Request the addendum
-              </a>
-            </div>
+            <p>
+              Our data processing addendum is available on request — email{" "}
+              <a href="mailto:contact@datawrap.io?subject=DPA%20request">contact@datawrap.io</a>.
+            </p>
+            <a className="mk-btn mk-btn--primary" href="mailto:contact@datawrap.io?subject=DPA%20request">
+              Request the addendum
+            </a>
           </div>
         </section>
       </div>
@@ -216,11 +209,12 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
             ? "How Datawrap handles workspace data, credentials, and audit logs, written for security and legal review."
             : "The agreement that governs use of Transfer Studio, schedules, Pilot, and MCP. A signed master agreement controls where it conflicts."
         }
-        plate={[
-          ["Document", title],
-          ["Last updated", "August 2026"],
-          ["Sections", String(blocks.length)],
-          ["Questions", <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>],
+        meta={[
+          "Last updated August 2026",
+          `${blocks.length} sections`,
+          <>
+            Questions: <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
+          </>,
         ]}
       />
       <div className="mk-wrap mk-legal-grid">
@@ -250,33 +244,30 @@ export function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
   );
 }
 
-/** The document header for Privacy, Terms, DPA, and Subprocessors: the title,
- * one sentence, and a plate that states what the document is. */
+/** The document header for Privacy, Terms, DPA, Subprocessors and Status:
+ * the title, one sentence, and an optional meta line under it. */
 export function DocHeader({
   title,
   lead,
-  plate,
+  meta,
+  titleId,
 }: {
   title: string;
   lead: ReactNode;
-  plate?: [string, ReactNode][];
+  meta?: ReactNode[];
+  titleId?: string;
 }) {
   return (
     <header className="mk-legal-hero">
-      <div className="mk-wrap mk-legal-hero-grid">
-        <div className="mk-legal-hero-copy">
-          <h1>{title}</h1>
-          <p className="mk-legal-lead">{lead}</p>
-        </div>
-        {plate?.length ? (
-          <dl className="mk-legal-plate">
-            {plate.map(([k, v]) => (
-              <div key={k}>
-                <dt>{k}</dt>
-                <dd>{v}</dd>
-              </div>
+      <div className="mk-wrap">
+        <h1 id={titleId}>{title}</h1>
+        <p className="mk-legal-lead">{lead}</p>
+        {meta?.length ? (
+          <p className="mk-legal-meta">
+            {meta.map((item, i) => (
+              <span key={i}>{item}</span>
             ))}
-          </dl>
+          </p>
         ) : null}
       </div>
     </header>

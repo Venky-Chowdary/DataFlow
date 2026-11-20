@@ -1,13 +1,6 @@
 import { useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import {
-  CoveragePanel,
-  EvidencePanel,
-  GatesPanel,
-  PlanPanel,
-  QuarantinePanel,
-  VerifyPanel,
-} from "../components/marketing/ProductPanels";
 import { StatementHero } from "../components/marketing/StatementHero";
+import { ConnectorStrip } from "../components/marketing/ConnectorStrip";
 import {
   McpScene,
   PilotScene,
@@ -19,18 +12,14 @@ import {
 import {
   EXAMPLE_JOBS,
   JobsWithTrust,
-  PanelWindow,
-  TrustDrawer,
 } from "../components/marketing/app-frame/AppFrame";
 import {
   ALL_CONNECTORS,
   PROVEN_CDC_SOURCES,
   PROVEN_DRIVERS,
-  catalogHonestyLead,
-  cdcSourcesPhrase,
 } from "../lib/provenEvidence";
 import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
-import { SYNC_MODE_COUNT_WORD, syncModesList } from "../lib/syncModesPhrase";
+import { SYNC_MODE_COUNT_WORD } from "../lib/syncModesPhrase";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -38,52 +27,7 @@ export interface LandingHomeProps {
   onNavigate: (route: PublicRoute) => void;
 }
 
-type Step = { id: string; name: string; title: string; body: string; facts: string[]; panel: ReactNode };
 
-/* Every panel on this page is product UI rendered in code, and each is
-   labelled as an example inside the panel. */
-const STEPS: Step[] = [
-  {
-    id: "plan",
-    name: "Plan",
-    title: "Pair columns by meaning, and approve the plan",
-    body: "Pick a table, a SQL query, or a stored procedure as the source. Each pairing is scored on the column's role, qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person, with the reason on the row.",
-    facts: ["Every pairing scored on role, qualifier, and type", "JSONB lands in Snowflake as VARIANT", "Pairs below the confidence floor wait for review"],
-    panel: <PlanPanel />,
-  },
-  {
-    id: "validate",
-    name: "Validate",
-    title: "Check the plan before the first write",
-    body: "The checks answer four questions: can we read and write, will every value fit, do the columns line up, and is it safe to write. Sample rows go through the real write path, so a value the destination cannot hold is a finding now, not a failed batch later.",
-    facts: ["Approving the plan records a hash of it", "Execute stays locked until the plan is approved"],
-    panel: <GatesPanel />,
-  },
-  {
-    id: "execute",
-    name: "Execute",
-    title: "Run the approved plan, and hold what fails",
-    body: "Rows are written in batches with bound parameters, by insert, merge, or a stored procedure. A row the destination rejects is held with its column, value, and reason instead of stopping the load. Fix the cause, then replay it into the same table.",
-    facts: ["A run that drifts from the approved plan is refused", "Accepting a known loss takes a signed risk record"],
-    panel: <QuarantinePanel />,
-  },
-  {
-    id: "verify",
-    name: "Verify",
-    title: "Read the destination back and compare",
-    body: "After the write, Datawrap queries the destination itself and compares it with what was read, so verification is part of the run rather than a job someone schedules later.",
-    facts: ["Row count, checksum, and a value census by key", "Each table records which comparison ran", "Only a full comparison is called proven"],
-    panel: <VerifyPanel />,
-  },
-  {
-    id: "evidence",
-    name: "Evidence",
-    title: "Hand the record to the people who sign it",
-    body: "The job keeps the mapping decisions, every check result, the held rows, and the comparison. Engineering, the data owner, and compliance sign the same report.",
-    facts: ["Signed proof pack, verifiable through the API", "Sign-off by role", "Tamper-evident audit log you can export"],
-    panel: <EvidencePanel />,
-  },
-];
 
 const DIFFERENT: { title: string; without: string; with: string; where: string }[] = [
   {
@@ -120,13 +64,6 @@ const VERDICTS: { name: string; tone: "proven" | "explained" | "bounded" | "open
   { name: "Unverifiable", tone: "none", meaning: "There is nothing to sign yet: the job is still running, or only row counts exist." },
 ];
 
-const CONTROLS: { term: string; detail: string }[] = [
-  { term: "Single sign-on", detail: "OIDC and SAML, routed by email domain, with an idle timeout you set." },
-  { term: "Provisioning", detail: "SCIM 2.0 maps identity-provider groups to workspace roles." },
-  { term: "Roles, keys, and isolation", detail: "Viewer, operator, editor, and admin, each scoped to its own workspace. An API key never holds more than the person who made it." },
-  { term: "Your own keys", detail: "Connector secrets are encrypted at rest and can be wrapped with your key in AWS KMS." },
-  { term: "Audit log", detail: "Tamper-evident: every entry is signed and linked to the one before, and the chain can be verified and exported." },
-];
 
 function RouteLink({
   route,
@@ -150,75 +87,6 @@ function RouteLink({
     >
       {children}
     </a>
-  );
-}
-
-/**
- * The path every load takes, as a selector: choosing a step swaps in that
- * step's product panel. Motion here only answers the click.
- */
-function PathSelector() {
-  const [active, setActive] = useState(0);
-  const tabs = useRef<Array<HTMLButtonElement | null>>([]);
-  const step = STEPS[active];
-
-  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    const last = STEPS.length - 1;
-    let next = active;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = active === last ? 0 : active + 1;
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = active === 0 ? last : active - 1;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = last;
-    else return;
-    e.preventDefault();
-    setActive(next);
-    tabs.current[next]?.focus();
-  };
-
-  return (
-    <div className="mk-path">
-      <div className="mk-path-track" role="tablist" aria-label="The five steps of a load" onKeyDown={onKey}>
-        {STEPS.map((s, i) => (
-          <button
-            key={s.id}
-            ref={(el) => {
-              tabs.current[i] = el;
-            }}
-            type="button"
-            role="tab"
-            id={`mk-path-tab-${s.id}`}
-            aria-selected={i === active}
-            aria-controls={`mk-path-panel-${s.id}`}
-            tabIndex={i === active ? 0 : -1}
-            className={`mk-path-stop${i === active ? " is-active" : ""}${i < active ? " is-past" : ""}`}
-            onClick={() => setActive(i)}
-          >
-            <span className="mk-path-num" aria-hidden>
-              {i + 1}
-            </span>
-            <span className="mk-path-name">{s.name}</span>
-          </button>
-        ))}
-      </div>
-      <div
-        className="mk-path-body"
-        role="tabpanel"
-        id={`mk-path-panel-${step.id}`}
-        aria-labelledby={`mk-path-tab-${step.id}`}
-        key={step.id}
-      >
-        <div className="mk-path-copy">
-          <h3>{step.title}</h3>
-          <p>{step.body}</p>
-          <ul className="mk-facts">
-            {step.facts.map((fact) => (
-              <li key={fact}>{fact}</li>
-            ))}
-          </ul>
-        </div>
-        <div className="mk-path-panel">{step.panel}</div>
-      </div>
-    </div>
   );
 }
 
@@ -446,40 +314,37 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               </RouteLink>
             </div>
           </div>
-          <div className="mk-hero-window">
-            <PanelWindow path={`jobs/${HERO_JOB.id}`} caption="" designWidth={540} maxScale={1.3}>
-              <TrustDrawer job={HERO_JOB} />
-            </PanelWindow>
-          </div>
           <div className="mk-hero-statement">
             <StatementHero />
           </div>
         </div>
       </section>
 
+      <ConnectorStrip />
+
       <section className="mk-evidence" aria-label="What CI and the product prove">
         <div className="mk-wrap">
           <ul className="mk-evidence-list">
             <li>
               <RouteLink route="integrations" onNavigate={onNavigate} className="mk-evidence-item">
-                {`${PROVEN_DRIVERS} of ${ALL_CONNECTORS.length} drivers proven in CI, each with a green run and no skipped test`}
+                {`${PROVEN_DRIVERS} of ${ALL_CONNECTORS.length} drivers proven in CI`}
               </RouteLink>
             </li>
             <li>
               <RouteLink route="solution-sync" onNavigate={onNavigate} className="mk-evidence-item">
-                {`${SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)} sync modes, from full overwrite to SCD Type 2`}
+                {`${SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)} sync modes, including CDC`}
               </RouteLink>
             </li>
             <li>
               <RouteLink route="product-pipelines" onNavigate={onNavigate} className="mk-evidence-item">
                 {PROVEN_CDC_SOURCES.length
-                  ? `Change data capture proven on ${cdcSourcesPhrase()}`
-                  : "Change data capture from the database log"}
+                  ? `CDC proven on ${PROVEN_CDC_SOURCES.length} databases`
+                  : "Change data capture from the log"}
               </RouteLink>
             </li>
             <li>
               <RouteLink route="customers" onNavigate={onNavigate} className="mk-evidence-item">
-                Every statement is signed, and you can verify it yourself
+                Signed statements you can verify
               </RouteLink>
             </li>
           </ul>
@@ -504,19 +369,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
             <p>Each run sorts every row it read into one of three places. The statement only balances when they add up.</p>
           </header>
           <RowBento />
-        </div>
-      </section>
-
-      <section className="mk-section mk-section--band" aria-labelledby="mk-steps-title">
-        <div className="mk-wrap">
-          <header className="mk-section-head">
-            <h2 id="mk-steps-title">The path every load takes</h2>
-            <p>
-              The same five steps run whether a person starts the load in Transfer Studio, a schedule
-              fires, or an agent calls it through MCP. Each panel is an example built from a recorded run.
-            </p>
-          </header>
-          <PathSelector />
         </div>
       </section>
 
@@ -571,87 +423,29 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
         </div>
       </section>
 
-      <section className="mk-section" aria-labelledby="mk-conn-title">
-        <div className="mk-wrap mk-split">
-          <header className="mk-section-head mk-section-head--stack">
-            <h2 id="mk-conn-title">Coverage, stated by what CI proves</h2>
-            <p>
-              {catalogHonestyLead()} Every family goes through the same map, checks, and quarantine.
+      <section className="mk-closer" aria-labelledby="mk-closing-title">
+        <div className="mk-wrap mk-closer-grid">
+          <div className="mk-closer-copy">
+            <h2 id="mk-closing-title">Run your first statement on your own data</h2>
+            <p className="mk-closer-lead">
+              Start with a free workspace and a table you know well, or ask for a scoped pilot on your
+              own sources with a solutions engineer.
             </p>
-            <dl className="mk-terms">
-              <div>
-                <dt>Sync modes</dt>
-                <dd>
-                  {SYNC_MODE_COUNT_WORD[0].toUpperCase() + SYNC_MODE_COUNT_WORD.slice(1)}: {syncModesList()}.
-                  Each scheduled run is held to the standard of the first.
-                </dd>
-              </div>
-              <div>
-                <dt>Change data capture</dt>
-                <dd>
-                  {PROVEN_CDC_SOURCES.length
-                    ? `Proven in CI on ${cdcSourcesPhrase()}. Inserts, updates, and deletes apply by key.`
-                    : "Reads the database log. Inserts, updates, and deletes apply by key."}
-                </dd>
-              </div>
-            </dl>
             <div className="mk-actions">
-              <RouteLink route="integrations" onNavigate={onNavigate} className="mk-btn mk-btn--secondary">
-                See every driver
+              <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+                Start free
+              </button>
+              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+                Request a pilot
               </RouteLink>
             </div>
-          </header>
-          <div className="mk-split-visual">
-            <CoveragePanel />
+            <p className="mk-caption">
+              Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
+              <RouteLink route="demos" onNavigate={onNavigate}>
+                Watch recorded runs
+              </RouteLink>
+            </p>
           </div>
-        </div>
-      </section>
-
-      <section className="mk-section mk-section--band" aria-labelledby="mk-controls-title">
-        <div className="mk-wrap">
-          <header className="mk-section-head">
-            <h2 id="mk-controls-title">Security and deployment</h2>
-            <p>The same controls apply in Transfer Studio, on schedules, in Pilot, and over MCP.</p>
-          </header>
-          <dl className="mk-terms mk-terms--grid">
-            {CONTROLS.map((c) => (
-              <div key={c.term}>
-                <dt>{c.term}</dt>
-                <dd>{c.detail}</dd>
-              </div>
-            ))}
-          </dl>
-          <div className="mk-deploy">
-            <div>
-              <h3>Hosted</h3>
-              <p>The default on every plan. Sign up and run transfers; connector credentials stay encrypted in your workspace.</p>
-            </div>
-            <div>
-              <h3>Self-managed</h3>
-              <p>
-                An Enterprise plan option: your cloud or VPC, with Docker Compose or Helm. Jobs,
-                schedules, and audit events live in your own MongoDB.
-              </p>
-            </div>
-          </div>
-          <p className="mk-inline-links">
-            <RouteLink route="security" onNavigate={onNavigate}>
-              Security overview
-            </RouteLink>
-            <RouteLink route="enterprise" onNavigate={onNavigate}>
-              Enterprise controls
-            </RouteLink>
-          </p>
-        </div>
-      </section>
-
-      <section className="mk-closer" aria-labelledby="mk-closing-title">
-        <div className="mk-wrap">
-          <h2 id="mk-closing-title">Run your first statement on your own data</h2>
-          <p className="mk-closer-lead">
-            Start with a free workspace and a table you know well, or ask for a scoped pilot on your
-            own sources with a solutions engineer.
-          </p>
           <figure className="mk-closer-sheet" aria-labelledby="mk-closer-sheet-title">
             <figcaption id="mk-closer-sheet-title">
               Sign-off for <code>{HERO_JOB.name}</code>, an example
@@ -665,20 +459,6 @@ export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
               ))}
             </ol>
           </figure>
-          <div className="mk-actions">
-            <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
-              Start free
-            </button>
-            <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
-              Request a pilot
-            </RouteLink>
-          </div>
-          <p className="mk-caption">
-            Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
-            <RouteLink route="demos" onNavigate={onNavigate}>
-              Watch recorded runs
-            </RouteLink>
-          </p>
         </div>
       </section>
     </div>

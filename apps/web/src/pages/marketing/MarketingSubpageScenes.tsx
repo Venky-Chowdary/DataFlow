@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   Bell,
@@ -6,12 +6,10 @@ import {
   Download,
   FileSignature,
   KeyRound,
-  Search,
   Settings,
   Shield,
   ShieldCheck,
   Users,
-  X,
   Zap,
 } from "lucide-react";
 import { ConnectorIcon } from "../../app/brand-icons";
@@ -23,7 +21,6 @@ import {
 } from "../../components/marketing/app-frame/AppFrame";
 import { ROLES } from "../../components/marketing/ProductPanels";
 import {
-  ALL_CONNECTORS,
   CATALOG_TOTAL,
   EMULATED_DRIVERS,
   EVIDENCE_AS_OF,
@@ -33,14 +30,23 @@ import {
 } from "../../lib/provenEvidence";
 
 /**
- * Product scenes for the Pricing, Enterprise, Proof, Security, and
- * Integrations pages, built on the shared AppFrame kit. Each mirrors a real
- * workspace screen (Settings, Connectors, the Jobs sign-off drawer, Proofs).
+ * Product scenes for the Enterprise, Proof, and Security pages, built on the
+ * shared AppFrame kit. Each mirrors a real workspace screen (Settings, the
+ * Jobs sign-off drawer, Proofs).
  * Example data says so in the caption; evidence data comes from the CI
  * evidence file and is never typed by hand.
  */
 
 const fmt = new Intl.NumberFormat("en-US");
+
+/**
+ * Layout width of a phone crop. It matches a 390px screen's content column,
+ * so the panel renders at about 1:1 and its UI text stays at 12px or more.
+ */
+const PHONE_WIDTH = 360;
+
+/** A full window, or one panel of it (a feature row's frame, or any phone). */
+export type FrameKind = "window" | "panel";
 
 /** True when the viewport is phone-sized: frames crop to one panel there. */
 export function useNarrow(query = "(max-width: 767px)") {
@@ -413,28 +419,35 @@ function SettingsScene({ section, onSection }: { section: SettingsSection; onSec
   );
 }
 
-/** Settings in a full window; a section picker and one cropped pane on phones. */
+/**
+ * Settings in a full window. As a panel (and always on phones) it crops to one
+ * pane, with a section picker when there is more than one section to show.
+ */
 export function SettingsShowcase({
   initial,
   caption,
   sections = ["sso", "team", "enterprise", "audit"],
+  frame = "window",
 }: {
   initial: SettingsSection;
   caption: string;
   sections?: SettingsSection[];
+  frame?: FrameKind;
 }) {
   const narrow = useNarrow();
   const [section, setSection] = useState<SettingsSection>(initial);
-  if (narrow) {
+  if (narrow || frame === "panel") {
     return (
       <div className="mk-app-phone">
-        <Picker
-          label="Choose a settings section (example)"
-          items={sections.map((id) => ({ id, label: SECTION_LABEL[id] }))}
-          value={section}
-          onChange={setSection}
-        />
-        <PanelWindow path={`settings/${section}`} caption={caption} designWidth={420}>
+        {sections.length > 1 ? (
+          <Picker
+            label="Choose a settings section (example)"
+            items={sections.map((id) => ({ id, label: SECTION_LABEL[id] }))}
+            value={section}
+            onChange={setSection}
+          />
+        ) : null}
+        <PanelWindow path={`settings/${section}`} caption={caption} designWidth={narrow ? PHONE_WIDTH : 660}>
           <div className="mk-sc-pane is-panel">
             <SettingsPane section={section} />
           </div>
@@ -445,153 +458,6 @@ export function SettingsShowcase({
   return (
     <AppWindow path={`settings/${section}`} active="settings" caption={caption}>
       <SettingsScene section={section} onSection={setSection} />
-    </AppWindow>
-  );
-}
-
-/* ══ Connectors: the connector wizard, with each driver's proof state ══ */
-
-type ProofFilter = "proven" | "unproven" | "all";
-
-const EXAMPLE_CONNECTIONS: { name: string; driver: string; label: string; host: string; used: string }[] = [
-  { name: "Orders Postgres", driver: "postgresql", label: "PostgreSQL", host: "orders-db:5432", used: "13m ago" },
-  { name: "Warehouse Snowflake", driver: "snowflake", label: "Snowflake", host: "DW_DEMO", used: "13m ago" },
-  { name: "Shop MySQL", driver: "mysql", label: "MySQL", host: "shop-db:3306", used: "5d ago" },
-  { name: "Catalog MongoDB", driver: "mongodb", label: "MongoDB", host: "catalog", used: "1h ago" },
-  { name: "Sales files", driver: "s3", label: "Amazon S3", host: "sales-files", used: "11d ago" },
-];
-
-function ConnectionsBackdrop() {
-  return (
-    <div className="mk-sc-conns" aria-hidden>
-      <div className="mk-app-toolbar">
-        <span className="mk-sc-search">
-          <Search size={13} />
-          Search connections
-        </span>
-        <span className="mk-sc-conns-tabs">
-          <span className="is-active">Connections ({EXAMPLE_CONNECTIONS.length})</span>
-          <span>Catalog</span>
-        </span>
-        <span className="mk-app-tbtn mk-app-tbtn--primary">New connection</span>
-      </div>
-      <div className="mk-app-table">
-        {EXAMPLE_CONNECTIONS.map((c) => (
-          <div key={c.name} className="mk-sc-conn">
-            <ConnectorIcon id={c.driver} size={18} />
-            <span>
-              <strong>{c.name} (example)</strong>
-              <small>
-                {c.label}, {c.host}
-              </small>
-            </span>
-            <span className="mk-app-chip">Source & destination</span>
-            <span className="mk-sc-ok">
-              <Check size={13} />
-              Test passed
-            </span>
-            <span className="mk-sc-muted">{c.used}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ConnectorPicker({ compact }: { compact?: boolean }) {
-  const families = useMemo(() => ["All categories", ...new Set(ALL_CONNECTORS.map((c) => c.family))], []);
-  const [family, setFamily] = useState("All categories");
-  const [proof, setProof] = useState<ProofFilter>("proven");
-  const rows = ALL_CONNECTORS.filter(
-    (c) =>
-      (family === "All categories" || c.family === family) &&
-      (proof === "all" || (proof === "proven" ? c.proven : !c.proven)),
-  );
-  const limit = compact ? 6 : 12;
-  const shown = rows.slice(0, limit);
-  return (
-    <div className="mk-sc-modal" role="group" aria-label="Choose a connector (example)">
-      <div className="mk-sc-modal-head">
-        <div>
-          <strong>Choose a connector</strong>
-          <p>Pick one product. Each tile says what CI has proven for its driver.</p>
-        </div>
-        <span className="mk-app-icon-btn" aria-hidden>
-          <X size={16} />
-        </span>
-      </div>
-      <div className="mk-sc-cats" role="group" aria-label="Category">
-        {families.map((f) => (
-          <button key={f} type="button" aria-pressed={family === f} className={family === f ? "is-active" : undefined} onClick={() => setFamily(f)}>
-            {f}
-          </button>
-        ))}
-      </div>
-      <div className="mk-sc-seg" role="group" aria-label="Proof state">
-        {(
-          [
-            ["proven", "Proven in CI"],
-            ["unproven", "Implemented"],
-            ["all", "All drivers"],
-          ] as const
-        ).map(([id, label]) => (
-          <button key={id} type="button" aria-pressed={proof === id} className={proof === id ? "is-active" : undefined} onClick={() => setProof(id)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <p className="mk-sc-tally" role="status" aria-live="polite">
-        {rows.length} shown. {CATALOG_TOTAL} drivers: {PROVEN_DRIVERS} proven in CI, {CATALOG_TOTAL - PROVEN_DRIVERS} implemented
-        and running their CI proof.
-      </p>
-      <ul className="mk-sc-tiles">
-        {shown.map((c) => (
-          <li key={c.driver} className={`mk-sc-tile${c.proven ? " is-proven" : ""}`}>
-            <span className="mk-sc-tile-icon">
-              <ConnectorIcon id={c.driver} size={22} />
-            </span>
-            <strong>{c.name}</strong>
-            <span className="mk-sc-tile-fam">{c.family}</span>
-            <span className={`mk-sc-badge${c.proven ? " is-proven" : ""}`}>
-              {c.proven ? (c.emulated ? "Proven in CI, emulator" : "Proven in CI") : "Implemented, proof running"}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {rows.length > shown.length ? (
-        <p className="mk-sc-more">
-          {rows.length - shown.length} more {family === "All categories" ? "" : `in ${family} `}below the fold
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-/** The Connectors screen with the connector wizard open over it. */
-export function ConnectorWizardShowcase({ caption }: { caption: string }) {
-  const narrow = useNarrow();
-  if (narrow) {
-    return (
-      <div className="mk-app-phone">
-        <PanelWindow path="connectors/new" caption={caption} designWidth={400}>
-          <ConnectorPicker compact />
-        </PanelWindow>
-      </div>
-    );
-  }
-  return (
-    <AppWindow
-      path="connectors/new"
-      active="connectors"
-      caption={caption}
-      className="mk-sc-has-modal"
-      overlay={
-        <div className="mk-sc-scrim">
-          <ConnectorPicker />
-        </div>
-      }
-    >
-      <ConnectionsBackdrop />
     </AppWindow>
   );
 }
@@ -650,7 +516,7 @@ function SignOff({ inPanel }: { inPanel?: boolean }) {
           {SIGNERS.map((s) => (
             <li key={s}>
               <strong>{s}</strong>
-              <span className={`mk-app-pill ${signed.includes(s) ? "mk-app-pill--completed" : "mk-app-pill--v-sampled"}`}>
+              <span className={`mk-app-pill ${signed.includes(s) ? "mk-app-pill--completed" : "mk-app-pill--v-not-run"}`}>
                 {signed.includes(s) ? "Signed" : "Waiting"}
               </span>
             </li>
@@ -711,13 +577,13 @@ function SignOff({ inPanel }: { inPanel?: boolean }) {
   );
 }
 
-/** The Jobs grid with the sign-off drawer open on the example run. */
-export function SignOffShowcase({ caption }: { caption: string }) {
+/** The Jobs grid with the sign-off drawer open on the example run; as a panel, the drawer alone. */
+export function SignOffShowcase({ caption, frame = "window" }: { caption: string; frame?: FrameKind }) {
   const narrow = useNarrow();
-  if (narrow) {
+  if (narrow || frame === "panel") {
     return (
       <div className="mk-app-phone">
-        <PanelWindow path="jobs/6af912d7/sign-off" caption={caption} designWidth={420}>
+        <PanelWindow path="jobs/6af912d7/sign-off" caption={caption} designWidth={narrow ? PHONE_WIDTH : 660}>
           <SignOff inPanel />
         </PanelWindow>
       </div>
@@ -797,7 +663,7 @@ function ProofsLedger({ compact }: { compact?: boolean }) {
               {fmt.format(g.executed)}
             </span>
             <span role="cell">
-              <span className={`mk-app-pill ${g.emulated ? "mk-app-pill--v-sampled" : "mk-app-pill--completed"}`}>
+              <span className="mk-app-pill mk-app-pill--completed">
                 {g.emulated ? "Green on an emulator" : "Green, none skipped"}
               </span>
             </span>
@@ -813,7 +679,7 @@ export function ProofsShowcase({ caption }: { caption: string }) {
   if (narrow) {
     return (
       <div className="mk-app-phone">
-        <PanelWindow path="proofs" caption={caption} designWidth={420}>
+        <PanelWindow path="proofs" caption={caption} designWidth={PHONE_WIDTH}>
           <ProofsLedger compact />
         </PanelWindow>
       </div>

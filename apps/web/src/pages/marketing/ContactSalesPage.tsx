@@ -269,11 +269,11 @@ export function ContactSalesPage({
             </ol>
           </div>
 
-          <div className="mk-ct-sheet">
+          <div className="mk-ct-card">
           {sent ? (
             <div className="mk-ct-f-success" role="status">
               <div className="mk-ct-f-success-mark" aria-hidden>
-                <DtIcon name="check" size={28} />
+                <DtIcon name="check" size={20} />
               </div>
               <h2>Request received</h2>
               <p>
@@ -458,7 +458,7 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="mk-ct-keep" aria-labelledby="mk-ct-keep-title">
+      <section className="mk-section mk-ct-keep" aria-labelledby="mk-ct-keep-title">
         <div className="mk-wrap mk-ct-keep-grid">
           <div className="mk-ct-keep-copy">
             <h2 id="mk-ct-keep-title">What a pilot leaves you with</h2>
@@ -475,7 +475,7 @@ export function ContactSalesPage({
 
       <DesignPartners headingId="mk-contact-partners" />
 
-      <section className="mk-section mk-section--band" aria-labelledby="mk-contact-faq">
+      <section className="mk-section mk-ct-faq" aria-labelledby="mk-contact-faq">
         <div className="mk-wrap mk-story-grid">
           <header className="mk-story-head">
             <h2 id="mk-contact-faq">Questions people ask first</h2>

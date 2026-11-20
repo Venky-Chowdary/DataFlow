@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +10,7 @@ import {
   Database,
   FileCode2,
   Filter,
+  OctagonX,
   Play,
   Plus,
   RefreshCw,
@@ -24,14 +25,16 @@ import {
 import { ConnectorIcon } from "../../app/brand-icons";
 import { AppWindow, PanelWindow } from "./app-frame/AppFrame";
 import { RECORDED_CHECK_GROUPS, RECORDED_MAPPING } from "./ProductPanels";
-import { REGIONS, RUN } from "./StoryPanels";
+import { MIGRATION_RUN, QUERY_SEGMENTS, REGIONS, RUN, type RunCounts } from "./StoryPanels";
 
 /**
  * Full product screens for the product and solution pages (designer B),
- * built on the shared AppFrame kit. Every figure is example data from the
- * same workspace the home page shows, and it adds up:
- * 48,213,906 read = 48,213,871 landed + 33 held + 2 skipped.
- * On phones each scene renders one panel in window chrome at a legible size.
+ * built on the shared AppFrame kit. Every figure is example data and adds up.
+ * With no props a scene shows the home page's run
+ * (48,213,906 read = 48,213,871 landed + 33 held + 2 skipped); the product
+ * and solution pages pass `example` to show their own labelled example.
+ * On phones each scene renders one panel in window chrome, which reflows at
+ * full size (UI text 12px or larger) instead of shrinking the whole screen.
  */
 
 const fmt = new Intl.NumberFormat("en-US");
@@ -94,8 +97,13 @@ function cap(caption: string | undefined, fallback: string, show: boolean | unde
   return { text: caption ?? fallback, cls: show === false ? " mk-bsc-nocap" : "" };
 }
 
-const SRC = { id: "postgresql", name: "Orders Postgres (demo)", table: "public.sales_orders" };
-const DST = { id: "snowflake", name: "Warehouse Snowflake (demo)", table: "DW_DEMO.SALES_ORDERS_REPORTING" };
+type Side = { id: string; name: string; table: string };
+
+const SRC: Side = { id: "postgresql", name: "Orders Postgres (demo)", table: "public.sales_orders" };
+const DST: Side = { id: "snowflake", name: "Warehouse Snowflake (demo)", table: "DW_DEMO.SALES_ORDERS_REPORTING" };
+
+/** Phone crops: designed at this width, so they reflow at full size on phones. */
+const PHONE_DESIGN = 460;
 
 /** True on phone-sized viewports. */
 function useNarrow(query = "(max-width: 767px)") {
@@ -130,6 +138,10 @@ function Conn({ id, name }: { id: string; name: string }) {
   );
 }
 
+function lastPart(table: string) {
+  return table.split(".").pop() ?? table;
+}
+
 /** A small segmented picker above a phone crop. */
 function Picker<T extends string>({
   label,
@@ -161,6 +173,71 @@ const STUDIO_STEPS = ["Source", "Destination", "Transform", "Map", "Validate", "
 const REVIEW_COL = "ordered_at";
 type StudioStep = "Map" | "Validate" | "Run";
 
+type TransferExample = {
+  src: Side;
+  dst: Side;
+  rows: string;
+  run: RunCounts;
+  duration: string;
+  held: ReactNode;
+  skipped: ReactNode;
+  caption: string;
+};
+
+/** Each page's Transfer example. The default is the home page's run. */
+const TRANSFER_EXAMPLES: Record<"home" | "transfer" | "migration", TransferExample> = {
+  home: {
+    src: SRC,
+    dst: DST,
+    rows: "48.2M rows",
+    run: RUN,
+    duration: "41m 37s",
+    held: (
+      <>
+        <code>status</code> is NULL; NOT NULL in the destination.
+      </>
+    ),
+    skipped: (
+      <>
+        {RUN.skipped} skipped: <code>region = &apos;TEST&apos;</code>.
+      </>
+    ),
+    caption: "Example data: Orders Postgres (demo) into Warehouse Snowflake (demo). Checks from a recorded run.",
+  },
+  transfer: {
+    src: { ...SRC, table: "public.store_orders" },
+    dst: { ...DST, table: "DW_DEMO.STORE_ORDERS" },
+    rows: "3.1M rows",
+    run: { read: 3_126_540, landed: 3_126_512, held: 26, skipped: 2 },
+    duration: "4m 12s",
+    held: (
+      <>
+        <code>status</code> is NULL; NOT NULL in the destination.
+      </>
+    ),
+    skipped: (
+      <>
+        2 skipped: <code>region = &apos;TEST&apos;</code>.
+      </>
+    ),
+    caption: "Example data. Column types and checks follow a recorded run; table names and row counts are illustrative.",
+  },
+  migration: {
+    src: { ...SRC, table: "legacy.orders" },
+    dst: { ...DST, table: "CORE.ORDERS" },
+    rows: "6.8M rows",
+    run: MIGRATION_RUN,
+    duration: "9m 48s",
+    held: (
+      <>
+        <code>created</code> is NULL; <code>CREATED_AT</code> is NOT NULL in the destination.
+      </>
+    ),
+    skipped: <>None skipped.</>,
+    caption: "Example schemas and counts. Validate and Run show the example cutover load: 6,804,113 read.",
+  },
+};
+
 const MIGRATION_ROWS: { from: string; ft: string; to: string; tt: string; state: "safe" | "review" | "risk"; why: string }[] = [
   { from: "order_id", ft: "bigint", to: "ORDER_ID", tt: "NUMBER(19,0)", state: "safe", why: "Same name, wider type" },
   { from: "cust_ref", ft: "integer", to: "CUSTOMER_ID", tt: "NUMBER(10,0)", state: "safe", why: "Renamed, matched by role" },
@@ -169,7 +246,7 @@ const MIGRATION_ROWS: { from: string; ft: string; to: string; tt: string; state:
   { from: "note", ft: "varchar(2000)", to: "NOTE", tt: "VARCHAR(500)", state: "risk", why: "Narrowing: needs a signed risk record" },
 ];
 
-function StudioRail({ step, onStep }: { step: StudioStep; onStep: (s: StudioStep) => void }) {
+function StudioRail({ step, onStep, ex }: { step: StudioStep; onStep: (s: StudioStep) => void; ex: TransferExample }) {
   const at = STUDIO_STEPS.indexOf(step);
   return (
     <div className="mk-bsc-rail">
@@ -200,11 +277,11 @@ function StudioRail({ step, onStep }: { step: StudioStep; onStep: (s: StudioStep
         })}
       </ol>
       <p className="mk-bsc-rail-route">
-        <Conn id={SRC.id} name={SRC.name} />
+        <Conn id={ex.src.id} name={ex.src.name} />
         <ArrowRight size={13} aria-hidden />
-        <Conn id={DST.id} name={DST.name} />
-        <code>SALES_ORDERS_REPORTING</code>
-        <strong>48.2M rows</strong>
+        <Conn id={ex.dst.id} name={ex.dst.name} />
+        <code>{lastPart(ex.dst.table)}</code>
+        <strong>{ex.rows}</strong>
       </p>
     </div>
   );
@@ -217,7 +294,7 @@ function StudioMap({ migration }: { migration?: boolean }) {
         <Pin n={2} />
         <div className="mk-bsc-card-head">
           <strong>Column matches</strong>
-          <span className="mk-app-pill mk-app-pill--v-explained">2 need a decision</span>
+          <span className="mk-app-pill mk-app-pill--v-not-run">2 need a decision</span>
           <span className="mk-bsc-grow" />
           <span className="mk-app-tbtn">Open mapping proof</span>
         </div>
@@ -240,7 +317,7 @@ function StudioMap({ migration }: { migration?: boolean }) {
                 {r.why}
               </span>
               <span role="cell">
-                <span className={`mk-app-pill ${r.state === "safe" ? "mk-app-pill--completed" : r.state === "review" ? "mk-app-pill--v-explained" : "mk-app-pill--failed mk-bsc-risk"}`}>
+                <span className={`mk-app-pill ${r.state === "safe" ? "mk-app-pill--completed" : r.state === "review" ? "mk-app-pill--v-not-run" : "mk-app-pill--failed mk-bsc-risk"}`}>
                   {r.state === "safe" ? "Safe" : r.state === "review" ? "Review" : "Risk record"}
                 </span>
               </span>
@@ -259,7 +336,7 @@ function StudioMap({ migration }: { migration?: boolean }) {
         <span className="mk-app-pill mk-app-pill--completed">
           {RECORDED_MAPPING.length} of {RECORDED_MAPPING.length} mapped
         </span>
-        <span className="mk-app-pill mk-app-pill--v-explained">1 needs review</span>
+        <span className="mk-app-pill mk-app-pill--v-not-run">1 needs review</span>
         <span className="mk-bsc-grow" />
         <span className="mk-app-tbtn">Open mapping proof</span>
       </div>
@@ -274,27 +351,27 @@ function StudioMap({ migration }: { migration?: boolean }) {
         {RECORDED_MAPPING.map((m) => {
           const review = m.col === REVIEW_COL;
           return (
-          <div key={m.col} className={`mk-bsc-gr${review ? " is-review" : ""}`} role="row">
-            <span role="cell">
-              <code>{m.col}</code>
-            </span>
-            <span role="cell">
-              <code>{m.from}</code>
-            </span>
-            <span role="cell">
-              <code>{m.to}</code>
-            </span>
-            <span role="cell" className="mk-bsc-muted">
-              {review ? "Time zone kept? Confirm" : (m.transform ?? "None")}
-            </span>
-            <span role="cell">
-              {review ? (
-                <span className="mk-app-pill mk-app-pill--v-explained">Needs review</span>
-              ) : (
-                <span className="mk-app-pill mk-app-pill--completed">Safe</span>
-              )}
-            </span>
-          </div>
+            <div key={m.col} className={`mk-bsc-gr${review ? " is-review" : ""}`} role="row">
+              <span role="cell">
+                <code>{m.col}</code>
+              </span>
+              <span role="cell">
+                <code>{m.from}</code>
+              </span>
+              <span role="cell">
+                <code>{m.to}</code>
+              </span>
+              <span role="cell" className="mk-bsc-muted">
+                {review ? "Time zone kept? Confirm" : (m.transform ?? "None")}
+              </span>
+              <span role="cell">
+                {review ? (
+                  <span className="mk-app-pill mk-app-pill--v-not-run">Needs review</span>
+                ) : (
+                  <span className="mk-app-pill mk-app-pill--completed">Safe</span>
+                )}
+              </span>
+            </div>
           );
         })}
       </div>
@@ -356,7 +433,34 @@ function StudioValidate() {
   );
 }
 
-function StudioRun() {
+/** read = landed + held + skipped, in the product's own figures. */
+function RunEquation({ run }: { run: RunCounts }) {
+  return (
+    <dl className="mk-bsc-eq">
+      <div>
+        <dt>Read</dt>
+        <dd>{fmt.format(run.read)}</dd>
+      </div>
+      <span aria-hidden>=</span>
+      <div className="is-landed">
+        <dt>Landed</dt>
+        <dd>{fmt.format(run.landed)}</dd>
+      </div>
+      <span aria-hidden>+</span>
+      <div className="is-held">
+        <dt>Held</dt>
+        <dd>{fmt.format(run.held)}</dd>
+      </div>
+      <span aria-hidden>+</span>
+      <div className="is-skipped">
+        <dt>Skipped</dt>
+        <dd>{fmt.format(run.skipped)}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function StudioRun({ ex }: { ex: TransferExample }) {
   return (
     <div className="mk-bsc-stack">
       <div className="mk-bsc-card mk-bsc-runcard">
@@ -365,33 +469,13 @@ function StudioRun() {
           <strong>Run complete</strong>
           <span className="mk-app-pill mk-app-pill--completed">Completed with quarantine</span>
           <span className="mk-bsc-grow" />
-          <span className="mk-bsc-muted">41m 37s</span>
+          <span className="mk-bsc-muted">{ex.duration}</span>
         </div>
-        <dl className="mk-bsc-eq">
-          <div>
-            <dt>Read</dt>
-            <dd>{fmt.format(RUN.read)}</dd>
-          </div>
-          <span aria-hidden>=</span>
-          <div className="is-landed">
-            <dt>Landed</dt>
-            <dd>{fmt.format(RUN.landed)}</dd>
-          </div>
-          <span aria-hidden>+</span>
-          <div className="is-held">
-            <dt>Held</dt>
-            <dd>{RUN.held}</dd>
-          </div>
-          <span aria-hidden>+</span>
-          <div className="is-skipped">
-            <dt>Skipped</dt>
-            <dd>{RUN.skipped}</dd>
-          </div>
-        </dl>
+        <RunEquation run={ex.run} />
         <div className="mk-bsc-bar" aria-hidden>
           <i style={{ flexGrow: 98 }} />
           <i className="is-held" style={{ flexGrow: 1 }} />
-          <i className="is-skipped" style={{ flexGrow: 1 }} />
+          {ex.run.skipped ? <i className="is-skipped" style={{ flexGrow: 1 }} /> : null}
         </div>
       </div>
       <div className="mk-bsc-two">
@@ -405,10 +489,10 @@ function StudioRun() {
         <div className="mk-bsc-card">
           <div className="mk-bsc-card-head">
             <strong>Quarantine</strong>
-            <span className="mk-app-pill mk-app-pill--v-explained">33 held</span>
+            <span className="mk-app-pill mk-app-pill--v-explained">{fmt.format(ex.run.held)} held</span>
           </div>
           <p className="mk-bsc-card-body">
-            <code>status</code> is NULL; NOT NULL in the destination. 2 skipped: <code>region = &apos;TEST&apos;</code>.
+            {ex.held} {ex.skipped}
           </p>
         </div>
       </div>
@@ -459,11 +543,13 @@ function TransferInner({
   showCaption,
   initial = "Validate",
   migration,
-}: SceneOptions & { initial?: StudioStep; migration?: boolean } = {}) {
+  example,
+}: SceneOptions & { initial?: StudioStep; migration?: boolean; example?: "transfer" | "migration" } = {}) {
   const narrow = useNarrow();
-  const c = cap(caption, "Example data: Orders Postgres (demo) into Warehouse Snowflake (demo). Checks from a recorded run.", showCaption);
+  const ex = TRANSFER_EXAMPLES[example ?? "home"];
+  const c = cap(caption, ex.caption, showCaption);
   const [step, setStep] = useState<StudioStep>(initial);
-  const body = step === "Map" ? <StudioMap migration={migration} /> : step === "Validate" ? <StudioValidate /> : <StudioRun />;
+  const body = step === "Map" ? <StudioMap migration={migration} /> : step === "Validate" ? <StudioValidate /> : <StudioRun ex={ex} />;
   if (narrow) {
     return (
       <div className="mk-bsc-phone">
@@ -477,7 +563,7 @@ function TransferInner({
           value={step}
           onChange={setStep}
         />
-        <PanelWindow path={`transfer/${step.toLowerCase()}`} caption={c.text} designWidth={460}>
+        <PanelWindow path={`transfer/${step.toLowerCase()}`} caption={c.text} designWidth={PHONE_DESIGN}>
           <div className={`mk-bsc-panel${c.cls}`}>{body}</div>
         </PanelWindow>
       </div>
@@ -486,7 +572,7 @@ function TransferInner({
   return (
     <AppWindow path={`transfer/${step.toLowerCase()}`} active="transfer" caption={c.text} className={`mk-bsc-studio${c.cls}`}>
       <div className="mk-bsc-studio-body">
-        <StudioRail step={step} onStep={setStep} />
+        <StudioRail step={step} onStep={setStep} ex={ex} />
         <div className="mk-bsc-studio-view" key={step}>
           {body}
         </div>
@@ -524,7 +610,7 @@ function HistoryList() {
         <li key={r.at} className={`is-${r.state}`}>
           {r.state === "paused" ? <Pin n={3} /> : null}
           <p className="mk-bsc-history-top">
-            <span className={`mk-app-pill ${r.state === "completed" ? "mk-app-pill--completed" : "mk-app-pill--v-explained"}`}>
+            <span className={`mk-app-pill ${r.state === "completed" ? "mk-app-pill--completed" : "mk-app-pill--v-not-run"}`}>
               {r.state === "completed" ? "Completed" : "Paused before writing"}
             </span>
             <span>{r.at}</span>
@@ -568,7 +654,7 @@ function ScheduleDrawer({ s, onClose }: { s: Sched; onClose: () => void }) {
       <div className="mk-app-drawer-head">
         <div>
           <strong>{s.name}</strong>
-          <span className={`mk-app-pill ${s.status === "Paused" ? "mk-app-pill--v-explained" : "mk-app-pill--completed"}`}>{s.status}</span>
+          <span className={`mk-app-pill ${s.status === "Paused" ? "mk-app-pill--v-not-run" : "mk-app-pill--completed"}`}>{s.status}</span>
           <p>{s.route}</p>
         </div>
         <button type="button" className="mk-app-icon-btn" onClick={onClose} aria-label="Close run history">
@@ -602,11 +688,11 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
 
   if (narrow) {
     return (
-      <PanelWindow path="schedules/orders-feed" caption={c.text} designWidth={440}>
+      <PanelWindow path="schedules/orders-feed" caption={c.text} designWidth={PHONE_DESIGN}>
         <div className={`mk-bsc-panel${c.cls}`}>
           <p className="mk-bsc-panel-title">
             <strong>Orders feed, every 2 min</strong>
-            <span className="mk-app-pill mk-app-pill--v-explained">Paused</span>
+            <span className="mk-app-pill mk-app-pill--v-not-run">Paused</span>
           </p>
           <HistoryList />
         </div>
@@ -704,7 +790,7 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
                 {s.mode}
               </span>
               <span role="cell">
-                <span className={`mk-app-pill ${s.last === "completed" ? "mk-app-pill--completed" : s.last === "running" ? "mk-app-pill--running" : "mk-app-pill--v-explained"}`}>
+                <span className={`mk-app-pill ${s.last === "completed" ? "mk-app-pill--completed" : s.last === "running" ? "mk-app-pill--running" : "mk-app-pill--v-not-run"}`}>
                   {s.last === "completed" ? "Completed" : s.last === "running" ? "Running" : "Needs review"}
                 </span>
               </span>
@@ -724,21 +810,61 @@ function SchedulesInner({ caption, showCaption, initial = "orders-feed" }: Scene
 
 /* ══ Query ═════════════════════════════════════════════════════════ */
 
-const WRITE_SQL = `DELETE FROM ${DST.table}\nWHERE region = 'APAC';`;
+type QueryExample = {
+  src: Side & { engine: string; tables: string[] };
+  dst: Side & { engine: string; tables: string[] };
+  col: string;
+  noun: string;
+  where: string;
+  numType: string;
+  rows: (side: "dest" | "source") => { name: string; n: number }[];
+  times: { dest: string; source: string };
+  caption: string;
+};
 
-function sqlFor(side: "dest" | "source") {
-  const t = side === "dest" ? DST.table : SRC.table;
-  return `SELECT region,\n       COUNT(*) AS orders\nFROM ${t}\nGROUP BY region\nORDER BY region;`;
+const QUERY_EXAMPLES: Record<"home" | "customers", QueryExample> = {
+  home: {
+    src: { ...SRC, engine: "PostgreSQL", tables: ["sales_orders", "customers", "order_items"] },
+    dst: { ...DST, engine: "Snowflake", tables: ["SALES_ORDERS", "SALES_ORDERS_REPORTING", "CUSTOMERS"] },
+    col: "region",
+    noun: "orders",
+    where: "region = 'APAC'",
+    numType: "NUMBER(18,0)",
+    rows: (side) => {
+      const rows = REGIONS.map((r) => ({ name: r.region, n: side === "dest" ? r.source - r.held : r.source }));
+      if (side === "source") rows.push({ name: "TEST", n: RUN.skipped });
+      return rows;
+    },
+    times: { dest: "3.10 s", source: "2.42 s" },
+    caption: "Example data: the copy holds 48,213,871 rows; the source 48,213,906, with 33 held and 2 skipped by the run.",
+  },
+  customers: {
+    src: { id: "mysql", name: "Customers MySQL (demo)", table: "crm.customers", engine: "MySQL", tables: ["accounts", "customers", "contacts"] },
+    dst: { ...DST, table: "DW_DEMO.CUSTOMERS", engine: "Snowflake", tables: ["CUSTOMERS", "SALES_ORDERS", "SALES_ORDERS_REPORTING"] },
+    col: "segment",
+    noun: "customers",
+    where: "segment = 'SMB'",
+    numType: "NUMBER(18,0)",
+    rows: () => QUERY_SEGMENTS.map((s) => ({ name: s.segment, n: s.n })),
+    times: { dest: "0.84 s", source: "0.61 s" },
+    caption: "Example data: the copy and the source each hold 2,418,550 customers, as the run's Trust Report says.",
+  },
+};
+
+function sqlFor(q: QueryExample, side: "dest" | "source") {
+  const t = side === "dest" ? q.dst.table : q.src.table;
+  return `SELECT ${q.col},\n       COUNT(*) AS ${q.noun}\nFROM ${t}\nGROUP BY ${q.col}\nORDER BY ${q.col};`;
 }
 
-function QueryEditor({ side, write }: { side: "dest" | "source"; write: boolean }) {
-  const sql = write ? WRITE_SQL : sqlFor(side);
+function QueryEditor({ q, side, write }: { q: QueryExample; side: "dest" | "source"; write: boolean }) {
+  const t = side === "dest" ? q.dst.table : q.src.table;
+  const sql = write ? `DELETE FROM ${t}\nWHERE ${q.where};` : sqlFor(q, side);
   const lines = sql.split("\n");
   return (
     <div className="mk-bsc-editor">
       <div className="mk-bsc-editor-bar">
         <span className="mk-bsc-muted">Syntax</span>
-        <span className="mk-app-chip">{side === "dest" ? "Snowflake" : "PostgreSQL"}</span>
+        <span className="mk-app-chip">{side === "dest" ? q.dst.engine : q.src.engine}</span>
         <span className="mk-bsc-muted">SELECT, WITH, SHOW</span>
         <span className="mk-bsc-grow" />
         <span className="mk-app-tbtn" aria-hidden>
@@ -758,31 +884,28 @@ function QueryEditor({ side, write }: { side: "dest" | "source"; write: boolean 
   );
 }
 
-function QueryResult({ side, write }: { side: "dest" | "source"; write: boolean }) {
+function QueryResult({ q, side, write }: { q: QueryExample; side: "dest" | "source"; write: boolean }) {
   if (write) {
     return (
       <div className="mk-bsc-refused" role="status">
         <p>
-          <TriangleAlert size={15} aria-hidden />
+          <OctagonX size={15} aria-hidden />
           <strong>Query refused</strong>
         </p>
         <p>Only read and metadata queries run here (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE, ANALYZE, PRAGMA, VALUES). Found DELETE.</p>
-        <p className="mk-bsc-muted">The statement never reached {side === "dest" ? DST.name : SRC.name}.</p>
+        <p className="mk-bsc-muted">The statement never reached {side === "dest" ? q.dst.name : q.src.name}.</p>
       </div>
     );
   }
-  const rows = REGIONS.map((r) => ({ region: r.region, n: side === "dest" ? r.source - r.held : r.source }));
-  if (side === "source") rows.push({ region: "TEST", n: RUN.skipped });
+  const rows = q.rows(side);
   const total = rows.reduce((a, r) => a + r.n, 0);
   return (
     <div className="mk-bsc-result">
       <div className="mk-bsc-result-bar">
         <Pin n={2} />
-        <strong>
-          {rows.length} rows, 2 cols
-        </strong>
+        <strong>{rows.length} rows, 2 cols</strong>
         <span className="mk-bsc-muted">
-          <Clock size={12} aria-hidden /> {side === "dest" ? "3.10 s" : "2.42 s"}
+          <Clock size={12} aria-hidden /> {side === "dest" ? q.times.dest : q.times.source}
         </span>
         <span className="mk-bsc-grow" />
         <span className="mk-app-tbtn" aria-hidden>
@@ -794,23 +917,23 @@ function QueryResult({ side, write }: { side: "dest" | "source"; write: boolean 
         </span>
       </div>
       <table className="mk-bsc-table">
-        <caption className="mk-sr-only">Orders by region (example)</caption>
+        <caption className="mk-sr-only">Rows by {q.col} (example)</caption>
         <thead>
           <tr>
             <th scope="col">#</th>
             <th scope="col">
-              REGION <small>VARCHAR</small>
+              {q.col.toUpperCase()} <small>VARCHAR</small>
             </th>
             <th scope="col" className="is-num">
-              ORDERS <small>NUMBER(18,0)</small>
+              {q.noun.toUpperCase()} <small>{q.numType}</small>
             </th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.region}>
+            <tr key={r.name}>
               <td className="mk-bsc-muted">{i + 1}</td>
-              <td>{r.region}</td>
+              <td>{r.name}</td>
               <td className="is-num">{fmt.format(r.n)}</td>
             </tr>
           ))}
@@ -827,9 +950,10 @@ function QueryResult({ side, write }: { side: "dest" | "source"; write: boolean 
   );
 }
 
-function QueryInner({ caption, showCaption }: SceneOptions = {}) {
+function QueryInner({ caption, showCaption, example }: SceneOptions & { example?: "customers" } = {}) {
   const narrow = useNarrow();
-  const c = cap(caption, "Example data: the copy holds 48,213,871 rows; the source 48,213,906, with 33 held and 2 skipped by the run.", showCaption);
+  const q = QUERY_EXAMPLES[example ?? "home"];
+  const c = cap(caption, q.caption, showCaption);
   const [side, setSide] = useState<"dest" | "source">("dest");
   const [write, setWrite] = useState(false);
   const controls = (
@@ -837,10 +961,10 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
       <Pin n={1} />
       <div className="mk-app-tabs" role="tablist" aria-label="Query tabs (example)">
         <button type="button" role="tab" aria-selected={side === "dest"} className={side === "dest" ? "is-active" : undefined} onClick={() => setSide("dest")}>
-          SALES_ORDERS_REPORTING
+          {lastPart(q.dst.table)}
         </button>
         <button type="button" role="tab" aria-selected={side === "source"} className={side === "source" ? "is-active" : undefined} onClick={() => setSide("source")}>
-          sales_orders
+          {lastPart(q.src.table)}
         </button>
       </div>
       <span className="mk-bsc-grow" />
@@ -852,16 +976,18 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
 
   if (narrow) {
     return (
-      <PanelWindow path="query" caption={c.text} designWidth={460}>
+      <PanelWindow path="query" caption={c.text} designWidth={PHONE_DESIGN}>
         <div className={`mk-bsc-panel${c.cls}`}>
           {controls}
-          <QueryEditor side={side} write={write} />
-          <QueryResult side={side} write={write} />
+          <QueryEditor q={q} side={side} write={write} />
+          <QueryResult q={q} side={side} write={write} />
         </div>
       </PanelWindow>
     );
   }
 
+  const tables = side === "dest" ? q.dst.tables : q.src.tables;
+  const activeTable = lastPart(side === "dest" ? q.dst.table : q.src.table);
   return (
     <AppWindow path="query" active="query" caption={c.text} className={`mk-bsc-query${c.cls}`}>
       <div className="mk-bsc-qwrap">
@@ -871,8 +997,8 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
           <label>
             <small>Connector</small>
             <span className="mk-bsc-field">
-              <ConnectorIcon id={side === "dest" ? DST.id : SRC.id} size={15} />
-              {side === "dest" ? DST.name : SRC.name}
+              <ConnectorIcon id={side === "dest" ? q.dst.id : q.src.id} size={15} />
+              {side === "dest" ? q.dst.name : q.src.name}
             </span>
           </label>
           <label>
@@ -892,8 +1018,8 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
               Schema
             </p>
             <ul>
-              {(side === "dest" ? ["SALES_ORDERS", "SALES_ORDERS_REPORTING", "CUSTOMERS"] : ["sales_orders", "customers", "order_items"]).map((t, i) => (
-                <li key={t} className={i === (side === "dest" ? 1 : 0) ? "is-active" : undefined}>
+              {tables.map((t) => (
+                <li key={t} className={t === activeTable ? "is-active" : undefined}>
                   <Table2 size={13} aria-hidden />
                   {t}
                 </li>
@@ -902,8 +1028,8 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
             <p className="mk-bsc-muted mk-bsc-schema-foot">Types from connector introspection</p>
           </aside>
           <div className="mk-bsc-qmain">
-            <QueryEditor side={side} write={write} />
-            <QueryResult side={side} write={write} />
+            <QueryEditor q={q} side={side} write={write} />
+            <QueryResult q={q} side={side} write={write} />
           </div>
         </div>
       </div>
@@ -913,33 +1039,87 @@ function QueryInner({ caption, showCaption }: SceneOptions = {}) {
 
 /* ══ Pilot ═════════════════════════════════════════════════════════ */
 
-function PilotChat({ confirmed, onConfirm }: { confirmed: boolean; onConfirm: (v: boolean) => void }) {
-  const rows = REGIONS.map((r) => ({ region: r.region, n: r.source - r.held }));
+type PilotExample = {
+  question: string;
+  table: string;
+  where: string;
+  noun: string;
+  col: string;
+  rows: { name: string; n: number }[];
+  sql: string;
+  route: string;
+  cadence: string;
+  job: string;
+  bar: string;
+  chats: string[];
+  caption: string;
+};
+
+const PILOT_EXAMPLES: Record<"home" | "users", PilotExample> = {
+  home: {
+    question: "How many orders per region are in the Snowflake copy?",
+    table: DST.table,
+    where: DST.name,
+    noun: "orders",
+    col: "REGION",
+    rows: REGIONS.map((r) => ({ name: r.region, n: r.source - r.held })),
+    sql: `SELECT "region", COUNT(*) AS "orders"\nFROM ${DST.table}\nGROUP BY "region"`,
+    route: `${SRC.name} → ${DST.name}`,
+    cadence: "Hourly, incremental on ordered_at",
+    job: "6af912d7",
+    bar: `${SRC.name} → ${DST.table}`,
+    chats: ["Orders per region in the copy", "Why did invoices.csv fail?", "Rows held on sales_orders"],
+    caption: "Example conversation on the example run's tables. Counts add up to the 48,213,871 landed rows.",
+  },
+  users: {
+    question: "How many users are on each plan in analytics.users?",
+    table: "analytics.users",
+    where: "Analytics Postgres (demo)",
+    noun: "users",
+    col: "PLAN",
+    rows: [
+      { name: "Enterprise", n: 24_242 },
+      { name: "Free", n: 701_352 },
+      { name: "Team", n: 186_410 },
+    ],
+    sql: `SELECT "plan", COUNT(*) AS "users"\nFROM analytics.users\nGROUP BY "plan"`,
+    route: "App MongoDB (demo) → Analytics Postgres (demo)",
+    cadence: "Hourly, incremental on updated_at",
+    job: "2c09d6e3",
+    bar: "App MongoDB (demo) → analytics.users",
+    chats: ["Users on each plan", "Why did invoices.csv fail?", "Which runs were sampled?"],
+    caption: "Example conversation. Counts add up to the 912,004 rows of the example users run.",
+  },
+};
+
+function PilotChat({ p, confirmed, onConfirm }: { p: PilotExample; confirmed: boolean; onConfirm: (v: boolean) => void }) {
+  const total = p.rows.reduce((a, r) => a + r.n, 0);
   return (
     <ol className="mk-bsc-chat" aria-label="Pilot conversation (example)">
       <li className="is-you">
-        <span className="mk-sr-only">You: </span>How many orders per region are in the Snowflake copy?
+        <span className="mk-sr-only">You: </span>
+        {p.question}
       </li>
       <li className="is-pilot">
         <Pin n={1} />
         <span className="mk-sr-only">Pilot: </span>
         <p>
-          <code>{DST.table}</code> on <strong>{DST.name}</strong> holds <strong>{fmt.format(RUN.landed)}</strong> orders in 5 regions.
+          <code>{p.table}</code> on <strong>{p.where}</strong> holds <strong>{fmt.format(total)}</strong> {p.noun} in {p.rows.length} {p.col === "REGION" ? "regions" : "plans"}.
         </p>
         <table className="mk-bsc-table mk-bsc-table--chat">
-          <caption className="mk-sr-only">Orders per region (example)</caption>
+          <caption className="mk-sr-only">{p.noun} per {p.col.toLowerCase()} (example)</caption>
           <thead>
             <tr>
-              <th scope="col">REGION</th>
+              <th scope="col">{p.col}</th>
               <th scope="col" className="is-num">
-                ORDERS
+                {p.noun.toUpperCase()}
               </th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.region}>
-                <td>{r.region}</td>
+            {p.rows.map((r) => (
+              <tr key={r.name}>
+                <td>{r.name}</td>
                 <td className="is-num">{fmt.format(r.n)}</td>
               </tr>
             ))}
@@ -948,7 +1128,7 @@ function PilotChat({ confirmed, onConfirm }: { confirmed: boolean; onConfirm: (v
         <p className="mk-bsc-muted">Exact server-side aggregate over the whole table, not a sample.</p>
         <pre className="mk-bsc-sql" tabIndex={0} aria-label="The SQL Pilot ran (example)">
           <small>SQL</small>
-          <code>{`SELECT "region", COUNT(*) AS "orders"\nFROM ${DST.table}\nGROUP BY "region"`}</code>
+          <code>{p.sql}</code>
         </pre>
         <p className="mk-bsc-pilot-meta">
           <Pin n={2} at="inline" />
@@ -969,20 +1149,18 @@ function PilotChat({ confirmed, onConfirm }: { confirmed: boolean; onConfirm: (v
           <p className="mk-bsc-staged-head">
             <CalendarClock size={14} aria-hidden />
             <strong>Create schedule</strong>
-            <span className={`mk-app-pill ${confirmed ? "mk-app-pill--completed" : "mk-app-pill--v-explained"}`} aria-live="polite">
+            <span className={`mk-app-pill ${confirmed ? "mk-app-pill--completed" : "mk-app-pill--v-not-run"}`} aria-live="polite">
               {confirmed ? "Confirmed" : "Staged, not run"}
             </span>
           </p>
           <dl>
             <div>
               <dt>Route</dt>
-              <dd>
-                {SRC.name} → {DST.name}
-              </dd>
+              <dd>{p.route}</dd>
             </div>
             <div>
               <dt>Cadence</dt>
-              <dd>Hourly, incremental on ordered_at</dd>
+              <dd>{p.cadence}</dd>
             </div>
             <div>
               <dt>Approval</dt>
@@ -1013,14 +1191,15 @@ function PilotChat({ confirmed, onConfirm }: { confirmed: boolean; onConfirm: (v
   );
 }
 
-function PilotInner({ caption, showCaption }: SceneOptions = {}) {
+function PilotInner({ caption, showCaption, example }: SceneOptions & { example?: "users" } = {}) {
   const narrow = useNarrow();
-  const c = cap(caption, "Example conversation on the example run's tables. Counts add up to the 48,213,871 landed rows.", showCaption);
+  const p = PILOT_EXAMPLES[example ?? "home"];
+  const c = cap(caption, p.caption, showCaption);
   const [confirmed, setConfirmed] = useState(false);
-  const chat = <PilotChat confirmed={confirmed} onConfirm={setConfirmed} />;
+  const chat = <PilotChat p={p} confirmed={confirmed} onConfirm={setConfirmed} />;
   if (narrow) {
     return (
-      <PanelWindow path="pilot" caption={c.text} designWidth={460}>
+      <PanelWindow path="pilot" caption={c.text} designWidth={PHONE_DESIGN}>
         <div className={`mk-bsc-panel${c.cls}`}>{chat}</div>
       </PanelWindow>
     );
@@ -1035,20 +1214,20 @@ function PilotInner({ caption, showCaption }: SceneOptions = {}) {
           </span>
           <p className="mk-bsc-chats-label">Recent chats</p>
           <ul>
-            <li className="is-active">Orders per region in the copy</li>
-            <li>Why did invoices.csv fail?</li>
-            <li>Rows held on sales_orders</li>
+            {p.chats.map((t, i) => (
+              <li key={t} className={i === 0 ? "is-active" : undefined}>
+                {t}
+              </li>
+            ))}
           </ul>
         </aside>
         <div className="mk-bsc-pmain">
           <div className="mk-bsc-pbar">
             <span className="mk-app-chip">
-              JOB <code>6af912d7</code>
+              JOB <code>{p.job}</code>
               <Copy size={11} aria-hidden />
             </span>
-            <span className="mk-bsc-muted">
-              {SRC.name} → {DST.table}
-            </span>
+            <span className="mk-bsc-muted">{p.bar}</span>
             <span className="mk-app-pill mk-app-pill--completed">Completed</span>
           </div>
           <div className="mk-bsc-pscroll">{chat}</div>
@@ -1112,9 +1291,7 @@ function McpActivity() {
               <td className="mk-bsc-muted">{c.who}</td>
               <td>
                 {c.status === "staged" ? <Pin n={2} at="inline" /> : c.status === "same" ? <Pin n={3} at="inline" /> : null}
-                <span className={`mk-app-pill ${c.status === "staged" ? "mk-app-pill--v-explained" : c.status === "same" ? "mk-app-pill--v-not-run" : "mk-app-pill--completed"}`}>
-                  {CALL_LABEL[c.status]}
-                </span>
+                <span className={`mk-app-pill ${c.status === "staged" || c.status === "same" ? "mk-app-pill--v-not-run" : "mk-app-pill--completed"}`}>{CALL_LABEL[c.status]}</span>
               </td>
               <td className="is-num mk-bsc-muted">{c.ms}</td>
             </tr>
@@ -1131,7 +1308,7 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
   const [open, setOpen] = useState<string | null>("Cursor");
   if (narrow) {
     return (
-      <PanelWindow path="mcp" caption={c.text} designWidth={480}>
+      <PanelWindow path="mcp" caption={c.text} designWidth={PHONE_DESIGN}>
         <div className={`mk-bsc-panel${c.cls}`}>
           <McpActivity />
         </div>
@@ -1164,25 +1341,25 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
               <strong>Client setup</strong>
             </div>
             <ul className="mk-bsc-clients">
-              {CLIENTS.map((c) => {
-                const isOpen = open === c.name;
+              {CLIENTS.map((cl) => {
+                const isOpen = open === cl.name;
                 return (
-                  <li key={c.name}>
+                  <li key={cl.name}>
                     <div className="mk-bsc-client">
                       <span className="mk-bsc-client-icon" aria-hidden>
                         <FileCode2 size={15} />
                       </span>
                       <span>
-                        <strong>{c.name}</strong>
-                        <small>{c.how}</small>
+                        <strong>{cl.name}</strong>
+                        <small>{cl.how}</small>
                       </span>
-                      <button type="button" className="mk-bsc-btn" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : c.name)}>
+                      <button type="button" className="mk-bsc-btn" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : cl.name)}>
                         {isOpen ? "Hide" : "Setup"}
                       </button>
                     </div>
                     {isOpen ? (
-                      <pre className="mk-bsc-sql" tabIndex={0} aria-label={`${c.name} configuration (example)`}>
-                        <code>{c.config}</code>
+                      <pre className="mk-bsc-sql" tabIndex={0} aria-label={`${cl.name} configuration (example)`}>
+                        <code>{cl.config}</code>
                       </pre>
                     ) : null}
                   </li>
@@ -1197,10 +1374,255 @@ function McpInner({ caption, showCaption }: SceneOptions = {}) {
   );
 }
 
+/* ══ Warehouse loading: one load, read back by the warehouse ═══════ */
+
+const WH = {
+  name: "order_lines → DW_DEMO.ORDER_LINES",
+  job: "8d3c27b5",
+  run: { read: 18_402_267, landed: 18_402_250, held: 17, skipped: 0 } as RunCounts,
+  duration: "11m 05s",
+};
+
+const WH_CHECKS = ["Destination write access", "Staging capacity", "Staging policy", "Population fit", "Target table definition"];
+
+function WarehouseCards() {
+  return (
+    <div className="mk-bsc-two">
+      <div className="mk-bsc-card">
+        <div className="mk-bsc-card-head">
+          <strong>Trust Report</strong>
+          <span className="mk-app-pill mk-app-pill--t-proven">Proven equal</span>
+          <span className="mk-bsc-grow" />
+          <span className="mk-bsc-muted">Check: Full checksum</span>
+        </div>
+        <dl className="mk-bsc-kv">
+          <div>
+            <dt>Rows read at the source</dt>
+            <dd>{fmt.format(WH.run.read)}</dd>
+          </div>
+          <div>
+            <dt>Rows in the destination, counted by Snowflake</dt>
+            <dd>{fmt.format(WH.run.landed)}</dd>
+          </div>
+          <div>
+            <dt>Rows that differ</dt>
+            <dd>0</dd>
+          </div>
+        </dl>
+        <p className="mk-bsc-card-foot">
+          Every landed row was compared and none differs. {WH.run.held} rows are held with a reason: <code>units</code> is NULL; NOT NULL in the destination.
+        </p>
+      </div>
+      <div className="mk-bsc-card">
+        <div className="mk-bsc-card-head">
+          <strong>Checked before the write</strong>
+          <span className="mk-app-pill mk-app-pill--completed">Passed</span>
+        </div>
+        <ul className="mk-bsc-checks">
+          {WH_CHECKS.map((c) => (
+            <li key={c}>
+              <Check size={13} aria-hidden />
+              <span>{c}</span>
+              <small>Passed</small>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function WarehouseInner({ caption, showCaption }: SceneOptions = {}) {
+  const narrow = useNarrow();
+  const c = cap(caption, "Example load. Column types follow a recorded run; table names and row counts are illustrative.", showCaption);
+  const head = (
+    <div className="mk-bsc-card mk-bsc-runcard">
+      <div className="mk-bsc-card-head">
+        <strong>{WH.name}</strong>
+        <span className="mk-app-pill mk-app-pill--completed">Completed</span>
+        <span className="mk-bsc-grow" />
+        <span className="mk-bsc-muted">
+          Full append, {WH.duration}, job <code>{WH.job}</code>
+        </span>
+      </div>
+      <p className="mk-bsc-route">
+        <Conn id={SRC.id} name={SRC.name} />
+        <ArrowRight size={13} aria-hidden />
+        <Conn id={DST.id} name={DST.name} />
+      </p>
+      <RunEquation run={WH.run} />
+      <div className="mk-bsc-bar" aria-hidden>
+        <i style={{ flexGrow: 99 }} />
+        <i className="is-held" style={{ flexGrow: 1 }} />
+      </div>
+    </div>
+  );
+  if (narrow) {
+    return (
+      <PanelWindow path={`jobs/${WH.job}`} caption={c.text} designWidth={PHONE_DESIGN}>
+        <div className={`mk-bsc-panel${c.cls}`}>
+          {head}
+          <WarehouseCards />
+        </div>
+      </PanelWindow>
+    );
+  }
+  return (
+    <AppWindow path={`jobs/${WH.job}`} active="jobs" caption={c.text} className={`mk-bsc-wh${c.cls}`}>
+      <div className="mk-bsc-stack">
+        {head}
+        <WarehouseCards />
+      </div>
+    </AppWindow>
+  );
+}
+
+/* ══ Recurring sync: one schedule's runs, each with its statement ══ */
+
+type SyncRun = { at: string; run?: RunCounts; note: ReactNode; job?: string; first?: boolean };
+
+const SYNC_RUNS: SyncRun[] = [
+  { at: "Today 01:40", run: { read: 2_418_550, landed: 2_418_550, held: 0, skipped: 0 }, note: "First run, full load: map reviewed, every check passed", job: "5d20b7c4", first: true },
+  { at: "Today 02:40", run: { read: 38, landed: 38, held: 0, skipped: 0 }, note: "Same checks, same read-back", job: "5d2a1e07" },
+  {
+    at: "Today 03:40",
+    run: { read: 41, landed: 40, held: 1, skipped: 0 },
+    note: (
+      <>
+        1 held: <code>email</code> is NULL; NOT NULL in the destination
+      </>
+    ),
+    job: "5d33c9a4",
+  },
+  { at: "Today 04:40", run: { read: 27, landed: 27, held: 0, skipped: 0 }, note: "Same checks, same read-back", job: "5d3d70f2" },
+  {
+    at: "Today 05:40",
+    note: (
+      <>
+        Paused before writing: <code>loyalty_tier</code> appeared at the source and waits in Map
+      </>
+    ),
+  },
+  {
+    at: "Today 06:40",
+    run: { read: 64, landed: 62, held: 0, skipped: 2 },
+    note: (
+      <>
+        Map reviewed. 2 skipped by the filter <code>is_test = true</code>
+      </>
+    ),
+    job: "5d50be61",
+  },
+  { at: "Today 07:40", run: { read: 33, landed: 33, held: 0, skipped: 0 }, note: "Same checks, same read-back", job: "5d5a6593" },
+];
+
+function SyncTable({ compact }: { compact?: boolean }) {
+  return (
+    <table className={`mk-bsc-table mk-bsc-table--sync${compact ? " is-compact" : ""}`}>
+      <caption className="mk-sr-only">Runs of the customers schedule, each with its statement (example)</caption>
+      <thead>
+        <tr>
+          <th scope="col">Run</th>
+          <th scope="col" className="is-num">
+            Read
+          </th>
+          <th scope="col" className="is-num">
+            Landed
+          </th>
+          <th scope="col" className="is-num">
+            Held
+          </th>
+          <th scope="col" className="is-num">
+            Skipped
+          </th>
+          {compact ? null : <th scope="col">What happened</th>}
+        </tr>
+      </thead>
+      <tbody>
+        {SYNC_RUNS.map((r) =>
+          r.run ? (
+            <tr key={r.at} className={r.first ? "is-first" : undefined}>
+              <th scope="row">
+                {r.at.replace("Today ", "")}
+                {compact ? null : (
+                  <small>
+                    <code>{r.job}</code>
+                  </small>
+                )}
+              </th>
+              <td className="is-num">{fmt.format(r.run.read)}</td>
+              <td className="is-num">{fmt.format(r.run.landed)}</td>
+              <td className={`is-num${r.run.held ? " is-held" : ""}`}>{r.run.held}</td>
+              <td className="is-num">{r.run.skipped}</td>
+              {compact ? null : <td className="mk-bsc-muted">{r.note}</td>}
+            </tr>
+          ) : (
+            <tr key={r.at} className="is-paused">
+              <th scope="row">{r.at.replace("Today ", "")}</th>
+              <td colSpan={compact ? 4 : 5}>
+                <span className="mk-app-pill mk-app-pill--v-not-run">Paused</span> {compact ? <code>loyalty_tier</code> : r.note}
+              </td>
+            </tr>
+          ),
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+function SyncInner({ caption, showCaption }: SceneOptions = {}) {
+  const narrow = useNarrow();
+  const c = cap(caption, "Example schedule. Each run is a job with its own statement: read = landed + held + skipped.", showCaption);
+  const head = (
+    <div className="mk-bsc-synchead">
+      <p className="mk-bsc-panel-title">
+        <strong>customers → DW_DEMO.CUSTOMERS</strong>
+        <span className="mk-app-pill mk-app-pill--completed">Active</span>
+      </p>
+      <p className="mk-bsc-route">
+        <Conn id="mysql" name="Customers MySQL (demo)" />
+        <ArrowRight size={13} aria-hidden />
+        <Conn id={DST.id} name={DST.name} />
+        <span className="mk-bsc-muted">Hourly, incremental deduped</span>
+      </p>
+    </div>
+  );
+  if (narrow) {
+    return (
+      <PanelWindow path="schedules/customers" caption={c.text} designWidth={PHONE_DESIGN}>
+        <div className={`mk-bsc-panel${c.cls}`}>
+          {head}
+          <SyncTable compact />
+        </div>
+      </PanelWindow>
+    );
+  }
+  return (
+    <AppWindow path="schedules/customers" active="schedules" caption={c.text} className={`mk-bsc-sync${c.cls}`}>
+      <div className="mk-bsc-stack">
+        <div className="mk-bsc-card">
+          {head}
+          <div className="mk-app-drawer-tabs" aria-hidden>
+            <span>Overview</span>
+            <span>
+              Schema <em>9</em>
+            </span>
+            <span className="is-active">
+              History <em>{SYNC_RUNS.length}</em>
+            </span>
+            <span>Config</span>
+          </div>
+          <SyncTable />
+        </div>
+      </div>
+    </AppWindow>
+  );
+}
+
 /* ══ Exports: each scene renders a whole AppWindow, with no required props ══ */
 
 /** Transfer Studio: the step rail with Map, Validate and Run you can switch between. */
-export function TransferScene(props: SceneOptions & { initial?: StudioStep; migration?: boolean } = {}) {
+export function TransferScene(props: SceneOptions & { initial?: StudioStep; migration?: boolean; example?: "transfer" | "migration" } = {}) {
   return (
     <MarksOn.Provider value={props.marks === true}>
       <TransferInner {...props} />
@@ -1218,7 +1640,7 @@ export function SchedulesScene(props: SceneOptions & { initial?: string | null }
 }
 
 /** Query: the editor and its result grid; switch sides, or try a write. */
-export function QueryScene(props: SceneOptions = {}) {
+export function QueryScene(props: SceneOptions & { example?: "customers" } = {}) {
   return (
     <MarksOn.Provider value={props.marks === true}>
       <QueryInner {...props} />
@@ -1227,7 +1649,7 @@ export function QueryScene(props: SceneOptions = {}) {
 }
 
 /** Pilot: a question, the answer with its SQL, and a change staged for Confirm. */
-export function PilotScene(props: SceneOptions = {}) {
+export function PilotScene(props: SceneOptions & { example?: "users" } = {}) {
   return (
     <MarksOn.Provider value={props.marks === true}>
       <PilotInner {...props} />
@@ -1242,6 +1664,16 @@ export function McpScene(props: SceneOptions = {}) {
       <McpInner {...props} />
     </MarksOn.Provider>
   );
+}
+
+/** Warehouse loading: one load, its statement, and the warehouse's read-back. */
+export function WarehouseScene(props: SceneOptions = {}) {
+  return <WarehouseInner {...props} />;
+}
+
+/** Recurring sync: one schedule's runs, each with its own statement. */
+export function SyncScene(props: SceneOptions = {}) {
+  return <SyncInner {...props} />;
 }
 
 /* ══ Jobs: the kit's grid and Trust Report, re-exported for the pages ══ */
