@@ -1187,22 +1187,23 @@ export function TransferPage({
 
   // Keep-alive leaves Studio mounted. A deleted or workspace-switched
   // connection must not keep a selected id the list no longer holds.
-  // D410: a failed read is not the workspace's list; it must not drop a selection.
-  const connectorsUnknown = connectorsLoading || Boolean(connectorsError);
   const connectorStatus = { connectorsLoading, connectorsError, onRetryConnectors };
+  // D410: a failed read is not the workspace's list either; it must not drop a selection.
   useEffect(() => {
-    if (connectorsUnknown) return;
+    if (connectorsLoading) return;
+    if (connectorsError) return;
     if (sourceConnectorId && !connectors.some((c) => c.id === sourceConnectorId)) {
       setSourceConnectorId("");
     }
-  }, [connectors, connectorsUnknown, sourceConnectorId]);
+  }, [connectors, connectorsLoading, connectorsError, sourceConnectorId]);
 
   useEffect(() => {
-    if (connectorsUnknown) return;
+    if (connectorsLoading) return;
+    if (connectorsError) return;
     if (connectorId && !connectors.some((c) => c.id === connectorId)) {
       setConnectorId("");
     }
-  }, [connectors, connectorsUnknown, connectorId]);
+  }, [connectors, connectorsLoading, connectorsError, connectorId]);
 
   useEffect(() => {
     // Never invent a destination type. Only coerce when an already-chosen type
@@ -2872,7 +2873,8 @@ export function TransferPage({
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
     // A job's route is matched against the saved connectors: applying it before
     // they load matched nothing and left the previous route in place.
-    if (connectorsUnknown) return;
+    if (connectorsLoading) return;
+    if (connectorsError) return;
     const replacing = Boolean(seedStudioIntent.replaceRoute);
     // A recovery replaces the mounted route even when the named connector was
     // deleted. Waiting for a non-empty list left the previous route on screen.
@@ -3231,7 +3233,7 @@ export function TransferPage({
             : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
-  }, [seedStudioIntent, toast, connectors, connectorsUnknown]);
+  }, [seedStudioIntent, toast, connectors, connectorsLoading, connectorsError]);
 
   // Only while Transfer is the visible screen: it stays mounted behind others.
   useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
