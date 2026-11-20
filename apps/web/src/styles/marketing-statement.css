@@ -2420,3 +2420,28 @@ html[data-theme="dark"] .mk .mk-hero-statement .mk-statement-seal.is-done .mk-st
   background: color-mix(in srgb, var(--df-landed-light) 12%, var(--df-paper-night));
   color: var(--df-intaglio-light);
 }
+
+/* ── Motion: one-shot, scroll-linked reveals (measured: top sites run ~9
+   small entrances per page). CSS only, transform only: text is never
+   faded, so it keeps full contrast in every frame. Content is in its final
+   place where scroll timelines are unsupported and under reduced motion,
+   and blocks already in view on load are at rest. ─────────────────── */
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .lp.mk .lp-main > div > section:not(:first-child) .mk-wrap > * {
+      animation: mk-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 40%;
+    }
+  }
+}
+
+@keyframes mk-rise {
+  from {
+    transform: translateY(20px);
+  }
+  to {
+    transform: none;
+  }
+}
