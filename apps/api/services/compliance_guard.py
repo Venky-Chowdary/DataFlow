@@ -622,6 +622,11 @@ def _temporal_column(col: str, values: list[str]) -> bool:
     return True
 
 
+#: Declared column types whose every value is a UUID (PostgreSQL ``uuid``,
+#: SQL Server ``uniqueidentifier``): content cannot be a direct identifier.
+_UUID_DECLARED_RE = re.compile(r"^\s*(uuid|uniqueidentifier)\s*$", re.IGNORECASE)
+
+
 def detect_pii_fields(
     columns: list[str],
     rows: list[dict[str, Any]] | None = None,
@@ -716,7 +721,11 @@ def detect_pii_fields(
             )
             name_hits = [h for h in name_hits if h != "dob"]
         embedded_hits: list[str] = []
-        if value_hits and _temporal_column(col, sample_values):
+        if _UUID_DECLARED_RE.match(declared):
+            # The engine stores only 128-bit UUIDs here: digit-run groups
+            # (00000000-0000-0000-1111-...) are not a phone or account (D72).
+            value_hits = []
+        elif value_hits and _temporal_column(col, sample_values):
             _logger.info(
                 "PII value pattern(s) %s on column %r ignored: every sampled value "
                 "is a date/timestamp",
