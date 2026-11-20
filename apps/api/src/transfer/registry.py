@@ -341,17 +341,25 @@ def get_capabilities() -> dict:
         get_capabilities as _caps,
     )
 
+    categories: dict[str, str] = {}
+
     def _category(fmt: str) -> str:
         """Catalog class of a route endpoint — 'database' is the engine kind,
         not the driver's class: ADLS is cloud_storage and HubSpot is saas, and
-        capabilities must not read both as databases (QA D08)."""
-        try:
-            from services.catalog_service import get_connector_by_id
+        capabilities must not read both as databases (QA D08).
 
-            entry = get_connector_by_id(str(fmt or "").lower()) or {}
-            return str(entry.get("category") or "") or "database"
-        except Exception:
-            return "database"
+        Read once per endpoint per call: each of ~2,600 routes asked again,
+        ~5,200 catalog enrichments on every Pilot turn (PR #433 CI)."""
+        key = str(fmt or "").lower()
+        if key not in categories:
+            try:
+                from services.catalog_service import get_connector_by_id
+
+                entry = get_connector_by_id(key) or {}
+                categories[key] = str(entry.get("category") or "") or "database"
+            except Exception:
+                categories[key] = "database"
+        return categories[key]
 
     def _combo(sk: str, sf: str, dk: str, df: str, op: str) -> dict:
         return {
