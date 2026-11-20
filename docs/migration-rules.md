@@ -55,13 +55,19 @@ Fivetran does not apply narrowing type changes. Datawrap matches that and also r
 
 SQL uses three-valued logic. `NULL <op> x` is UNKNOWN, so the row does not match. `NULL = NULL` is not true. `NULL <> x` is not true. Only `IS NULL` / `IS NOT NULL` test for null. PostgreSQL states this directly: ordinary comparison operators yield null when either input is null ([comparison functions](https://www.postgresql.org/docs/current/functions-comparison.html), [logical operators](https://www.postgresql.org/docs/current/functions-logical.html)). ISO/IEC 9075 is the same rule.
 
-`''` is a value on PostgreSQL, SQL Server, MySQL, MariaDB, Snowflake and in CSV. It is not NULL. Whitespace is not NULL. The text `'NULL'` and `'none'` are not NULL.
+A NULL operand behaves the same way. `x = NULL` matches no row. `x IN (a, NULL)` is true only where `x = a`. `x NOT IN (a, NULL)` is never true, because `x <> NULL` is UNKNOWN for every `x` ([row and array comparisons](https://www.postgresql.org/docs/current/functions-comparisons.html)). Datawrap's filter follows that on the in-memory path and the pushdown path, and refuses a filter whose value is NULL or whose `in` / `not_in` list holds a NULL, naming `is_null` / `is_not_null` (joined with `or` to keep NULL rows). Checked on PostgreSQL 16, MySQL 8.0 and SQLite 3.45: `n = NULL` 0 rows, `n IN ('a', NULL)` 1 row, `n NOT IN ('b', NULL)` 0 rows, `n NOT IN ('b')` every non-NULL row.
 
-Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`. A `CLOB` or `NCLOB` is not a comparison key (`ORA-22848`); a probe compares `DBMS_LOB.SUBSTR` of the leading 4000 characters ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_LOB.html)).
+`''` is a value on PostgreSQL, SQL Server, MySQL, MariaDB and Snowflake. It is not NULL. Whitespace is not NULL. The text `'NULL'` and `'none'` are not NULL. In CSV, `""` is the empty string and an unquoted empty field is NULL (rule 9).
+
+MySQL `BOOLEAN` is `TINYINT(1)`, and `TRUE` / `FALSE` are the literals 1 and 0 ([numeric types](https://dev.mysql.com/doc/refman/8.4/en/numeric-type-syntax.html), [boolean literals](https://dev.mysql.com/doc/refman/8.4/en/boolean-literals.html)), so `flag = TRUE` matches 1 and not 2. A filter `eq true` / `eq false` (and `in [true]`) matches 1 / 0, a one-byte `BIT(1)`, and Oracle `NUMBER(1)` 1 / 0. NULL is neither true nor false. Ordering operators stay numeric.
+
+Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). That covers the character types (`VARCHAR2`, `NVARCHAR2`, `CHAR`); a LOB set with `EMPTY_CLOB()` is an empty LOB, not NULL. Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`. A `CLOB` or `NCLOB` is not a comparison key (`ORA-22848`); a probe compares `DBMS_LOB.SUBSTR` of the leading 4000 characters ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_LOB.html)).
 
 A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL. PostgreSQL treats NaN as equal to NaN and greater than every non-NaN number; a filter uses that order, not a text compare of the word nan.
 
-MongoDB `$ne` and `$nin` match documents where the field is null or missing ([$ne](https://www.mongodb.com/docs/manual/reference/operator/query/ne/)). A not-equal or not-in filter therefore adds an existence and non-null guard, and the plan warns that NULL rows are dropped. That matches SQL, where `NULL <> x` is unknown.
+MongoDB `$ne` and `$nin` match documents where the field is null or missing ([$ne](https://www.mongodb.com/docs/manual/reference/operator/query/ne/)); `$lt` / `$gt` do not match null (MongoDB 7.0, checked). A not-equal or not-in snapshot filter therefore adds an existence and non-null guard. That matches SQL, where `NULL <> x` is unknown.
+
+Before this rule the in-memory filter read NULL as `''`, so `ne`, `not_in`, `lt` and `lte` kept NULL rows. A plan whose filter uses one of those operators warns that NULL rows are now dropped.
 
 ## 4. Primary keys and MongoDB `_id`
 
@@ -106,7 +112,7 @@ Datawrap applies the snapshot first, then change events in commit order. A colum
 
 ## 8. Reversibility and rollback
 
-A transfer that requires reversibility is refused at plan and at schedule create when a step cannot be undone (`omit`, `mask_pii`, a destructive type change). Execute checks the same predicate. An unattended run must not be the first place the operator learns it will fail.
+A transfer that requires reversibility is refused at plan, at schedule create and update (REST, MCP and GitOps apply) and at replay when a step cannot be undone (`omit`, `mask_pii`, `hash_pii`, a destructive type change). Execute checks the same predicate. An unattended run must not be the first place the operator learns it will fail. A schedule save sees only the mapping: a column whose fit depends on a type the mapping does not declare (`id` to `id` with no types) is judged by Execute from both catalogs, so save does not refuse it.
 
 Cancel stops the writer before the next row. The per-row fallback checks the flag too. Source transactions roll back and return the connection; no `idle in transaction` session is left holding locks. A table this job created is dropped only when this attempt's plain `CREATE` succeeded and, under a table lock, a count still shows it empty. `CREATE TABLE IF NOT EXISTS` succeeding is not that proof. PostgreSQL takes `ACCESS EXCLUSIVE` with `lock_timeout` of 5 seconds. SQL Server takes `TABLOCKX` with `LOCK_TIMEOUT` of 5000 milliseconds and sets it back to the session default before the connection returns to the pool. MySQL `LOCK TABLES` is not released by `COMMIT` ([LOCK TABLES](https://dev.mysql.com/doc/refman/8.4/en/lock-tables.html)); `UNLOCK TABLES` runs in a `finally`, outside the transaction, on the empty path and the not-empty path, and the connection is rolled back before the pool lends it out. Before that lock, the session's `lock_wait_timeout` and `innodb_lock_wait_timeout` are 5 seconds, and both are set back to the server default in the same `finally`. A cancel waiting on a lock fails inside that timeout instead of waiting behind a long transaction. A table the customer already had is never dropped. A failed widen rolls back before the restore `ALTER`. The restore runs when the widen was applied and zero rows were committed, including when the policy is quarantine and every row was held out. It runs before the connection is closed. Offsets and watermarks move only with a committed destination batch (rule 5).
 
@@ -134,7 +140,7 @@ libpq `service`, `servicefile`, `passfile`, `sslkey`, `sslcert`, `sslrootcert` a
 
 ## 11. Decimals never pass through float
 
-`99999999999.999999` is `NUMERIC(18,6)`. IEEE-754 double cannot hold it; `float()` yields `100000000000.0`. PostgreSQL says `real` and `double precision` are inexact. Informatica documents the same loss when high precision is off. MongoDB metadata and JSONL use `Decimal128` or a decimal string. A float or a decimal measure is not a payment-card candidate: a PAN is a 13 to 19 digit integer with no decimal point.
+`99999999999.999999` is `NUMERIC(18,6)`. IEEE-754 double cannot hold it; `float()` yields `100000000000.0`. PostgreSQL says `real` and `double precision` are inexact. Informatica documents the same loss when high precision is off. MongoDB metadata and JSONL use `Decimal128` or a decimal string. A value with a fractional part is a measure, not a payment card: stripping the point from `1.4285714285714286` gives a Luhn-valid digit run, and that is not a PAN. A card number stored in an integer or `NUMBER(p,0)` column is still a card number and is flagged. A PAN has at most 19 digits (ISO/IEC 7812-1); Datawrap checks 13 to 19 Luhn-valid digits by value, so a rare 12-digit PAN is not flagged by its value.
 
 ## 12. Honest trust and audit reporting
 
@@ -147,3 +153,17 @@ The text `nan` or `Nan` is a string. Only a real float NaN, or a NaN from a nume
 The plan and execute run the same gates on the same inputs. A green plan does not fail at execute for a reason that was knowable. Error text names the cause and a remedy that exists in the product UI and in the MCP tools. No raw driver exception, no internal hostname, no invented job from an empty request. A REST `detail` that is a dict or a list stays that JSON object. Every REST error, including an unknown route, also carries `error.reference`. A job started from the caller's workspace is listed in that workspace. Confirm stamps that workspace onto the job when staging did not, so the job, the trust report and the proof pack answer in the caller's workspace and 404 in every other one. Replay of a reversible job uses the same reversibility block as schedule create and update.
 
 Catalog count is not transfer-live. Only a route with `TRANSFER_READY` / `PRODUCTION_SKU` evidence is described as live. CDC is at-least-once upsert until an exactly-once proof is attached.
+
+## Verified against
+
+Checked on 2026-11-20 against PostgreSQL 16, MySQL 8.0, MongoDB 7.0 and SQLite 3.45 running locally, and against the code and tests below. SQL Server, Oracle and Snowflake statements are from the vendor documentation linked above and were not run.
+
+- `apps/api/services/row_filter.py` (rule 3: three-valued filter, NULL operand refusal, boolean bits, plan warning)
+- `apps/api/services/cdc_snapshot_filter.py` (rule 3: SQL and MongoDB pushdown)
+- `apps/api/services/oracle_empty_string.py` (rule 3: Oracle `''` notice)
+- `apps/api/services/reversibility_schedule.py` (rule 8: schedule save gate)
+- `apps/api/services/gitops_manifest.py` (rule 8: GitOps apply)
+- `apps/api/services/compliance_guard.py` and `apps/api/services/pii_guard.py` (rule 11: PAN detection)
+- `apps/api/tests/test_d364_d365_null_filter.py`
+- `apps/api/tests/test_d372_d373_plan_execute.py`
+- `apps/api/tests/test_d295_d399_d297_d318_d374.py`
