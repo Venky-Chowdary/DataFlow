@@ -4173,13 +4173,6 @@
 
 .lp :is(
   .lp-pricing-card,
-  .lp-pricing-principle,
-  .lp-ent-capability,
-  .lp-sec-layer-card,
-  .lp-int-family-card,
-  .lp-mkt-evidence-card,
-  .lp-home-market-grid article,
-  .lp-home-depth-list li,
   .lp-sales-form,
   .lp-sales-success,
   .lp-sales-rail-box
@@ -4191,14 +4184,6 @@
   transform: none !important;
   filter: none !important;
   color: var(--lp-ink) !important;
-}
-
-.lp :is(
-  .lp-home-market-grid article
-):hover {
-  transform: none !important;
-  box-shadow: none !important;
-  border-color: var(--df-border-strong) !important;
 }
 
 .lp-pricing-card.is-featured {

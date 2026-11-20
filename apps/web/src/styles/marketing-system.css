@@ -1921,7 +1921,7 @@ html[data-theme="dark"] .mk {
 
 .mk-gates li {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto auto 1fr;
   align-items: baseline;
   column-gap: 8px;
   padding: 9px 14px;
@@ -1941,7 +1941,7 @@ html[data-theme="dark"] .mk {
 }
 
 .mk-gates em {
-  grid-column: 2;
+  grid-column: 3;
   color: var(--mk-verified);
   font-size: 12px;
   font-style: normal;
@@ -2385,7 +2385,7 @@ html[data-theme="dark"] .mk {
 
 /* Legacy subpage blocks drawn as cards become hairline-ruled items: the
    rule carries the grouping, the page surface stays one plane. */
-.lp.mk .lp-scene-card,
+.lp.mk .lp-scene-card:not(.lp-pricing-card),
 .lp.mk .lp-mkt-algo-steps li,
 .lp.mk .lp-mkt-scenario li,
 .lp.mk .lp-sales-honesty li {
@@ -2396,7 +2396,7 @@ html[data-theme="dark"] .mk {
   box-shadow: none;
 }
 
-.lp.mk .lp-scene-card {
+.lp.mk .lp-scene-card:not(.lp-pricing-card) {
   padding: 20px 0 4px;
 }
 
@@ -2456,4 +2456,27 @@ html[data-theme="dark"] .mk {
 .lp.mk #vulnerability-disclosure p + p,
 .lp.mk .lp-mkt-prose p + p {
   margin-top: 12px;
+}
+
+.mk-gates .mk-dot {
+  margin-right: 0;
+}
+
+@media (max-width: 767px) {
+  .mk-gates {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .mk-gates li {
+    padding: 7px 12px;
+  }
+
+  .mk-gates em {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
 }

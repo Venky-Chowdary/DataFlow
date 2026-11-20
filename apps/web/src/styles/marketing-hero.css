@@ -1768,16 +1768,8 @@
 
 /* One numbered card. Homepage promises, solution paths, warehouse
    steps, enterprise controls, and security layers share it. */
-.lp .lp-scene-card,
-.lp .lp-sol-step.lp-scene-card:last-child,
-.lp .lp-sec-layer-card.lp-scene-card,
-.lp .lp-ent-capability.lp-scene-card,
 .lp .lp-pricing-card.lp-scene-card,
-.lp .lp-pricing-card.lp-scene-card.is-featured,
-.lp .lp-int-family-card.lp-scene-card,
-.lp .lp-mkt-evidence-card.lp-scene-card,
-.lp .lp-demos-card.lp-scene-card,
-.lp .lp-pricing-principle.lp-scene-card {
+.lp .lp-pricing-card.lp-scene-card.is-featured {
   border-top: 2px solid var(--df-teal-600) !important;
   transition:
     transform 150ms ease,

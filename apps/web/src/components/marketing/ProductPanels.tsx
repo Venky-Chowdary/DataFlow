@@ -253,6 +253,7 @@ export function GatesPanel() {
       <ul className="mk-gates">
         {RECORDED_GATES.map((g) => (
           <li key={g.id} className={g.state === "pass" ? "is-pass" : "is-na"}>
+            <span className={`mk-dot ${g.state === "pass" ? "mk-dot--ok" : "mk-dot--na"}`} aria-hidden />
             <code>{g.id}</code>
             <span>{g.name}</span>
             <em>{g.state === "pass" ? "Passed" : "Not applicable"}</em>
