@@ -2843,7 +2843,10 @@ class DataPilotTools:
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
-                "phase_timings": job_phase_timings(job),
+                # The timings stamped on the finished record, so get_job and the
+                # record agree; recomputing read a later updated_at (D308 AC-4).
+                "phase_timings": job.get("phase_timings")
+                if isinstance(job.get("phase_timings"), dict) else job_phase_timings(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,
