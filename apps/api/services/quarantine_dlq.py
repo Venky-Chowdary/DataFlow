@@ -1030,6 +1030,16 @@ def _edited_cells(posted: dict[str, Any], base: dict[str, Any]) -> dict[str, Any
                 edits[key] = value
     for key, value in posted.items():
         if key in columns and key not in base:
+            if looks_like_stored_mask(value):
+                # A flat row copied from the masked preview (D294 AC-1 shape)
+                # echoes 'BA***TY'. Like a bag echo, the stored raw cell stays.
+                raw = next(
+                    (b[key] for b in (base.get("source_values"), base.get("values"))
+                     if isinstance(b, dict) and key in b),
+                    None,
+                )
+                _refuse_mask_without_raw(value, column=str(key), stored=raw)
+                continue
             edits[key] = value
     return edits
 

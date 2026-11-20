@@ -263,6 +263,22 @@ def pg_empty_live_for_overwrite(
     if not exists or exists[0][0] is None:
         return False
     live_reg = _literal(live_ref) + "::regclass"
+    pg_decline_live_type_drift(cur, live_ref, column_types, action="overwrite")
+    _pg_empty_in_transaction(cur, live_ref, live_reg)
+    return True
+
+
+def pg_decline_live_type_drift(
+    cur: Any, live_ref: str, column_types: dict[str, str], *, action: str
+) -> None:
+    """Decline the binary COPY when a loaded live column is absent or typed differently.
+
+    Binary COPY sends each value in the source type's wire format, so an
+    existing INT8 or INT4 column fed an INT4 or TEXT image fails mid-stream
+    ('insufficient data left in message'). The row path casts, widens or
+    quarantines per cell instead.
+    """
+    live_reg = _literal(live_ref) + "::regclass"
     live_types = {
         str(name).casefold(): str(typ)
         for name, typ in _rows(
@@ -278,12 +294,10 @@ def pg_empty_live_for_overwrite(
     ]
     if differs:
         _decline(
-            f"overwrite of {live_ref}: live column(s) {', '.join(differs)} are absent or "
+            f"{action} of {live_ref}: live column(s) {', '.join(differs)} are absent or "
             "typed differently from the source; the row path keeps the table and "
             "its constraints"
         )
-    _pg_empty_in_transaction(cur, live_ref, live_reg)
-    return True
 
 
 _PG_TRUNCATING_CAST = re.compile(

@@ -1428,6 +1428,16 @@ def pg_pg_copy_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _pair_source_types(pairs: Any, types: dict[str, str]) -> dict[str, str]:
+    """Target column -> the source's declared type, matched by case."""
+    return {
+        tgt: str(types.get(src) or next(
+            (v for k, v in types.items() if k.lower() == src.lower()), ""
+        ))
+        for src, tgt in pairs
+    }
+
+
 def copy_between_postgres(
     *,
     source_cfg: dict[str, Any],
@@ -1527,12 +1537,7 @@ def copy_between_postgres(
                     schema=dest_schema or "public",
                     table=dest_table,
                     quote=_quote,
-                    column_types={
-                        tgt: str(shape.types.get(src) or next(
-                            (v for k, v in shape.types.items() if k.lower() == src.lower()), ""
-                        ))
-                        for src, tgt in pairs
-                    },
+                    column_types=_pair_source_types(pairs, shape.types),
                 )
                 create = not existed
                 if existed:
@@ -1541,12 +1546,20 @@ def copy_between_postgres(
                     )
             else:
                 from connectors.sql_identifiers import pg_regclass_literal
+                from services.dest_overwrite_swap import pg_decline_live_type_drift
 
                 dst_cur.execute(
                     "SELECT to_regclass(%s)",
                     (pg_regclass_literal(dest_schema or "public", dest_table),),
                 )
                 create = dst_cur.fetchone()[0] is None
+                if not create:
+                    pg_decline_live_type_drift(
+                        dst_cur,
+                        f"{_quote(dest_schema or 'public')}.{_quote(dest_table)}",
+                        _pair_source_types(pairs, shape.types),
+                        action="append",
+                    )
             if create:
                 try:
                     create_destination_like_source(

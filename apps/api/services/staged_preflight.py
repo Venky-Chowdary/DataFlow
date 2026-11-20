@@ -344,9 +344,47 @@ def bounded_destination_schema_version(dest: Any) -> str:
         return "unread"
 
 
+def _resolved_view(endpoint: Any, workspace_id: str) -> Any:
+    """The endpoint as a run dials it now, whichever side is hashing.
+
+    Staging hashes the approval (a connector id and a table); Confirm hashes
+    the job's request after its saved connectors were resolved (host, port,
+    credentials, TLS, stamped extras). Hashing those two shapes never matched,
+    so a staged preflight was never reused (D308 AC-2). Both sides now hash the
+    saved connector's *current* resolution of the job's own choices (table,
+    schema, an explicit database override): ``refresh_saved_endpoint`` strips
+    what an earlier resolution filled in and resolves again. A connector edited
+    between staging and Confirm (host, credentials, TLS) resolves differently,
+    so the hash misses and the gates run. Secrets are HMAC-sealed, never kept.
+    A connector that cannot be resolved hashes as given, which never matches.
+    """
+    if endpoint is None or not str(getattr(endpoint, "connector_id", "") or "").strip():
+        return endpoint
+    try:
+        from src.transfer.adapters import refresh_saved_endpoint
+
+        return refresh_saved_endpoint(copy.deepcopy(endpoint), workspace_id=workspace_id or None)
+    except Exception:  # noqa: BLE001 - an unresolvable connector only means "no reuse"
+        logger.debug("staged preflight endpoint was not resolved", exc_info=True)
+        return endpoint
+
+
+def _requested_delivery(request: Any) -> str:
+    """The guarantee the operator asked for; an unpinned request is ``auto``.
+
+    The engine later replaces ``auto`` with the route's selected class, so the
+    selected value is not an input of the check staging ran.
+    """
+    from services.cdc_exactly_once import operator_pinned_delivery
+
+    raw = str(getattr(request, "delivery_guarantee", "") or "").strip().lower()
+    return raw if operator_pinned_delivery(raw) else "auto"
+
+
 def request_preflight_fingerprint(request: Any) -> str:
-    source = getattr(request, "source", None)
-    dest = getattr(request, "destination", None)
+    workspace = str(getattr(request, "workspace_id", "") or "")
+    source = _resolved_view(getattr(request, "source", None), workspace)
+    dest = _resolved_view(getattr(request, "destination", None), workspace)
     return preflight_input_fingerprint(
         source_connector_id=getattr(source, "connector_id", "") or "",
         source_table=getattr(source, "table", "") or getattr(source, "collection", "") or "",
@@ -405,7 +443,7 @@ def request_preflight_fingerprint(request: Any) -> str:
         date_locale=getattr(request, "date_locale", "") or "",
         number_locale=getattr(request, "number_locale", "") or "",
         number_locale_assumed=getattr(request, "number_locale_assumed", False),
-        delivery_guarantee=getattr(request, "delivery_guarantee", "") or "",
+        delivery_guarantee=_requested_delivery(request),
         limit=getattr(request, "limit", 0) or 0,
         workspace_id=getattr(request, "workspace_id", "") or "",
         approved_shape_recipe_hash=getattr(request, "approved_shape_recipe_hash", "") or "",
@@ -523,144 +561,14 @@ def _connector_endpoint(connector_id: str) -> dict[str, Any] | None:
     }
 
 
-_SNAPSHOT_KINDS = frozenset({
-    "postgresql", "postgres", "mysql", "mariadb", "sqlserver", "mssql", "azure_sql",
-})
-
-
 def _read_schema_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     """Columns, keys, indexes, foreign keys, checks, defaults and identity.
 
-    The dial is the guarded engine, the same path a transfer uses, so the
-    egress guard and the connector's TLS settings apply (D308).
+    Inside staging's tool call the read borrows the session the preflight's
+    own introspection opened, so it is not a second login per endpoint (D308).
+    Outside one it dials the guarded engine, the path a transfer uses, so the
+    egress guard and the connector's TLS settings apply.
     """
-    import sqlalchemy as sa
+    from services.staged_schema_snapshot import read_schema_snapshot
 
-    from connectors.generic_sql import get_sqlalchemy_engine
-    from services.engine_pool import release_engine
-
-    kind = str(cfg.get("type") or "").lower()
-    schema = str(cfg.get("schema") or "")
-    table = str(cfg.get("table") or "")
-    if kind not in _SNAPSHOT_KINDS:
-        # No catalog read for this engine: never log in only to fail. A remote
-        # Snowflake login is the slowest step of a plan (D187); "unread" keeps
-        # the staged result from being reused.
-        raise RuntimeError(f"schema version is not read for {kind or 'this engine'}")
-    engine = get_sqlalchemy_engine(cfg)
-    try:
-        with engine.connect() as conn:
-            if kind in {"postgresql", "postgres"}:
-                columns = conn.execute(
-                    sa.text(
-                        "SELECT column_name, data_type, character_maximum_length, "
-                        "numeric_precision, numeric_scale, collation_name, is_nullable, "
-                        "column_default, is_identity, identity_generation "
-                        "FROM information_schema.columns "
-                        "WHERE table_schema = :s AND table_name = :t "
-                        "ORDER BY ordinal_position"
-                    ),
-                    {"s": schema or "public", "t": table},
-                ).fetchall()
-                indexes = conn.execute(
-                    sa.text(
-                        "SELECT indexname, indexdef FROM pg_indexes "
-                        "WHERE schemaname = :s AND tablename = :t ORDER BY indexname"
-                    ),
-                    {"s": schema or "public", "t": table},
-                ).fetchall()
-                constraints = conn.execute(
-                    sa.text(
-                        "SELECT con.conname, con.contype::text, pg_get_constraintdef(con.oid) "
-                        "FROM pg_constraint con "
-                        "JOIN pg_class rel ON rel.oid = con.conrelid "
-                        "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
-                        "WHERE nsp.nspname = :s AND rel.relname = :t "
-                        "ORDER BY con.conname"
-                    ),
-                    {"s": schema or "public", "t": table},
-                ).fetchall()
-                return {
-                    "columns": [tuple(row) for row in columns],
-                    "indexes": [tuple(row) for row in indexes],
-                    "constraints": [tuple(row) for row in constraints],
-                }
-            if kind in {"mysql", "mariadb"}:
-                columns = conn.execute(
-                    sa.text(
-                        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
-                        "EXTRA, COLUMN_KEY, GENERATION_EXPRESSION, COLLATION_NAME "
-                        "FROM information_schema.COLUMNS "
-                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
-                        "ORDER BY ORDINAL_POSITION"
-                    ),
-                    {"t": table},
-                ).fetchall()
-                indexes = conn.execute(
-                    sa.text(
-                        "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, INDEX_TYPE "
-                        "FROM information_schema.STATISTICS "
-                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
-                        "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
-                    ),
-                    {"t": table},
-                ).fetchall()
-                checks = conn.execute(
-                    sa.text(
-                        "SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, cc.CHECK_CLAUSE "
-                        "FROM information_schema.TABLE_CONSTRAINTS tc "
-                        "LEFT JOIN information_schema.CHECK_CONSTRAINTS cc "
-                        "ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA "
-                        "AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME "
-                        "WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = :t "
-                        "ORDER BY tc.CONSTRAINT_NAME"
-                    ),
-                    {"t": table},
-                ).fetchall()
-                return {
-                    "columns": [tuple(row) for row in columns],
-                    "indexes": [tuple(row) for row in indexes],
-                    "constraints": [tuple(row) for row in checks],
-                }
-            if kind in {"sqlserver", "mssql", "azure_sql"}:
-                columns = conn.execute(
-                    sa.text(
-                        "SELECT c.name, ty.name, c.max_length, c.precision, c.scale, "
-                        "c.collation_name, c.is_nullable, c.is_identity, "
-                        "OBJECT_DEFINITION(c.default_object_id) "
-                        "FROM sys.columns c "
-                        "JOIN sys.types ty ON c.user_type_id = ty.user_type_id "
-                        "JOIN sys.tables t ON c.object_id = t.object_id "
-                        "JOIN sys.schemas s ON t.schema_id = s.schema_id "
-                        "WHERE s.name = :s AND t.name = :t ORDER BY c.column_id"
-                    ),
-                    {"s": schema or "dbo", "t": table},
-                ).fetchall()
-                indexes = conn.execute(
-                    sa.text(
-                        "SELECT i.name, i.is_unique, i.is_primary_key, col.name "
-                        "FROM sys.indexes i "
-                        "JOIN sys.tables t ON i.object_id = t.object_id "
-                        "JOIN sys.schemas s ON t.schema_id = s.schema_id "
-                        "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
-                        "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
-                        "WHERE s.name = :s AND t.name = :t AND i.name IS NOT NULL "
-                        "ORDER BY i.name, ic.key_ordinal"
-                    ),
-                    {"s": schema or "dbo", "t": table},
-                ).fetchall()
-                checks = conn.execute(
-                    sa.text(
-                        "SELECT name, definition FROM sys.check_constraints "
-                        "WHERE parent_object_id = OBJECT_ID(:qualified) ORDER BY name"
-                    ),
-                    {"qualified": f"{schema or 'dbo'}.{table}"},
-                ).fetchall()
-                return {
-                    "columns": [tuple(row) for row in columns],
-                    "indexes": [tuple(row) for row in indexes],
-                    "constraints": [tuple(row) for row in checks],
-                }
-            raise RuntimeError(f"schema version is not read for {kind or 'this engine'}")
-    finally:
-        release_engine(engine)
+    return read_schema_snapshot(cfg)

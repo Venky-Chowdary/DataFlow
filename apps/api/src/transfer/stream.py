@@ -88,7 +88,7 @@ from .stream_commit_window import (
 )
 from .stream_row_accounting import (
     _raw_page_rows,
-    stamp_incremental_no_op,
+    stamp_incremental_no_op, incremental_pass_empty,
     reader_population,
     stamp_source_row_count,
 )
@@ -2842,7 +2842,7 @@ def _stream_database_transfer_impl(
                     )
                 state["conn"] = None
 
-    if run.tally.written == 0 and run.cfg.incremental:
+    if run.cfg.incremental and incremental_pass_empty(run.tally):
         run.cfg.ddl_log.append("INCREMENTAL — no new rows since last watermark")
         run.tally.dest_summary["sync_mode"] = run.cfg.effective_sync
         # No batch ran, so no writer summary named the table; the job record
