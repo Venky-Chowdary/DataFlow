@@ -2994,6 +2994,9 @@ def apply_transform(
                     return None, f"Invalid phone: {text!r}"
                 if re.search(r"[A-Za-z]", out):
                     return None, f"Invalid phone: {text!r}"
+                # ITU-T E.164: a country code (never 0) and at most 15 digits.
+                if digits.startswith("+") and not re.fullmatch(r"\+[1-9]\d{6,14}", digits):
+                    return None, f"Invalid phone: {text!r}"
                 # Normalize, as the catalog says (D330): formatting is dropped
                 # and a leading + (country code) is kept, so '+1 (555) 123-4567'
                 # becomes the E.164 '+15551234567'. No region is assumed: a

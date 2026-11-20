@@ -40,8 +40,9 @@ import {
   connectorTestHealth,
 } from "../lib/connectorHealth";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
+import { ConnectorListStatus, connectorListKnown, type ConnectorListStatusProps } from "../components/ConnectorListStatus";
 
-interface DashboardPageProps {
+interface DashboardPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
   jobs: TransferJob[];
   /** Whole-history counts. Overview must not count the recent page of rows. */
@@ -87,6 +88,9 @@ function HealthRing({ score }: { score: number }) {
 
 export function DashboardPage({
   connectors,
+  connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
   jobs,
   history,
   listsLoading = false,
@@ -159,7 +163,14 @@ export function DashboardPage({
   const runningCount = stats.running;
   const untestedConnectors = connectors.filter((c) => connectorTestHealth(c) === "never_tested").length;
   const failedConnectors = connectors.filter((c) => connectorTestHealth(c) === "failed").length;
-  const connectionHealthLine = connectionHealthSummary(connectors);
+  // D410: [] means "no connections" only after a successful read.
+  const connectorsKnown = connectorListKnown({ connectorsLoading, connectorsError });
+  const connectorStatus = { connectorsLoading, connectorsError, onRetryConnectors };
+  const connectionHealthLine = connectorsKnown
+    ? connectionHealthSummary(connectors)
+    : connectorsLoading
+      ? "Loading connections…"
+      : "Connections unavailable";
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
   const cdcLagSeconds = useMemo(() => {
     const lags = [...running, ...completed]
@@ -183,6 +194,8 @@ export function DashboardPage({
   const plane = summarizeDataPlane(topology, connectors.length);
 
   const healthScore = useMemo(() => {
+    // A score without the connectors would grade the workspace on half its facts.
+    if (!connectorsKnown) return null;
     if (connectors.length === 0 && stats.total === 0) return null;
     let score = 100;
     if (connectors.length) {
@@ -195,7 +208,7 @@ export function DashboardPage({
     if (failedCount) score -= Math.min(15, failedCount * 4);
     if (runningCount) score = Math.min(score + 2, 100);
     return Math.round(Math.max(0, Math.min(100, score)));
-  }, [connectors.length, failedConnectors, untestedConnectors, stats.total, stats.completed, failedCount, runningCount]);
+  }, [connectorsKnown, connectors.length, failedConnectors, untestedConnectors, stats.total, stats.completed, failedCount, runningCount]);
 
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
   const hasJobs = stats.total > 0;
@@ -368,7 +381,7 @@ export function DashboardPage({
                 <div>
                   <h2 className="df2-overview-v3-card-title">Data plane</h2>
                   <p className="df2-overview-v3-card-sub">
-                    {dataPlaneSubtitle(plane)}
+                    {connectorsKnown || connectors.length > 0 ? dataPlaneSubtitle(plane) : connectionHealthLine}
                   </p>
                 </div>
                 {onOpenConnectors && (
@@ -378,12 +391,16 @@ export function DashboardPage({
                 )}
               </header>
               <div className="df2-overview-v3-card-body df2-overview-v3-plane-body">
-                <DataPlaneFlow
-                  nodes={topology.nodes}
-                  edges={topology.edges}
-                  connectionCount={connectors.length}
-                  onOpenConnectors={onOpenConnectors}
-                />
+                {connectorsKnown || connectors.length > 0 ? (
+                  <DataPlaneFlow
+                    nodes={topology.nodes}
+                    edges={topology.edges}
+                    connectionCount={connectors.length}
+                    onOpenConnectors={onOpenConnectors}
+                  />
+                ) : (
+                  <ConnectorListStatus compact {...connectorStatus} />
+                )}
               </div>
             </article>
 
@@ -529,7 +546,9 @@ export function DashboardPage({
                 )}
               </header>
               <div className="df2-overview-v3-card-body">
-                {connectors.length === 0 ? (
+                {connectors.length === 0 && !connectorsKnown ? (
+                  <ConnectorListStatus compact {...connectorStatus} />
+                ) : connectors.length === 0 ? (
                   <p className="df2-overview-v3-inline-empty">No saved connections.</p>
                 ) : (
                   <ul className="df2-overview-conn-list">

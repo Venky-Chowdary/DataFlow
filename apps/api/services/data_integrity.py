@@ -1325,7 +1325,8 @@ def _in_file_collapse_message(
 DUPLICATE_KEY_ROUTES = (
     "Choose a duplicate route: in_file_dedupe=keep_last (one row per key, the "
     "last copy wins), sync_mode=upsert (merge on the key), or "
-    "duplicate_policy=append to load every copy."
+    "duplicate_policy=append to load every copy. On start_transfer, dedupe_key "
+    "with full_refresh_overwrite keeps the last row of a file."
 )
 #: A table source: no read order picks a "last" copy, and an upsert over a
 #: source whose key repeats is refused by the source probe.

@@ -198,7 +198,7 @@ def _concat_bytes(fmt: str, existing: bytes, new: bytes) -> bytes | None:
     if fmt == "jsonl":
         return _jsonl_concat(existing, new)
     if fmt in {"csv", "tsv"}:
-        return _delimited_concat(existing, new)
+        return _delimited_concat(existing, new, fmt=fmt)
     return None
 
 
@@ -229,14 +229,52 @@ def _jsonl_concat(existing: bytes, new: bytes) -> bytes | None:
     return old + b"\n" + fresh + b"\n"
 
 
-def _delimited_concat(existing: bytes, new: bytes) -> bytes | None:
+def _uniform_record_terminator(body: bytes, delimiter: str) -> bytes | None:
+    """Record break outside quoted fields, or ``None`` when those breaks disagree.
+
+    A quoted LF, CR or CRLF is data, not a record break (D376). A body with no
+    record break yet takes the object-store writers' LF.
+    """
+    from services.delimited_scan import record_breaks
+
+    crlf, bare_lf, bare_cr = record_breaks(body, delimiter)
+    if bare_cr or (crlf and bare_lf):
+        return None
+    if crlf:
+        return b"\r\n"
+    return b"\n"
+
+
+def _delimited_concat(existing: bytes, new: bytes, *, fmt: str = "") -> bytes | None:
+    """``existing`` plus ``new``'s data rows, in ``existing``'s own record terminator.
+
+    One file never mixes LF and CRLF record breaks: PostgreSQL ``COPY`` refuses
+    such a file ("unquoted carriage return found in data" / "unquoted newline
+    found in data") and MySQL ``LOAD DATA`` takes one ``LINES TERMINATED BY``.
+    The appended rows are re-spelled outside their quoted fields only; a CR or
+    LF inside quotes is data and stays byte for byte (D108, D376 AC-3).
+    """
     old_header, _old_rest = _first_line(existing)
     new_header, new_rest = _first_line(new)
     if not old_header or old_header != new_header:
         return None
+    delimiter = "\t" if fmt == "tsv" else ","
+    existing_term = _uniform_record_terminator(existing, delimiter)
+    if existing_term is None:
+        raise ObjectMergeRefused(
+            "The existing file mixes LF and CRLF line endings, so rows cannot be "
+            "appended in one of them. Overwrite the object instead. "
+            "The existing object was not replaced."
+        )
+    base = existing if existing.endswith(existing_term) else existing + existing_term
     if not new_rest.strip():
-        return existing if existing.endswith(b"\n") else existing + b"\n"
-    base = existing if existing.endswith(b"\n") else existing + b"\n"
+        return base
+    if _uniform_record_terminator(new, delimiter) != existing_term:
+        from services.csv_codec import rewrite_record_terminators
+
+        _new_header, new_rest = _first_line(
+            rewrite_record_terminators(new, existing_term, delimiter)
+        )
     return base + new_rest
 
 

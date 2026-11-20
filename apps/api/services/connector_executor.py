@@ -478,11 +478,16 @@ def get_executor() -> ConnectorExecutor:
 
 
 def snapshot() -> dict[str, Any]:
-    return get_executor().snapshot()
+    from services.call_lanes import snapshot as lane_snapshot
+
+    # The threads async routes wait on (D321), next to the workers they wait for.
+    return {**get_executor().snapshot(), "lanes": lane_snapshot()}
 
 
 def readiness() -> dict[str, Any]:
-    return get_executor().readiness()
+    from services.call_lanes import snapshot as lane_snapshot
+
+    return {**get_executor().readiness(), "lanes": lane_snapshot()}
 
 
 def reset_for_tests() -> None:

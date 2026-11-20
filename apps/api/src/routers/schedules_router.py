@@ -821,6 +821,11 @@ async def create_pipeline_schedule(
         warnings.append(dropped)
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
+    from services.reversibility_schedule import schedule_reversibility_block
+
+    reversible = schedule_reversibility_block(payload)
+    if reversible:
+        raise HTTPException(status_code=422, detail=reversible)
     try:
         payload.update(_acknowledgment_fields(request, payload))
         sched = create_schedule(
@@ -890,6 +895,11 @@ async def patch_pipeline_schedule(
         else:
             data.pop("acknowledgment_actor", None)
             data.pop("acknowledgment_reason", None)
+        from services.reversibility_schedule import schedule_reversibility_block
+
+        reversible = schedule_reversibility_block({**existing.to_dict(), **data})
+        if reversible:
+            raise HTTPException(status_code=422, detail=reversible)
         updated = update_schedule(
             schedule_id, data, warnings=warnings, refuse_unrunnable_mappings=True
         )

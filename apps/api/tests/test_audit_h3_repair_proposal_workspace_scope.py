@@ -24,6 +24,8 @@ if str(_TESTS) not in sys.path:
 
 from tenancy_world import tenancy_world  # noqa: E402,F401
 
+from tests.helpers.error_bodies import assert_indistinguishable  # noqa: E402
+
 QUARANTINE = {
     "rejected_details": [
         {"column": "A_SECRET_COLUMN_SENTINEL", "reason": "value is not a number"},
@@ -57,7 +59,10 @@ def test_proposal_is_listed_and_read_only_inside_its_workspace(tenancy_world):  
     foreign = tenancy_world.b.get(f"/api/v1/repair/proposals/{proposal['id']}")
     missing = tenancy_world.b.get("/api/v1/repair/proposals/repair_000000000000")
     assert foreign.status_code == missing.status_code == 404
-    assert foreign.json() == missing.json() == {"detail": "Proposal not found"}
+    assert foreign.json()["detail"] == missing.json()["detail"] == "Proposal not found"
+    assert foreign.json()["error"]["code"] == missing.json()["error"]["code"]
+    assert foreign.json()["error"]["reference"] and missing.json()["error"]["reference"]
+    assert_indistinguishable(foreign, missing)  # U2 / R11: the whole body
 
     listed_a = tenancy_world.a.get("/api/v1/repair/proposals")
     assert [p["id"] for p in listed_a.json()["proposals"]] == [proposal["id"]]
@@ -79,7 +84,10 @@ def test_another_workspace_cannot_decide_a_proposal(tenancy_world):  # noqa: F81
             "/api/v1/repair/proposals/repair_000000000000/decide", json={"approve": approve}
         )
         assert foreign.status_code == missing.status_code == 404, foreign.text
-        assert foreign.json() == missing.json() == {"detail": "Proposal not found"}
+        assert foreign.json()["detail"] == missing.json()["detail"] == "Proposal not found"
+    assert foreign.json()["error"]["code"] == missing.json()["error"]["code"]
+    assert foreign.json()["error"]["reference"] and missing.json()["error"]["reference"]
+    assert_indistinguishable(foreign, missing)  # U2 / R11: the whole body
     stored = _stored(tenancy_world, proposal["id"])
     assert (stored["status"], stored["decided_by"]) == ("proposed", "")
 
@@ -105,7 +113,10 @@ def test_proposal_cannot_be_planted_on_another_workspaces_job(tenancy_world):  #
         json={**QUARANTINE, "job_id": "0123456789abcdef01234567"},
     )
     assert planted.status_code == unknown.status_code == 404, planted.text
-    assert planted.json() == unknown.json() == {"detail": "Job not found"}
+    assert planted.json()["detail"] == unknown.json()["detail"] == "Job not found"
+    assert planted.json()["error"]["code"] == unknown.json()["error"]["code"]
+    assert planted.json()["error"]["reference"] and unknown.json()["error"]["reference"]
+    assert_indistinguishable(planted, unknown)  # U2 / R11: the whole body
 
     queue_a = tenancy_world.a.get("/api/v1/repair/proposals", params={"job_id": job_a})
     assert queue_a.json() == {"proposals": []}

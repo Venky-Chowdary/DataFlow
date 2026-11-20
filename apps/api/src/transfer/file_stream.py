@@ -981,7 +981,14 @@ def file_empty_cell_bind(value: Any, carrier: str, *, empty_cell: str = "null") 
     """
     if value is None or value != "":
         return value
-    if _TEXT_FAMILY_DDL_RE.match(str(carrier or "").strip()):
+    carrier_text = str(carrier or "").strip()
+    if _TEXT_FAMILY_DDL_RE.match(carrier_text):
+        return ""
+    # SQL Server JSON is an NVARCHAR. A quoted ``""`` stays an empty string;
+    # the unquoted empty field is already None (D297). A number still cannot
+    # store ``''``.
+    folded = carrier_text.lower()
+    if folded.startswith("nvarchar") or folded == "json":
         return ""
     return None
 
@@ -1047,7 +1054,12 @@ def combine_file_set(
                 counts.append(count)
         return f"{stem}.jsonl", counts
 
-    from services.csv_codec import csv_cell_encode, format_csv_row, iter_csv_records
+    from services.csv_codec import (
+        RECORD_TERMINATOR,
+        csv_cell_encode,
+        format_csv_row,
+        iter_csv_records,
+    )
 
     header: list[str] | None = None
     with open(target, "w", encoding="utf-8", newline="") as out:
@@ -1064,7 +1076,7 @@ def combine_file_set(
                 )
                 if header is None:
                     header = list(headers)
-                    out.write(format_csv_row(header) + "\n")
+                    out.write(format_csv_row(header) + RECORD_TERMINATOR)
                 elif list(headers) != header:
                     raise ValueError(
                         f"{name} has columns {list(headers)} but {first_name} has "
@@ -1073,7 +1085,7 @@ def combine_file_set(
                     )
                 count = 0
                 for row in rows:
-                    out.write(format_csv_row([csv_cell_encode(c) for c in row]) + "\n")
+                    out.write(format_csv_row([csv_cell_encode(c) for c in row]) + RECORD_TERMINATOR)
                     count += 1
                 counts.append(count)
     return f"{stem}.csv", counts
@@ -2205,10 +2217,21 @@ def stream_file_to_database(
         return rows_copied, copy_ddl, dest_summary, columns
 
     keep_last_key: list[str] = []
-    if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
-        from services.duplicate_policy import iter_keep_last
+    if in_file_dedupe == "keep_last":
+        from services.duplicate_policy import declared_dedupe_columns, iter_keep_last
 
-        keep_last_key = list(contract.primary_key_columns())
+        keep_last_key = list(contract.primary_key_columns()) if contract else []
+        if not keep_last_key:
+            keep_last_key = declared_dedupe_columns(
+                dict(getattr(destination, "extra", None) or {}),
+                dict(dest_cfg or {}),
+            )
+        if not keep_last_key:
+            raise ValueError(
+                "in_file_dedupe=keep_last was set but no dedupe key is declared, "
+                "so both copies of a repeated key would be written. Name dedupe_key, "
+                "or remove keep_last."
+            )
         batch_iter = iter_keep_last(batch_iter, keep_last_key)
         dest_summary["in_file_dedupe"] = "keep_last"
 

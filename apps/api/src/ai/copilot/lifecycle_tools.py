@@ -633,7 +633,10 @@ def resolve_job(job_id: str = "", selector: str = "") -> tuple[dict[str, Any] | 
 def _stage(tool: str, *, payload: dict[str, Any], preview: dict[str, Any], label: str, destructive: bool) -> ToolResult:
     from .ack_ledger import get_ack_ledger
 
+    from .ack_ledger import stamp_caller_workspace
+
     kind = ACK_KIND_BY_TOOL[tool]
+    payload = stamp_caller_workspace(payload)
     ack_id = get_ack_ledger().put(kind=kind, payload=payload, preview=preview)
     return _tool_result(tool,
         success=True,
@@ -892,6 +895,12 @@ def _job_tool(
             )
             if isinstance(d, dict)
         ]
+        from services.reversibility_schedule import schedule_reversibility_block
+
+        stored_request = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+        reversible = schedule_reversibility_block(stored_request)
+        if reversible:
+            return _tool_result(tool, success=False, output=None, error=reversible)
         if stored and not replay_quarantine_details(stored):
             return _tool_result(tool, success=False, output=None,
                 error=(
@@ -1228,6 +1237,10 @@ def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
     refusal = _host_executable_refusal(conn)
     if refusal:
         return _tool_result("test_connector", success=False, output=None, error=refusal)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(conn.get("type") or "")):
+        return _tool_result("test_connector", success=False, output=None, error=brand)
     from services.connector_probe import probe_saved_connector
     from services.connector_store import mark_tested
 
@@ -1627,6 +1640,11 @@ def update_schedule(
     sched, err = _schedule("update_schedule", resolver, schedule_id, name)
     if err:
         return err
+    from services.reversibility_schedule import schedule_reversibility_block
+
+    reversible = schedule_reversibility_block(sched)
+    if reversible:
+        return _tool_result("update_schedule", success=False, output=None, error=reversible)
     from .schedule_cadence import parse_cadence
 
     cadence_text = (cadence or "").strip()
@@ -1646,6 +1664,8 @@ def update_schedule(
     current_interval = str(getattr(sched, "interval", "") or "")
     current_cron = str(getattr(sched, "cron", "") or "")
     current_tz = str(getattr(sched, "timezone", "") or "UTC")
+    from services.schedule_store import schedule_is_enabled
+
     payload: dict[str, Any] = {"schedule_id": sched.id}
     preview: dict[str, Any] = {
         "schedule_id": sched.id,
@@ -1653,7 +1673,7 @@ def update_schedule(
         "interval": current_interval,
         "cron": current_cron,
         "timezone": current_tz,
-        "enabled": bool(getattr(sched, "enabled", True)),
+        "enabled": schedule_is_enabled(sched),
     }
     label_bits: list[str] = []
 

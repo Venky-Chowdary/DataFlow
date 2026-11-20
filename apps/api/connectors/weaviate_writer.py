@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import re
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable
 
 from services.value_serializer import (
@@ -217,6 +219,7 @@ def build_weaviate_objects(
     dimension: int,
     live_property_names: Any = (),
     text_properties: Any = (),
+    native_properties: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Map Datawrap vector rows to Weaviate batch objects (testable, no I/O).
 
@@ -247,6 +250,9 @@ def build_weaviate_objects(
         for name in text_properties:
             if name in props and not isinstance(props[name], str):
                 props[name] = cell_to_string(props[name])
+        for name, kind in (native_properties or {}).items():
+            if name in props:
+                props[name] = _weaviate_native_cell(props[name], kind)
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -304,12 +310,59 @@ def build_weaviate_objects(
     return objects, rejected
 
 
-# The payload stores an integer as a JSON int; every other cell is the exact
-# text the plan names (``DDL_TYPES["weaviate"]``), booleans and IEEE floats
-# included, so the class, the plan and the stored value agree.
+_JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+
+def _weaviate_native_cell(value: Any, kind: str) -> Any:
+    """A cell as the JSON type of its ``boolean`` / ``number`` / ``int`` property (D293).
+
+    Stream pages are text, so ``"true"`` / ``"1.5"`` must be sent as the JSON
+    bool / number the property holds. ``number`` is float64 and is declared
+    only for an IEEE float source, whose text is a float's own round-trip
+    spelling, so ``float(text)`` is that value. Anything else (a non-finite
+    or non-numeric text) is sent unchanged and Weaviate's per-object refusal
+    names it (D304).
+    """
+    if isinstance(value, Decimal) and kind == "number" and value.is_finite():
+        # The exact-text dump writes a Decimal as a JSON string.
+        return float(value)
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if kind == "boolean" and text.lower() in ("true", "false"):
+        return text.lower() == "true"
+    if kind == "number" and _JSON_NUMBER.fullmatch(text):
+        number = float(text)
+        return number if math.isfinite(number) else value
+    if kind == "int" and re.fullmatch(r"-?(?:0|[1-9][0-9]*)", text):
+        return int(text)
+    return value
+
+
+def _weaviate_native_property_names(schema_doc: Any) -> dict[str, str]:
+    """Live properties typed ``boolean`` / ``number`` / ``int`` (GET /v1/schema/{class})."""
+    if not isinstance(schema_doc, dict):
+        return {}
+    out: dict[str, str] = {}
+    for prop in schema_doc.get("properties") or []:
+        if isinstance(prop, dict) and prop.get("name") and isinstance(prop.get("dataType"), list):
+            kind = str((prop["dataType"] or [""])[0]).lower()
+            if kind in _WEAVIATE_NATIVE:
+                out[str(prop["name"])] = kind
+    return out
+
+
+# The payload stores an integer as a JSON int, a boolean as a JSON bool and an
+# IEEE float as a JSON number; every other cell is the exact text the plan
+# names (``DDL_TYPES["weaviate"]``), so the class, the plan and the stored
+# value agree. A decimal is never ``number`` (float64 rounds it, R3).
 _WEAVIATE_DATA_TYPE_FOR_LOGICAL = {
     "integer": "int",
+    "boolean": "boolean",
+    "float": "number",
 }
+#: Weaviate dataType names a plan can carry as a mapping's target type.
+_WEAVIATE_NATIVE = frozenset({"int", "boolean", "number"})
 
 
 def weaviate_mapped_property_types(
@@ -343,13 +396,34 @@ def weaviate_mapped_property_types(
         source = str(m.get("source") or target).strip()
         if not target or target in _RESERVED_PROPERTIES:
             continue
-        declared = vector_payload_declared_type(
-            dest_type_map.get(target.lower(), "") or str(m.get("target_type") or ""),
-            source_types.get(source.lower(), "") or str(m.get("source_type") or ""),
-        )
+        planned = dest_type_map.get(target.lower(), "") or str(m.get("target_type") or "")
+        source_type = source_types.get(source.lower(), "") or str(m.get("source_type") or "")
+        # A native type the plan chose wins (R8): Weaviate's "number" is not
+        # Oracle's NUMBER. A "text" stamp follows the payload rule below.
+        if planned.strip().lower() in _WEAVIATE_NATIVE:
+            out[target] = _weaviate_planned_type(planned, source_type)
+            continue
+        declared = vector_payload_declared_type(planned, source_type)
         logical = normalize_logical_type(declared) if declared else ""
+        if planned and logical != "integer" and normalize_logical_type(planned) in (
+            "string", "text"
+        ):
+            # A plan that names text stores text; only an integer keeps the
+            # schemaless-stamp rule (``vector_payload_declared_type``).
+            out[target] = "text"
+            continue
         out[target] = _WEAVIATE_DATA_TYPE_FOR_LOGICAL.get(logical, "text")
     return out
+
+
+def _weaviate_planned_type(planned: str, source_type: str) -> str:
+    """A plan's Weaviate type, never ``number`` for an exact decimal (R3)."""
+    from services.type_system import normalize_logical_type
+
+    kind = planned.strip().lower()
+    if kind == "number" and normalize_logical_type(source_type) not in ("float", "integer"):
+        return "text"
+    return kind
 
 
 def weaviate_decimal_into_number_columns(
@@ -867,6 +941,7 @@ def write_mapped_rows(
     hdrs = _headers(key)
     class_existed = False
     text_properties: set[str] = set()
+    native_properties: dict[str, str] = {}
     try:
         class_resp = session.get(
             f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
@@ -891,6 +966,7 @@ def write_mapped_rows(
                 schema_types = _weaviate_live_property_types(class_resp.json())
                 live_names = _live_property_names(class_resp.json())
                 text_properties = _weaviate_text_property_names(class_resp.json())
+                native_properties = _weaviate_native_property_names(class_resp.json())
             except Exception:
                 schema_types = {}
             if not schema_types and not studio_typed_all:
@@ -1217,12 +1293,16 @@ def write_mapped_rows(
         text_properties = {
             declared_names.get(k, k) for k, v in declared_types.items() if v == "text"
         }
+        native_properties = {
+            declared_names.get(k, k): v for k, v in declared_types.items() if v in _WEAVIATE_NATIVE
+        }
     objects, embed_rejected = build_weaviate_objects(
         vector_rows,
         class_name=class_name,
         dimension=dimension,
         live_property_names=live_names,
         text_properties=text_properties,
+        native_properties=native_properties,
     )
     rejected = list(map_rejected) + list(embed_rejected)
     if not objects and rejected:
@@ -1318,30 +1398,21 @@ def write_mapped_rows(
                 raise RuntimeError(
                     "Weaviate returned incomplete per-object batch acknowledgement"
                 )
-            failures = [
-                item for item in response_items
-                if not isinstance(item, dict)
-                or (item.get("result") or {}).get("errors")
-                or str((item.get("result") or {}).get("status") or "").upper() == "FAILED"
-            ]
-            if failures:
-                for item in failures:
-                    if not isinstance(item, dict):
-                        continue
-                    rejected.append({
-                        "row": str(item.get("id") or ""),
-                        "column": "",
-                        "target": class_name,
-                        "value": "",
-                        "reason": str((item.get("result") or {}).get("errors") or item)[:500],
-                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
-                    })
-                if policy == "fail":
-                    raise RuntimeError(
-                        f"Weaviate rejected {len(failures)} batch object(s); "
-                        "strict error policy blocks partial activation"
-                    )
-            inserted += len(batch) - len(failures)
+            from connectors.weaviate_batch_result import weaviate_batch_rejects
+
+            # Weaviate stores the rest of a batch it partly refuses (D304):
+            # count what it kept before a strict stop, and keep its reasons.
+            stored, failures = weaviate_batch_rejects(
+                response_items, batch, class_name=class_name, policy=policy
+            )
+            rejected.extend(failures)
+            inserted += stored
+            if failures and policy == "fail":
+                raise RuntimeError(
+                    f"Weaviate rejected {len(failures)} batch object(s) of {len(batch)} "
+                    f"in batch {(i // batch_size) + 1} ({failures[0]['reason']}); "
+                    "strict error policy blocks partial activation"
+                )
             if on_checkpoint:
                 on_checkpoint((i // batch_size) + 1, (total + batch_size - 1) // batch_size, inserted)
         # Re-check FAIL_JOB / strict after mid-write per-object rejects.

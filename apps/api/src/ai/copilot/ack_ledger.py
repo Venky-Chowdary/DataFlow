@@ -127,6 +127,20 @@ def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def stamp_caller_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+    """Put the caller's workspace on a staged payload when it has none.
+
+    Schedules already do this. A one-shot transfer and a connector created
+    from the same call must, or the job is invisible to the workspace list.
+    """
+    if str(payload.get("workspace_id") or "").strip():
+        return payload
+    workspace = owner_stamp().get("workspace_id") or ""
+    if not workspace:
+        return payload
+    return {**payload, "workspace_id": workspace}
+
+
 def _staged_by() -> dict[str, str]:
     """Where and by whom an approval is being staged (from the bound request)."""
     stamp = owner_stamp()

@@ -38,6 +38,23 @@ _CONFIG_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _CURSOR_PLACEHOLDER = re.compile(r"\{cursor(?::([^{}]*))?\}")
 
 
+def _base_url_keeping_manifest_path(supplied: str, manifest: str) -> str:
+    """Keep the manifest API path when the form only named the same host."""
+    supplied_text = (supplied or "").strip().rstrip("/")
+    manifest_text = (manifest or "").strip().rstrip("/")
+    if not supplied_text or not manifest_text:
+        return supplied_text or manifest_text
+    got = urlsplit(supplied_text)
+    own = urlsplit(manifest_text)
+    if got.scheme not in {"http", "https"} or own.scheme not in {"http", "https"}:
+        return supplied_text
+    if (got.path or "").rstrip("/") or not (own.path or "").rstrip("/"):
+        return supplied_text
+    if got.netloc.lower() != own.netloc.lower():
+        return supplied_text
+    return manifest_text
+
+
 def _render_config_template(
     template: str,
     config: Mapping[str, Any],
@@ -195,7 +212,15 @@ class DeclarativeSource(BaseConnector):
             raise ManifestError("manifest: expected an object", path="manifest")
         raw_manifest = dict(raw_manifest)
         if config.get("base_url"):
-            raw_manifest["base_url"] = str(config["base_url"])
+            # A connector form stores the API host (``api.notion.com``). That
+            # origin must not erase the manifest's API path: Notion's search
+            # is ``POST /v1/search``, and ``https://api.notion.com/search`` is
+            # not a route (D312). An operator URL that already names a path,
+            # or a different host, is kept as typed.
+            raw_manifest["base_url"] = _base_url_keeping_manifest_path(
+                str(config["base_url"]),
+                str(raw_manifest.get("base_url") or ""),
+            )
         self.manifest: Manifest = parse_manifest(raw_manifest)
         self._base_url = (
             _render_config_template(

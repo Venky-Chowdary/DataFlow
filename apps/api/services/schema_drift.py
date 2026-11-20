@@ -865,6 +865,51 @@ def _evolution_summary(evolution: dict[str, Any]) -> str:
 
 
 _PARAM_TYPE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_ ]*?)\s*\(([^)]*)\)(.*)$")
+_SQLSERVER_NATIONAL = {"NVARCHAR", "NCHAR"}
+# Non-MAX NVARCHAR/NCHAR stop at 4000. Past that the carrier is NVARCHAR(MAX).
+_SQLSERVER_NATIONAL_MAX = 4000
+
+
+def _national_length_carrier(base: str, width: str, suffix: str) -> str:
+    """Destination family at the source width, clamped for SQL Server national types."""
+    base_u = base.strip().upper()
+    token = width.strip()
+    if base_u in _SQLSERVER_NATIONAL and (
+        token.upper() == "MAX" or (token.isdigit() and int(token) > _SQLSERVER_NATIONAL_MAX)
+    ):
+        carrier = "NVARCHAR(MAX)"
+    else:
+        carrier = f"{base.strip()}({token})"
+    return f"{carrier} {suffix}".strip().upper()
+
+
+def _promote_national_source(dest_type: str, source_type: str) -> str:
+    """NVARCHAR proposal for a non-national source that does not fit the live width.
+
+    ``VARCHAR(MAX)`` and any character length past 4000 become ``NVARCHAR(MAX)``.
+    ``VARCHAR(800)`` onto ``NVARCHAR(400)`` becomes ``NVARCHAR(800)``. An unsized
+    source returns ``""`` so the caller keeps the live column.
+    """
+    dest_m = _PARAM_TYPE.match(str(dest_type or ""))
+    if not dest_m:
+        return ""
+    base = dest_m.group(1).strip().upper()
+    if base not in _SQLSERVER_NATIONAL:
+        return ""
+    suffix = dest_m.group(3).strip()
+    src = str(source_type or "").upper()
+    if re.search(r"\(\s*MAX\s*\)", src) or re.search(r"\b(TEXT|CLOB|NTEXT|NCLOB)\b", src):
+        return _national_length_carrier(base, "MAX", suffix)
+    src_m = _PARAM_TYPE.match(src)
+    if not src_m:
+        return ""
+    width = src_m.group(2).split(",")[0].strip()
+    if not width.isdigit():
+        return ""
+    dest_width = dest_m.group(2).split(",")[0].strip()
+    if dest_width.isdigit() and int(width) <= int(dest_width) <= _SQLSERVER_NATIONAL_MAX:
+        return ""
+    return _national_length_carrier(base, width, suffix)
 
 
 def widened_dest_carrier(dest_type: str, source_type: str) -> str:
@@ -885,9 +930,25 @@ def widened_dest_carrier(dest_type: str, source_type: str) -> str:
         src_args = [a.strip() for a in src_m.group(2).split(",")]
         if len(dest_args) == len(src_args) and all(a.isdigit() for a in src_args):
             suffix = dest_m.group(3).strip()
-            carrier = f"{dest_m.group(1).strip()}({','.join(src_args)})"
-            return f"{carrier} {suffix}".strip().upper()
-    return str(source_type or "").upper()
+            return _national_length_carrier(
+                dest_m.group(1).strip(), ",".join(src_args), suffix
+            )
+    # INTEGER -> BIGINT takes the source spelling. A bare VARCHAR does not:
+    # emitting it ALTERs NVARCHAR(400) to VARCHAR(1) (D368). A national
+    # collapse keeps the destination family and takes the source width,
+    # clamped to NVARCHAR(MAX) past 4000. VARCHAR(MAX) is NVARCHAR(MAX).
+    fallback = str(source_type or "").upper()
+    from connectors.schema_drift import character_ddl_is_unsized
+    from services.type_system import national_charset_would_collapse
+
+    if national_charset_would_collapse(dest_type, fallback):
+        promoted = _promote_national_source(str(dest_type or ""), str(source_type or ""))
+        if promoted:
+            return promoted
+        return str(dest_type or "").upper()
+    if character_ddl_is_unsized(fallback):
+        return str(dest_type or "").upper()
+    return fallback
 
 
 def propose_dest_widens(
@@ -1097,6 +1158,10 @@ def dest_widen_proposal(
     if stamp_is_operator_ceiling(mapping):
         return None
     new_type = widened_dest_carrier(tgt_type, src_type)
+    # The carrier we would emit must itself be a widen. A bare VARCHAR
+    # fallback used to come back here and ALTER NVARCHAR(400) to VARCHAR(1).
+    if not is_wider_type(tgt_type, new_type, dest_db=dest_db):
+        return None
     if key_groups:
         from connectors.schema_drift import keyed_widen_carrier, with_key_charsets
 
@@ -1115,6 +1180,12 @@ def dest_widen_proposal(
         split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == tgt.casefold()
         for g in key_groups or [] for c in g
     )
+    from connectors.schema_drift import character_ddl_is_unsized
+
+    if character_ddl_is_unsized(new_type) or not is_wider_type(
+        tgt_type, new_type, dest_db=dest_db
+    ):
+        return None
     return {
         "kind": "widen_type",
         "column": src,

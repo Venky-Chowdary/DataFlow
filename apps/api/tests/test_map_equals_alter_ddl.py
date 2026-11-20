@@ -181,7 +181,9 @@ def test_generic_sql_sa_widen_refuses_past_map_stamp(monkeypatch):
         def get_columns(self, table_name, schema=None):
             return [{"name": "amount", "type": _FakeType()}]
 
-    monkeypatch.setattr(gs.sa, "inspect", lambda _conn: _FakeInspector())
+    monkeypatch.setattr(
+        "connectors.column_widen_restore.sa.inspect", lambda _conn: _FakeInspector()
+    )
 
     engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
     refusals: list[dict] = []
@@ -226,7 +228,9 @@ def test_generic_sql_sa_widen_aligns_live_up_to_stamp(monkeypatch):
         def get_columns(self, table_name, schema=None):
             return [{"name": "amount", "type": _FakeType()}]
 
-    monkeypatch.setattr(gs.sa, "inspect", lambda _conn: _FakeInspector())
+    monkeypatch.setattr(
+        "connectors.column_widen_restore.sa.inspect", lambda _conn: _FakeInspector()
+    )
 
     engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
     refusals: list[dict] = []

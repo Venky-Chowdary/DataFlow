@@ -2382,6 +2382,7 @@ def verify_sqlserver_table(
     """
     try:
         import pymssql
+        from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
         from connectors.sql_identifiers import quote_table_ref
 
@@ -2392,6 +2393,7 @@ def verify_sqlserver_table(
             password=password or "",
             database=database or "master",
             login_timeout=10,
+            tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
             timeout=30,
         )
         sch = (schema or "dbo").strip() or "dbo"
@@ -3345,18 +3347,13 @@ def fingerprint_for_reconcile(
         # that really did store an empty string.
         wire = None
         value = None
-    if wire is not None and type(wire).__name__ == "JsonNullToken" and ddl_type:
-        # A file read-back hands a present JSONL ``null`` over as the JSON-null
-        # token. Only a document column can hold JSON null as a value; on
-        # every other column the file's ``null`` is the SQL NULL the writer
-        # emitted for it (D144 — the key is no longer dropped).
-        from services.type_system import normalize_logical_type
+    from services.file_json_null import json_null_reads_as_sql_null
 
-        if normalize_logical_type(ddl_type) not in {
-            "json", "array", "object", "struct", "map",
-        }:
-            wire = None
-            value = None
+    if json_null_reads_as_sql_null(wire, ddl_type, engine):
+        # A file's present ``null`` is the SQL NULL its writer emitted: on a
+        # scalar column (D144), and on a JSON column of a file (D307).
+        wire = None
+        value = None
     if is_explicit_null(value):
         # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
         wire = None
@@ -4896,6 +4893,16 @@ def sample_compare_rows(
             src_col = str(m.get("source") or "")
             tgt_col = str(m.get("target") or "")
             if not src_col or not tgt_col:
+                continue
+            # An omitted column is not written and is not compared (D369).
+            if m.get("intentional_omit") or m.get("intentionalOmit") or m.get("omit") or m.get("omitted"):
+                continue
+            if str(m.get("transform") or "").strip().lower() in {
+                "omit",
+                "intentional_omit",
+                "drop",
+                "exclude",
+            }:
                 continue
             physical_tgt = tgt_keys.get(tgt_col.lower())
             if physical_tgt is None:

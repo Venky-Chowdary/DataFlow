@@ -2469,6 +2469,67 @@ def temporal_precision_would_narrow(
 ) -> bool:
     """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
 
+    The verdict and :func:`temporal_tick_disclosure` come from one assessment,
+    so plan and execute grade and disclose a column alike (R3, R8).
+    """
+    return _temporal_precision_assessment(
+        source_type, target_type, dest_db=dest_db, population=population
+    )[0]
+
+
+_FRACTION_UNITS = {0: "seconds", 3: "milliseconds", 6: "microseconds"}
+
+
+def _ordinal(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def temporal_tick_disclosure(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    population: object = None,
+    population_complete: bool = False,
+    column: str = "",
+) -> str:
+    """What the plan must say about a declared tick past the destination's ceiling.
+
+    SQL Server's default ``datetime2(7)`` counts 100 ns; PostgreSQL and MySQL
+    keep at most microseconds, so no carrier there holds the 7th digit (R3:
+    preserve, or disclose and accept). A 7th digit observed non-zero is lossy
+    (:func:`temporal_precision_would_narrow` is True, a Risk Contract item).
+    When every row was measured and none has one, nothing is lost and this
+    returns ``""``. Otherwise, unmeasured or only sampled, it is not a blocker
+    (it is the product's own create-new carrier) but it is disclosed, naming
+    the column. ``population_complete`` is the caller's claim that
+    ``population`` is every value of the column.
+    """
+    narrow, tick_digits = _temporal_precision_assessment(
+        source_type, target_type, dest_db=dest_db, population=population
+    )
+    if narrow or tick_digits is None:
+        return ""
+    if population_complete and population_fits_temporal_precision(population, tick_digits) is True:
+        return ""
+    unit = _FRACTION_UNITS.get(tick_digits, f"{tick_digits} fractional digits")
+    label = f"{column}: " if column else ""
+    return (
+        f"{label}{source_type} → {target_type} ({unit}): a {_ordinal(tick_digits + 1)} "
+        "fractional digit was not observed in the sample; any such digit would be truncated."
+    )
+
+
+def _temporal_precision_assessment(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    population: object = None,
+) -> tuple[bool, int | None]:
+    """``(narrows, tick_digits)``; ``tick_digits`` is set when the verdict rests
+    on the measured values of a dialect-default tick (see the exemption below).
+
     ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
     unless G3 blocks and write paths refuse inventing lower precision.
 
@@ -2505,11 +2566,11 @@ def temporal_precision_would_narrow(
         LOGICAL_TIME,
         LOGICAL_DATETIME,
     }:
-        return False
+        return False, None
     tgt_u = strip_identity_qualifier(target_type).upper().strip()
     src_u = strip_identity_qualifier(source_type).upper().strip()
     if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
-        return True
+        return True, None
     tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
     src_p = parse_temporal_fractional_precision(source_type)
     if src_p is None and is_document_instant_token(active_source_engine(), source_type):
@@ -2518,7 +2579,7 @@ def temporal_precision_would_narrow(
         # (fractional digits 0) and dropped every millisecond.
         src_p = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     if tgt_p is None:
-        return False
+        return False, None
     if src_p is None:
         # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
         # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
@@ -2535,7 +2596,7 @@ def temporal_precision_would_narrow(
                 # resolves through ``dest_db`` invented a fidelity collapse
                 # (``TIMESTAMP_NTZ → TIMESTAMP_NTZ``) on routes that never
                 # touched Snowflake. One declaration, one precision rule.
-                return False
+                return False, None
             # Snowflake declares TIMESTAMP_NTZ/LTZ/TZ with no typmod in its
             # catalog but stores nanoseconds (default scale 9). Reading the
             # absent typmod as "unknown" green-lit Snowflake→MySQL DATETIME
@@ -2551,10 +2612,10 @@ def temporal_precision_would_narrow(
             # to sign unread. Landing at millisecond or whole-second FSP is the
             # fixable case: widen the destination column.
             if tgt_p >= SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR:
-                return False
+                return False, None
             src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
         else:
-            return False
+            return False, None
     # SQL Server DATETIME2(7) / TIMESTAMP_NTZ(7) into a destination that is
     # already at its documented maximum (PostgreSQL microseconds) cannot be
     # widened. Blocking that pair made every MSSQL→Postgres timestamp route
@@ -2571,14 +2632,18 @@ def temporal_precision_would_narrow(
         and tgt_p >= cap
         and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
     ):
-        # C3: the exemption covers a declared tick the rows do not use. When
-        # the measured values carry a digit past the cap, it is rounded away
-        # (DATETIME2(7) → PostgreSQL microseconds): flagged, not green.
-        return population_fits_temporal_precision(population, tgt_p) is False
+        # C3/D372: the exemption covers a declared tick the rows do not use.
+        # A measured non-zero digit past the cap is truncated (DATETIME2(7)
+        # into microseconds): lossy at plan and at execute. A 7th digit of 0
+        # loses nothing. Unmeasured or only sampled is not a blocker (no
+        # PostgreSQL/MySQL type holds 100 ns, so blocking would refuse the
+        # product's own create-new carrier on every second run) but R3 asks
+        # for disclosure: temporal_tick_disclosure says so, from this verdict.
+        return population_fits_temporal_precision(population, tgt_p) is False, tgt_p
     if src_p <= tgt_p:
-        return False
+        return False, None
     # A declared ceiling (a warehouse's nanosecond default) narrows only if the
     # rows use the digits being dropped. Measured cells that fit the
     # destination lose nothing, and the writer quarantines any later cell that
     # does not (D49).
-    return population_fits_temporal_precision(population, tgt_p) is not True
+    return population_fits_temporal_precision(population, tgt_p) is not True, None

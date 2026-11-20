@@ -392,6 +392,13 @@ def run_file_preflight(
     source_population_counted: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
+    from services.staged_preflight import staged_preflight_for_bound
+
+    # Confirm reuses staging's result when the inputs are the same (D308).
+    # A miss falls through and opens the catalog, as a first Validate does.
+    staged = staged_preflight_for_bound()
+    if staged is not None:
+        return staged
     from services.schema_drift import (
         PROPAGATE_POLICIES,
         destination_evolution_approved,
@@ -2819,6 +2826,19 @@ def run_file_preflight(
     )
     if _pii_warnings:
         out.setdefault("warnings", []).extend(_pii_warnings)
+    from services.row_filter import null_dropping_warnings
+
+    for _null_warning in null_dropping_warnings(source_filter):
+        out.setdefault("warnings", []).append(_null_warning)
+    from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
+
+    out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
+    from services.temporal_tick_disclosure import temporal_tick_warnings  # D372/R3
+
+    out.setdefault("warnings", []).extend(temporal_tick_warnings(
+        plan_mappings, sample_rows, source_types=column_types, dest_types=dest_types,
+        dest_db=destination_db_type, row_count=row_count, rows_are_population=rows_are_population,
+    ))
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(

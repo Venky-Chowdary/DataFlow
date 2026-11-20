@@ -431,13 +431,16 @@ def test_non_member_and_anonymous_learn_nothing(ent, s3, monkeypatch):
     foreign = stranger.get(f"/api/v1/jobs/{job_id}/export/download")
     absent = stranger.get(f"/api/v1/jobs/{missing}/export/download")
     assert foreign.status_code == absent.status_code == 404
-    assert foreign.json() == absent.json() == {"detail": "Job not found"}
+    assert foreign.json()["detail"] == absent.json()["detail"] == "Job not found"
+    assert foreign.json()["error"]["reference"] and absent.json()["error"]["reference"]
+    assert foreign.json()["error"]["code"] == absent.json()["error"]["code"]
 
     anon = ent.anonymous()
     a1 = anon.get(f"/api/v1/jobs/{job_id}/export/download")
     a2 = anon.get(f"/api/v1/jobs/{missing}/export/download")
     assert a1.status_code == a2.status_code == 401
-    assert a1.json() == a2.json()
+    assert a1.json()["detail"] == a2.json()["detail"]
+    assert a1.json()["error"]["code"] == a2.json()["error"]["code"]
     issued = [e for e in ent.audit(limit=500) if e.get("action") == "job.export.download_url.issued"]
     assert issued == []
 
@@ -460,7 +463,8 @@ def test_sweeper_deletes_expired_exports_and_the_route_answers_410(ent, s3, monk
     assert old_key not in _keys(s3)
     assert get_mongodb_service().get_job(old_job).get("export_expired_at")
     res = owner.get(f"/api/v1/jobs/{old_job}/export/download")
-    assert res.status_code == 410 and res.json() == {"detail": "export expired"}
+    assert res.status_code == 410 and res.json()["detail"] == "export expired"
+    assert res.json()["error"]["reference"]
     expired = [e for e in ent.audit(ws, limit=500) if e.get("action") == "job.export.expired"]
     assert expired and expired[0]["details"]["object_key"] == old_key
 

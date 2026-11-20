@@ -60,12 +60,39 @@ def _data_key() -> Any:
     return Fernet(base64.urlsafe_b64encode(_hkdf_32(root, info=_KEY_INFO)))
 
 
+#: Whether this process has said that it has no key to seal Pilot state with.
+_warned_no_key = False
+
+
+def _note_no_key() -> None:
+    """Say once per process that Pilot state stays in memory, and how to change that.
+
+    The stores retry every record they hold on every write, so a warning per
+    call was millions of identical lines in one CI job (PR #433) and said
+    nothing the first one had not.
+    """
+    global _warned_no_key
+    if _warned_no_key:
+        return
+    _warned_no_key = True
+    _log.warning(
+        "Pilot state is kept in memory only: there is no local key to seal it with. "
+        "Follow-ups do not survive a restart or reach another worker until DATAWRAP_SECRETS_KEY, "
+        "or a DATAWRAP_AUTH_SECRET other than the public default, is set."
+    )
+
+
 def seal(value: Any) -> str | None:
     """Ciphertext for ``value``, or None when the vault cannot seal it.
 
     None means "do not persist this": the caller keeps the value in memory
     only, which is the safe failure for a production vault with no key.
+    With no key the value is not serialized at all: the stores offer every
+    record they hold on each write.
     """
+    if not _has_local_key():
+        _note_no_key()
+        return None
     try:
         plain = json.dumps({"v": value}, default=json_default).encode("utf-8")
         return _PREFIX + _data_key().encrypt(plain).decode("ascii")

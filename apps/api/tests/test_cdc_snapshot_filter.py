@@ -38,6 +38,24 @@ def test_compile_sqlserver_brackets_and_like_escapes():
     assert params == ["50!%!_![x]!!%"]
 
 
+def test_mongo_ne_and_nin_require_the_field_to_exist():
+    from services.cdc_snapshot_filter import compile_snapshot_filter_mongo
+
+    ne = compile_snapshot_filter_mongo(
+        normalize_snapshot_filter({"column": "status", "op": "ne", "value": "x"})
+    )
+    assert ne["$and"][0] == {"status": {"$exists": True}}
+    assert {"status": {"$ne": None}} in ne["$and"]
+    nin = compile_snapshot_filter_mongo(
+        normalize_snapshot_filter({"column": "status", "op": "not_in", "value": ["x"]})
+    )
+    assert nin["$and"][0] == {"status": {"$exists": True}}
+    present = compile_snapshot_filter_mongo(
+        normalize_snapshot_filter({"column": "status", "op": "is_not_null"})
+    )
+    assert present == {"status": {"$exists": True, "$ne": None}}
+
+
 def test_compile_oracle_upper_and_in_list():
     spec = normalize_snapshot_filter({"column": "status", "op": "not_in", "value": ["X", "Y"]})
     sql, params = compile_snapshot_filter_sql(spec, dialect="oracle", upper_columns=True)

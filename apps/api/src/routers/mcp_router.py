@@ -15,7 +15,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from services.brand import PRODUCT_SLUG
+from services.call_lanes import run_in_lane
 from services.mcp_protocol import SERVER_INFO
+
+
+async def _default_lane(_lane: str, fn, /, *args, **kwargs):
+    """``ping`` / ``tools/list`` stay on the default executor."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
 oauth_resource_router = APIRouter(tags=["MCP OAuth"])
@@ -147,7 +153,15 @@ async def mcp_streamable(http_request: Request):
                 # timeout (JSON-RPC -32001 Request timed out). A thread keeps
                 # the listener free. A process restart during deploy still
                 # drops the in-flight call.
-                out = await asyncio.to_thread(
+                # A tool call waits on customer systems: it runs on its own
+                # lane so it cannot take the threads short routes use (D321).
+                lane_call = (
+                    run_in_lane
+                    if message.get("method") == "tools/call"
+                    else _default_lane
+                )
+                out = await lane_call(
+                    "mcp_tool",
                     handle_jsonrpc,
                     message,
                     authenticated=authenticated,
@@ -369,8 +383,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         request_token = set_mcp_request(http_request)
         try:
             with bind_request_principal(http_request, mcp_role):
-                result = await asyncio.to_thread(
-                    get_pilot_tools().execute, request.name, request.arguments
+                result = await run_in_lane(
+                    "mcp_tool", get_pilot_tools().execute, request.name, request.arguments
                 )
         finally:
             reset_mcp_request(request_token)

@@ -46,6 +46,7 @@ QUARANTINED = "quarantined"
 ACCEPTED_BY_OPERATOR = "accepted_by_operator"
 CONCURRENT_SOURCE_UPDATE = "concurrent_source_update"
 OUT_OF_SCOPE_POPULATION = "out_of_scope_population"
+MERGED_IN_PLACE = "merged_in_place"
 UNEXPLAINED = "unexplained"
 
 CAUSE_LABELS: dict[str, str] = {
@@ -63,6 +64,7 @@ CAUSE_LABELS: dict[str, str] = {
     ACCEPTED_BY_OPERATOR: "Accepted by operator",
     CONCURRENT_SOURCE_UPDATE: "Changed in source during the run",
     OUT_OF_SCOPE_POPULATION: "Not written by this run",
+    MERGED_IN_PLACE: "Merged in place",
     UNEXPLAINED: "Unexplained",
 }
 

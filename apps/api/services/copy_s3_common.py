@@ -351,8 +351,11 @@ class DelimitedFileScan:
 
     * ``backslash`` — any ``\\``: MySQL ``ESCAPED BY '\\\\'`` would rewrite it.
     * ``legacy_null`` — a ``\\N`` (the C04 legacy NULL spelling).
-    * ``quote`` — any ``"``: PostgreSQL ``COPY (FORMAT csv)`` reads a mid-field
-      quote as quoting.
+    * ``quote`` — any ``"``.
+    * ``bare_quote`` — a ``"`` that does not open or close a well-formed quoted
+      field (``5" pipe``, ``"a"b``, an unclosed quote). PostgreSQL
+      ``COPY (FORMAT csv)`` starts a quoted section at it: ``a"b"c`` loads as
+      ``abc`` and ``5" pipe`` swallows the next rows (``services.delimited_scan``).
     * ``unquoted_null`` — a field that is exactly ``NULL`` with no enclosing
       quotes: MySQL ``LOAD DATA ... ENCLOSED BY`` loads it as SQL NULL. The scan
       is conservative: ``NULL`` between separators inside a quoted multi-line
@@ -363,6 +366,7 @@ class DelimitedFileScan:
     backslash: bool = False
     legacy_null: bool = False
     quote: bool = False
+    bare_quote: bool = False
     unquoted_null: bool = False
     # "lf" (every line break is \n), "crlf" (every \r is followed by \n and
     # every \n preceded by \r) or "mixed" (anything else, bare \r included).
@@ -380,6 +384,9 @@ def scan_delimited_file(
     path: str, delimiter: str, *, chunk_size: int = 1 << 20
 ) -> DelimitedFileScan:
     """One read of ``path`` in ``chunk_size`` chunks; patterns may span chunks."""
+    from services.delimited_scan import QuoteScanner
+
+    quotes = QuoteScanner(delimiter)
     sep = re.escape(delimiter.encode("utf-8"))
     field_null = re.compile(rb"[" + sep + rb"\r\n]NULL(?=[" + sep + rb"\r\n])")
     null_at_end = re.compile(rb"[" + sep + rb"\r\n]NULL\Z")
@@ -399,6 +406,7 @@ def scan_delimited_file(
             backslash = backslash or b"\\" in chunk
             legacy_null = legacy_null or b"\\N" in window
             quote = quote or b'"' in chunk
+            quotes.feed(chunk)
             not_utf8 = not_utf8 or b"\x00" in chunk
             unquoted_null = unquoted_null or field_null.search(window) is not None
             lf += chunk.count(b"\n")
@@ -419,6 +427,7 @@ def scan_delimited_file(
         backslash=backslash,
         legacy_null=legacy_null,
         quote=quote,
+        bare_quote=quotes.finish(),
         unquoted_null=unquoted_null,
         line_ending=line_ending,
         not_utf8_text=not_utf8,

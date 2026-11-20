@@ -93,3 +93,24 @@ def test_phone_still_refuses_garbage(raw):
 def test_phone_catalog_names_the_form_and_the_region_rule():
     text = TRANSFORM_SEMANTICS["phone"]["semantics"]
     assert "E.164" in text and "no region" in text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "+1234567890123456",     # 16 digits: E.164 allows at most 15
+        "+1234567890123456789",  # 19 digits
+        "+0123456789",           # no country code starts with 0
+    ],
+)
+def test_phone_refuses_what_is_not_an_e164_number(raw):
+    """ITU-T E.164: at most 15 digits, country code first (never 0). A value
+    written with a leading + is presented as E.164, so one that cannot be an
+    E.164 number is refused (quarantined by the run's policy), never written
+    as if it were one (D330(b))."""
+    value, err = apply_transform(raw, "phone")
+    assert value is None and err and "Invalid phone" in err, (raw, value, err)
+
+
+def test_phone_keeps_the_longest_e164_number():
+    assert apply_transform("+123 456 789 012 345", "phone") == ("+123456789012345", None)

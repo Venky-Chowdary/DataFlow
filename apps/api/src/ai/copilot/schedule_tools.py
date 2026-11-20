@@ -243,6 +243,16 @@ def create_schedule(
             success=False,
             error="No column mapping was produced, so there is nothing safe to schedule.",
         )
+    if require_reversibility:
+        from services.reversibility_schedule import reversibility_refusal
+
+        refusal = reversibility_refusal(
+            engine_mappings,
+            table=str((plan.get("destination") or {}).get("table") or dest_table or ""),
+            dest_db=str((plan.get("destination") or {}).get("type") or ""),
+        )
+        if refusal:
+            return _tool_result(tool, success=False, error=refusal)
 
     try:
         # Same fail-closed bind as a chat-started run: an unsigned or tripped

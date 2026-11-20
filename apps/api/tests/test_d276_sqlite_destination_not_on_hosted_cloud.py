@@ -7,8 +7,9 @@ the API from its own disk: "Data kept at <table> (31 rows)", then the
 connector showed 0 tables. Owner decision: on the hosted cloud (a deployed
 Railway service) SQLite is refused as a destination, before any row is written,
 with one operator message; ``DATAWRAP_SQLITE_DESTINATION=on|off`` decides
-explicitly; self-hosted installs, tests and dev keep it; SQLite as a source is
-unchanged.
+explicitly; self-hosted installs, tests and dev keep it. On the hosted
+cloud a SQLite source is refused at create and at test as well, before any
+server path is opened.
 """
 
 from __future__ import annotations

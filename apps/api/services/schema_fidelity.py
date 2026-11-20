@@ -538,6 +538,43 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+def plain_append_sync(mode: str | None) -> bool:
+    """full_refresh_append and its aliases. Not incremental_append (that keeps the key)."""
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode or "", default="") == "full_refresh_append"
+
+
+def append_existing_key_disclosure(
+    *,
+    sync_mode: str | None,
+    table_exists: bool,
+    key_columns: list[str] | None,
+) -> str:
+    """What the plan must say about append into a table that enforces a key.
+
+    R6: append is INSERT only and never merges. Appending new keys into a
+    keyed table is legitimate, so it is not refused. A source row whose key
+    is already stored (a repeat snapshot, or a changed row under
+    incremental_append) is refused loudly by the write-time collision check,
+    or quarantined under the signed contract; it is never updated in place.
+    R8: the plan says so before Confirm (D395). Empty when nothing applies.
+    """
+    from services.sync_cursor import is_append_sync
+
+    keys = [str(col).strip() for col in (key_columns or []) if str(col or "").strip()]
+    if not table_exists or not keys or not is_append_sync(sync_mode):
+        return ""
+    shown = ", ".join(keys)
+    return (
+        f"The destination table already enforces primary key ({shown}). Append "
+        "only inserts: new keys land, and a source row whose key is already "
+        "stored is refused (or quarantined under the contract), never merged "
+        "in place. Use upsert to replace stored keys, or append into a table "
+        "with no business primary key to keep every version."
+    )
+
+
 _APPEND_KEY_REASON = (
     "Append create-new does not declare a key. A second copy of the same row "
     "is legal on this sync. Upsert or merge is what enforces the source key."

@@ -19,6 +19,8 @@ if str(_TESTS) not in sys.path:
 
 from tenancy_world import tenancy_world  # noqa: E402,F401
 
+from tests.helpers.error_bodies import assert_indistinguishable  # noqa: E402
+
 
 @pytest.mark.parametrize("method,suffix", [("POST", "/resend"), ("DELETE", "")])
 def test_outsider_gets_the_same_404_for_a_real_and_a_missing_invite(tenancy_world, method, suffix):  # noqa: F811
@@ -35,7 +37,8 @@ def test_outsider_gets_the_same_404_for_a_real_and_a_missing_invite(tenancy_worl
 
     real = admin_b.request(method, f"{base}/{invite_id}{suffix}")
     missing = admin_b.request(method, f"{base}/inv_000000000000000000000000{suffix}")
-    assert (real.status_code, real.json()) == (missing.status_code, missing.json()), (real.text, missing.text)
+    # U2 / R11: identical except each response's own error.reference.
+    assert_indistinguishable(real, missing)
     assert real.status_code == 404
     assert workspace_invites.store.get(invite_id)["status"] == "pending"
 

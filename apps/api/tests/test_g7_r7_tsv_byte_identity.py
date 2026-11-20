@@ -1,13 +1,14 @@
-"""G7 re-review B1: TSV quoting must not change bytes of ordinary values.
+"""TSV exports use the same quoting dialect as CSV (D371, migration rule 9).
 
-The H1 fix quoted any TSV cell containing ``"``, so a default ("off") TSV of
-``5" pipe`` became ``"5"" pipe"``. Loaders that read the TSV without quote
-handling (the S3→MySQL LOAD DATA fast path) then stored the literal quotes.
-
-Rule: a TSV cell is quoted only when it contains a tab, CR or LF, or starts
-with ``"``. A mid-field ``"`` stays raw — every product TSV reader takes it
-literally — so rows without those characters are byte-identical to the
-pre-H1 writer (aacea0e05).
+A cell that contains a tab, a quote, CR or LF is quoted and quotes are
+doubled. ``''`` is ``""``. NULL is an empty unquoted field. That is what the
+file_export TSV (PR 402) and the PostgreSQL to S3 ``COPY (FORMAT csv)`` TSV
+already wrote; the object-store row writer used to leave a mid-field quote raw
+and write ``''`` as NULL (G7 B1), so the same transfer produced different
+bytes depending on which path ran. Every product loader reads the quoted form
+exactly (MySQL ``LOAD DATA ... OPTIONALLY ENCLOSED BY '"'`` reads a doubled
+quote as one). Record terminators are unchanged: object-store and converter
+rows end LF, a file_export ends CRLF.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-# No tab / CR / LF / leading quote: these rows must be byte-identical to aacea0e05.
+# Rows with no tab / CR / LF: quotes and '' are the only cells quoted.
 ORDINARY = [
     ["1", '5" pipe', "a\\b", 'say "hi"'],
     ["2", "=1+1", "a,b", "x\"\"y"],
@@ -31,9 +32,9 @@ ORDINARY = [
 ]
 ORDINARY_TSV = (
     "id\tnote\tpath\tquote\n"
-    '1\t5" pipe\ta\\b\tsay "hi"\n'
-    '2\t=1+1\ta,b\tx""y\n'
-    "3\tcafé\t\t-5\n"
+    '1\t"5"" pipe"\ta\\b\t"say ""hi"""\n'
+    '2\t=1+1\ta,b\t"x""""y"\n'
+    '3\tcafé\t""\t-5\n'
 ).encode("utf-8")
 COLS = ["id", "note", "path", "quote"]
 
@@ -83,14 +84,13 @@ def test_object_store_tsv_is_byte_identical_for_ordinary_values():
         dest_types={c: "TEXT" for c in COLS},
     )
     body = export.read_all()
-    # '' is the empty cell on the object-store wire as well.
-    assert body.replace(b"\r\n", b"\n") == ORDINARY_TSV
+    assert body == ORDINARY_TSV
 
 
 def test_s3_copy_row_formatter_keeps_mid_field_quotes_raw():
     from services.copy_s3_common import s3_format_delimited_row
 
-    assert s3_format_delimited_row(['5" pipe', "a\\b", "plain"], "\t") == '5" pipe\ta\\b\tplain'
+    assert s3_format_delimited_row(['5" pipe', "a\\b", "plain"], "\t") == '"5"" pipe"\ta\\b\tplain'
 
 
 @pytest.mark.parametrize(
@@ -101,7 +101,7 @@ def test_s3_copy_row_formatter_keeps_mid_field_quotes_raw():
         ("e\rf", '"e\rf"'),
         ('"lead', '"""lead"'),
         ('mid"tab\there', '"mid""tab\there"'),
-        ('5" pipe', '5" pipe'),
+        ('5" pipe', '"5"" pipe"'),
         ("plain", "plain"),
     ],
 )
@@ -126,7 +126,8 @@ def test_product_tsv_readers_read_the_exact_values(tmp_path, rows):
     from services.file_parser import FileParser
 
     text = _tsv_text(rows)
-    expected = [[c if c != "" else None for c in r] for r in rows]
+    # Quoted ``""`` reads back as an empty string. A SQL NULL is not in these rows.
+    expected = [list(r) for r in rows]
 
     parsed = list(csv.reader(io.StringIO(text, newline=""), delimiter="\t"))[1:]
     assert parsed == rows

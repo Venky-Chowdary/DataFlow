@@ -606,6 +606,11 @@ def build_job_payload(
     needs a bearer, so a browser gets 401, and its host is the API service's.
     A run that never created a job has no "Job ID:" line and no job link.
     """
+    from services.job_message_redaction import redact_driver_text
+
+    # D405: an e-mail or webhook is read outside the workspace; no statement,
+    # bound value or driver dump goes into it.
+    error = redact_driver_text(str(error or ""))
     succeeded = status in ("completed", "success")
     color = "28a745" if succeeded else "ffc107" if status in ("partial", "failed_with_quarantine", "completed_with_quarantine") else "dc3545"
     title = f"Datawrap transfer {status}: {source} → {destination}"

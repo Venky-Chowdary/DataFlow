@@ -45,6 +45,10 @@ CONNECTION_LOST_SIGNALS: tuple[str, ...] = (
     "connection is closed",
     "connection not open",
     "server closed the connection unexpectedly",
+    # SQLAlchemy refuses the next statement on a session whose transaction
+    # died with the socket. That is the dropped connection, not a new error.
+    "can't reconnect until invalid transaction is rolled back",
+    "invalid transaction is rolled back",
 )
 
 logger = logging.getLogger(__name__)
@@ -155,6 +159,34 @@ def _mysql_error_code(exc: BaseException | str) -> int | None:
         code = err.args[0]
     # pymysql raises InterfaceError(0, "") on a closed socket: no code to read.
     return code if isinstance(code, int) and code > 0 else None
+
+
+def pending_rollback(exc: BaseException | str) -> bool:
+    """True when the session cannot be reused until its transaction is rolled back.
+
+    SQLAlchemy raises this after the socket drops. The words are the driver's,
+    and they must not become the job's message.
+    """
+    return "invalid transaction is rolled back" in str(exc).lower()
+
+
+def rollback_pending_transaction(resource: Any) -> bool:
+    """Roll back a session a reconnect will not touch until it is rolled back.
+
+    Returns True when ``rollback`` ran. A resource that has no rollback, or
+    whose rollback itself fails, is left as it was and returns False.
+    """
+    if resource is None or pending_rollback(resource):
+        return False
+    rollback = getattr(resource, "rollback", None)
+    if not callable(rollback):
+        return False
+    try:
+        rollback()
+    except Exception:
+        logger.warning("pending-transaction rollback failed", exc_info=True)
+        return False
+    return True
 
 
 def is_connection_lost(exc: BaseException | str) -> bool:
@@ -402,6 +434,7 @@ def apply_mysql_session_guards(
     *,
     lock_wait_seconds: int = 0,
     require_strict_sql_mode: bool = True,
+    io_timeout: int | None = None,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
@@ -426,8 +459,11 @@ def apply_mysql_session_guards(
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
-            cur.execute("SET SESSION net_read_timeout = 600")
-            cur.execute("SET SESSION net_write_timeout = 600")
+            # Server-side waits on the client: never below the 600s bulk
+            # floor, raised for a purpose whose client waits longer (reconcile).
+            net = max(600, int(io_timeout or 0))
+            cur.execute("SET SESSION net_read_timeout = %s", (net,))
+            cur.execute("SET SESSION net_write_timeout = %s", (net,))
             # TIMESTAMP conversion is session-relative. The same pin is used by
             # source readers, dest writers, and generic_sql pooled connections
             # (services.timezone_policy.pin_mysql_session_utc).

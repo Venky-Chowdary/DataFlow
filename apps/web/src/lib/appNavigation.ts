@@ -112,6 +112,29 @@ export function inviteLinkToken(pathname: string, hash: string): string {
   return emailedLinkToken("/accept-invite", pathname, hash);
 }
 
+const JOB_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Notification e-mails link to `https://<web origin>/jobs/<id>` (D339): a
+ * plain path that survives mail clients and link scanners. The app routes on
+ * the hash, so at boot that path becomes `/#/jobs?jobId=<id>` (the Jobs
+ * screen focused on the job, also after a sign-in detour). Returns the URL to
+ * replace the current one with, or "" when this is not a job link.
+ */
+export function emailedJobLinkUrl(pathname: string, _search: string, hash: string): string {
+  const match = /^\/jobs\/([^/]+)\/?$/.exec(pathname || "");
+  if (!match) return "";
+  let id = "";
+  try {
+    id = decodeURIComponent(match[1]);
+  } catch {
+    return "";
+  }
+  if (!JOB_ID.test(id)) return "";
+  const panel = focusFromHash(hash || "")?.panel;
+  return `/${hashForScreen("jobs", { jobId: id, panel })}`;
+}
+
 /** Token from an emailed `<route>#token=…` link; "" on any other path. */
 function emailedLinkToken(route: string, pathname: string, hash: string): string {
   if (pathname !== route) return "";

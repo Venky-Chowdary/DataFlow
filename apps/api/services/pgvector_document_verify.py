@@ -15,7 +15,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
 from services.instant_text import parse_iso_instant
@@ -34,9 +34,16 @@ def _canon(value: Any) -> str:
             dec = Decimal(str(value))
         except InvalidOperation:
             return f"s:{value}"
-        if dec == dec.to_integral_value():
-            return f"n:{dec.quantize(Decimal(1))}"
-        return f"n:{dec.normalize()}"
+        if not dec.is_finite():
+            return f"s:{value}"
+        # Exact at any width: the default 28-digit context rounded a 31-digit
+        # NUMERIC so two different values compared equal, and raised on an
+        # integral value past 1e28 (a REAL 3.4e38). The proof must catch
+        # rounding (D352, R9), so normalize at the value's own precision.
+        exact = dec.normalize(Context(prec=max(1, len(dec.as_tuple().digits))))
+        if exact.as_tuple().exponent >= 0:
+            return f"n:{int(exact)}"
+        return f"n:{exact}"
     if isinstance(value, (dict, list)):
         # Exact on both sides: a nested decimal read back exactly from JSONB
         # (D216) is a Decimal, and a JSON number is written as its digits.
@@ -533,9 +540,37 @@ def _source_for_proof(
     rows = read_source_population(source, mappings, total, read_sample)
     if rows is not None:
         provenance["source"] = "independent_source_reread"
-        return rows
+        return [_decoded_record(r, marked_only=True) for r in rows]
     records = [r for r in run_records or [] if isinstance(r, dict)]
     if records and len(records) == total:
         provenance["source"] = "run_records_as_read"
-        return records
+        return [_decoded_record(r) for r in records]
     return None
+
+
+def _decoded_record(record: Mapping[str, Any], *, marked_only: bool = False) -> dict[str, Any]:
+    """A source row as values: the reader's wire NULL is None, a literal unescaped.
+
+    Rows a reader hands over are wire text (``__DF_SQL_NULL__`` for NULL): the
+    run's own rows by contract, a re-read's cells when the reader marked them
+    (``WireCell``; a plain driver string is a value whatever it spells). The
+    proof compared that spelling with the stored null, so a Kafka source failed
+    every row with a NULL anywhere, each unkeyed message's ``_kafka_key``
+    included (D293/D304 Kafka -> Weaviate).
+    """
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        SQL_NULL_SENTINEL,
+        WireCell,
+        unescape_wire_text,
+    )
+
+    out: dict[str, Any] = {}
+    for key, value in record.items():
+        if marked_only and not isinstance(value, WireCell):
+            out[key] = value
+        elif isinstance(value, str) and value in (SQL_NULL_SENTINEL, DF_MISSING_SENTINEL):
+            out[key] = None
+        else:
+            out[key] = unescape_wire_text(value)
+    return out

@@ -137,7 +137,7 @@ from .models import (
     endpoint_to_dict,
     transfer_request_to_dict,
 )
-from .reconcile_step import run_reconciliation
+from .reconcile_step import run_reconciliation, stamp_run_proof_context
 from .registry import validate_transfer
 from .stream_multi import last_stream_reconcile_inputs
 from .stream import (
@@ -870,7 +870,10 @@ class UniversalTransferEngine:
         from services.source_filter_gate import request_refusal
         from .job_scope import start_refusal
 
-        ident_err = start_refusal(request) or request_refusal(request)
+        from services.transform_binding import compile_and_record_recipe
+
+        ident_err = compile_and_record_recipe(request, job_id, _job_store())
+        ident_err = ident_err or start_refusal(request) or request_refusal(request)
         if ident_err:
             try:
                 from services.mongodb_service import get_mongodb_service
@@ -1716,7 +1719,7 @@ class UniversalTransferEngine:
                 )
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
-                records = apply_row_filter(records, request.source_filter)
+                records = apply_row_filter(records, request.source_filter, engine=src_fmt)
             from services.duplicate_policy import keep_last_records
             records = keep_last_records(request, records)
             # The batch path reads the source whole, so an incremental mode has
@@ -2822,6 +2825,7 @@ class UniversalTransferEngine:
                     # the summary the ladder and the ledger read, not only on the
                     # record written afterwards.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
 
                 spill_holder = (
@@ -3234,7 +3238,7 @@ class UniversalTransferEngine:
             read_columns = list(columns)
             raw_sample_size = len(sample_rows)
             if request.source_filter:
-                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+                sample_rows = apply_row_filter(sample_rows, request.source_filter, engine=src_fmt)
 
             # The recipe runs on the read, so Map, the narrowing scan and the DDL
             # identity are decided from the shaped columns and values the writer
@@ -3983,6 +3987,7 @@ class UniversalTransferEngine:
                     # summary, so a shaped run balances instead of reporting a
                     # destination population short by the filtered rows.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -4445,7 +4450,7 @@ class UniversalTransferEngine:
                 )
 
             if request.source_filter:
-                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+                sample_rows = apply_row_filter(sample_rows, request.source_filter, engine=src_fmt)
 
             # The recipe runs before Map on the sample as well as on the stream:
             # Map, the narrowing scan and the DDL identity are all decided from
@@ -4933,6 +4938,7 @@ class UniversalTransferEngine:
                     # Before reconciliation, not after: the cell ladder decides
                     # whether a source re-read is still comparable from this stamp.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                    stamp_run_proof_context(dest_summary, request)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],

@@ -141,6 +141,11 @@ def clear_tokens(value: Any) -> set[str]:
     text = value if isinstance(value, str) else ""
     doc = _parse_document(value, text.strip())
     out = set(_leaves(doc)) if doc is not None else set()
+    if doc is not None and not out:
+        # ``{}``, ``[]``, and a document whose only values are empty
+        # containers carry no clear leaf. The cell text is the container
+        # itself, which mask_pii leaves unchanged (D399). It is not a leak.
+        return set()
     if not isinstance(value, (dict, list, tuple)):
         out.add(str(value).strip())
     return {t for t in out if t and not set(t) <= _MASK_CHARS}

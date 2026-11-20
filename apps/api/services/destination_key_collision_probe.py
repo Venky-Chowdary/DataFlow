@@ -118,6 +118,40 @@ class DestinationCollisionResult:
         return self.status == "ran"
 
 
+def incremental_append_keeps_versions(sync_mode: str) -> bool:
+    """True when a repeated key is a new version, not a refused duplicate.
+
+    ``incremental_append`` on a table that does not enforce the key stores one
+    new version per change, on every run (D377). ``full_refresh_append`` of a
+    whole table onto keys already stored is still a duplicate.
+    """
+    return str(sync_mode or "").strip().lower() in {
+        "incremental_append",
+        "incremental_append_only",
+    }
+
+
+def unenforced_append_warns(
+    *,
+    enforced: bool,
+    resume_redelivery: bool,
+    has_delta_scope: bool,
+    sync_mode: str,
+) -> bool:
+    """A heap append warns instead of blocking when a second copy is the mode.
+
+    An enforced key always blocks (the insert would abort). Resume of the same
+    batch onto a heap blocks (it would store the overlap twice). A cursor
+    delta that repeats a key blocks a full-table append, and warns for
+    ``incremental_append``, which is defined as one new version per change.
+    """
+    if enforced or resume_redelivery:
+        return False
+    if not has_delta_scope:
+        return True
+    return incremental_append_keeps_versions(sync_mode)
+
+
 def sync_mode_appends_without_key_resolution(sync_mode: str) -> bool:
     """True when the write inserts rows without resolving an existing key."""
     return (sync_mode or "").strip().lower() in APPEND_ONLY_SYNC_MODES

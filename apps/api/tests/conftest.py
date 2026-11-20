@@ -816,6 +816,14 @@ def _select_ci_shard(config, items):
 _OWN_LOGGER_NAMESPACES = ("services", "src", "connectors", "preflight")
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """CI: a fresh BigQuery emulator process per BigQuery test module (go-googlesql#10)."""
+    from tests.helpers.bigquery_emulator_lifecycle import before_test
+
+    before_test(item.nodeid)
+
+
 def pytest_collection_finish(session):
     """Fail fast when importing the test modules re-configured logging.
 

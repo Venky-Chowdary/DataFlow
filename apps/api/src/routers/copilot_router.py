@@ -826,6 +826,26 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "start_transfer":
+        # Staging records the workspace when it still has the request stamp.
+        # The connector executor can run that staging without the stamp, and
+        # the job was then saved with no workspace: the member who confirmed
+        # got 404 on the job, the trust report and the proof pack, while an
+        # owner key that can read unscoped rows still saw them (D380).
+        if not str(payload.get("workspace_id") or "").strip():
+            payload["workspace_id"] = str(peek.get("workspace_id") or staged_in or "")
+        from services.confirm_transfer_workspace import confirm_transfer_workspace
+
+        try:
+            # The confirming caller's workspace, and an unscoped approval only
+            # for its stager or over that workspace's own connectors (D380).
+            payload = confirm_transfer_workspace(
+                payload,
+                staged_by=str(peek.get("staged_by") or ""),
+                http_request=http_request,
+            )
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
         try:
             result = await _start_confirmed_transfer(payload)
         except DuplicateTransferSubmission:
@@ -875,6 +895,15 @@ async def copilot_confirm(
     if kind == "create_connector":
         try:
             require_admin_connector_access(None, payload.get("type"))
+            if not str(payload.get("workspace_id") or "").strip():
+                # D363: an MCP-created connector lands where the approval was
+                # staged, else where this confirmer may create (the REST
+                # create's rule), never in the unscoped bucket.
+                from services.workspace_access import resolve_write_workspace
+
+                payload["workspace_id"] = staged_in or resolve_write_workspace(
+                    http_request, http_request.headers.get("X-Workspace-Id", "")
+                )
         except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise

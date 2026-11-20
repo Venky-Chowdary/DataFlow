@@ -521,6 +521,19 @@ class MongodbChangeStreamCdc:
                 logger.warning("pre-image capability probe failed: %s", exc)
         return self._pre_images_enabled
 
+    def delete_keying_refusal(self) -> Any | None:
+        """The refusal a business-keyed pipeline gets when deletes cannot be keyed.
+
+        One function for Execute (attach time) and Validate (g9c), so a green
+        preflight never meets this refusal after Confirm (D316). ``None`` when
+        the pipeline is keyed on ``_id`` or the catalog cannot be read.
+        """
+        if not self._needs_pre_image or self.pre_images_state() is not False:
+            return None
+        from services.cdc_capability import mongo_delete_key_refusal
+
+        return mongo_delete_key_refusal(self.db_name, self.collection, self.primary_key)
+
     def _assert_delete_keying_possible(self) -> None:
         """Fail fast when a business-keyed pipeline can never key a delete.
 
@@ -528,17 +541,12 @@ class MongodbChangeStreamCdc:
         attach time so the operator sees the ``collMod`` remedy at run 1 rather
         than after a snapshot and a partial catch-up.
         """
-        if not self._needs_pre_image or self.pre_images_state() is not False:
+        refusal = self.delete_keying_refusal()
+        if refusal is None:
             return
-        from services.cdc_capability import (
-            LogCaptureUnavailable,
-            mongo_delete_key_refusal,
-        )
+        from services.cdc_capability import LogCaptureUnavailable
 
-        raise LogCaptureUnavailable(
-            mongo_delete_key_refusal(self.db_name, self.collection, self.primary_key),
-            "mongodb",
-        )
+        raise LogCaptureUnavailable(refusal, "mongodb")
 
     def _watch_kwargs(self, base: dict[str, Any]) -> dict[str, Any]:
         """Add ``fullDocumentBeforeChange`` when deletes need a business key."""

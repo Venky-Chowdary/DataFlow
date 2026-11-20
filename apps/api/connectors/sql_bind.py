@@ -1934,6 +1934,26 @@ def coerce_bitstring_wire(
     return bits
 
 
+# MySQL BIT(n) is n bits. The 0/1 digit string is n characters, and MySQL
+# rejects it with "Data too long" (PostgreSQL BIT(8) '10101010' → MySQL BIT(8)).
+_MYSQL_BIT_ENGINES = frozenset({"mysql", "mariadb", "tidb"})
+
+
+def bind_bitstring_wire(value: Any, route: BindRoute) -> Any:
+    """BIT/VARBIT wire for the destination engine.
+
+    PostgreSQL binds the 0/1 digit string. MySQL (and MariaDB / TiDB) bind the
+    integer value of those bits: BIT(8) stores one byte, not eight characters.
+    NULL stays NULL. A value that is not a bit string still raises.
+    """
+    bits = coerce_bitstring_wire(
+        value, width=route.bit_width, varying=route.bit_varying
+    )
+    if bits is None or route.eng not in _MYSQL_BIT_ENGINES:
+        return bits
+    return int(bits, 2)
+
+
 def coerce_array_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
     """Normalize ARRAY / list wire for SQL bind.
 
@@ -2336,9 +2356,7 @@ _BIND_DISPATCH: dict[str, Any] = {
     "enum": lambda v, r: coerce_enum_wire(v, ddl_type=r.ddl_arg),
     "set": lambda v, r: coerce_set_wire(v, ddl_type=r.ddl_arg, as_list=r.pg_list),
     "year": lambda v, r: coerce_year_wire(v),
-    "bitstring": lambda v, r: coerce_bitstring_wire(
-        v, width=r.bit_width, varying=r.bit_varying
-    ),
+    "bitstring": lambda v, r: bind_bitstring_wire(v, r),
     "boolean": lambda v, r: coerce_boolean_wire(v, as_int=r.as_int),
     "rowversion": lambda v, r: coerce_rowversion_wire(v),
     "sql_variant": _bind_sql_variant,

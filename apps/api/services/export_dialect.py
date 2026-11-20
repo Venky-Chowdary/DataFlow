@@ -82,10 +82,8 @@ def format_written_row(cells: list[Any], delimiter: str, *, null_marker: str = "
     """One export row in the C04 codec: NULL an empty unquoted cell, ``''`` quoted ``""``.
 
     Anything else is quoted only when it holds the delimiter, a quote or a line
-    break. Unlike :func:`services.csv_codec.format_csv_row`'s TSV branch (bulk
-    COPY payloads, quoted only when a cell would split: a tab, CR, LF or a
-    leading quote), a TSV export quotes like CSV, so a tab or a line break
-    inside a value stays one cell and can never start a new (formula) cell.
+    break. TSV uses that same rule (D371): ``''`` is ``""`` and a quote is
+    doubled, so a tab, a quote or a line break stays one cell.
     ``null_marker="\\N"`` writes the text NULL convention instead
     (:func:`services.csv_codec.text_null_cell`).
     """

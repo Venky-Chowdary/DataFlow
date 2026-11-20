@@ -1400,6 +1400,40 @@ def _cursor_code_family(dialect: str) -> str:
     return _CODE_FAMILY_UNTRUSTED
 
 
+def _pg_character_carrier(type_code: int, col: Any, dialect: str) -> str:
+    """``VARCHAR(n)`` / ``CHAR(n)`` from a PostgreSQL result column.
+
+    OID 1043 is varchar and 1042 is bpchar. PEP 249 puts the declared size in
+    ``internal_size`` (index 3) or ``display_size`` (index 2). A missing size
+    stays unsized: that token is not evidence of an unlimited column, and a
+    widen must not treat it as one (D368).
+    """
+    if type_code not in {1042, 1043}:
+        return ""
+    family = _cursor_code_family(dialect)
+    if family != _CODE_FAMILY_MYSQL_PG:
+        return ""
+    named = (dialect or "").strip().lower()
+    if named and named not in _PG_CATALOG_DIALECTS and named not in {"", "generic_sql"}:
+        # MySQL never uses these OIDs. An explicit non-PG dialect stays bare.
+        if named not in {"postgresql", "postgres"} and named not in _PG_CATALOG_DIALECTS:
+            return ""
+    width: int | None = None
+    for idx in (3, 2):
+        if not col or len(col) <= idx or col[idx] is None:
+            continue
+        try:
+            size = int(col[idx])
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            width = size
+            break
+    if width is None:
+        return ""
+    return f"{'CHAR' if type_code == 1042 else 'VARCHAR'}({width})"
+
+
 def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
     """Logical carrier a cursor column declared, or ``""`` when it did not.
 
@@ -1442,7 +1476,8 @@ def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
         if type_code in _CURSOR_JSON_CODES:
             return "JSON"
         if type_code in _CURSOR_TEXT_CODES:
-            return "VARCHAR"
+            sized = _pg_character_carrier(type_code, col, dialect)
+            return sized or "VARCHAR"
         if type_code in _CURSOR_BINARY_CODES:
             return _CURSOR_BINARY_CODES[type_code]
         if type_code in _CURSOR_UUID_CODES:

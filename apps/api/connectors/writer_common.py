@@ -1296,6 +1296,11 @@ def dedupe_rows_keeping_numbers(
     seen_numbers: dict[tuple, int] = {}
     for position, row in enumerate(rows):
         key = tuple(_conflict_key_identity(row[i]) for i in indices)
+        # Re-insert so the survivor sits where its last copy was. Kept at
+        # its first copy, ``a/v3`` went before ``A/v2`` and a destination
+        # whose collation calls them one key stored v2 (R4, D391).
+        seen.pop(key, None)
+        seen_numbers.pop(key, None)
         seen[key] = row
         seen_numbers[key] = resolve_row_number(row_numbers, position)
     if row_numbers is None:
