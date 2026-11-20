@@ -158,6 +158,7 @@ def is_precision_collapse_coercion(
     ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    target_type = _ts.weaviate_gate_type(target_type, dest_db)
     from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
 
     # C3: what the token means on the engine that declared it (unsigned
@@ -846,6 +847,7 @@ def is_lossy_coercion(
                 proven=proven,
             )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    target_type = _ts.weaviate_gate_type(target_type, dest_db)
     from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
 
     # C3: what the token means on the engine that declared it (unsigned

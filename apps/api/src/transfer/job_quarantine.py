@@ -38,7 +38,9 @@ def rebase_batch_rejects(
         raw_row = detail.get("row")
         # A record-valued finding (shape divert, Kafka poison message) names
         # its record, not a batch line: there is no number to rebase (D286).
-        local_row = 0 if isinstance(raw_row, (dict, list)) else int(raw_row or 0)
+        # Nor does a text label such as an object id: int() of it crashed the
+        # run with "invalid literal for int()" (D304).
+        local_row = _batch_line(raw_row)
         if local_row > 0:
             detail["batch_row"] = local_row
             detail["batch_offset"] = int(batch_start)
@@ -47,6 +49,16 @@ def rebase_batch_rejects(
                 detail["row_basis"] = row_basis
         out.append(detail)
     return out
+
+
+def _batch_line(raw_row: Any) -> int:
+    """The writer's 1-based batch line, or 0 when ``row`` names no line."""
+    if isinstance(raw_row, bool) or isinstance(raw_row, (dict, list)):
+        return 0
+    if isinstance(raw_row, int):
+        return raw_row
+    text = str(raw_row or "").strip()
+    return int(text) if text.isdigit() else 0
 
 
 def rows_with_findings(details: list[dict[str, Any]]) -> int:
