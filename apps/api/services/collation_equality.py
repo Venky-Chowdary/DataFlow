@@ -94,19 +94,36 @@ def read_column_collation(
     return None
 
 
+# Letters a UCA collation expands or folds to a base letter that NFKD does not
+# decompose (``utf8mb4_0900_ai_ci``: 'Æ' = 'AE', 'Ø' = 'O'). Over-folding is
+# safe: the fold only picks which values the destination is asked about.
+_EXPANSIONS = {
+    "æ": "ae", "œ": "oe", "ø": "o", "þ": "th", "ð": "d", "đ": "d", "ł": "l",
+    "ħ": "h", "ı": "i", "ŀ": "l", "ŧ": "t", "ĳ": "ij", "ß": "ss", "ſ": "s",
+    "ŋ": "n", "ə": "e", "ɖ": "d", "ƒ": "f",
+}
+
+
 def _local_fold(value: str, collation: ColumnCollation) -> str:
     """A fold that may call two values equal when the destination does not.
 
-    It only decides which values are worth asking the destination about.
-    ``NO PAD`` keeps trailing spaces, so ``'a'`` and ``'a '`` are not sent.
-    ``PAD SPACE`` strips trailing spaces and not tabs. Accents are folded so
-    an accent-insensitive collation still gets the pair.
+    It only decides which values are worth asking the destination about, so
+    it must never split a pair the destination calls equal (D391: it missed
+    'Œ'/'OE', 'Æ'/'AE', 'Ø'/'O' and a zero-width space, and a correct write
+    failed its proof). ``NO PAD`` keeps trailing spaces, so ``'a'`` and
+    ``'a '`` are not sent. ``PAD SPACE`` strips trailing spaces and not tabs.
+    Accents and format characters (zero-width space, joiners, soft hyphen,
+    which UCA ignores) are dropped, and letters with a UCA expansion expand.
     """
     text = value
     if str(collation.pad or "").upper() == "PAD SPACE":
         text = text.rstrip(" ")
     folded = unicodedata.normalize("NFKD", text).casefold()
-    return "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return "".join(
+        _EXPANSIONS.get(ch, ch)
+        for ch in folded
+        if not unicodedata.combining(ch) and unicodedata.category(ch) != "Cf"
+    )
 
 
 def _collision_buckets(values: list[str], collation: ColumnCollation) -> list[list[str]]:
@@ -210,9 +227,10 @@ def collapse_destination_equal_keys(
     ]
     if len(usable) < 2 or not columns:
         return 0
-    grouped = _groups_on_destination(usable, dialect=dialect, endpoint=endpoint, columns=columns)
-    if not grouped:
+    found = _groups_on_destination(usable, dialect=dialect, endpoint=endpoint, columns=columns)
+    if not found:
         return 0
+    grouped, stored = found
     by_group: dict[str, list[tuple[int, int, str]]] = {}
     for key, seq, latest in usable:
         by_group.setdefault(grouped.get(key, key), []).append((seq, latest, key))
@@ -220,9 +238,11 @@ def collapse_destination_equal_keys(
     for members in by_group.values():
         if len(members) < 2:
             continue
-        # Upsert keeps the key text of the first insert and the value of
-        # the latest write. Keeping the latest row whole kept 'A'/'v2'
-        # when MySQL stored 'a'/'v3' (D391).
+        # The values are the latest write's (R4). The key's spelling is the
+        # engine's: an upsert does not rewrite key columns, and which equal
+        # spelling arrived first depends on how the writer batched. So the
+        # spelling is read back from the destination (R5); the first source
+        # spelling is only the fallback when that row cannot be read (D391).
         first_seq, _first_latest, first_key = min(members, key=lambda item: item[0])
         latest_row_seq, _latest_at, _latest_key = max(members, key=lambda item: item[1])
         payload_row = db.execute(
@@ -231,7 +251,8 @@ def collapse_destination_equal_keys(
         ).fetchone()
         if payload_row is None:
             continue
-        payload = _payload_with_first_key(payload_row[0], columns, first_key)
+        key_text = stored.get(grouped.get(first_key, first_key)) or first_key
+        payload = _payload_with_first_key(payload_row[0], columns, key_text)
         db.execute("UPDATE spill SET payload = ? WHERE seq = ?", (payload, first_seq))
         for seq, _latest, key in members:
             if seq == first_seq:
@@ -254,13 +275,52 @@ def _payload_with_first_key(payload: bytes, columns: list[str], first_key: str) 
     return pickle.dumps((orow, shaped, origin), protocol=4)
 
 
+def _stored_key_texts(
+    conn: Any,
+    kind: str,
+    *,
+    schema: str,
+    table: str,
+    columns: list[str],
+    probes: dict[str, tuple[str, ...]],
+) -> dict[str, str]:
+    """The spelling the destination holds for each collided key group.
+
+    ``WHERE k = :v`` compares under the column's collation, so it finds the one
+    stored row of the group whichever equal spelling it was written with.
+    """
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
+    mysql = kind in {"mysql", "mariadb"}
+    quote = "`" if mysql else "["
+    ref = quote_table_ref(
+        table, None if mysql else (schema or "dbo"), dialect="mysql" if mysql else "sqlserver",
+        sanitize=False,
+    )
+    cols = ", ".join(quote_sql_identifier(c, quote) for c in columns)
+    where = " AND ".join(
+        f"{quote_sql_identifier(c, quote)} = :k{i}" for i, c in enumerate(columns)
+    )
+    head = "SELECT " if mysql else "SELECT TOP 2 "
+    tail = " LIMIT 2" if mysql else ""
+    stmt = sa.text(f"{head}{cols} FROM {ref} WHERE {where}{tail}")  # nosec B608
+    out: dict[str, str] = {}
+    for canonical, parts in probes.items():
+        rows = conn.execute(stmt, {f"k{i}": part for i, part in enumerate(parts)}).fetchall()
+        if len(rows) == 1:
+            out[canonical] = "\x1f".join("" if v is None else str(v) for v in rows[0])
+    return out
+
+
 def _groups_on_destination(
-    usable: list[tuple[str, int]],
+    usable: list[tuple[str, int, int]],
     *,
     dialect: str,
     endpoint: Any,
     columns: list[str],
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str], dict[str, str]] | None:
     kind = str(dialect or "").lower()
     if kind not in {"mysql", "mariadb", "sqlserver", "mssql", "azure_sql"}:
         return None
@@ -301,14 +361,25 @@ def _groups_on_destination(
                     for bucket in _collision_buckets(values, fact):  # type: ignore[arg-type]
                         mapping.update(group_key_values(conn, kind, fact, bucket))  # type: ignore[arg-type]
                     representatives.append(mapping)
+                out: dict[str, str] = {}
+                members: dict[str, int] = {}
+                for key, part in zip(keys, parts):
+                    canonical = "\x1f".join(
+                        representatives[index].get(part[index], part[index])
+                        for index in range(len(columns))
+                    )
+                    out[key] = canonical
+                    members[canonical] = members.get(canonical, 0) + 1
+                probes = {
+                    canonical: tuple(canonical.split("\x1f"))
+                    for canonical, count in members.items()
+                    if count > 1
+                }
+                stored = _stored_key_texts(
+                    conn, kind, schema=schema, table=table, columns=columns, probes=probes
+                ) if probes else {}
                 conn.commit()
     except Exception:
         logger.debug("destination key equality failed", exc_info=True)
         return None
-    out: dict[str, str] = {}
-    for key, part in zip(keys, parts):
-        canonical = "\x1f".join(
-            representatives[index].get(part[index], part[index]) for index in range(len(columns))
-        )
-        out[key] = canonical
-    return out
+    return out, stored

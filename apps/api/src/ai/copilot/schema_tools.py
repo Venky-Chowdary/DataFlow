@@ -870,6 +870,10 @@ def introspect_connector_schema(
                 "tables": info.get("tables") or [],
                 "warnings": info.get("warnings") or [],
                 "schema_map": _schema_map(columns),
+                # The destination's keys: Map never proposes onto them (rule 4).
+                "primary_key_columns": list(info.get("primary_key_columns") or []),
+                "identity_columns": list(info.get("identity_columns") or []),
+                "dynamo_key_schema": list(info.get("dynamo_key_schema") or []),
             },
         )
     except Exception as e:
@@ -1040,14 +1044,19 @@ def map_connector_schemas(
         if dst.success:
             dst_db = str((dst.output or {}).get("type") or "")
             dst_cols = [c["name"] for c in (dst.output or {}).get("columns") or []]
-            dst_schemas = [
-                {
-                    "name": c["name"],
-                    "inferred_type": c.get("inferred_type") or "VARCHAR",
-                    "samples": [],
-                }
-                for c in (dst.output or {}).get("columns") or []
-            ]
+            from services.key_column_guard import with_key_flags
+
+            dst_schemas = with_key_flags(
+                [
+                    {
+                        "name": c["name"],
+                        "inferred_type": c.get("inferred_type") or "VARCHAR",
+                        "samples": [],
+                    }
+                    for c in (dst.output or {}).get("columns") or []
+                ],
+                dst.output,
+            ) or []
             dst_name = (dst.output or {}).get("connector_name") or dest_connector_name
         elif not dst_table:
             return _tool_result("map_connector_schemas", success=False, error=dst.error)

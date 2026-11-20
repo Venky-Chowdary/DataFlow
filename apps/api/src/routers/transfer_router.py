@@ -460,6 +460,9 @@ class MapColumnsRequest(PolicyFieldsModel):
     source_schema: dict[str, str] = Field(default_factory=dict)
     target_columns: list[str] = Field(default_factory=list)
     target_schema: dict[str, str] = Field(default_factory=dict)
+    # Destination primary key / identity / partition key columns, as the probe
+    # read them. Map never proposes an unrelated source onto one (rule 4).
+    target_key_columns: list[str] = Field(default_factory=list)
     validation_mode: str = "balanced"
     file_format: Optional[str] = None
     use_llm: bool = True
@@ -658,6 +661,11 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         if body.target_columns
         and all(str(body.target_schema.get(c) or "").strip() for c in body.target_columns)
         else None
+    )
+    from services.key_column_guard import with_key_flags
+
+    target_schemas = with_key_flags(
+        target_schemas, {"primary_key_columns": list(body.target_key_columns or [])}
     )
 
     try:

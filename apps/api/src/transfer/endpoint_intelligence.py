@@ -2194,6 +2194,7 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
 
             dest_cols = plan.get("destination", {}).get("columns") or []
             from services.data_profiler import source_types_are_authoritative
+            from services.key_column_guard import with_key_flags
 
             preview = run_mapping_pipeline(
                 columns,
@@ -2202,10 +2203,13 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
                     {"name": c, "inferred_type": schema.get(c, "VARCHAR"), "samples": []}
                     for c in columns
                 ],
-                target_schemas=[
-                    {"name": c, "inferred_type": plan.get("destination", {}).get("schema", {}).get(c, "VARCHAR"), "samples": []}
-                    for c in dest_cols
-                ] if dest_cols else None,
+                target_schemas=with_key_flags(
+                    [
+                        {"name": c, "inferred_type": plan.get("destination", {}).get("schema", {}).get(c, "VARCHAR"), "samples": []}
+                        for c in dest_cols
+                    ],
+                    plan.get("destination"),
+                ) if dest_cols else None,
                 file_format=src_fmt if source.kind == "file" else None,
                 source_db_type=str(src_fmt or ""),  # D204: bind the source engine
                 confidence_threshold=0.75,

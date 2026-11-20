@@ -811,11 +811,16 @@ async def run_off_event_loop(
     (python-oracledb has no handshake timeout) the loop stopped, and with it
     every ``/api/v1`` route, ``/api/v1/health`` and MCP included, until the far
     end closed (D321). The call runs on the connector executor under its
-    deadline; the loop only awaits a thread that the deadline bounds.
+    deadline; the loop only awaits a thread that the deadline bounds. That
+    waiting thread comes from the connector lane, not the default executor
+    every other route offloads to: waits on dead hosts used to take those
+    threads and stall ``/api/v1/jobs`` for the length of the deadline.
     """
-    import asyncio
+    from services.call_lanes import run_in_lane
 
-    return await asyncio.to_thread(run_with_deadline, tool, fn, on_timeout, seconds=seconds)
+    return await run_in_lane(
+        "connector", run_with_deadline, tool, fn, on_timeout, seconds=seconds
+    )
 
 
 @dataclass

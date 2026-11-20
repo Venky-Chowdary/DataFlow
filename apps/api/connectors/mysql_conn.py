@@ -244,8 +244,19 @@ def get_connection(
 
     def _open() -> Any:
         assert_connector_dial_allowed(ep["host"], connection_string)
+        # PyMySQL reads the server greeting (and the TLS handshake) under
+        # read_timeout. The handshake is part of connecting (R10, D281): a
+        # host that accepts and never speaks must fail at connect_timeout,
+        # not at the 120s write or 1800s reconcile socket wait.
+        handshake = {
+            **kwargs,
+            "read_timeout": min(kwargs["read_timeout"], kwargs["connect_timeout"]),
+            "write_timeout": min(kwargs["write_timeout"], kwargs["connect_timeout"]),
+        }
         try:
-            opened = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"], local_infile_ok=True)
+            opened = dial_pymysql(handshake, plan=tls_plan, host=ep["host"], local_infile_ok=True)
+            opened._read_timeout = kwargs["read_timeout"]
+            opened._write_timeout = kwargs["write_timeout"]
         except Exception as exc:
             hint = private_cloud_host_hint(ep["host"], connection_string)
             if hint:
