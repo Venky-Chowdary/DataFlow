@@ -1444,6 +1444,7 @@ def plan_transfer(
         cursor_semantics=cursor_semantics,
         cursor_lookback_days=cursor_lookback_days,
         source_type=str(src_info.get("db_type") or src_conn.get("type") or ""),
+        dest_type=_engine_format(dst_info),
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
@@ -2007,6 +2008,7 @@ def _identity_stream_contract(
     cursor_semantics: str = "",
     cursor_lookback_days: int = 0,
     source_type: str = "",
+    dest_type: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
@@ -2019,9 +2021,15 @@ def _identity_stream_contract(
     ``modification_timestamp`` — the plan says so. Two candidates are not a
     guess, a missing column is not invented, and a named cursor with no
     semantics stays undeclared so the gate can still refuse it.
+
+    An Elasticsearch document needs an ``_id`` in every mode. The plan's g6
+    gate counts the source catalog key as that identity, so the contract
+    carries it too: Execute (its own preflight and the writer) reads the same
+    key, instead of refusing a run Validate passed (D300). Insert and append
+    index with ``op_type=create``, so a key already present fails loudly (R6).
     """
     from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
-    from services.primary_key import mapped_catalog_upsert_key
+    from services.primary_key import _is_elasticsearch_kind, mapped_catalog_upsert_key
     from services.sync_cursor import normalize_sync_mode as engine_sync_mode
 
     if (mode or "").strip():
@@ -2054,7 +2062,9 @@ def _identity_stream_contract(
                 "so the write cannot merge on it. Map that column, or name a "
                 "key that is mapped."
             )
-    elif mode in MODES_REQUIRING_PRIMARY_KEY and catalog_key:
+    elif catalog_key and (
+        mode in MODES_REQUIRING_PRIMARY_KEY or _is_elasticsearch_kind(dest_type)
+    ):
         known = {col.lower(): col for col in source_columns}
         parts = [part.strip() for part in catalog_key.split(",") if part.strip()]
         if parts and all(part.lower() in known for part in parts):
