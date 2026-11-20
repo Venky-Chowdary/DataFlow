@@ -26,8 +26,9 @@ import {
 } from "../lib/api";
 import type { Connector, Screen } from "../lib/types";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { ConnectorListStatus, connectorListKnown, type ConnectorListStatusProps } from "../components/ConnectorListStatus";
 
-interface TransformsPageProps {
+interface TransformsPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
   onNavigate?: (screen: Screen) => void;
 }
@@ -57,7 +58,13 @@ const EMPTY_DRAFT = (): Omit<TransformProject, "id"> & { id?: string } => ({
   description: "",
 });
 
-export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) {
+export function TransformsPage({
+  connectors,
+  connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
+  onNavigate,
+}: TransformsPageProps) {
   const runGate = useWriteGate(PERMISSIONS.jobRun);
   const { toast } = useToast();
   const { confirm } = useConfirm();
@@ -390,6 +397,14 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
                   ))}
                 </select>
               </label>
+              {destConnectors.length === 0 && !connectorListKnown({ connectorsLoading, connectorsError }) && (
+                <ConnectorListStatus
+                  compact
+                  connectorsLoading={connectorsLoading}
+                  connectorsError={connectorsError}
+                  onRetryConnectors={onRetryConnectors}
+                />
+              )}
 
               <label className="df2-field">
                 <span>Linked data contract (optional)</span>

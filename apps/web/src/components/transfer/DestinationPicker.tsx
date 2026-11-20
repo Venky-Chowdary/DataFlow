@@ -5,13 +5,14 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { Connector } from "../../lib/types";
 import { getConnectorDefaults } from "../../lib/connectorTypes";
 import type { UnavailableDestType } from "../../lib/destinationAvailability";
+import { ConnectorListStatus, connectorListKnown, type ConnectorListStatusProps } from "../ConnectorListStatus";
 
 /** Curated engines shown first — matches TransferPage FALLBACK_DEST_TYPES. */
 const FEATURED_DEST_IDS = ["postgresql", "mongodb", "mysql", "snowflake", "bigquery"] as const;
 
 type DestPickTab = "saved" | "new";
 
-interface DestinationPickerProps {
+interface DestinationPickerProps extends ConnectorListStatusProps {
   connectors: Connector[];
   connectorId: string;
   destType: string;
@@ -31,6 +32,9 @@ function matchesEngineQuery(d: { id: string; label: string }, q: string): boolea
 
 export function DestinationPicker({
   connectors,
+  connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
   connectorId,
   destType,
   liveDestTypes,
@@ -48,7 +52,8 @@ export function DestinationPicker({
   }, [connectors, liveDestTypes]);
 
   const [tab, setTab] = useState<DestPickTab>(
-    connectorId ? "saved" : connectors.length > 0 ? "saved" : "new",
+    // Unknown list (loading or failed): show its state, not an implied "none saved".
+    connectorId || connectors.length > 0 || !connectorListKnown({ connectorsLoading, connectorsError }) ? "saved" : "new",
   );
   const [typeFilter, setTypeFilter] = useState("all");
   const [connectorQuery, setConnectorQuery] = useState("");
@@ -206,7 +211,10 @@ export function DestinationPicker({
             ))}
           </div>
 
-          {connectors.length === 0 && (
+          {connectors.length === 0 && !connectorListKnown({ connectorsLoading, connectorsError }) && (
+            <ConnectorListStatus compact connectorsLoading={connectorsLoading} connectorsError={connectorsError} onRetryConnectors={onRetryConnectors} />
+          )}
+          {connectors.length === 0 && connectorListKnown({ connectorsLoading, connectorsError }) && (
             <p className="df2-label-hint df2-dest-picker-empty">
               No saved connectors yet. Open <strong>New connection</strong> to pick an engine, or add one under Connectors.
             </p>

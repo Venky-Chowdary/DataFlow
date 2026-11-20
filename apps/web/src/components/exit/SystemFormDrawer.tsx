@@ -23,8 +23,9 @@ import {
 } from "../../lib/exitReadiness";
 import { roleLabel } from "../../lib/parity";
 import type { Connector } from "../../lib/types";
+import { ConnectorListStatus, connectorListKnown, type ConnectorListStatusProps } from "../ConnectorListStatus";
 
-export interface SystemFormDrawerProps {
+export interface SystemFormDrawerProps extends ConnectorListStatusProps {
   open: boolean;
   /** Editing this system; null declares a new one. */
   system: ExitSystem | null;
@@ -42,7 +43,16 @@ function FieldError({ id, message }: { id: string; message?: string }) {
   );
 }
 
-export function SystemFormDrawer({ open, system, connectors, onClose, onSubmit }: SystemFormDrawerProps) {
+export function SystemFormDrawer({
+  open,
+  system,
+  connectors,
+  connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
+  onClose,
+  onSubmit,
+}: SystemFormDrawerProps) {
   const [draft, setDraft] = useState<SystemDraft>(() => (system ? draftFromSystem(system) : emptyDraft()));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState("");
@@ -60,6 +70,8 @@ export function SystemFormDrawer({ open, system, connectors, onClose, onSubmit }
   const set = <K extends keyof SystemDraft>(key: K, value: SystemDraft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const sources = connectors.filter((c) => (c.role || "both") !== "destination");
   const connectorMissing = Boolean(draft.connectorId) && !sources.some((c) => c.id === draft.connectorId);
+  // D410: an unread list offers no choices; say why instead of an empty picker.
+  const connectorsKnown = connectorListKnown({ connectorsLoading, connectorsError });
 
   const submit = async () => {
     const { errors: found, input } = validateDraft(draft);
@@ -143,6 +155,9 @@ export function SystemFormDrawer({ open, system, connectors, onClose, onSubmit }
                 ))}
               </select>
               <FieldError id={`${f("connector")}-error`} message={errors.connector} />
+              {!connectorsKnown && sources.length === 0 && (
+                <ConnectorListStatus compact connectorsLoading={connectorsLoading} connectorsError={connectorsError} onRetryConnectors={onRetryConnectors} />
+              )}
             </div>
           </div>
         </fieldset>

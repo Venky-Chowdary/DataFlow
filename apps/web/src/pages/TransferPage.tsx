@@ -9,6 +9,7 @@ import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
+import { ConnectorListStatus } from "../components/ConnectorListStatus";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
@@ -400,6 +401,8 @@ function streamExtractToken(name: string, sql: string | undefined): string {
 export function TransferPage({
   connectors,
   connectorsLoading = false,
+  connectorsError = "",
+  onRetryConnectors,
   onTransferComplete,
   onOpenSchedules,
   onOpenContracts,
@@ -1181,19 +1184,22 @@ export function TransferPage({
 
   // Keep-alive leaves Studio mounted. A deleted or workspace-switched
   // connection must not keep a selected id the list no longer holds.
+  // D410: a failed read is not the workspace's list; it must not drop a selection.
+  const connectorsUnknown = connectorsLoading || Boolean(connectorsError);
+  const connectorStatus = { connectorsLoading, connectorsError, onRetryConnectors };
   useEffect(() => {
-    if (connectorsLoading) return;
+    if (connectorsUnknown) return;
     if (sourceConnectorId && !connectors.some((c) => c.id === sourceConnectorId)) {
       setSourceConnectorId("");
     }
-  }, [connectors, connectorsLoading, sourceConnectorId]);
+  }, [connectors, connectorsUnknown, sourceConnectorId]);
 
   useEffect(() => {
-    if (connectorsLoading) return;
+    if (connectorsUnknown) return;
     if (connectorId && !connectors.some((c) => c.id === connectorId)) {
       setConnectorId("");
     }
-  }, [connectors, connectorsLoading, connectorId]);
+  }, [connectors, connectorsUnknown, connectorId]);
 
   useEffect(() => {
     // Never invent a destination type. Only coerce when an already-chosen type
@@ -2851,7 +2857,7 @@ export function TransferPage({
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
     // A job's route is matched against the saved connectors: applying it before
     // they load matched nothing and left the previous route in place.
-    if (connectorsLoading) return;
+    if (connectorsUnknown) return;
     const replacing = Boolean(seedStudioIntent.replaceRoute);
     // A recovery replaces the mounted route even when the named connector was
     // deleted. Waiting for a non-empty list left the previous route on screen.
@@ -3210,7 +3216,7 @@ export function TransferPage({
             : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
-  }, [seedStudioIntent, toast, connectors, connectorsLoading]);
+  }, [seedStudioIntent, toast, connectors, connectorsUnknown]);
 
   // Only while Transfer is the visible screen: it stays mounted behind others.
   useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
@@ -8002,6 +8008,8 @@ export function TransferPage({
                 hint="Fetching saved S3, GCS, and Azure connections…"
                 size="sm"
               />
+            ) : connectorsError && cloudSourceConnectors.length === 0 ? (
+              <ConnectorListStatus compact {...connectorStatus} />
             ) : cloudSourceConnectors.length === 0 ? (
               <EmptyState
                 icon="connectors"
@@ -8044,6 +8052,8 @@ export function TransferPage({
               hint="Fetching your saved MongoDB, PostgreSQL, and warehouse connections…"
               size="sm"
             />
+          ) : connectorsError && dbSourceConnectors.length === 0 ? (
+            <ConnectorListStatus compact {...connectorStatus} />
           ) : dbSourceConnectors.length === 0 ? (
             <EmptyState
               icon="connectors"
@@ -8484,6 +8494,7 @@ export function TransferPage({
               ) : (
                 <DestinationPicker
                   connectors={transferDestConnectors}
+                  {...connectorStatus}
                   connectorId={connectorId}
                   destType={destType}
                   liveDestTypes={liveDestTypes}

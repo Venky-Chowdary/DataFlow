@@ -24,7 +24,7 @@ import { clearSession, readSession, sessionDisplayName, writeSession } from "./l
 import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
-import { connectorListFailed, connectorListLoaded, connectorListPatched, connectorListStarted, connectorListView, initialConnectorList } from "./lib/connectorListLoad";
+import { connectorListFailed, connectorListLoaded, connectorListPageState, connectorListPatched, connectorListStarted, connectorListView, initialConnectorList } from "./lib/connectorListLoad";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -620,6 +620,10 @@ function AppShell({
   };
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
+  // D410: every page that lists connectors gets the list's own load state, so
+  // [] reads as "no connections" only after a successful answer.
+  const retryConnectors = useCallback(() => void loadConnectors(), [loadConnectors]);
+  const connectorStatus = connectorListPageState(connectorView, retryConnectors);
   const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
   return (
     <div
@@ -886,6 +890,7 @@ function AppShell({
                 <PageErrorBoundary label="Overview">
                   <DashboardPage
                     connectors={connectors}
+                    {...connectorStatus}
                     jobs={jobs}
                     history={jobHistory}
                     listsLoading={bootLoading}
@@ -918,7 +923,7 @@ function AppShell({
                   <TransferPage
                     key={transferStudioKey}
                     connectors={connectors}
-                    connectorsLoading={!connectorsReady}
+                    {...connectorStatus}
                     seedSourceConnector={transferSeedSource}
                     seedStudioIntent={transferStudioIntent}
                     onOpenSchedules={() => setScreen("schedules")}
@@ -937,7 +942,7 @@ function AppShell({
               {mountedScreens.has("query") && (
                 <div className={`df2-screen-keep ${showScreen("query")}`} hidden={screen !== "query"} aria-hidden={screen !== "query"}>
                 <PageErrorBoundary label="Query Playground">
-                  <QueryPage connectors={connectors} connectorsLoading={!connectorsReady} />
+                  <QueryPage connectors={connectors} {...connectorStatus} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -976,6 +981,7 @@ function AppShell({
                 <PageErrorBoundary label="Schedules">
                   <SchedulesPage
                     connectors={connectors}
+                    {...connectorStatus}
                     onViewJobs={() => setScreen("jobs")}
                     onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     onSchedulesChange={loadSchedules}
@@ -997,7 +1003,7 @@ function AppShell({
               {mountedScreens.has("transforms") && (
                 <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
                 <PageErrorBoundary label="Transformations">
-                  <TransformsPage connectors={connectors} onNavigate={setScreen} />
+                  <TransformsPage connectors={connectors} {...connectorStatus} onNavigate={setScreen} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -1043,6 +1049,7 @@ function AppShell({
                   <ExitReadinessPage
                     active={screen === "exit"}
                     connectors={connectors}
+                    {...connectorStatus}
                     focus={exitFocus}
                     onOpenJob={(jobId) => writeJobsDeepLink(jobId)}
                   />

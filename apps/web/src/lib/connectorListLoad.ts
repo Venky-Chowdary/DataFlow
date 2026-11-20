@@ -93,3 +93,20 @@ export function connectorListView<T>(state: ConnectorListState<T>): ConnectorLis
   if (state.pending.length || !state.error) return { kind: "loading" };
   return { kind: "error", message: state.error };
 }
+
+/**
+ * The props every page that shows connectors receives (D410): loading while a
+ * read may answer, the reason when every read failed, and how to read again.
+ * Only a successful answer leaves both unset, so only then may a page say the
+ * workspace has no connections.
+ */
+export function connectorListPageState<T>(
+  view: ConnectorListView<T>,
+  onRetryConnectors?: () => void,
+): { connectorsLoading: boolean; connectorsError: string; onRetryConnectors?: () => void } {
+  return {
+    connectorsLoading: view.kind === "loading",
+    connectorsError: view.kind === "error" ? view.message : "",
+    onRetryConnectors,
+  };
+}
