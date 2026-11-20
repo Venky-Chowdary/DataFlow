@@ -158,6 +158,53 @@ export function FeatureRow({
   );
 }
 
+export type RowPoint = { icon: LucideIcon; lead?: string; text: string };
+
+/**
+ * Two or three short points under a feature row's lead: a line icon and one
+ * line each, with an optional bold lead-in that starts the sentence. Each
+ * point restates something the product docs already say. An optional link
+ * goes to the in-site docs article for the row.
+ */
+export function RowPoints({
+  items,
+  link,
+}: {
+  items: RowPoint[];
+  link?: { label: string; route: PublicRoute; onNavigate: (r: PublicRoute) => void };
+}) {
+  return (
+    <div className="mk-sb-points">
+      <ul>
+        {items.map(({ icon: Icon, lead, text }) => (
+          <li key={text}>
+            <Icon size={18} strokeWidth={1.75} aria-hidden />
+            <span>
+              {lead ? <strong>{lead}</strong> : null}
+              {lead ? " " : null}
+              {text}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {link ? (
+        <p className="mk-sb-points-link">
+          <a
+            href={hashForPublicRoute(link.route)}
+            onClick={(e) => {
+              e.preventDefault();
+              link.onNavigate(link.route);
+            }}
+          >
+            {link.label}
+            <ArrowRight size={16} aria-hidden />
+          </a>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export type Fact = { icon: LucideIcon; title: string; body: ReactNode };
 
 /** Three columns of short facts: a line icon, a title and two lines. */

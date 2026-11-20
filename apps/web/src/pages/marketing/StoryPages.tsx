@@ -1,4 +1,47 @@
-import { CalendarClock, Database, FileSearch, GitCompareArrows, KeyRound, ListFilter, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  Archive,
+  Ban,
+  Bell,
+  BookOpen,
+  Braces,
+  CalendarClock,
+  CirclePause,
+  Clock,
+  Code,
+  Copy,
+  Database,
+  Eye,
+  EyeOff,
+  FileCode,
+  FileSearch,
+  FileSignature,
+  FileText,
+  Gauge,
+  GitCompareArrows,
+  Hash,
+  History,
+  Info,
+  KeyRound,
+  ListChecks,
+  ListFilter,
+  Lock,
+  Percent,
+  Plug,
+  Power,
+  RefreshCw,
+  Repeat,
+  RotateCcw,
+  Ruler,
+  Scale,
+  Server,
+  ShieldCheck,
+  TableProperties,
+  Trash2,
+  TriangleAlert,
+  Undo2,
+  UserCheck,
+  Workflow,
+} from "lucide-react";
 import { MirrorDeletePanel, TickDetailPanel } from "../../components/marketing/ProductPanels";
 import {
   CannotList,
@@ -30,7 +73,7 @@ import {
 import { SYNC_MODE_COUNT_WORD } from "../../lib/syncModesPhrase";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { JobsWithTrust, McpScene, PilotScene, QueryScene, SchedulesScene, SyncScene, TransferScene, WarehouseScene } from "../../components/marketing/StoryScenes";
-import { FactGrid, FeatureRow, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
+import { FactGrid, FeatureRow, RowPoints, RulesTable, StoryFrame, StoryHero, TableSection, type StoryAction } from "./StoryPage";
 
 /*
  * Product and solution pages. Every claim here is something the product does
@@ -81,7 +124,21 @@ export function TransferStudioPage(p: PageProps) {
       ]}
       closing={{ title: "Plan a transfer on your own data", body: "Start with a free workspace and approve your first plan." }}
     >
-      <FeatureRow id="mk-ts-fail" title="Most loads fail at the write" body="A cast that truncates, a column nobody owns. Validate finds both before the first row moves.">
+      <FeatureRow
+        id="mk-ts-fail"
+        title="Most loads fail at the write"
+        body="A cast that truncates, a column nobody owns. Validate finds both before the first row moves."
+        more={
+          <RowPoints
+            items={[
+              { icon: ListChecks, lead: "Nine core gates", text: "run on every route, plus the gates that route needs." },
+              { icon: Lock, lead: "Execute stays locked", text: "until the server returns approve with no gate blocked." },
+              { icon: TableProperties, lead: "A missing table", text: "is created only after you approve its DDL." },
+            ]}
+            link={{ label: "Read how Validate works", route: "help-preflight-gates", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <ValidateFindings />
       </FeatureRow>
 
@@ -89,7 +146,22 @@ export function TransferStudioPage(p: PageProps) {
         <TransferSteps points={how} />
       </TableSection>
 
-      <FeatureRow id="mk-ts-why" flip title="See why each column was paired" body="Open any row in Map: the reason, the confidence, and a sample.">
+      <FeatureRow
+        id="mk-ts-why"
+        flip
+        title="See why each column was paired"
+        body="Open any row in Map: the reason, the confidence, and a sample."
+        more={
+          <RowPoints
+            items={[
+              { icon: Scale, lead: "Look-alike pairs", text: "such as quantity and amount are confirmed one by one." },
+              { icon: BookOpen, lead: "Accepted pairs", text: "join your workspace synonym dictionary for future maps." },
+              { icon: ListFilter, lead: "Needs attention", text: "shows only the rows still waiting on a decision." },
+            ]}
+            link={{ label: "Read how mapping works", route: "help-semantic-mapping", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <MappingDetail />
       </FeatureRow>
 
@@ -127,7 +199,21 @@ export function JobTheaterPage(p: PageProps) {
       ]}
       closing={{ title: "Open a run you can sign", body: "Start a workspace and run a transfer; the Trust Report comes with every job." }}
     >
-      <FeatureRow id="mk-jobs-green" title="A green job is not proof" body="The writer's count says what it sent. Job space reads the destination back and counts what it holds.">
+      <FeatureRow
+        id="mk-jobs-green"
+        title="A green job is not proof"
+        body="The writer's count says what it sent. Job space reads the destination back and counts what it holds."
+        more={
+          <RowPoints
+            items={[
+              { icon: Scale, lead: "Every row read", text: "is landed, held with a reason, or skipped by rule." },
+              { icon: Archive, lead: "Held rows", text: "keep column, value and reason, and replay into the same table." },
+              { icon: Info, lead: "A run with held rows", text: "ends as completed_with_quarantine, not completed." },
+            ]}
+            link={{ label: "Read how Job space works", route: "help-job-theater", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <GreenVsCounted />
       </FeatureRow>
 
@@ -135,11 +221,38 @@ export function JobTheaterPage(p: PageProps) {
         <CoverageTable />
       </TableSection>
 
-      <FeatureRow id="mk-jobs-sign" flip title="Sign the report, not a spreadsheet" body="A Trust Report carries the statement, the check that ran and the verdict, and goes to sign-off from Job space.">
+      <FeatureRow
+        id="mk-jobs-sign"
+        flip
+        title="Sign the report, not a spreadsheet"
+        body="A Trust Report carries the statement, the check that ran and the verdict, and goes to sign-off from Job space."
+        more={
+          <RowPoints
+            items={[
+              { icon: ShieldCheck, lead: "Sign-off waits", text: "until no unexplained difference remains." },
+              { icon: UserCheck, lead: "Roles carry authority:", text: "by default only an admin signs for compliance." },
+              { icon: RefreshCw, lead: "A changed report", text: "is signed again; approvals cover only what was signed." },
+            ]}
+          />
+        }
+      >
         <SignoffPanel title="Trust Report, sign-off" meta="Example rows, the home page's run" counts={RUN} />
       </FeatureRow>
 
-      <FeatureRow id="mk-jobs-evid" title="Evidence you can verify yourself" body="Download a run's proof pack and check it without trusting the screen.">
+      <FeatureRow
+        id="mk-jobs-evid"
+        title="Evidence you can verify yourself"
+        body="Download a run's proof pack and check it without trusting the screen."
+        more={
+          <RowPoints
+            items={[
+              { icon: FileSearch, lead: "A sampled pack", text: "can be exported, but refuses the migration proven claim." },
+              { icon: FileText, lead: "The Markdown report", text: "is rendered from the signed pack, approvals included." },
+              { icon: Info, lead: "Not an attestation:", text: "a pack is engineering evidence, not an audit." },
+            ]}
+          />
+        }
+      >
         <ProofPackApi />
       </FeatureRow>
     </StoryFrame>
@@ -165,7 +278,21 @@ export function PipelinesPage(p: PageProps) {
       ]}
       closing={{ title: "Put a transfer on a schedule", body: "Approve a transfer once, then let it run on a cadence with the same checks." }}
     >
-      <FeatureRow id="mk-pipe-drift" title="The first run gets reviewed. So does the hundredth." body="A new or renamed source column pauses the schedule until someone decides where it belongs.">
+      <FeatureRow
+        id="mk-pipe-drift"
+        title="The first run gets reviewed. So does the hundredth."
+        body="A new or renamed source column pauses the schedule until someone decides where it belongs."
+        more={
+          <RowPoints
+            items={[
+              { icon: CirclePause, lead: "A failing gate", text: "parks the schedule with the reason instead of retrying." },
+              { icon: RotateCcw, lead: "Retries", text: "apply to transient failures only, with a backoff you set." },
+              { icon: FileSignature, lead: "A required contract", text: "keeps unattended runs off a schema nobody signed." },
+            ]}
+            link={{ label: "Read how schedules work", route: "help-pipelines", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <DriftReview />
       </FeatureRow>
 
@@ -174,11 +301,33 @@ export function PipelinesPage(p: PageProps) {
         flip
         title={`${SYNC_MODE_COUNT_WORD[0].toUpperCase()}${SYNC_MODE_COUNT_WORD.slice(1)} ways to run a tick`}
         body="Each mode says what it needs. Unknown mode names are refused."
+        more={
+          <RowPoints
+            items={[
+              { icon: EyeOff, lead: "Incremental reads", text: "cannot see deletes; use mirror or CDC when they matter." },
+              { icon: Ban, lead: "Append-only destinations", text: "such as Kafka topics accept append modes only." },
+              { icon: Plug, lead: "The modes offered", text: "depend on the two connectors in the route." },
+            ]}
+          />
+        }
       >
         <ModeSelector />
       </FeatureRow>
 
-      <FeatureRow id="mk-pipe-tick" title="Open any tick" body="Its map version, the checks it cleared, and its statement.">
+      <FeatureRow
+        id="mk-pipe-tick"
+        title="Open any tick"
+        body="Its map version, the checks it cleared, and its statement."
+        more={
+          <RowPoints
+            items={[
+              { icon: History, lead: "History", text: "shows rows read, written and rejected per run, with its job ID." },
+              { icon: FileCode, lead: "Export YAML", text: "to keep cadence, route and sync mode in version control." },
+              { icon: Bell, lead: "Notifications", text: "go out on failure, on success, or both, per schedule." },
+            ]}
+          />
+        }
+      >
         <TickDetailPanel />
       </FeatureRow>
 
@@ -217,15 +366,56 @@ export function QueryPlaygroundPage(p: PageProps) {
       ]}
       closing={{ title: "Check a copy without a second console", body: "Start a workspace, save two connections, and ask the same question of both." }}
     >
-      <FeatureRow id="mk-q-both" title="Ask both sides the same question" body="Run one statement on the source and on the copy, and set the answers side by side.">
+      <FeatureRow
+        id="mk-q-both"
+        title="Ask both sides the same question"
+        body="Run one statement on the source and on the copy, and set the answers side by side."
+        more={
+          <RowPoints
+            items={[
+              { icon: Code, lead: "The editor", text: "knows each connection's SQL dialect." },
+              { icon: Copy, lead: "Results", text: "can be filtered and copied as CSV, JSON or Markdown." },
+              { icon: Ban, lead: "Not queried here:", text: "Kafka topics and vector stores." },
+            ]}
+            link={{ label: "Read the Query guide", route: "help-query", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <QueryCompare />
       </FeatureRow>
 
-      <FeatureRow id="mk-q-guards" flip title="Three guards between a statement and your data" body="Pick a statement and see where it stops.">
+      <FeatureRow
+        id="mk-q-guards"
+        flip
+        title="Three guards between a statement and your data"
+        body="Pick a statement and see where it stops."
+        more={
+          <RowPoints
+            items={[
+              { icon: Code, lead: "One statement per run:", text: "a second one after a semicolon is refused." },
+              { icon: Eye, lead: "A read-only head:", text: "it must start as a read, such as SELECT or WITH." },
+              { icon: ListFilter, lead: "1,000 rows by default:", text: "the row limit caps a result until you raise it." },
+            ]}
+          />
+        }
+      >
         <GuardLayers />
       </FeatureRow>
 
-      <FeatureRow id="mk-q-refused" title="A write never reaches the database" body="Statements that write are refused in the editor, with the reason, before anything is sent.">
+      <FeatureRow
+        id="mk-q-refused"
+        title="A write never reaches the database"
+        body="Statements that write are refused in the editor, with the reason, before anything is sent."
+        more={
+          <RowPoints
+            items={[
+              { icon: Ban, lead: "Refused alike:", text: "DML, DDL, and CALL or EXEC." },
+              { icon: Workflow, lead: "To load a result,", text: "use the SELECT as the source in Transfer Studio." },
+              { icon: ListChecks, lead: "A query that worked here", text: "still goes through Validate before a load." },
+            ]}
+          />
+        }
+      >
         <RefusalPanel />
       </FeatureRow>
 
@@ -266,6 +456,16 @@ export function DataPilotPage(p: PageProps) {
         id="mk-pilot-loop"
         title="Answers come from tool results, not recollection"
         body="Each tool is checked against the same permission as the matching API route. Pilot and the MCP server share one registry."
+        more={
+          <RowPoints
+            items={[
+              { icon: Info, lead: "An ungrounded answer", text: "is general guidance, not a fact about your workspace." },
+              { icon: KeyRound, lead: "A viewer", text: "can ask questions but cannot reach a tool that changes anything." },
+              { icon: Server, lead: "With the local engine,", text: "no model provider is called." },
+            ]}
+            link={{ label: "Read the Pilot guide", route: "help-data-pilot", onNavigate: p.onNavigate }}
+          />
+        }
       >
         <PilotLoop />
       </FeatureRow>
@@ -344,7 +544,21 @@ export function McpServerPage(p: PageProps) {
       ]}
       closing={{ title: "Connect an agent under a role", body: "Create a workspace API key with the role you choose, then add the server URL to your client." }}
     >
-      <FeatureRow id="mk-mcp-lanes" title="Stage, then confirm" body="What passes between an agent and Datawrap when the agent asks for a change.">
+      <FeatureRow
+        id="mk-mcp-lanes"
+        title="Stage, then confirm"
+        body="What passes between an agent and Datawrap when the agent asks for a change."
+        more={
+          <RowPoints
+            items={[
+              { icon: Lock, lead: "Secrets stay on the server;", text: "the client gets only the ack_id and preview." },
+              { icon: ListChecks, lead: "Confirmed transfers", text: "pass Validate and appear in Job space." },
+              { icon: UserCheck, lead: "A client that confirms on its own", text: "takes the person out of the loop; give keys the lowest role." },
+            ]}
+            link={{ label: "Read the MCP guide", route: "help-mcp", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <McpLanes />
       </FeatureRow>
 
@@ -378,7 +592,21 @@ export function McpServerPage(p: PageProps) {
         </table>
       </TableSection>
 
-      <FeatureRow id="mk-mcp-key" flip title="A URL and a key, never a database password" body="The agent holds a workspace API key with the role you chose. Every call it makes is on record.">
+      <FeatureRow
+        id="mk-mcp-key"
+        flip
+        title="A URL and a key, never a database password"
+        body="The agent holds a workspace API key with the role you chose. Every call it makes is on record."
+        more={
+          <RowPoints
+            items={[
+              { icon: KeyRound, lead: "Viewer keys", text: "get read tools; Operator keys can also run and cancel jobs." },
+              { icon: Power, lead: "An admin", text: "can turn MCP off, or limit it to a list of tools." },
+              { icon: Gauge, lead: "Calls are rate limited,", text: "and recent calls are listed on the MCP page." },
+            ]}
+          />
+        }
+      >
         <McpKeyPanel />
       </FeatureRow>
 
@@ -420,11 +648,39 @@ export function MigrationsSolutionPage(p: PageProps) {
         <CutoverTable />
       </TableSection>
 
-      <FeatureRow id="mk-mig-sign" title="Sign the destination, not a spreadsheet of counts" body="The cutover is signed on the Trust Report: the statement, the check that ran, and the verdict.">
+      <FeatureRow
+        id="mk-mig-sign"
+        title="Sign the destination, not a spreadsheet of counts"
+        body="The cutover is signed on the Trust Report: the statement, the check that ran, and the verdict."
+        more={
+          <RowPoints
+            items={[
+              { icon: ShieldCheck, lead: "Proven", text: "is used only when every row was compared." },
+              { icon: Percent, lead: "A sampled result", text: "is never called proven; it bounds a rate." },
+              { icon: Lock, lead: "Once every role signs,", text: "the report is final; no later decision changes it." },
+            ]}
+            link={{ label: "Read how sign-off works", route: "help-job-theater", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <SignoffPanel title="Trust Report, sign-off" meta="Example cutover load, legacy.orders to CORE.ORDERS" counts={MIGRATION_RUN} />
       </FeatureRow>
 
-      <FeatureRow id="mk-mig-risk" flip title="Accept a known loss on the record" body="A column that narrows needs a signed risk record before the load can go ahead.">
+      <FeatureRow
+        id="mk-mig-risk"
+        flip
+        title="Accept a known loss on the record"
+        body="A column that narrows needs a signed risk record before the load can go ahead."
+        more={
+          <RowPoints
+            items={[
+              { icon: TriangleAlert, lead: "What can be lost:", text: "precision, truncation or nulls, named on the record." },
+              { icon: FileSignature, lead: "Who approved it,", text: "when and why, with the quarantine and rollback posture." },
+              { icon: Ban, lead: "Unapproved risks", text: "fail the job by default, not continue silently." },
+            ]}
+          />
+        }
+      >
         <RiskRecordPanel />
       </FeatureRow>
 
@@ -463,15 +719,55 @@ export function WarehouseSolutionPage(p: PageProps) {
       ]}
       closing={{ title: "Load a warehouse on your own data", body: "Start free on the same engine your production loads will use." }}
     >
-      <FeatureRow id="mk-wh-prec" title="A load can succeed and still lose a cent" body="Bulk jobs report success when they finish, not when every value is right. Validate checks the fit first.">
+      <FeatureRow
+        id="mk-wh-prec"
+        title="A load can succeed and still lose a cent"
+        body="Bulk jobs report success when they finish, not when every value is right. Validate checks the fit first."
+        more={
+          <RowPoints
+            items={[
+              { icon: Ruler, lead: "Population fit", text: "checks DECIMAL(p,s) and VARCHAR(n) on this run's rows." },
+              { icon: Braces, lead: "A JSON number", text: "the destination would store differently is refused first." },
+            ]}
+            link={{ label: "Read what Validate checks", route: "help-preflight-gates", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <PrecisionSpecimen />
       </FeatureRow>
 
-      <FeatureRow id="mk-wh-types" flip title="Exact types, the same map as any route" body="Decimals and timestamps keep their precision, and JSON lands as a semi-structured column.">
+      <FeatureRow
+        id="mk-wh-types"
+        flip
+        title="Exact types, the same map as any route"
+        body="Decimals and timestamps keep their precision, and JSON lands as a semi-structured column."
+        more={
+          <RowPoints
+            items={[
+              { icon: Clock, lead: "Timestamps", text: "are compared at the precision the destination column holds." },
+              { icon: TableProperties, lead: "A new table", text: "is created on first write, from DDL you approve in Validate." },
+              { icon: Undo2, lead: "Reversibility", text: "shows whether each column can give the source value back." },
+            ]}
+          />
+        }
+      >
         <TypeMapping />
       </FeatureRow>
 
-      <FeatureRow id="mk-wh-upsert" title="Upserts by key, checked first" body="Duplicate keys already in the destination block an upsert at Validate, before the load window.">
+      <FeatureRow
+        id="mk-wh-upsert"
+        title="Upserts by key, checked first"
+        body="Duplicate keys already in the destination block an upsert at Validate, before the load window."
+        more={
+          <RowPoints
+            items={[
+              { icon: Database, lead: "Rows only in the destination", text: "are left alone." },
+              { icon: KeyRound, lead: "No key, no upsert:", text: "Validate refuses the mode when the stream names none." },
+              { icon: Repeat, lead: "A retried batch", text: "updates the same rows rather than adding them twice." },
+            ]}
+          />
+        }
+      >
         <UpsertCheck />
       </FeatureRow>
 
@@ -535,7 +831,21 @@ export function SyncSolutionPage(p: PageProps) {
         </table>
       </TableSection>
 
-      <FeatureRow id="mk-sync-delete" title="A delete at the source, carried to the copy" body="Soft by default: the row is kept and flagged, so the copy shows what was removed and when.">
+      <FeatureRow
+        id="mk-sync-delete"
+        title="A delete at the source, carried to the copy"
+        body="Soft by default: the row is kept and flagged, so the copy shows what was removed and when."
+        more={
+          <RowPoints
+            items={[
+              { icon: RotateCcw, lead: "A row that returns", text: "at the source is reactivated." },
+              { icon: Hash, lead: "Row counts hold:", text: "filter on _deleted to count active rows." },
+              { icon: TriangleAlert, lead: "Complete reads only:", text: "a partial source read would delete rows." },
+            ]}
+            link={{ label: "Read about sync modes", route: "help-pipelines", onNavigate: p.onNavigate }}
+          />
+        }
+      >
         <MirrorDeletePanel />
       </FeatureRow>
 

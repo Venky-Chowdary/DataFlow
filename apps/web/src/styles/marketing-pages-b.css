@@ -2769,3 +2769,56 @@ html[data-theme="dark"] .mk .mk-status--stop {
     pointer-events: none;
   }
 }
+
+/* ── Pass 6: points under a feature row's lead ─────────────────────
+   One sentence beside a 300–450px panel left the text column mostly
+   empty. Two or three short points carry the next-level detail: a line
+   icon and one line each, no borders, cards or shadows. */
+.lp.mk .mk-sb-points {
+  margin-top: 24px;
+}
+
+.lp.mk .mk-sb-points ul {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-sb-points li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  max-width: 36em;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
+}
+
+.lp.mk .mk-sb-points li svg {
+  margin-top: 2px;
+  color: var(--mk-ink-3);
+}
+
+.lp.mk .mk-sb-points strong {
+  color: var(--mk-ink);
+  font-weight: 600;
+}
+
+.lp.mk .mk-sb-points-link {
+  margin: 20px 0 0;
+  font-size: var(--mk-fs-small);
+  line-height: 1.5;
+}
+
+.lp.mk .mk-sb-points-link a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lp.mk .mk-sb-points-link svg {
+  flex: none;
+}
