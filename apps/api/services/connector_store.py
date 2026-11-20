@@ -1128,9 +1128,13 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
     return True, str(getattr(conn, "workspace_id", "") or "")
 
 
-_LIBPQ_FILE_KEYS = frozenset({
-    "service", "servicefile", "passfile", "sslkey", "sslcert", "sslrootcert", "sslcrl",
-})
+# Keys whose file the tenant cannot choose safely in any area: a service file
+# or file DSN can itself name further files and drivers, and a password file is
+# never how a connector carries its password. TLS file keys (sslrootcert,
+# sslcert, sslkey, sslcrl) are not here: they are judged by path in
+# ``connectors.tls_file_options`` (an upload, the system store, inline PEM or an
+# operator-listed folder are allowed; any other host path is refused).
+_LIBPQ_FILE_KEYS = frozenset({"service", "servicefile", "passfile"})
 
 # Driver names that do not name a file. A brace does not make a path safe:
 # ``Driver={/tmp/x.so}`` is still a server-side file read (U1).
@@ -1287,8 +1291,7 @@ def _odbc_driver_is_path(value: str) -> bool:
 # A field with one of these names is the option itself, not a password that
 # happens to contain the word. Values of password / pwd are never re-parsed.
 _REFUSED_FIELD_KEYS = frozenset({
-    "service", "servicefile", "passfile", "sslkey", "sslcert", "sslrootcert",
-    "sslcrl", "dsn", "filedsn",
+    "service", "servicefile", "passfile", "dsn", "filedsn",
 })
 _PASSWORD_FIELDS = frozenset({"password", "pwd"})
 
@@ -1310,6 +1313,7 @@ def server_side_dsn_refusal(*texts: Any) -> str:
 
 def _refusal_like_connect(raw: Any, key: str = "") -> str:
     from connectors.host_config_selectors import mapping_refusal, text_refusal
+    from connectors.tls_file_options import mapping_refusal as file_mapping_refusal
     from connectors.tls_file_options import text_refusal as file_refusal
 
     flags = {"libpq": True, "odbc": True, "installed_only": False}
@@ -1325,7 +1329,10 @@ def _refusal_like_connect(raw: Any, key: str = "") -> str:
             "instead."
         )
     if isinstance(raw, dict):
-        refusal = mapping_refusal(raw, where, **flags)
+        # A TLS file option is judged by where its path points (U1 round 7:
+        # a blanket refusal of the key also refused sslrootcert=system, an
+        # uploaded CA and inline PEM, the ways the product supplies CA files).
+        refusal = mapping_refusal(raw, where, **flags) or file_mapping_refusal(raw, where)
         if refusal:
             return refusal
         for child_key, value in raw.items():

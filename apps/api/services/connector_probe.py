@@ -189,8 +189,16 @@ def probe_saved_connector(
         cfg = probe_cfg_from_saved(conn)
         from services.connector_store import server_side_dsn_refusal
 
+        # The tenant's own saved fields, not the dial DSN Datawrap derives from
+        # them: that DSN percent-encodes the form's TLS paths (``?ssl_ca=%2F...``),
+        # which a keyword reading takes for a relative path and refused an
+        # allowed CA (U1 regression). The driver's own arguments are judged
+        # again at dial (``tls_file_options.check_dial``).
         refused = server_side_dsn_refusal(
-            cfg.get("connection_string"), cfg.get("host"), cfg.get("extra")
+            (conn.get("connection_string") if isinstance(conn, dict)
+             else getattr(conn, "connection_string", "")) or "",
+            cfg.get("host"),
+            cfg.get("extra"),
         )
         if refused:
             op.failed(category="probe_failed")
