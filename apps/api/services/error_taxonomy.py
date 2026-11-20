@@ -26,6 +26,7 @@ sqlalche.me links, repeated lines, host:port pairs and row values.
 from __future__ import annotations
 
 import errno as _errno
+import ipaddress
 import re
 import socket
 import uuid
@@ -1050,6 +1051,10 @@ _DNS_FAILURE = re.compile(
 _SQLSERVER_HOST = re.compile(r"does not exist \(([^)]+)\)", re.I)
 _MYSQL_CONNECT_TIMEOUT = re.compile(r"\b2003\b.*timed out|timed out.*\b2003\b", re.I)
 _ORACLE_CONNECT_TIMEOUT = re.compile(r"\bDPY-6005\b", re.I)
+# python-oracledb wraps the listener's answer in DPY-6005. A service or SID the
+# listener does not know (DPY-6001 / DPY-6003, ORA-12514 / ORA-12505) is a wrong
+# database name on the connection, not a timeout (D366 AC-3).
+_ORACLE_SERVICE_MISSING = re.compile(r"\b(?:DPY-600[13]|ORA-12514|ORA-12505)\b", re.I)
 
 
 def sqlserver_is_network_failure(text: str) -> bool:
@@ -1069,21 +1074,42 @@ def sqlserver_is_network_failure(text: str) -> bool:
     return "adaptive server is unavailable" in low or "unable to connect" in low
 
 
+# FreeTDS reports the operating-system error of every socket it opened
+# ("Net-Lib error during Connection refused (111)", "Operating System error
+# during ..."). A host name that did not resolve opened no socket, so its 20009
+# carries no such line. Captured from pymssql 2.4.6 / FreeTDS:
+#   unresolvable name -> 20009 "... does not exist (name)" and nothing else
+#   refused port      -> 20009 + "Net-Lib error during Connection refused (111)"
+#   silent host       -> 20003 "connection timed out" + OS error + 20002
+_FREETDS_OS_ERROR = re.compile(r"(?:net-lib|operating system) error during", re.I)
+SQLSERVER_UNKNOWN_HOST = 20017  # SYBEUHST "Unknown host machine name"
+
+
 def _dns_from_sqlserver_numbers(text: str) -> bool:
-    """True when 20009 or 20002 names a host ``socket.getaddrinfo`` cannot resolve."""
+    """True when pymssql's own report says the host name did not resolve.
+
+    Read from the driver's numbers and message structure only: 20017, or a
+    20009 that names a host name (not an IP literal or a named instance) with
+    no operating-system socket error. Classification never resolves the name
+    itself: a lookup here would be an unbounded network call made after the
+    fact, and could answer differently from the lookup the dial made (D366, R10).
+    """
     nums = sqlserver_error_numbers(text)
-    if 20009 not in nums and 20002 not in nums:
-        return False
-    found = _SQLSERVER_HOST.search(str(text or ""))
-    host = str(found.group(1) if found else "").strip()
-    if not host or host.isdigit():
-        return False
-    try:
-        socket.getaddrinfo(host, None)
-    except socket.gaierror:
+    if SQLSERVER_UNKNOWN_HOST in nums:
         return True
-    except Exception:
+    if 20009 not in nums or any(n != 20009 for n in nums):
         return False
+    raw = str(text or "")
+    if _FREETDS_OS_ERROR.search(raw):
+        return False
+    found = _SQLSERVER_HOST.search(raw)
+    host = str(found.group(1) if found else "").strip().strip("[]")
+    if not host or "\\" in host:
+        return False  # no name, or a named instance (its port lookup can fail too)
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return True
     return False
 
 
@@ -1137,11 +1163,15 @@ def classify(
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
     if _dns_from_sqlserver_numbers(full_raw):
-        # pymssql reports DNS and a dead host as the same 20009/20002, and
-        # the connect-timeout phrase matches both. Resolve the host named in
-        # the message; only a getaddrinfo failure is dns_not_found (D366).
+        # pymssql reports DNS and a dead host under the same 20009, and the
+        # connect-timeout phrase matches both. FreeTDS's own report tells them
+        # apart: only a name that never resolved has no OS socket error (D366).
         code = "network.dns_not_found"
-        matched_by = "getaddrinfo"
+        matched_by = "sqlserver_number"
+    if (not code or code.startswith("network.")) and _ORACLE_SERVICE_MISSING.search(full_raw):
+        # Checked before the DPY-6005 connect-timeout rule that wraps it.
+        code = "object.database_not_found"
+        matched_by = "structured"
     if not code and _DNS_FAILURE.search(full_raw):
         code = "network.dns_not_found"
         matched_by = "pattern"

@@ -459,9 +459,11 @@ def apply_mysql_session_guards(
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
-            net = int(io_timeout) if io_timeout else 600
-            cur.execute(f"SET SESSION net_read_timeout = {net}")
-            cur.execute(f"SET SESSION net_write_timeout = {net}")
+            # Server-side waits on the client: never below the 600s bulk
+            # floor, raised for a purpose whose client waits longer (reconcile).
+            net = max(600, int(io_timeout or 0))
+            cur.execute("SET SESSION net_read_timeout = %s", (net,))
+            cur.execute("SET SESSION net_write_timeout = %s", (net,))
             # TIMESTAMP conversion is session-relative. The same pin is used by
             # source readers, dest writers, and generic_sql pooled connections
             # (services.timezone_policy.pin_mysql_session_utc).

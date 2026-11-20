@@ -791,18 +791,25 @@ def write_mapped_rows(
     # G11: dynamodb stores field / attribute names exactly as mapped.
     from connectors.destination_naming import writer_identifier
 
-    # Connect + describe before Map bind — AttributeDefinitions / sample must
-    # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
-    client = boto3_client("dynamodb", cfg)
-    creating = bool(create_table) and not _table_exists(client, table)
-    # Pending Map rows are skipped while table existence is unknown. A confirmed
-    # create-new (the table is absent) resolves them, so the HASH key and the
-    # mapped columns are what CREATE TABLE receives (D298).
+    # Map names resolve before any network call (G11); a refused mapping never
+    # dials the table.
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
         identifier=writer_identifier("dynamodb"),
-        table_exists=False if creating else None,
     )
+    # Connect + describe before the write: AttributeDefinitions / sample must
+    # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
+    client = boto3_client("dynamodb", cfg)
+    creating = bool(create_table) and not _table_exists(client, table)
+    if creating:
+        # Pending Map rows are skipped while table existence is unknown. A
+        # confirmed create-new (the table is absent) resolves them, so the HASH
+        # key and the mapped columns are what CREATE TABLE receives (D298).
+        target_cols, logical_types = resolve_target_columns(
+            mappings, column_types, preserve_case=True,
+            identifier=writer_identifier("dynamodb"),
+            table_exists=False,
+        )
     live_dest = _kwargs.get("destination_column_types")
 
     if creating:

@@ -2579,7 +2579,11 @@ def _run_preflight(
                 acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
             ),
             result,
-            schema_version=destination_schema_version(dst_conn),
+            # The table staging checked, so the version is that table's
+            # shape and not "" (no table: never reusable, D308 round 7).
+            schema_version=destination_schema_version(
+                {**dst_conn, "table": dst_table} if isinstance(dst_conn, dict) else dst_conn
+            ),
         )
     except Exception as exc:
         _LOG.warning("preflight failed: %s", exc, exc_info=True)

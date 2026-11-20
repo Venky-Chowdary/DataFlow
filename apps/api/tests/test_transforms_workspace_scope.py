@@ -12,6 +12,18 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 
+def _without_reference(response) -> dict:
+    """The 404 body minus its per-response ``error.reference`` (U2).
+
+    Every error carries a fresh reference for support, so two 404s never have
+    the same one. Everything else must be identical, and both must carry one.
+    """
+    body = response.json()
+    error = dict(body.get("error") or {})
+    assert error.pop("reference", None), body
+    return {**body, "error": error}
+
+
 @pytest.fixture
 def transform_scope(tmp_path, monkeypatch):
     admin_email = f"root-{tmp_path.name}@example.com"
@@ -116,7 +128,7 @@ def test_foreign_project_lifecycle_is_indistinguishable_from_missing(transform_s
         if (
             foreign.status_code != 404
             or missing.status_code != 404
-            or foreign.json() != missing.json()
+            or _without_reference(foreign) != _without_reference(missing)
         ):
             failures.append(
                 {
@@ -180,7 +192,7 @@ def test_legacy_project_lifecycle_is_indistinguishable_from_missing(transform_sc
             method, path.replace("{id}", "f" * 24), json=body
         )
         assert foreign.status_code == missing.status_code == 404
-        assert foreign.json() == missing.json()
+        assert _without_reference(foreign) == _without_reference(missing)
     unchanged = context["store"].get(legacy.id)
     assert unchanged is not None and unchanged.name == "Legacy project"
 
@@ -400,7 +412,7 @@ def test_live_mongo_transform_lookup_hides_foreign_workspace_project(
             f"/api/v1/transforms/{'f' * 24}"
         )
         assert foreign.status_code == missing.status_code == 404
-        assert foreign.json() == missing.json()
+        assert _without_reference(foreign) == _without_reference(missing)
         legacy_foreign = transform_scope["member"].get(
             f"/api/v1/transforms/{legacy.id}"
         )
@@ -408,7 +420,7 @@ def test_live_mongo_transform_lookup_hides_foreign_workspace_project(
             f"/api/v1/transforms/{'e' * 24}"
         )
         assert legacy_foreign.status_code == legacy_missing.status_code == 404
-        assert legacy_foreign.json() == legacy_missing.json()
+        assert _without_reference(legacy_foreign) == _without_reference(legacy_missing)
     finally:
         client.drop_database(database.name)
         client.close()
