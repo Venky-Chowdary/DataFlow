@@ -19,6 +19,7 @@ from pymongo import MongoClient
 # Callers import the terminal-status set from this module (cancel-race guard).
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
+from services.job_message_redaction import redact_job_update
 from services.runtime_estimate import append_throughput_mark
 from services.workspace_filter import WorkspaceFilter, bound_allows
 
@@ -658,7 +659,8 @@ class MongoDBService:
         operator_command = bool(kwargs.pop("operator_command", False))
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
-        updates.update(kwargs)
+        # D405: no statement, bound value or driver dump reaches the record.
+        updates.update(redact_job_update(kwargs))
 
         prev_doc = None
         try:
@@ -1295,7 +1297,7 @@ class MongoDBService:
         key = job_key_filter(job_id)
         if not key:
             return False
-        updates = dict(fields)
+        updates = dict(redact_job_update(fields))  # D405
         if touch_updated_at:
             updates["updated_at"] = datetime.now(timezone.utc)
         query = {"$and": [key, expected_fields_filter(expected)]} if expected else key
@@ -1994,6 +1996,7 @@ class MemoryMongoDBService:
             )
             return False
 
+        kwargs = dict(redact_job_update(kwargs))  # D405: one sink for every writer
         _terminal_message_over_progress(status, kwargs, rec)
         try:
             from services.job_trust import attach_trust_to_updates
@@ -2173,7 +2176,7 @@ class MemoryMongoDBService:
                 return False
             if expected and not expected_fields_hold(rec, expected):
                 return False
-            for name, value in fields.items():
+            for name, value in redact_job_update(fields).items():  # D405
                 _set_dotted(rec, name, value)
             if touch_updated_at:
                 rec["updated_at"] = datetime.now(timezone.utc)

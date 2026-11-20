@@ -236,15 +236,18 @@ def emit_run_failed(
     error_details: dict[str, Any] | None = None,
     retriable: bool = False,
 ) -> dict[str, Any]:
+    from services.job_message_redaction import redact_job_update
+
+    # D405: the event is persisted on the job and exported; same rule as the job.
     return _emit(
         "run_failed",
-        {
+        redact_job_update({
             "run_id": run_id,
             "job_id": job_id,
             "error": error,
             "error_details": error_details or {},
             "retriable": retriable,
-        },
+        }),
     )
 
 
