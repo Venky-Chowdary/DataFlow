@@ -186,7 +186,7 @@ def transfer_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
     monkeypatch.setenv("DATAFLOW_PILOT_ENGINE", "local")
-    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "")
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
     sqlite_root = tmp_path / "sqlite"
     sqlite_root.mkdir()
     monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(sqlite_root))

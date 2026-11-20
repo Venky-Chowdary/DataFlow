@@ -247,7 +247,7 @@ def transfer_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "acks.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
-    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "")
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
 
     import services.connector_store as connector_store
