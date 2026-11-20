@@ -947,6 +947,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("network.connection_lost", re.compile(
         r"server closed the connection unexpectedly|lost connection to mysql server during query|"
         r"mysql server has gone away|terminating connection due to administrator command|connection reset by peer|"
+        r"ssl connection has been closed unexpectedly|"
         r"can'?t reconnect until invalid transaction is rolled back", re.I)),
     ("object.file_not_found", re.compile(r"^unable to open database file|\[errno 2\] no such file", re.I)),
     ("object.table_not_found", re.compile(

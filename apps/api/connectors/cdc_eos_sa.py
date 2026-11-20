@@ -268,6 +268,11 @@ def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
                 text(_lock_watermark_sql(dialect, with_seq=True)), {"k": stream_key}
             ).fetchone()
     except SQLAlchemyError as exc:
+        # A dropped connection is not a missing column. The fallback SELECT on
+        # an invalidated connection raised "Can't reconnect until invalid
+        # transaction is rolled back" and hid the real cause (D406).
+        if _connection_dropped(exc):
+            raise
         _logger.warning(
             "cdc_eos: watermark lock read without seq columns for stream_key=%s "
             "(dialect=%s): %s",
@@ -279,6 +284,42 @@ def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
             text(_lock_watermark_sql(dialect, with_seq=False)), {"k": stream_key}
         ).fetchone()
     return _row_to_wm(locked)
+
+
+def _connection_dropped(exc: BaseException) -> bool:
+    """True when SQLAlchemy invalidated the connection under this error."""
+    return bool(getattr(exc, "connection_invalidated", False))
+
+
+#: One retry of a batch whose destination connection dropped (bounded, R10).
+_RECONNECT_ATTEMPTS = 2
+
+
+def _in_dest_transaction(engine: Any, work: Any) -> Any:
+    """Run ``work(conn)`` in one destination transaction.
+
+    A dropped connection discards that transaction, and the batch is retried
+    once on a fresh pooled connection. The retry reads the destination-owned
+    watermark under lock, so a commit that landed before the drop is seen as
+    already committed and is not applied twice (D406).
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    for attempt in range(1, _RECONNECT_ATTEMPTS + 1):
+        try:
+            with engine.begin() as conn:
+                return work(conn)
+        except DBAPIError as exc:
+            if not _connection_dropped(exc) or attempt >= _RECONNECT_ATTEMPTS:
+                raise
+            _logger.warning(
+                "cdc_eos: destination connection dropped during apply (attempt %d of %d); "
+                "retrying the batch on a new connection: %s",
+                attempt,
+                _RECONNECT_ATTEMPTS,
+                type(exc.orig or exc).__name__,
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _row_to_wm(locked: Any) -> DestWmView:
@@ -338,7 +379,9 @@ def _existing_columns(conn: Any, table_name: str) -> set[str]:
     inspector = sa_inspect(conn)
     try:
         cols = inspector.get_columns(table_name)
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        if _connection_dropped(exc):
+            raise
         cols = []
     if not cols:
         # Oracle (and any UPPER-case-default catalog) folds an unquoted lower-case
@@ -1204,8 +1247,9 @@ def apply_eos_sqlalchemy(
             dialect,
             [(dest_table, target_cols, pk_target_cols, logical_by, collations)],
         )
-        with engine.begin() as conn:
-            result = _sa_apply_member(
+        result = _in_dest_transaction(
+            engine,
+            lambda conn: _sa_apply_member(
                 conn,
                 dialect,
                 dest_table=dest_table,
@@ -1218,7 +1262,8 @@ def apply_eos_sqlalchemy(
                 batch_id=batch_id,
                 writer_fence=writer_fence,
                 crash_after=crash_after,
-            )
+            ),
+        )
         if crash_after == "after_commit_before_ack":
             raise EosCrash(crash_after)
         if result.status in {"applied", "empty"} and result.committed_lsn:
@@ -1284,7 +1329,10 @@ def apply_eos_sa_bundle(
                 for s in streams
             ],
         )
-        with engine.begin() as conn:
+        def _bundle(conn: Any) -> None:
+            # A retried transaction starts its members again (D406).
+            member_keys.clear()
+            members.clear()
             for stream in sorted(streams, key=lambda s: s.stream_key):
                 member_lsn = incoming_lsn
                 try:
@@ -1339,6 +1387,8 @@ def apply_eos_sa_bundle(
                 "after_watermark_before_commit",
             }:
                 raise EosCrash(crash_after)
+
+        _in_dest_transaction(engine, _bundle)
     except EosCrash:
         raise
     finally:
@@ -1392,17 +1442,19 @@ def open_eos_sa_session(
     engine = _engine(cfg)
     wm_token = _enter_wm_scope(engine, dialect)
     try:
-        with engine.begin() as conn:
+        def _open(conn: Any) -> EosOpenResult:
+            # Raising the fence is idempotent, so a dropped connection is
+            # retried on a new one rather than failing the run (D406).
             conn.execute(text(_wm_ddl(dialect)))
             _ensure_wm_columns(conn, dialect)
             view = _lock_watermark(conn, dialect, stream_key)
             from services.cdc_slot_resume import without_retired_slot_resume
 
-            view, job_resume = without_retired_slot_resume(
+            view, resume = without_retired_slot_resume(
                 view, job_resume, cursor_key=stream_key
             )
             opened = plan_open_session(
-                dest=view, incoming_fence=incoming_fence, job_resume=job_resume
+                dest=view, incoming_fence=incoming_fence, job_resume=resume
             )
             if opened.fence_raised and view.committed_lsn:
                 _sa_write_watermark(
@@ -1425,6 +1477,8 @@ def open_eos_sa_session(
                     expected=view,
                 )
             return opened
+
+        return _in_dest_transaction(engine, _open)
     finally:
         _WM_TABLE.reset(wm_token)
         release_engine(engine)
