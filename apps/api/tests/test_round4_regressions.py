@@ -9,16 +9,39 @@ import pytest
 
 
 def test_a_dead_sqlserver_host_is_a_connect_timeout():
+    """A host that resolves but never answers is a connect timeout (D366).
+
+    The fixtures are pymssql 2.4.6 / FreeTDS's own reports. A host that opened
+    a socket carries the OS error after the DB-Lib line; the earlier fixture
+    "(host)" with no OS line is the shape of a name that did not resolve, and
+    is classified as DNS below (it depended on whether "host" resolved).
+    """
     from services.error_taxonomy import classify
 
-    down = pymssql.OperationalError(
+    dead = pymssql.OperationalError(
+        20009,
+        b"DB-Lib error message 20009, severity 9:\n"
+        b"Unable to connect: Adaptive Server is unavailable or does not exist (db.example)\n"
+        b"Net-Lib error during Connection timed out (110)\n",
+    )
+    silent = pymssql.OperationalError(
+        20009,
+        b"DB-Lib error message 20003, severity 6:\n"
+        b"TDS server connection timed out (db.example)\n"
+        b"Operating System error during Operation now in progress (115)\n"
+        b"DB-Lib error message 20002, severity 9:\n"
+        b"TDS server connection failed (db.example)\n",
+    )
+    for down in (dead, silent):
+        classified = classify(down)
+        assert classified is not None
+        assert classified.code == "network.connect_timeout", down
+    unresolved = pymssql.OperationalError(
         20009,
         b"DB-Lib error message 20009, severity 9:\n"
         b"Unable to connect: Adaptive Server is unavailable or does not exist (host)\n",
     )
-    classified = classify(down)
-    assert classified is not None
-    assert classified.code == "network.connect_timeout"
+    assert classify(unresolved).code == "network.dns_not_found"
 
 
 def test_a_password_may_contain_service_and_an_extra_key_may_not():

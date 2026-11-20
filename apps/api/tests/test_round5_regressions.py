@@ -47,15 +47,21 @@ def test_mysql_2003_and_oracle_dpy_6005_are_connect_timeouts():
     assert oracle is not None and oracle.code == "network.connect_timeout"
 
 
-def test_sqlserver_20009_uses_getaddrinfo(monkeypatch):
+def test_sqlserver_20009_dns_is_read_from_the_driver_report(monkeypatch):
+    """D366 AC-1 without a live lookup: classify() never calls getaddrinfo.
+
+    pymssql 2.4.6 / FreeTDS (captured): an unresolvable name gives 20009 with
+    no OS socket error; a refused or timed-out socket carries "Net-Lib error
+    during ..." after it.
+    """
     import socket
 
     from services.error_taxonomy import classify
 
-    def _fail(host, *_a, **_k):
-        raise socket.gaierror("name or service not known")
+    def _no_lookup(*_a, **_k):
+        raise AssertionError("classify() made a DNS lookup")
 
-    monkeypatch.setattr(socket, "getaddrinfo", _fail)
+    monkeypatch.setattr(socket, "getaddrinfo", _no_lookup)
     dead = classify(Exception(
         "(20009, 'DB-Lib error message 20009, severity 9:\\n"
         "Unable to connect: Adaptive Server is unavailable or does not exist "
@@ -64,17 +70,44 @@ def test_sqlserver_20009_uses_getaddrinfo(monkeypatch):
     assert dead is not None
     assert dead.code == "network.dns_not_found"
 
-    def _ok(host, *_a, **_k):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
-
-    monkeypatch.setattr(socket, "getaddrinfo", _ok)
     reached = classify(Exception(
         "(20009, 'DB-Lib error message 20009, severity 9:\\n"
         "Unable to connect: Adaptive Server is unavailable or does not exist "
-        "(db.internal)\\n')"
+        "(db.internal)\\nNet-Lib error during Connection timed out (110)\\n')"
     ))
     assert reached is not None
     assert reached.code == "network.connect_timeout"
+
+    refused = classify(Exception(
+        "(20009, 'DB-Lib error message 20009, severity 9:\\n"
+        "Unable to connect: Adaptive Server is unavailable or does not exist "
+        "(db.internal)\\nNet-Lib error during Connection refused (111)\\n')"
+    ))
+    assert refused is not None and refused.code == "network.refused"
+
+    literal = classify(Exception(
+        "(20009, 'DB-Lib error message 20009, severity 9:\\n"
+        "Unable to connect: Adaptive Server is unavailable or does not exist (10.0.0.5)\\n')"
+    ))
+    assert literal is not None and literal.code == "network.connect_timeout"
+
+
+def test_oracle_unknown_service_is_a_database_name_not_a_timeout():
+    """D366 AC-3: DPY-6005 wrapping DPY-6001 / ORA-12514 / ORA-12505."""
+    from services.error_taxonomy import classify
+
+    for text in (
+        'DPY-6005: cannot connect to database (CONNECTION_ID=x).\nDPY-6001: Service "nope" '
+        'is not registered with the listener at host "db" port 1521. (Similar to ORA-12514)',
+        "DPY-6005: cannot connect to database.\nDPY-6003: SID \"XE2\" is not registered "
+        "with the listener at host \"db\" port 1521. (Similar to ORA-12505)",
+        "ORA-12514: TNS:listener does not currently know of service requested",
+    ):
+        classified = classify(Exception(text))
+        assert classified is not None
+        assert classified.code == "object.database_not_found", text
+    timed_out = classify(Exception("DPY-6005: cannot connect to database. timed out"))
+    assert timed_out is not None and timed_out.code == "network.connect_timeout"
 
 
 def test_a_dead_dns_name_is_not_a_connect_timeout():
