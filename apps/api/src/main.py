@@ -845,6 +845,11 @@ app.add_middleware(OwnHostRedirectMiddleware)
 from src.middleware.body_size_limit import BodySizeLimitMiddleware  # noqa: E402
 
 app.add_middleware(BodySizeLimitMiddleware)
+# U2: a JSON error written by a middleware (401, CSRF/tenant 403, 413, 503)
+# gets the error.reference the exception handlers give every raised error.
+from src.middleware.error_reference_middleware import ErrorReferenceMiddleware  # noqa: E402
+
+app.add_middleware(ErrorReferenceMiddleware)
 # Outermost: client address and scheme from the trusted proxy chain
 # (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
 app.add_middleware(ProxyFixMiddleware)
