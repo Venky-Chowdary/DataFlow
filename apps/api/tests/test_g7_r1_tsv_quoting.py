@@ -52,17 +52,18 @@ def test_format_csv_row_quotes_tsv_cells_that_would_split():
 
     cells = ["a\tb", "c\nd", "e\rf", 'g"h', '"lead', "plain", "", None]
     line = format_csv_row([csv_cell_encode(c) for c in cells], "\t")
-    # Tab/CR/LF/leading-quote cells are quoted like Python csv does; a
-    # mid-field quote stays raw (B1); '' and NULL stay empty cells.
-    assert line == '"a\tb"\t"c\nd"\t"e\rf"\tg"h\t"""lead"\tplain\t\t'
-    assert next(csv.reader(io.StringIO(line, newline=""), delimiter="\t"))[:6] == cells[:6]
+    # Same dialect as CSV: '' is "", a quote is doubled, NULL stays empty.
+    assert line == '"a\tb"\t"c\nd"\t"e\rf"\t"g""h"\t"""lead"\tplain\t""\t'
+    parsed = next(csv.reader(io.StringIO(line, newline=""), delimiter="\t"))
+    assert parsed[:7] == cells[:7]
+    assert parsed[7] == ""
 
 
 def test_format_csv_row_plain_tsv_rows_stay_byte_identical():
     from services.csv_codec import csv_cell_encode, format_csv_row
 
     cells = ["1", "alice", "", None, "-5", "=1+1", "a,b"]
-    assert format_csv_row([csv_cell_encode(c) for c in cells], "\t") == "1\talice\t\t\t-5\t=1+1\ta,b"
+    assert format_csv_row([csv_cell_encode(c) for c in cells], "\t") == '1\talice\t""\t\t-5\t=1+1\ta,b'
     # A *text* \N is quoted, or every reader takes it as the legacy NULL spelling.
     assert format_csv_row([csv_cell_encode("\\N")], "\t") == '"\\N"'
 

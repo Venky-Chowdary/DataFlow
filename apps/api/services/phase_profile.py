@@ -23,6 +23,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -162,6 +163,18 @@ _STAGE_PHASES = {
 }
 
 
+def _parse_stamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def job_phase_timings(job: dict[str, Any] | None) -> dict[str, Any] | None:
     """Per-stage timings of a finished job, from the run's own PhaseProfile.
 
@@ -193,10 +206,17 @@ def job_phase_timings(job: dict[str, Any] | None) -> dict[str, Any] | None:
     stages["verify_seconds"] = round(
         seconds.get(PHASE_CHECKSUM, 0.0) + float(gate8 or 0.0), 3
     )
+    elapsed = (profile or {}).get("elapsed_seconds")
+    # The phase clock starts at the first read. Queue and validate happened
+    # before that. The job's own created and completed stamps include them (D308).
+    created = _parse_stamp(doc.get("created_at"))
+    finished = _parse_stamp(doc.get("completed_at") or doc.get("updated_at"))
+    if created is not None and finished is not None and finished >= created:
+        elapsed = round((finished - created).total_seconds(), 3)
     return {
         **stages,
         "dominant_phase": (profile or {}).get("dominant_phase") or "",
-        "elapsed_seconds": (profile or {}).get("elapsed_seconds"),
+        "elapsed_seconds": elapsed,
         "note": (
             "Phases overlap (the reader fetches ahead of the writer pool), so "
             "stage seconds can sum to more than elapsed. Transform and write are "

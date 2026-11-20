@@ -28,8 +28,10 @@ import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/
 
 interface ConnectorsPageProps {
   connectors: Connector[];
-  /** True while the first connectors fetch has not settled yet. */
+  /** True while no list for this workspace has loaded and a request may still answer. */
   connectorsLoading?: boolean;
+  /** Why the list could not be loaded, when nothing has loaded (D410). Never the empty state. */
+  connectorsError?: string;
   jobs?: TransferJob[];
   schedules?: PipelineSchedule[];
   onAdd: (type?: string) => void;
@@ -53,6 +55,7 @@ function catalogType(id: string) {
 export function ConnectorsPage({
   connectors,
   connectorsLoading = false,
+  connectorsError = "",
   jobs = [],
   schedules = [],
   onAdd,
@@ -293,7 +296,8 @@ export function ConnectorsPage({
                 value={tab}
                 onChange={setTab}
                 items={[
-                  { id: "connections" as const, label: "Connections", count: connectors.length },
+                  // No count until the list has loaded: "(0)" while loading or after a failed read was untrue (D410).
+                  { id: "connections" as const, label: "Connections", count: connectorsLoading || connectorsError ? undefined : connectors.length },
                   { id: "catalog" as const, label: "Catalog" },
                 ]}
               />
@@ -359,6 +363,27 @@ export function ConnectorsPage({
                   title="Loading connections"
                   hint="Fetching saved connectors from your workspace…"
                   size="md"
+                />
+              </div>
+            ) : connectorsError && connectors.length === 0 ? (
+              <div className="df2-connectors-empty">
+                <EmptyState
+                  page
+                  role="alert"
+                  icon="alert"
+                  title="Couldn't load your connections"
+                  description={`${connectorsError}. Reading the list doesn't change your connections. Try again in a moment.`}
+                  action={
+                    <div className="df2-empty-actions-row">
+                      <Button
+                        variant="primary"
+                        onClick={() => void onRefresh?.()}
+                        leadingIcon={<DtIcon name="refresh" size={14} />}
+                      >
+                        Try again
+                      </Button>
+                    </div>
+                  }
                 />
               </div>
             ) : connectors.length === 0 ? (

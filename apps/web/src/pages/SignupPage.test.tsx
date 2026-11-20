@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
 import { focusFirstInvalid, PasswordToggle, ResendRow } from "../components/AuthFlow.js";
 import { ChangeEmailCard } from "../components/ChangeEmailCard.js";
-import { ForgotPasswordPage, ResetPasswordPage } from "./SignupPage.js";
+import { CodeStep, ForgotPasswordPage, ResetPasswordPage } from "./SignupPage.js";
 import { inspectResetToken, resetPassword } from "../lib/signupApi.js";
 
 describe("ResendRow", () => {
@@ -166,5 +166,33 @@ describe("PasswordToggle", () => {
     );
     assert.match(on, /aria-label="Hide password"/);
     assert.match(on, /aria-pressed="true"/);
+  });
+});
+
+/** D323: the code screen after signup is honest for both cases without
+ *  saying which one applies (enumeration-safe): a new address got a code; an
+ *  existing account got a sign-in reminder, and the screen offers sign-in. */
+describe("CodeStep copy", () => {
+  it("covers an existing account and offers sign in and a different email", () => {
+    const markup = renderToStaticMarkup(createElement(CodeStep, {
+      email: "ada@example.com", challengeId: "otc_x", resendAfterSec: 60,
+      onSubmitCode: () => {}, busy: false, error: "", errorIsField: false,
+      accountMayExist: true, onSignIn: () => {}, onChangeEmail: () => {},
+    }));
+    assert.match(markup, /If <strong>ada@example.com<\/strong> is new to Datawrap, we sent it a 6-digit code/);
+    assert.match(markup, /If it already has a Datawrap account, we sent a sign-in reminder instead of a code/);
+    assert.match(markup, /<span>Sign in<\/span>/);
+    assert.match(markup, /<span>Use a different email<\/span>/);
+    assert.doesNotMatch(markup, /We sent a verification code to/);
+  });
+
+  it("keeps the plain promise when the address is a known pending signup", () => {
+    const markup = renderToStaticMarkup(createElement(CodeStep, {
+      email: "ada@example.com", challengeId: "otc_x", resendAfterSec: 60,
+      onSubmitCode: () => {}, busy: false, error: "", errorIsField: false,
+      accountMayExist: false, onSignIn: () => {}, onChangeEmail: () => {},
+    }));
+    assert.match(markup, /We sent a 6-digit code to <strong>ada@example.com<\/strong>/);
+    assert.doesNotMatch(markup, /sign-in reminder/);
   });
 });

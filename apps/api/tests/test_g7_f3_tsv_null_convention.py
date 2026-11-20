@@ -9,7 +9,9 @@ PostgreSQL ``COPY ... TEXT``) reads as two quote characters.
 After: a TSV destination may opt in with ``tsv_null: "\\N"`` (the MySQL /
 PostgreSQL text convention): NULL is ``\\N``, ``''`` an empty cell, and a text
 value that is literally ``\\N`` is quoted. The writers, Gate-8 and the TSV
-readers all honour it. The default (``"empty"``) output is unchanged.
+readers all honour it. Since D371 the default (``"empty"``) object-store TSV
+also keeps them apart, RFC 4180 style: NULL an empty unquoted cell, ``''`` as
+``""`` (what the file_export TSV already wrote).
 """
 
 from __future__ import annotations
@@ -190,11 +192,21 @@ def _object_body(tsv_null: str | None) -> bytes:
         export.close()
 
 
-def test_object_store_tsv_default_bytes_unchanged_and_collapse_documented():
+# The default object-store TSV once wrote '' and NULL as the same empty cell, so
+# a source '' read back as NULL and Gate-8 failed every such run (D371). '' is a
+# value, not NULL (migration rule R2); the default now writes it as PostgreSQL's
+# CSV format does - "an empty string data value is written with double quotes
+# ("")" (https://www.postgresql.org/docs/current/sql-copy.html, CSV Format) - the
+# bytes the file_export TSV and the PostgreSQL to S3 COPY TSV already wrote.
+COLLAPSED_TSV = b'id\tnote\n1\t\n2\t\n3\t"\\N"\n4\t"a\tb"\n5\tplain\n'
+
+
+def test_object_store_tsv_default_keeps_empty_and_null_apart():
     body = _object_body(None)
-    assert body == b'id\tnote\n1\t\n2\t\n3\t"\\N"\n4\t"a\tb"\n5\tplain\n'
-    # The default codec cannot tell '' from NULL — why the opt-in exists.
-    assert _decoded(body, "null")[0][1] is None
+    assert body == b'id\tnote\n1\t""\n2\t\n3\t"\\N"\n4\t"a\tb"\n5\tplain\n'
+    assert _decoded(body, "null") == [["1", ""], ["2", None], ["3", TEXT_NULL], ["4", "a\tb"], ["5", "plain"]]
+    # The pre-D371 bytes cannot tell '' from NULL.
+    assert _decoded(COLLAPSED_TSV, "null")[0][1] is None
 
 
 def test_object_store_tsv_opt_in_round_trips_empty_and_null():
@@ -224,12 +236,17 @@ def _fake_bucket(monkeypatch, body: bytes) -> None:
     monkeypatch.setattr(object_streaming, "open_object_store_binary", lambda *_a, **_k: (io.BytesIO(body), None))
 
 
-@pytest.mark.parametrize("tsv_null, green", [(TEXT_NULL, True), (None, False)])
-def test_gate8_object_store_checksum_and_sample(monkeypatch, tsv_null, green):
-    """Gate-8 on a bucket: the read-back equals what was sent only with the convention."""
+@pytest.mark.parametrize(
+    "tsv_null, green, collapsed", [(TEXT_NULL, True, False), (None, True, False), (None, False, True)]
+)
+def test_gate8_object_store_checksum_and_sample(monkeypatch, tsv_null, green, collapsed):
+    """Gate-8 on a bucket: the read-back equals what was sent in both conventions.
+
+    A body that writes '' as NULL (the pre-D371 default) must still fail.
+    """
     from services.dest_precount import _checksum_records, checksum_object_store, sample_object_store
 
-    _fake_bucket(monkeypatch, _object_body(tsv_null))
+    _fake_bucket(monkeypatch, COLLAPSED_TSV if collapsed else _object_body(tsv_null))
     cfg = {"database": "bucket", **({"tsv_null": tsv_null} if tsv_null else {})}
     expected = _checksum_records(iter([dict(r) for r in RECORDS]), columns=list(COLS))
     got = checksum_object_store("s3", cfg, table_name="out/data.tsv", columns=list(COLS))

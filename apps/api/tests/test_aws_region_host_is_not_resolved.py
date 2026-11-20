@@ -379,6 +379,14 @@ def test_extra_cannot_override_the_type_or_dial_fields_of_a_probe(monkeypatch, t
     from src.main import app
 
     seen = _capture_route_probe(monkeypatch, tmp_path)
+    # A CA file in a folder the operator lists (DATAFLOW_SOURCE_PATH_ROOTS).
+    # The earlier "/certs/ca.pem" is a host path outside every connector area:
+    # libpq reads sslrootcert from the API host's disk, so /test now refuses it
+    # before the probe, as save and dial always did (U1, R11).
+    ca_dir = tmp_path / "operator-certs"
+    ca_dir.mkdir()
+    monkeypatch.setenv("DATAFLOW_SOURCE_PATH_ROOTS", str(ca_dir))
+    ca_path = str(ca_dir / "ca.pem")
     response = TestClient(app).post(
         "/api/v1/connectors/test",
         json={
@@ -386,7 +394,7 @@ def test_extra_cannot_override_the_type_or_dial_fields_of_a_probe(monkeypatch, t
             "extra": {
                 "type": "s3", "db_type": "s3", "host": "us-east-1", "port": 9000,
                 "endpoint_url": "http://us-east-1:9000", "connection_string": "http://us-east-1",
-                "sslrootcert": "/certs/ca.pem",
+                "sslrootcert": ca_path,
             },
         },
     )
@@ -398,7 +406,7 @@ def test_extra_cannot_override_the_type_or_dial_fields_of_a_probe(monkeypatch, t
     assert seen["port"] in (0, None, "")
     assert seen["endpoint_url"] == ""
     assert "us-east-1" not in str(seen.get("connection_string") or "")
-    assert seen["sslrootcert"] == "/certs/ca.pem", "other extra fields still reach the probe"
+    assert seen["sslrootcert"] == ca_path, "other extra fields still reach the probe"
 
 
 @pytest.mark.parametrize("ip", _TARGETS)

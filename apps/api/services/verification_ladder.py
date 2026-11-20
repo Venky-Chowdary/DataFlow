@@ -1025,6 +1025,7 @@ def read_sqlserver_rows(
     accounting so a tampered norecipe run can no longer stay count-only (X-22).
     """
     import pymssql
+    from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
     from connectors.sql_identifiers import quote_table_ref, require_safe_identifier
 
@@ -1045,6 +1046,7 @@ def read_sqlserver_rows(
         password=password or "",
         database=database or "master",
         login_timeout=10,
+        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
         timeout=30,
     )
     try:

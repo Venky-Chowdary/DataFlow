@@ -867,16 +867,19 @@ def extract_cdc_phase(resume_token: Any) -> str:
     """Snapshot vs streaming phase — Debezium handoff token, dest-owned."""
     resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
-        nested = resume_token.get("token")
-        if isinstance(nested, (dict, str)) and nested:
-            phase = extract_cdc_phase(nested)
-            if phase:
-                return phase
         if resume_token.get("incremental_snapshot") or resume_token.get("snapshot_window"):
             return "snapshot"
+        # The wrapper's own phase wins. A nested stream position (a Mongo
+        # ``{"_data": ...}`` handoff token) has no phase and reads as the
+        # "streaming" default, which turned every Mongo snapshot chunk into a
+        # streaming commit: chunk 2 then failed as a redelivery of chunk 1 and
+        # the handoff never left the snapshot (D315 follow-up).
         raw = str(resume_token.get("phase") or "").strip().lower()
         if raw in {"snapshot", "streaming"}:
             return raw
+        nested = resume_token.get("token")
+        if isinstance(nested, (dict, str)) and nested:
+            return extract_cdc_phase(nested)
         return "streaming"
     text = str(resume_token or "").lower()
     if "incremental_snapshot" in text or "phase=snapshot" in text:
@@ -964,6 +967,9 @@ def extract_snapshot_last_pk(resume_token: Any) -> str:
     if isinstance(resume_token, dict):
         if resume_token.get("last_pk") not in (None, ""):
             return str(resume_token.get("last_pk") or "").strip()
+        # The Mongo snapshot keyset bookmark is ``last_id`` (the ``_id``).
+        if resume_token.get("phase") == "snapshot" and resume_token.get("last_id") not in (None, ""):
+            return str(resume_token.get("last_id") or "").strip()
         nested = resume_token.get("snapshot_window")
         if isinstance(nested, dict) and nested.get("last_pk") not in (None, ""):
             return str(nested.get("last_pk") or "").strip()

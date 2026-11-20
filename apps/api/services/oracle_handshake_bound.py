@@ -40,14 +40,31 @@ def _budget_seconds(cparams: dict[str, Any]) -> float:
     return float(DEFAULT_CONNECT_TIMEOUT_SECONDS)
 
 
-def _timeout_error(dialect: Any, cparams: dict[str, Any], seconds: float) -> Exception:
+def _connected(sock: Any) -> bool:
+    """True once the TCP connect completed (a peer address exists)."""
+    try:
+        sock.getpeername()
+    except (OSError, AttributeError):
+        return False
+    return True
+
+
+def _timeout_error(
+    dialect: Any, cparams: dict[str, Any], seconds: float, *, accepted: bool = True
+) -> Exception:
     m = _DSN_ADDRESS.search(str(cparams.get("dsn") or ""))
     host = m.group(1) if m else str(cparams.get("host") or "")
     port = m.group(2) if m else str(cparams.get("port") or "")
     where = f" ({host}:{port})" if host and port else ""
+    budget = max(1, int(seconds))
+    # A black hole drops the SYN: nothing accepted the connection, so saying
+    # it did sends the operator to the wrong layer (D354, R10).
     message = (
         f"Handshake timed out{where}: the server accepted the TCP connection but did not "
-        f"answer the Oracle handshake within {max(1, int(seconds))} seconds."
+        f"answer the Oracle handshake within {budget} seconds."
+        if accepted
+        else f"Connection timed out{where}: the host did not accept the TCP connection "
+        f"within {budget} seconds."
     )
     error = getattr(getattr(dialect, "loaded_dbapi", None), "OperationalError", None)
     try:
@@ -63,7 +80,7 @@ def connect_within_timeout(dialect: Any, cargs: Any, cparams: dict[str, Any]) ->
     seconds = _budget_seconds(cparams)
     lock = threading.Lock()
     sockets: list[Any] = []
-    state = {"done": False, "expired": False}
+    state = {"done": False, "expired": False, "accepted": False}
 
     def _track(sock: Any) -> None:
         with lock:
@@ -76,6 +93,7 @@ def connect_within_timeout(dialect: Any, cargs: Any, cparams: dict[str, Any]) ->
             if state["done"] or not sockets:
                 return
             state["expired"] = True
+            state["accepted"] = any(_connected(sock) for sock in sockets)
             for sock in sockets:
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
@@ -92,9 +110,10 @@ def connect_within_timeout(dialect: Any, cargs: Any, cparams: dict[str, Any]) ->
             with lock:
                 state["done"] = True
                 expired = state["expired"]
+                accepted = state["accepted"]
             timer.cancel()
             if expired:
-                raise _timeout_error(dialect, cparams, seconds) from exc
+                raise _timeout_error(dialect, cparams, seconds, accepted=accepted) from exc
             raise
     with lock:
         state["done"] = True

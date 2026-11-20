@@ -128,9 +128,10 @@ def test_dedupe_carries_the_surviving_rows_number():
     kept, numbers = dedupe_rows_keeping_numbers(
         rows, ["id"], ["id", "v"], [10, 20, 30]
     )
-    # Last occurrence wins, so the survivor came from source row 30, not 10.
-    assert kept == [("a", "3"), ("b", "2")]
-    assert numbers == [30, 20]
+    # Last occurrence wins, so the survivor came from source row 30, not 10,
+    # and sits where row 30 was (R4, D391).
+    assert kept == [("b", "2"), ("a", "3")]
+    assert numbers == [20, 30]
 
     # Without numbers the caller gets none back rather than invented positions.
     _kept, none_numbers = dedupe_rows_keeping_numbers(rows, ["id"], ["id", "v"])

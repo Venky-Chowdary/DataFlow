@@ -256,6 +256,70 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
 # digest only compares against the destination when every declared step is
 # row-local (or an engine-level no-op like scd2): population-changing recipes
 # are proven by the row ledger and the dedupe winner checks instead.
+def stamp_run_proof_context(dest_summary: dict[str, Any] | None, request: Any) -> None:
+    """Publish the filter the writer applied, so the proof re-reads the same rows.
+
+    D331. A missing filter is not invented.
+    """
+    if not isinstance(dest_summary, dict) or request is None:
+        return
+    filt = getattr(request, "source_filter", None)
+    if filt:
+        dest_summary["source_filter"] = filt
+        from services.row_filter import null_dropping_warnings
+
+        for warning in null_dropping_warnings(filt):
+            warnings = dest_summary.setdefault("warnings", [])
+            if isinstance(warnings, list) and warning not in warnings:
+                warnings.append(warning)
+
+
+def _truncate_instant_to_milliseconds(value: Any) -> Any:
+    """BSON Date precision: keep three fractional digits (D325)."""
+    import datetime as dt
+
+    if isinstance(value, dt.datetime):
+        ms = (value.microsecond // 1000) * 1000
+        return value.replace(microsecond=ms)
+    text = str(value)
+    matched = re.match(
+        r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\.\d{3})\d+",
+        text,
+    )
+    if matched:
+        return matched.group(1)
+    return value
+
+
+def canonical_bson_instant(value: Any) -> Any:
+    """One UTC text at millisecond precision, or the value when it is not an instant.
+
+    MySQL ``DATETIME`` after ``assume_timezone:UTC`` and a MongoDB BSON Date of
+    the same instant differ as text (naive wall clock, ``Z``, ``+00:00``, a
+    datetime). The proof compares this form so a correct write is not failed
+    (D398). A value that is not a timestamp is returned unchanged. Sub-millisecond
+    digits are dropped, which is the precision BSON Date stores.
+    """
+    import datetime as dt
+
+    if isinstance(value, dt.datetime):
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=dt.timezone.utc)
+        utc = aware.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        ms = (utc.microsecond // 1000) * 1000
+        return utc.replace(microsecond=ms).isoformat(timespec="milliseconds")
+    text = str(value).strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", text):
+        return value
+    normalised = text.replace("Z", "+00:00")
+    if " " in normalised and "T" not in normalised:
+        normalised = normalised.replace(" ", "T", 1)
+    try:
+        parsed = dt.datetime.fromisoformat(normalised)
+    except ValueError:
+        return _truncate_instant_to_milliseconds(value)
+    return canonical_bson_instant(parsed)
+
+
 def _proof_source_batches(
     *,
     source_endpoint: EndpointConfig,
@@ -1188,7 +1252,7 @@ def _transform_applied_proof_impl(
         except Exception:
             return str(v)
 
-    def _val_norm(v: Any, ddl: str = "") -> str:
+    def _val_norm(v: Any, ddl: str = "", column: str = "") -> str:
         # Type-driven canonicalization for VALUE compares (recipe output vs
         # destination read-back). Strings stay literal unless the column is
         # numeric-family — 'A ' vs 'A' and '01' vs '1' on a TEXT column are
@@ -1199,6 +1263,13 @@ def _transform_applied_proof_impl(
         if v is None:
             return _NULL_SENTINEL
         try:
+            # D325: truncate to BSON milliseconds only when the plan flagged
+            # this column's precision loss and a continue-policy contract
+            # accepted it. Truncating every Mongo date would hide a real
+            # microsecond mismatch the operator did not accept.
+            if column and _bson_ms_accepted(column):
+                folded = canonical_bson_instant(v)
+                v = folded if folded is not None else v
             # Oracle VARCHAR2 stores '' AS NULL natively — '' vs NULL
             # can never be told apart on read-back there, so they are
             # the same value on an Oracle destination only.
@@ -1268,7 +1339,46 @@ def _transform_applied_proof_impl(
 
     mappings = mappings or []
     dest_db_type = resolve_driver_type(endpoint.format or "")
+    accepted_bson_ms: set[str] = set()
+
+    def _bson_ms_accepted(column: str) -> bool:
+        if accepted_bson_ms:
+            return column in accepted_bson_ms
+        return False
     dest_types = _dest_types_from_mappings(mappings)
+    if "mongo" in str(dest_db_type or "").lower():
+        from services.millisecond_fit import narrowed_columns
+
+        accepted_bson_ms.update(
+            col.target
+            for col in narrowed_columns(
+                mappings,
+                column_types=source_schema,
+                dest_types=dest_types,
+                dest_db=dest_db_type,
+                source_db=str(getattr(source_endpoint, "format", "") or ""),
+            )
+            if col.acknowledged
+        )
+        # assume_timezone:UTC on a MySQL DATETIME is an instant the destination
+        # stores as a BSON Date. Compare that column at millisecond precision
+        # even when the precision gate did not flag it (D398).
+        for mapping in mappings:
+            raw_tf = str(mapping.get("transform") or mapping.get("engine_transform") or "")
+            if "assume_timezone" in raw_tf.lower():
+                name = str(mapping.get("target") or mapping.get("source") or "").strip()
+                if name:
+                    accepted_bson_ms.add(name)
+        for step in steps:
+            blob = str(step.get("op") or "")
+            options = step.get("options") if isinstance(step.get("options"), dict) else {}
+            blob += " " + " ".join(str(options.get(key) or "") for key in ("transform", "cast", "to"))
+            if "assume_timezone" not in blob.lower():
+                continue
+            for col in _step_cols(step):
+                target = str(map_source_to_target(col, mappings) or col).strip()
+                if target:
+                    accepted_bson_ms.add(target)
     scd2_opts = dest_summary.get("scd2_opts")
     sync_mode = str(
         dest_summary.get("sync_mode")
@@ -1276,6 +1386,7 @@ def _transform_applied_proof_impl(
         or ""
     )
     scope_pk: list[str] = []
+    append_versions = False
     if scd2_opts:
         from connectors.destination_naming import target_identifier
 
@@ -1286,10 +1397,19 @@ def _transform_applied_proof_impl(
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
         digest_cols = _mapped_targets(mappings, columns)
-        if not is_overwrite_sync(sync_mode):
-            # G-1c: an append/upsert can hold rows outside this run's
-            # population — scope the read-back to this run's keys so the
-            # proof still compares honestly.
+        from services.append_proof_scope import append_versions_by_window
+
+        # D359: incremental_append keeps every version of a key. Scoping the
+        # read-back by key returns the previous version and a correct new
+        # version looks untransformed. When the run recorded its cursor window
+        # (and the cursor lands as written) that window is this run's rows.
+        # Otherwise the read-back stays scoped by key, as before (R9).
+        append_versions = append_versions_by_window(
+            dest_summary, sync_mode, mappings, digest_cols
+        )
+        if not is_overwrite_sync(sync_mode) and not append_versions:
+            # G-1c: an upsert holds one row per key — scope the read-back to
+            # this run's keys so earlier rows are not the proof.
             scope_pk = [
                 c
                 for c in (
@@ -1332,7 +1452,7 @@ def _transform_applied_proof_impl(
     def _fph(row: dict[str, Any]) -> str:
         return hashlib.sha256(
             "\x1f".join(
-                _val_norm(row.get(c), _val_ddl(c)) for c in digest_cols
+                _val_norm(row.get(c), _val_ddl(c), c) for c in digest_cols
             ).encode()
         ).hexdigest()[:16]
 
@@ -1438,8 +1558,19 @@ def _transform_applied_proof_impl(
     from services.incremental_drift import IN_WINDOW, RunWindow
 
     _proof_window = (
-        RunWindow.from_summary(dest_summary) if scope_pk and not scd2_opts else None
+        RunWindow.from_summary(dest_summary)
+        if (scope_pk or append_versions) and not scd2_opts
+        else None
     )
+    _dest_window = None
+    if append_versions and _proof_window is not None:
+        _to_target = {
+            str(m.get("source")): str(m.get("target"))
+            for m in (mappings or [])
+            if isinstance(m, dict) and m.get("source") and m.get("target")
+        }
+        _dest_window = _proof_window.renamed(_to_target)
+    _proof_filter = dest_summary.get("source_filter") if isinstance(dest_summary, dict) else None
 
     from services.mapping_constraints import write_mappings as _write_mappings
 
@@ -1460,8 +1591,136 @@ def _transform_applied_proof_impl(
             validation_mode=validation_mode,
         )
 
+    def _dest_in_this_run(row: dict[str, Any]) -> bool:
+        # D359: only the versions this run appended, not an older copy of the key.
+        if _dest_window is not None:
+            return _dest_window.position(row) == IN_WINDOW
+        return True
+
+    from services.primary_key import sync_collapses_in_file_duplicates
+
+    # D391: an upsert, and an explicit keep_last, writes one row per key (the
+    # last copy). The proof has to grade that same population. Counting every
+    # source line makes a correct load look like the source changed.
+    _collapse_keys: list[str] = []
+    if (
+        sync_collapses_in_file_duplicates(sync_mode)
+        or str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
+    ):
+        _collapse_keys = [
+            str(c)
+            for c in (
+                scope_pk
+                or dest_summary.get("primary_key_columns")
+                or dest_summary.get("conflict_columns")
+                or []
+            )
+            if c
+        ]
+    _collapsed_duplicates = 0
+
     def _expected_iter():
-        nonlocal raw_count
+        nonlocal raw_count, _collapsed_duplicates
+        import pickle
+
+        from services.duplicate_policy import duplicate_key_token
+
+        # Last-wins spills to the proof's sqlite file. Holding every source
+        # row in a list made an upsert of a large file a memory copy (D391).
+        # A run with no repeated key never rewrites a row.
+        _spill_ready = False
+        _spill_seq = 0
+        _spill_dropped = 0
+
+        def _spill_init() -> None:
+            nonlocal _spill_ready
+            if _spill_ready or not _collapse_keys:
+                return
+            pin_store.db.execute(
+                "CREATE TABLE IF NOT EXISTS spill (seq INTEGER PRIMARY KEY, payload BLOB)"
+            )
+            pin_store.db.execute(
+                "CREATE TABLE IF NOT EXISTS spill_key ("
+                "k TEXT PRIMARY KEY, seq INTEGER, latest INTEGER)"
+            )
+            _spill_ready = True
+
+        def _spill_key(orow: dict) -> str:
+            parts: list[str] = []
+            for col in _collapse_keys:
+                token = duplicate_key_token(orow.get(col), dest_db_type)
+                if token == "\x00NULL\x00":
+                    # A NULL key is not collapsed with another NULL key.
+                    return f"\x00null:{_spill_seq}"
+                parts.append(token)
+            return "\x1f".join(parts)
+
+        def _spill_row(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
+            nonlocal _spill_seq, _spill_dropped
+            _spill_init()
+            key = _spill_key(orow)
+            payload = pickle.dumps((orow, shaped_t, origin_row), protocol=4)
+            # ``seq`` stays the first time this exact text was written.
+            # ``latest`` moves on every write, including a repeat of that
+            # text, so a later value is not stuck behind an earlier spelling
+            # the destination treats as the same key (D391).
+            _spill_seq += 1
+            found = pin_store.db.execute(
+                "SELECT seq FROM spill_key WHERE k = ?", (key,)
+            ).fetchone()
+            if found is None:
+                pin_store.db.execute(
+                    "INSERT INTO spill (seq, payload) VALUES (?, ?)",
+                    (_spill_seq, payload),
+                )
+                pin_store.db.execute(
+                    "INSERT INTO spill_key (k, seq, latest) VALUES (?, ?, ?)",
+                    (key, _spill_seq, _spill_seq),
+                )
+                return
+            _spill_dropped += 1
+            pin_store.db.execute(
+                "UPDATE spill SET payload = ? WHERE seq = ?",
+                (payload, found[0]),
+            )
+            pin_store.db.execute(
+                "UPDATE spill_key SET latest = ? WHERE k = ?",
+                (_spill_seq, key),
+            )
+
+        def _record_expected(orow: dict, shaped_t: dict, origin_row: dict | None) -> None:
+            _fpm_buf.append(("e", _fph(orow)))
+            if keyed:
+                _exp_buf.append(
+                    (
+                        "\x1f".join(
+                            _key_norm(orow.get(c)) for c in pin_key_cols
+                        ),
+                        _fph(orow),
+                        json.dumps(
+                            {
+                                c: _val_norm(orow.get(c), _val_ddl(c), c)
+                                for c in digest_cols
+                            }
+                        ),
+                    )
+                )
+            if scope_keys is not None:
+                scope_keys.add(
+                    "\x1f".join(_key_norm(orow.get(c)) for c in scope_pk)
+                )
+            for sc, tc in col_pairs:
+                _cv_buf.append(
+                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc), tc)))
+                )
+                if origin_row is not None:
+                    _eo_buf.append(
+                        (
+                            tc,
+                            _vh(_key_norm(origin_row.get(sc))),
+                            _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc), tc)),
+                        )
+                    )
         _extra = (
             [
                 c
@@ -1477,6 +1736,12 @@ def _transform_applied_proof_impl(
             src_cfg=src_cfg,
             read_cols=read_cols + _extra,
         ):
+            if _proof_filter:
+                # D331: the write applied this filter. Rows it excluded are
+                # not "changed in source during run".
+                from services.row_filter import apply_row_filter
+
+                batch = apply_row_filter(list(batch), _proof_filter)
             if _proof_window is not None:
                 batch = [
                     {k: v for k, v in r.items() if k not in _extra}
@@ -1534,42 +1799,10 @@ def _transform_applied_proof_impl(
                 orow = {**shaped_t, **written[i]}
                 if _is_kept(orow, pin_key_cols):
                     continue
-                _fpm_buf.append(("e", _fph(orow)))
-                if keyed:
-                    _exp_buf.append(
-                        (
-                            "\x1f".join(
-                                _key_norm(orow.get(c))
-                                for c in pin_key_cols
-                            ),
-                            _fph(orow),
-                            json.dumps(
-                                {
-                                    c: _val_norm(orow.get(c), _val_ddl(c))
-                                    for c in digest_cols
-                                }
-                            ),
-                        )
-                    )
-                if scope_keys is not None:
-                    scope_keys.add(
-                        "\x1f".join(
-                            _key_norm(orow.get(c)) for c in scope_pk
-                        )
-                    )
-                for sc, tc in col_pairs:
-                    _cv_buf.append(
-                        (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
-                    )
-                    if origin[i] is not None:
-                        # The SQL oracle recomputes the recipe stage only.
-                        _eo_buf.append(
-                            (
-                                tc,
-                                _vh(_key_norm(origin[i].get(sc))),
-                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc))),
-                            )
-                        )
+                if _collapse_keys:
+                    _spill_row(orow, shaped_t, origin[i])
+                    continue
+                _record_expected(orow, shaped_t, origin[i])
                 yield orow
             _flush_ms()
         _drained = list(runner.drain() or [])
@@ -1580,33 +1813,30 @@ def _transform_applied_proof_impl(
                 **{map_source_to_target(k, mappings): v for k, v in out.items()},
                 **written,
             }
-            _fpm_buf.append(("e", _fph(orow)))
-            if keyed:
-                _exp_buf.append(
-                    (
-                        "\x1f".join(
-                            _key_norm(orow.get(c)) for c in pin_key_cols
-                        ),
-                        _fph(orow),
-                        json.dumps(
-                            {
-                                c: _val_norm(orow.get(c), _val_ddl(c))
-                                for c in digest_cols
-                            }
-                        ),
-                    )
-                )
-            if scope_keys is not None:
-                scope_keys.add(
-                    "\x1f".join(
-                        _key_norm(orow.get(c)) for c in scope_pk
-                    )
-                )
-            for _sc, tc in col_pairs:
-                _cv_buf.append(
-                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
-                )
+            if _collapse_keys:
+                _spill_row(orow, {}, None)
+                continue
+            _record_expected(orow, {}, None)
             yield orow
+        if _collapse_keys and _spill_ready:
+            # Exact text already kept the last copy. Keys the destination
+            # collation treats as equal (accents, trailing spaces) are merged
+            # here, by asking the destination, not by guessing (D391).
+            from services.collation_equality import collapse_destination_equal_keys
+
+            _spill_dropped += collapse_destination_equal_keys(
+                pin_store.db,
+                dialect=dest_db_type,
+                endpoint=endpoint,
+                columns=_collapse_keys,
+            )
+            _collapsed_duplicates = _spill_dropped
+            for (payload,) in pin_store.db.execute(
+                "SELECT payload FROM spill ORDER BY seq"
+            ):
+                orow, shaped_t, origin_row = pickle.loads(payload)
+                _record_expected(orow, shaped_t, origin_row)
+                yield orow
         _flush_ms()
 
     try:
@@ -1802,7 +2032,7 @@ def _transform_applied_proof_impl(
                                             _key_norm(r.get(f"__raw_{c}"))
                                         ),
                                         _vh(
-                                            _val_norm(r.get(f"__o_{c}"), _val_ddl(c))
+                                            _val_norm(r.get(f"__o_{c}"), _val_ddl(c), c)
                                         ),
                                     )
                                 )
@@ -1908,6 +2138,8 @@ def _transform_applied_proof_impl(
                     for r in batch:
                         if _is_kept(r, pin_key_cols):
                             continue
+                        if not _dest_in_this_run(r):
+                            continue
                         if scope_keys is not None and (
                             "\x1f".join(
                                 _key_norm(r.get(c)) for c in scope_pk
@@ -1920,7 +2152,7 @@ def _transform_applied_proof_impl(
                         _fpm_buf.append(("d", _fph(row)))
                         for _sc, tc in col_pairs:
                             _cv_buf.append(
-                                (tc, "d", _vh(_val_norm(row.get(tc), _val_ddl(tc))))
+                                (tc, "d", _vh(_val_norm(row.get(tc), _val_ddl(tc), tc)))
                             )
                         if keyed:
                             _destk_buf.append(
@@ -1932,7 +2164,7 @@ def _transform_applied_proof_impl(
                                     _fph(row),
                                     json.dumps(
                                         {
-                                            c: _val_norm(row.get(c), _val_ddl(c))
+                                            c: _val_norm(row.get(c), _val_ddl(c), c)
                                             for c in digest_cols
                                         }
                                     ),
@@ -2285,10 +2517,11 @@ def _transform_applied_proof_impl(
             scd2_provenance = ""
 
     if expected_checksum == actual_checksum and actual_rows == exp_n:
-        return {
+        verified = {
             "status": "verified",
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "rows": exp_n,
+            "collapsed_duplicate_rows": _collapsed_duplicates,
             "scoped_to_run_keys": scope_keys is not None,
             "provenance": (
                 "independent SQL oracle"
@@ -2306,6 +2539,7 @@ def _transform_applied_proof_impl(
                 "scd2_invariants": bool(scd2_provenance),
             },
         }
+        return verified
 
     # G-1a: the re-read runs AFTER the write — a busy source may have
     # drifted in between. Row-local steps never change the written row
@@ -2407,6 +2641,8 @@ def _transform_applied_proof_impl(
                         dconn, stmt, sel_cols
                     ):
                         for r in batch:
+                            if not _dest_in_this_run(r):
+                                continue
                             if scope_keys is not None and (
                                 "\x1f".join(
                                     _key_norm(r.get(c)) for c in scope_pk
@@ -2421,7 +2657,7 @@ def _transform_applied_proof_impl(
                                     (
                                         tc,
                                         "d",
-                                        _vh(_val_norm(row.get(tc), _val_ddl(tc))),
+                                        _vh(_val_norm(row.get(tc), _val_ddl(tc), tc)),
                                     )
                                 )
                             if keyed:
@@ -2434,7 +2670,7 @@ def _transform_applied_proof_impl(
                                         _fph(row),
                                         json.dumps(
                                             {
-                                                c: _val_norm(row.get(c), _val_ddl(c))
+                                                c: _val_norm(row.get(c), _val_ddl(c), c)
                                                 for c in digest_cols
                                             }
                                         ),
@@ -2481,7 +2717,7 @@ def _transform_applied_proof_impl(
                     # written column that no recipe step touches must name
                     # itself, not blame the recipe's declared columns.
                     for _tc in digest_cols:
-                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc)) != _evals.get(_tc):
+                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc), _tc) != _evals.get(_tc):
                             culprit_cols_p.add(_tc)
             culprits = (
                 sorted(culprit_cols_p or declared_tcols)
@@ -2627,6 +2863,18 @@ def _transform_applied_proof(**kwargs: Any) -> Any:
         return _transform_applied_proof_impl(**kwargs)
 
 
+def _record_batch_blanks_are_null(source_endpoint: Any) -> bool:
+    """The buffered writer's blank-cell rule for this source (adapters, D1)."""
+    if source_endpoint is None:
+        return False
+    from services.preflight_source_kind import source_is_record_batch
+
+    return bool(source_is_record_batch(
+        getattr(source_endpoint, "kind", "") or "database",
+        getattr(source_endpoint, "format", "") or "",
+    ))
+
+
 def _compute_source_checksum_from_spool(
     source_spool: Any,
     columns: list[str],
@@ -2638,6 +2886,7 @@ def _compute_source_checksum_from_spool(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[str, str]:
     """Remap Gate-8 from the engine spool in bundles — never rebuild ``records``."""
     from connectors.engine_record_spill import iter_fingerprints_from_spool
@@ -2663,6 +2912,7 @@ def _compute_source_checksum_from_spool(
             dest_types=dest_types or {},
             error_policy=policy,
             destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
         )
     )
     return acc.digest(), SOURCE_DIGEST_REMAPPED_ROWS
@@ -2681,8 +2931,13 @@ def _compute_source_checksum(
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
     source_spool: Any = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[str, str]:
     """Return ``(digest, provenance)`` for the source side of Gate-8.
+
+    ``empty_cells_as_null`` is the writer's blank-cell rule for a file or
+    object source (an empty field into a typed column is SQL NULL); the remap
+    must apply it too, or every blank date reads as a digest difference.
 
     When source ``records`` or an engine ``source_spool`` are available, always
     remap and fingerprint them. Preferring the writer checksum first made
@@ -2707,6 +2962,7 @@ def _compute_source_checksum(
             dest_types=dest_types,
             validation_mode=validation_mode,
             destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
         )
     if not records:
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
@@ -2729,6 +2985,7 @@ def _compute_source_checksum(
         preserve_case=True,
         dest_kind=dest_db_type or "",
         destination_pk_columns=destination_pk_columns,
+        empty_cells_as_null=empty_cells_as_null,
     )
     return (
         checksum_rows(
@@ -3258,9 +3515,14 @@ def _covered_keyed_noop_verify(
         ),
         pk_column,
     )
-    columns = [str(m.get("target") or "") for m in map_list if m.get("target")]
-    if pk_column not in columns:
-        columns.append(pk_column)
+    from services.mapping_constraints import verify_write_pairs
+
+    # Omitted columns are not created. Reading them fails a correct re-run
+    # (D409). The key stays so a tampered cell can be named.
+    verify_pairs = verify_write_pairs(
+        map_list, key_target=pk_column, key_source=src_pk
+    )
+    columns = [target for _source, target in verify_pairs]
     try:
         dest_rows = _read_verify_rows(
             db_type,
@@ -3273,9 +3535,7 @@ def _covered_keyed_noop_verify(
             src_type,
             src_cfg,
             table=str(source_endpoint.table or src_cfg.get("table") or ""),
-            columns=[
-                str(m.get("source") or "") for m in map_list if m.get("source")
-            ] or None,
+            columns=[source for source, _target in verify_pairs] or None,
         )
     except PopulationTooLarge as exc:
         return {
@@ -3291,7 +3551,16 @@ def _covered_keyed_noop_verify(
         }
     except Exception as exc:
         # A covered destination we cannot re-read has no tamper proof — the
-        # count-only green must not stamp verified (X-22 doctrine).
+        # count-only green must not stamp verified (X-22 doctrine). The job
+        # message is the classified cause. The driver text, including any
+        # statement, stays in the server log (D405, D409).
+        from services.error_taxonomy import new_reference, user_message
+
+        ref = new_reference()
+        cause = user_message(exc, side="destination", phase="read")
+        _logger.exception(
+            "Keyed no-op poll re-read failed reference=%s", ref
+        )
         return {
             "passed": False,
             "unproven": True,
@@ -3299,8 +3568,8 @@ def _covered_keyed_noop_verify(
             "assurance_level": "none",
             "message": (
                 "Keyed no-op poll could not re-verify covered content "
-                f"({exc}). Count unchanged is not a value proof. "
-                "Not migration_proven."
+                f"({cause}). Reference {ref}. "
+                "Count unchanged is not a value proof. Not migration_proven."
             ),
         }
     if src_rows is None or dest_rows is None:
@@ -3313,13 +3582,7 @@ def _covered_keyed_noop_verify(
     # DATAFLOW_INCREMENTAL_DRIFT_FAILS=1).
     from services.incremental_drift import attach_drift, measure_drift
 
-    pairs = [
-        (str(m.get("source") or ""), str(m.get("target") or ""))
-        for m in map_list
-        if m.get("source") and m.get("target")
-    ]
-    if not any(t == pk_column for _s, t in pairs):
-        pairs.append((src_pk, pk_column))
+    pairs = list(verify_pairs)
     as_target = [
         {t: r.get(s) for s, t in pairs} for r in src_rows if isinstance(r, dict)
     ]
@@ -7609,6 +7872,7 @@ def _run_reconciliation_impl(
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
             source_spool=source_spool,
+            empty_cells_as_null=_record_batch_blanks_are_null(source_endpoint),
         )
         digest_provenance["source"] = source_checksum_provenance
 
@@ -8260,6 +8524,7 @@ def _run_reconciliation_impl(
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
             },
+            write_rejects=list((dest_summary or {}).get("rejected_details") or []),
         )
         if value_report is not None:
             return _finalize(value_report)
@@ -9318,6 +9583,69 @@ def _file_export_cell_readback(
         source_locale=str(summary.get("number_locale") or ""),
     )
 
+def rejection_explains_shortfall(proof: dict[str, Any], dest_summary: dict[str, Any]) -> str:
+    """The write refusal that accounts for a short destination, or "".
+
+    A transform proof that still blames the recipe's name and note steps is
+    wrong when those rows were refused at write and never landed (D408).
+    """
+    rejections = [
+        str(d.get("reason") or "")
+        for d in (dest_summary.get("rejected_details") or [])
+        if isinstance(d, dict) and str(d.get("reason") or "").strip()
+    ]
+    if not rejections:
+        return ""
+    try:
+        expected_n = int(proof.get("expected_rows") or 0)
+        actual_n = int(proof.get("actual_rows") or 0)
+        refused_n = int(dest_summary.get("rejected_rows") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not (
+        (expected_n and actual_n + refused_n >= expected_n)
+        or (actual_n == 0 and refused_n > 0)
+    ):
+        return ""
+    return (
+        f"{refused_n or len(rejections)} row(s) were refused at write "
+        f"and are not in the destination: {rejections[0]}"
+    )
+
+
+def engine_copy_identity_alignment(
+    recon: dict[str, Any], dest_summary: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Identity alignment a verify-time population digest implies, or ``None``.
+
+    The row path aligns the write-pass fingerprint with the re-read. An engine
+    copy has no write pass in this process; both whole populations are re-read
+    and digested at verify time. When the destination holds only this run's
+    write (overwrite, or it was empty before) and the two digests match, the
+    destination this run wrote equals the source population re-read, which is
+    the alignment. Anything else (a mismatch, rows already there) is not
+    (D381, R9).
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    if recon.get("checksum_match") is not True:
+        return None
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    mode = str(summary.get("sync_mode") or summary.get("effective_sync_mode") or "")
+    before = recon.get("target_rows_before", summary.get("target_rows_before"))
+    replaced = is_overwrite_sync(mode) or (isinstance(before, int) and before == 0)
+    if not replaced:
+        return None
+    return {
+        "identity_hash_aligned": True,
+        "method": "verify_time_population_digest",
+        "reason": (
+            "the destination holds only this run's write and its whole-population "
+            "digest equals the source re-read"
+        ),
+    }
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -9426,6 +9754,9 @@ def run_reconciliation(
                         if steps_txt
                         else str(proof.get('reason') or "the recipe output differs")
                     )
+                    explained = rejection_explains_shortfall(proof, dest_summary)
+                    if explained:
+                        why_txt = explained
                 head = "Transform-applied proof failed: the destination does not hold the approved recipe's output"
                 cell = recon.get("artifact_cell_compare")
                 if isinstance(cell, dict) and cell.get("passed") is False:
@@ -9446,6 +9777,12 @@ def run_reconciliation(
                     f"transform output verified — {prov} "
                     f"({proof.get('rows')} rows)"
                 )
+                collapsed = int(proof.get("collapsed_duplicate_rows") or 0)
+                if collapsed:
+                    note += (
+                        f"; {collapsed} duplicate source row(s) collapsed, "
+                        "last copy kept"
+                    )
                 if (
                     proof.get("scoped_to_run_keys")
                     and "per-cell fidelity is NOT proven"
@@ -9530,6 +9867,21 @@ def run_reconciliation(
             recon["target_checksum"] = _l3_dst
             recon["checksum_match"] = _l3_src == _l3_dst
             recon["source_checksum_provenance"] = "independent_source_reread"
+            # D381: the evidence the certificate asks of an independent
+            # re-read, which the row path stamps and this route did not.
+            _alignment = engine_copy_identity_alignment(recon, dest_summary)
+            if _alignment:
+                recon["identity_alignment"] = _alignment
+                recon["identity_hash_aligned"] = True
+            if not isinstance(recon.get("connector_versions"), dict) or not recon.get(
+                "connector_versions"
+            ):
+                from services.connector_versions import capture_route_versions
+
+                recon["connector_versions"] = capture_route_versions(
+                    source_engine=str(getattr(source_endpoint, "format", "") or ""),
+                    dest_type=str(getattr(endpoint, "format", "") or ""),
+                )
             # full_checksum names the *matching* coverage — stamping it on a
             # proven mismatch lets a failed job read as verified (the verdict
             # field carries the failure; the label must not contradict it).

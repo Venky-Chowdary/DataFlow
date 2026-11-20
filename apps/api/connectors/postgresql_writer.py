@@ -23,8 +23,15 @@ from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
 from connectors.pg_tx_guard import tolerated as pg_tolerated
+from connectors.column_widen_restore import (
+    bind_restore_cursor,
+    settle_widen_restore,
+    widen_restore_pending,
+    writer_restore_guard,
+)
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
+from connectors.salvage_cancel import SalvageCancelGuard
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -1453,6 +1460,7 @@ def _open_pg(
     return conn
 
 
+@writer_restore_guard
 def write_mapped_rows(
     *,
     host: str,
@@ -1870,6 +1878,11 @@ def write_mapped_rows(
 
     def _reconnect():
         nonlocal conn, cur, close_connection
+        # A socket that died mid-transaction leaves SQLAlchemy unable to
+        # reconnect until this transaction is rolled back (D406).
+        from connectors.write_resilience import rollback_pending_transaction
+
+        rollback_pending_transaction(conn)
         # Drop the dead handle.
         close_quietly(conn)
         conn = _open_pg(
@@ -2218,6 +2231,7 @@ def write_mapped_rows(
                 )
 
             suppressed_widens: dict[str, str] = {}
+            bind_restore_cursor(cursor)
             widen_existing_columns_native(
                 cursor,
                 "postgresql",
@@ -2893,7 +2907,13 @@ def write_mapped_rows(
                                 insert = _build_insert()
                             # SAVEPOINT per row + single commit — avoids one RTT/commit
                             # per rejected cell (was the CDC/quarantine throughput cliff).
+                            # D299: a cancel during the salvage discards the chunk.
+                            salvage_cancel = SalvageCancelGuard(conn, cur)
                             for row_i, row in enumerate(batch):
+                                held_now = _held_overwrite()
+                                salvage_cancel.check(
+                                    written, held_overwrite=bool(held_now and held_now.active)
+                                )
                                 try:
                                     cur.execute("SAVEPOINT df_row_sp")
                                     write_rows = [row]
@@ -3192,6 +3212,16 @@ def write_mapped_rows(
             # path leaves a successful transaction open until the last batch.
             finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
+        # Quarantine does not set the abort flag. A widen with nothing
+        # committed is restored on every policy, before close (D368).
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+        restore_empty_widen = int(written or 0) == 0 and widen_restore_pending()
+        if close_connection or child_flush_error or restore_empty_widen:
+            settle_widen_restore(
+                conn,
+                rows_written=written,
+                failed=bool(child_flush_error) or restore_empty_widen,
+            )
         if close_connection:
             close_quietly(conn)
         if child_flush_error:
@@ -3215,7 +3245,6 @@ def write_mapped_rows(
                 warnings=transform_errors,
                 load_method=load_method,
             )
-        _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
         if _final_abort:
             return WriteResult(
                 ok=False,
@@ -3259,6 +3288,7 @@ def write_mapped_rows(
         if isinstance(fid_report, dict):
             meta_out = dict(meta_out or {})
             meta_out["schema_fidelity"] = fid_report
+        settle_widen_restore(conn, rows_written=written, failed=False)
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -3287,6 +3317,9 @@ def write_mapped_rows(
             from connectors.write_resilience import finish_held_overwrite
 
             finish_held_overwrite(conn, success=False)
+        settle_widen_restore(
+            conn, rows_written=written, failed=True, original=exc
+        )
         if close_connection:
             close_quietly(conn)
         return WriteResult(

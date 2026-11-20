@@ -157,8 +157,13 @@ def test_declared_zone_clears_naive_mysql_timestamp_into_timestamptz():
     assert report["has_blocking_failures"] is False
 
 
-def test_sqlserver_timestamp_ntz7_fits_postgres_microsecond_ceiling():
-    from services.type_system import temporal_precision_would_narrow
+def test_sqlserver_timestamp_ntz7_into_postgres_microseconds_is_disclosed_when_unmeasured():
+    """D372/R3: an unmeasured 7th digit is never a silent equivalent.
+
+    It is not a blocker (no PostgreSQL type holds 100 ns, so it is the
+    product's own create-new carrier), but the loss is disclosed per column.
+    """
+    from services.type_system import temporal_precision_would_narrow, temporal_tick_disclosure
 
     assert (
         temporal_precision_would_narrow(
@@ -166,6 +171,18 @@ def test_sqlserver_timestamp_ntz7_fits_postgres_microsecond_ceiling():
         )
         is False
     )
+    note = temporal_tick_disclosure(
+        "TIMESTAMP_NTZ(7)", "TIMESTAMP(6)", dest_db="postgresql", column="created_at"
+    )
+    assert note == (
+        "created_at: TIMESTAMP_NTZ(7) → TIMESTAMP(6) (microseconds): a 7th fractional "
+        "digit was not observed in the sample; any such digit would be truncated."
+    )
+    # An observed 7th digit is lossy instead: a Risk Contract item, not a note.
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(7)", "TIMESTAMP(6)", dest_db="postgresql",
+        population=["2026-01-01 00:00:00.1234567"],
+    ) is True
     assert (
         temporal_precision_would_narrow(
             "TIMESTAMP_NTZ(7)", "TIMESTAMP(3)", dest_db="postgresql"

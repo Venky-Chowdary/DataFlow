@@ -94,7 +94,7 @@ def live(ent, monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
-    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "")
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
 
     import services.connector_store as connector_store
     import services.schedule_store as schedule_store

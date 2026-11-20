@@ -103,7 +103,7 @@ def mcp_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "acks.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
-    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "")
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
     monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(uploads))
     monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(sqlite_root))
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)

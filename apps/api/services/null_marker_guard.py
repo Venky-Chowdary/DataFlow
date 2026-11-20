@@ -298,6 +298,14 @@ def _leak_note(v: dict[str, Any]) -> str:
 def _unmeasured_note(t: dict[str, Any]) -> str:
     from services.null_marker_probe import PROBE_TIMEOUT_ENV
 
+    reason = str(t.get("reason") or "")
+    if "ora-22848" in reason.lower() or "comparison key" in reason.lower():
+        return (
+            f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "
+            f"({reason}). A CLOB or NCLOB is not a comparison key (ORA-22848); the "
+            "probe compares DBMS_LOB.SUBSTR of the leading 4000 characters. "
+            "Raising the probe timeout does not fix a comparison-key error."
+        )
     if t.get("internal"):
         return (
             f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "

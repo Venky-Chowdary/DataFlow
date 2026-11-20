@@ -65,3 +65,24 @@ def test_d76_copy_stage_binary_decodes_to_source_bytes():
     binary_format = match.group(1).upper() if match else "HEX"
     decoded = [_decode(rec[1], binary_format) for rec in cur.staged[1:]]
     assert decoded == [r[1] for r in rows]
+
+
+def test_d76_empty_bytes_and_null_stay_apart_on_the_copy_wire():
+    """R2 for BINARY: ``b''`` is a value, NULL is not. The staged CSV encloses
+    every field, so an empty payload is ``""`` (BASE64 of zero bytes) and a
+    NULL is the file format's ``NULL_IF`` token, never the same cell. How
+    Snowflake reads the two (``""`` enclosed -> empty, NULL_IF -> NULL) is its
+    documented CSV contract; a live account is needed to observe it."""
+    rows = [(str(i), [b"\x00\xff", b"", None][i % 3]) for i in range(sf.COPY_THRESHOLD)]
+    cur = _RecordingCursor()
+    sf._load_rows_into_table(
+        cur, "T", ["ID", "PAYLOAD"], ["NUMBER(38,0)", "BINARY"], rows,
+        prefer_copy=True, conn=object(), policy="fail",
+    )
+    null_if = re.search(r"NULL_IF\s*=\s*\(\s*'([^']*)'", cur.copy_sql, re.I)
+    assert null_if, cur.copy_sql
+    token = null_if.group(1).replace("\\\\", "\\")
+    cells = {int(rec[0]): rec[1] for rec in cur.staged[1:]}
+    assert cells[1] == "" and base64.b64decode(cells[1]) == b""
+    assert cells[2] == token and cells[2] != cells[1]
+    assert base64.b64decode(cells[0]) == b"\x00\xff"

@@ -85,7 +85,10 @@ class TypedWeaviate(WeaviateFake):
                     k for k, v in props.items()
                     if v is not None and (
                         (kinds.get(k) == "text" and not isinstance(v, str))
-                        or (kinds.get(k) == "number" and isinstance(v, str))
+                        or (kinds.get(k) == "number"
+                            and (isinstance(v, (str, bool)) or not isinstance(v, (int, float))))
+                        or (kinds.get(k) == "int" and (isinstance(v, bool) or not isinstance(v, int)))
+                        or (kinds.get(k) == "boolean" and not isinstance(v, bool))
                     )
                 ]
                 if bad or props.get("source_id") in self.refuse:

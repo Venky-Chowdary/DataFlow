@@ -207,6 +207,13 @@ async def get_users(request: Request):
 async def post_user(body: UserCreateBody, request: Request):
     """Create a login. Returns a one-time password when the admin did not set one."""
     actor = _require_platform_admin(request)
+    if body.password is not None:
+        # D340: a password the admin chose meets the policy of every other
+        # door (signup, invite-accept, reset, change, admin set). An issued
+        # one-time password is generated, so it needs no check.
+        from services.signup_service import check_new_password
+
+        check_new_password(body.password)
     try:
         user, issued = create_user(
             email=body.email,

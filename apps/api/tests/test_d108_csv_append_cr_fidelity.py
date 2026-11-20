@@ -30,12 +30,19 @@ def test_delimited_concat_preserves_cr_in_appended_rows():
 
 def test_delimited_concat_crlf_headers_still_match():
     # CRLF-terminating existing object vs LF writer output — headers compare
-    # on content, appended bytes stay verbatim.
+    # on content, and the quoted CR in the appended row stays verbatim. The
+    # record break after it takes the existing file's CRLF: a file that mixes
+    # LF and CRLF record breaks is refused by PostgreSQL COPY ("unquoted
+    # newline found in data"; COPY FROM "will complain if the line endings in
+    # the input are not all alike", https://www.postgresql.org/docs/current/sql-copy.html)
+    # and by any LOAD DATA with one LINES TERMINATED BY (D376 AC-3).
     existing = b'id,v\r\n1,"a\rb"\r\n'
     new = b'id,v\n2,"x\ry"\n'
     out = _delimited_concat(existing, new)
     assert out is not None
-    assert out == b'id,v\r\n1,"a\rb"\r\n2,"x\ry"\n'
+    assert out == b'id,v\r\n1,"a\rb"\r\n2,"x\ry"\r\n'
+    # Only the record break moved: the quoted CR is byte for byte the same.
+    assert out.count(b'"x\ry"') == 1
 
 
 def test_delimited_concat_mismatched_headers_decline():

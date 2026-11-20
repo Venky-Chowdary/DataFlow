@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -48,11 +49,31 @@ logger = logging.getLogger(__name__)
 _field = writer_identifier("mongodb")
 
 
+#: Protections whose output is a fixed text token, never a document.
+_TOKEN_PROTECTIONS = frozenset({"redact", "hash_pii"})
+
+
+def bind_mongo_json_field(value: Any, transform: str = "") -> Any:
+    """Bind a cell into a Mongo JSON/OBJECT/ARRAY/VARIANT field.
+
+    A column the mapping protects with ``redact`` or ``hash_pii`` carries the
+    redact token or the HMAC digest, which is text. It is stored as a JSON
+    string value (RFC 8259 allows a string as a JSON text): what the SQL JSON
+    destinations bind and what the read-back expects (D397). The decision is
+    the mapping's transform, shared with the coercion probe; a value that
+    merely looks like a token is judged as JSON like any other text.
+    """
+    if isinstance(value, str) and str(transform or "").strip().lower() in _TOKEN_PROTECTIONS:
+        return value
+    return bind_mongo_json_document(value)
+
+
 def bind_mongo_json_document(value: Any) -> Any:
     """Parse a Mongo JSON/OBJECT/ARRAY/VARIANT cell.
 
     Numbers match ``json_loads_exact``. Invalid text refuses — never store the
-    raw string as a silent invent. Non-finite constants refuse.
+    raw string as a silent invent. Non-finite constants refuse. A protected
+    column's token is bound by :func:`bind_mongo_json_field`, by transform.
     """
     if isinstance(value, (dict, list)):
         return value
@@ -1179,7 +1200,7 @@ def write_mapped_rows(
                 refusal = json_number_refusal(value, engine="mongodb", ddl_type=upper)
                 if refusal:
                     raise ValueError(refusal)
-                return bind_mongo_json_document(value)
+                return bind_mongo_json_field(value, transform)
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
 
@@ -1254,6 +1275,29 @@ def write_mapped_rows(
             carrier_label="MongoDB date",
         )
         if ms_guard.refusal:
+            # The batch is not written (D148). Each refused row is still named,
+            # with its key, so the job and the transform proof can say why the
+            # destination is short instead of blaming an unrelated recipe step.
+            guard_details = list(rejected_details)
+            seen_rows: set[int] = set()
+            key_names = [str(c) for c in (conflict_columns or []) if str(c) in target_cols]
+            for row_no, col in ms_guard.refused_cells:
+                idx = row_no - 1
+                row = mapped_rows[idx] if 0 <= idx < len(mapped_rows) else []
+                values = {
+                    c: (row[i] if i < len(row) else None)
+                    for i, c in enumerate(target_cols)
+                }
+                detail: dict[str, Any] = {
+                    "row": row_no,
+                    "column": col,
+                    "reason": ms_guard.refusal,
+                    "values": values,
+                }
+                if key_names:
+                    detail["source_pk"] = [values.get(c) for c in key_names]
+                guard_details.append(detail)
+                seen_rows.add(row_no)
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -1262,8 +1306,8 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=0,
                 error=ms_guard.refusal,
-                rejected_rows=rejected_rows,
-                rejected_details=list(rejected_details),
+                rejected_rows=len(seen_rows) or rejected_rows,
+                rejected_details=guard_details,
                 warnings=transform_errors,
             )
 

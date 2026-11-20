@@ -88,7 +88,7 @@ from .stream_commit_window import (
 )
 from .stream_row_accounting import (
     _raw_page_rows,
-    stamp_incremental_no_op,
+    stamp_incremental_no_op, incremental_pass_empty,
     reader_population,
     stamp_source_row_count,
 )
@@ -474,7 +474,11 @@ def _stream_database_transfer_impl(
         contract.sync_mode if contract else None,
     )
     run.cfg.incremental = requires_incremental(run.cfg.effective_sync)
-    run.cfg.cursor_source_col = contract.cursor_field if contract else ""
+    from .engine_kafka import kafka_run_cursor  # D404: the plan's cursor rule
+
+    run.cfg.cursor_source_col = kafka_run_cursor(
+        run.cfg.src_type, run.cfg.incremental, contract.cursor_field if contract else ""
+    )
     run.cfg.pk_target_cols: list[str] = []
     run.cfg.pk_source_cols: list[str] = []
     run.cfg.cursor_pk_source = ""
@@ -610,6 +614,7 @@ def _stream_database_transfer_impl(
         _fast_path_source_catalog(run.cfg.src_read_type, run.cfg.mappings, run.cfg.schema, _src_rich_catalog),
         run.cfg.mappings,
         resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+        run.cfg.effective_sync,
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
@@ -2837,7 +2842,7 @@ def _stream_database_transfer_impl(
                     )
                 state["conn"] = None
 
-    if run.tally.written == 0 and run.cfg.incremental:
+    if run.cfg.incremental and incremental_pass_empty(run.tally):
         run.cfg.ddl_log.append("INCREMENTAL — no new rows since last watermark")
         run.tally.dest_summary["sync_mode"] = run.cfg.effective_sync
         # No batch ran, so no writer summary named the table; the job record

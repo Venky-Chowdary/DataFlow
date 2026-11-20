@@ -186,12 +186,16 @@ def copy_s3_to_postgres(
                     f"source object {src_key!r} spells NULL as \\N; the row "
                     "path's CSV codec reads it (COPY's CSV NULL is the empty field)"
                 )
-            if ext == "tsv" and scan.quote:
-                # G7 B1: PG's CSV parser reads a mid-field '"' (raw in a
-                # product TSV) as a quote; the row path reads it literally.
+            if scan.bare_quote:
+                # PostgreSQL's CSV parser opens a quoted section at a mid-field
+                # '"' (a raw TSV cell 5" pipe, or a"b"c in a CSV): a"b"c loads
+                # as abc and the next rows can merge into one field. A
+                # well-formed quoted field (the dialect this product writes,
+                # '' as "" included) is COPY CSV; anything else takes the row
+                # path, whose codec reads the quote literally.
                 raise FastPathUnavailable(
-                    f"source TSV object {src_key!r} holds a quote character; "
-                    "COPY (FORMAT csv) would read a mid-field quote as quoting"
+                    f"source object {src_key!r} holds a quote that is not a "
+                    "quoted field; COPY (FORMAT csv) would read it as quoting"
                 )
             _census_csv_cells(tmp_path, ext, src_key, pg_ddls)
             # C04 is PostgreSQL's own CSV rule: NULL '' makes an unquoted empty
@@ -201,7 +205,9 @@ def copy_s3_to_postgres(
                 f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
                 f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
             )
-            with open(tmp_path, "r", encoding="utf-8") as handle:
+            from services.csv_codec import open_delimited_text
+
+            with open_delimited_text(tmp_path) as handle:
                 from services.cancel_check import copy_expert_keeping_cancel
 
                 copy_expert_keeping_cancel(dst_cur, copy_sql, handle)

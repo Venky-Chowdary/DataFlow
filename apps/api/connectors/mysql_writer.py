@@ -15,6 +15,12 @@ from services.reversibility_enforce import scan_pass
 
 from connectors.destination_naming import column_key
 from connectors.mysql_conn import get_connection
+from connectors.column_widen_restore import (
+    bind_restore_cursor,
+    settle_widen_restore,
+    widen_restore_pending,
+    writer_restore_guard,
+)
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -650,6 +656,7 @@ def _mysql_materialize_mapped_batch(
     )
 
 
+@writer_restore_guard
 def write_mapped_rows(
     *,
     host: str,
@@ -1301,6 +1308,7 @@ def write_mapped_rows(
                 )
 
             suppressed_widens: dict[str, str] = {}
+            bind_restore_cursor(cursor)
             widen_existing_columns_native(
                 cursor,
                 "mysql",
@@ -2013,6 +2021,15 @@ def write_mapped_rows(
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        # Quarantine does not set the abort flag. A widen with nothing
+        # committed is restored on every policy, before close (D368).
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
+        restore_empty_widen = int(written or 0) == 0 and widen_restore_pending()
+        settle_widen_restore(
+            conn,
+            rows_written=written,
+            failed=bool(child_flush_error) or restore_empty_widen,
+        )
         close_quietly(conn)
         load_method = (
             "load_data"
@@ -2040,7 +2057,6 @@ def write_mapped_rows(
                 warnings=transform_errors,
                 load_method=load_method,
             )
-        _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
         if _final_abort:
             return WriteResult(
                 ok=False,
@@ -2100,6 +2116,9 @@ def write_mapped_rows(
         # D102: cancel is control flow, not a write failure.
         raise
     except Exception as exc:
+        settle_widen_restore(
+            conn, rows_written=written, failed=True, original=exc
+        )
         close_quietly(conn)
         return WriteResult(
             ok=False,

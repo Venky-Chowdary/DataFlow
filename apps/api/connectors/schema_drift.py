@@ -171,6 +171,99 @@ def widen_keeps_logical_family(old_type: str, new_type: str) -> bool:
     return bool(old_logical == new_logical)
 
 
+# CHAR/VARCHAR/NCHAR/NVARCHAR with no length and no MAX. SQL Server's
+# data-definition default for that spelling is length 1.
+_UNSIZED_CHARACTER_DDL = re.compile(
+    r"^(?:NATIONAL\s+)?(?:CHARACTER(?:\s+VARYING)?|N?CHAR|N?VARCHAR|NVARCHAR2|VARCHAR2)\s*$",
+    re.IGNORECASE,
+)
+
+
+def character_ddl_is_unsized(type_name: str | None) -> bool:
+    """True when a character DDL token has no length and is not a LOB.
+
+    ``VARCHAR`` with no ``(n)`` is ``VARCHAR(1)`` in a SQL Server data
+    definition (Microsoft char and varchar). ``TEXT`` / ``CLOB`` /
+    ``VARCHAR(MAX)`` are unlimited carriers and are not this case.
+    """
+    from services.type_system import is_unlimited_string_carrier
+
+    text = re.sub(
+        r"\s+COLLATE\s+\S.*$", "", (type_name or "").strip(), flags=re.I
+    ).strip()
+    if not text or "(" in text:
+        return False
+    if is_unlimited_string_carrier(text):
+        return False
+    return bool(_UNSIZED_CHARACTER_DDL.match(text))
+
+
+def _oracle_character_capacity(type_name: str) -> int | None:
+    """Characters a VARCHAR2/NVARCHAR2 length can hold.
+
+    Oracle's default unit is BYTE. AL32UTF8 uses up to 4 bytes per character,
+    so ``VARCHAR2(800 BYTE)`` holds 200 characters and is not a widen of
+    ``VARCHAR2(400 CHAR)``. An explicit ``CHAR`` length is a character count.
+    ``NVARCHAR2`` is characters. A plain ``CHAR(n)`` with no unit is left to
+    the caller: SQL Server ``CHAR`` is not Oracle BYTE.
+    """
+    upper = str(type_name or "").upper()
+    match = re.search(r"\b(N?VARCHAR2|N?CHAR)\s*\(\s*(\d+)\s*(CHAR|BYTE)?", upper)
+    if not match:
+        return None
+    kind, raw, unit = match.group(1), match.group(2), match.group(3)
+    if kind in {"CHAR", "NCHAR"} and unit is None:
+        return None
+    count = int(raw)
+    if kind.startswith("N") or unit == "CHAR":
+        return count
+    return count // 4
+
+
+def _string_span_for_widen(type_name: str) -> tuple[int | None, bool]:
+    """``(declared length, unlimited)`` for a character carrier.
+
+    Unlimited means TEXT/CLOB/VARCHAR(MAX). An explicit ``(n)`` is that
+    length. A bare character token has no proven span: it is not unlimited,
+    so it never licenses a widen. Oracle BYTE lengths are converted to
+    characters at 4 bytes per character before the comparison.
+    """
+    from services.type_system import is_unlimited_string_carrier
+
+    if is_unlimited_string_carrier(type_name) or normalize_logical_type(type_name) == "text":
+        return None, True
+    oracle = _oracle_character_capacity(type_name)
+    if oracle is not None:
+        return (oracle, False) if oracle > 0 else (None, False)
+    length = _type_length(type_name)
+    if length is not None and length > 0:
+        return length, False
+    return None, False
+
+
+def existing_carrier_holds_source(
+    source_type: str | None,
+    existing_type: str | None,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when the live column already stores every source value.
+
+    SQL Server materializes a logical INTEGER as BIGINT. That invention is
+    not a reason to ALTER an operator's INT column when the source is still
+    32-bit (D368). A real BIGINT source does not fit and is not suppressed.
+    """
+    source = str(source_type or "").strip()
+    existing = str(existing_type or "").strip()
+    if not source or not existing:
+        return False
+    if not is_lossy_coercion(source, existing, dest_db=dest_db):
+        return True
+    src_w = _integer_bit_width(source)
+    dst_w = _integer_bit_width(existing)
+    return src_w is not None and dst_w is not None and dst_w >= src_w
+
+
 def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
@@ -186,16 +279,18 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     if old_vb and new_vb:
         return int(new_vb.group(1)) > int(old_vb.group(1))
 
-    # String / text family: compare length, treating TEXT/unlimited as max.
+    # String / text family: compare a proven span. Unsized VARCHAR is not
+    # unlimited (D368). Unicode loss is refused when the ALTER is built:
+    # the source spelling VARCHAR(n) is only a width witness here.
     if _is_string_like(old_logical) and _is_string_like(new_logical):
-        old_len = _type_length(old_type)
-        new_len = _type_length(new_type)
-        old_is_unlimited = old_logical == "text" or old_len is None
-        new_is_unlimited = new_logical == "text" or new_len is None
-        if old_is_unlimited:
+        old_len, old_unlimited = _string_span_for_widen(old_type)
+        new_len, new_unlimited = _string_span_for_widen(new_type)
+        if old_unlimited:
             return False
-        if new_is_unlimited:
+        if new_unlimited:
             return True
+        if old_len is None or new_len is None:
+            return False
         return new_len > old_len
 
     if old_logical == new_logical:
@@ -259,6 +354,8 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
     # Cross-logical promotions to string-like: length must be sufficient.
     if _is_string_like(new_logical):
+        if character_ddl_is_unsized(new_type):
+            return False
         min_len = _minimum_string_length_for(old_type)
         new_len = _type_length(new_type)
         if new_len is None:
@@ -484,6 +581,21 @@ def _build_widen_ddl(
     """
     dialect = (dialect or "").lower()
     new_type = _sanitize_ddl_type(materialize_widen_type(dialect, new_type))
+    if character_ddl_is_unsized(new_type):
+        raise ValueError(
+            f"Refusing ALTER to unsized character type {new_type!r}. "
+            "A data-definition CHAR/VARCHAR/NCHAR/NVARCHAR without a length "
+            "is length 1 on SQL Server and is never a widen. Name (n) or (MAX)."
+        )
+    if existing_type:
+        from services.type_system import national_charset_would_collapse
+
+        if national_charset_would_collapse(existing_type, new_type, dest_db=dialect):
+            raise ValueError(
+                f"Refusing ALTER that drops Unicode on {dialect or 'this engine'}: "
+                f"{existing_type} -> {new_type}. Keep NVARCHAR/NCHAR/NCLOB "
+                "(or a longer national type), or approve a new table."
+            )
     table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
     col_q = _quote_col(dialect, col)
 
@@ -1157,6 +1269,73 @@ def mysql_keyed_widen_carrier(
     return carrier, False
 
 
+def _note_native_restore(
+    cursor: Any,
+    dialect: str,
+    schema: str | None,
+    table_name: str,
+    column: str,
+    existing_type: str,
+) -> str:
+    """Restore SQL for a column this widen just changed, recorded for a failed write.
+
+    MySQL commits the MODIFY immediately. The statement restates the captured
+    nullability and collation. A probe that is not an information_schema row
+    (test doubles) restores the type only.
+    """
+    from connectors.column_widen_restore import note_restore, restate_column_ddl
+
+    nullable: bool | None = None
+    collation = ""
+    name = (dialect or "").lower()
+    try:
+        if name in {"mysql", "mariadb"}:
+            # MODIFY replaces the whole column. The information_schema clause
+            # restates nullability, collation, DEFAULT, ON UPDATE and
+            # AUTO_INCREMENT. Parsing it back down to NULL and COLLATE dropped
+            # the rest (D368).
+            base = _build_widen_ddl(
+                name, schema, table_name, column, existing_type, existing_type
+            )
+            clause = _mysql_preserved_column_clause(
+                cursor, schema, table_name, column, existing_type
+            )
+            sql = base + clause
+            note_restore(sql)
+            return sql
+        elif name in {"postgresql", "postgres"}:
+            cursor.execute(
+                """SELECT is_nullable, collation_name
+                   FROM information_schema.columns
+                   WHERE table_schema = %s AND table_name = %s AND column_name = %s""",
+                (schema or "public", table_name, column),
+            )
+            rows = cursor.fetchall() or []
+            if rows and len(rows[0]) >= 1:
+                flag = str(rows[0][0] or "").strip().upper()
+                if flag == "NO":
+                    nullable = False
+                elif flag == "YES":
+                    nullable = True
+                if len(rows[0]) > 1 and rows[0][1]:
+                    collation = str(rows[0][1]).strip()
+    except Exception as exc:  # noqa: BLE001 — type-only restore still runs
+        logger.debug("column attribute probe failed for restore: %s", exc)
+        nullable, collation = None, ""
+    sql = restate_column_ddl(
+        name,
+        schema,
+        table_name,
+        column,
+        existing_type,
+        nullable=nullable,
+        collation=collation,
+        existing_type=existing_type,
+    )
+    note_restore(sql)
+    return sql
+
+
 def widen_existing_columns_native(
     cursor: Any,
     dialect: str,
@@ -1212,6 +1391,7 @@ def widen_existing_columns_native(
         return []
 
     log: list[str] = []
+    mysql_restores: list[tuple[str, str]] = []
     # Every key part this run widens is budgeted together, and MySQL gets one
     # ALTER TABLE for all of them: per-column MODIFYs committed ``a`` and then
     # failed ``b`` with 1071, leaving the key half-migrated.
@@ -1238,8 +1418,8 @@ def widen_existing_columns_native(
         ):
             return False
         source_type = str((source_types or {}).get(col) or "").strip()
-        return not (
-            source_type and not is_lossy_coercion(source_type, existing[col], dest_db=dialect)
+        return not existing_carrier_holds_source(
+            source_type, existing[col], dest_db=dialect
         )
 
     for col in [c for c in growing if _will_alter(c)]:
@@ -1268,7 +1448,7 @@ def widen_existing_columns_native(
         ):
             continue
         source_type = str((source_types or {}).get(col) or "").strip()
-        if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
+        if existing_carrier_holds_source(source_type, existing_type, dest_db=dialect):
             if suppressed_out is not None:
                 suppressed_out[col] = existing_type
             logger.debug(
@@ -1313,10 +1493,15 @@ def widen_existing_columns_native(
                     cursor, schema, table_name, col, new_type
                 )
                 mysql_modifies.append((ddl, col, existing_type, new_type))
+                mysql_restores.append((col, existing_type))
                 continue
             if not dry_run:
                 cursor.execute(ddl)
             log.append(ddl)
+            if not dry_run:
+                _note_native_restore(
+                    cursor, dialect, schema, table_name, col, existing_type
+                )
             logger.debug(
                 "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
             )
@@ -1346,7 +1531,13 @@ def widen_existing_columns_native(
         if dry_run:
             log.append(_combined_mysql_modify(mysql_modifies))
         else:
-            log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
+            issued = _execute_mysql_modifies(cursor, table_name, mysql_modifies)
+            log.extend(issued)
+            if issued:
+                for col, existing_type in mysql_restores:
+                    _note_native_restore(
+                        cursor, dialect, schema, table_name, col, existing_type
+                    )
     return log
 
 

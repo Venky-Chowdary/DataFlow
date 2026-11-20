@@ -460,6 +460,14 @@ class MapColumnsRequest(PolicyFieldsModel):
     source_schema: dict[str, str] = Field(default_factory=dict)
     target_columns: list[str] = Field(default_factory=list)
     target_schema: dict[str, str] = Field(default_factory=dict)
+    # Destination primary key / identity / partition key columns, as the probe
+    # read them. Map never proposes an unrelated source onto one (rule 4).
+    # Only a hint: with ``destination`` the server reads the keys from the
+    # catalog; without it only names that are target columns are kept.
+    target_key_columns: list[str] = Field(default_factory=list)
+    # The destination table being mapped onto, so its keys come from its own
+    # catalog (services.map_key_columns), not from the client's list.
+    destination: Optional[EndpointDTO] = None
     validation_mode: str = "balanced"
     file_format: Optional[str] = None
     use_llm: bool = True
@@ -659,6 +667,10 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         and all(str(body.target_schema.get(c) or "").strip() for c in body.target_columns)
         else None
     )
+    from services.key_column_guard import with_key_flags
+
+    key_columns, key_source = await _map_key_columns(body, request)
+    target_schemas = with_key_flags(target_schemas, {"primary_key_columns": key_columns})
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -722,6 +734,10 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "llm": result.get("llm", {}),
         "confidence_threshold": threshold,
         "destination_aware": bool(body.target_columns),
+        # Which keys Map protected, and where they came from (catalog or the
+        # client's list checked against the target columns).
+        "target_key_columns": key_columns,
+        "target_key_columns_source": key_source,
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
@@ -734,6 +750,33 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "nested_fields": nested_fields,
         "correlation_id": get_correlation_id(),
     }
+
+
+async def _map_key_columns(body: MapColumnsRequest, request: Request) -> tuple[list[str], str]:
+    """Map's rule-4 keys from the destination catalog, never the client's word alone."""
+    from services.map_key_columns import MAP_KEY_PROBE_TIMEOUT_S, resolve_map_key_columns
+
+    catalog = None
+    dest = body.destination
+    if dest is not None and dest.kind == "database" and (dest.table or dest.collection):
+        _assert_endpoint_connectors(request, read=(dest,))
+        from ..transfer.endpoint_intelligence import introspect_endpoint
+        from ..transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig.from_dict(dest.kind, dest.model_dump(by_alias=True))
+        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "destination"}
+        try:
+            catalog = await asyncio.wait_for(
+                asyncio.to_thread(introspect_endpoint, endpoint), MAP_KEY_PROBE_TIMEOUT_S
+            )
+        except Exception as exc:  # an unreadable catalog falls back to the checked list
+            logging.getLogger(__name__).warning(
+                "Map could not read the destination keys; using checked client keys: %s", exc
+            )
+            catalog = None
+    return resolve_map_key_columns(
+        body.target_key_columns, target_columns=body.target_columns, catalog=catalog
+    )
 
 
 class CreatePlanRequest(BaseModel):
@@ -1456,6 +1499,17 @@ async def execute_transfer_json(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
+    from services.transform_binding import compile_transfer_recipe
+
+    try:
+        compile_transfer_recipe(request_obj)
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.recipe_compile.refused",
+            public_message="Could not compile the saved transform recipe.",
+            status_code=400,
+        ) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -1568,6 +1622,27 @@ async def execute_transfer_json(
     }
 
 
+def incomplete_transfer_run_detail(*, has_source: bool, has_destination: bool) -> str:
+    """Why POST /transfer/run must not start, or ``""`` when it may.
+
+    An empty form used to create a job on the form defaults (source file,
+    MongoDB ``test_db``). A destination with no source did the same (D374).
+    A file with no explicit destination is still the upload form: the caller
+    supplied a source.
+    """
+    if has_source:
+        return ""
+    if has_destination:
+        return (
+            "Name a source. This request has a destination and no source, "
+            "so no job was started."
+        )
+    return (
+        "Name a source and a destination. This request has neither, "
+        "so no job was started."
+    )
+
+
 @router.post("/run")
 async def run_universal_transfer(
     background_tasks: BackgroundTasks,
@@ -1664,6 +1739,34 @@ async def run_universal_transfer(
     continue-policy Risk Contract on the mapped columns that need one, so rows
     that fail to cast are quarantined and the valid rows load (QA r12 D2).
     """
+    supplied_source = any(
+        (
+            file is not None and bool(getattr(file, "filename", None)),
+            str(source_connector_id or "").strip(),
+            str(source_host or "").strip(),
+            str(source_connection_string or "").strip(),
+            str(source_table or "").strip(),
+            str(source_collection or "").strip(),
+            str(source_database or "").strip(),
+            str(source_file_id or "").strip(),
+        )
+    )
+    supplied_dest = any(
+        (
+            str(dest_connector_id or "").strip(),
+            str(dest_host or "").strip(),
+            str(dest_connection_string or "").strip(),
+            str(dest_table or "").strip(),
+            str(dest_collection or "").strip(),
+            str(dest_output_path or "").strip(),
+        )
+    )
+    if detail := incomplete_transfer_run_detail(
+        has_source=supplied_source, has_destination=supplied_dest
+    ):
+        # Form defaults (source file, mongodb test_db) are not an operator choice.
+        # A destination with no source used to run on those defaults (D374).
+        raise HTTPException(status_code=422, detail=detail)
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
         assert_delivery_guarantee_allowed,
@@ -2068,6 +2171,17 @@ async def run_universal_transfer(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
+    from services.transform_binding import compile_transfer_recipe
+
+    try:
+        compile_transfer_recipe(request_obj)
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.recipe_compile.refused",
+            public_message="Could not compile the saved transform recipe.",
+            status_code=400,
+        ) from exc
 
     engine = get_transfer_engine()
     try:

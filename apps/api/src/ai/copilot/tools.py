@@ -2580,11 +2580,12 @@ class DataPilotTools:
             safe_preview["readable_objects"] = readable_objects
         if readable_warning:
             safe_preview["warning"] = readable_warning
-        from .ack_ledger import get_ack_ledger
+        from .ack_ledger import get_ack_ledger, stamp_caller_workspace
 
+        # D363: staged with the caller's workspace, like start_transfer.
         ack_id = get_ack_ledger().put(
             kind="create_connector",
-            payload=draft,
+            payload=stamp_caller_workspace(draft),
             preview=safe_preview,
         )
         return ToolResult(
@@ -2843,7 +2844,10 @@ class DataPilotTools:
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
-                "phase_timings": job_phase_timings(job),
+                # The timings stamped on the finished record, so get_job and the
+                # record agree; recomputing read a later updated_at (D308 AC-4).
+                "phase_timings": job.get("phase_timings")
+                if isinstance(job.get("phase_timings"), dict) else job_phase_timings(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,

@@ -759,6 +759,47 @@ def _recipe_hash(payload: dict[str, Any]) -> str:
     return ShapeRecipe.parse(payload).recipe_hash
 
 
+def _apply_compiled_shape(
+    recipe: dict[str, Any],
+    src_names: list[str],
+    src_rows: list[dict[str, Any]],
+    sample_rows: list[dict[str, Any]],
+    source_format: str,
+) -> str | tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]]]:
+    """Shape the sample Map and the gates see, or the refusal text.
+
+    Map decides each carrier from the values the writer will receive. The
+    confirmed preview and the execute recipe are this same image.
+    """
+    from services.shape_apply import is_typed_value_source
+    from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
+
+    try:
+        image = shaped_preflight_image(
+            recipe,
+            columns=src_names,
+            column_types={r["name"]: r["inferred_type"] for r in src_rows},
+            sample_rows=sample_rows,
+            typed_values=is_typed_value_source(source_format),
+        )
+    except ShapePreflightRefused as exc:
+        return str(exc)
+    shaped_rows = list(image.sample_rows or [])
+    samples = _column_samples(shaped_rows, src_names)
+    touched = set(image.retyped_columns) | {
+        str(st.get("column") or "") for st in (recipe.get("steps") or [])
+    }
+    rows = [
+        {
+            **r,
+            "inferred_type": image.column_types.get(r["name"], r["inferred_type"]),
+            "samples": (samples.get(r["name"]) or []) if r["name"] in touched else r["samples"],
+        }
+        for r in src_rows
+    ]
+    return rows, shaped_rows, samples
+
+
 def _shape_plan_image(
     pipelines: dict[str, list[str]],
     src_names: list[str],
@@ -773,35 +814,16 @@ def _shape_plan_image(
     Same image function, same value model as Studio Validate and Execute.
     """
     from services.column_transform_chain import compile_column_chains
-    from services.shape_apply import is_typed_value_source
-    from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
 
     recipe, refusal = compile_column_chains(pipelines, src_names)
     if refusal:
         return refusal
-    try:
-        image = shaped_preflight_image(
-            recipe,
-            columns=src_names,
-            column_types={r["name"]: r["inferred_type"] for r in src_rows},
-            sample_rows=sample_rows,
-            typed_values=is_typed_value_source(source_format),
-        )
-    except ShapePreflightRefused as exc:
-        return str(exc)
-    shaped_rows = list(image.sample_rows or [])
-    samples = _column_samples(shaped_rows, src_names)
-    touched = set(image.retyped_columns) | {
-        str(st.get("column") or "") for st in recipe.get("steps") or []
-    }
-    rows = [
-        {
-            **r,
-            "inferred_type": image.column_types.get(r["name"], r["inferred_type"]),
-            "samples": (samples.get(r["name"]) or []) if r["name"] in touched else r["samples"],
-        }
-        for r in src_rows
-    ]
+    applied = _apply_compiled_shape(
+        recipe, src_names, src_rows, sample_rows, source_format
+    )
+    if isinstance(applied, str):
+        return applied
+    rows, shaped_rows, samples = applied
     return recipe, rows, shaped_rows, samples
 
 
@@ -912,6 +934,10 @@ def plan_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    transform_recipe_id: str = "",
+    transform_recipe_version: int = 0,
+    transform_recipe_version_mode: str = "pin",
+    transform_recipe_params: dict[str, Any] | None = None,
     cursor_column: str = "",
     cursor_semantics: str = "",
     cursor_lookback_days: int = 0,
@@ -1057,10 +1083,16 @@ def plan_transfer(
         return _tool_result(tool, success=False, error=not_a_source)
     # D345: a Planned connector whose driver is not installed here cannot be
     # planned or run; say so before the gates blame the destination or DDL.
-    from src.transfer.connector_capabilities import planned_driver_message
+    # D47: nor a Certified connector whose driver package this host lacks
+    # (Execute refuses it through endpoint_allowed_for_role; plan asks first).
+    from src.transfer.connector_capabilities import (
+        driver_environment_gap,
+        planned_driver_message,
+    )
 
     for conn in (dst_conn, src_conn):
-        if not_installed := planned_driver_message(str(conn.get("type") or conn.get("format") or "")):
+        kind = str(conn.get("type") or conn.get("format") or "")
+        if not_installed := planned_driver_message(kind) or driver_environment_gap(kind):
             return _tool_result(tool, success=False, error=not_installed)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
@@ -1206,6 +1238,18 @@ def plan_transfer(
     if rules_error:
         return _tool_result(tool, success=False, error=rules_error)
     mode = row_rules["sync_mode"]
+    from services.schema_fidelity import append_existing_key_disclosure
+
+    # D395/R6/R8: append into a keyed table is allowed and disclosed, not refused.
+    append_key_note = append_existing_key_disclosure(
+        sync_mode=mode,
+        table_exists=dest_exists is True,
+        key_columns=[
+            part.strip()
+            for part in _source_primary_key(dst_info).split(",")
+            if part.strip()
+        ],
+    )
     # A filter narrows what the run must move, so every gate that reasons about
     # "the rows about to be written" has to see the filtered sample.
     if row_rules["source_filter"]:
@@ -1266,7 +1310,61 @@ def plan_transfer(
             **(src_info.get("schema") or {}),
             **{r["name"]: r["inferred_type"] for r in src_rows},
         }
-    dst_rows = _schema_rows(dst_info.get("columns") or [])
+    library_recipe_id = str(transform_recipe_id or "").strip()
+    library_recipe_version = 0
+    library_recipe_hash = ""
+    if library_recipe_id:
+        # A saved recipe is the run. Compiling it here is what Confirm and
+        # Execute both persist; an id with an empty shape_recipe shipped the
+        # raw rows (D400). A recipe that cannot compile is refused before Confirm.
+        if shape_recipe.get("steps"):
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"Transform recipe {library_recipe_id} and column pipelines "
+                    "are both set. Put every step in the library recipe, or "
+                    "drop the recipe id, then stage the run again."
+                ),
+            )
+        from services.transform_binding import resolve_recipe_binding
+
+        recipe_mode = str(transform_recipe_version_mode or "pin").strip().lower() or "pin"
+        try:
+            bound = resolve_recipe_binding(
+                library_recipe_id,
+                version=(
+                    (int(transform_recipe_version or 0) or None)
+                    if recipe_mode == "pin"
+                    else None
+                ),
+                params=transform_recipe_params if isinstance(transform_recipe_params, dict) else None,
+                source_columns=src_names,
+                workspace_id=str(src_conn.get("workspace_id") or "") or None,
+            )
+        except ValueError as exc:
+            return _tool_result(tool, success=False, error=str(exc))
+        applied = _apply_compiled_shape(
+            bound.payload,
+            src_names,
+            src_rows,
+            sample_rows,
+            _engine_format(src_info),
+        )
+        if isinstance(applied, str):
+            return _tool_result(tool, success=False, error=applied)
+        src_rows, sample_rows, samples = applied
+        shape_recipe = bound.payload
+        library_recipe_version = bound.bound_version
+        library_recipe_hash = bound.recipe_hash
+        src_info["schema"] = {
+            **(src_info.get("schema") or {}),
+            **{r["name"]: r["inferred_type"] for r in src_rows},
+        }
+    from services.key_column_guard import with_key_flags
+
+    # Rule 4: the mapper protects the destination's keys only if it sees them.
+    dst_rows = with_key_flags(_schema_rows(dst_info.get("columns") or []), dst_info) or []
     # Document metadata keys are the source's own columns, not the physical
     # id/content/embedding/metadata columns of an existing document table.
     is_document = bool(pgvector_layout and pgvector_layout[0] == LAYOUT_DOCUMENT)
@@ -1353,6 +1451,8 @@ def plan_transfer(
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
         cursor_lookback_days=cursor_lookback_days,
+        source_type=str(src_info.get("db_type") or src_conn.get("type") or ""),
+        dest_type=_engine_format(dst_info),
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
@@ -1379,6 +1479,7 @@ def plan_transfer(
 
     blocked_for_contract: set[str] = set()
     preflight: dict[str, Any] = {}
+    keep_last_file = False
     for _contract_pass in (1, 2):
         if risk_acceptance:
             try:
@@ -1399,6 +1500,47 @@ def plan_transfer(
             role="source",
             also=(("destination", dst_conn),),
         )
+        from services.preflight_source_kind import file_overwrite_keep_last
+
+        source_config = _stamp_callable_source_config(
+            _endpoint_dict(src_info.get("endpoint")),
+            callable_plan,
+        )
+        # Only a declared dedupe_key collapses copies, by that key (R4). A
+        # primary_key or upsert_key on an overwrite names the identity; its
+        # in-file repeats still block on the duplicate-identity gate.
+        dedupe_named = str(dedupe_key or "").strip()
+        keep_last_file = file_overwrite_keep_last(
+            source_kind="database",
+            source_format=_engine_format(src_info),
+            sync_mode=mode,
+            dedupe_key=dedupe_named,
+        )
+        if keep_last_file:
+            # A file has a row order. Overwrite plus the operator's key keeps
+            # the last copy and says so. A table is not stamped (no ORDER BY).
+            from services.duplicate_policy import multi_stream_keep_last_refusal
+
+            multi = multi_stream_keep_last_refusal(_engine_format(src_info), contracts)
+            if multi:
+                return _tool_result(tool, success=False, error=multi)
+            source_config = {
+                **source_config,
+                "in_file_dedupe": "keep_last",
+                "dedupe_key": dedupe_named,
+            }
+        elif str(dedupe_key or "").strip():
+            from services.preflight_source_kind import dedupe_key_unhonoured_reason
+
+            reason = dedupe_key_unhonoured_reason(
+                source_kind="database",
+                source_format=_engine_format(src_info),
+                sync_mode=mode,
+                dedupe_key=str(dedupe_key or ""),
+                mode_was_explicit=bool(requested_sync_mode),
+            )
+            if reason:
+                return _tool_result(tool, success=False, error=reason)
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,
@@ -1411,10 +1553,7 @@ def plan_transfer(
             schema_policy=schema_policy,
             validation_mode=validation_mode,
             src_db_type=_engine_format(src_info),
-            source_config=_stamp_callable_source_config(
-                _endpoint_dict(src_info.get("endpoint")),
-                callable_plan,
-            ),
+            source_config=source_config,
             dest_db_type=_engine_format(dst_info),
             dest_exists=map_dest_exists,
             source_primary_key=(
@@ -1483,6 +1622,8 @@ def plan_transfer(
     if contract:
         preflight = attach_contract_to_preflight(preflight, contract)
 
+    from services.row_filter import null_dropping_warnings
+
     return _tool_result(
         tool,
         success=True,
@@ -1542,10 +1683,23 @@ def plan_transfer(
             **(
                 {
                     "shape_recipe": shape_recipe,
-                    "approved_shape_recipe_hash": _recipe_hash(shape_recipe),
+                    "approved_shape_recipe_hash": library_recipe_hash or _recipe_hash(shape_recipe),
                     "column_pipelines": column_pipelines,
                 }
                 if shape_recipe
+                else {}
+            ),
+            **(
+                {
+                    "transform_recipe_id": library_recipe_id,
+                    "transform_recipe_version": library_recipe_version,
+                    "transform_recipe_version_mode": str(
+                        transform_recipe_version_mode or "pin"
+                    ).strip().lower()
+                    or "pin",
+                    "transform_recipe_params": dict(transform_recipe_params or {}),
+                }
+                if library_recipe_id
                 else {}
             ),
             "column_types": {r["name"]: r["inferred_type"] for r in src_rows},
@@ -1558,6 +1712,21 @@ def plan_transfer(
             ),
             "sync_mode": mode,
             "sync_mode_requested": (sync_mode or "").strip(),
+            **(
+                {
+                    "in_file_dedupe": "keep_last",
+                    "dedupe_key": str(dedupe_key or "").strip(),
+                    "in_file_dedupe_note": (
+                        "Overwrite keeps the last row of each "
+                        f"{str(dedupe_key or '').strip()}. "
+                        "Inside one file, last is the last row. Across a folder, "
+                        "last is the file with the greatest modified time, then "
+                        "the file name. Earlier copies of that key are not written."
+                    ),
+                }
+                if keep_last_file
+                else {}
+            ),
             **(
                 {
                     "sync_mode_alias_note": (
@@ -1577,6 +1746,8 @@ def plan_transfer(
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
+            "warnings": null_dropping_warnings(row_rules["source_filter"])
+            + ([append_key_note] if append_key_note else []),
             "stream_contracts": row_rules["stream_contracts"],
             "data_rules": _data_rules_preview(row_rules, applied_rules, cadence),
             "mapped_count": len(mappings),
@@ -1632,6 +1803,10 @@ _UNREACHABLE_MARKERS = (
     "unreachable",
     "name or service not known",
     "no route to host",
+    "unavailable or does not exist",
+    "unable to connect",
+    "adaptive server is unavailable",
+    "getaddrinfo",
 )
 
 
@@ -1655,7 +1830,21 @@ def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) ->
     target = describe_target(src_conn)
     name = src_conn.get("name") or "the source"
     where = f"{name} ({target})" if target else str(name)
-    if any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+    from services.error_taxonomy import (
+        SQLSERVER_OBJECT_OR_AUTH,
+        sqlserver_error_numbers,
+        sqlserver_is_network_failure,
+    )
+
+    # pymssql appends "DB-Lib error" to a missing table (208) and a bad login
+    # (18456). Those are not a dead host (D366).
+    numbers = sqlserver_error_numbers(detail)
+    unreachable = bool(numbers) and sqlserver_is_network_failure(detail)
+    if not numbers and any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+        unreachable = True
+    if any(n in SQLSERVER_OBJECT_OR_AUTH for n in numbers):
+        unreachable = False
+    if unreachable:
         return (
             f"source unreachable/slow: {where} did not answer while reading "
             f"`{src_table}` ({detail.strip()}). Check the host and port, the "
@@ -1830,6 +2019,8 @@ def _identity_stream_contract(
     cursor_column: str = "",
     cursor_semantics: str = "",
     cursor_lookback_days: int = 0,
+    source_type: str = "",
+    dest_type: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
@@ -1842,9 +2033,15 @@ def _identity_stream_contract(
     ``modification_timestamp`` — the plan says so. Two candidates are not a
     guess, a missing column is not invented, and a named cursor with no
     semantics stays undeclared so the gate can still refuse it.
+
+    An Elasticsearch document needs an ``_id`` in every mode. The plan's g6
+    gate counts the source catalog key as that identity, so the contract
+    carries it too: Execute (its own preflight and the writer) reads the same
+    key, instead of refusing a run Validate passed (D300). Insert and append
+    index with ``op_type=create``, so a key already present fails loudly (R6).
     """
     from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
-    from services.primary_key import mapped_catalog_upsert_key
+    from services.primary_key import _is_elasticsearch_kind, mapped_catalog_upsert_key
     from services.sync_cursor import normalize_sync_mode as engine_sync_mode
 
     if (mode or "").strip():
@@ -1877,7 +2074,9 @@ def _identity_stream_contract(
                 "so the write cannot merge on it. Map that column, or name a "
                 "key that is mapped."
             )
-    elif mode in MODES_REQUIRING_PRIMARY_KEY and catalog_key:
+    elif catalog_key and (
+        mode in MODES_REQUIRING_PRIMARY_KEY or _is_elasticsearch_kind(dest_type)
+    ):
         known = {col.lower(): col for col in source_columns}
         parts = [part.strip() for part in catalog_key.split(",") if part.strip()]
         if parts and all(part.lower() in known for part in parts):
@@ -1942,10 +2141,17 @@ def _identity_stream_contract(
                 MODIFICATION_TIMESTAMP,
                 sole_modification_timestamp_column,
             )
+            from services.copy_kafka_common import kafka_family_name
             from services.preflight_cursor_gate import MODES_REQUIRING_CURSOR
 
             picked = ""
-            if mode in MODES_REQUIRING_CURSOR:
+            # Kafka has no table cursor. Inferring updated_at from the payload
+            # made the plan look safe and the first run refuse to page (D404).
+            # The consumer-group offset is the cursor.
+            if (
+                mode in MODES_REQUIRING_CURSOR
+                and kafka_family_name(source_type) != "kafka"
+            ):
                 picked = sole_modification_timestamp_column(source_columns)
             if picked:
                 cursor = picked
@@ -2051,6 +2257,26 @@ def _preflight_issue_lines(details: dict[str, Any]) -> list[str]:
             if reason and reason not in lines:
                 lines.append(reason)
     return lines[:3]
+
+
+def _align_confirmed_preflight(payload: dict[str, Any]) -> None:
+    """Hash the request Confirm will execute, not the narrower plan subset.
+
+    A fingerprint that does not cover destination schema, database, extra,
+    duplicate policy, backfill, reversibility, acknowledgments, contracts and
+    locales does not match this hash, so reuse is skipped (D308).
+    """
+    run_id = str(payload.get("preflight_run_id") or "").strip()
+    if not run_id:
+        return
+    try:
+        from services.confirmed_transfer import transfer_request_from_ack
+        from services.staged_preflight import align_staged_preflight
+
+        # The builder Confirm uses, so both sides hash the same request (D308).
+        align_staged_preflight(run_id, transfer_request_from_ack(payload))
+    except Exception:
+        _LOG.debug("staged preflight was not aligned to the confirm request", exc_info=True)
 
 
 def _run_preflight(
@@ -2332,6 +2558,48 @@ def _run_preflight(
             dest_label=f"{dst_conn.get('name')}.{dst_table}",
             validation_mode=validation_mode,
             route=f"{src_conn.get('type')}->{dst_conn.get('type')}",
+        )
+        from services.staged_preflight import (
+            destination_schema_version,
+            preflight_input_fingerprint,
+            remember_staged_preflight,
+        )
+
+        remember_staged_preflight(
+            str(result.get("run_id") or ""),
+            preflight_input_fingerprint(
+                source_connector_id=str(src_conn.get("id") or ""),
+                source_table=src_table,
+                source_schema=str(src_conn.get("schema") or ""),
+                source_database=str(src_conn.get("database") or ""),
+                source_format=src_db_type,
+                source_extra=source_config if isinstance(source_config, dict) else {},
+                destination_connector_id=str(dst_conn.get("id") or ""),
+                destination_table=dst_table,
+                destination_schema=str(dst_conn.get("schema") or ""),
+                destination_database=str(dst_conn.get("database") or ""),
+                destination_db_type=dest_db_type,
+                destination_extra=dst_conn.get("extra") if isinstance(dst_conn.get("extra"), dict) else {},
+                mappings=mappings,
+                sync_mode=mode,
+                schema_policy=schema_policy,
+                validation_mode=validation_mode,
+                source_filter=source_filter,
+                shape_recipe=shape_recipe,
+                stream_contracts=list(stream_contracts or []),
+                compliance_acknowledged=bool(pii_ack),
+                schema_drift_acknowledged=bool(schema_drift_acknowledged),
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+                ddl_changes_acknowledged=bool(ddl_ack),
+                acknowledgment_actor=(pii_ack or ddl_ack or {}).get("approved_by", ""),
+                acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
+            ),
+            result,
+            # The table staging checked, so the version is that table's
+            # shape and not "" (no table: never reusable, D308 round 7).
+            schema_version=destination_schema_version(
+                {**dst_conn, "table": dst_table} if isinstance(dst_conn, dict) else dst_conn
+            ),
         )
     except Exception as exc:
         _LOG.warning("preflight failed: %s", exc, exc_info=True)
@@ -2719,6 +2987,7 @@ def _stage_bound_contract(
     return bound_contract_preview(cid, require_signed=require)
 
 
+@_share_catalog_reads
 def start_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -2741,6 +3010,10 @@ def start_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    transform_recipe_id: str = "",
+    transform_recipe_version: int = 0,
+    transform_recipe_version_mode: str = "pin",
+    transform_recipe_params: dict[str, Any] | None = None,
     cursor_column: str = "",
     cursor_semantics: str = "",
     cursor_lookback_days: int = 0,
@@ -2780,6 +3053,10 @@ def start_transfer(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        transform_recipe_id=transform_recipe_id,
+        transform_recipe_version=transform_recipe_version,
+        transform_recipe_version_mode=transform_recipe_version_mode,
+        transform_recipe_params=transform_recipe_params,
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
         cursor_lookback_days=cursor_lookback_days,
@@ -2931,11 +3208,22 @@ def start_transfer(
         # Validate approved, under its hash.
         "shape_recipe": plan.get("shape_recipe") or {},
         "approved_shape_recipe_hash": plan.get("approved_shape_recipe_hash") or "",
+        "transform_recipe_id": plan.get("transform_recipe_id") or "",
+        "transform_recipe_version": int(plan.get("transform_recipe_version") or 0),
+        "transform_recipe_version_mode": plan.get("transform_recipe_version_mode") or "pin",
+        "transform_recipe_params": plan.get("transform_recipe_params") or {},
         # Chat can never turn the gates off.
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
+    if plan.get("in_file_dedupe") == "keep_last":
+        for side in ("source", "destination"):
+            extra = dict((payload[side].get("extra") or {}))
+            extra["in_file_dedupe"] = "keep_last"
+            if str(plan.get("dedupe_key") or "").strip():
+                extra["dedupe_key"] = str(plan.get("dedupe_key") or "").strip()
+            payload[side]["extra"] = extra
     pii_ack = _pii_acknowledgement(pii_acknowledgement)
     if pii_ack:
         # Execute re-runs Validate: the same ack and its trail ride on the job.
@@ -3018,8 +3306,10 @@ def start_transfer(
         if bound.get("breaker_state"):
             preview["breaker_state"] = bound["breaker_state"]
 
-    from .ack_ledger import get_ack_ledger
+    from .ack_ledger import get_ack_ledger, stamp_caller_workspace
 
+    payload = stamp_caller_workspace(payload)
+    _align_confirmed_preflight(payload)
     ack_id = get_ack_ledger().put(
         kind="start_transfer",
         payload=payload,

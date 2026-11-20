@@ -249,7 +249,9 @@ def stage_dataset_transfer(
     src_rows = _schema_rows(_column_dicts(list(parsed.columns), sample_rows))
     if not src_rows:
         return _tool_result(tool, success=False, error=f"{path.name} has no columns.")
-    dst_rows = _schema_rows(dst_info.get("columns") or [])
+    from services.key_column_guard import with_key_flags
+
+    dst_rows = with_key_flags(_schema_rows(dst_info.get("columns") or []), dst_info) or []
     dest_exists = _dest_table_exists_tri_state(dst_info)
     mode = normalize_sync_mode(sync_mode)
     file_type = str(getattr(parsed, "file_type", "") or schema.file_type or "csv")
@@ -431,8 +433,11 @@ def stage_dataset_transfer(
             str(g.get("message") or "") for g in preflight.get("gates") or []
             if g.get("id") == "g1_source_encoding"
         ]
-    from .ack_ledger import get_ack_ledger
+    from .ack_ledger import get_ack_ledger, stamp_caller_workspace
+    from .transfer_tools import _align_confirmed_preflight
 
+    payload = stamp_caller_workspace(payload)
+    _align_confirmed_preflight(payload)
     ack_id = get_ack_ledger().put(kind="start_transfer", payload=payload, preview=preview)
     return _tool_result(
         tool,

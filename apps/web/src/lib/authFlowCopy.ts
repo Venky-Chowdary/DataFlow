@@ -26,6 +26,57 @@ export function codeEntryError(err: AuthFlowError, fallback: string): string {
   return err.message || fallback;
 }
 
+/** What the code screen says when Resend is refused, how long the link stays
+ *  muted, and whether the screen should offer a way out (D324). Each code the
+ *  API sends (signup_service.resend_code) has its own sentence; an unknown one
+ *  falls back without inventing a cause. */
+export interface ResendRefusal {
+  text: string;
+  cooldownSec: number;
+  /** The challenge is gone (410): offer "Start again" and "Sign in". */
+  restart: boolean;
+}
+
+export function resendRefusal(err: AuthFlowError): ResendRefusal {
+  const wait = Math.max(0, Math.round(err.retryAfterSec ?? 0));
+  switch (err.code) {
+    case "resend_too_soon": {
+      const seconds = Math.max(1, wait);
+      return {
+        text: `Wait ${seconds} second${seconds === 1 ? "" : "s"} before requesting another code.`,
+        cooldownSec: seconds,
+        restart: false,
+      };
+    }
+    case "resend_limit":
+      return {
+        text: `You've requested the most codes allowed for now. Try again in ${retryMinutes(wait)} min.`,
+        cooldownSec: wait,
+        restart: false,
+      };
+    case "email_quota_exceeded":
+      return {
+        text: `Email sending is paused for a few minutes. Try again in ${retryMinutes(wait)} min.`,
+        cooldownSec: wait,
+        restart: false,
+      };
+    case "email_send_failed":
+      return {
+        text: "The email with your code didn't go out. Try again in a minute.",
+        cooldownSec: wait || 60,
+        restart: false,
+      };
+    case "code_expired":
+      return {
+        text: "This signup has expired, so there's no code to resend. Start again, or sign in if you already have an account.",
+        cooldownSec: 0,
+        restart: true,
+      };
+    default:
+      return { text: "Couldn't resend the code. Try again shortly.", cooldownSec: wait, restart: false };
+  }
+}
+
 /** A code-send request refused by quota or velocity limits. */
 export function mailSendError(err: AuthFlowError, fallback: string): string {
   if (err.code === "email_quota_exceeded") {

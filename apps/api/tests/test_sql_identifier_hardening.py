@@ -96,9 +96,67 @@ def test_quote_table_ref_bigquery() -> None:
         project="my-proj",
         dataset="raw",
     )
-    # hyphen in project is sanitized to underscore
-    assert ref == "`my_proj.raw.events`"
+    # A GCP project ID's hyphen is part of the name (lowercase letters, digits,
+    # hyphens: cloud.google.com/resource-manager/docs/creating-managing-projects);
+    # ``my_proj`` would be another, invalid project (D314).
+    assert ref == "`my-proj.raw.events`"
     assert "DROP" not in ref
+    # Anything that is not a project ID is still sanitized segment by segment.
+    hostile = quote_table_ref(
+        "events", dialect="bigquery", project="my-proj`; DROP TABLE x; --", dataset="raw"
+    )
+    assert hostile.count("`") == 2
+    assert ";" not in hostile and " " not in hostile
+
+
+def test_quote_table_ref_bigquery_keeps_a_legal_table_name_as_spelled() -> None:
+    """D314 for tables: BigQuery table names may hold Unicode letters, marks,
+    numbers, connectors (_), dashes (-) and spaces, up to 1024 UTF-8 bytes
+    (cloud.google.com/bigquery/docs/tables#table_naming). Rewriting
+    ``daily-events`` to ``daily_events`` read a different table, which may
+    exist. A legal name is quoted as spelled; a dataset name stays letters,
+    digits and underscores (cloud.google.com/bigquery/docs/datasets#dataset-naming)."""
+    for name in ("daily-events", "daily events", "étudiant-01", "ग्राहक", "00_お客様", "table 01"):
+        assert quote_table_ref(name, dialect="bigquery", project="my-proj", dataset="raw") == (
+            f"`my-proj.raw.{name}`"
+        )
+    # The dataset may also come with the table: only the table segment is a table name.
+    assert quote_table_ref("raw.daily-events", dialect="bigquery", project="my-proj") == (
+        "`my-proj.raw.daily-events`"
+    )
+    # Characters a table name cannot hold are never passed through into the SQL.
+    hostile = quote_table_ref("a`b; DROP TABLE x", dialect="bigquery", project="my-proj", dataset="raw")
+    assert hostile.count("`") == 2 and ";" not in hostile
+    too_long = "t" * 1025
+    assert quote_table_ref(too_long, dialect="bigquery", project="my-proj", dataset="raw") != (
+        f"`my-proj.raw.{too_long}`"
+    )
+
+
+def test_bigquery_reader_queries_the_hyphenated_table_it_was_given(monkeypatch) -> None:
+    """The reader's SQL names the table the operator picked, not a look-alike."""
+    pytest.importorskip("google.cloud.bigquery")
+    import connectors.bigquery_conn as bq_conn
+    import connectors.bigquery_reader as reader
+
+    seen: list[str] = []
+
+    class _Client:
+        def get_table(self, ref):
+            raise RuntimeError("stop after the reference is built")
+
+        def query(self, sql, *a, **kw):
+            seen.append(sql)
+            raise RuntimeError("stop after the query is built")
+
+    monkeypatch.setattr(bq_conn, "get_client", lambda **_kw: _Client())
+    with pytest.raises(Exception):
+        reader.read_table_batch(
+            host="", port=0, database="my-proj", username="", password="", schema="raw",
+            connection_string="", ssl=False, table="daily-events", columns=["id"], limit=5,
+        )
+    assert seen and all("`my-proj.raw.daily-events`" in sql for sql in seen), seen
+    assert not any("daily_events" in sql for sql in seen), seen
 
 
 def test_quote_table_ref_rejects_empty() -> None:

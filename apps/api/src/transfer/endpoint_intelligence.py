@@ -335,6 +335,16 @@ def _introspect_endpoint_guarded(
 
     if endpoint.kind == "file" and sample_content:
         return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    # A SQLite connector saved before Cloud refused SQLite still listed "0
+    # tables": the list and sample opened a server path. One refusal, before
+    # any path is resolved (D276).
+    hosted = sqlite_hosted_refusal(
+        str(endpoint.format or endpoint.kind or ""), str(endpoint.connection_string or "")
+    )
+    if hosted:
+        return {"connected": False, "error": hosted, "message": hosted, "objects": [], "columns": []}
     scope_cfg = {
         "host": str(endpoint.host or ""),
         "connection_string": str(endpoint.connection_string or ""),
@@ -2184,6 +2194,7 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
 
             dest_cols = plan.get("destination", {}).get("columns") or []
             from services.data_profiler import source_types_are_authoritative
+            from services.key_column_guard import with_key_flags
 
             preview = run_mapping_pipeline(
                 columns,
@@ -2192,10 +2203,13 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
                     {"name": c, "inferred_type": schema.get(c, "VARCHAR"), "samples": []}
                     for c in columns
                 ],
-                target_schemas=[
-                    {"name": c, "inferred_type": plan.get("destination", {}).get("schema", {}).get(c, "VARCHAR"), "samples": []}
-                    for c in dest_cols
-                ] if dest_cols else None,
+                target_schemas=with_key_flags(
+                    [
+                        {"name": c, "inferred_type": plan.get("destination", {}).get("schema", {}).get(c, "VARCHAR"), "samples": []}
+                        for c in dest_cols
+                    ],
+                    plan.get("destination"),
+                ) if dest_cols else None,
                 file_format=src_fmt if source.kind == "file" else None,
                 source_db_type=str(src_fmt or ""),  # D204: bind the source engine
                 confidence_threshold=0.75,

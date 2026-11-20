@@ -54,6 +54,9 @@ REVERSIBLE, PARTLY, NOT_REVERSIBLE = "reversible", "partly_reversible", "not_rev
 
 #: Map transforms that never change a value the engine binds.
 _IDENTITY = frozenset({"", "none", "identity", "passthrough", "string", "varchar", "text"})
+#: Case and trim change the stored text when they change a value (D385). A
+#: no-op (every observed value already fits) stays conditional.
+_VALUE_FOLDING = frozenset({"trim", "trim_id", "ltrim", "rtrim", "upper", "lower"})
 #: Map transforms whose output cannot give the input back.
 _LOSSY_TRANSFORMS: dict[str, tuple[str, str]] = {
     "hash_pii": ("hash_pii", "is hashed (hash_pii); the original value cannot be recovered from the destination"),
@@ -426,7 +429,19 @@ def classify_mapping(
         # renders the value, as the writer checks it (review 4, M-2).
         check = _covered(check_cast_values(values, ttype, dest_db, transform) if slog in TEXT and renders_rule(
             transform, ttype) else check_values(values, transform), covers_population, enforce)
-        return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=named)
+        entry = _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=named)
+        if named in _VALUE_FOLDING and (entry.get("check") or {}).get("status") == "does_not_fit":
+            # The observed values changed, so the original text is not in the
+            # destination. A fold that changes nothing stays conditional.
+            changed = int((entry.get("check") or {}).get("rows_not_fitting") or 0)
+            checked = int((entry.get("check") or {}).get("rows_checked") or 0)
+            entry["invertibility"] = LOSSY
+            entry["reason_code"] = "folding"
+            entry["reason"] = (
+                f"{source or target} {named} changed {changed} of {checked} observed value(s); "
+                "the original text is not kept."
+            )
+        return entry
     if kind == CONDITIONAL:
         side = "source" if not slog else "destination"
         cast = _CAST_FOR.get(tlog)

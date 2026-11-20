@@ -26,6 +26,7 @@ sqlalche.me links, repeated lines, host:port pairs and row values.
 from __future__ import annotations
 
 import errno as _errno
+import ipaddress
 import re
 import socket
 import uuid
@@ -941,10 +942,14 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("network.unreachable", re.compile(r"network is unreachable|no route to host|host is unreachable|\[errno 11[03]\]", re.I)),
     ("network.connect_timeout", re.compile(
         r"timeout expired|connection timed out|timed out connecting|serverselectiontimeout|"
-        r"connect timeout|\[errno 110\]|login timeout expired", re.I)),
+        r"connect timeout|\[errno 110\]|login timeout expired|"
+        r"adaptive server is unavailable or does not exist|db-lib error message 20009\b|"
+        r"unable to connect: .*unavailable", re.I)),
     ("network.connection_lost", re.compile(
         r"server closed the connection unexpectedly|lost connection to mysql server during query|"
-        r"mysql server has gone away|terminating connection due to administrator command|connection reset by peer", re.I)),
+        r"mysql server has gone away|terminating connection due to administrator command|connection reset by peer|"
+        r"ssl connection has been closed unexpectedly|"
+        r"can'?t reconnect until invalid transaction is rolled back", re.I)),
     ("object.file_not_found", re.compile(r"^unable to open database file|\[errno 2\] no such file", re.I)),
     ("object.table_not_found", re.compile(
         r"^no such table: |relation \"[^\"]+\" does not exist|table '[^']+' doesn't exist|"
@@ -1012,6 +1017,103 @@ def _typed(exc: Any) -> tuple[str, dict[str, Any]]:
     return "", {}
 
 
+# pymssql puts the SQL Server number in the exception args and then appends
+# "DB-Lib error message ..." to every server error, including 208 (missing
+# table) and 207 (missing column). Matching that suffix classified a missing
+# table as a dead host (D366).
+_PYMSSQL_ARG = re.compile(r"^\((\d+),")
+_DBLIB_MESSAGE = re.compile(r"db-lib error message (\d+)", re.I)
+SQLSERVER_OBJECT_OR_AUTH = frozenset({208, 207, 4060, 18456})
+SQLSERVER_NETWORK = frozenset({20009, 20002, 20003, 20004})
+
+
+def sqlserver_error_numbers(text: str) -> list[int]:
+    """SQL Server and DB-Lib numbers in a pymssql exception string."""
+    raw = str(text or "")
+    nums: list[int] = []
+    lead = _PYMSSQL_ARG.match(raw.strip())
+    if lead:
+        nums.append(int(lead.group(1)))
+    nums.extend(int(n) for n in _DBLIB_MESSAGE.findall(raw))
+    return nums
+
+
+# Tied to driver phrases. A bare token such as ``eai_again`` also matches
+# ``column eai_again does not exist`` (D366).
+_DNS_FAILURE = re.compile(
+    r"name or service not known|nodename nor servname provided|"
+    r"\bgetaddrinfo\b|no such host is known|temporary failure in name resolution|"
+    r"could not (?:translate|resolve) host(?: name)?|"
+    r"no address associated with hostname|unknown mysql server host|"
+    r"the dns query name does not exist|dns did not resolve|"
+    r"\[errno -[23]\]|\bnxdomain\b",
+    re.I,
+)
+_SQLSERVER_HOST = re.compile(r"does not exist \(([^)]+)\)", re.I)
+_MYSQL_CONNECT_TIMEOUT = re.compile(r"\b2003\b.*timed out|timed out.*\b2003\b", re.I)
+_ORACLE_CONNECT_TIMEOUT = re.compile(r"\bDPY-6005\b", re.I)
+# python-oracledb wraps the listener's answer in DPY-6005. A service or SID the
+# listener does not know (DPY-6001 / DPY-6003, ORA-12514 / ORA-12505) is a wrong
+# database name on the connection, not a timeout (D366 AC-3).
+_ORACLE_SERVICE_MISSING = re.compile(r"\b(?:DPY-600[13]|ORA-12514|ORA-12505)\b", re.I)
+
+
+def sqlserver_is_network_failure(text: str) -> bool:
+    """True only for a connect failure, never for 208/207/4060/18456.
+
+    Those four are a missing table, a missing column, a missing database, and
+    a rejected login. pymssql appends a DB-Lib line to all of them.
+    """
+    nums = sqlserver_error_numbers(text)
+    if any(n in SQLSERVER_OBJECT_OR_AUTH for n in nums):
+        return False
+    if any(n in SQLSERVER_NETWORK for n in nums):
+        return True
+    low = str(text or "").lower()
+    if "db-lib error" in low:
+        return "unable to connect" in low or "adaptive server is unavailable" in low
+    return "adaptive server is unavailable" in low or "unable to connect" in low
+
+
+# FreeTDS reports the operating-system error of every socket it opened
+# ("Net-Lib error during Connection refused (111)", "Operating System error
+# during ..."). A host name that did not resolve opened no socket, so its 20009
+# carries no such line. Captured from pymssql 2.4.6 / FreeTDS:
+#   unresolvable name -> 20009 "... does not exist (name)" and nothing else
+#   refused port      -> 20009 + "Net-Lib error during Connection refused (111)"
+#   silent host       -> 20003 "connection timed out" + OS error + 20002
+_FREETDS_OS_ERROR = re.compile(r"(?:net-lib|operating system) error during", re.I)
+SQLSERVER_UNKNOWN_HOST = 20017  # SYBEUHST "Unknown host machine name"
+
+
+def _dns_from_sqlserver_numbers(text: str) -> bool:
+    """True when pymssql's own report says the host name did not resolve.
+
+    Read from the driver's numbers and message structure only: 20017, or a
+    20009 that names a host name (not an IP literal or a named instance) with
+    no operating-system socket error. Classification never resolves the name
+    itself: a lookup here would be an unbounded network call made after the
+    fact, and could answer differently from the lookup the dial made (D366, R10).
+    """
+    nums = sqlserver_error_numbers(text)
+    if SQLSERVER_UNKNOWN_HOST in nums:
+        return True
+    if 20009 not in nums or any(n != 20009 for n in nums):
+        return False
+    raw = str(text or "")
+    if _FREETDS_OS_ERROR.search(raw):
+        return False
+    found = _SQLSERVER_HOST.search(raw)
+    host = str(found.group(1) if found else "").strip().strip("[]")
+    if not host or "\\" in host:
+        return False  # no name, or a named instance (its port lookup can fail too)
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return True
+    return False
+
+
 def _anchored(raw: str) -> str:
     text = raw.strip()
     for code, pat in _PATTERNS:
@@ -1061,6 +1163,36 @@ def classify(
         # MySQL 2013 at connect is a handshake that never finished, not a drop.
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
+    if _dns_from_sqlserver_numbers(full_raw):
+        # pymssql reports DNS and a dead host under the same 20009, and the
+        # connect-timeout phrase matches both. FreeTDS's own report tells them
+        # apart: only a name that never resolved has no OS socket error (D366).
+        code = "network.dns_not_found"
+        matched_by = "sqlserver_number"
+    if (not code or code.startswith("network.")) and _ORACLE_SERVICE_MISSING.search(full_raw):
+        # Checked before the DPY-6005 connect-timeout rule that wraps it.
+        code = "object.database_not_found"
+        matched_by = "structured"
+    if not code and _DNS_FAILURE.search(full_raw):
+        code = "network.dns_not_found"
+        matched_by = "pattern"
+    if not code and (
+        _MYSQL_CONNECT_TIMEOUT.search(full_raw) or _ORACLE_CONNECT_TIMEOUT.search(full_raw)
+    ):
+        # MySQL 2003 "(timed out)" and Oracle DPY-6005 are a connect timeout,
+        # not an unclassified driver error (D366).
+        code = "network.connect_timeout"
+        matched_by = "pattern"
+    if not code and sqlserver_is_network_failure(full_raw):
+        # pymssql's 20009 text does not always match the anchored patterns.
+        # A dead host must not fall through to unclassified (D366).
+        code = "network.connect_timeout"
+        matched_by = "sqlserver_number"
+    if not code and not isinstance(exc, str):
+        number = exc.args[0] if getattr(exc, "args", None) else None
+        if isinstance(number, int) and number in SQLSERVER_NETWORK:
+            code = "network.connect_timeout"
+            matched_by = "sqlserver_number"
     if not code:
         if not fallback:
             return None

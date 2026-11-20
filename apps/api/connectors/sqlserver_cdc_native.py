@@ -61,6 +61,23 @@ __all_gap__ = ("CdcLsnGapError",)
 logger = logging.getLogger(__name__)
 
 
+def _capture_instance_identity_ddl(ddl: str) -> bool:
+    """True for no DDL or the capture's own name, not a switch or a command."""
+    import re
+
+    text = (ddl or "").strip()
+    return not text or bool(re.fullmatch(r"cdc\.capture_instance=\S+", text))
+
+
+def _snapshot_column_names(entry: dict | None) -> list[str]:
+    snap = (entry or {}).get("schema_snapshot") or {}
+    return [
+        str(col.get("name") or "")
+        for col in (snap.get("columns") or [])
+        if isinstance(col, dict) and col.get("name")
+    ]
+
+
 def _sqlserver_error_number(exc: BaseException) -> int | None:
     pending = list(getattr(exc, "args", ()))
     while pending:
@@ -882,18 +899,76 @@ class SqlServerNativeCdc:
                 and not force
             ):
                 return
-            from services.cdc_schema_history import record_ddl
+            from connectors.sqlserver_ddl_history import (
+                DdlHistory,
+                columns_in_ddl,
+                read_ddl_history,
+            )
+            from services.cdc_schema_history import list_history, record_ddl
 
+            table_key = f"{self.schema}.{table_name}"
+            current_names = [str(c.get("name") or "") for c in cols if c.get("name")]
+            prior = list_history(self.source_key, table_key)
+            prior_snapshot = dict((prior[-1] if prior else {}).get("schema_snapshot") or {})
+            prior_names = _snapshot_column_names(prior[-1] if prior else None)
+            # ``cdc.capture_instance=<name>`` is the capture's identity, not DDL.
+            # DML does not change it, and a new process must not open a review
+            # for the column list it already stored (D392). A capture-instance
+            # switch (``old->new``) and a new row in cdc.ddl_history are DDL.
+            identity_only = _capture_instance_identity_ddl(ddl)
+            history = read_ddl_history(cur, self.capture_instance) if identity_only else DdlHistory()
+            # cdc.ddl_history keeps every DDL row while the capture instance
+            # lives. Only rows past the ddl_lsn stored with the last snapshot
+            # are new; on first sight the history is the baseline. So is it for
+            # a snapshot stored before the watermark existed: that history was
+            # reviewed under the old build, and a column change since then shows
+            # in the captured columns, which are still compared below (D392).
+            watermark = str(prior_snapshot.get("ddl_lsn") or "")
+            pre_watermark = bool(prior_names) and "ddl_lsn" not in prior_snapshot
+            new_commands = history.commands_after(watermark) if "ddl_lsn" in prior_snapshot else []
+            # An unreadable history keeps the old watermark: what it missed is
+            # read, and reviewed, on the next run.
+            ddl_lsn = (history.latest_lsn or watermark) if history.readable else watermark
+            added = [name for name in current_names if name not in prior_names]
+            removed = [name for name in prior_names if name not in current_names]
+            unchanged = bool(prior_names) and prior_names == current_names
+            snapshot = {
+                "capture_instance": self.capture_instance,
+                "row_filter": self.row_filter,
+                "columns": cols,
+            }
+            if history.readable or "ddl_lsn" in prior_snapshot:
+                snapshot["ddl_lsn"] = ddl_lsn
+            if identity_only and not new_commands and (unchanged or not prior_names):
+                # Store the baseline once it is known; an empty one stored for
+                # an unreadable history would later read it all as new.
+                if not prior_names or (pre_watermark and history.readable):
+                    record_ddl(
+                        self.source_key,
+                        table_key,
+                        ddl=ddl or f"cdc.capture_instance={self.capture_instance}",
+                        offset=offset or self.start_lsn or self.capture_instance,
+                        schema_snapshot=snapshot,
+                    )
+                self._last_schema_fingerprint[table_name] = fingerprint
+                return
+            named = columns_in_ddl(new_commands if identity_only else [ddl])
+            if identity_only:
+                change_ddl = "; ".join(
+                    new_commands
+                    or [
+                        *(["ADD COLUMN " + ", ".join(added)] if added else []),
+                        *(["DROP COLUMN " + ", ".join(removed)] if removed else []),
+                    ]
+                )
+            else:
+                change_ddl = ddl
             entry = record_ddl(
                 self.source_key,
-                f"{self.schema}.{table_name}",
-                ddl=ddl or f"cdc.capture_instance={self.capture_instance}",
+                table_key,
+                ddl=change_ddl or f"cdc.capture_instance={self.capture_instance}",
                 offset=offset or self.start_lsn or self.capture_instance,
-                schema_snapshot={
-                    "capture_instance": self.capture_instance,
-                    "row_filter": self.row_filter,
-                    "columns": cols,
-                },
+                schema_snapshot=snapshot,
             )
             self._last_schema_fingerprint[table_name] = fingerprint
             try:
@@ -901,11 +976,11 @@ class SqlServerNativeCdc:
 
                 flag_mapping_review(
                     source_key=self.source_key,
-                    table=f"{self.schema}.{table_name}",
+                    table=table_key,
                     reason="cdc_schema_drift",
                     schema_version=int(entry.get("version") or 0) or None,
                     ddl=str(entry.get("ddl") or ""),
-                    column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
+                    column_names=named or (added + removed) or current_names,
                     workspace_id=str(self.cfg.get("workspace_id") or ""),
                 )
             except Exception as exc:

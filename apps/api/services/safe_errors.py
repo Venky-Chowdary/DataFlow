@@ -277,3 +277,16 @@ def run_failure_http_exception(
     if human.get("legacy_code"):
         envelope["error"]["legacy_code"] = human["legacy_code"]  # deprecated, one release
     return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})
+
+
+def enveloped_error_body(status_code: int, detail: str, **extra: Any) -> tuple[dict[str, Any], str]:
+    """``{error: {..., reference}, detail}`` for a response built outside a route.
+
+    Middleware answers (the anonymous 401) never reach the app's HTTPException
+    handler, so they carry the same envelope from here (U2, R11). ``detail``
+    keeps its text; ``extra`` keys (``reason``) keep their place.
+    """
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    body = _platform_envelope(detail, cid, detail, status_code)
+    body.update(extra)
+    return body, cid

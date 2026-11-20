@@ -427,6 +427,95 @@ _ELASTICSEARCH_KINDS = frozenset({
 })
 
 
+# A mapped column the Elasticsearch writer already treats as document identity
+# (``_resolve_doc_id``). ``order_id`` is not in this set: inventing ``_id`` from
+# the only ``*_id`` column collides rows the operator never keyed.
+_ELASTICSEARCH_IMPLICIT_IDENTITY = frozenset({
+    "_id", "id", "pk", "doc_id", "document_id",
+})
+
+
+def elasticsearch_document_identity(
+    mappings: Iterable[Any] | None,
+    *,
+    conflict_columns: Sequence[str] | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    contract_primary_key: str | None = None,
+    destination_extra: Any = None,
+    stream_name: str = "",
+    target_columns: Sequence[str] | None = None,
+) -> tuple[list[str], str | None]:
+    """The document id the Elasticsearch writer will use, or ``([], None)``.
+
+    Explicit Map / Advanced / endpoint identity first. A mapped ``id`` / ``_id``
+    / ``pk`` / ``doc_id`` / ``document_id`` is the same identity the writer
+    accepts when nothing was declared. A column merely named ``order_id`` is
+    not an id. Disagreement is ``([], message)`` and writes nothing.
+    """
+    cols, err = explicit_identity_target_columns(
+        mappings,
+        conflict_columns=conflict_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+        destination_extra=destination_extra,
+        stream_name=stream_name,
+    )
+    if err or cols:
+        return cols, err
+    names: list[str] = []
+    for item in mappings or []:
+        if isinstance(item, dict):
+            target = str(item.get("target") or "").strip()
+        else:
+            target = str(getattr(item, "target", "") or "").strip()
+        if target and target not in names:
+            names.append(target)
+    for raw in target_columns or []:
+        target = str(raw or "").strip()
+        if target and target not in names:
+            names.append(target)
+    for name in names:
+        if name.casefold() in _ELASTICSEARCH_IMPLICIT_IDENTITY:
+            return [name], None
+    return [], None
+
+
+def elasticsearch_identity_refusal(
+    mappings: Iterable[Any] | None,
+    *,
+    row_count: int | None = None,
+    conflict_columns: Sequence[str] | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    contract_primary_key: str | None = None,
+    destination_extra: Any = None,
+    stream_name: str = "",
+    target_columns: Sequence[str] | None = None,
+) -> str:
+    """Why this Elasticsearch write has no document id, or ``""`` when it does.
+
+    Validate and the writer share this sentence. An empty result means the
+    index may be created. A refusal means nothing is created.
+    """
+    cols, err = elasticsearch_document_identity(
+        mappings,
+        conflict_columns=conflict_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+        destination_extra=destination_extra,
+        stream_name=stream_name,
+        target_columns=target_columns,
+    )
+    if err:
+        return err
+    if cols:
+        return ""
+    counted = f"{int(row_count)} row(s) " if row_count else "rows "
+    return (
+        f"elasticsearch blocked: {counted}lack document identity — set Primary "
+        "key on Map or Identity key in Advanced settings"
+    )
+
+
 def _is_elasticsearch_kind(dest_kind: str | None) -> bool:
     raw = (dest_kind or "").strip().lower().replace(" ", "_").replace("-", "_")
     if raw in _ELASTICSEARCH_KINDS:
@@ -442,7 +531,7 @@ def _flagged_identity_names(mappings: Iterable[Any] | None) -> list[str]:
     names: list[str] = []
     for item in mappings or []:
         if isinstance(item, dict):
-            if item.get("intentional_omit") or item.get("omit"):
+            if item.get("intentional_omit") or item.get("omit") or item.get("omitted"):
                 continue
             flagged = (
                 item.get("primary_key")

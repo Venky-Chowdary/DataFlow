@@ -507,11 +507,17 @@ def driver_missing_refusal(ctype: str) -> str:
     install), yet create_connector staged it and every later call went on to
     a connection attempt that could only fail, blamed on the token (D310).
     """
-    from src.transfer.connector_capabilities import driver_available, resolve_driver_type
-
-    from src.transfer.connector_capabilities import planned_driver_message
+    from src.transfer.connector_capabilities import (
+        driver_available,
+        planned_driver_message,
+        resolve_driver_type,
+        unproven_wire_brand_refusal,
+    )
 
     kind = (ctype or "").strip().lower()
+
+    if refused := unproven_wire_brand_refusal(kind):
+        return f"{refused} Nothing was saved."
     if not kind or driver_available(resolve_driver_type(kind), kind):
         return ""
     if planned := planned_driver_message(kind):

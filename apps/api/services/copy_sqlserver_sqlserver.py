@@ -128,6 +128,7 @@ def _is_connect_failure(exc: BaseException) -> bool:
 
 def _pymssql_connect(cfg: dict[str, Any]) -> Any:
     import pymssql
+    from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
     conn = pymssql.connect(
         server=str(cfg.get("host") or "127.0.0.1"),
@@ -136,6 +137,7 @@ def _pymssql_connect(cfg: dict[str, Any]) -> Any:
         password=str(cfg.get("password") or ""),
         database=str(cfg.get("database") or ""),
         login_timeout=10,
+        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
         autocommit=False,
     )
     return conn
@@ -228,18 +230,7 @@ def _ss_table_pk_and_types(
     missing = [c for c in columns if c.lower() not in live_l]
     if missing:
         raise FastPathUnavailable(f"source column {missing[0]!r} absent")
-    cur.execute(
-        "SELECT c.name FROM sys.indexes i "
-        "JOIN sys.index_columns ic ON ic.object_id = i.object_id "
-        "AND ic.index_id = i.index_id "
-        "JOIN sys.columns c ON c.object_id = ic.object_id "
-        "AND c.column_id = ic.column_id "
-        "WHERE i.object_id = OBJECT_ID(%s) AND i.is_primary_key = 1 "
-        "ORDER BY ic.key_ordinal",
-        (obj,),
-    )
-    pk = [str(r[0]) for r in cur.fetchall() or []]
-    return pk, types
+    return _primary_key_names(cur, schema, table), types
 
 
 def _table_exists(cur: Any, schema: str, table: str) -> bool:
@@ -249,6 +240,21 @@ def _table_exists(cur: Any, schema: str, table: str) -> bool:
     )
     row = cur.fetchone()
     return bool(row and row[0] is not None)
+
+
+def _primary_key_names(cur: Any, schema: str, table: str) -> list[str]:
+    """Columns of the live table's PRIMARY KEY, in key order. Empty when there is none."""
+    cur.execute(
+        "SELECT c.name FROM sys.indexes i "
+        "JOIN sys.index_columns ic ON ic.object_id = i.object_id "
+        "AND ic.index_id = i.index_id "
+        "JOIN sys.columns c ON c.object_id = ic.object_id "
+        "AND c.column_id = ic.column_id "
+        "WHERE i.object_id = OBJECT_ID(%s) AND i.is_primary_key = 1 "
+        "ORDER BY ic.key_ordinal",
+        (_object_id_name(schema, table),),
+    )
+    return [str(row[0]) for row in cur.fetchall() or [] if row and row[0]]
 
 
 def _has_identity(cur: Any, schema: str, table: str) -> bool:

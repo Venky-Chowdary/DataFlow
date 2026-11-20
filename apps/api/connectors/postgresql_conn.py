@@ -135,6 +135,14 @@ def _scoped_connection_class(psycopg2: Any) -> type:
             def close(self) -> None:
                 release, self._df_release = self._df_release, None
                 if release is not None:
+                    # D305: a session handed back to the scope ends its
+                    # transaction now, not when the next consumer resets it:
+                    # an idle pooled session held catalog locks meanwhile.
+                    try:
+                        self.rollback()
+                    except psycopg2.Error as exc:
+                        logger.debug("pooled session rollback failed: %s", exc)
+                        super().close()  # dead: the pool replaces it
                     release()
                     return
                 super().close()

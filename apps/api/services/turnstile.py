@@ -26,7 +26,59 @@ logger = logging.getLogger(__name__)
 
 _VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 _TIMEOUT_SEC = 5.0
-_ALLOWED_HOSTNAMES = {"datawrap.io", "www.datawrap.io", "localhost"}
+_PUBLIC_HOSTNAMES = {"datawrap.io", "www.datawrap.io"}
+_LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def signup_expected_hostname(request_host: str) -> str:
+    """The Host header to pin, or empty when it is not a served public host.
+
+    Signup's test client sends ``testserver``. Pinning that would reject a
+    token Cloudflare minted for www.datawrap.io. A public host is pinned so
+    the apex and www check is live on the signup route.
+    """
+    host = _host_token(request_host)
+    return host if host in _PUBLIC_HOSTNAMES else ""
+
+
+def production_turnstile() -> bool:
+    """True when this process must enforce production Turnstile policy.
+
+    ``platform_config.is_production`` is fail-closed: an unknown environment
+    name does not become development, and a deployed host does not stay open
+    because ``ENV`` was left unset (D322).
+    """
+    from services.platform_config import is_production
+
+    return is_production()
+
+
+#: ENV values that name a developer machine or a test run (unset counts too).
+_DEVELOPER_ENVS = frozenset({"", "development", "dev", "local", "test"})
+
+
+def local_tokens_allowed() -> bool:
+    """May a token minted on localhost pass? Only on a developer environment.
+
+    ``is_production()`` answers False for an unknown name such as ``staging``
+    off Railway, so keying this on it let a localhost token pass there. Fail
+    closed: anything but a developer ``ENV`` (or production) refuses (D322).
+    """
+    import os
+
+    if production_turnstile():
+        return False
+    env = (getenv_brand("ENV", os.getenv("ENVIRONMENT", "")) or "").strip().lower()
+    return env in _DEVELOPER_ENVS
+
+
+def _host_token(value: str) -> str:
+    host = (value or "").strip().lower().rstrip(".")
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    else:
+        host = host.split(":")[0]
+    return host
 
 
 def secret() -> str:
@@ -63,12 +115,27 @@ def verify(token: str, *, remote_ip: str = "", expected_action: str = "",
     if not data.get("success"):
         return {"ok": False, "reason": "rejected",
                 "codes": data.get("error-codes", [])}
-    hostname = str(data.get("hostname") or "").lower()
+    hostname = _host_token(str(data.get("hostname") or ""))
     action = str(data.get("action") or "")
-    if expected_hostname and hostname != expected_hostname.lower():
+    expected = _host_token(expected_hostname)
+    served = _PUBLIC_HOSTNAMES | (_LOCAL_HOSTNAMES if local_tokens_allowed() else set())
+    # Apex and www are one site. A token minted on www.datawrap.io matches a
+    # caller that names the apex, and the reverse, because both are served.
+    if not hostname or hostname not in served:
+        reason = "empty_hostname" if not hostname else "hostname_not_allowed"
+        logger.info(
+            "turnstile hostname refused",
+            extra={"reason_code": f"turnstile:{reason}"},
+        )
+        return {"ok": False, "reason": reason, "hostname": hostname}
+    if expected and hostname != expected and not (
+        hostname in _PUBLIC_HOSTNAMES and expected in _PUBLIC_HOSTNAMES
+    ):
+        logger.info(
+            "turnstile hostname refused",
+            extra={"reason_code": "turnstile:hostname_mismatch"},
+        )
         return {"ok": False, "reason": "hostname_mismatch", "hostname": hostname}
-    if hostname and hostname not in _ALLOWED_HOSTNAMES:
-        return {"ok": False, "reason": "hostname_not_allowed", "hostname": hostname}
     if expected_action and action != expected_action:
         return {"ok": False, "reason": "action_mismatch", "action": action}
     return {"ok": True, "reason": "ok", "hostname": hostname, "action": action}

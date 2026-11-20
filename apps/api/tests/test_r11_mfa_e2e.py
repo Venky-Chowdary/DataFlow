@@ -30,9 +30,13 @@ MEMBER = "ana.member@acme.test"
 
 @pytest.fixture
 def clock(monkeypatch):
-    real = time.time
+    # Frozen at the fixture's start: only advance() moves it. With real time
+    # still flowing, a 30 s TOTP boundary crossed between code_for() and the
+    # server's check shrank a 2-step drift to 1 and the code was accepted
+    # (PR #433 CI, test_drift_of_one_step_is_accepted on a slow runner).
+    base = time.time()
     offset = [0.0]
-    monkeypatch.setattr(time, "time", lambda: real() + offset[0])
+    monkeypatch.setattr(time, "time", lambda: base + offset[0])
 
     def advance(seconds: float = 30.0) -> None:
         offset[0] += seconds

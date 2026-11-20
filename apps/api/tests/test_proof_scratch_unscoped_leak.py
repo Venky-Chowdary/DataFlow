@@ -44,7 +44,9 @@ def private_tmp(tmp_path: Path, monkeypatch):
     return root
 
 
-def _proof_kwargs(tmp_path: Path) -> dict:
+def _proof_kwargs(
+    tmp_path: Path, sync_mode: str = "incremental_upsert", summary: dict | None = None
+) -> dict:
     src = EndpointConfig(
         kind="database", format="sqlite", database=str(tmp_path / "s.db"), table="t"
     )
@@ -53,12 +55,16 @@ def _proof_kwargs(tmp_path: Path) -> dict:
     )
     return {
         "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
-        # A keyed append: the proof opens both the run-key set (df_scope_)
-        # and the pin store (df_pinmap_) before it reads anything.
+        # A keyed run: the proof opens the run-key set (df_scope_) and the
+        # pin store (df_pinmap_) before it reads anything. An incremental
+        # append that recorded its cursor window keeps every version per key
+        # (R6, D359): it scopes the read-back by that window and opens no
+        # run-key set.
         "dest_summary": {
             "shape_recipe_hash": "h",
-            "sync_mode": "full_refresh_append",
+            "sync_mode": sync_mode,
             "primary_key_columns": ["id"],
+            **(summary or {}),
         },
         "source_endpoint": src,
         "endpoint": dst,
@@ -72,8 +78,21 @@ def _proof_kwargs(tmp_path: Path) -> dict:
     }
 
 
+_WINDOW = {"incremental_window_cursor": "id", "incremental_window_max": "3"}
+
+
+@pytest.mark.parametrize(
+    ("sync_mode", "summary", "stores"),
+    [
+        ("incremental_upsert", {}, {"pinmap", "scope"}),
+        # The append proofs (the mode the leak was first found on) must leave
+        # nothing behind either, with and without a recorded cursor window.
+        ("full_refresh_append", {}, {"pinmap", "scope"}),
+        ("incremental_append", _WINDOW, {"pinmap"}),
+    ],
+)
 def test_proof_body_called_outside_the_wrapper_leaves_nothing_when_cancelled(
-    private_tmp, tmp_path, monkeypatch
+    private_tmp, tmp_path, monkeypatch, sync_mode, summary, stores
 ):
     import services.reconciliation as recon_mod
 
@@ -97,10 +116,10 @@ def test_proof_body_called_outside_the_wrapper_leaves_nothing_when_cancelled(
     monkeypatch.setattr(recon_mod, "canonical_checksum_from_iter", cancelled)
 
     with pytest.raises(_Cancelled) as held:
-        rs._transform_applied_proof_impl(**_proof_kwargs(tmp_path))
+        rs._transform_applied_proof_impl(**_proof_kwargs(tmp_path, sync_mode, summary))
 
-    # Both stores were really opened by the proof path under test...
-    assert {Path(p).name.split("_")[1] for p in opened} == {"pinmap", "scope"}, opened
+    # The stores this mode uses were really opened by the proof path under test...
+    assert {Path(p).name.split("_")[1] for p in opened} == stores, opened
     # ...and the failed run's traceback still references their frame, so
     # __del__ has not run. Nothing may be left in the shared temp dir.
     assert held.value is not None

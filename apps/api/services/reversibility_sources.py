@@ -174,6 +174,57 @@ def _steps(recipe: Any) -> list[dict[str, Any]]:
     return [s for s in _dict(recipe).get("steps") or [] if isinstance(s, dict)]
 
 
+#: Engines whose empty catalog means "the writer will CREATE this type".
+#: A live catalog (any column type) is never replaced. Mongo and Elasticsearch
+#: are not here: an empty document store is not a SQL create-new stamp.
+_CREATE_NEW_REVERSIBILITY = frozenset({
+    "sqlserver", "oracle", "mysql", "postgresql", "snowflake", "bigquery",
+    "redshift", "databricks", "mariadb",
+})
+
+
+def _catalog_or_create_new_types(
+    mappings: list[Any],
+    dest_types: Mapping[str, str] | None,
+    *,
+    dest_db: str,
+    source_db: str,
+    source_types: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Destination types the reversibility gate and the report both read.
+
+    A live catalog wins. When the catalog is empty (a new table), each column
+    without a Map ``target_type`` takes the create-new stamp the writer will
+    run. JSONB into a new SQL Server table is ``NVARCHAR(MAX)`` on the plan
+    and at Execute, so the gate does not refuse a column the report calls
+    reversible (D388).
+    """
+    live = {str(k): str(v) for k, v in dict(dest_types or {}).items() if str(v or "").strip()}
+    if live or dest_db not in _CREATE_NEW_REVERSIBILITY:
+        return live
+    from services.decision_kernel.type_invent import create_new_mapping_target_type
+
+    types = dict(source_types or {})
+    out: dict[str, str] = {}
+    for mapping in mappings or []:
+        if not isinstance(mapping, Mapping):
+            continue
+        target = str(mapping.get("target") or mapping.get("source") or "").strip()
+        if not target:
+            continue
+        declared = str(mapping.get("target_type") or "").strip()
+        if declared:
+            out[target] = declared
+            continue
+        source = str(mapping.get("source_type") or types.get(str(mapping.get("source") or "")) or "").strip()
+        if not source:
+            continue
+        stamp = create_new_mapping_target_type(source, dest_db, source_db=source_db)
+        if str(stamp or "").strip():
+            out[target] = str(stamp)
+    return out
+
+
 def _engine(endpoint: Mapping[str, Any] | Any) -> str:
     """The endpoint's engine by its family: a hosted tile (``supabase``) is its engine (review 5, C-1 / M-3).
 
@@ -282,7 +333,11 @@ def plan_report(plan: Any) -> dict[str, Any]:
         mappings=mappings,
         source_columns=list(plan.source_columns or []),
         source_types=dict(plan.source_schema or {}),
-        target_types=dict(plan.target_schema or {}),
+        target_types=_catalog_or_create_new_types(
+            mappings, dict(plan.target_schema or {}),
+            dest_db=_engine(plan.destination), source_db=_engine(plan.source),
+            source_types=dict(plan.source_schema or {}),
+        ),
         recipe_steps=by_stream.get(names[0], steps) if several else steps,
         # The plan's source columns are the read before the recipe (the shaped image is derived).
         recipe_input_columns=_recipe_inputs(policies.get("shape_recipe"), plan.source_columns),
@@ -336,6 +391,9 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     mappings, keys, window = _primary(first, mappings_of(job), src, read_options,
                                       lambda: _catalog_keys_of_saved(src))
     rows, target_types = _file_export_view(dst, mappings, source_types, dest_types_of(job))
+    target_types = _catalog_or_create_new_types(
+        rows, target_types, dest_db=_engine(dst), source_db=_engine(src), source_types=source_types,
+    )
     by_stream = _steps_by_stream(req.get("shape_recipe"), names) if several else {}
     steps = _steps(req.get("shape_recipe"))
     summary = _dict(job.get("destination_summary"))
@@ -406,6 +464,10 @@ def _request_tables(
         keys = _key_columns(contracts) or _catalog_keys_of_endpoint(src)
     column_types, primary_view = _as_read_from_text(src, column_types, primary_maps)
     rows, target_types = _file_export_view(dst, primary_view, dict(column_types or {}), dest_types)
+    target_types = _catalog_or_create_new_types(
+        rows, target_types, dest_db=_engine(dst), source_db=_engine(src),
+        source_types=dict(column_types or {}),
+    )
     tables = [analyze_table(
         table=(names[0] if several else _table(dst, src)),
         mappings=rows,

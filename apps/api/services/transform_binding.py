@@ -80,6 +80,128 @@ def resolve_recipe_binding(
     )
 
 
+def _mapping_source_columns(mappings: Any) -> list[str]:
+    columns: list[str] = []
+    for item in mappings or []:
+        row = item
+        if not isinstance(row, dict):
+            dump = getattr(row, "model_dump", None)
+            row = dump() if callable(dump) else {}
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("source") or row.get("source_column") or "").strip()
+        if name and name not in columns:
+            columns.append(name)
+    return columns
+
+
+def _recipe_steps(shape: Any) -> list[Any]:
+    if not isinstance(shape, dict):
+        return []
+    steps = shape.get("steps")
+    return list(steps) if isinstance(steps, list) else []
+
+
+def compile_transfer_recipe(request: Any) -> bool:
+    """Compile ``transform_recipe_id`` into ``shape_recipe``, or refuse.
+
+    Execute reads ``shape_recipe`` only. A run that stored the library id and
+    left ``shape_recipe`` empty shipped the raw rows under a verified badge
+    (D400). Pin mode bakes the version resolved here. A library edit between
+    stage and confirm changes the hash and is refused — the new recipe is
+    not applied silently. An empty id does nothing. Returns True when this
+    call attached the compiled recipe.
+    """
+    recipe_id = str(getattr(request, "transform_recipe_id", "") or "").strip()
+    if not recipe_id:
+        return False
+    mode = str(getattr(request, "transform_recipe_version_mode", "") or "pin").strip().lower() or "pin"
+    if mode not in BINDING_MODES:
+        raise ValueError(
+            f"transform_recipe_version_mode must be one of {sorted(BINDING_MODES)}"
+        )
+    version = int(getattr(request, "transform_recipe_version", 0) or 0) or None
+    params = getattr(request, "transform_recipe_params", None) or None
+    bound = resolve_recipe_binding(
+        recipe_id,
+        version=version if mode == "pin" else None,
+        params=params if isinstance(params, dict) else None,
+        source_columns=_mapping_source_columns(getattr(request, "mappings", None)) or None,
+        workspace_id=str(getattr(request, "workspace_id", "") or "") or None,
+    )
+    existing = _recipe_steps(getattr(request, "shape_recipe", None))
+    approved = str(getattr(request, "approved_shape_recipe_hash", "") or "").strip()
+    if existing:
+        if approved and approved == bound.recipe_hash:
+            return False
+        if approved and approved != bound.recipe_hash:
+            raise ValueError(
+                "Transform recipe "
+                f"{recipe_id} changed between stage and confirm "
+                f"(approved {approved}, library now {bound.recipe_hash}). "
+                "The new recipe was not applied. Stage the run again so the "
+                "plan and the execute recipe are the same."
+            )
+        raise ValueError(
+            f"This run has shape_recipe steps and transform_recipe_id {recipe_id}, "
+            "and they are not the same compiled recipe. Put the steps in the "
+            "library recipe, or drop one of them, then stage the run again."
+        )
+    request.shape_recipe = bound.payload
+    request.transform_recipe_version = bound.bound_version
+    request.transform_recipe_version_mode = mode
+    request.approved_shape_recipe_hash = bound.recipe_hash
+    return True
+
+
+def compile_preflight_recipe(body: Any) -> None:
+    """Validate judges the library recipe Execute will run (D400, R8).
+
+    ``body`` is a preflight request: its ``shape_recipe`` becomes the compiled
+    recipe, so the gates see the shaped image. A recipe that cannot compile
+    (a draft, a missing id, steps mixed with another recipe) raises
+    ValueError here, before Confirm, with the same text Execute would give.
+
+    The recipe is looked up in the caller's workspace, as Execute does: a
+    preflight body carries none, and an unscoped lookup compiled another
+    workspace's recipe (R11) that Execute then refused (R8). The body is never
+    asked for one, because the caller writes the body.
+    """
+    from types import SimpleNamespace
+
+    from services.workspace_filter import current_workspace_stamp
+
+    probe = SimpleNamespace(
+        transform_recipe_id=str(getattr(body, "transform_recipe_id", "") or ""),
+        transform_recipe_version=int(getattr(body, "transform_recipe_version", 0) or 0),
+        transform_recipe_version_mode=str(getattr(body, "transform_recipe_version_mode", "") or "pin"),
+        transform_recipe_params=getattr(body, "transform_recipe_params", None),
+        mappings=getattr(body, "mappings", None),
+        workspace_id=current_workspace_stamp(for_write=False) or "",
+        shape_recipe=getattr(body, "shape_recipe", None),
+        approved_shape_recipe_hash="",
+    )
+    if compile_transfer_recipe(probe):
+        body.shape_recipe = probe.shape_recipe
+
+
+def recipe_ignored_failure(request: Any) -> str:
+    """Why a run that named a library recipe must not be called verified.
+
+    The proof checks recipe output. An id with no compiled steps means the
+    raw rows would be certified (D400). Empty when the recipe is absent or
+    compiled.
+    """
+    recipe_id = str(getattr(request, "transform_recipe_id", "") or "").strip()
+    if not recipe_id or _recipe_steps(getattr(request, "shape_recipe", None)):
+        return ""
+    return (
+        f"Transform recipe {recipe_id} was not compiled into this run "
+        "(shape_recipe has no steps). The destination would hold the raw "
+        "rows, so the run is refused instead of verified."
+    )
+
+
 def apply_schedule_binding(
     payload: dict[str, Any],
     *,
@@ -113,3 +235,38 @@ def apply_schedule_binding(
     payload["transform_recipe_version"] = bound.bound_version
     payload["transform_recipe_version_mode"] = mode
     return payload
+
+
+def compile_and_record_recipe(request: Any, job_id: str, store: Any) -> str:
+    """Compile a saved recipe into ``request`` and stamp it on the job (D400).
+
+    Returns the refusal text when the recipe cannot run as asked (a draft, a pin
+    drift, a second recipe, or a recipe the run would ignore), else ``""``. A
+    compiled recipe is written on the job record so Resume, replay and the
+    proof read the same shape the run used; a failure to store it is logged and
+    never turns a runnable transfer into a refusal.
+    """
+    import logging
+
+    try:
+        compiled = compile_transfer_recipe(request)
+    except ValueError as exc:
+        return str(exc)
+    refusal = recipe_ignored_failure(request)
+    if compiled and not refusal:
+        try:
+            store.update_job_fields(
+                job_id,
+                {
+                    "transfer_request.shape_recipe": request.shape_recipe,
+                    "transfer_request.transform_recipe_version": request.transform_recipe_version,
+                    "transfer_request.transform_recipe_version_mode": request.transform_recipe_version_mode,
+                    "transfer_request.approved_shape_recipe_hash": request.approved_shape_recipe_hash,
+                },
+                touch_updated_at=False,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not store the compiled recipe on %s", job_id
+            )
+    return refusal

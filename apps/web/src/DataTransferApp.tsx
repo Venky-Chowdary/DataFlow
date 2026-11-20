@@ -24,6 +24,7 @@ import { clearSession, readSession, sessionDisplayName, writeSession } from "./l
 import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
+import { connectorListFailed, connectorListLoaded, connectorListPageState, connectorListPatched, connectorListStarted, connectorListView, initialConnectorList } from "./lib/connectorListLoad";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -36,7 +37,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash, writeJobsDeepLink, exitFocusFromHash, type ExitFocus } from "./lib/appNavigation";
+import { emailedJobLinkUrl, focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash, writeJobsDeepLink, exitFocusFromHash, type ExitFocus } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -156,13 +157,17 @@ function AppShell({
   const [helpArticle, setHelpArticle] = useState<ReturnType<typeof signedInHelpArticleFromHash>>(
     () => signedInHelpArticleFromHash(window.location.hash),
   );
-  const [connectors, setConnectors] = useState<Connector[]>([]);
+  // One source of truth for the list, its loading/error state and the nav badge (D410).
+  const [connectorList, setConnectorList] = useState(initialConnectorList<Connector>);
+  const connectors = connectorList.rows;
+  const connectorView = connectorListView(connectorList);
   const [jobHistory, setJobHistory] = useState<JobHistory>(EMPTY_JOB_HISTORY);
   const jobs = jobHistory.jobs;
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
-  /** False until the first connectors fetch settles — prevents false “no connectors” empty states. */
-  const [connectorsReady, setConnectorsReady] = useState(false);
+  /** False while no list has loaded and a request may still answer — never a false “no connectors”. */
+  const connectorsReady = connectorView.kind !== "loading";
+  const connectorsError = connectorView.kind === "error" ? connectorView.message : "";
   const [apiOnline, setApiOnline] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState("");
@@ -292,22 +297,24 @@ function AppShell({
   }, []);
 
   const patchConnector = useCallback((id: string, patch: Partial<Connector>) => {
-    setConnectors((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    );
+    setConnectorList((state) => connectorListPatched(state, id, patch));
   }, []);
 
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     const gen = ++connectorsGen.current;
+    // Tagged with the workspace it is for: an answer for another workspace is
+    // never shown, and an older success is kept when a newer request fails.
+    const workspaceId = getActiveWorkspaceId();
+    setConnectorList((state) => connectorListStarted(state, { gen, workspaceId }));
     try {
       const rows = await fetchConnectors();
-      if (isStaleGeneration(gen, connectorsGen.current)) return;
-      setConnectors(rows);
+      setConnectorList((state) => connectorListLoaded(state, { gen, workspaceId, rows }));
       noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
-      if (isStaleGeneration(gen, connectorsGen.current)) return;
       const msg = err instanceof Error ? err.message : "";
+      setConnectorList((state) => connectorListFailed(state, { gen, workspaceId, message: msg }));
+      if (isStaleGeneration(gen, connectorsGen.current)) return;
       const authOnly = /authentication required|sign in|401/i.test(msg);
       const timedOut = /timed out|abort/i.test(msg);
       // 401/session is not an outage — Railway /health can still be green.
@@ -340,8 +347,6 @@ function AppShell({
         }
       }
       // Below threshold: keep previous online state (no flicker).
-    } finally {
-      if (!isStaleGeneration(gen, connectorsGen.current)) setConnectorsReady(true);
     }
   }, [toast]);
 
@@ -615,6 +620,10 @@ function AppShell({
   };
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
+  // D410: every page that lists connectors gets the list's own load state, so
+  // [] reads as "no connections" only after a successful answer.
+  const retryConnectors = useCallback(() => void loadConnectors(), [loadConnectors]);
+  const connectorStatus = connectorListPageState(connectorView, retryConnectors);
   const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
   return (
     <div
@@ -881,6 +890,7 @@ function AppShell({
                 <PageErrorBoundary label="Overview">
                   <DashboardPage
                     connectors={connectors}
+                    {...connectorStatus}
                     jobs={jobs}
                     history={jobHistory}
                     listsLoading={bootLoading}
@@ -913,7 +923,7 @@ function AppShell({
                   <TransferPage
                     key={transferStudioKey}
                     connectors={connectors}
-                    connectorsLoading={!connectorsReady}
+                    {...connectorStatus}
                     seedSourceConnector={transferSeedSource}
                     seedStudioIntent={transferStudioIntent}
                     onOpenSchedules={() => setScreen("schedules")}
@@ -932,7 +942,7 @@ function AppShell({
               {mountedScreens.has("query") && (
                 <div className={`df2-screen-keep ${showScreen("query")}`} hidden={screen !== "query"} aria-hidden={screen !== "query"}>
                 <PageErrorBoundary label="Query Playground">
-                  <QueryPage connectors={connectors} connectorsLoading={!connectorsReady} />
+                  <QueryPage connectors={connectors} {...connectorStatus} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -942,6 +952,7 @@ function AppShell({
                   <ConnectorsPage
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
+                    connectorsError={connectorsError}
                     jobs={jobs}
                     schedules={schedules}
                     onAdd={openModal}
@@ -970,6 +981,7 @@ function AppShell({
                 <PageErrorBoundary label="Schedules">
                   <SchedulesPage
                     connectors={connectors}
+                    {...connectorStatus}
                     onViewJobs={() => setScreen("jobs")}
                     onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     onSchedulesChange={loadSchedules}
@@ -991,7 +1003,7 @@ function AppShell({
               {mountedScreens.has("transforms") && (
                 <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
                 <PageErrorBoundary label="Transformations">
-                  <TransformsPage connectors={connectors} onNavigate={setScreen} />
+                  <TransformsPage connectors={connectors} {...connectorStatus} onNavigate={setScreen} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -1037,6 +1049,7 @@ function AppShell({
                   <ExitReadinessPage
                     active={screen === "exit"}
                     connectors={connectors}
+                    {...connectorStatus}
                     focus={exitFocus}
                     onOpenJob={(jobId) => writeJobsDeepLink(jobId)}
                   />
@@ -1150,6 +1163,13 @@ export function DataTransferApp() {
 }
 
 function DataTransferAppInner() {
+  // Emailed job links (/jobs/<id>, D339) become the Jobs hash before any
+  // screen state reads the URL.
+  useState(() => {
+    const next = emailedJobLinkUrl(window.location.pathname, window.location.search, window.location.hash);
+    if (next) window.history.replaceState(null, "", next);
+    return next;
+  });
   const [signupSeed, setSignupSeed] = useState<{ challengeId: string; email: string } | null>(null);
   // Emailed reset links land on /reset-password#token=... — capture the
   // token once at boot; the page itself strips it from the URL.

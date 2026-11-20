@@ -30,8 +30,15 @@ def test_in_does_not_match_str_none_or_sentinel_spelling():
     assert {r["id"] for r in apply_row_filter(
         rows, {"column": "note", "operator": "in", "value": ["None"]}
     )} == {"3"}
+    # A NULL in an IN list equals nothing: ``x IN (NULL)`` is UNKNOWN, not
+    # true, even when x is NULL (SQL three-valued logic, rule R2; PostgreSQL
+    # docs 9.24.3 "IN"). The sentinel is still not a present token: it does
+    # not match the text "None" or "kept". NULL rows are reached by is_null.
     assert {r["id"] for r in apply_row_filter(
         rows, {"column": "note", "operator": "in", "value": [SQL_NULL_SENTINEL]}
+    )} == set()
+    assert {r["id"] for r in apply_row_filter(
+        rows, {"column": "note", "operator": "is_null"}
     )} == {"1", "2"}
     assert {r["id"] for r in apply_row_filter(
         rows, {"column": "note", "operator": "in", "value": ["kept"]}

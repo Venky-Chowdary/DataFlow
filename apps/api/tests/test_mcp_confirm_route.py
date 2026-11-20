@@ -42,7 +42,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "acks.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
-    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "")
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
 
     import services.connector_store as connector_store
     import services.schedule_store as schedule_store

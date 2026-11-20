@@ -34,6 +34,32 @@ def write_mappings(mappings: list[dict] | None) -> list[dict]:
     return [m for m in (mappings or []) if not is_intentional_omit(m)]
 
 
+def verify_write_pairs(
+    mappings: list[dict] | None,
+    *,
+    key_target: str = "",
+    key_source: str = "",
+) -> list[tuple[str, str]]:
+    """``(source, destination)`` columns a re-read may select.
+
+    An omitted column is not on the destination, so selecting it fails the
+    poll (``Invalid column name``) and fails a run whose cells were exact
+    (D409). A rename is verified under the destination name. The key is
+    always included so a tampered row can be named.
+    """
+    pairs: list[tuple[str, str]] = []
+    for mapping in write_mappings(mappings):
+        source = str(mapping.get("source") or mapping.get("source_column") or "").strip()
+        target = str(mapping.get("target") or mapping.get("target_column") or "").strip()
+        if not source or not target:
+            continue
+        pairs.append((source, target))
+    key = str(key_target or "").strip()
+    if key and not any(target == key for _source, target in pairs):
+        pairs.append((str(key_source or key).strip() or key, key))
+    return pairs
+
+
 def known_target(name: str, target_columns: list[str]) -> bool:
     """True when name matches a declared destination column (case/underscore insensitive)."""
     if not target_columns:
@@ -60,6 +86,7 @@ def enforce_destination_constraints(
     target_columns: list[str],
     *,
     confidence_floor: float = 0.55,
+    target_schemas: list[dict] | None = None,
 ) -> tuple[list[dict], list[str], list[str]]:
     """
     Keep mappings whose target exists in the destination schema.
@@ -76,10 +103,23 @@ def enforce_destination_constraints(
     kept: list[dict] = []
     dropped: list[str] = []
     invented: list[str] = []
+    schema_by_name = {
+        str(s.get("name") or ""): s for s in (target_schemas or []) if s.get("name")
+    }
+    from services.mapping_engine_contract import is_operator_locked
+    from services.semantic_mapper import mapping_violates_key_rule
 
     for m in mappings:
         src = m["source"]
         tgt = m["target"]
+        if mapping_violates_key_rule(
+            src,
+            tgt,
+            schema_by_name.get(tgt),
+            operator_locked=is_operator_locked(m),
+        ):
+            dropped.append(src)
+            continue
         if _is_create_new_mapping(m):
             out = dict(m)
             out["create_new"] = True
@@ -101,6 +141,14 @@ def enforce_destination_constraints(
 
         exact = next((c for c in target_columns if name_identical(tgt, c)), None)
         canon = exact or next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
+        if mapping_violates_key_rule(
+            src,
+            canon,
+            schema_by_name.get(canon) or schema_by_name.get(tgt),
+            operator_locked=is_operator_locked(out),
+        ):
+            dropped.append(src)
+            continue
         out["target"] = canon
         kept.append(out)
 

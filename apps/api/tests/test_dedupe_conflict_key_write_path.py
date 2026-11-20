@@ -46,7 +46,9 @@ def test_dedupe_zero_stays_distinct_from_null():
 def test_dedupe_present_text_still_last_wins():
     rows = [("a", "1"), ("b", "2"), ("a", "3")]
     kept = dedupe_rows(rows, ["id"], ["id", "v"])
-    assert kept == [("a", "3"), ("b", "2")]
+    # The survivor keeps its last copy's place (R4, D391): a destination
+    # whose collation folds keys applies the batch in source order.
+    assert kept == [("b", "2"), ("a", "3")]
 
 
 def test_lsn_dedupe_collapses_reader_null_and_keeps_newest_per_key():

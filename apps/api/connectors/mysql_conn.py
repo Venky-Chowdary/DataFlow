@@ -242,42 +242,186 @@ def get_connection(
         kwargs["write_timeout"] = min(kwargs["write_timeout"], bound)
     from services.egress_guard import assert_connector_dial_allowed
 
-    assert_connector_dial_allowed(ep["host"], connection_string)
-    try:
-        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"], local_infile_ok=True)
-    except Exception as exc:
-        hint = private_cloud_host_hint(ep["host"], connection_string)
-        if hint:
-            raise RuntimeError(f"{exc}{hint}") from exc
-        raise
+    def _open() -> Any:
+        assert_connector_dial_allowed(ep["host"], connection_string)
+        # PyMySQL reads the server greeting (and the TLS handshake) under
+        # read_timeout. The handshake is part of connecting (R10, D281): a
+        # host that accepts and never speaks must fail at connect_timeout,
+        # not at the 120s write or 1800s reconcile socket wait.
+        handshake = {
+            **kwargs,
+            "read_timeout": min(kwargs["read_timeout"], kwargs["connect_timeout"]),
+            "write_timeout": min(kwargs["write_timeout"], kwargs["connect_timeout"]),
+        }
+        try:
+            opened = dial_pymysql(handshake, plan=tls_plan, host=ep["host"], local_infile_ok=True)
+            opened._read_timeout = kwargs["read_timeout"]
+            opened._write_timeout = kwargs["write_timeout"]
+        except Exception as exc:
+            hint = private_cloud_host_hint(ep["host"], connection_string)
+            if hint:
+                raise RuntimeError(f"{exc}{hint}") from exc
+            raise
 
-    # TCP keepalive so public proxies do not drop idle bulk-write sockets.
-    try:
-        import socket
+        # TCP keepalive so public proxies do not drop idle bulk-write sockets.
+        try:
+            import socket
 
-        sock = getattr(conn, "_sock", None) or getattr(conn, "socket", None)
-        if sock is not None:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            if hasattr(socket, "TCP_KEEPIDLE"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-            if hasattr(socket, "TCP_KEEPINTVL"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-            if hasattr(socket, "TCP_KEEPCNT"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
-    except Exception as exc:
-        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            sock = getattr(opened, "_sock", None) or getattr(opened, "socket", None)
+            if sock is not None:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        return opened
+
+    from services.endpoint_session import borrow, in_scope
+
+    # Preflight used to open a fresh TLS session for every catalog read (D308).
+    # Inside a tool-call scope, introspect and probe share one login.
+    if in_scope("mysql") and purpose_l in {"introspect", "probe", "reconcile", "ddl"}:
+        # Purpose is not part of the identity. Probe, introspect, reconcile
+        # and DDL on one endpoint are one login (D308).
+        key = (
+            kwargs["host"],
+            kwargs["port"],
+            kwargs["user"],
+            kwargs["database"] or "",
+            bool(ssl),
+        )
+        shared, release = borrow(
+            "mysql",
+            key,
+            _open,
+            alive=_mysql_session_alive,
+            reset=_mysql_session_reset,
+        )
+        # A login opened for a schema read has a 40s client timeout and may
+        # not have STRICT. Reconcile and DDL re-apply their own limits and
+        # check that they stuck; a mismatch opens a new login (D308). The
+        # client wait is the deadline-bounded one, never the purpose default.
+        try:
+            _retune_mysql_session(
+                shared,
+                io_timeout=kwargs["read_timeout"],
+                lock_wait_s=lock_wait_s,
+                require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+            )
+        except Exception:
+            logger.debug("mysql session could not be retuned for %s", purpose_l, exc_info=True)
+            try:
+                shared.close()
+            except Exception:
+                pass
+            shared = _open()
+            _retune_mysql_session(
+                shared,
+                io_timeout=kwargs["read_timeout"],
+                lock_wait_s=lock_wait_s,
+                require_strict=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+            )
+            release = None
+        if release is not None:
+            return _MysqlHandback(shared, release)
+        return shared
+    opened = _open()
+    # A fresh login already has this purpose's client timeouts from connect;
+    # only its session limits are applied (no read-back: nothing to correct).
     from connectors.write_resilience import apply_mysql_session_guards
 
-    # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
-    # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
-    require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
+    apply_mysql_session_guards(
+        opened,
+        lock_wait_seconds=lock_wait_s,
+        require_strict_sql_mode=purpose_l in {"write", "bulk", "ddl", "setup", "drop"},
+        io_timeout=io_timeout,
+    )
+    return opened
+
+
+class _MysqlHandback:
+    """A borrowed introspect session. ``close`` returns it to the scope."""
+
+    def __init__(self, conn: Any, release: Any) -> None:
+        self._conn = conn
+        self._release = release
+        self._done = False
+
+    def close(self) -> None:
+        if not self._done:
+            self._done = True
+            # End the read's transaction before the session idles in the
+            # scope (R10). An idle session that had read a table holds its
+            # metadata lock, and the writer's own ALTER (widen) then waited
+            # out lock_wait_timeout behind it.
+            _mysql_session_reset(self._conn)
+            self._release()
+
+    def __enter__(self) -> "_MysqlHandback":
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        self.close()
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def _retune_mysql_session(
+    conn: Any, *, io_timeout: int, lock_wait_s: int, require_strict: bool
+) -> None:
+    """Apply this purpose's client and session limits, then read them back.
+
+    pymysql's read timeout is fixed at connect time. A reconcile that reused
+    an introspect login kept the 40s client timeout, so ``SELECT SLEEP(45)``
+    died with 2013. A probe that reused a reconcile login kept 1800s and
+    undid the fail-fast budget. STRICT is checked the same way for DDL.
+    """
+    from connectors.write_resilience import apply_mysql_session_guards
+
+    seconds = int(io_timeout)
+    conn._read_timeout = seconds
+    conn._write_timeout = seconds
     apply_mysql_session_guards(
         conn,
         lock_wait_seconds=lock_wait_s,
         require_strict_sql_mode=require_strict,
+        io_timeout=seconds,
     )
-    return conn
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT @@SESSION.net_read_timeout, @@SESSION.net_write_timeout, @@SESSION.sql_mode"
+        )
+        net_read, net_write, mode = cur.fetchone()
+    if int(net_read) < seconds or int(net_write) < seconds:
+        raise RuntimeError(
+            f"MySQL session timeout stayed at {net_read}/{net_write}, wanted {seconds}"
+        )
+    if require_strict:
+        flags = str(mode or "").upper()
+        if "STRICT_TRANS_TABLES" not in flags and "STRICT_ALL_TABLES" not in flags:
+            raise RuntimeError(f"MySQL STRICT sql_mode did not stick ({mode})")
+
+
+def _mysql_session_alive(conn: Any) -> bool:
+    try:
+        conn.ping(reconnect=False)
+        return True
+    except Exception:
+        return False
+
+
+def _mysql_session_reset(conn: Any) -> None:
+    try:
+        conn.rollback()
+    except Exception:
+        return None
 
 
 def enable_autocommit(conn: Any) -> None:

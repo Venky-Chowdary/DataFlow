@@ -1103,6 +1103,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                         "postgresql", cur, resolved_schema, target
                     ).to_dict()
         conn.close()
+        conn = None  # handed back: the failure path must not close it again
         out: dict[str, Any] = {
             "ok": True,
             "tables": tables,
@@ -1132,6 +1133,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "tables": [],
         }
     except Exception as exc:
+        # D305: a read that failed midway ends its session's transaction now.
+        from connectors.write_resilience import close_quietly
+
+        close_quietly(locals().get("conn"))
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 

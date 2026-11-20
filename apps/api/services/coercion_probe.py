@@ -443,6 +443,41 @@ def _probe_target_not_null(
     return _target_explicitly_not_null(mapping, tgt_name, dest_nullability)
 
 
+def _writer_cell(
+    cell: Any,
+    transform: Any,
+    mapping: dict[str, Any],
+    *,
+    empty_cells_as_null: bool,
+    dest_nullability: dict[str, bool] | None,
+    target: str,
+) -> tuple[Any, str | None]:
+    """One cell through the writer's own pipeline (transform, crosswalk, blank rule)."""
+    from connectors.writer_common import _convert_mapped_cell
+
+    return _convert_mapped_cell(
+        cell,
+        transform,
+        mapping,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dict(dest_nullability or {}),
+        target=target,
+    )
+
+
+def _transform_rewrites_empty(transform: Any, mapping: dict[str, Any], *, target: str) -> bool:
+    """True when the writer would not keep '' under ``transform`` (refused or NULL)."""
+    if not transform:
+        return False
+    for as_null in (False, True):
+        value, err = _writer_cell(
+            "", transform, mapping, empty_cells_as_null=as_null, dest_nullability=None, target=target
+        )
+        if err or value != "":
+            return True
+    return False
+
+
 def analyze_coercion(
     *,
     sample_rows: list[dict[str, Any]] | None,
@@ -570,6 +605,9 @@ def analyze_coercion(
             and not live_present
             and not bool(m.get("create_new"))
         )
+        transform = resolve_transform(
+            m, column_types=source_types, dest_types=dest_types, dest_kind=str(dest_db_type or "")
+        )
         if (
             tgt_logical in _TEXTUAL_LOGICALS
             and is_unlimited_string_carrier(tgt_type)
@@ -581,12 +619,12 @@ def analyze_coercion(
             )
             and not specialty_base
             and not unknown_physical
+            # A typed transform (``json`` on SQL Server's NVARCHAR(MAX) JSON
+            # carrier) refuses or nulls cells the carrier alone would keep, so
+            # the column is probed with the writer's rule (D297, R8).
+            and not _transform_rewrites_empty(transform, m, target=tgt_name)
         ):
             continue
-
-        transform = resolve_transform(
-            m, column_types=source_types, dest_types=dest_types, dest_kind=str(dest_db_type or "")
-        )
 
         ok = nulls = sentinel_nulls = failed = 0
         #: Failures the validation mode holds out given their refusal reason
@@ -833,6 +871,19 @@ def analyze_coercion(
                             })
                             raw_failure_values.append(cell[:120])
                         continue
+                    if transform:
+                        # The writer's own cell pipeline decides a blank under a
+                        # transform: NULL when blanks are absence, else refused.
+                        _blank, blank_err = _writer_cell(
+                            cell, transform, m, empty_cells_as_null=empty_cells_as_null,
+                            dest_nullability=dest_nullability, target=tgt_name,
+                        )
+                        if blank_err:
+                            failed += 1
+                            if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                                sample_failures.append({"row": idx, "value": cell[:120], "reason": blank_err})
+                                raw_failure_values.append(cell[:120])
+                            continue
                     nulls += 1
                     observed_values.append(cell)
                     continue
@@ -875,6 +926,24 @@ def analyze_coercion(
                 }:
                     nulls += 1
                 else:
+                    # Mongo JSON/VARIANT binds through the writer's own function:
+                    # a redact / hash_pii token is a JSON string value there, any
+                    # other non-JSON text refuses before Execute (D397, R8).
+                    if dest_l in {"mongodb", "mongo"} and tgt_logical in _STRUCTURAL_LOGICALS:
+                        try:
+                            from connectors.mongodb_writer import bind_mongo_json_field
+
+                            bind_mongo_json_field(converted, transform)
+                        except (TypeError, ValueError) as exc:
+                            failed += 1
+                            if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                                sample_failures.append({
+                                    "row": idx,
+                                    "value": cell[:120],
+                                    "reason": str(exc),
+                                })
+                                raw_failure_values.append(cell[:120])
+                            continue
                     # Domain change: bare scalar → JSON string literal (VARIANT/JSON).
                     if tgt_logical in _STRUCTURAL_LOGICALS and _is_json_scalar_wrap(
                         cell, converted

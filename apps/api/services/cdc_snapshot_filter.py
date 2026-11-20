@@ -192,18 +192,38 @@ def compile_snapshot_filter_mongo(spec: dict[str, Any] | None) -> dict[str, Any]
     col, op = spec["column"], spec["op"]
     if op == "is_null":
         return {col: None}
+    # $ne and $nin match documents where the field is null or absent.
+    # An existence and non-null guard makes them agree with SQL: the row
+    # is kept only when the field exists, is not null, and fails the value.
     if op == "is_not_null":
-        return {col: {"$ne": None}}
+        return {col: {"$exists": True, "$ne": None}}
     if op == "eq":
         return {col: spec["value"]}
-    if op in _IN:
-        return {col: {"$in" if op == "in" else "$nin": list(spec["value"])}}
+    if op == "in":
+        return {col: {"$in": list(spec["value"])}}
+    if op == "not_in":
+        return {
+            "$and": [
+                {col: {"$exists": True}},
+                {col: {"$ne": None}},
+                {col: {"$nin": list(spec["value"])}},
+            ]
+        }
     if op in _LIKE:
         body = re.escape(spec["value"])
         pattern = {"startswith": f"^{body}", "endswith": f"{body}$"}.get(op, body)
         return {col: {"$regex": pattern}}
     mongo_op = {"ne": "$ne", "gt": "$gt", "gte": "$gte", "lt": "$lt", "lte": "$lte"}[op]
-    return {col: {mongo_op: spec["value"]}}
+    pred = {col: {mongo_op: spec["value"]}}
+    if op == "ne":
+        return {
+            "$and": [
+                {col: {"$exists": True}},
+                {col: {"$ne": None}},
+                pred,
+            ]
+        }
+    return pred
 
 
 def describe_snapshot_filter(spec: dict[str, Any] | None) -> str:

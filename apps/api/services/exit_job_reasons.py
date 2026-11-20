@@ -128,6 +128,13 @@ def engine_finding(job: dict[str, Any], schema: Any = ()) -> str:
         return "preflight blocked it: " + "; ".join(gates[:4])
     if str(details.get("reason") or "") == "Preflight blocked transfer":
         return "preflight blocked it (open the job for the blocking checks)"
+    # The Cloud file-export refusal is a fixed sentence with no cell value.
+    # Leaving it unlisted made the rehearsal say "see the server log".
+    if "File exports aren't available as a destination" in error:
+        return (
+            "file exports aren't available on Cloud: the file would be written to "
+            "one server's disk. Send the extract to an object store or SFTP, or run self-hosted"
+        )
     return ""
 
 

@@ -58,6 +58,19 @@ def test_signup_from_www_and_apex_reaches_the_otp_step(siteverify, host):
     assert resp.json()["challenge_id"].startswith("otc_")
 
 
+def test_production_refuses_empty_hostname_and_localhost(monkeypatch):
+    monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "test-secret")
+    monkeypatch.setenv("DATAWRAP_ENV", "production")
+    for hostname in ("", "localhost", "127.0.0.1"):
+        verdict = turnstile.verify(
+            "tok",
+            expected_action="signup",
+            post_fn=lambda **_kw: {"success": True, "hostname": hostname, "action": "signup"},
+        )
+        assert verdict["ok"] is False, hostname
+        assert verdict["reason"] in {"empty_hostname", "hostname_not_allowed"}
+
+
 def test_unknown_host_is_refused_and_the_reason_is_logged(siteverify, caplog):
     siteverify("evil.example")
     body = {**_body(email="mallory@example.com"), "turnstile_token": "tok"}
@@ -75,7 +88,35 @@ def test_unknown_host_is_refused_and_the_reason_is_logged(siteverify, caplog):
 def test_verify_accepts_every_served_hostname(monkeypatch, host):
     monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "test-secret")
     verdict = turnstile.verify(
-        "tok", expected_action="signup",
+        "tok", expected_action="signup", expected_hostname="datawrap.io",
         post_fn=lambda **_kw: {"success": True, "hostname": host, "action": "signup"},
     )
     assert verdict["ok"], verdict
+
+
+@pytest.mark.parametrize("env_name", ["staging", "qa", "preprod"])
+def test_an_unknown_environment_name_refuses_a_localhost_token(monkeypatch, env_name):
+    """AC-2 fail-closed: ``is_production()`` is False for ENV=staging off
+    Railway, so a localhost token passed there. Local tokens are accepted
+    only where ENV names a developer environment (or is unset, on a laptop)."""
+    monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "test-secret")
+    monkeypatch.setenv("DATAWRAP_ENV", env_name)
+    for marker in ("RAILWAY_DEPLOYMENT_ID", "RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
+                   "RAILWAY_SERVICE_ID", "DATAWRAP_ASSUME_PRODUCTION"):
+        monkeypatch.delenv(marker, raising=False)
+    verdict = turnstile.verify(
+        "tok", expected_action="signup",
+        post_fn=lambda **_kw: {"success": True, "hostname": "localhost", "action": "signup"},
+    )
+    assert verdict["ok"] is False and verdict["reason"] == "hostname_not_allowed"
+
+
+@pytest.mark.parametrize("env_name", ["development", "test", "local"])
+def test_a_developer_environment_still_accepts_a_localhost_token(monkeypatch, env_name):
+    monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "test-secret")
+    monkeypatch.setenv("DATAWRAP_ENV", env_name)
+    verdict = turnstile.verify(
+        "tok", expected_action="signup",
+        post_fn=lambda **_kw: {"success": True, "hostname": "localhost", "action": "signup"},
+    )
+    assert verdict["ok"] is True, verdict

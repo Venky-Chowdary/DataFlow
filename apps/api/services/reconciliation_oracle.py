@@ -93,10 +93,10 @@ def oracle_comparable_expr(
 ) -> str:
     """SQL expression for ``column`` usable as an Oracle comparison key.
 
-    LOB columns raise ORA-22848 in ORDER BY / IN, so they are compared on their
-    leading 4000 characters. Keys that differ only beyond that prefix would
-    collide; Oracle offers no wider comparison and refusing the read outright
-    would leave a written table unproven.
+    LOB columns raise ORA-22848 in ORDER BY / IN. ``DBMS_LOB.SUBSTR`` of 4000
+    characters raises ORA-06502 when those characters exceed 4000 bytes, so
+    the order key is a 1000-character prefix. Equality of a sort key uses
+    ``DBMS_LOB.COMPARE`` on the whole value, which does not return a VARCHAR2.
     """
     import sqlalchemy as sa
 
@@ -122,7 +122,8 @@ def oracle_comparable_expr(
         return quoted
     data_type = str((row or [""])[0] or "").upper()
     if data_type in _ORACLE_LOB_TYPES:
-        return f"DBMS_LOB.SUBSTR({quoted}, 4000, 1)"
+        # 1000 characters stays inside VARCHAR2's 4000-byte SQL limit (ORA-06502).
+        return f"DBMS_LOB.SUBSTR({quoted}, 1000, 1)"
     return quoted
 
 
@@ -221,6 +222,26 @@ def verify_oracle_table(
         return -1, ""
 
 
+# A single VARCHAR2 bind of a 40k character key raises ORA-01460.
+_ORACLE_BIND_CHARS = 1000
+
+
+def _oracle_clob_equals(quoted_col: str, index: int, key: str) -> tuple[str, dict[str, str]]:
+    """``DBMS_LOB.COMPARE`` of ``key`` using binds that fit in VARCHAR2."""
+    text = key or ""
+    pieces = [
+        text[offset:offset + _ORACLE_BIND_CHARS]
+        for offset in range(0, max(len(text), 1), _ORACLE_BIND_CHARS)
+    ]
+    names: list[str] = []
+    bound: dict[str, str] = {}
+    for piece_i, piece in enumerate(pieces):
+        name = f"k{index}_{piece_i}"
+        names.append(f"TO_CLOB(:{name})")
+        bound[name] = piece
+    return f"DBMS_LOB.COMPARE({quoted_col}, {' || '.join(names)}) = 0", bound
+
+
 def read_oracle_target_sample(
     dest: dict[str, Any],
     *,
@@ -317,7 +338,25 @@ def read_oracle_target_sample(
             else ""
         )
         ora_order = key_expr or "ROWID"
-        if keys and sort_key:
+        lob_order = key_expr.startswith("DBMS_LOB.SUBSTR")
+        if keys and sort_key and lob_order:
+            # The whole sort key, not the 1000-character order prefix (D362).
+            # One TO_CLOB bind of a 40k key raises ORA-01460. Each bind stays
+            # inside VARCHAR2 and the pieces are concatenated.
+            quoted_col = key_expr[key_expr.find("(") + 1:key_expr.find(",")]
+            params: dict[str, Any] = {"lim": lim}
+            clauses: list[str] = []
+            for i, key in enumerate(keys):
+                clause, bound = _oracle_clob_equals(quoted_col, i, str(key))
+                clauses.append(clause)
+                params.update(bound)
+            where = " OR ".join(clauses)
+            sql = (
+                f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
+                f"WHERE {where} "
+                f"ORDER BY {ora_order}, ROWID FETCH FIRST :lim ROWS ONLY"
+            )
+        elif keys and sort_key:
             params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
             params["lim"] = lim
             placeholders = ",".join(f":k{i}" for i in range(len(keys)))
@@ -332,7 +371,15 @@ def read_oracle_target_sample(
                 f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
                 f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
             )
-        result = conn.execute(sa.text(sql), params)
+        try:
+            result = conn.execute(sa.text(sql), params)
+        except Exception as exc:
+            if "01460" not in str(exc):
+                raise
+            raise RuntimeError(
+                "Oracle rejected a key longer than VARCHAR2 (ORA-01460). "
+                "The comparison was split into 1000-character binds and still failed."
+            ) from exc
         names = list(cols) if cols and cols != ["*"] else list(result.keys())
         rows = result.fetchall()
         return [dict(zip(names, parse_oracle_tz_row(row, tz_positions))) for row in rows]

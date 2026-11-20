@@ -1128,11 +1128,250 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
     return True, str(getattr(conn, "workspace_id", "") or "")
 
 
+# Keys whose file the tenant cannot choose safely in any area: a service file
+# or file DSN can itself name further files and drivers, and a password file is
+# never how a connector carries its password. TLS file keys (sslrootcert,
+# sslcert, sslkey, sslcrl) are not here: they are judged by path in
+# ``connectors.tls_file_options`` (an upload, the system store, inline PEM or an
+# operator-listed folder are allowed; any other host path is refused).
+_LIBPQ_FILE_KEYS = frozenset({"service", "servicefile", "passfile"})
+
+# Driver names that do not name a file. A brace does not make a path safe:
+# ``Driver={/tmp/x.so}`` is still a server-side file read (U1).
+_ODBC_DRIVER_ALLOWLIST = frozenset({
+    "odbc driver 18 for sql server",
+    "odbc driver 17 for sql server",
+    "odbc driver 13 for sql server",
+    "odbc driver 11 for sql server",
+    "sql server",
+    "sql server native client 11.0",
+    "sql server native client 10.0",
+    "freetds",
+    "mysql odbc 9.1 unicode driver",
+    "mysql odbc 9.0 unicode driver",
+    "mysql odbc 8.0 unicode driver",
+    "mysql odbc 8.0 ansi driver",
+    "postgresql unicode",
+    "postgresql ansi",
+    "oracle in instantclient_19_3",
+})
+
+
+def _decode_conn_text(raw: str) -> str:
+    """Percent-decode a connection string before looking for file keys.
+
+    ``?serv%69ce=prod`` is ``?service=prod`` after libpq decodes it. One decode
+    is not enough when the percent sign itself is encoded.
+    """
+    from urllib.parse import unquote
+
+    text = str(raw or "")
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            return text
+        text = decoded
+    return text
+
+
+_CONNECTION_STRING_KEYS = {"", "connection_string", "dsn", "url", "uri", "odbc_connect"}
+
+
+def _refused_pairs(pairs: list[tuple[str, str]]) -> list[str]:
+    """Forbidden keys. Values are not scanned, so a password may contain them."""
+    refused: list[str] = []
+    for key, value in pairs:
+        if key in _LIBPQ_FILE_KEYS or key in {"dsn", "filedsn"}:
+            refused.append(key)
+        elif key == "driver" and _odbc_driver_is_path(value):
+            refused.append("driver")
+    return refused
+
+
+def _collect_dsn_keys(value: Any, key: str = "") -> list[str]:
+    """Keys of a connection string or of ``extra``, never substrings of a value."""
+    key_l = str(key or "").strip().lower()
+    if isinstance(value, dict):
+        found: list[str] = []
+        for child_key, child in value.items():
+            found.extend(_collect_dsn_keys(child, str(child_key)))
+        return found
+    if isinstance(value, (list, tuple)):
+        found = []
+        for child in value:
+            found.extend(_collect_dsn_keys(child, key_l))
+        return found
+    if not isinstance(value, str):
+        return []
+    # The key itself is what extra={"service": "prod"} means. The value is
+    # not a second connection string unless this field is one.
+    own = _refused_pairs([(key_l, value)]) if key_l else []
+    if key_l not in _CONNECTION_STRING_KEYS and "://" not in value:
+        return own
+    return own + _refused_pairs(_connection_pairs(value))
+
+
+def _connection_pairs(raw: str, _depth: int = 0) -> list[tuple[str, str]]:
+    """Named keys in a libpq URL, a keyword string, or an ODBC connection string.
+
+    Values are parsed, not scanned. A password inside quotes or ``PWD={...}``
+    may contain ``service=`` and is not a key. A braced ODBC driver name is one
+    value, so spaces inside ``{ODBC Driver 18 for SQL Server}`` are not a
+    second key. The userinfo of a URL (``user:secret@host``) is not a key list;
+    only the query string is.
+    """
+    text = _decode_conn_text(raw)
+    if "://" in text:
+        query = text.split("?", 1)[1] if "?" in text else ""
+        body = query
+    else:
+        body = text
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        while i < n and body[i] in " \t\r\n;&?":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and body[i] not in "= \t\r\n;&?":
+            i += 1
+        key = body[start:i].strip().lower()
+        if i >= n or body[i] != "=":
+            while i < n and body[i] not in " \t\r\n;&?":
+                i += 1
+            continue
+        i += 1
+        if i < n and body[i] in "'\"":
+            quote = body[i]
+            i += 1
+            vstart = i
+            while i < n and body[i] != quote:
+                i += 1
+            value = body[vstart:i]
+            if i < n:
+                i += 1
+        elif i < n and body[i] == "{":
+            i += 1
+            vstart = i
+            while i < n and body[i] != "}":
+                i += 1
+            value = body[vstart:i]
+            if i < n:
+                i += 1
+        else:
+            vstart = i
+            while i < n and body[i] not in " \t\r\n;&?":
+                i += 1
+            value = body[vstart:i]
+        if key:
+            pairs.append((key, value.strip()))
+            if key == "odbc_connect" and value.strip() and _depth < 3:
+                pairs.extend(_connection_pairs(value, _depth + 1))
+    return pairs
+
+
+def _odbc_driver_is_path(value: str) -> bool:
+    """True unless the value is an allowlisted driver name with no path separator.
+
+    ``{ODBC Driver 18 for SQL Server}`` is a name. ``{/tmp/x.so}`` and
+    ``{C:\\driver.dll}`` are files the process would open.
+    """
+    token = str(value or "").strip()
+    if token.startswith("{") and token.endswith("}"):
+        token = token[1:-1].strip()
+    if not token:
+        return True
+    if any(sep in token for sep in ("/", "\\", ":")):
+        return True
+    return token.casefold() not in _ODBC_DRIVER_ALLOWLIST
+
+
+# A field with one of these names is the option itself, not a password that
+# happens to contain the word. Values of password / pwd are never re-parsed.
+_REFUSED_FIELD_KEYS = frozenset({
+    "service", "servicefile", "passfile", "dsn", "filedsn",
+})
+_PASSWORD_FIELDS = frozenset({"password", "pwd"})
+
+
+def server_side_dsn_refusal(*texts: Any) -> str:
+    """Refuse a connection string that would read a file on this server.
+
+    Save uses the same readings as connect: libpq's own conninfo parser
+    (single quotes and backslash escapes, no double quotes) and the ODBC
+    driver manager (``}}`` is one ``}``). A password field is not a second
+    connection string.
+    """
+    for raw in texts:
+        refusal = _refusal_like_connect(raw)
+        if refusal:
+            return refusal
+    return ""
+
+
+def _refusal_like_connect(raw: Any, key: str = "") -> str:
+    from connectors.host_config_selectors import mapping_refusal, text_refusal
+    from connectors.tls_file_options import mapping_refusal as file_mapping_refusal
+    from connectors.tls_file_options import text_refusal as file_refusal
+
+    flags = {"libpq": True, "odbc": True, "installed_only": False}
+    where = "in this connector's connection settings"
+    key_l = str(key or "").strip().lower()
+    if key_l in _PASSWORD_FIELDS:
+        return ""
+    if key_l in _REFUSED_FIELD_KEYS:
+        return (
+            f"Connection string key {key_l} reads a file on this server "
+            "(a libpq service file, a password file, a certificate path, or an "
+            "ODBC DSN). Save the host, port, database and password on the connector "
+            "instead."
+        )
+    if isinstance(raw, dict):
+        # A TLS file option is judged by where its path points (U1 round 7:
+        # a blanket refusal of the key also refused sslrootcert=system, an
+        # uploaded CA and inline PEM, the ways the product supplies CA files).
+        refusal = mapping_refusal(raw, where, **flags) or file_mapping_refusal(raw, where)
+        if refusal:
+            return refusal
+        for child_key, value in raw.items():
+            found = _refusal_like_connect(value, str(child_key))
+            if found:
+                return found
+        return ""
+    if isinstance(raw, (list, tuple)):
+        for value in raw:
+            found = _refusal_like_connect(value, key_l)
+            if found:
+                return found
+        return ""
+    if isinstance(raw, str) and raw.strip():
+        return (
+            text_refusal(raw, where, **flags)
+            or file_refusal(raw, where)
+            or ""
+        )
+    return ""
+
+
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
     from services.connector_request_limits import refuse_control_characters
 
     refuse_control_characters("Connector name", data.get("name"))
+    refused = server_side_dsn_refusal(
+        data.get("connection_string"), data.get("host"), data.get("extra")
+    )
+    if refused:
+        raise ValueError(refused)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    hosted = sqlite_hosted_refusal(
+        str(data.get("type") or ""), str(data.get("connection_string") or "")
+    )
+    if hosted:
+        raise ValueError(hosted)
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1237,6 +1476,11 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
     if "name" in data:
         refuse_control_characters("Connector name", data.get("name"))
+    refused = server_side_dsn_refusal(
+        data.get("connection_string"), data.get("host"), data.get("extra")
+    )
+    if refused:
+        raise ValueError(refused)
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None

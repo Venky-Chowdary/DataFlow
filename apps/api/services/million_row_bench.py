@@ -960,6 +960,7 @@ def _sqlserver_cfg() -> dict[str, Any]:
 
 def _sqlserver_connect():
     import pymssql
+    from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
     return pymssql.connect(
         server="127.0.0.1",
@@ -968,6 +969,7 @@ def _sqlserver_connect():
         password=getenv_brand("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         database="dataflow",
         login_timeout=10,
+        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
         autocommit=True,
     )
 

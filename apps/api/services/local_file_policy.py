@@ -235,9 +235,10 @@ def sqlite_destination_message() -> str:
     from services.brand import PRODUCT_NAME
 
     return (
-        f"SQLite isn't available as a destination on {PRODUCT_NAME} Cloud: the file "
-        "would live on a single server and isn't kept between runs. Use PostgreSQL, "
-        f"MySQL or another database destination, or run {PRODUCT_NAME} self-hosted "
+        f"SQLite isn't available as a destination on {PRODUCT_NAME} Cloud, and it "
+        "isn't available as a source either: the file would live on a single server "
+        "and isn't kept between runs. No server filesystem path is opened. Use "
+        f"PostgreSQL, MySQL or another database, or run {PRODUCT_NAME} self-hosted "
         f"(where {SQLITE_DESTINATION_FLAG}=on keeps it)."
     )
 
@@ -270,6 +271,13 @@ def _is_sqlite_destination(dest_type: str, connection_string: str = "") -> bool:
         return True
     # A generic SQL connector pointed at a ``sqlite:`` URL writes the same local file.
     return driver == "generic_sql" and (connection_string or "").strip().lower().startswith("sqlite:")
+
+
+def sqlite_hosted_refusal(conn_type: str, connection_string: str = "") -> str | None:
+    """One message for a hosted SQLite source or destination. No path is opened."""
+    if sqlite_destination_allowed() or not _is_sqlite_destination(conn_type, connection_string):
+        return None
+    return sqlite_destination_message()
 
 
 def sqlite_destination_refusal(dest_type: str, connection_string: str = "") -> str | None:

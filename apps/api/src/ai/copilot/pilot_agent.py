@@ -3433,8 +3433,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
-            elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):
+            elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict) and tr.output:
                 # A blocked transfer still owes the operator the gate evidence.
+                # A refusal before any plan has none: its error is the answer.
                 parts.append(f"{tr.error}\n\n{_render_transfer('plan_transfer', tr.output)}")
             elif tr.name == "plan_transfer_route" and tr.success:
                 o = tr.output or {}

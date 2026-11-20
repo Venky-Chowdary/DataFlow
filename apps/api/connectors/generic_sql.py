@@ -60,10 +60,8 @@ from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
 )
 from connectors.upsert_fallback import note_native_upsert_failed, upsert_fallback_warnings
 from connectors.schema_drift import (
-    _build_widen_ddl,
     add_missing_columns,
     is_wider_type,
-    raise_widen_refusal,
 )
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -884,6 +882,11 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     if drivername.startswith("mssql"):
         drivername = _mssql_drivername()
         query = _mssql_connect_query(cfg, drivername)
+        if drivername == "mssql+pymssql":
+            from connectors.mssql_login import pymssql_tds_version
+
+            # One login attempt per login_timeout (D281): no Sybase 5.0 re-dial.
+            query = {**query, "tds_version": pymssql_tds_version(cfg)}
         if not query:
             query = None
 
@@ -2669,119 +2672,18 @@ def _source_ddl_for_widen(
     return mapping_source
 
 
-def _widen_existing_columns_sa(
-    conn: Any,
-    engine: Any,
-    dialect_name: str,
-    schema: str | None,
-    table_name: str,
-    target_cols: list[str],
-    target_column_types: dict[str, str],
-    conflict_columns: list[str] | None = None,
-    *,
-    stamp_ceiling_by_col: dict[str, str] | None = None,
-    refusals_out: list[dict[str, Any]] | None = None,
-) -> list[str]:
-    """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
+def _widen_existing_columns_sa(*args: Any, **kwargs: Any) -> list[str]:
+    """SQLAlchemy widen. The body lives in ``column_widen_restore`` (size cap)."""
+    from connectors.column_widen_restore import widen_existing_columns_sa
 
-    Uses SQLAlchemy reflection and text execution so the same helper works for
-    every SQLAlchemy-backed dialect (DuckDB, SQL Server, Oracle, SQLite skipped).
-    Primary-key / conflict columns are skipped because most engines cannot
-    ALTER the type of a key column in place.
+    return widen_existing_columns_sa(*args, **kwargs)
 
-    Map≡ALTER: when ``stamp_ceiling_by_col`` is set, never ALTER past the
-    approved Map stamp — refuse-closed with audit evidence in ``refusals_out``.
-    """
-    if not target_cols or not target_column_types:
-        return []
 
-    dialect_name = (dialect_name or "").lower()
-    if dialect_name == "sqlite":
-        return []
+def _apply_widen_restore(engine: Any, statements: list[str]) -> None:
+    """Compensating ALTER of the captured column. A failure fails the job."""
+    from connectors.column_widen_restore import apply_column_restores
 
-    skip_cols = set(conflict_columns or [])
-    ceilings = {
-        str(k): str(v)
-        for k, v in (stamp_ceiling_by_col or {}).items()
-        if k and v
-    }
-
-    try:
-        inspector = sa.inspect(conn)
-        existing_cols = inspector.get_columns(table_name, schema=schema)
-    except Exception as exc:
-        logger.debug("Could not reflect columns for widen: %s", exc, exc_info=exc)
-        return []
-
-    from connectors.schema_drift import existing_column_index
-
-    catalog_names = existing_column_index(
-        dialect_name, (c["name"] for c in existing_cols)
-    )
-    log: list[str] = []
-    for col in target_cols:
-        if col in skip_cols:
-            continue
-        # Reflection normalises Oracle's ``LABEL`` to ``label``; an exact match
-        # skipped the widen and the row it was needed for was truncated or
-        # refused with no ALTER ever attempted.
-        catalog_name = catalog_names.get(col) or catalog_names.get(col.casefold())
-        existing = next(
-            (c for c in existing_cols if c["name"] == catalog_name), None
-        )
-        if not existing:
-            continue
-        existing_type = str(existing["type"].compile(dialect=engine.dialect))
-        proposed = target_column_types.get(col, existing_type)
-        stamp = ceilings.get(col)
-        desired_type = proposed
-        if stamp:
-            # Hard ceiling: align live up to stamp only; never past it.
-            if proposed and is_wider_type(stamp, proposed):
-                refusal = {
-                    "column": col,
-                    "mapped_type": stamp,
-                    "refused_wider": proposed,
-                    "reason": "explicit_map_stamp_ceiling",
-                }
-                if refusals_out is not None:
-                    refusals_out.append(refusal)
-                else:
-                    logger.info(
-                        "generic_sql Map≡ALTER refusal (stamp ceiling): %s", refusal
-                    )
-            desired_type = stamp
-        if not is_wider_type(existing_type, desired_type):
-            continue
-        try:
-            ddl = _build_widen_ddl(
-                dialect_name, schema, table_name, col, desired_type, existing_type
-            )
-            conn.execute(sa.text(ddl))
-            conn.commit()
-            log.append(ddl)
-            logger.debug(
-                "Widened %s.%s from %s to %s",
-                table_name,
-                col,
-                existing_type,
-                desired_type,
-            )
-        except Exception as exc:
-            err = str(exc).lower()
-            if any(
-                phrase in err for phrase in ("already", "cannot alter", "not supported")
-            ):
-                logger.debug(
-                    "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
-                )
-                continue
-            logger.warning(
-                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
-            )
-            raise_widen_refusal(col, existing_type, desired_type, exc)
-            raise
-    return log
+    apply_column_restores(engine, statements)
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
@@ -2878,6 +2780,28 @@ def _is_not_found_error(exc: BaseException) -> bool:
     if names & {"NoSuchTableError", "UndefinedTable", "CatalogException"}:
         return True
     blob = " ".join(str(e) for e in chain)[:4000]
+    lowered = blob.lower()
+    from services.error_taxonomy import sqlserver_error_numbers, sqlserver_is_network_failure
+
+    # 208 is "Invalid object name" even though pymssql appends "DB-Lib error"
+    # to it. That suffix is not a dead host (D366).
+    if 208 in sqlserver_error_numbers(blob):
+        return True
+    if sqlserver_is_network_failure(blob):
+        return False
+    if any(
+        marker in lowered
+        for marker in (
+            "login timeout",
+            "timeout expired",
+            "could not connect",
+            "connection refused",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+        )
+    ):
+        return False
     return bool(
         re.search(
             r"does not exist|doesn't exist|invalid object name|"
@@ -5677,7 +5601,12 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     rows_skipped = 0
+    created_this_call = False
     identity_session: Any = None
+    # DDL this attempt applied. A failed run with nothing committed puts the
+    # columns back (D368). A successful write keeps the widen.
+    widen_restore: list[str] = []
+    keep_widen = False
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -5815,9 +5744,9 @@ def write_mapped_rows(
                     if db_type == "questdb":
                         # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
                         ddl = str(
-                            sa.schema.CreateTable(
-                                table_obj, if_not_exists=True
-                            ).compile(dialect=engine.dialect)
+                            sa.schema.CreateTable(table_obj).compile(
+                                dialect=engine.dialect
+                            )
                         )
                         ddl = ddl.replace(
                             "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP"
@@ -5852,9 +5781,7 @@ def write_mapped_rows(
                             )
                         )
                     else:
-                        create = sa.schema.CreateTable(
-                            table_obj, if_not_exists=True
-                        )
+                        create = sa.schema.CreateTable(table_obj)
                         if placement_suffix:
                             # Placement lives inside CREATE: no engine can
                             # partition or relocate a table after the fact.
@@ -5917,6 +5844,9 @@ def write_mapped_rows(
                         )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
+                    # Plain CREATE succeeded, so this attempt created the
+                    # table. IF NOT EXISTS succeeding is not that proof (D378).
+                    created_this_call = True
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
                     # was created concurrently, ignore the error and continue.
@@ -5946,6 +5876,17 @@ def write_mapped_rows(
                     if col in explicit_stamps and col in target_column_types
                 }
                 alter_widen_refusals: list[dict[str, Any]] = []
+                _widen_source_types: dict[str, str] = {}
+                for _wcol in target_cols:
+                    _wmap = by_tgt.get(_wcol) or by_tgt.get(str(_wcol).lower()) or {}
+                    _wsrc = str(_wmap.get("source") or "")
+                    _wtype = (
+                        column_types.get(_wsrc)
+                        or _wmap.get("source_type")
+                        or ""
+                    )
+                    if _wtype:
+                        _widen_source_types[_wcol] = str(_wtype)
                 _widen_existing_columns_sa(
                     conn,
                     engine,
@@ -5957,6 +5898,8 @@ def write_mapped_rows(
                     conflict_columns=conflict_columns,
                     stamp_ceiling_by_col=stamp_ceiling_by_col or None,
                     refusals_out=alter_widen_refusals,
+                    source_types=_widen_source_types,
+                    restore_out=widen_restore,
                 )
                 if alter_widen_refusals:
                     logger.info(
@@ -6354,6 +6297,7 @@ def write_mapped_rows(
             meta_out = dict(meta_out or {})
             meta_out["schema_fidelity"] = fid_report
         _cleanup_spool()
+        keep_widen = True
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -6378,10 +6322,16 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=[*upsert_fallback_warnings(table_obj), *transform_errors],
         )
-    except TransferCancelled:
+    except TransferCancelled as cancelled:
         # D168: cancel is control flow, not a write failure. The chunks already
-        # committed stay (cancel_outcome reports them); the open one was never
-        # begun, and the finally below releases the connection.
+        # committed stay. A table this attempt created, with nothing committed,
+        # is dropped and named on the cancel (D378). A pre-existing table is not.
+        if created_this_call and int(written or 0) == 0 and table_name:
+            from services.batch_undo import note_dropped_empty_create
+
+            note_dropped_empty_create(
+                cancelled, cfg, table_name, schema_name or schema or None
+            )
         raise
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")
@@ -6408,6 +6358,8 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
+        if widen_restore and written == 0 and not keep_widen:
+            _apply_widen_restore(engine, widen_restore)
         # A pooled connection left with IDENTITY_INSERT ON fails the *next*
         # table's load with an error naming the wrong table, so the release is
         # owed on every exit — success, early return, or exception.

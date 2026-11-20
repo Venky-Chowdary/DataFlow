@@ -12,6 +12,11 @@ _IDENT_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
 _PLAIN_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: A Google Cloud project ID: 6-30 lowercase letters, digits and hyphens,
+#: starting with a letter and not ending with a hyphen, optionally under a
+#: legacy domain scope (``example.com:my-project``). See
+#: https://cloud.google.com/resource-manager/docs/creating-managing-projects
+_GCP_PROJECT_ID = re.compile(r"^(?:[a-z0-9][a-z0-9.-]{0,61}[a-z0-9]:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 
 
 def unsafe_sql_identifier_reason(name: str) -> str | None:
@@ -384,6 +389,25 @@ def pg_regclass_literal(schema: str | None, table: str) -> str:
     return _seg(tbl)
 
 
+_BIGQUERY_TABLE_NAME_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "Pd", "Zs"})
+
+
+def bigquery_table_name_is_legal(name: str) -> bool:
+    """BigQuery's table-naming rule: 1..1024 UTF-8 bytes of Unicode letters (L),
+    marks (M), numbers (N), connectors (Pc, e.g. ``_``), dashes (Pd, e.g. ``-``)
+    and spaces (Zs). cloud.google.com/bigquery/docs/tables#table_naming
+
+    Backticks, dots, quotes and control characters are outside every one of
+    those categories, so a legal name is inert inside a backtick-quoted path.
+    """
+    import unicodedata
+
+    text = str(name or "")
+    if not text or len(text.encode("utf-8")) > 1024:
+        return False
+    return all(unicodedata.category(ch) in _BIGQUERY_TABLE_NAME_CATEGORIES for ch in text)
+
+
 def quote_table_ref(
     table: str,
     schema: str | None = None,
@@ -427,11 +451,27 @@ def quote_table_ref(
     if dialect in ("bigquery", "bq"):
         # BigQuery: `project.dataset.table` — sanitize each segment.
         parts: list[str] = []
-        for part in (project, dataset or schema, table):
-            if not part:
-                continue
+        if project and _GCP_PROJECT_ID.match(project):
+            # A valid project ID is kept as spelled: its hyphens are part of the
+            # name, and `my_proj` is another (invalid) project (D314). The
+            # grammar admits no backtick, dot-path or quote, so it is inert here.
+            parts.append(project)
+        elif project:
             parts.append(
-                catalog_identifier(part, preserve_case=True, max_len=1024, sanitize=sanitize)
+                catalog_identifier(project, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
+        if dataset or schema:
+            parts.append(
+                catalog_identifier(dataset or schema, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
+        if table:
+            # A legal table name is kept as spelled (``daily-events`` is not
+            # ``daily_events``, which may be another table: D314); only a name
+            # BigQuery could not hold is sanitized.
+            parts.append(
+                table
+                if bigquery_table_name_is_legal(table)
+                else catalog_identifier(table, preserve_case=True, max_len=1024, sanitize=sanitize)
             )
         if not parts:
             raise ValueError("BigQuery table reference is empty")

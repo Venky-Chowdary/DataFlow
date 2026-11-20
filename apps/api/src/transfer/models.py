@@ -229,6 +229,8 @@ class TransferRequest:
     # Phase C11 — Decision Artifact content_hash from Validate / ledger.
     # Programmatic skip_preflight stamps inline when empty.
     approved_decision_artifact_hash: str = ""
+    # The Validate run Confirm may reuse when its inputs still match (D308).
+    preflight_run_id: str = ""
     decision_artifact: dict = field(default_factory=dict)
     source_timezone: str = ""
     # G11: the legacy-column adoption Execute made in this run and the live
@@ -427,6 +429,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "acknowledgment_reason": request.acknowledgment_reason or "",
         "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
         "approved_decision_artifact_hash": request.approved_decision_artifact_hash or "",
+        "preflight_run_id": request.preflight_run_id or "",
         "decision_artifact": dict(request.decision_artifact or {}),
         # Path/URI are durable; never embed source_content bytes in Mongo.
         "source_path": request.source_path or "",
@@ -681,6 +684,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         approved_decision_artifact_hash=str(
             data.get("approved_decision_artifact_hash") or ""
         ).strip(),
+        preflight_run_id=str(data.get("preflight_run_id") or "").strip(),
         decision_artifact=dict(data.get("decision_artifact") or {}),
     )
 

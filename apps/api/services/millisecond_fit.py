@@ -169,6 +169,8 @@ class BatchGuard:
     refusal: str = ""
     #: Values with sub-millisecond digits per acknowledged column (to truncate).
     truncated: dict[str, int] = field(default_factory=dict)
+    #: ``(1-based row, column)`` for every unacknowledged sub-millisecond cell.
+    refused_cells: list[tuple[int, str]] = field(default_factory=list)
 
 
 def guard_batch(
@@ -190,11 +192,13 @@ def guard_batch(
         return BatchGuard()
     counts: dict[str, int] = {}
     first: dict[str, tuple[int, Any]] = {}
+    hits: list[tuple[int, str]] = []
     for row_no, row in enumerate(rows, start=1):
         for i, col in idx:
             if i < len(row) and has_sub_millisecond(row[i]):
                 counts[col] = counts.get(col, 0) + 1
                 first.setdefault(col, (row_no, row[i]))
+                hits.append((row_no, col))
     if not counts:
         return BatchGuard()
     acked = {str(c) for c in acknowledged}
@@ -202,7 +206,11 @@ def guard_batch(
     truncated = {c: n for c, n in counts.items() if c in acked}
     if not refused:
         return BatchGuard(truncated=truncated)
-    return BatchGuard(refusal=refusal_message(refused, first, carrier_label), truncated=truncated)
+    return BatchGuard(
+        refusal=refusal_message(refused, first, carrier_label),
+        truncated=truncated,
+        refused_cells=[(n, c) for n, c in hits if c not in acked],
+    )
 
 
 def _values(n: int) -> str:

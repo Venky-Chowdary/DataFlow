@@ -115,6 +115,58 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def is_reserved_document_key(name: str) -> bool:
+    """MongoDB ``_id`` is the document key, not a fuzzy-match target.
+
+    A DATE, INT or TEXT column must not land on it by a fuzzy or model score.
+    An operator-locked mapping may: ``id`` onto ``_id`` is the normal Mongo
+    upsert. Migration rule 4.
+    """
+    return _folded_ident(name).lower() == "_id"
+
+
+def column_is_protected_key(name: str, schema: dict | None = None) -> bool:
+    """True for ``_id`` and for a destination primary key or identity column."""
+    if is_reserved_document_key(name):
+        return True
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("primary_key") or schema.get("is_primary_key"):
+        return True
+    if schema.get("identity") or schema.get("is_identity") or schema.get("autoincrement"):
+        return True
+    key = str(schema.get("column_key") or schema.get("key") or "").strip().upper()
+    return key in {"PRI", "PRIMARY", "IDENTITY"}
+
+
+_KEY_RULE_REASON = (
+    "destination key column takes only its own name, a source _id or an operator mapping (rule 4)"
+)
+
+
+def mapping_violates_key_rule(
+    source: str,
+    target: str,
+    schema: dict | None = None,
+    *,
+    operator_locked: bool = False,
+) -> bool:
+    """Rule 4. Unlocked fuzzy or model pairs do not land on ``_id`` or a key.
+
+    An operator-locked mapping is the declared key, including ``id`` onto
+    ``_id``. A name-identical source may also land on a primary key, and
+    "identical" is :func:`name_identical`: the key Datawrap created from
+    ``Número`` is ``numero`` (D55), so run 2 must map it (review M2).
+    """
+    if operator_locked:
+        return False
+    if is_reserved_document_key(target) and not is_reserved_document_key(source):
+        return True
+    if not column_is_protected_key(target, schema):
+        return False
+    return not name_identical(source, target)
+
+
 def _folded_ident(name: str) -> str:
     """Case- and separator-insensitive identifier (UserID ≡ userid ≡ user_id).
 
@@ -658,6 +710,8 @@ def _near_target_by_form(
     for tgt in target_columns:
         if tgt.lower() in used:
             continue
+        if is_reserved_document_key(tgt) and not name_identical(source, tgt):
+            continue
         if not _qualifiers_compatible(source, tgt):
             continue
         ratio = _similarity(src_form, _semantic_form(tgt))
@@ -831,10 +885,20 @@ def _score_pair(
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
 
-    src_norm = _normalize(source)
-    tgt_norm = _normalize(target)
+    from connectors.sql_identifiers import transliterate_identifier
+
+    # An accented letter is its transliteration, as Datawrap's own sanitiser
+    # writes it: ``naïve col`` onto the ``naive_col`` it created is the exact
+    # name, not a one-token overlap (D55).
+    src_norm = _normalize(transliterate_identifier(source))
+    tgt_norm = _normalize(transliterate_identifier(target))
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
+    if is_reserved_document_key(target) and not name_identical(source, target):
+        return 0.0, (
+            "reserved document key _id is mapped only from a source _id "
+            "or an explicit operator mapping"
+        )
 
     target_type = _scored_dest_type(source_type, target_type, dest_db)
 
@@ -1438,8 +1502,19 @@ def map_columns(
     mappings: list[dict] = []
 
     pair_scores: dict[tuple[str, str], tuple[float, str]] = {}
+    # Rule 4 (D369): a destination key, identity column, DynamoDB key or
+    # ``_id`` takes only its own name; every other pair scores zero here, so
+    # the Hungarian, greedy and near-form passes all agree.
+    tgt_by_name = {str(t.get("name") or ""): t for t in (target_schemas or []) if isinstance(t, dict)}
+
+    def _key_blocked(source: str, target: str) -> bool:
+        return mapping_violates_key_rule(source, target, tgt_by_name.get(target))
+
     for source in source_columns:
         for target in target_columns:
+            if _key_blocked(source, target):
+                pair_scores[(source, target)] = (0.0, _KEY_RULE_REASON)
+                continue
             score, reason = _score_pair(
                 source,
                 target,
@@ -1550,7 +1625,7 @@ def map_columns(
         best_score = 0.0
         best_reason = ""
         for target in target_columns:
-            if target in used_targets:
+            if target in used_targets or _key_blocked(source, target):
                 continue
             score, reason = _score_pair(
                 source,
@@ -1572,7 +1647,9 @@ def map_columns(
         # Prefer a near-matching existing destination over inventing a column
         # when abbreviation/form similarity is strong enough (ph_num → phone).
         # Never override a hard type/sample demotion (ObjectId → DECIMAL id).
-        near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
+        near_tgt, near_ratio = _near_target_by_form(
+            source, [t for t in target_columns if not _key_blocked(source, t)], used_targets=used_targets
+        )
         if near_tgt:
             near_tgt_type = _scored_dest_type(
                 src_type, tgt_types.get(near_tgt, "VARCHAR"), dest_db

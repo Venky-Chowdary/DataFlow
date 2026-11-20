@@ -228,6 +228,24 @@ _PROBE_FIELDS_EXTRA_CANNOT_SET = frozenset(
 
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
+    from services.connector_store import server_side_dsn_refusal
+
+    refused = server_side_dsn_refusal(
+        request.connection_string, request.host, getattr(request, "extra", None)
+    )
+    if refused:
+        raise HTTPException(status_code=422, detail=refused)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(request.type or "")):
+        raise HTTPException(status_code=422, detail=brand)
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    hosted = sqlite_hosted_refusal(
+        str(request.type or ""), str(request.connection_string or "")
+    )
+    if hosted:
+        raise HTTPException(status_code=422, detail=hosted)
     require_admin_connector_access(http_request, request.type)
     _refuse_unhonourable_ssl_mode(
         request.type, request.ssl_mode, request.connection_string, request.extra
@@ -462,6 +480,10 @@ def create_connector(
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
+    from src.transfer.connector_capabilities import unproven_wire_brand_refusal
+
+    if brand := unproven_wire_brand_refusal(str(config.type or "")):
+        raise HTTPException(status_code=422, detail=brand)
     _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode, config.connection_string)
     connector_data = {
         "name": config.name,
@@ -1786,7 +1808,7 @@ def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    from services.quarantine_dlq import count_finding_rows, replay_parent_not_committed
+    from services.quarantine_dlq import quarantine_row_ledger, replay_parent_not_committed
 
     parent_refusal = replay_parent_not_committed(job) if open_n else None
     if parent_refusal:
@@ -1794,12 +1816,13 @@ def get_job_quarantine(job_id: str, request: Request):
         replay_block_reason = parent_refusal
         closure = {**closure, "next_action": parent_refusal}
 
-    finding_rows = count_finding_rows(details) or len(details)
-    rejected_rows = int(
-        job.get("rejected_details_total")
-        or job.get("rejected_rows")
-        or 0
-    ) or finding_rows
+    _ledger = quarantine_row_ledger(
+        details,
+        job_rejected_rows=job.get("rejected_rows"),
+        details_total=job.get("rejected_details_total"),
+    )
+    finding_rows = _ledger["finding_rows"]
+    rejected_rows = _ledger["rejected_rows"]
     summary = job.get("destination_summary")
     has_write = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
     source = quarantine_evidence_source(job, details)
@@ -2046,8 +2069,10 @@ def _merge_edited_row_payloads(
         if len(candidates) == 1:
             idx = candidates[0]
             used.add(idx)
-            merged = dict(base_records[idx] if idx < len(base_records) else {})
-            merged.update({str(k): v for k, v in edit.items() if k != "row"})
+            from services.quarantine_dlq import merge_replay_record
+
+            base_row = dict(base_records[idx] if idx < len(base_records) else {})
+            merged = merge_replay_record(base_row, {str(k): v for k, v in edit.items() if k != "row"})
             bound.append((idx, merged))
             continue
         candidates = []
@@ -2092,8 +2117,9 @@ def _merge_edited_row_payloads(
             )
         idx = candidates[0]
         used.add(idx)
-        merged = dict(base_records[idx])
-        merged.update({str(k): v for k, v in edit.items()})
+        from services.quarantine_dlq import merge_replay_record
+
+        merged = merge_replay_record(dict(base_records[idx]), edit)
         bound.append((idx, merged))
     # Replay only the bound findings — unedited open rows stay open.
     return (
@@ -2462,16 +2488,22 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             record_rows = True
             open_details = open_quarantine_details(durable)
             base_records, _ = _quarantine_details_to_records(open_details)
-            records, details = _merge_edited_row_payloads(
-                open_details, base_records, raw_rows, job_id=job_id
-            )
+            try:
+                records, details = _merge_edited_row_payloads(
+                    open_details, base_records, raw_rows, job_id=job_id
+                )
+            except MaskedQuarantineReplayError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             columns = list(dict.fromkeys(k for r in records for k in r))
         else:
-            details = [
-                overlay_cell_edit(d, durable)
-                for d in body.rows
-                if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
-            ]
+            try:
+                details = [
+                    overlay_cell_edit(d, durable)
+                    for d in body.rows
+                    if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+                ]
+            except MaskedQuarantineReplayError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         details = open_quarantine_details(durable)
     if not details:

@@ -252,33 +252,63 @@ def mapping_fidelity(
             "requires_risk_contract": True,
         }
 
+    measured = _mapping_population(mapping, population)
     if is_lossy_coercion(
         _tz_effective(src_type, transform),
         tgt_type,
         dest_db=dest,
         dest_table_exists=dest_table_exists,
-        population=_mapping_population(mapping, population),
+        population=measured,
     ):
         from services.conversion_contract import classify_conversion
+        from services.document_instant import (
+            is_document_instant_token,
+            population_fits_document_instant,
+        )
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
+        instant_narrow = (
+            is_document_instant_token(dest, tgt_type)
+            and population_fits_document_instant(measured) is False
+        )
+        # A bare risk_acknowledged flag does not license a millisecond truncation.
+        cleared = (
+            mapping_has_clearing_risk_contract(mapping)
+            if instant_narrow
+            else bool(mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged"))
+        )
         conv = classify_conversion(
             src_type,
             tgt_type,
             dest_db=dest,
             transform=transform,
-            risk_acknowledged=bool(
-                mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged")
-            ),
+            risk_acknowledged=cleared,
+            population=measured,
         )
+        if instant_narrow:
+            reason = (
+                f"{src_type} → date keeps milliseconds. Measured values have "
+                "sub-millisecond digits. Accept that truncation with a "
+                "continue-policy Migration Risk Contract, or map the column to "
+                "a string to keep every digit."
+            )
+        else:
+            reason = f"{src_type} → {tgt_type} can lose precision, range, or domain."
         return {
             "verdict": "lossy_cast",
-            "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
+            "reason": reason,
             "type_narrowing": True,
             "transform_fidelity": t_fidelity,
             "conversion_class": conv["conversion_class"],
             "invents_capacity": conv["invents_capacity"],
             "requires_risk_contract": conv["requires_risk_contract"],
         }
+    from services.decision_kernel.type_invent import temporal_tick_disclosure
+
+    # D372/R3: not lossy on what was measured, but a sample is not every row.
+    tick_note = temporal_tick_disclosure(
+        _tz_effective(src_type, transform), tgt_type, dest_db=dest, population=measured
+    )
     if t_fidelity == "mutate":
         from services.conversion_contract import ConversionClass
 
@@ -338,12 +368,15 @@ def mapping_fidelity(
 
     return {
         "verdict": "preserve",
-        "reason": f"{src_type} → {tgt_type} round-trips without loss.",
+        "reason": tick_note or f"{src_type} → {tgt_type} round-trips without loss.",
         "type_narrowing": False,
         "transform_fidelity": t_fidelity,
-        "conversion_class": ConversionClass.LOSSLESS.value,
+        # A tick the sample did not show is equivalent on what was read, not
+        # proven lossless; the plan discloses it (temporal_tick_disclosure).
+        "conversion_class": (ConversionClass.EQUIVALENT if tick_note else ConversionClass.LOSSLESS).value,
         "invents_capacity": False,
         "requires_risk_contract": False,
+        **({"disclosure": tick_note} if tick_note else {}),
     }
 
 
@@ -386,6 +419,7 @@ def stamp_mapping_fidelity(
             "conversion_class": verdict.get("conversion_class"),
             "invents_capacity": verdict.get("invents_capacity"),
             "requires_risk_contract": verdict.get("requires_risk_contract"),
+            **({"fidelity_disclosure": verdict["disclosure"]} if verdict.get("disclosure") else {}),
         })
     return out
 

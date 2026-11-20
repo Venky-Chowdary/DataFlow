@@ -2311,10 +2311,29 @@ def _g6_mysql_key_refusal(ctx: PreflightContext, dest_kind: str) -> str | None:
 def _g6_dynamodb_key_refusal(
     ctx: PreflightContext, dest_kind: str
 ) -> str | None:
-    if (
-        dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}
-        or ctx.plan.destination.table_exists is not True
-    ):
+    if dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}:
+        return None
+    if ctx.plan.destination.table_exists is False:
+        # Create-new: the writer builds the table from these columns and the
+        # HASH key. Refuse here, before Confirm, when it cannot (D298).
+        try:
+            from connectors.dynamodb_writer import dynamodb_create_refusal
+        except ImportError:
+            return None
+        _sources, key_targets = _g6_sample_identity(ctx, dest_kind)
+        rows = [
+            {
+                "source": str(getattr(mapping, "source", "") or ""),
+                "target": str(getattr(mapping, "target", "") or ""),
+                "assignment_strategy": str(
+                    getattr(mapping, "assignment_strategy", "") or ""
+                ),
+                "intentional_omit": bool(getattr(mapping, "intentional_omit", False)),
+            }
+            for mapping in (ctx.plan.mappings or [])
+        ]
+        return dynamodb_create_refusal(rows, conflict_columns=key_targets) or None
+    if ctx.plan.destination.table_exists is not True:
         return None
     try:
         from connectors.dynamodb_schema import (
@@ -2431,6 +2450,45 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     dest_kind = (ctx.plan.destination.db_type or "").lower()
+    # Elasticsearch has no relational DDL, so the schemaless branch below does
+    # not run and a keyless overwrite used to pass with upsert_key ''. The
+    # writer then created an empty index and rejected every row (D301). The
+    # refusal is the writer's, before any index exists.
+    try:
+        from services.primary_key import (
+            _is_elasticsearch_kind,
+            elasticsearch_identity_refusal,
+        )
+
+        if _is_elasticsearch_kind(dest_kind):
+            estimate = int(getattr(ctx.plan.source, "row_count_estimate", 0) or 0)
+            es_refusal = elasticsearch_identity_refusal(
+                ctx.plan.mappings,
+                row_count=estimate or None,
+                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None),
+                stream_contracts=getattr(ctx.plan, "stream_contracts", None),
+                stream_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+            )
+            if es_refusal:
+                return _block(
+                    GateId.G6_TARGET_DDL,
+                    es_refusal,
+                    start,
+                    _scope(
+                        {
+                            "issues": [es_refusal],
+                            "rule_id": "g6_target_ddl.elasticsearch_identity",
+                            "remediation_kind": "set_primary_key",
+                            "upsert_key": "",
+                        },
+                        coverage="declared_ddl",
+                        note="Elasticsearch document identity required before index create",
+                    ),
+                )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Elasticsearch identity gate skipped: %s", exc, exc_info=exc
+        )
     schemaless = is_schemaless_dest(dest_kind)
     # Host apps must never fold fingerprint drift into DDL. Scrub defensively so
     # a stale process cannot block Redis/Mongo/Dynamo as "Target DDL incompatible".
@@ -2899,10 +2957,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             "delta_scope": delta_scope,
         }
         # A heap stores the second copy. That is what append means on a table
-        # with no key. Resume is the exception: the same batch is re-delivered,
-        # and a heap would store it twice.
-        if not enforced and not delta_scope and not getattr(
-            collision, "resume_redelivery", False
+        # with no key. incremental_append does it on purpose, including for a
+        # key already stored: one new version per change, on every run (D377).
+        # Resume is the exception: the same batch is re-delivered, and a heap
+        # would store that overlap twice.
+        from services.destination_key_collision_probe import (
+            incremental_append_keeps_versions,
+            unenforced_append_warns,
+        )
+
+        versioned_append = incremental_append_keeps_versions(
+            str(getattr(ctx.plan, "sync_mode", "") or "")
+        )
+        if versioned_append and not enforced and delta_scope:
+            cause = (
+                f"{collision_count} key(s) in this batch already have a version "
+                f"on {key}. incremental_append stores one new version per change. "
+                "Use incremental_deduped or upsert when one row per key is required."
+            )
+        if unenforced_append_warns(
+            enforced=enforced,
+            resume_redelivery=bool(getattr(collision, "resume_redelivery", False)),
+            has_delta_scope=bool(delta_scope),
+            sync_mode=str(getattr(ctx.plan, "sync_mode", "") or ""),
         ):
             return _warn(
                 GateId.G6_TARGET_DDL,
