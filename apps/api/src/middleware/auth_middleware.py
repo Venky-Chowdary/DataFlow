@@ -380,6 +380,18 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     return None
 
 
+def _unauthorized(detail: str, *, headers: dict[str, str] | None = None, **extra: Any) -> JSONResponse:
+    """A 401 that keeps ``detail`` and carries ``error.reference`` (U2)."""
+    from services.safe_errors import enveloped_error_body
+
+    body, cid = enveloped_error_body(401, detail, **extra)
+    return JSONResponse(
+        status_code=401,
+        content=body,
+        headers={"X-Correlation-ID": cid, **(headers or {})},
+    )
+
+
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
     """Phase D2 — Host tenant must match authenticated identity claims."""
     tenant_id = getattr(request.state, "tenant_id", None) or ""
@@ -547,9 +559,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 if path == "/api/v1/mcp/tools/call":
                     from services.mcp_oauth import bearer_challenge
 
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": "Authentication required"},
+                    return _unauthorized(
+                        "Authentication required",
                         headers={"WWW-Authenticate": bearer_challenge()},
                     )
                 if reason_code == "auth_store_unavailable":
@@ -561,14 +572,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         },
                     )
                 if reason_code == "session_idle_timeout":
-                    return JSONResponse(
-                        status_code=401,
-                        content={
-                            "detail": "Your session expired after inactivity (workspace policy). Sign in again.",
-                            "reason": "session_idle_timeout",
-                        },
+                    return _unauthorized(
+                        "Your session expired after inactivity (workspace policy). Sign in again.",
+                        reason="session_idle_timeout",
                     )
-                return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+                return _unauthorized("Authentication required")
 
             from services import audit_coverage
 

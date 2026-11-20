@@ -1497,7 +1497,14 @@ def plan_transfer(
             _endpoint_dict(src_info.get("endpoint")),
             callable_plan,
         )
-        dedupe_named = str(row_rules.get("upsert_key") or dedupe_key or "").strip()
+        # Only a declared dedupe_key collapses copies (R4). A primary_key or
+        # upsert_key on an overwrite names the identity; its in-file repeats
+        # still block on the duplicate-identity gate.
+        dedupe_named = (
+            str(row_rules.get("upsert_key") or dedupe_key or "").strip()
+            if str(dedupe_key or "").strip()
+            else ""
+        )
         keep_last_file = file_overwrite_keep_last(
             source_kind="database",
             source_format=_engine_format(src_info),

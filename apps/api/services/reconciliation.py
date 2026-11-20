@@ -3345,18 +3345,13 @@ def fingerprint_for_reconcile(
         # that really did store an empty string.
         wire = None
         value = None
-    if wire is not None and type(wire).__name__ == "JsonNullToken" and ddl_type:
-        # A file read-back hands a present JSONL ``null`` over as the JSON-null
-        # token. Only a document column can hold JSON null as a value; on
-        # every other column the file's ``null`` is the SQL NULL the writer
-        # emitted for it (D144 — the key is no longer dropped).
-        from services.type_system import normalize_logical_type
+    from services.file_json_null import json_null_reads_as_sql_null
 
-        if normalize_logical_type(ddl_type) not in {
-            "json", "array", "object", "struct", "map",
-        }:
-            wire = None
-            value = None
+    if json_null_reads_as_sql_null(wire, ddl_type, engine):
+        # A file's present ``null`` is the SQL NULL its writer emitted: on a
+        # scalar column (D144), and on a JSON column of a file (D307).
+        wire = None
+        value = None
     if is_explicit_null(value):
         # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
         wire = None
