@@ -437,3 +437,23 @@ def test_failed_restore_is_audited_and_raises(monkeypatch) -> None:
     assert events
     assert events[0]["outcome"] == "failed"
     assert events[0]["reason_code"] == "widen_restore_failed"
+
+
+def test_duckdb_widen_is_one_alter_action() -> None:
+    """DuckDB rejects a second ALTER action; its type change keeps NOT NULL."""
+    import duckdb
+
+    from connectors.column_widen_restore import restate_column_ddl
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE w (amount DECIMAL(6,2) NOT NULL, note VARCHAR(5))")
+    for col, typ, nullable in (("amount", "DECIMAL(12,2)", False), ("note", "VARCHAR(40)", True)):
+        sql = restate_column_ddl(
+            "duckdb", "main", "w", col, typ, nullable=nullable, collation="", existing_type=typ
+        )
+        assert sql.upper().count("ALTER COLUMN") == 1, sql
+        con.execute(sql)
+    cols = dict(con.execute(
+        "SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'w'"
+    ).fetchall())
+    assert cols == {"amount": "NO", "note": "YES"}
