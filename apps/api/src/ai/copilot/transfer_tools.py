@@ -1238,9 +1238,10 @@ def plan_transfer(
     if rules_error:
         return _tool_result(tool, success=False, error=rules_error)
     mode = row_rules["sync_mode"]
-    from services.schema_fidelity import append_existing_key_refusal
+    from services.schema_fidelity import append_existing_key_disclosure
 
-    append_key_refusal = append_existing_key_refusal(
+    # D395/R6/R8: append into a keyed table is allowed and disclosed, not refused.
+    append_key_note = append_existing_key_disclosure(
         sync_mode=mode,
         table_exists=dest_exists is True,
         key_columns=[
@@ -1249,8 +1250,6 @@ def plan_transfer(
             if part.strip()
         ],
     )
-    if append_key_refusal:
-        return _tool_result(tool, success=False, error=append_key_refusal)
     # A filter narrows what the run must move, so every gate that reasons about
     # "the rows about to be written" has to see the filtered sample.
     if row_rules["source_filter"]:
@@ -1744,7 +1743,8 @@ def plan_transfer(
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
-            "warnings": null_dropping_warnings(row_rules["source_filter"]),
+            "warnings": null_dropping_warnings(row_rules["source_filter"])
+            + ([append_key_note] if append_key_note else []),
             "stream_contracts": row_rules["stream_contracts"],
             "data_rules": _data_rules_preview(row_rules, applied_rules, cadence),
             "mapped_count": len(mappings),

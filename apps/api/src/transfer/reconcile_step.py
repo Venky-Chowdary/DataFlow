@@ -1397,18 +1397,15 @@ def _transform_applied_proof_impl(
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
         digest_cols = _mapped_targets(mappings, columns)
-        from services.destination_key_collision_probe import (
-            sync_mode_appends_without_key_resolution,
-        )
-        from services.sync_cursor import is_append_sync as _is_append_sync
+        from services.append_proof_scope import append_versions_by_window
 
         # D359: incremental_append keeps every version of a key. Scoping the
         # read-back by key returns the previous version and a correct new
-        # version looks untransformed. The cursor window is this run's rows.
-        append_versions = bool(
-            _is_append_sync(sync_mode)
-            and sync_mode_appends_without_key_resolution(sync_mode)
-            and not dest_summary.get("key_enforced")
+        # version looks untransformed. When the run recorded its cursor window
+        # (and the cursor lands as written) that window is this run's rows.
+        # Otherwise the read-back stays scoped by key, as before (R9).
+        append_versions = append_versions_by_window(
+            dest_summary, sync_mode, mappings, digest_cols
         )
         if not is_overwrite_sync(sync_mode) and not append_versions:
             # G-1c: an upsert holds one row per key — scope the read-back to
@@ -1574,15 +1571,6 @@ def _transform_applied_proof_impl(
         }
         _dest_window = _proof_window.renamed(_to_target)
     _proof_filter = dest_summary.get("source_filter") if isinstance(dest_summary, dict) else None
-    if append_versions and _proof_window is None:
-        return {
-            "status": "unverifiable",
-            "reason": (
-                "incremental append stores a new version per key, and this run "
-                "did not record its cursor window, so earlier versions cannot "
-                "be separated from the rows this run appended"
-            ),
-        }
 
     from services.mapping_constraints import write_mappings as _write_mappings
 

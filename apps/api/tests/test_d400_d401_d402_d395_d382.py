@@ -347,26 +347,30 @@ def test_d395_overwrite_and_incremental_append_still_carry_the_key(monkeypatch):
         assert create.primary_key == ("id",), mode
 
 
-def test_d395_append_into_an_existing_key_is_refused_and_a_repeat_snapshot_is_named():
+def test_d395_append_into_an_existing_key_is_disclosed_not_refused_and_a_repeat_snapshot_is_named():
+    # R6: append never merges, but appending new keys into a keyed table is
+    # legitimate. D395 AC-2 ("refuse any existing keyed table") over-reached;
+    # the plan discloses the key and the write-time check refuses a collision.
     from services.copy_fast_path import append_repeat_of_stored_snapshot
-    from services.schema_fidelity import append_existing_key_refusal
+    from services.schema_fidelity import append_existing_key_disclosure
 
-    refused = append_existing_key_refusal(
-        sync_mode="full_refresh_append",
-        table_exists=True,
-        key_columns=["id"],
-    )
-    assert "primary key" in refused
-    assert append_existing_key_refusal(
-        sync_mode="append", table_exists=True, key_columns=["id"]
-    )
-    assert append_existing_key_refusal(
+    for mode in ("full_refresh_append", "append", "incremental_append"):
+        note = append_existing_key_disclosure(
+            sync_mode=mode, table_exists=True, key_columns=["id"]
+        )
+        assert "primary key (id)" in note, mode
+        assert "never merged" in note, mode
+        assert "refused" in note, mode
+    assert append_existing_key_disclosure(
         sync_mode="full_refresh_append", table_exists=False, key_columns=["id"]
     ) == ""
-    assert append_existing_key_refusal(
-        sync_mode="incremental_append", table_exists=True, key_columns=["id"]
+    assert append_existing_key_disclosure(
+        sync_mode="full_refresh_overwrite", table_exists=True, key_columns=["id"]
     ) == ""
-    assert append_existing_key_refusal(
+    assert append_existing_key_disclosure(
+        sync_mode="upsert", table_exists=True, key_columns=["id"]
+    ) == ""
+    assert append_existing_key_disclosure(
         sync_mode="full_refresh_append", table_exists=True, key_columns=[]
     ) == ""
     assert append_repeat_of_stored_snapshot(
