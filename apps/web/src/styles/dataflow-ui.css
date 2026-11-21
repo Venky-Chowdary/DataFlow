@@ -3153,7 +3153,7 @@ body {
   margin-bottom: 4px;
   font-size: 13px;
   line-height: 1.25;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-policy-option span {
