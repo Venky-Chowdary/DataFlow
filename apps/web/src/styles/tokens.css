@@ -317,7 +317,8 @@
 
   /* Toast hold times live in Toast.tsx (TOAST_HOLD_MS); errors stay until dismissed. */
   --df-toast-width: min(400px, calc(100vw - 32px));
-  /* Toast region distance from the viewport bottom (raised above sticky action footers). */
+  /* Toast region distance from the viewport bottom. The studio raises it above
+     its step footer by measuring the footer (useStepFooterToastClearance). */
   --df-toast-offset-bottom: 20px;
   --df-toast-offset-bottom-mobile: 16px;
 
@@ -494,13 +495,6 @@
 .df2-btn-primary:focus-visible,
 .df2-btn-danger:focus-visible {
   --df-focus-ring: var(--df-focus-ring-on-fill);
-}
-
-/* A page with a sticky action footer (the studio's step footer) lifts the
-   toast region above it, so a notification never covers the primary action. */
-body:has(.df2-wizard-footer) {
-  --df-toast-offset-bottom: 88px;
-  --df-toast-offset-bottom-mobile: 120px;
 }
 
 html,

@@ -144,6 +144,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   openReview.current = (item: ToastItem) => {
     show(item, Infinity);
     setReview([item]);
+    // When focus leaves its region, sonner hands it back to whatever was
+    // focused before the toast, which pulls it straight out of the review the
+    // moment the dialog takes it. Take it back once that hand-back is done.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const panel = document.querySelector<HTMLElement>(".dt-toast-review");
+      if (panel && !panel.contains(document.activeElement)) panel.focus();
+    }));
   };
 
   const closeReview = useCallback(() => {

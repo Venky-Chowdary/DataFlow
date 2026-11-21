@@ -67,7 +67,12 @@ import { useStudioFlags } from "../lib/useStudioFlags";
 import { StudioFlagBanner } from "../components/transfer/StudioFlagBanner";
 import { Button } from "../components/ui/Button";
 import { Callout } from "../components/ui/Callout";
-import { StepBackButton, StepFooterReason, StepPrimaryButton } from "../components/transfer/StudioStepFooter";
+import {
+  StepBackButton,
+  StepFooterReason,
+  StepPrimaryButton,
+  useStepFooterToastClearance,
+} from "../components/transfer/StudioStepFooter";
 import { ButtonGroup } from "../components/ui/ButtonGroup";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
@@ -3250,6 +3255,8 @@ export function TransferPage({
 
   // Only while Transfer is the visible screen: it stays mounted behind others.
   useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
+  // Notifications sit above the step footer, whatever its height at this width.
+  useStepFooterToastClearance();
 
   const loadTransferPlan = async () => {
     if (!currentSourceColumns.length && !(sourceKind === "file" && file)) {
