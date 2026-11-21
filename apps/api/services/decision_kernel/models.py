@@ -339,13 +339,23 @@ def interim_content_hash(payload: Mapping[str, Any]) -> str:
 
 
 def accepted_stamps(artifact: DecisionArtifact | Mapping[str, Any]) -> set[str]:
-    """Every digest a stored stamp of this decision may carry."""
+    """Every digest a stored stamp of this decision may carry.
+
+    The interim digest dropped key flags with the scores, so for a decision
+    with a key it would equal the current hash of the same rows without the
+    key (review Q2): it is accepted only for a decision with no key-flagged
+    row, where it cannot hide a key change. The feature/Cleanup digest never
+    covered key flags either; it is kept as it always verified.
+    """
     payload = _payload(artifact)
-    return {
+    stamps = {
         compute_content_hash(payload),
         base_content_hash(payload),
-        interim_content_hash(payload),
     }
+    rows = payload.get("mappings") or []
+    if not any(isinstance(row, Mapping) and _row_is_key(row) for row in rows):
+        stamps.add(interim_content_hash(payload))
+    return stamps
 
 
 def same_structural_decision(left: DecisionArtifact, right: DecisionArtifact) -> bool:
