@@ -1,37 +1,39 @@
 {
   "about": [
-    "Floors for the CI throughput smoke (benchmarks/throughput_smoke.py, ci.yml job throughput-smoke).",
-    "Each entry runs benchmarks/db_throughput.py at the smoke size (200k rows) and fails the job",
-    "below min_rows_per_second. rows/s is over the whole engine call, Gate-8 included; at 200k the",
-    "in-memory verification ladder runs too, so it is lower than a 1M run on the same route.",
+    "Floors for the CI throughput smoke (benchmarks/throughput_smoke.py, ci.yml job throughput-smoke,",
+    "report-only: not in the Required PR gate until it has 5 consecutive green runs).",
+    "Each entry runs benchmarks/db_throughput.py and fails below min_rows_per_second. rows/s is over",
+    "the whole engine call, Gate-8 included; at or below 250k rows the in-memory verification ladder",
+    "runs too, so it is lower than a 1M run on the same route.",
     "Floors are set against a machine whose calibrate() takes reference_calibration_seconds (the",
-    "local 4-vCPU box, 2026-11-21: 0.39 s). On a slower runner the smoke scales each floor down by",
-    "reference / measured (never up): two hosted-runner jobs on the same commit ran 2x apart",
-    "(runs 44923502709 and 44936017037). Local clean rates, 100k rows, after -> floor:",
-    "pg-pg copy 1768 -> 1000, pg-pg row path 524 -> 300, pg-mysql (MariaDB) 446 -> 300,",
-    "mysql-pg 550 -> 330. The code before the fast paths ran 236-271 rows/s on the row path there,",
-    "so losing them trips the gate. Raise a floor only with the CI artifacts that justify it."
+    "local 4-vCPU box, 2026-11-21: 0.39 s). On a slower runner the smoke scales a floor down by",
+    "reference / measured, never up and never below MIN_SCALE (0.75) of it: two hosted-runner jobs on",
+    "the same code ran 2x apart (runs 44923502709, 44936017037).",
+    "The code before the per-column fast paths ran 236-271 rows/s on the row path locally (100k rows,",
+    "70cb4669c). Every row-path floor at 0.75 scale stays above 290 rows/s, so losing the fast paths",
+    "trips the gate on any runner. Local clean rates after: pg-pg row path 524, pg-mysql (MariaDB) 446",
+    "(MySQL 8 in CI: 469-953), mysql-pg 550, pg-pg copy 1768. Raise a floor only with CI artifacts."
   ],
   "routes": {
     "pg-pg": {
       "route": "pg-pg",
       "row_path": false,
-      "min_rows_per_second": 1000
+      "min_rows_per_second": 1600
     },
     "pg-pg-row": {
       "route": "pg-pg",
       "row_path": true,
-      "min_rows_per_second": 300
+      "min_rows_per_second": 400
     },
     "pg-mysql": {
       "route": "pg-mysql",
       "row_path": false,
-      "min_rows_per_second": 300
+      "min_rows_per_second": 420
     },
     "mysql-pg": {
       "route": "mysql-pg",
       "row_path": false,
-      "min_rows_per_second": 330
+      "min_rows_per_second": 420
     }
   },
   "reference_calibration_seconds": 0.39

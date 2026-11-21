@@ -81,8 +81,11 @@ def test_a_push_run_never_reuses(reuse, monkeypatch):
 def test_the_gate_only_forgives_the_jobs_the_script_proves(reuse):
     wf = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     gate = wf["jobs"]["required-checks"]["steps"][0]["env"]["REUSABLE"].split()
+    # Report-only jobs are not in the gate, so the gate has nothing to forgive.
+    report_only = {"live-engine-evidence", "throughput-smoke"}
     skippable = {name for name, job in wf["jobs"].items()
-                 if "changes.outputs.reuse != 'true'" in str(job.get("if", "")) and name != "live-engine-evidence"}
+                 if "changes.outputs.reuse != 'true'" in str(job.get("if", "")) and name not in report_only}
+    assert not report_only & set(wf["jobs"]["required-checks"]["needs"])
     assert set(gate) == skippable
     # Every skippable job's check runs are among what the script requires green.
     names = " ".join(reuse.BACKEND_CHECKS)

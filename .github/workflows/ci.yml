@@ -296,17 +296,19 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
-  # Throughput regression smoke (NF-6): 200k mixed-type rows through the real
-  # engine and Gate-8 on the live PostgreSQL / MySQL services, every route,
-  # with an independent cell-by-cell re-read of both tables. Fails when a
-  # route errs, a cell differs, or rows/s falls below the floor in
-  # apps/api/benchmarks/throughput_floors.json. 10M+ runs are the
-  # workflow_dispatch "Throughput benchmark" workflow, not this job.
+  # Throughput regression smoke (NF-6): 100k mixed-type rows through the real
+  # engine and Gate-8 on the live PostgreSQL / MySQL services (the row path
+  # PG->PG and PG->MySQL), with an independent cell-by-cell re-read of both
+  # tables. Fails when a route errs, a cell differs, or rows/s falls below the
+  # runner-calibrated floor in apps/api/benchmarks/throughput_floors.json.
+  # Report-only: not in the Required PR gate until it has five consecutive
+  # green runs. The full route matrix and 10M+ runs are the workflow_dispatch
+  # "Throughput benchmark" workflow.
   throughput-smoke:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -325,7 +327,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r apps/api/requirements-dev.txt
 
-      - name: Throughput smoke (200k rows per route)
+      - name: Throughput smoke (100k rows, row path)
         working-directory: apps/api
         env:
           PYTHONPATH: .
@@ -344,8 +346,8 @@ jobs:
           MYSQL_DATABASE: dataflow
         run: |
           mkdir -p "$RUNNER_TEMP/throughput"
-          python -m benchmarks.throughput_smoke --rows 200000 \
-            --out-dir "$RUNNER_TEMP/throughput"
+          python -m benchmarks.throughput_smoke --rows 100000 \
+            --routes pg-pg-row,pg-mysql --out-dir "$RUNNER_TEMP/throughput"
 
       - name: Upload throughput results
         if: ${{ always() }}
@@ -1394,7 +1396,6 @@ jobs:
       - ai-offline-correctness
       - pilot-answer-quality
       - no-config-transfer
-      - throughput-smoke
       - gitops
       - api-tests
       - api-and-web
@@ -1412,7 +1413,6 @@ jobs:
           AI_OFFLINE: ${{ needs.ai-offline-correctness.result }}
           PILOT_QUALITY: ${{ needs.pilot-answer-quality.result }}
           NO_CONFIG_TRANSFER: ${{ needs.no-config-transfer.result }}
-          THROUGHPUT_SMOKE: ${{ needs.throughput-smoke.result }}
           GITOPS: ${{ needs.gitops.result }}
           API_TESTS: ${{ needs.api-tests.result }}
           API_AND_WEB: ${{ needs.api-and-web.result }}
@@ -1426,7 +1426,7 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           REUSE: ${{ needs.changes.outputs.reuse }}
           REUSED_FROM: ${{ needs.changes.outputs.from }}
-          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer throughput-smoke gitops api-tests cdc-sqlserver security api-image "
+          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests cdc-sqlserver security api-image "
         run: |
           failed=0
           if [ "$CHANGES" != "success" ]; then
@@ -1439,7 +1439,6 @@ jobs:
             "ai-offline-correctness:$AI_OFFLINE" \
             "pilot-answer-quality:$PILOT_QUALITY" \
             "no-config-transfer:$NO_CONFIG_TRANSFER" \
-            "throughput-smoke:$THROUGHPUT_SMOKE" \
             "gitops:$GITOPS" \
             "api-tests:$API_TESTS" \
             "api-and-web:$API_AND_WEB" \

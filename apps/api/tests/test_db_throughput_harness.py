@@ -79,9 +79,20 @@ def test_smoke_floors_cover_every_route_with_a_floor():
         assert float(cfg["min_rows_per_second"]) > 0, name
 
 
-def test_floors_scale_down_only_for_a_slower_runner():
-    assert throughput_smoke.effective_floor(300, 0.4, 0.8) == 150
+def test_floors_scale_down_only_for_a_slower_runner_and_never_below_three_quarters():
+    assert throughput_smoke.effective_floor(400, 0.4, 0.5) == 320
+    assert throughput_smoke.effective_floor(400, 0.4, 0.8) == 300  # clamped, not 200
+    assert throughput_smoke.effective_floor(400, 0.4, 4.0) == 300
     assert throughput_smoke.effective_floor(300, 0.4, 0.2) == 300
     assert throughput_smoke.effective_floor(300, 0, 0.8) == 300
+
+
+def test_every_row_path_floor_stays_above_the_pre_fast_path_rate():
+    """At the most a runner can scale a floor down, the row-path routes still
+    fail at the rate the code ran before the fast paths (271 rows/s max)."""
+    floors = throughput_smoke.load_floors()
+    for name, cfg in floors["routes"].items():
+        lowest = float(cfg["min_rows_per_second"]) * throughput_smoke.MIN_SCALE
+        assert lowest > 271 * 1.05, (name, lowest)
     assert throughput_smoke.load_floors()["reference_calibration_seconds"] > 0
     assert 0 < throughput_smoke.calibrate(rounds=1) < 60

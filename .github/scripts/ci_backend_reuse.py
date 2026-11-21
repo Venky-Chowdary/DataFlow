@@ -28,7 +28,6 @@ BACKEND_CHECKS = (
     "cdc-sqlserver (pymssql)",
     "cdc-sqlserver (pyodbc)",
     "no-config-transfer",
-    "throughput-smoke",
     "mapping-evidence",
     "ai-offline-correctness",
     "pilot-answer-quality",
