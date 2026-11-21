@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-591 flags: 510 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
+592 flags: 511 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -185,6 +185,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `CDC_TXN_BUFFER_MAX_EVENTS` | `50000` | Read by `default_txn_buffer_max_events()`: Debezium-class transaction buffering for log CDC | `apps/api/services/cdc_transaction_buffer.py` |
 | `CDC_TXN_HOLD_SLEEP_SEC` | `0.25` | Read by `_run_cdc_shared_multi_table()`: One log consumer for N tables (Debezium-class); demux apply per stream (and other readers) | `apps/api/src/transfer/cdc_transfer.py` |
 | `CDC_TXN_SPILL_AFTER` | `""` | Read by `default_txn_spill_after()`: Spill in-memory events to disk after this many (keeps RAM bounded) | `apps/api/services/cdc_transaction_buffer.py` |
+| `CELL_FASTPATH` | `1` | Read by `enabled()`: `DATAWRAP_CELL_FASTPATH` / `DATAFLOW_CELL_FASTPATH` = 0 turns the fast paths off | `apps/api/services/cell_fastpath.py` |
 | `CHUNK_SIZE` | `20000` | Read at module level: Shared row mapping utilities for database writers | `apps/api/connectors/writer_common.py` |
 | `COMMIT_SAFE_PROBE_TIMEOUT_MS` | `5000` | Statement timeout, in milliseconds, of every commit-safe probe connection (relation facts, snapshot capture, late-commit check). A probe that times out makes that run "not guaranteed" and raises a Gate-8 warning. `0` = no timeout. | `apps/api/services/commit_safe_window.py` |
 | `COMMIT_SAFE_WALK_SECONDS` | `30` | Budget, in seconds, of one PostgreSQL late-commit walk, which holds one read-only snapshot on the source. Past it the walk stops and the run re-reads from the oldest reported row (no row is skipped). `0` = stop after one page. | `apps/api/services/commit_safe_window.py` |
@@ -262,8 +263,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ENGINE_CACHE` | `1` | Read by `cache_enabled()`: Whether engines are reused. Off restores per-call construction | `apps/api/services/engine_pool.py` |
 | `ENGINE_CACHE_SIZE` | `32` | Read by `max_engines()`: Process-wide SQLAlchemy Engine cache | `apps/api/services/engine_pool.py` |
 | `ENGINE_DIGEST` | `0` | Read by `_engine_digest_enabled()`: Operator gate — default **off** until two gaps are closed | `apps/api/src/transfer/reconcile_step.py` |
-| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
-| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
+| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
+| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
 | `ES_HOST` | `127.0.0.1` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `ES_PORT` | `9200` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `EXIT_VERIFY_MAX_SECONDS` | `""` | Read by `max_verify_seconds()`: The most a rehearsal's verification may take, all attempts together | `apps/api/services/exit_verify_guard.py` |
@@ -711,6 +712,7 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 These functions read a variable whose name is built at run time, so the name does not appear in the tables above.
 
+- `apps/api/services/call_lanes.py` — `lane_size()`
 - `apps/api/services/export_object_store.py` — `s3_client_for()`
 - `apps/api/services/integrations_store.py` — `apply_integrations_to_env()`
 - `apps/api/services/integrations_store.py` — `provider_key_state()`

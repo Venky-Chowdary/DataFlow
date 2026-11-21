@@ -35,7 +35,6 @@ generated corpora on every plan kind, engine, transform and locale pin.
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 from dataclasses import dataclass
@@ -62,7 +61,11 @@ _BOOL_TEXT = {"true": "1", "false": "0", "1": "1", "0": "0"}
 
 
 def enabled() -> bool:
-    return (os.environ.get("DATAFLOW_CELL_FASTPATH", "1") or "1").strip() not in {"0", "false", "off"}
+    """``DATAWRAP_CELL_FASTPATH`` / ``DATAFLOW_CELL_FASTPATH`` = 0 turns the fast paths off."""
+    from services.brand_env import getenv_brand
+
+    raw = (getenv_brand("CELL_FASTPATH", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
 
 
 @dataclass(frozen=True)

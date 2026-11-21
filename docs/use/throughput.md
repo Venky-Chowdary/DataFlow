@@ -139,3 +139,14 @@ checksum), peak RSS of the process, and the independent check.
 - SQL Server, Oracle, Snowflake and BigQuery routes are not in the harness.
 - Parallel table workers: a multi-table job runs its tables in parallel where
   the engine already did; nothing here changed that.
+
+## Verified against
+
+- `apps/api/benchmarks/db_throughput.py`, `apps/api/benchmarks/throughput_smoke.py`,
+  `apps/api/benchmarks/throughput_floors.json`
+- `apps/api/services/cell_fastpath.py`, `apps/api/connectors/batch_salvage.py`,
+  `apps/api/src/transfer/copy_route.py`
+- `apps/api/tests/test_cell_fastpath_equivalence.py`, `apps/api/tests/test_batch_salvage.py`,
+  `apps/api/tests/test_kill_resume_live.py`, `apps/api/tests/test_pg_jsonb_identity_copy.py`,
+  `apps/api/tests/test_db_throughput_harness.py`
+- `.github/workflows/ci.yml` (`throughput-smoke`), `.github/workflows/throughput-benchmark.yml`
