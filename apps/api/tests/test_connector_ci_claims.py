@@ -86,13 +86,20 @@ def test_peers_do_not_speak_for_an_engine(manifest) -> None:
     assert ev["mysql"]["status"] == "no_ci_result"
 
 
-def test_kafka_is_proved_only_by_the_nightly_engine_suite(manifest) -> None:
-    pr_jobs = [
+def test_kafka_is_live_only_when_a_kafka_job_runs_green(manifest) -> None:
+    # Every other PR job green: none of them proves Kafka.
+    others = [
         _result(name, "green")
         for name, spec in manifest["jobs"].items()
-        if spec["workflow"].endswith("ci.yml") and spec["mode"] != "report"
+        if spec["workflow"].endswith("ci.yml") and spec["mode"] != "report" and name != "kafka-live"
     ]
-    assert not engine_evidence(manifest, pr_jobs)["kafka"]["live_verified"]
+    assert not engine_evidence(manifest, others)["kafka"]["live_verified"]
+    # The PR job against the KRaft broker proves it ...
+    assert engine_evidence(manifest, [_result("kafka-live", "green")])["kafka"]["live_verified"]
+    # ... and a red one makes it red, whatever else ran green.
+    red = engine_evidence(manifest, [*others, _result("kafka-live", "red")])["kafka"]
+    assert red["status"] == "ci_red" and not red["live_verified"]
+    # The nightly whole suite still counts, but only when every shard reported.
     shards = [
         {**_result("engine-suite", "green"), "labels": {"shard": str(n)}} for n in range(1, 7)
     ]
@@ -101,6 +108,22 @@ def test_kafka_is_proved_only_by_the_nightly_engine_suite(manifest) -> None:
     partial = engine_evidence(manifest, shards[:5])["kafka"]
     assert partial["status"] == "no_ci_result"
     assert "engine-suite[shard=6]" in partial["missing_results"]
+
+
+def test_oracle_is_live_from_the_container_job_without_the_opt_in_one(manifest) -> None:
+    # The secrets-based cdc-oracle job is opt-in and records not_run when off;
+    # the container job oracle-live then decides Oracle on its own.
+    not_run = _result("cdc-oracle", "not_run", executed=0)
+    green = engine_evidence(manifest, [not_run, _result("oracle-live", "green")])["oracle"]
+    assert green["status"] == "ci_green" and green["live_verified"]
+    assert not green["emulated"], "Oracle Free in a container is the real engine"
+    red = engine_evidence(manifest, [not_run, _result("oracle-live", "red")])["oracle"]
+    assert red["status"] == "ci_red"
+    # A configured real Oracle that fails outweighs a green container run.
+    both = engine_evidence(
+        manifest, [_result("cdc-oracle", "red"), _result("oracle-live", "green")]
+    )["oracle"]
+    assert both["status"] == "ci_red"
 
 
 def test_an_opt_in_job_that_did_not_run_is_not_live(manifest) -> None:
@@ -134,9 +157,9 @@ def test_every_proving_job_starts_its_engine_in_the_workflow(manifest) -> None:
         "mysql": r"start_ci_databases\.sh[^\n]*\bmysql\b|mysql:8",
         "mongodb": r"start_ci_databases\.sh[^\n]*\bmongo\b|mongo:7",
         "redis": r"start_ci_databases\.sh[^\n]*\bredis\b|image: redis",
-        "kafka": r"apache/kafka",
+        "kafka": r"start_ci_databases\.sh[^\n]*\bkafka\b|apache/kafka",
         "sqlserver": r"start_ci_databases\.sh[^\n]*\bsqlserver\b",
-        "oracle": r"DATAFLOW_ORACLE_HOST",
+        "oracle": r"start_ci_databases\.sh[^\n]*\boracle\b|DATAFLOW_ORACLE_HOST",
         "bigquery": r"start_ci_databases\.sh[^\n]*\bbigquery\b",
         "snowflake": r"fakesnow",
         # In-process engines (manifest ``in_process_engines_about``): the job's

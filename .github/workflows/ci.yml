@@ -959,6 +959,297 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # Oracle proven on every backend change, with no secrets: Oracle Database
+  # 23ai Free (gvenzl/oracle-free slim-faststart, the real engine under the
+  # Oracle Free Use Terms, which allow testing) in a container, ARCHIVELOG +
+  # supplemental logging + the LogMiner common user (tests/oracle_ci_init.sql).
+  # Runs the Oracle connector, copy fast paths, LogMiner CDC and the Oracle
+  # cells of the cross-engine suites against PostgreSQL, MySQL, MongoDB and
+  # SQL Server peers started in this job. The secrets-based cdc-oracle job
+  # below still proves a real customer-style Oracle when it is configured.
+  oracle-live:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    name: oracle-live
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_PII_HASH_KEY: test-pii-key
+      DATAFLOW_ALLOW_STUB_WRITES: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_CDC_LEASE_BACKEND: memory
+      DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+      # Oracle (container; password generated per run in the first steps).
+      # Every spelling the suite reads: DATAFLOW_ORACLE_* (connector, CDC),
+      # DATAFLOW_TEST_ORACLE_* (route e2e tests), the LogMiner CDB service and
+      # common user, and the container the admin-SQL helpers exec into.
+      DATAFLOW_ORACLE_ENABLE: "1"
+      DATAFLOW_ORACLE_HOST: 127.0.0.1
+      DATAFLOW_ORACLE_PORT: "1521"
+      DATAFLOW_ORACLE_SERVICE: FREEPDB1
+      DATAFLOW_ORACLE_DATABASE: FREEPDB1
+      DATAFLOW_ORACLE_USER: dataflow
+      DATAFLOW_ORACLE_SCHEMA: DATAFLOW
+      DATAFLOW_ORACLE_CDB_SERVICE: FREE
+      DATAFLOW_ORACLE_LOGMINER_USER: C##DATAFLOW
+      DATAFLOW_ORACLE_CONTAINER: dataflow-ci-oracle
+      DATAFLOW_TEST_ORACLE_HOST: 127.0.0.1
+      DATAFLOW_TEST_ORACLE_PORT: "1521"
+      DATAFLOW_TEST_ORACLE_SERVICE: FREEPDB1
+      DATAFLOW_TEST_ORACLE_USER: dataflow
+      DATAFLOW_TEST_ORACLE_SCHEMA: DATAFLOW
+      # SQL Server peer (password generated per run).
+      DATAFLOW_SQLSERVER_ENABLE: "1"
+      DATAFLOW_SQLSERVER_HOST: localhost
+      DATAFLOW_SQLSERVER_PORT: "1433"
+      DATAFLOW_SQLSERVER_DATABASE: dataflow
+      DATAFLOW_SQLSERVER_USER: sa
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
+      DATAFLOW_TEST_MSSQL_USER: sa
+      DATAFLOW_TEST_MSSQL_ENCRYPT: "yes"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Export live-engine connection settings (every name the suite reads)
+        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
+
+      - name: Generate per-run Oracle and SQL Server passwords (masked)
+        run: |
+          # Throwaway containers of this run only; masked before use.
+          ora="Ci1$(openssl rand -hex 10)Zz"
+          mssql="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${ora}"
+          echo "::add-mask::${mssql}"
+          {
+            echo "DATAFLOW_ORACLE_PASSWORD=${ora}"
+            echo "DATAFLOW_TEST_ORACLE_PASSWORD=${ora}"
+            echo "MSSQL_SA_PASSWORD=${mssql}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${mssql}"
+            echo "DATAFLOW_SQLSERVER_PASSWORD=${mssql}"
+          } >> "$GITHUB_ENV"
+
+      - name: Start Oracle Free (ARCHIVELOG, LogMiner user)
+        run: bash .github/scripts/start_ci_databases.sh oracle
+
+      - name: Start peers (PostgreSQL logical, MySQL, MongoDB, SQL Server)
+        run: bash .github/scripts/start_ci_databases.sh postgres-cdc mysql mongo sqlserver
+
+      - name: Set up Python
+        if: ${{ !cancelled() }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
+          python -m pip install -e packages/preflight
+
+      - name: The test interpreter has pytest and the Oracle driver
+        id: python_ready
+        if: ${{ !cancelled() }}
+        run: python -c "import pytest, oracledb; print('pytest', pytest.__version__, 'oracledb', oracledb.__version__)"
+
+      - name: Install Microsoft ODBC Driver 18 (SQL Server peer)
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        run: bash .github/scripts/install_msodbcsql18.sh
+
+      - name: Oracle connector, copy paths and LogMiner CDC (live)
+        id: oracle_files
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          # Every Oracle test module, by name, plus the Oracle-only modules
+          # whose name does not say so.
+          python -m pytest \
+            tests/test_*oracle*.py \
+            tests/test_cdc_poll_reconnects_live.py \
+            -v --tb=short -rs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-files.xml"
+
+      - name: Oracle cells of the cross-engine suites (live)
+        id: oracle_cells
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          python -m pytest \
+            tests/test_production_sku_matrix.py \
+            tests/test_execute_tracked_universal_matrix.py \
+            tests/test_cdc_exactly_once_live_engines.py \
+            tests/test_c3_lossy_pairs_live.py \
+            tests/test_typed_fidelity_transfer_matrix_e2e.py \
+            tests/test_family_b_run2_own_table_e2e.py \
+            tests/test_r11_engine_family_alias_e2e.py \
+            tests/test_r13_precision_d279_in_file_duplicate_key_case.py \
+            tests/test_r4_upsert_identity_e2e.py \
+            tests/test_r6_tz_cursor_instant_order_e2e.py \
+            tests/test_r8_append_fastpath_key_proof_e2e.py \
+            tests/test_r8_d212_unicode_into_sqlserver_e2e.py \
+            tests/test_row_conservation.py \
+            tests/test_saas_privilege_deny_live.py \
+            tests/test_create_new_uppercase_column_constraints.py \
+            tests/test_cross_engine_empty_schema_introspect.py \
+            tests/test_dest_physical_types.py \
+            tests/test_keyed_readback_scope.py \
+            tests/test_r10_fidelity_run2_e2e.py \
+            -k "oracle" \
+            -v --tb=short -rs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-cells.xml"
+
+      - name: No Oracle live test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job oracle-live --junit "$RUNNER_TEMP/live-junit/oracle-files.xml" --junit "$RUNNER_TEMP/live-junit/oracle-cells.xml" --out "$RUNNER_TEMP/live-engine/oracle-live.json"
+
+      - name: Oracle container log (tail)
+        if: ${{ failure() }}
+        run: docker logs --tail 120 dataflow-ci-oracle || true
+
+      - name: Upload Oracle junit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-live-junit
+          path: ${{ runner.temp }}/live-junit/
+          if-no-files-found: warn
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-oracle-live
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
+  # Kafka proven on every backend change: a single-node KRaft broker
+  # (apache/kafka, PLAINTEXT :9092 and SASL_PLAINTEXT/PLAIN :9094) with
+  # PostgreSQL / MySQL / MongoDB peers. Before this, Kafka was started only by
+  # the nightly whole-suite run, which has never completed (no CI result).
+  kafka-live:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    name: kafka-live
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_PII_HASH_KEY: test-pii-key
+      DATAFLOW_ALLOW_STUB_WRITES: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_CDC_LEASE_BACKEND: memory
+      DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+      # Throwaway broker credential of this job's container (same literal
+      # as the nightly); not a secret.
+      KAFKA_SASL_CI_PASSWORD: "dataflow-ci-secret"
+      DATAFLOW_LIVE_KAFKA_SASL_BOOTSTRAP: 127.0.0.1:9094
+      DATAFLOW_LIVE_KAFKA_SASL_USER: admin
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD: dataflow-ci-secret
+      DATAFLOW_LIVE_KAFKA_SASL_MECHANISMS: PLAIN
+      DATAFLOW_LIVE_KAFKA_SASL_USER_PLAIN: admin
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_PLAIN: dataflow-ci-secret
+      DATAFLOW_TEST_KAFKA_BOOTSTRAP: 127.0.0.1:9092
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Export live-engine connection settings (every name the suite reads)
+        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
+
+      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB)
+        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo
+
+      - name: Set up Python
+        if: ${{ !cancelled() }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
+          python -m pip install -e packages/preflight
+
+      - name: The test interpreter has pytest and the Kafka client
+        id: python_ready
+        if: ${{ !cancelled() }}
+        run: python -c "import pytest, kafka; print('pytest', pytest.__version__, 'kafka-python', kafka.__version__)"
+
+      - name: Kafka connector, SASL, offsets and Kafka routes (live)
+        id: kafka_files
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          python -m pytest tests/test_*kafka*.py \
+            -v --tb=short -rs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/kafka-files.xml"
+
+      - name: Kafka cells of the cross-engine suites (live)
+        id: kafka_cells
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          python -m pytest \
+            tests/test_production_sku_matrix.py \
+            tests/test_execute_tracked_universal_matrix.py \
+            tests/test_r4_upsert_identity_e2e.py \
+            tests/test_r4_temporal_family_e2e.py \
+            tests/test_d190_d194_d197_declared_string_types_e2e.py \
+            tests/test_r12_d259_source_timezone_create_new_carrier.py \
+            tests/test_g11_map_target_ingress.py \
+            tests/test_g11_naming_history.py \
+            tests/test_source_duplicate_preflight.py \
+            tests/test_qa_defect_regressions.py \
+            tests/test_wave_aa_accuracy.py \
+            tests/test_wave_u_accuracy.py \
+            -k "kafka" \
+            -v --tb=short -rs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/kafka-cells.xml"
+
+      - name: No Kafka live test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job kafka-live --junit "$RUNNER_TEMP/live-junit/kafka-files.xml" --junit "$RUNNER_TEMP/live-junit/kafka-cells.xml" --out "$RUNNER_TEMP/live-engine/kafka-live.json"
+
+      - name: Kafka broker log (tail)
+        if: ${{ failure() }}
+        run: docker logs --tail 120 dataflow-ci-kafka || true
+
+      - name: Upload Kafka junit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kafka-live-junit
+          path: ${{ runner.temp }}/live-junit/
+          if-no-files-found: warn
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-kafka-live
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
   # A4: which engines CI actually ran green. Merges the live-engine results
   # (scripts/check_live_skips.py) into connector_ci_evidence.json, the file
   # the connector capability page reads. Configuration alone never makes an
@@ -967,7 +1258,7 @@ jobs:
     name: Connector CI evidence
     # api-tests proves PostgreSQL / MySQL / Mongo / Redis and the in-process
     # engines; without it in needs, its results could be missing here.
-    needs: [changes, no-config-transfer, api-tests, cdc-sqlserver, cdc-oracle, api-and-web]
+    needs: [changes, no-config-transfer, api-tests, cdc-sqlserver, cdc-oracle, oracle-live, kafka-live, api-and-web]
     if: ${{ always() && !cancelled() && needs.changes.outputs.reuse != 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -1365,7 +1656,7 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           REUSE: ${{ needs.changes.outputs.reuse }}
           REUSED_FROM: ${{ needs.changes.outputs.from }}
-          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests cdc-sqlserver security api-image "
+          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests cdc-sqlserver oracle-live kafka-live security api-image "
         run: |
           failed=0
           if [ "$CHANGES" != "success" ]; then

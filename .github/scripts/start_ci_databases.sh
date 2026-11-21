@@ -17,9 +17,19 @@
 #              tests/sqlserver_cdc_init.sql. The SA password is read from
 #              MSSQL_SA_PASSWORD (a per-run value the workflow generates and
 #              masks); it is never written on a command line or in this file.
+#   oracle — Oracle Database 23ai Free (gvenzl/oracle-free slim-faststart: the
+#              real database engine, not an emulator), switched to ARCHIVELOG
+#              with supplemental logging, then tests/oracle_ci_init.sql creates
+#              the PDB login DATAFLOW and the LogMiner common user C##DATAFLOW.
+#              Their password is read from DATAFLOW_ORACLE_PASSWORD (per run,
+#              masked by the workflow), passed on stdin only. Oracle Free Use
+#              Terms permit development and testing use such as CI.
+#   kafka  — apache/kafka KRaft single node (broker+controller), PLAINTEXT on
+#              9092 and SASL_PLAINTEXT/PLAIN on 9094; the SASL password is read
+#              from KAFKA_SASL_CI_PASSWORD.
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres] [sqlserver]
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres] [sqlserver] [oracle] [kafka]
 set -euo pipefail
 
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:16}"
@@ -30,6 +40,11 @@ AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
 BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
 REDIS_IMAGE="${REDIS_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}"
 MSSQL_IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
+# Pinned: a new Oracle release must not change what CI proves unannounced.
+# ghcr.io first (no Docker Hub anonymous-pull quota), Docker Hub as fallback.
+ORACLE_IMAGE="${ORACLE_IMAGE:-ghcr.io/gvenzl/oracle-free:23.26.4-slim-faststart}"
+ORACLE_IMAGE_FALLBACK="${ORACLE_IMAGE_FALLBACK:-docker.io/gvenzl/oracle-free:23.26.4-slim-faststart}"
+KAFKA_IMAGE="${KAFKA_IMAGE:-docker.io/apache/kafka:3.9.0}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -319,6 +334,116 @@ mssql_cdc_init() {
   echo "$out"
 }
 
+# sqlplus as SYSDBA inside the Oracle container; the script comes on stdin.
+oracle_sysdba() {
+  docker exec -i -u oracle dataflow-ci-oracle bash -lc "sqlplus -s / as sysdba"
+}
+
+# The image's own health check: the CDB and FREEPDB1 are open.
+oracle_healthy() {
+  docker exec dataflow-ci-oracle healthcheck.sh >/dev/null 2>&1
+}
+
+# The tests' login, the way the tests reach it (TCP listener, PDB service).
+oracle_serving() {
+  printf 'WHENEVER SQLERROR EXIT 1\nCONNECT DATAFLOW/"%s"@//127.0.0.1:1521/FREEPDB1\nSELECT 1 FROM DUAL;\nEXIT\n' \
+    "$DATAFLOW_ORACLE_PASSWORD" \
+    | docker exec -i -u oracle dataflow-ci-oracle bash -lc "sqlplus -s /nolog" >/dev/null 2>&1
+}
+
+start_oracle() {
+  if [ -z "${DATAFLOW_ORACLE_PASSWORD:-}" ]; then
+    echo "DATAFLOW_ORACLE_PASSWORD is empty: the workflow must generate it first" >&2
+    exit 1
+  fi
+  local image started=$SECONDS
+  image=$(pull_image "$ORACLE_IMAGE" "$ORACLE_IMAGE_FALLBACK")
+  echo "Oracle image pulled in $((SECONDS - started)) s: ${image}"
+  docker rm -f dataflow-ci-oracle >/dev/null 2>&1 || true
+  # ORACLE_PASSWORD (SYS/SYSTEM) is required by the image; -e NAME copies the
+  # value from this process's environment so it never reaches a command line.
+  ORACLE_PASSWORD="$DATAFLOW_ORACLE_PASSWORD" docker run -d --name dataflow-ci-oracle \
+    --shm-size=1g \
+    -e ORACLE_PASSWORD \
+    -p 1521:1521 \
+    "$image"
+  wait_for "Oracle" 120 2 oracle_healthy \
+    || { docker logs --tail 80 dataflow-ci-oracle || true; exit 1; }
+  echo "Oracle open in $((SECONDS - started)) s"
+  # LogMiner needs archived redo: ARCHIVELOG mode is set at MOUNT, so the
+  # instance restarts once. Archived logs go to a fixed local destination.
+  docker exec -u oracle dataflow-ci-oracle mkdir -p /opt/oracle/oradata/FREE/archivelogs
+  oracle_sysdba <<'SQL'
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SYSTEM SET log_archive_dest_1='LOCATION=/opt/oracle/oradata/FREE/archivelogs' SCOPE=SPFILE;
+SHUTDOWN IMMEDIATE
+STARTUP MOUNT
+ALTER DATABASE ARCHIVELOG;
+ALTER DATABASE OPEN;
+ALTER PLUGGABLE DATABASE ALL OPEN;
+EXIT
+SQL
+  wait_for "Oracle (ARCHIVELOG)" 60 2 oracle_healthy \
+    || { docker logs --tail 80 dataflow-ci-oracle || true; exit 1; }
+  docker cp apps/api/tests/oracle_ci_init.sql dataflow-ci-oracle:/tmp/oracle_ci_init.sql
+  docker exec -u root dataflow-ci-oracle chmod 0644 /tmp/oracle_ci_init.sql
+  # The password reaches sqlplus as a substitution variable on stdin only.
+  printf 'SET VERIFY OFF\nDEFINE ci_pw = "%s"\n@/tmp/oracle_ci_init.sql\n' "$DATAFLOW_ORACLE_PASSWORD" \
+    | oracle_sysdba \
+    || { echo "Oracle CI init (tests/oracle_ci_init.sql) failed" >&2; exit 1; }
+  wait_for "Oracle DATAFLOW@FREEPDB1" 30 2 oracle_serving \
+    || { docker logs --tail 80 dataflow-ci-oracle || true; exit 1; }
+  oracle_sysdba <<'SQL'
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0
+SELECT 'log_mode=' || log_mode || ' supplemental_min=' || supplemental_log_data_min FROM v$database;
+SELECT 'version=' || banner_full FROM v$version WHERE ROWNUM = 1;
+EXIT
+SQL
+  echo "Oracle ready for the tests in $((SECONDS - started)) s"
+}
+
+kafka_serving() {  # kafka_serving <bootstrap> [command-config]
+  docker exec dataflow-ci-kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+    --bootstrap-server "$1" ${2:+--command-config "$2"} >/dev/null 2>&1
+}
+
+start_kafka() {
+  if [ -z "${KAFKA_SASL_CI_PASSWORD:-}" ]; then
+    echo "KAFKA_SASL_CI_PASSWORD is empty: the workflow must set it first" >&2
+    exit 1
+  fi
+  local image started=$SECONDS jaas
+  image=$(pull_image "$KAFKA_IMAGE" "$KAFKA_IMAGE")
+  docker rm -f dataflow-ci-kafka >/dev/null 2>&1 || true
+  # apache/kafka maps KAFKA_* env to server.properties. The SASL listener's
+  # JAAS line carries the password, so it is passed by name (-e NAME).
+  jaas="org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"${KAFKA_SASL_CI_PASSWORD}\" user_admin=\"${KAFKA_SASL_CI_PASSWORD}\" user_dataflow=\"${KAFKA_SASL_CI_PASSWORD}\";"
+  KAFKA_LISTENER_NAME_SASL_PLAIN_SASL_JAAS_CONFIG="$jaas" docker run -d --name dataflow-ci-kafka --network host \
+    -e KAFKA_NODE_ID=1 \
+    -e KAFKA_PROCESS_ROLES=broker,controller \
+    -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093 \
+    -e KAFKA_LISTENERS=PLAINTEXT://127.0.0.1:9092,SASL://127.0.0.1:9094,CONTROLLER://127.0.0.1:9093 \
+    -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092,SASL://127.0.0.1:9094 \
+    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL:SASL_PLAINTEXT \
+    -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+    -e KAFKA_SASL_ENABLED_MECHANISMS=PLAIN \
+    -e KAFKA_LISTENER_NAME_SASL_PLAIN_SASL_JAAS_CONFIG \
+    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+    -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+    -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+    -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+    "$image"
+  wait_for "Kafka (PLAINTEXT :9092)" 60 2 kafka_serving 127.0.0.1:9092 \
+    || { docker logs --tail 80 dataflow-ci-kafka || true; exit 1; }
+  printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="%s";\n' \
+    "$KAFKA_SASL_CI_PASSWORD" | docker exec -i dataflow-ci-kafka sh -c 'cat > /tmp/sasl.properties'
+  wait_for "Kafka (SASL_PLAINTEXT :9094)" 30 2 kafka_serving 127.0.0.1:9094 /tmp/sasl.properties \
+    || { docker logs --tail 80 dataflow-ci-kafka || true; exit 1; }
+  echo "Kafka ready in $((SECONDS - started)) s"
+}
+
 for svc in "$@"; do
   case "$svc" in
     postgres) start_postgres ;;
@@ -330,6 +455,8 @@ for svc in "$@"; do
     bigquery) start_bigquery ;;
     redis) start_redis ;;
     sqlserver) start_sqlserver ;;
+    oracle) start_oracle ;;
+    kafka) start_kafka ;;
     *) echo "unknown service: $svc" >&2; exit 2 ;;
   esac
 done
