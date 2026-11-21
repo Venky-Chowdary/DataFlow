@@ -50,7 +50,7 @@ import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import type { JobsStudioIntent } from "./pages/JobsPage";
 import { DashboardPage } from "./pages/DashboardPage";
-import { lazyNamed } from "./lib/lazyPage";
+import { expireAfterLoad, lazyNamed } from "./lib/lazyPage";
 
 /** Overview is the signed-in home screen — never a separate hashed chunk.
  * Other routes stay lazy; stale Vite hashes reload once (see lazyPage). */
@@ -70,7 +70,7 @@ const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
 const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
 
 /** Each lazy screen by the screen id that opens it, so its code can be fetched early (UX-43). */
-const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void }>> = {
+const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void; whenLoaded: () => Promise<void> }>> = {
   pilot: PilotPage,
   transfer: TransferPage,
   connectors: ConnectorsPage,
@@ -544,8 +544,10 @@ function AppShell({
 
   useEffect(() => {
     if (!searchFocus) return;
-    const timer = window.setTimeout(() => setSearchFocus(null), 800);
-    return () => window.clearTimeout(timer);
+    // The focus is a prop of a lazy screen: drop it only once that screen's code
+    // has loaded, or a slow chunk mounts the page after the link is gone.
+    const loaded = SCREEN_CHUNKS[searchFocus.screen]?.whenLoaded() ?? Promise.resolve();
+    return expireAfterLoad(loaded, 800, () => setSearchFocus(null));
   }, [searchFocus]);
 
   const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";

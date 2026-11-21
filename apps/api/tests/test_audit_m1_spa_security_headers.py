@@ -237,3 +237,64 @@ def test_hashes_are_checked_against_the_built_shell_when_there_is_one(tmp_path):
     shell, which = _served_shell(tmp_path)
     assert (shell, which) == (tmp_path / "dist" / "index.html", "built")
     assert _inline_scripts(shell.read_text(encoding="utf-8")) == ["built()"]
+
+
+# --------------------------------------------------------------------------- ZAP baseline (web)
+#
+# The DAST baseline (OWASP ZAP, passive rules) warned on the web app for missing
+# headers. Every header rule it raised is answered here, in the production
+# configs, on every kind of URL it flagged (the shell, a deep link, the
+# favicons, robots.txt, sitemap.xml, hashed assets, a missing asset).
+#
+#   10020 anti-clickjacking   X-Frame-Options DENY (+ CSP frame-ancestors 'none')
+#   10021 nosniff             X-Content-Type-Options nosniff
+#   10038 CSP not set         Content-Security-Policy (the SPA policy above)
+#   10063 Permissions-Policy  Permissions-Policy
+#   10036 Server version      server_tokens off
+#   90004 site isolation      Cross-Origin-Opener-Policy + Cross-Origin-Resource-Policy
+#
+# Not set, on purpose: Cross-Origin-Embedder-Policy. require-corp (or
+# credentialless) makes every cross-origin iframe opt in, and the signup
+# Turnstile widget and the marketing videos (youtube-nocookie) do not, so COEP
+# would break sign-up. 90004 keeps one COEP line for that reason. 10049
+# (storable but non-cacheable) is the shell's deliberate "no-cache": a deploy
+# must never leave a cached shell asking for deleted chunks.
+
+ISOLATION = {
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+ZAP_FLAGGED = (
+    "/", "/jobs/123", "/favicon.svg?v=dw-mark-1", "/favicon-32.png?v=dw-mark-1",
+    "/robots.txt", "/sitemap.xml", "/assets/index-abc123.js", "/assets/missing.js",
+)
+
+
+@pytest.mark.parametrize("conf", [*CONFIGS, REPO / "deploy" / "nginx.static.conf"],
+                         ids=[*(c.name for c in CONFIGS), "nginx.static.conf"])
+def test_every_config_isolates_the_spa_and_hides_the_server_version(conf):
+    text = conf.read_text(encoding="utf-8")
+    assert re.search(r"^    server_tokens off;$", text, re.M), conf.name
+    for path in ("/assets/", "/"):
+        body = re.search(rf"\n    location {re.escape(path)} \{{\n(.*?)\n    \}}", text, re.S).group(1)
+        for name, value in ISOLATION.items():
+            assert f'add_header {name} "{value}" always;' in body, (conf.name, path, name)
+        assert "Cross-Origin-Embedder-Policy" not in body, "COEP blocks the Turnstile and video iframes"
+
+
+def test_real_nginx_answers_every_zap_flagged_url_with_the_headers(spa_behind_nginx, tmp_path):
+    html = tmp_path / "html"
+    for name, body in (("favicon.svg", "<svg/>"), ("favicon-32.png", "png"), ("robots.txt", "User-agent: *"),
+                       ("sitemap.xml", "<urlset/>")):
+        (html / name).write_text(body, encoding="utf-8")
+    expected_csp = re.search(r'set \$dw_csp "([^"]+)";', TEMPLATE.read_text(encoding="utf-8")).group(1)
+    for path in ZAP_FLAGGED:
+        status, headers, _ = _get(spa_behind_nginx, path)
+        assert headers.get_all("Content-Security-Policy") == [expected_csp], (path, status)
+        for name, value in {**BASELINE, **ISOLATION}.items():
+            assert headers.get_all(name) == [value], (path, name, status)
+        assert headers.get("Permissions-Policy"), path
+        assert headers.get("Cross-Origin-Embedder-Policy") is None, path
+        assert headers.get("Server") in (None, "nginx"), (path, headers.get("Server"))
+    status, _, body = _get(spa_behind_nginx, "/assets/missing.js")
+    assert status == 404 and "nginx/" not in body, "nginx's own error page names no version"

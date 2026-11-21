@@ -1266,6 +1266,23 @@ test.describe("schedules sync", () => {
       fullPage: false,
     });
   });
+
+  // The flake behind this suite's first-attempt failures: Jobs is a lazy screen,
+  // and the job to open was dropped 800 ms after the click. A cold browser took
+  // longer than that to load the Jobs code, so the page mounted without the job.
+  test("run now opens the new job even when the Jobs screen code loads slowly", async ({ page }) => {
+    await page.route(/\/(src\/pages\/JobsPage\.tsx|assets\/JobsPage-[^/]+\.js)(\?|$)/, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await route.continue();
+    });
+    await openSchedules(page);
+    await page.locator(".df2-pipeline-row").first().getByRole("button", { name: "Run now" }).click();
+    const dialog = page.getByRole("dialog", { name: "Run now" });
+    await dialog.getByRole("button", { name: "Run now" }).click();
+    await expect(page).toHaveURL(/#\/jobs/);
+    await expect(page.getByRole("heading", { name: "Nightly orders sync" })).toBeVisible();
+    await expect(page.locator("#job-item-job-child-91ab")).toBeVisible();
+  });
 });
 
 test.describe("studio flag opt-in", () => {

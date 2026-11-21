@@ -105,7 +105,34 @@ export function lazyPage<T extends ComponentType<any>>(
 }
 
 /** A lazy screen whose code can be fetched before it first renders (UX-43). */
-export type PreloadableLazy<T extends ComponentType<any>> = LazyExoticComponent<T> & { preload: () => void };
+export type PreloadableLazy<T extends ComponentType<any>> = LazyExoticComponent<T> & {
+  preload: () => void;
+  /** Settles once the screen's code has loaded, or failed to (never rejects). */
+  whenLoaded: () => Promise<void>;
+};
+
+/**
+ * Run `onExpire` `afterMs` after `loaded` settles; returns a cancel function.
+ *
+ * A deep link (open job X on Jobs) is handed to a lazy screen as a prop and
+ * dropped a moment later so a later visit starts clean. Timing that from the
+ * click lost the link whenever the screen's code took longer than the delay to
+ * load (a cold CI browser): the page mounted after the prop was gone and
+ * opened no job (studio-next "run now" flake). The delay now starts when the
+ * code has loaded, so the page has mounted with the link before it expires.
+ */
+export function expireAfterLoad(loaded: Promise<unknown>, afterMs: number, onExpire: () => void): () => void {
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const start = () => {
+    if (!cancelled) timer = setTimeout(onExpire, afterMs);
+  };
+  loaded.then(start, start);
+  return () => {
+    cancelled = true;
+    if (timer != null) clearTimeout(timer);
+  };
+}
 
 export function lazyNamed<T extends ComponentType<any>, K extends string>(
   importer: () => Promise<Record<K, T>>,
@@ -130,5 +157,6 @@ export function lazyNamed<T extends ComponentType<any>, K extends string>(
       /* the render reports it */
     });
   };
+  Screen.whenLoaded = () => load().then(() => undefined, () => undefined);
   return Screen;
 }
