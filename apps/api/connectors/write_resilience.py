@@ -473,6 +473,7 @@ def apply_mysql_session_guards(
             cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
             cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
             _ensure_mysql_strict_sql_mode(cur, require=require_strict_sql_mode)
+            _guard_mariadb_bulk_insert_mode(cur, conn)
     except RuntimeError:
         raise
     except Exception as exc:
@@ -481,6 +482,22 @@ def apply_mysql_session_guards(
                 f"MySQL session guards failed — refuse write without STRICT sql_mode: {exc}"
             ) from exc
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def _guard_mariadb_bulk_insert_mode(cur: Any, conn: Any) -> None:
+    """A MariaDB 10.6+ session must not start with both unique/FK checks off.
+
+    A server whose global defaults are both off would put every INSERT or
+    LOAD DATA into an empty table in InnoDB's bulk insert mode, which hangs
+    the server under a concurrent reader (see connectors.mysql_load_data).
+    Best effort here; ``execute_load_data_local`` checks again per load.
+    """
+    from connectors.mysql_load_data import guard_mariadb_bulk_insert_session
+
+    try:
+        guard_mariadb_bulk_insert_session(cur, conn)
+    except Exception as exc:  # noqa: BLE001 - the LOAD DATA guard still runs
+        logger.debug("MariaDB bulk insert session guard not applied: %s", exc)
 
 
 _MYSQL_STRICT_MODES = (
