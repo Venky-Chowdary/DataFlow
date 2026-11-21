@@ -80,21 +80,6 @@ def resolve_recipe_binding(
     )
 
 
-def _mapping_source_columns(mappings: Any) -> list[str]:
-    columns: list[str] = []
-    for item in mappings or []:
-        row = item
-        if not isinstance(row, dict):
-            dump = getattr(row, "model_dump", None)
-            row = dump() if callable(dump) else {}
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("source") or row.get("source_column") or "").strip()
-        if name and name not in columns:
-            columns.append(name)
-    return columns
-
-
 def _recipe_steps(shape: Any) -> list[Any]:
     if not isinstance(shape, dict):
         return []
@@ -102,7 +87,28 @@ def _recipe_steps(shape: Any) -> list[Any]:
     return list(steps) if isinstance(steps, list) else []
 
 
-def compile_transfer_recipe(request: Any) -> bool:
+def _read_column_names(columns: list[str] | None) -> list[str] | None:
+    names = [str(name).strip() for name in (columns or []) if str(name).strip()]
+    return names or None
+
+
+def _program_hash(steps: list[Any]) -> str:
+    """Identity of staged steps. Empty when they are not a runnable program."""
+    if not steps:
+        return ""
+    try:
+        from services.shape_models import ShapeRecipe
+
+        return ShapeRecipe.parse({"steps": steps}).recipe_hash
+    except Exception:
+        return ""
+
+
+def compile_transfer_recipe(
+    request: Any,
+    *,
+    read_columns: list[str] | None = None,
+) -> bool:
     """Compile ``transform_recipe_id`` into ``shape_recipe``, or refuse.
 
     Execute reads ``shape_recipe`` only. A run that stored the library id and
@@ -122,16 +128,30 @@ def compile_transfer_recipe(request: Any) -> bool:
         )
     version = int(getattr(request, "transform_recipe_version", 0) or 0) or None
     params = getattr(request, "transform_recipe_params", None) or None
+    # The recipe runs on the read, before Map. Mapping sources are the image
+    # Map saw — after rename note→memo that source is "memo" — so checking the
+    # recipe against them refuses the rename of "note" that preview just ran
+    # (D400). Only an explicit read-column list (Validate's source columns)
+    # is a column contract. Execute leaves it empty and the live read checks
+    # the columns when the recipe is applied.
     bound = resolve_recipe_binding(
         recipe_id,
         version=version if mode == "pin" else None,
         params=params if isinstance(params, dict) else None,
-        source_columns=_mapping_source_columns(getattr(request, "mappings", None)) or None,
+        source_columns=_read_column_names(read_columns),
         workspace_id=str(getattr(request, "workspace_id", "") or "") or None,
     )
     existing = _recipe_steps(getattr(request, "shape_recipe", None))
     approved = str(getattr(request, "approved_shape_recipe_hash", "") or "").strip()
     if existing:
+        staged = _program_hash(existing)
+        if staged and staged == bound.recipe_hash:
+            # Preview already compiled this pinned version. Keep those steps.
+            request.transform_recipe_version = bound.bound_version
+            request.transform_recipe_version_mode = mode
+            if not approved:
+                request.approved_shape_recipe_hash = bound.recipe_hash
+            return False
         if approved and approved == bound.recipe_hash:
             return False
         if approved and approved != bound.recipe_hash:
@@ -179,9 +199,11 @@ def compile_preflight_recipe(body: Any) -> None:
         mappings=getattr(body, "mappings", None),
         workspace_id=current_workspace_stamp(for_write=False) or "",
         shape_recipe=getattr(body, "shape_recipe", None),
-        approved_shape_recipe_hash="",
+        approved_shape_recipe_hash=str(getattr(body, "approved_shape_recipe_hash", "") or ""),
     )
-    if compile_transfer_recipe(probe):
+    # ``columns`` is the source table. A rename's old name is still there;
+    # Map's source names are the names the recipe emits.
+    if compile_transfer_recipe(probe, read_columns=list(getattr(body, "columns", None) or [])):
         body.shape_recipe = probe.shape_recipe
 
 
