@@ -470,7 +470,7 @@
    "expected": "V13:1704067200124"
   },
   {
-   "name": "timestamp pre-epoch projected half up",
+   "name": "timestamp pre-2000 projected for PostgreSQL rounds half away from 2000",
    "kind": "timestamp",
    "value": {
     "$dt": "1969-12-31T23:59:59.999500"
@@ -481,7 +481,35 @@
     "digits": 3,
     "dest_engine": "postgresql"
    },
+   "expected": "V2:-1"
+  },
+  {
+   "name": "timestamp pre-epoch projected for MySQL rounds half up",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "1969-12-31T23:59:59.999500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "DATETIME(3)",
+    "digits": 3,
+    "dest_engine": "mysql"
+   },
    "expected": "V1:0"
+  },
+  {
+   "name": "timestamp 2000 boundary projected for PostgreSQL",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2000-01-01T00:00:00.000500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V12:946684800001"
   },
   {
    "name": "timestamptz to utc",
