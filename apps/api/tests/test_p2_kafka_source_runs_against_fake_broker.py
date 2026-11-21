@@ -1,10 +1,13 @@
-"""Kafka -> PostgreSQL runs against an in-memory broker (D86, D286, D287, D404).
+"""Kafka -> PostgreSQL stories D86, D286, D287, D404, on a fake and a real broker.
 
-No Kafka broker runs in the API test job, so the live tests for these stories
-skip there. These run the real engine (reader, Debezium bridge, type census,
-Gate-8, offset commit) against ``tests.helpers.fake_kafka.FakeBroker``, which
-replaces only kafka-python's client classes, and against the local
-PostgreSQL. Each story stays open for a production retest on a real broker.
+Each story test runs twice. ``fake``: the real engine (reader, Debezium
+bridge, type census, Gate-8, offset commit) against
+``tests.helpers.fake_kafka.FakeBroker``, which replaces only kafka-python's
+client classes; it runs wherever PostgreSQL does. ``live``: the same body
+against the broker on 127.0.0.1:9092 through ``tests.helpers.live_kafka``,
+with nothing patched; the kafka-live CI job starts that broker, so this is the
+stories' live retest. A test that needs a fault a real broker cannot be told
+to produce (a dead group coordinator) runs on the fake only.
 
 Kafka consumer semantics checked here (Apache Kafka docs, "Consumer
 Configs"/``enable.auto.commit``; kafka-python ``KafkaConsumer.commit``): a
@@ -28,15 +31,20 @@ import src.transfer.engine as engine_mod  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 from tests.helpers.fake_kafka import FakeBroker  # noqa: E402
+from tests.helpers.live_env import pg_creds  # noqa: E402
+from tests.helpers.live_kafka import LiveBroker, broker_up  # noqa: E402
 from tests.test_property2_golden_path_never_blocked import _FakeMongo  # noqa: E402
 
 psycopg2 = pytest.importorskip("psycopg2")
 
 
+_PG = pg_creds()
+
+
 def _pg():
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "127.0.0.1"), port=5432,
-                                dbname="dataflow", user="dataflow", password="dataflow",
+        conn = psycopg2.connect(host=_PG["host"], port=_PG["port"], dbname=_PG["database"],
+                                user=_PG["username"], password=_PG["password"],
                                 connect_timeout=3)
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"PostgreSQL unavailable: {exc}")
@@ -56,26 +64,46 @@ def pg():
     conn.close()
 
 
-@pytest.fixture
-def broker(monkeypatch):
-    fake = FakeBroker().install(monkeypatch)
-
+def _memory_jobs(monkeypatch) -> None:
     class _Mongo(_FakeMongo):
         def update_job_fields(self, job_id, fields, **_kw):
             self.jobs.setdefault(job_id, {}).update(fields or {})
             return True
 
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _Mongo())
+
+
+@pytest.fixture
+def fake_broker(monkeypatch):
+    fake = FakeBroker().install(monkeypatch)
+    _memory_jobs(monkeypatch)
     return fake
+
+
+@pytest.fixture(params=["fake", "live"])
+def broker(request, monkeypatch):
+    """The story's broker: the in-memory fake, then the real one on :9092."""
+    if request.param == "fake":
+        yield request.getfixturevalue("fake_broker")
+        return
+    if not broker_up():
+        pytest.skip("Kafka 127.0.0.1:9092 not reachable (the kafka-live CI job starts it)")
+    _memory_jobs(monkeypatch)
+    live = LiveBroker()
+    try:
+        yield live
+    finally:
+        live.close()
 
 
 def _request(topic, dst, *, sync_mode, mappings, validation_mode="lenient", extra=None):
     return TransferRequest(
         source=EndpointConfig(kind="database", format="kafka", host="127.0.0.1", port=9092,
                               table=topic, database=topic, extra=dict(extra or {})),
-        destination=EndpointConfig(kind="database", format="postgresql", host="127.0.0.1",
-                                   port=5432, database="dataflow", username="dataflow",
-                                   password="dataflow", schema="public", table=dst),
+        destination=EndpointConfig(kind="database", format="postgresql", host=_PG["host"],
+                                   port=_PG["port"], database=_PG["database"],
+                                   username=_PG["username"], password=_PG["password"],
+                                   schema="public", table=dst),
         mappings=mappings,
         sync_mode=sync_mode,
         skip_preflight=True,
@@ -224,8 +252,12 @@ def test_d287_overwrite_finalizes_on_every_one_of_five_runs(broker, pg):
         assert len(_rows(conn, dst)) == 20  # a full refresh re-reads from earliest
 
 
-def test_d287_an_unavailable_coordinator_fails_the_run_with_its_cause(broker, pg):
-    """An incremental run whose group coordinator is gone ends; it does not hang."""
+def test_d287_an_unavailable_coordinator_fails_the_run_with_its_cause(fake_broker, pg):
+    """An incremental run whose group coordinator is gone ends; it does not hang.
+
+    Fake only: a running broker cannot be told to lose its coordinator.
+    """
+    broker = fake_broker
     conn, made = pg
     topic, dst = _names("coord")
     made.append(dst)
@@ -381,8 +413,9 @@ def test_d83_sasl_plaintext_connector_introspects_and_plans_on_its_own_listener(
     }).id)
     dst = str(create_connector({
         "name": f"p2k-pg-{uuid.uuid4().hex[:6]}", "type": "postgresql", "role": "destination",
-        "host": "127.0.0.1", "port": 5432, "database": "dataflow", "username": "dataflow",
-        "password": "dataflow", "schema": "public", "ssl": False, "workspace_id": "",
+        "host": _PG["host"], "port": _PG["port"], "database": _PG["database"],
+        "username": _PG["username"], "password": _PG["password"], "schema": "public",
+        "ssl": False, "workspace_id": "",
     }).id)
 
     info = introspect_connector_schema(connector_id=src, table=topic)
@@ -426,8 +459,9 @@ def test_d352_kafka_into_pgvector_document_keeps_every_digit_and_passes_its_proo
         source=EndpointConfig(kind="database", format="kafka", host="127.0.0.1", port=9092,
                               table=topic, database=topic),
         destination=EndpointConfig(
-            kind="database", format="pgvector", host="127.0.0.1", port=5432,
-            database="dataflow", username="dataflow", password="dataflow", schema="public",
+            kind="database", format="pgvector", host=_PG["host"], port=_PG["port"],
+            database=_PG["database"], username=_PG["username"], password=_PG["password"],
+            schema="public",
             table=dst, extra={"vector_layout": "document", "embedding_model": "hash/32",
                               "skip_chunking": True}),
         sync_mode="full_refresh_overwrite", skip_preflight=True, validation_mode="strict",
