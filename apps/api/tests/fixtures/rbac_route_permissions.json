@@ -95,6 +95,7 @@
   "GET /api/v1/iam/service-accounts": "iam.manage",
   "GET /api/v1/jobs": "job.read",
   "GET /api/v1/jobs/{job_id}": "job.read",
+  "GET /api/v1/jobs/{job_id}/ai-decisions": "job.read",
   "GET /api/v1/jobs/{job_id}/export/download": "job.read",
   "GET /api/v1/jobs/{job_id}/mapping-witness": "job.read",
   "GET /api/v1/jobs/{job_id}/parity-report": "job.read",

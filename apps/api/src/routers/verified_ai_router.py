@@ -5,7 +5,8 @@ the data (``services.mapping_witness``) and keeps the report for that mapping
 and destination; it never changes the mapping. ``POST
 /transfer/mapping-witness/review`` records a person's answer to one flag.
 ``GET /jobs/{id}/mapping-witness`` returns the report for the mapping the job
-ran with. A job of another workspace is a 404, exactly as ``GET /jobs/{id}``.
+ran with; ``GET /jobs/{id}/ai-decisions`` the AI decisions ledger
+(``services.ai_decision_ledger``), the same rows the signed packs carry. A job of another workspace is a 404, exactly as ``GET /jobs/{id}``.
 """
 
 from __future__ import annotations
@@ -155,3 +156,11 @@ async def job_mapping_witness(job_id: str, request: Request):
     record = await asyncio.to_thread(record_for_job, job)
     return {"job_id": job_id, "witness": _public_record(record)}
 
+
+@router.get("/jobs/{job_id}/ai-decisions")
+async def job_ai_decisions(job_id: str, request: Request):
+    """Every AI-originated proposal or explanation on the job and what became of it."""
+    from services.ai_decision_ledger import build_ledger
+
+    job = _visible_job(job_id, request)
+    return await asyncio.to_thread(build_ledger, job)

@@ -1,3 +1,4 @@
+import { AiInvolvementSection } from "./AiInvolvementSection";
 import { MappingEvidenceSection } from "./MappingEvidenceSection";
 
 /**
@@ -6,5 +7,10 @@ import { MappingEvidenceSection } from "./MappingEvidenceSection";
  */
 export function VerifiedAiSection({ jobId }: { jobId: string }) {
   if (!jobId) return null;
-  return <MappingEvidenceSection jobId={jobId} />;
+  return (
+    <>
+      <MappingEvidenceSection jobId={jobId} />
+      <AiInvolvementSection jobId={jobId} />
+    </>
+  );
 }

@@ -244,6 +244,10 @@ def render_markdown(report: dict[str, Any], pack: dict[str, Any] | None) -> str:
         for r in body["rounds"]:
             lines.append(f"- Round {r['n']} ({r['at']}): unexplained {r['unexplained_before']} → "
                          f"{r['unexplained_after']} after fix {r['fix_id']}")
+    if pack and isinstance(pack.get("ai_decisions"), dict):
+        from services.ai_decision_ledger import markdown_lines
+
+        lines += markdown_lines(pack["ai_decisions"])
     signoff = body["signoff"]
     lines += ["", "## Approvals", ""]
     if signoff["approvals"]:

@@ -1009,3 +1009,15 @@
   color: var(--df-text-tertiary);
   font-weight: 600;
 }
+
+.df2-trust-ai-kind {
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+}
+
+.df2-trust-ai-digest {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  overflow-wrap: anywhere;
+}
