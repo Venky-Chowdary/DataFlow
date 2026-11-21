@@ -588,11 +588,14 @@ def _sign_required_risk_contracts(
     """
     if not isinstance(acceptance, dict) or not acceptance:
         return list(mappings or [])
-    from services.oracle_empty_not_null import OPTION as _EMPTY_AS_NULL, sign_empty_as_null
+    from services import oracle_empty_not_null as _oe
 
-    if str(acceptance.get("option") or "").strip() == _EMPTY_AS_NULL:
+    if str(acceptance.get("option") or "").strip() == _oe.OPTION:
         # "Create <col> as NULL-able; empty strings land as NULL" (Oracle).
-        return sign_empty_as_null(list(mappings or []), acceptance, table=table)
+        return _oe.sign_empty_as_null(list(mappings or []), acceptance, table=table)
+    if str(acceptance.get("option") or "").strip() == _oe.CHECK_OPTION:
+        # "Check this column now": a longer, asked-for scan (not a risk).
+        return _oe.stamp_check_now(list(mappings or []), acceptance)
     from preflight.risk_contract import (
         mapping_is_structural_review,
         mapping_requires_risk_contract,

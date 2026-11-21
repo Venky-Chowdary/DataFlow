@@ -108,7 +108,7 @@ def test_an_existing_not_null_column_blocks_with_no_option_to_alter():
     assert gate["status"] == "block" and "existing NOT NULL column" in gate["message"]
     ids = [a["id"] for a in blockers[0]["suggested_actions"]]
     assert oe.OPTION not in ids
-    assert "DEFAULT" in blockers[0]["suggested_actions"][0]["label"]
+    assert any("DEFAULT" in a["label"] for a in blockers[0]["suggested_actions"])
     # Approval does not unlock an existing column.
     signed = oe.sign_empty_as_null(
         [dict(m) for m in _MAPS], {"option": oe.OPTION, "columns": ["note"],
@@ -350,4 +350,5 @@ def test_the_refusal_carries_the_exact_approval_and_the_alternative():
     )
     fix = gate["details"]["recommended_fix"]
     assert '"option": "oracle_empty_as_null", "columns": ["note"]' in fix
-    assert "code is a key column" in fix
+    assert "code (key column) would receive 1 empty string(s)" in gate["message"]
+    assert "default:<value> on code" in fix

@@ -186,17 +186,21 @@ def test_f4_a_scan_that_stops_blocks_instead_of_warning(monkeypatch):
 
 
 def test_f4_the_push_down_counts_the_whole_source_exactly(sqlite_source):
-    counts = oe.sql_empty_counts(source_connector_id="", source_config=sqlite_source,
-                                 source_table="t", columns=["note", "id", "memo"])
+    counts = {
+        c: oe.sql_empty_probe(source_connector_id="", source_config=sqlite_source,
+                              source_table="t", column=c)
+        for c in ("note", "id", "memo")
+    }
     # '  ' is not the empty string; NULL is not either.
-    assert counts == {"note": 2, "id": 1, "memo": 0}
+    assert counts == {"note": {"state": "found", "count": 2}, "id": {"state": "found", "count": 1},
+                      "memo": {"state": "zero", "count": 0}}
     # A count past any walk bound is still exact: the walk is never asked.
     targets = oe.candidates(
         destination_db_type="oracle", mappings=[dict(m) for m in _MAPS],
         column_nullability={"note": False}, destination_table_exists=False,
         destination_column_nullability={}, key_columns=[],
     )
-    measured = oe.measure(targets, pushdown=lambda cols: {"note": 7}, whole_scope=True,
+    measured = oe.measure(targets, probe=lambda col, now: {"state": "found", "count": 7}, whole_scope=True,
                           walk=lambda cols: pytest.fail("walked"))
     assert measured[0]["count"] == 7 and measured[0]["exact"] and measured[0]["how"] == "pushdown"
 
@@ -231,7 +235,7 @@ def test_f6_the_source_primary_key_is_never_offered_as_null_able(sqlite_source):
     assert by_target["id"]["approvable"] is False and by_target["note"]["approvable"] is True
     option = next(a for a in _blocker(result)["suggested_actions"] if a["id"] == oe.OPTION)
     assert option["risk_acceptance"]["columns"] == ["note"]
-    assert "id is a key column" in gate["details"]["recommended_fix"]
+    assert "id (key column) would receive 1 empty string(s)" in gate["message"]
 
 
 # ---------------------------------------------------------------- finding 7

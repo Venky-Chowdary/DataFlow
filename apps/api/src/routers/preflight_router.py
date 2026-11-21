@@ -88,6 +88,8 @@ class MappingItem(BaseModel):
     risk_contract: dict[str, Any] | None = None
     # Signed "Oracle '' lands as NULL" approval (services.oracle_empty_not_null).
     empty_as_null_contract: dict[str, Any] | None = None
+    # "Check this column now" (services.oracle_empty_not_null.CHECK_KEY).
+    empty_check_now: dict[str, Any] | None = None
     # G20 — operator-declared source→target code map. Extra=ignore would
     # drop this on Validate, so Execute would be the first place an unmapped
     # population code is seen. Empty dict is still a declaration.

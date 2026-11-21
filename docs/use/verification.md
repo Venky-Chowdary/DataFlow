@@ -59,9 +59,20 @@ Execute. A SQL source counts them itself; otherwise Validate reads the rows the
 run will read (with its filter, incremental window and transform). If there
 are none, nothing is shown. If there are some, the run is blocked and the gate
 names the column and the count. If Validate could not count them exactly (only
-a preview could be read, the scan stopped, or the source could not be read), a
-new table's column is blocked too, and the gate says empty strings could not be
-ruled out:
+a preview could be read, the scan stopped, or the source or its catalog could
+not be read), the column is blocked too, and the gate says why empty strings
+could not be ruled out. Every block lists what you can do:
+
+- **Map `default:<value>`** on the column: empty and blank values are written
+  as `<value>`, everything else is unchanged; Validate then needs no read.
+- **Check this column now** (`risk_acceptance: {"option":
+  "oracle_empty_check_now", "columns": [...]}`): a longer bounded read when
+  Validate could not finish one. On BigQuery, Snowflake, Databricks,
+  ClickHouse and Trino this is the only way Validate reads the column, because
+  the warehouse bills the scan.
+- **Replace the empty values in the source**, then validate again.
+
+And, per table:
 
 - **New table:** one option, "Create `<col>` as NULL-able; empty strings land
   as NULL". Approving it signs a risk contract (over MCP:
@@ -73,10 +84,10 @@ ruled out:
   "NULL cells in this column: N (table-wide)" and does not call them
   explained. A contract applies only to the column pair, table and workspace
   it was signed for.
-- **Existing table:** Datawrap never alters the column. Add a `DEFAULT` to it
-  or map a transform that writes a non-empty value, then validate again.
+- **Existing table:** Datawrap never alters the column. Add a `DEFAULT` to it,
+  or use one of the actions above, then validate again.
 - **Key column** (the run's key, or the destination's or source's primary
-  key): cannot be made NULL-able; map a transform instead.
+  key): cannot be made NULL-able; use one of the actions above.
 
 When a route's mapping confidence is below the mode's floor, review the
 mapping in the Map step and run Validate again. Nothing is written until that
