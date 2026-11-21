@@ -2228,9 +2228,7 @@ def run_file_preflight(
         key_hint=contract_primary_key or ",".join(destination_pk_columns or []), mappings=write_maps,
         source={"config": source_config, "connector_id": source_connector_id, "table": source_table},
     )
-    null_cursor_blocked = bool(
-        null_cursor_gate and null_cursor_gate.get("status") == "block"
-    )
+    null_cursor_blocked = bool(null_cursor_gate and null_cursor_gate.get("status") == "block")
     overwrite_governance_blocked = bool(
         overwrite_governance_gate and overwrite_governance_gate.get("status") == "block"
     )

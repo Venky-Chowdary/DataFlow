@@ -110,8 +110,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
-from services.create_ddl_gate import refuse_unapproved_create
-from services.overwrite_governance_gate import stamp_overwrite_governance_approval
+from services.overwrite_governance_gate import apply_destination_ddl_approval
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -1794,8 +1793,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
-            stamp_overwrite_governance_approval(request)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3298,8 +3296,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
-            stamp_overwrite_governance_approval(request)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4480,8 +4477,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
-            stamp_overwrite_governance_approval(request)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(

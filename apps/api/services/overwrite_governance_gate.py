@@ -182,3 +182,15 @@ def stamp_overwrite_governance_approval(request: Any) -> None:
     extra = dict(getattr(destination, "extra", None) or {})
     extra[APPROVAL_KEY] = bool(getattr(request, "ddl_changes_acknowledged", False))
     destination.extra = extra
+
+
+def apply_destination_ddl_approval(request: Any, table_exists: bool | None) -> None:
+    """Execute's one call for Validate's destination DDL approval.
+
+    Refuses a create nobody approved (``refuse_unapproved_create``), then
+    carries the approval to the overwrite clear.
+    """
+    from services.create_ddl_gate import refuse_unapproved_create
+
+    refuse_unapproved_create(request, table_exists)
+    stamp_overwrite_governance_approval(request)
