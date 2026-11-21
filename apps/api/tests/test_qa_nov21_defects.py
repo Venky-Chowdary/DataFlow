@@ -115,32 +115,49 @@ def test_mysql_boolean_and_json_are_the_planned_ddl():
     assert not planned_ddl_matches_live(
         {"name": "VARCHAR(40)"}, {"name": "varchar(80)"}
     )
+    assert not planned_ddl_matches_live(
+        {"qty": "BIGINT"}, {"qty": "bigint(20) unsigned"}
+    )
+    assert planned_ddl_matches_live({"qty": "BIGINT"}, {"qty": "bigint(20)"})
 
 
-def test_confidence_only_change_keeps_the_decision_hash():
-    """A scoring pass is not Map drift. A target-type change still is.
+def test_base_stamped_hash_replays_and_scores_are_not_drift():
+    """A content hash stamped with confidence still inside it must replay.
 
-    On the previous hash, confidence was inside the digest, so this refused.
+    Changing that digest broke every stored approval. Scoring is a separate
+    structural hash: a confidence-only change of the stored artifact still
+    runs, and a target-type change still refuses. On the previous gate the
+    confidence-only replay refused.
     """
     from services.decision_kernel.execute_gate import (
         build_artifact_from_mappings,
         enforce_decision_artifact,
     )
+    from services.decision_kernel.models import (
+        decision_artifact_from_dict,
+        structural_decision_hash,
+    )
     from services.schema_fingerprint import fingerprint_schema
 
-    def _maps(confidence: float, target_type: str = "BIGINT") -> list[dict]:
+    def _maps(
+        confidence: float,
+        target_type: str = "BIGINT",
+        *,
+        key: bool = False,
+        target: str = "id",
+    ) -> list[dict]:
         return [{
             "source": "id",
-            "target": "id",
+            "target": target,
             "source_type": "BIGINT",
             "target_type": target_type,
             "confidence": confidence,
             "create_new": True,
+            "is_primary_key": key,
         }]
 
     src_fp = fingerprint_schema(["id"], {"id": "BIGINT"})
-    high = build_artifact_from_mappings(
-        _maps(0.99),
+    common = dict(
         dest_db="mysql",
         source_db="mysql",
         source_fingerprint=src_fp,
@@ -151,35 +168,29 @@ def test_confidence_only_change_keeps_the_decision_hash():
         artifact_id="da_inline",
         created_at="1970-01-01T00:00:00+00:00",
     )
-    low = build_artifact_from_mappings(
-        _maps(0.72),
-        dest_db="mysql",
-        source_db="mysql",
-        source_fingerprint=src_fp,
-        dest_fingerprint="",
-        sync_mode="incremental_append",
-        error_policy="quarantine",
-        route_id="validate:mysql",
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
+    high = build_artifact_from_mappings(_maps(0.99), **common)
+    low = build_artifact_from_mappings(_maps(0.72), **common)
+    # One design (merge of #435 into fix/qa-batch1): scores are not part of
+    # the content hash; they are compared separately. A base stamp (scores
+    # inside) is still accepted — see test_schedules_saved_with_the_base_...
     assert high.content_hash == low.content_hash
-    edited = build_artifact_from_mappings(
-        _maps(0.99, "VARCHAR(8)"),
-        dest_db="mysql",
-        source_db="mysql",
-        source_fingerprint=src_fp,
-        dest_fingerprint="",
-        sync_mode="incremental_append",
-        error_policy="quarantine",
-        route_id="validate:mysql",
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
-    assert edited.content_hash != high.content_hash
+    assert structural_decision_hash(high) == structural_decision_hash(low)
+    from services.decision_kernel.models import base_content_hash
+
+    assert base_content_hash(high.to_dict()) != base_content_hash(low.to_dict())
+    revived = decision_artifact_from_dict(high.to_dict())
+    assert revived.content_hash == high.content_hash
+    keyed = build_artifact_from_mappings(_maps(0.99, key=True), **common)
+    # The key flag is structure: it moves the hash.
+    assert keyed.content_hash != high.content_hash
+    assert structural_decision_hash(keyed) != structural_decision_hash(high)
+    assert decision_artifact_from_dict(keyed.to_dict()).content_hash == keyed.content_hash
+    named = high.to_dict()
+    named["ddl"]["column_ddl"]["confidence"] = "VARCHAR(8)"
+    assert structural_decision_hash(named) != structural_decision_hash(high.to_dict())
     live = fingerprint_schema(["id"], {"id": "bigint"})
     err, art = enforce_decision_artifact(
-        mappings=_maps(0.72),
+        mappings=_maps(0.99),
         dest_db="mysql",
         source_db="mysql",
         approved_content_hash=high.content_hash,
@@ -191,14 +202,53 @@ def test_confidence_only_change_keeps_the_decision_hash():
         live_column_types={"id": "bigint"},
         sync_mode="incremental_append",
         error_policy="quarantine",
+        route_id="validate:mysql",
     )
     assert err is None, err
     assert art is not None
+    err_score, art_score = enforce_decision_artifact(
+        mappings=_maps(0.72),
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=high.content_hash,
+        artifact_payload=high.to_dict(),
+        source_fingerprint=src_fp,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        source_column_names=["id"],
+        live_column_types={"id": "bigint"},
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+    )
+    assert err_score is None, err_score
+    assert art_score is not None
+    # A base stamp (feature/Cleanup digest) of the stored artifact replays too.
+    err_base, art_base = enforce_decision_artifact(
+        mappings=_maps(0.72),
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=base_content_hash(high.to_dict()),
+        artifact_payload={**high.to_dict(), "content_hash": base_content_hash(high.to_dict())},
+        source_fingerprint=src_fp,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        source_column_names=["id"],
+        live_column_types={"id": "bigint"},
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+    )
+    assert err_base is None, err_base
+    assert art_base is not None
     err_type, art_type = enforce_decision_artifact(
         mappings=_maps(0.99, "VARCHAR(8)"),
         dest_db="mysql",
         source_db="mysql",
         approved_content_hash=high.content_hash,
+        artifact_payload=high.to_dict(),
         source_fingerprint=src_fp,
         dest_fingerprint=live,
         destination_table_exists=True,
@@ -207,6 +257,7 @@ def test_confidence_only_change_keeps_the_decision_hash():
         live_column_types={"id": "bigint"},
         sync_mode="incremental_append",
         error_policy="quarantine",
+        route_id="validate:mysql",
     )
     assert err_type and art_type is None
 
@@ -759,19 +810,43 @@ def test_d407_ownership_probe_runs_only_for_a_create_new_plan(monkeypatch):
         assert len(calls) == expected, (dest_fp, calls)
 
 
-def test_decision_hash_keeps_name_keyed_columns_and_accepts_legacy_stamps():
-    """#435 took confidence out of the hash. Two follow-ups: a column named
-    like a stripped key (``created_at``, ``score``) stays in ``ddl.column_ddl``,
-    and a stamp minted before the change still names the same decision."""
-    from services.decision_kernel.execute_gate import (
-        build_artifact_from_mappings,
-        enforce_decision_artifact,
-    )
-    from services.decision_kernel.models import (
-        _structural_hash_body,
-        decision_artifact_from_dict,
-        legacy_content_hash,
-    )
+def _base_digest(payload: dict) -> str:
+    """The content hash as feature/Cleanup (70cb4669c) computed it."""
+    import hashlib
+    import json
+
+    body = {k: v for k, v in payload.items()
+            if k not in {"content_hash", "policy_signature", "created_at", "artifact_id"}}
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _interim_digest(payload: dict) -> str:
+    """The content hash as PR #435's interim build (e83b6dc7a) computed it."""
+    import hashlib
+    import json
+
+    drop = {"content_hash", "policy_signature", "created_at", "artifact_id", "confidence",
+            "calibration_reason", "score", "score_gap", "alternatives"}
+
+    def strip(value):
+        if isinstance(value, dict):
+            return {str(k): strip(v) for k, v in value.items() if str(k) not in drop}
+        if isinstance(value, (list, tuple)):
+            return [strip(v) for v in value]
+        return value
+
+    return hashlib.sha256(
+        json.dumps(strip(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def test_decision_hash_keeps_name_keyed_columns_out_of_the_score_strip():
+    """Scores leave only mapping rows: a column named ``created_at`` or
+    ``score`` stays in the structural (replay) hash's DDL part."""
+    from services.decision_kernel.execute_gate import build_artifact_from_mappings
+    from services.decision_kernel.models import structural_decision_hash
 
     maps = [
         {"source": "created_at", "target": "created_at", "source_type": "BIGINT",
@@ -783,30 +858,70 @@ def test_decision_hash_keeps_name_keyed_columns_and_accepts_legacy_stamps():
         maps, dest_db="mysql", dest_fingerprint="", route_id="validate:mysql",
         artifact_id="da_inline", created_at="1970-01-01T00:00:00+00:00",
     )
-    body = _structural_hash_body(art.to_dict())
-    assert set(body["ddl"]["column_ddl"]) == {"created_at", "score"}
-    assert all("confidence" not in m for m in body["mappings"])
-    assert "created_at" not in body and "content_hash" not in body
+    for name in ("created_at", "score"):
+        edited = art.to_dict()
+        edited["ddl"]["column_ddl"][name] = "VARCHAR(8)"
+        assert structural_decision_hash(edited) != structural_decision_hash(art.to_dict()), name
 
-    legacy = legacy_content_hash(art.to_dict())
-    assert legacy != art.content_hash
-    assert art.matches_hash(legacy) and art.matches_hash(art.content_hash.upper())
-    # A stored payload stamped under the legacy digest still loads.
-    stored = {**art.to_dict(), "content_hash": legacy}
-    assert decision_artifact_from_dict(stored).content_hash == legacy
-    # And Execute accepts a legacy approved stamp for the unchanged Map.
-    err, ok = enforce_decision_artifact(
-        mappings=maps, dest_db="mysql", approved_content_hash=legacy,
-        dest_fingerprint="", destination_table_exists=False,
+
+def test_schedules_saved_with_the_base_or_the_interim_hash_still_run():
+    """A schedule stamped by feature/Cleanup (confidence inside the digest)
+    and one stamped by #435's interim build (scores stripped at every depth)
+    both still pass the schedule-side check and the Execute gate a beat
+    runs. A rescored Map still runs; a target-type change still refuses."""
+    from types import SimpleNamespace
+
+    from services.decision_kernel.execute_gate import build_artifact_from_mappings
+    from services.decision_kernel.models import decision_artifact_from_dict
+    from services.schedule_approvals import create_new_stamp_matches_schedule
+    from src.transfer.engine_identity import _enforce_decision_artifact_once
+
+    maps = [{"source": "id", "target": "id", "source_type": "BIGINT",
+             "target_type": "BIGINT", "confidence": 0.93, "create_new": True}]
+    art = build_artifact_from_mappings(
+        maps, dest_db="mysql", source_db="", source_fingerprint="", dest_fingerprint="",
+        sync_mode="incremental_append", route_id="validate:mysql", tenant_id="anonymous",
+        artifact_id="da_inline", created_at="1970-01-01T00:00:00+00:00",
     )
-    assert err is None and ok is not None, err
-    # A legacy stamp still moves with confidence, exactly as before.
-    rescored = [{**maps[0], "confidence": 0.5}, maps[1]]
-    err2, _ = enforce_decision_artifact(
-        mappings=rescored, dest_db="mysql", approved_content_hash=legacy,
-        dest_fingerprint="", destination_table_exists=False,
+    base = _base_digest(art.to_dict())
+    interim = _interim_digest(art.to_dict())
+    assert base != interim
+
+    for label, stamp in (("base", base), ("interim", interim)):
+        sched = SimpleNamespace(
+            mappings=maps, approved_decision_artifact_hash=stamp, sync_mode="incremental_append",
+            stream_contracts=[], source_connector_id="", workspace_id="", source_schema_fingerprint="",
+        )
+        assert create_new_stamp_matches_schedule(sched, dest_db="mysql"), label
+        # The Execute gate the beat runs (inline stamp, as the scheduler sends it).
+        err, ok = _enforce_decision_artifact_once(
+            None, maps, dest_db="mysql", approved_decision_artifact_hash=stamp,
+            skip_preflight=True, sync_mode="incremental_append",
+        )
+        assert err is None and ok, (label, err)
+        # The stored payload under that digest still loads (no "tampered").
+        assert decision_artifact_from_dict({**art.to_dict(), "content_hash": stamp})
+        # A different target type is still drift.
+        edited = [{**maps[0], "target_type": "VARCHAR(8)"}]
+        err_t, _ = _enforce_decision_artifact_once(
+            None, edited, dest_db="mysql", approved_decision_artifact_hash=stamp,
+            skip_preflight=True, sync_mode="incremental_append",
+        )
+        assert err_t, label
+    # The scores-only change runs under a current stamp and the interim stamp
+    # (neither holds scores). A base stamp held its score, so an inline replay
+    # of a rescored Map is matched only through the stored artifact payload.
+    rescored = [{**maps[0], "confidence": 0.61}]
+    err_c, ok_c = _enforce_decision_artifact_once(
+        None, rescored, dest_db="mysql", approved_decision_artifact_hash=art.content_hash,
+        skip_preflight=True, sync_mode="incremental_append",
     )
-    assert err2
+    assert err_c is None and ok_c, err_c
+    err_s, ok_s = _enforce_decision_artifact_once(
+        None, rescored, dest_db="mysql", approved_decision_artifact_hash=interim,
+        skip_preflight=True, sync_mode="incremental_append",
+    )
+    assert err_s is None and ok_s, err_s
 
 
 def test_d47_scd2_error_drops_postgres_context_lines():

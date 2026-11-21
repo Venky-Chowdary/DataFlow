@@ -23,6 +23,8 @@ from services.decision_kernel.models import (
     ProofPlan,
     build_decision_artifact,
     decision_artifact_from_dict,
+    decision_stamps_match,
+    same_structural_decision,
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
@@ -129,6 +131,12 @@ def build_artifact_from_mappings(
                 ),
                 create_new=create_new,
                 omitted=False,
+                is_primary_key=bool(
+                    m.get("is_primary_key")
+                    or m.get("primary_key")
+                    or m.get("identity")
+                    or m.get("is_identity")
+                ),
             )
         )
 
@@ -186,15 +194,23 @@ def _ddl_compare_token(type_sql: str) -> str:
         flags=re.I,
     )
     text = text.upper().strip()
+    # UNSIGNED is a different carrier. bigint(20) unsigned is not BIGINT.
+    unsigned = bool(re.search(r"\bUNSIGNED\b", text))
+    text = re.sub(r"\bUNSIGNED\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
     # MySQL reports BOOLEAN as tinyint(1) and sometimes BIT(1). JSON is json.
-    if re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}:
+    # tinyint(1) unsigned is not that boolean spelling.
+    if not unsigned and (
+        re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}
+    ):
         return "BOOLEAN"
     if text in {"JSON", "JSONB"}:
         return "JSON"
     shown = _INT_DISPLAY_WIDTH.match(text)
     if shown:
         base = shown.group(1).upper()
-        return "INT" if base in {"INTEGER", "INT4"} else ("BIGINT" if base == "INT8" else base)
+        token = "INT" if base in {"INTEGER", "INT4"} else ("BIGINT" if base == "INT8" else base)
+        return f"{token} UNSIGNED" if unsigned else token
     head, sep, rest = text.partition("(")
     head = {
         "NUMERIC": "DECIMAL",
@@ -208,8 +224,10 @@ def _ddl_compare_token(type_sql: str) -> str:
         "CHARACTER": "CHAR",
     }.get(head.strip(), head.strip())
     if head in {"TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT"}:
-        return head
-    return f"{head}({rest}" if sep else head
+        token = head
+    else:
+        token = f"{head}({rest}" if sep else head
+    return f"{token} UNSIGNED" if unsigned else token
 
 
 def planned_ddl_matches_live(
@@ -370,6 +388,7 @@ def create_new_validate_holds_after_dest_exists(
     tenant_id: str = "",
     route_id: str = "",
     schema_policy: str = "",
+    reference: DecisionArtifact | None = None,
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -428,7 +447,9 @@ def create_new_validate_holds_after_dest_exists(
                     artifact_id="da_inline",
                     created_at="1970-01-01T00:00:00+00:00",
                 )
-                if create_new.matches_hash(approved):
+                if decision_stamps_match(approved, create_new) or (
+                    reference is not None and same_structural_decision(reference, create_new)
+                ):
                     matched = True
                     break
             if matched:
@@ -491,11 +512,15 @@ def enforce_decision_artifact(
     has_maps = bool(mappings)
     approved = (approved_content_hash or "").strip().lower()
 
-    def _dest_exists_hold(stamp: str) -> tuple[bool, str]:
+    def _dest_exists_hold(
+        stamp: str,
+        reference: DecisionArtifact | None = None,
+    ) -> tuple[bool, str]:
         return create_new_validate_holds_after_dest_exists(
             mappings=mappings,
             dest_db=dest_db,
             approved_content_hash=stamp,
+            reference=reference,
             live_dest_fingerprint=dest_fingerprint,
             source_fingerprint=source_fingerprint,
             source_db=source_db,
@@ -555,7 +580,7 @@ def enforce_decision_artifact(
                         None,
                     )
                 if not supplied.dest_fingerprint:
-                    holds, hold_err = _dest_exists_hold(supplied.content_hash)
+                    holds, hold_err = _dest_exists_hold(supplied.content_hash, supplied)
                     if holds:
                         return (None, supplied)
                     if hold_err:
@@ -593,7 +618,7 @@ def enforce_decision_artifact(
                         "re-run Validate before Execute.",
                         None,
                     )
-                if approved and not supplied.matches_hash(approved):
+                if approved and not decision_stamps_match(approved, supplied):
                     return (
                         "Decision Artifact content_hash does not match approved hash — "
                         "refuse write.",
@@ -604,7 +629,7 @@ def enforce_decision_artifact(
                 policy_same = (not error_policy) or error_policy == (
                     supplied.error_policy or error_policy
                 )
-                hash_same = (not approved) or supplied.matches_hash(approved)
+                hash_same = (not approved) or decision_stamps_match(approved, supplied)
                 # DW-D407: only a create-new plan (empty dest fingerprint) whose
                 # table this job created, and only after the checks above.
                 if (
@@ -643,7 +668,7 @@ def enforce_decision_artifact(
                     "re-run Validate before Execute.",
                     None,
                 )
-            if approved and not supplied.matches_hash(approved):
+            if approved and not decision_stamps_match(approved, supplied):
                 return (
                     "Decision Artifact content_hash does not match approved hash — "
                     "refuse write.",
@@ -691,7 +716,7 @@ def enforce_decision_artifact(
     if approved:
         for rid in route_candidates:
             candidate = _rebuild(rid, dest_fp_now)
-            if candidate.matches_hash(approved):
+            if decision_stamps_match(approved, candidate):
                 return (None, candidate)
         holds, hold_err = _dest_exists_hold(approved)
         if holds:

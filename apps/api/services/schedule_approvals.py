@@ -671,6 +671,7 @@ def dest_engine_from_schedule(sched: Any, dest_db: str = "") -> str:
 def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
     """True when the schedule's create-new Validate hash still matches Map."""
     from services.decision_kernel import build_artifact_from_mappings
+    from services.decision_kernel.models import decision_stamps_match
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     maps = persisted_mapping_rows(getattr(sched, "mappings", None))
@@ -719,7 +720,7 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
             artifact_id="da_inline",
             created_at="1970-01-01T00:00:00+00:00",
         )
-        if art.matches_hash(approved):
+        if decision_stamps_match(approved, art):
             return True
     return False
 

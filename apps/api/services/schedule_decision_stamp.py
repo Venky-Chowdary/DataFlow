@@ -80,10 +80,11 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
                 )
                 if art.content_hash:
                     found.add(art.content_hash.lower())
-                    # A stamp minted before confidence left the hash (#435).
-                    from services.decision_kernel.models import legacy_content_hash
+                    # The same decision under every accepted digest (the
+                    # feature/Cleanup and PR #435 interim stamps).
+                    from services.decision_kernel.models import accepted_stamps
 
-                    found.add(legacy_content_hash(art.to_dict()))
+                    found.update(accepted_stamps(art))
     return found
 
 
