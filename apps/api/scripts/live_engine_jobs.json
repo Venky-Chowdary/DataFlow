@@ -86,8 +86,8 @@
       "proves": ["oracle"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "engine_scoped",
-      "engines": ["oracle", "postgresql", "mysql", "mongodb", "sqlserver", "sqlite", "files"],
-      "container": "Oracle Database 23ai Free (gvenzl/oracle-free faststart, with RMAN) in ARCHIVELOG with supplemental logging: the real engine, not an emulator. Peers: PostgreSQL, MySQL, MongoDB, SQL Server.",
+      "engines": ["oracle", "postgresql", "mysql", "mongodb", "redis", "sqlserver", "sqlite", "files"],
+      "container": "Oracle Database 23ai Free (gvenzl/oracle-free faststart, with RMAN) in ARCHIVELOG with supplemental logging: the real engine, not an emulator. Peers: PostgreSQL, MySQL, MongoDB, Redis, SQL Server.",
       "min_executed": 100,
       "expected_skips": [
         {
@@ -106,8 +106,8 @@
       "proves": ["kafka"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "engine_scoped",
-      "engines": ["kafka", "postgresql", "mysql", "mongodb", "sqlite", "files"],
-      "container": "apache/kafka 3.9 single-node KRaft broker, PLAINTEXT and SASL_PLAINTEXT/PLAIN: the real broker, not a fake. Peers: PostgreSQL, MySQL, MongoDB.",
+      "engines": ["kafka", "postgresql", "mysql", "mongodb", "redis", "sqlite", "files"],
+      "container": "apache/kafka 3.9 single-node KRaft broker, PLAINTEXT and SASL_PLAINTEXT/PLAIN: the real broker, not a fake. Peers: PostgreSQL, MySQL, MongoDB, Redis.",
       "min_executed": 100,
       "expected_skips": []
     },

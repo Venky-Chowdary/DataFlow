@@ -1069,8 +1069,8 @@ jobs:
       - name: Start Oracle Free (ARCHIVELOG, LogMiner user)
         run: bash .github/scripts/start_ci_databases.sh oracle
 
-      - name: Start peers (PostgreSQL logical, MySQL, MongoDB, SQL Server)
-        run: bash .github/scripts/start_ci_databases.sh postgres-cdc mysql mongo sqlserver
+      - name: Start peers (PostgreSQL logical, MySQL, MongoDB, Redis, SQL Server)
+        run: bash .github/scripts/start_ci_databases.sh postgres-cdc mysql mongo redis sqlserver
 
       - name: Set up Python
         if: ${{ !cancelled() }}
@@ -1231,8 +1231,8 @@ jobs:
       - name: Export live-engine connection settings (every name the suite reads)
         run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
 
-      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB)
-        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo
+      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB, Redis)
+        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo redis
 
       - name: Set up Python
         if: ${{ !cancelled() }}
