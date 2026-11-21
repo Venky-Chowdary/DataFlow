@@ -84,3 +84,16 @@ def test_route_needs_only_job_read():
     from services.rbac import Permission, _required_permission
 
     assert _required_permission("GET", "/api/v1/parity/verdicts") == Permission.JOB_READ
+
+
+def test_the_list_row_carries_a_stamp_that_changes_with_parity_decisions(store):
+    """Review UI2 #2: parity writes do not touch updated_at, so the grid needs this stamp."""
+    from services.job_list_view import parity_stamp, slim_job_for_list
+
+    job_id = _job(store)
+    doc = store.get_job(job_id)
+    assert parity_stamp(doc) == "" and "parity_stamp" not in slim_job_for_list(doc)
+    doc["parity"] = {"version": 2, "summary": {"verdict": "explained", "at": "2026-11-21T10:00:00Z"}}
+    assert slim_job_for_list(doc)["parity_stamp"] == "2:2026-11-21T10:00:00Z"
+    doc["parity"]["summary"]["at"] = "2026-11-21T10:05:00Z"
+    assert slim_job_for_list(doc)["parity_stamp"] == "2:2026-11-21T10:05:00Z", "a re-read moves the stamp"

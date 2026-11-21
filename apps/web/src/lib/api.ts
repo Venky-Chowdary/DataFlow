@@ -1,3 +1,4 @@
+import { publishReportVerdict } from "./reportVerdicts";
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
 import { ApiUnreachableError, noteApiReachable, noteApiUnreachable } from "./connectivity";
 import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
@@ -6283,7 +6284,10 @@ function parityReportUrl(jobId: string, suffix = ""): string {
 
 async function parityReportFrom(res: Response, fallback: string): Promise<ParityReport> {
   if (!res.ok) throw await apiErrorFrom(res, fallback);
-  return (await res.json()) as ParityReport;
+  const report = (await res.json()) as ParityReport;
+  // One verdict per job everywhere: the Jobs grid and drawer follow this report.
+  publishReportVerdict(report);
+  return report;
 }
 
 /** GET the trust report for one job. */

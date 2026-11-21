@@ -144,7 +144,10 @@ def job_verdicts(ids: list[str], visible: Any) -> dict[str, dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001 - one unreadable job must not blank the page
             logger.info("parity verdict unavailable for %s (%s)", job_id, type(exc).__name__)
             continue
+        from services.job_list_view import parity_stamp
+
         out[job_id] = {
+            "parity_stamp": parity_stamp(job),
             "verdict": summary.get("verdict") or "unverifiable",
             "unexplained": int(summary.get("unexplained") or 0),
             "method": summary.get("method") or "none",

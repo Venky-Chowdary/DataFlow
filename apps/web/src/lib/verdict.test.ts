@@ -70,14 +70,16 @@ describe("guard: no second verdict vocabulary", () => {
   });
 });
 
-describe("list verdict cache", () => {
+describe("list verdict cache (review UI2 #2)", () => {
   const job = (id: string, patch: Partial<TransferJob> = {}) =>
     ({ _id: id, status: "completed", updated_at: "t1", verification_summary: { passed: true }, ...patch }) as TransferJob;
+  const proven = { verdict: "proven" as const, unexplained: 0 };
+  const bad = { verdict: "unexplained" as const, unexplained: 4 };
 
   it("asks only for finished, reconciled rows it has no current verdict for", () => {
     const rows = [job("a"), job("b", { status: "running" }), job("c", { verification_summary: undefined }), job("a")];
     assert.deepEqual(jobsNeedingVerdicts(rows), ["a"]);
-    const cache = new Map([["a", { stamp: listVerdictStamp(rows[0]), verdict: { verdict: "proven" as const, unexplained: 0 } }]]);
+    const cache = new Map([["a", { stamp: listVerdictStamp(rows[0]), verdict: proven, at: 1 }]]);
     assert.deepEqual(verdictIdsToFetch(rows, cache), []);
     assert.deepEqual(verdictIdsToFetch([job("a", { updated_at: "t2" })], cache), ["a"], "a re-run re-reads");
     const merged = mergeListVerdicts(rows, cache);
@@ -85,5 +87,25 @@ describe("list verdict cache", () => {
     assert.equal(merged[1], rows[1], "rows without a verdict are untouched");
     const untouched = [job("z")];
     assert.equal(mergeListVerdicts(untouched, cache), untouched, "no current verdict: the same array, no re-render");
+  });
+
+  it("re-reads when Parity Studio changes the verdict without touching updated_at", () => {
+    const before = job("a", { parity_stamp: "1:2026-11-21T10:00:00Z" });
+    const cache = new Map([["a", { stamp: listVerdictStamp(before), verdict: proven, at: 1 }]]);
+    assert.deepEqual(verdictIdsToFetch([job("a", { parity_stamp: "2:2026-11-21T10:05:00Z" })], cache), ["a"]);
+  });
+
+  it("a newer Trust Report read wins over the list; an older one does not", () => {
+    const rows = [job("a")];
+    const cache = new Map([["a", { stamp: listVerdictStamp(rows[0]), verdict: proven, at: 10 }]]);
+    assert.equal(mergeListVerdicts(rows, cache, new Map([["a", { verdict: bad, at: 20 }]]))[0].parity_verdict?.verdict, "unexplained");
+    assert.equal(mergeListVerdicts(rows, cache, new Map([["a", { verdict: bad, at: 5 }]]))[0].parity_verdict?.verdict, "proven");
+  });
+
+  it("a failed read shows Not loaded but is never cached", () => {
+    const rows = [job("a")];
+    const merged = mergeListVerdicts(rows, new Map(), new Map(), new Set(["a"]));
+    assert.equal(merged[0].parity_verdict, null);
+    assert.deepEqual(verdictIdsToFetch(rows, new Map()), ["a"], "still wanted: retried on the next read");
   });
 });

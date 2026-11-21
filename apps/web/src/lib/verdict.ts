@@ -166,16 +166,21 @@ export function jobsNeedingVerdicts(jobs: Pick<TransferJob, "_id" | "status" | "
   return ids.slice(0, 100);
 }
 
-/** A fetched list verdict, keyed to the job state it was read for. */
+/** A verdict read for one job state, and when it was read (ms). Errors are never cached. */
 export interface CachedListVerdict {
   stamp: string;
-  /** null: the read failed or the API left the job out. */
-  verdict: ListVerdict | null;
+  verdict: ListVerdict;
+  /** Date.now() when it arrived: the newer of a list read and a report read wins. */
+  at: number;
 }
 
-/** The job state a list verdict belongs to: a re-run or late reconciliation changes it. */
-export function listVerdictStamp(job: Pick<TransferJob, "status" | "updated_at" | "completed_at">): string {
-  return [job.status || "", job.updated_at || "", job.completed_at || ""].join("|");
+/**
+ * The job state a verdict belongs to. Parity Studio decisions and re-reads
+ * do not touch updated_at, so the list's parity_stamp (version and stored
+ * summary time) is part of it (review UI2 #2).
+ */
+export function listVerdictStamp(job: Pick<TransferJob, "status" | "updated_at" | "completed_at" | "parity_stamp">): string {
+  return [job.status || "", job.updated_at || "", job.completed_at || "", job.parity_stamp || ""].join("|");
 }
 
 /** Ids whose verdict is missing or was read for another state of the job. */
@@ -188,14 +193,34 @@ export function verdictIdsToFetch(jobs: TransferJob[], cache: ReadonlyMap<string
   });
 }
 
-/** Rows with their verdict merged in (`parity_verdict`); untouched when none is current. */
-export function mergeListVerdicts(jobs: TransferJob[], cache: ReadonlyMap<string, CachedListVerdict>): TransferJob[] {
+/**
+ * Rows with their verdict merged in (`parity_verdict`). The verdict of a
+ * Trust Report opened in this session (`reports`, keyed by job id) is the
+ * source of truth when it is newer than the list's: the grid row and the
+ * drawer never show two different words. `unavailable` ids (read failed, or
+ * the API left them out) get null: "Not loaded", retried on the next read.
+ */
+export function mergeListVerdicts(
+  jobs: TransferJob[],
+  cache: ReadonlyMap<string, CachedListVerdict>,
+  reports: ReadonlyMap<string, { verdict: ListVerdict; at: number }> = new Map(),
+  unavailable: ReadonlySet<string> = new Set(),
+): TransferJob[] {
   let changed = false;
   const out = jobs.map((job) => {
     const hit = cache.get(job._id);
-    if (!hit || hit.stamp !== listVerdictStamp(job)) return job;
-    changed = true;
-    return { ...job, parity_verdict: hit.verdict };
+    const listed = hit && hit.stamp === listVerdictStamp(job) ? hit : null;
+    const report = reports.get(job._id);
+    const pick = report && (!listed || report.at >= listed.at) ? report.verdict : listed?.verdict;
+    if (pick) {
+      changed = true;
+      return { ...job, parity_verdict: pick };
+    }
+    if (unavailable.has(job._id)) {
+      changed = true;
+      return { ...job, parity_verdict: null };
+    }
+    return job;
   });
   return changed ? out : jobs;
 }
