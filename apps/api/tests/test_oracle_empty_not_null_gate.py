@@ -61,7 +61,7 @@ def test_only_not_null_text_columns_into_oracle_are_candidates():
 def test_the_scan_counts_the_written_value_after_the_transform():
     scan = oe.count_empty_strings(_ROWS, _targets())
     # note: two '' rows; code: trim("  ") is '' once.
-    assert scan["counts"] == {"note": 2, "code": 1}
+    assert scan["counts"] == {"note->note": 2, "code->code": 1}
     assert scan["rows_scanned"] == 3 and scan["truncated"] == ""
     capped = oe.count_empty_strings(_ROWS, _targets(), max_rows=1)
     assert capped["truncated"] == "rows" and capped["rows_scanned"] == 1
@@ -88,10 +88,10 @@ def test_empty_strings_block_with_column_count_and_one_approvable_option():
         destination_table_exists=False, destination_column_nullability={},
         column_types={}, key_columns=["id"], sample_rows=[], walk=walk,
     )
-    assert walked == [["note", "code"]]  # only the candidates are projected
+    assert walked == [["code", "note"]]  # only the candidates are projected
     assert gate["id"] == oe.GATE_ID and gate["status"] == "block"
     assert "note" in gate["message"] and "2 empty string(s)" in gate["message"]
-    assert "ORA-01400" in gate["message"] and "source population" in gate["message"]
+    assert "ORA-01400" in gate["message"] and "every source row Execute will read" in gate["message"]
     (blocker,) = blockers
     option = next(a for a in blocker["suggested_actions"] if a["id"] == oe.OPTION)
     assert option["label"].startswith("Create note as NULL-able; empty strings land as NULL")
@@ -144,7 +144,7 @@ def test_the_approval_signs_a_verifiable_contract_and_clears_the_gate():
         column_types={}, key_columns=["id"], sample_rows=[], walk=lambda cols: iter(_ROWS),
     )
     assert blockers == [] and gate["status"] == "pass"
-    assert {a["source"]: a["empty_rows"] for a in gate["details"]["approved"]} == {"note": 2, "code": 1}
+    assert {a["source"]: a["count"] for a in gate["details"]["approved"]} == {"note": 2, "code": 1}
     # A tampered contract is not an approval.
     by["note"][oe.CONTRACT_KEY] = {**by["note"][oe.CONTRACT_KEY], "approved_by": "someone else"}
     assert oe.approved_contract(by["note"]) is None
@@ -248,24 +248,26 @@ def test_gate8_counts_at_the_destination_when_the_run_holds_no_records(monkeypat
     )
     asked: list[tuple] = []
 
-    def fake(endpoint, table, columns):
-        asked.append((table, columns))
+    def fake(endpoint, table, columns, scope=None):
+        asked.append((table, columns, getattr(scope, "kind", None)))
         return {"note": 5}
 
     monkeypatch.setattr(oe, "destination_null_rows", fake)
     out = oe.explain_empty_as_null(
         {"passed": True, "message": ""}, endpoint=SimpleNamespace(format="oracle", table="T"),
-        mappings=signed, records=None, dest_summary={"table": "SCH.T"},
+        mappings=signed, records=None,
+        dest_summary={"table": "SCH.T", "sync_mode": "full_refresh_overwrite"},
     )
-    assert asked == [("SCH.T", ["note"])]
+    assert asked == [("SCH.T", ["note"], "table_written_by_run")]
     (explained,) = out["explained_changes"]
-    assert explained["rows"] == 5 and explained["counted_by"] == "destination NULL cells"
-    monkeypatch.setattr(oe, "destination_null_rows", lambda *a: None)
+    assert explained["rows"] == 5 and explained["counted_by"] == "NULL cells in the rows this run wrote"
+    monkeypatch.setattr(oe, "destination_null_rows", lambda *a, **k: None)
     out = oe.explain_empty_as_null(
         {"passed": True, "message": ""}, endpoint=SimpleNamespace(format="oracle", table="T"),
-        mappings=signed, records=None,
+        mappings=signed, records=None, dest_summary={"sync_mode": "full_refresh_overwrite"},
     )
-    assert out["explained_changes"][0]["rows"] is None and out["passed"] is True
+    assert "explained_changes" not in out and out["passed"] is True
+    assert out["unscoped_null_cells"][0]["table_wide_null_cells"] is None
 
 
 def test_the_destination_null_count_reads_the_table_through_the_writers_engine(tmp_path, monkeypatch):

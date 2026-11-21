@@ -281,7 +281,7 @@ def test_oracle_empty_strings_into_a_new_not_null_column_block_then_approve(clie
                     dest_table=dst_t, sync_mode="full_refresh_overwrite")
         blocker = _blocker(_start(**args))
         assert "note" in blocker["message"] and "2 empty string(s)" in blocker["message"], blocker
-        assert "source population" in blocker["message"], blocker
+        assert "counted by the source database" in blocker["message"], blocker
         option = next(a for a in blocker["suggested_actions"] if a["id"] == oe.OPTION)
         assert "Create note as NULL-able" in option["label"]
         assert not _ora("SELECT 1 FROM user_tables WHERE UPPER(table_name) = :t", {"t": dst_t.upper()})

@@ -2210,18 +2210,9 @@ def run_file_preflight(
         source_table=source_table,
     )
     enriched_blockers.extend(_cursor_blockers)
-    from services.oracle_empty_not_null import preflight_gate as _oracle_empty_gate
+    from services.oracle_empty_not_null import preflight_hook as _oracle_empty_hook
 
-    oracle_empty_gate, _oe_blockers = _oracle_empty_gate(  # Oracle '' into NOT NULL text
-        destination_db_type=destination_db_type, mappings=write_maps, column_types=column_types,
-        column_nullability=column_nullability, destination_table_exists=dest_table_exists,
-        destination_column_nullability=destination_column_nullability, sample_rows=sample_rows,
-        key_columns=[*str(contract_primary_key or "").split(","), *(destination_pk_columns or [])],
-        population_rows=population_rows if rows_are_population else None, walk=lambda cols: _ps._iter_table_population_for_preflight(
-            source_columns=cols, source_kind=source_kind, source_format=source_format,
-            source_connector_id=source_connector_id or "", source_config=source_config,
-            source_table=source_table or "", mappings=list(mappings or []), column_types=dict(column_types or {}),
-            dest_types=dict(destination_column_types or {}), dest_db=destination_db_type, sync_mode=sync_mode))
+    oracle_empty_gate, _oe_blockers = _oracle_empty_hook(dict(locals()))  # Oracle '' into NOT NULL text
     enriched_blockers.extend(_oe_blockers)
 
     # Only an operator-declared manual_review gates create-new (the default is the golden path).
@@ -2249,8 +2240,7 @@ def run_file_preflight(
         + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
-        + ([shape_route_gate] if shape_route_gate else [])
-        + ([oracle_empty_gate] if oracle_empty_gate else [])
+        + ([shape_route_gate] if shape_route_gate else []) + ([oracle_empty_gate] if oracle_empty_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)

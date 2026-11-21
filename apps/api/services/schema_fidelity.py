@@ -798,7 +798,7 @@ def resolve_create_fidelity_plan(
     plan = _retarget_explode_parent_pk(plan, mappings, target_columns)
     from services.oracle_empty_not_null import relax_create_plan
 
-    plan = relax_create_plan(plan, mappings, dest)  # approved '' -> NULL on Oracle
+    plan = relax_create_plan(plan, mappings, dest, dest_table=dest_table)  # approved '' -> NULL on Oracle
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:
