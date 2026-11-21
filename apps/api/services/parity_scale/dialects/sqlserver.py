@@ -86,10 +86,12 @@ def units_sql(t100: str, digits: int, *, project: bool, pg_axis: bool) -> str:
     step = 10 ** (6 - digits)
     if project:
         if pg_axis:
-            v = f"(({u}) - {PG_EPOCH_US})"
+            # bigint literals: a bare 946684800000000 is NUMERIC(15,0) in T-SQL,
+            # and NUMERIC division keeps a fraction.
+            v = f"(({u}) - CAST({PG_EPOCH_US} AS bigint))"
             rounded = (
                 f"(CASE WHEN {v} >= 0 THEN {_floor_div(f'{v} + {step // 2}', step)} "
-                f"ELSE -{_floor_div(f'-{v} + {step // 2}', step)} END + {PG_EPOCH_US // step})"
+                f"ELSE -{_floor_div(f'-{v} + {step // 2}', step)} END + CAST({PG_EPOCH_US // step} AS bigint))"
             )
         else:
             rounded = _floor_div(f"{u} + {step // 2}", step)

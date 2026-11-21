@@ -158,6 +158,20 @@ def _bind(engine: str, value: Any) -> Any:
     return value
 
 
+def _insert(cur: Any, engine: str, table: str, cols: list[str], values: list[Any]) -> None:
+    """One row. pymssql sends ``bytes`` as a varchar literal (and ``b''`` as
+    ``''``), which SQL Server refuses for varbinary: inline it as hex."""
+    marks, params = [], []
+    for value in values:
+        if engine == "sqlserver" and isinstance(value, (bytes, bytearray)):
+            marks.append(f"CONVERT(varbinary(max), '{bytes(value).hex()}', 2)")
+        else:
+            marks.append("%s")
+            params.append(_bind(engine, value))
+    sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(marks)})"
+    cur.execute(sql, tuple(params)) if params else cur.execute(sql)
+
+
 def _side(engine: str, conn: Any, col: ColumnPlan, table: str, dest_engine: str):
     from services.parity_scale.dialects import open_side
 
@@ -174,7 +188,7 @@ def _render(engine: str, table: str, col: ColumnPlan, values: list[Any], dest_en
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {table}")
             for i, value in enumerate(values):
-                cur.execute(f"INSERT INTO {table} (id, x) VALUES (%s, %s)", (i, _bind(engine, value)))
+                _insert(cur, engine, table, ["id", "x"], [i, value])
         conn.commit()
         side = _side(engine, conn, col, table, dest_engine)
         q = side.quote("x")
@@ -388,17 +402,16 @@ def test_pair_copy_by_the_real_writer_is_found_equal_and_faults_exactly(src, dst
     _create(dst, d_table, kinds)
     try:
         conn = parity_engines.connect(src)
-        with conn.cursor() as cur:
-            for i in range(1, N_ROWS + 1):
-                vals = _row_values(rng, i)
-                cols = ", ".join(f"c_{k}" for k in kinds)
-                marks = ", ".join("%s" for _ in range(len(kinds) + 1))
-                cur.execute(f"INSERT INTO {s_table} (id, {cols}) VALUES ({marks})",
-                            (i, *[_bind(src, vals[k]) for k in kinds]))
-            cur.execute(f"SELECT id, {', '.join(f'c_{k}' for k in kinds)} FROM {s_table} ORDER BY id")
-            rows = [[bytes(v) if isinstance(v, memoryview) else v for v in r] for r in cur.fetchall()]
-        conn.commit()
-        conn.close()
+        try:
+            with conn.cursor() as cur:
+                for i in range(1, N_ROWS + 1):
+                    vals = _row_values(rng, i)
+                    _insert(cur, src, s_table, ["id", *[f"c_{k}" for k in kinds]], [i, *[vals[k] for k in kinds]])
+                cur.execute(f"SELECT id, {', '.join(f'c_{k}' for k in kinds)} FROM {s_table} ORDER BY id")
+                rows = [[bytes(v) if isinstance(v, memoryview) else v for v in r] for r in cur.fetchall()]
+            conn.commit()
+        finally:
+            conn.close()  # never leave an open transaction holding locks the DROP waits on
         headers = ["id", *[f"c_{k}" for k in kinds]]
         mappings = [{"source": h, "target": h} for h in headers]
         dest_types = {"id": "INT", **{f"c_{k}": KINDS[k][3][dst] for k in kinds}}
