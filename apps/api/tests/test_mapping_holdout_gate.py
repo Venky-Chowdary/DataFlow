@@ -89,3 +89,21 @@ def test_evidence_claim_floors_match_the_gate() -> None:
     for key in ("top1", "top3", "auto_precision"):
         assert claim["floors"][key] == HOLDOUT_FLOORS["test"][key]
     assert claim["floors"]["neg_auto_zero"] == 1
+
+
+def test_docs_page_claims_no_more_than_the_gate_measures(results) -> None:
+    """docs/use/mapping-accuracy.md quotes the test split; it may not overstate it."""
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[3] / "docs" / "use" / "mapping-accuracy.md").read_text()
+    o = results["test"]["overall"]
+    m = re.search(r"\*\*(\d+) of (\d+)\*\* \(95% lower bound (\d+)%\)", text)
+    assert m, "auto-approve line missing"
+    assert (int(m.group(1)), int(m.group(2))) == (o["auto_correct"], o["auto_count"])
+    assert int(m.group(3)) <= round(o["auto_precision_wilson_lb"] * 100)
+    top1 = re.search(r"top-1\) \| (\d+)%", text)
+    top3 = re.search(r"top-3\) \| (\d+)%", text)
+    assert top1 and int(top1.group(1)) <= round(o["top1"] * 100)
+    assert top3 and int(top3.group(1)) <= round(o["top3"] * 100)
+    assert "100% mapping accuracy\". The" in text or "Not \"100% mapping accuracy\"" in text
