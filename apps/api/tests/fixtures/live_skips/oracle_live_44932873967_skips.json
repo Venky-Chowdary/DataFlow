@@ -1,0 +1,338 @@
+{
+ "source": "oracle-live job 136935340067, CI run 44932873967 (3e0a9cd53): every skipped test id with its pytest skip message, from the job log; the two d350 MariaDB skips (one per junit file, files and cells steps) are from the job's short summary",
+ "executed": 740,
+ "skips": [
+  {
+   "test": "tests/test_d226_case_oracle_follows_source_case_mapping.py::test_timescale_sharp_s_upper_verifies_and_names_the_uncovered_step",
+   "message": "TimescaleDB not configured (DATAFLOW_TEST_TIMESCALE_*)"
+  },
+  {
+   "test": "tests/test_d356_oracle_proof_stored_column_spelling.py::test_live_oracle_destination_proof_runs_and_verifies[mariadb-full_refresh_overwrite]",
+   "message": "MariaDB not reachable (DATAFLOW_TEST_MARIADB_*, :3307)"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_dest_count",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_empty_string_as_null",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_skip_when_dest_count_matches",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_occupied_mismatch_declines",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_overwrite_replaces_dest",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_source_count_is_not_scan",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_iceberg_oracle_copy.py::test_live_iceberg_oracle_stream_load_method",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_dest_count",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_varchar2_empty_is_null",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_skip_when_dest_count_matches",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_occupied_mismatch_declines",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_overwrite_replaces_snapshot",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_dest_count_is_not_scan_count",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_iceberg_copy.py::test_live_oracle_iceberg_stream_load_method",
+   "message": "Iceberg REST catalog not reachable at http://127.0.0.1:8181"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_dest_count",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_empty_string_and_null",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_skip_when_dest_count_matches",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_occupied_mismatch_declines",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_overwrite_replaces_dest",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_oracle_s3_copy.py::test_live_oracle_s3_stream_load_method",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_s3_oracle_jsonl_declines",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_dest_count",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_empty_string_and_null",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_skip_when_dest_count_matches",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_occupied_mismatch_declines",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_overwrite_replaces_dest",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_s3_oracle_copy.py::test_live_s3_oracle_stream_load_method",
+   "message": "MinIO 9000 not reachable"
+  },
+  {
+   "test": "tests/test_cdc_poll_reconnects_live.py::test_sqlserver_eos_runner_recovers_from_source_restart",
+   "message": "set DATAFLOW_CDC_LIVE_RESTART_TESTS=1 to restart CDC source containers"
+  },
+  {
+   "test": "tests/test_cdc_poll_reconnects_live.py::test_oracle_eos_runner_recovers_from_source_restart[buffer-off]",
+   "message": "set DATAFLOW_CDC_LIVE_RESTART_TESTS=1 to restart CDC source containers"
+  },
+  {
+   "test": "tests/test_cdc_poll_reconnects_live.py::test_oracle_eos_runner_recovers_from_source_restart[buffer-on]",
+   "message": "set DATAFLOW_CDC_LIVE_RESTART_TESTS=1 to restart CDC source containers"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_adls_to_database_oracle]",
+   "message": "source database/adls not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_airtable_to_database_oracle]",
+   "message": "No endpoint template for driver 'airtable'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_asana_to_database_oracle]",
+   "message": "No endpoint template for driver 'asana'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_bigcommerce_to_database_oracle]",
+   "message": "No endpoint template for driver 'bigcommerce'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_bigquery_to_database_oracle]",
+   "message": "source database/bigquery not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_brevo_to_database_oracle]",
+   "message": "No endpoint template for driver 'brevo'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_calendly_to_database_oracle]",
+   "message": "No endpoint template for driver 'calendly'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_clickup_to_database_oracle]",
+   "message": "No endpoint template for driver 'clickup'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_close_to_database_oracle]",
+   "message": "No endpoint template for driver 'close'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_confluence_to_database_oracle]",
+   "message": "No endpoint template for driver 'confluence'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_couchbase_to_database_oracle]",
+   "message": "No endpoint template for driver 'couchbase'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_elasticsearch_to_database_oracle]",
+   "message": "source database/elasticsearch not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_freshdesk_to_database_oracle]",
+   "message": "No endpoint template for driver 'freshdesk'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_freshservice_to_database_oracle]",
+   "message": "No endpoint template for driver 'freshservice'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_gcs_to_database_oracle]",
+   "message": "source database/gcs not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_github_to_database_oracle]",
+   "message": "No endpoint template for driver 'github'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_gitlab_to_database_oracle]",
+   "message": "No endpoint template for driver 'gitlab'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_influxdb_to_database_oracle]",
+   "message": "No endpoint template for driver 'influxdb'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_intercom_to_database_oracle]",
+   "message": "No endpoint template for driver 'intercom'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_jira_to_database_oracle]",
+   "message": "No endpoint template for driver 'jira'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_kafka_to_database_oracle]",
+   "message": "source database/kafka not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_klaviyo_to_database_oracle]",
+   "message": "No endpoint template for driver 'klaviyo'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_linear_to_database_oracle]",
+   "message": "No endpoint template for driver 'linear'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_mailchimp_to_database_oracle]",
+   "message": "No endpoint template for driver 'mailchimp'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_mailjet_to_database_oracle]",
+   "message": "No endpoint template for driver 'mailjet'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_monday_to_database_oracle]",
+   "message": "No endpoint template for driver 'monday'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_neo4j_to_database_oracle]",
+   "message": "No endpoint template for driver 'neo4j'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_notion_to_database_oracle]",
+   "message": "No endpoint template for driver 'notion'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_adls]",
+   "message": "destination database/adls not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_bigquery]",
+   "message": "destination database/bigquery not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_elasticsearch]",
+   "message": "destination database/elasticsearch not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_gcs]",
+   "message": "destination database/gcs not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_kafka]",
+   "message": "destination database/kafka not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_milvus]",
+   "message": "destination database/milvus not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_pinecone]",
+   "message": "destination database/pinecone not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_qdrant]",
+   "message": "destination database/qdrant not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_oracle_to_database_weaviate]",
+   "message": "destination database/weaviate not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_pipedrive_to_database_oracle]",
+   "message": "No endpoint template for driver 'pipedrive'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_posthog_to_database_oracle]",
+   "message": "No endpoint template for driver 'posthog'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_qdrant_to_database_oracle]",
+   "message": "source database/qdrant not reachable"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_sendgrid_to_database_oracle]",
+   "message": "No endpoint template for driver 'sendgrid'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_servicenow_to_database_oracle]",
+   "message": "No endpoint template for driver 'servicenow'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_singer_tap_to_database_oracle]",
+   "message": "No endpoint template for driver 'singer_tap'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_slack_to_database_oracle]",
+   "message": "No endpoint template for driver 'slack'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_todoist_to_database_oracle]",
+   "message": "No endpoint template for driver 'todoist'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_typeform_to_database_oracle]",
+   "message": "No endpoint template for driver 'typeform'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_woocommerce_to_database_oracle]",
+   "message": "No endpoint template for driver 'woocommerce'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_zendesk_to_database_oracle]",
+   "message": "No endpoint template for driver 'zendesk'"
+  },
+  {
+   "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_zoho_crm_to_database_oracle]",
+   "message": "No endpoint template for driver 'zoho_crm'"
+  },
+  {
+   "test": "tests/test_d350_pipeline_default_on_empty.py::test_live_typed_pair_defaults_empty_and_the_proof_verifies[sqlserver-mariadb]",
+   "message": "MariaDB not reachable (DATAFLOW_TEST_MARIADB_*, :3307)"
+  },
+  {
+   "test": "tests/test_d350_pipeline_default_on_empty.py::test_live_typed_pair_defaults_empty_and_the_proof_verifies[sqlserver-mariadb]",
+   "message": "MariaDB not reachable (DATAFLOW_TEST_MARIADB_*, :3307)"
+  }
+ ]
+}

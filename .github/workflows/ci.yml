@@ -969,6 +969,10 @@ jobs:
   # below still proves a real customer-style Oracle when it is configured.
   # In the Required PR gate: three legs in a row ran green on 81f5ec525
   # (740 executed, 0 failed, 0 unexpected skips each).
+  # Its skip check is strict: every skip must be on the job's allowlist in
+  # scripts/live_engine_jobs.json, which names what this job does NOT prove
+  # (Oracle <-> S3 / Iceberg copy without MinIO / an Iceberg catalog, CDC
+  # reconnect after a container restart, routes to engines it does not start).
   oracle-live:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
