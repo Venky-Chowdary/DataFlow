@@ -7,6 +7,7 @@
  * snapshot it was submitted with; the Trust Report reads only that.
  */
 import { apiFetch, parseApiError } from "./api";
+import { isCallableSourceMode } from "./sourceReadMode";
 import { API_BASE } from "./types";
 
 export type WitnessStatus =
@@ -145,7 +146,40 @@ export interface WitnessRequest {
   date_locale?: string;
   trigger?: "auto" | "explicit";
   session_id?: string;
-  source_ref?: { kind: string; name: string };
+  source_ref?: WitnessSourceRef;
+}
+
+/** What the sample came from, named the way the run names its source (the server folds both the same way). */
+export interface WitnessSourceRef {
+  kind: string;
+  name: string;
+  /** A query or procedure source: its statement (two extracts of one stream are two sources). */
+  statement?: string;
+}
+
+/**
+ * The Map step's source, from the same state the run is submitted from: a file by
+ * its name; a cloud object by its path; a table by the stream Map shows (the run
+ * submits the primary stream, so evidence for another stream never attaches);
+ * a query or procedure by its statement, as callableSourceExtra sends it.
+ */
+export function witnessSourceRef(state: {
+  sourceKind: string;
+  fileName?: string | null;
+  cloudPath?: string | null;
+  activeStream?: string | null;
+  primaryStream?: string | null;
+  readMode?: string | null;
+  statement?: string | null;
+}): WitnessSourceRef {
+  if (state.sourceKind === "file") return { kind: "file", name: state.fileName || "", statement: "" };
+  if (state.sourceKind === "cloud") return { kind: "database", name: state.cloudPath || "", statement: "" };
+  const callable = state.sourceKind === "database" && isCallableSourceMode(state.readMode || undefined);
+  return {
+    kind: "database",
+    name: state.activeStream || state.primaryStream || "",
+    statement: callable ? String(state.statement || "").trim() : "",
+  };
 }
 
 /** The rows sent: what Map already shows, capped (the server caps again). */
@@ -168,7 +202,7 @@ export function buildWitnessRequest(input: {
   dateLocale?: string;
   trigger: "auto" | "explicit";
   sessionId?: string;
-  source?: { kind: string; name: string };
+  source?: WitnessSourceRef;
 }): WitnessRequest {
   return {
     mappings: writtenPairs(input.rows).map((m) => ({
@@ -239,11 +273,12 @@ export async function recordMapDecisions(
   sessionId: string,
   destination: Record<string, unknown> | null,
   mappings: Array<{ source: string; target: string; approved: boolean; changed: boolean }>,
+  source?: WitnessSourceRef,
 ): Promise<number> {
   const res = await apiFetch(`${API_BASE}/transfer/mapping-witness/decisions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, destination, mappings }),
+    body: JSON.stringify({ session_id: sessionId, destination, mappings, source_ref: source ?? { kind: "", name: "" } }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Map decisions could not be recorded"));
   return (await res.json()).recorded;

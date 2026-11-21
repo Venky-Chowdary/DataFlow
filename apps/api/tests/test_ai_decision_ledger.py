@@ -135,7 +135,7 @@ def test_who_is_the_person_who_approved_in_map_not_who_started_the_run(data_dir,
 
     maps = _rows(F.SWAPPED_NAMES)
     _src, identity, _, _ = _witness_on_map(maps)
-    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com", mappings=[
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com", source=SOURCE, mappings=[
         {"source": "mail", "target": "email", "approved": True},
         {"source": "login", "target": "username", "approved": True, "changed": True},
     ])
@@ -157,7 +157,7 @@ def test_a_scheduled_run_shows_the_map_approver_and_the_schedule_separately(data
 
     maps = _rows(F.CORRECT_MAPPING)
     _src, identity, _, _ = _witness_on_map(maps)
-    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com",
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com", source=SOURCE,
                          mappings=[{"source": "mail", "target": "email", "approved": True}])
     job = _job(maps, _submit(maps, triggered_by="schedule:nightly"), triggered_by="schedule:nightly")
     ledger = build_ledger(job)
@@ -452,7 +452,7 @@ def test_an_approval_posted_in_another_session_never_attaches(data_dir, calls):
 
     maps = _rows(F.CORRECT_MAPPING)
     _src, identity, _, _ = _witness_on_map(maps)
-    record_map_decisions(workspace_id=WS, session="a-different-session", identity=identity,
+    record_map_decisions(workspace_id=WS, session="a-different-session", identity=identity, source=SOURCE,
                          actor="mallory@example.com", mappings=[{"source": "mail", "target": "email", "approved": True}])
     row = next(e for e in _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_MAPPING_PROPOSAL)
                if e["subject"] == "mail → email")
@@ -465,7 +465,7 @@ def test_kept_needs_the_explicit_keep_on_that_flag_and_continuing_is_recorded(da
     maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
     _src, identity, digest, report = _witness_on_map(maps)
     # Approving the row (Continue) after the flag was shown is not a review of the flag.
-    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com",
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com", source=SOURCE,
                          mappings=[{"source": "login", "target": "email", "approved": True}])
     [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
     assert flag["decision"]["status"] == "unreviewed"

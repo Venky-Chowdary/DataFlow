@@ -155,6 +155,7 @@ import {
   streamExtractPlaceholder,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
+import { witnessSourceRef } from "../lib/mappingWitness";
 import {
   describeDestRoute,
   destRouteKey,
@@ -7644,10 +7645,15 @@ export function TransferPage({
           columnMappings={columnMappings}
           dateLocale={dateLocale}
           witnessSessionId={witnessSessionId}
-          witnessSource={{
-            kind: sourceKind === "file" ? "file" : "database",
-            name: (sourceKind === "file" ? sourceFileName : mapActiveStream || primarySourceStream) || "",
-          }}
+          witnessSource={witnessSourceRef({
+            sourceKind,
+            fileName: sourceFileName,
+            cloudPath,
+            activeStream: mapActiveStream,
+            primaryStream: primarySourceStream,
+            readMode: sourceReadMode,
+            statement: procedureCall,
+          })}
           hideFooter={studioFlags.canvas}
           analysis={analysis}
           destColumns={destColumns}

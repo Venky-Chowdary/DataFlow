@@ -10,6 +10,7 @@ import {
   type WitnessPair,
   type WitnessResult,
   type WitnessRow,
+  type WitnessSourceRef,
 } from "../../lib/mappingWitness";
 
 export interface MappingWitnessInput {
@@ -27,7 +28,7 @@ export interface MappingWitnessInput {
   /** The Map session (plan id or minted id) the evidence belongs to. */
   sessionId: string;
   /** What the sample came from: the file name, or the table. */
-  source: { kind: string; name: string };
+  source: WitnessSourceRef;
 }
 
 export interface MappingWitnessState {

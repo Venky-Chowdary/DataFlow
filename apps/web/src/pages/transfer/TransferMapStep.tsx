@@ -46,7 +46,7 @@ import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
 import { MapIssueList, mapIssueSummary, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
 import { useMappingWitness } from "../../components/mapping/useMappingWitness";
-import { isWarehouse, recordMapDecisions } from "../../lib/mappingWitness";
+import { isWarehouse, recordMapDecisions, type WitnessSourceRef } from "../../lib/mappingWitness";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -144,7 +144,7 @@ interface TransferMapStepProps {
   /** The Map session the witness evidence belongs to; the run submits the same id. */
   witnessSessionId?: string;
   /** What the sample came from (file name or table), so a job only takes evidence for its own source. */
-  witnessSource?: { kind: string; name: string };
+  witnessSource?: WitnessSourceRef;
 }
 
 
@@ -508,7 +508,7 @@ export function TransferMapStep({
     // Flags nobody answered are recorded as "not reviewed (continued)" by this person.
     void witness.continuePastFlags().catch(() => undefined);
     if (decided.length && witnessSessionId) {
-      void recordMapDecisions(witnessSessionId, destEndpoint ?? null, decided).catch(() => {
+      void recordMapDecisions(witnessSessionId, destEndpoint ?? null, decided, witnessSource).catch(() => {
         /* Evidence only: Validate never depends on it; the ledger then says "not reviewed". */
       });
     }

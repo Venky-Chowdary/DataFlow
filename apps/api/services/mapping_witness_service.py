@@ -19,8 +19,11 @@
   the sampler cannot address, or one past the read bound is "not read". A
   warehouse is read only on an explicit Check mapping. Reads run under the
   workspace's egress allowlist.
-* **Bounds.** Records are per workspace and session; each is capped, and a
-  workspace keeps at most :data:`MAX_RECORDS_PER_WORKSPACE`, oldest pruned.
+* **Bounds.** Records are per workspace and session; each is capped. Past
+  :data:`MAX_RECORDS_PER_WORKSPACE`, records older than the evidence window go
+  first; a record inside the window (an open Map session) goes only past the
+  hard bound :data:`MAX_LIVE_RECORDS_PER_WORKSPACE`, and its session then reads
+  "evidence expired", never "no check matches".
 """
 
 from __future__ import annotations
@@ -53,8 +56,12 @@ MAX_REPORTS = 3
 MAX_REVIEWS = 400
 MAX_SOURCES = 400
 MAX_PER_SOURCE = 5
-#: Witness and activity records one workspace keeps; the oldest are pruned first.
+#: Witness and activity records one workspace keeps before records past the evidence window are pruned.
 MAX_RECORDS_PER_WORKSPACE = 300
+#: The hard bound: only past it is a record inside the evidence window pruned (oldest first).
+MAX_LIVE_RECORDS_PER_WORKSPACE = 3000
+#: Sessions remembered as pruned, so their runs read "evidence expired".
+MAX_EXPIRED_SESSIONS = 1000
 #: Evidence older than this at submit is not used.
 MAX_EVIDENCE_AGE = timedelta(hours=24)
 CLOCK_SKEW = timedelta(minutes=5)
@@ -204,19 +211,41 @@ def destination_identity(endpoint: Any, workspace_id: str = "") -> str:
 
 
 def source_identity(source: dict[str, Any] | None) -> str:
-    """``kind|name`` of what the sample came from: the file name, or the table / collection."""
+    """What the sample came from, the one normal form both Map and the job are compared in.
+
+    ``file|<file name>`` (no folder), or ``database|<table or collection>`` for every
+    other source kind (a cloud object is named by its path). A query or procedure
+    source adds ``#`` and a digest of its statement (whitespace and case folded),
+    so two different extracts of one stream are two sources.
+    """
     src = dict(source or {})
-    kind = str(src.get("kind") or "").strip().casefold()
-    name = str(src.get("name") or "").strip().casefold()
-    return f"{kind}|{name}" if kind or name else ""
+    raw_kind = str(src.get("kind") or "").strip().casefold()
+    name = str(src.get("name") or "").strip()
+    kind = "file" if raw_kind == "file" else ("database" if raw_kind or name else "")
+    if kind == "file":
+        name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    text = " ".join(str(src.get("statement") or "").split()).casefold()
+    ident = f"{kind}|{name.casefold()}" if kind or name else ""
+    return f"{ident}#{hashlib.sha256(text.encode()).hexdigest()[:16]}" if text else ident
+
+
+def _callable_statement(extra: Any) -> str:
+    extra = extra if isinstance(extra, dict) else {}
+    mode = str(extra.get("source_read_mode") or "").strip().casefold()
+    if mode == "query":
+        return str(extra.get("source_query") or "")
+    if mode == "procedure":
+        return str(extra.get("procedure_call") or "")
+    return ""
 
 
 def request_source_identity(request: Any) -> str:
+    """The job's side of :func:`source_identity`, from the submitted transfer request."""
     src = getattr(request, "source", None)
     kind = str(getattr(src, "kind", "") or "")
     name = (getattr(request, "source_filename", "") or "") if kind == "file" else (
         getattr(src, "table", "") or getattr(src, "collection", "") or "")
-    return source_identity({"kind": kind, "name": name})
+    return source_identity({"kind": kind, "name": name, "statement": _callable_statement(getattr(src, "extra", None))})
 
 
 def mapping_digest(mappings: list[dict[str, Any]] | None, identity: str) -> str:
@@ -248,20 +277,45 @@ def _save(data: Any, key: str, record: dict[str, Any], *, new: bool) -> None:
         prune_workspace(str(record.get("workspace_id") or ""))
 
 
-def prune_workspace(workspace_id: str, keep: int | None = None) -> int:
-    """Drop this workspace's oldest witness records beyond ``keep``. Returns how many went."""
+def _expired_key(workspace_id: str) -> str:
+    return f"expired::{workspace_id}"
+
+
+def _is_old(updated_at: str, now: datetime) -> bool:
+    try:
+        return datetime.fromisoformat(updated_at) < now - MAX_EVIDENCE_AGE - CLOCK_SKEW
+    except ValueError:
+        return True
+
+
+def prune_workspace(workspace_id: str, keep: int | None = None, live_keep: int | None = None) -> int:
+    """Past ``keep`` records, drop those older than the evidence window (oldest first); drop a record
+    inside the window only past ``live_keep``. Pruned sessions are remembered as expired. Returns how many went."""
     keep = MAX_RECORDS_PER_WORKSPACE if keep is None else keep
+    live_keep = MAX_LIVE_RECORDS_PER_WORKSPACE if live_keep is None else live_keep
     try:
         data = _DOC.load(part=workspace_id)
-        mine = [(str((r or {}).get("updated_at") or ""), k) for k, r in data.items()
-                if isinstance(r, dict) and str(r.get("workspace_id") or "") == workspace_id
-                and str(k).startswith(("witness::", "activity::"))]
+        mine = sorted((str((r or {}).get("updated_at") or ""), k) for k, r in data.items()
+                      if isinstance(r, dict) and str(r.get("workspace_id") or "") == workspace_id
+                      and str(k).startswith(("witness::", "activity::")))
         if len(mine) <= keep:
             return 0
-        mine.sort()
-        drop = [k for _, k in mine[: len(mine) - keep]]
+        now = datetime.now(timezone.utc)
+        old = [k for at, k in mine if _is_old(at, now)]
+        drop = old[: len(mine) - keep]
+        live = [k for at, k in mine if not _is_old(at, now)]
+        drop += live[: max(0, len(live) - live_keep)]
+        if not drop:
+            return 0
+        expired_key = _expired_key(workspace_id)
+        expired = dict((data.get(expired_key) or {}).get("sessions") or {})
+        stamp = now.isoformat()
         for k in drop:
+            expired[str(data[k].get("session") or "")] = stamp
             del data[k]
+        expired.pop("", None)
+        newest = sorted(expired.items(), key=lambda kv: kv[1])[-MAX_EXPIRED_SESSIONS:]
+        data[expired_key] = {"workspace_id": workspace_id, "sessions": dict(newest), "updated_at": stamp}
         _DOC.save(tracked(data, getattr(data, "rev", None)))
         return len(drop)
     except Exception as exc:  # noqa: BLE001 - pruning is housekeeping; the evidence is already stored
@@ -349,6 +403,7 @@ def record_review(*, workspace_id: str, session: str, identity: str, digest: str
         "flag_kind": pair_flag.get("kind"),
         "flag_id": pair_flag.get("id"),
         "report_sha256": latest["report_sha256"],
+        "source_identity": latest.get("source_identity") or "",
         "mapping_digest": digest,
         "decision": decision,
         "new_target": target if decision == "changed" else None,
@@ -362,8 +417,8 @@ def record_review(*, workspace_id: str, session: str, identity: str, digest: str
 
 
 def record_map_decisions(*, workspace_id: str, session: str, identity: str, mappings: list[dict[str, Any]],
-                         actor: str) -> int:
-    """Who approved or changed each pair in Map, in this session (the caller is authenticated)."""
+                         actor: str, source: str = "") -> int:
+    """Who approved or changed each pair in Map, in this session, for this source (the caller is authenticated)."""
     session = clean_session(session)
     if not session:
         return 0
@@ -374,13 +429,13 @@ def record_map_decisions(*, workspace_id: str, session: str, identity: str, mapp
     for m in mappings[:MAX_SOURCES]:
         if not isinstance(m, dict) or not (m.get("approved") or m.get("changed")):
             continue
-        source, target = _clean_name(m.get("source")), _clean_name(m.get("target"))
-        if not source or not target:
+        column, target = _clean_name(m.get("source")), _clean_name(m.get("target"))
+        if not column or not target:
             continue
         entry = {"target": target, "approved": bool(m.get("approved")), "changed": bool(m.get("changed")),
-                 "by": str(actor or "anonymous")[:256], "at": at}
-        history = [e for e in decisions.get(source.casefold(), []) if isinstance(e, dict)]
-        decisions[source.casefold()] = [*history, entry][-MAX_PER_SOURCE:]
+                 "source_identity": source, "by": str(actor or "anonymous")[:256], "at": at}
+        history = [e for e in decisions.get(column.casefold(), []) if isinstance(e, dict)]
+        decisions[column.casefold()] = [*history, entry][-MAX_PER_SOURCE:]
         recorded += 1
     if recorded:
         _save(data, key, {**record, "map_decisions": _bounded_sources(decisions), "updated_at": at}, new=new)
@@ -449,26 +504,37 @@ def build_snapshot(*, workspace_id: str, session: str, identity: str, source: st
         body = {**base, "not_checked_reason": "The run was not submitted from a Map session."}
         return {**body, "sha256": _sha(body)}
     latest = latest_report(workspace_id=workspace_id, session=session, digest=digest)
-    if latest and (latest.get("source_identity") != source or not _fresh(latest.get("recorded_at"), taken)):
-        latest = None  # another file or table, or too old: not this run's evidence
+    expired = False
+    if latest and latest.get("source_identity") == source and not _fresh(latest.get("recorded_at"), taken):
+        latest, expired = None, True  # this run's check, but too old to stand
+    if latest and latest.get("source_identity") != source:
+        latest = None  # another file or table: not this run's evidence
+    if not latest and not expired:
+        _d, gone = _load(_expired_key(workspace_id), workspace_id)
+        expired = session in ((gone or {}).get("sessions") or {})
     _data, _key, activity, _new = _activity(workspace_id, session, identity)
     map_decisions: dict[str, dict[str, Any]] = {}
     for src_key, history in (activity.get("map_decisions") or {}).items():
         pair = pairs.get(src_key)
         valid = [e for e in history or [] if isinstance(e, dict) and pair
-                 and str(e.get("target") or "").casefold() == pair["target"].casefold() and _fresh(e.get("at"), taken)]
+                 and str(e.get("target") or "").casefold() == pair["target"].casefold()
+                 and e.get("source_identity") == source and _fresh(e.get("at"), taken)]
         if valid:
             map_decisions[pair["source"]] = valid[-1]
     reviews = []
     report_digest = (latest or {}).get("report_sha256")
+    # A flag id covers the check's inputs, source, target and kind: the same flag on a re-check keeps its answer.
+    flag_ids = {p["source"].casefold(): (p.get("flag") or {}).get("id")
+                for p in flagged_pairs((latest or {}).get("report") or {})}
     for r in activity.get("flag_reviews") or []:
-        if not isinstance(r, dict) or not _fresh(r.get("at"), taken):
+        if not isinstance(r, dict) or not _fresh(r.get("at"), taken) or r.get("source_identity") != source:
             continue
         pair = pairs.get(str(r.get("source") or "").casefold())
         if not pair:
             continue
         ran = pair["target"].casefold()
-        on_what_ran = r.get("report_sha256") == report_digest and str(r.get("flagged_target") or "").casefold() == ran
+        on_what_ran = (bool(r.get("flag_id")) and r.get("flag_id") == flag_ids.get(pair["source"].casefold())
+                       and str(r.get("flagged_target") or "").casefold() == ran)
         if r.get("decision") in ("kept", CONTINUED) and on_what_ran:
             reviews.append(r)  # the flag on what ran: kept explicitly, or continued past unreviewed
         elif r.get("decision") == "changed" and str(r.get("new_target") or "").casefold() == ran:
@@ -490,7 +556,9 @@ def build_snapshot(*, workspace_id: str, session: str, identity: str, source: st
         "model_suggestions": suggestions,
     }
     if not latest:
-        body["not_checked_reason"] = "No mapping check of this session matches this run's source and mapping."
+        body["not_checked_reason"] = (
+            "Evidence expired: this session's mapping check is older than 24 hours or was removed; check the "
+            "mapping again." if expired else "No mapping check of this session matches this run's source and mapping.")
     return {**body, "sha256": _sha(body)}
 
 

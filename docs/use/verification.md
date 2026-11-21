@@ -143,7 +143,15 @@ read only that copy.
 A job takes evidence only from the Map session it was submitted from, for its
 own source and destination, at most a day old; the Trust Report says who ran
 the check and when. A flag counts as kept only when someone chose Keep this
-mapping on it; continuing past it is recorded as not reviewed.
+mapping on it; continuing past it is recorded as not reviewed. A Keep stays
+with its flag when the same inputs are checked again. Map approvals and
+changed flags count only for the source they were given on: switching the
+file or table in one session starts them over. The session is only a key:
+the people named are the ones who checked, approved and ran.
+
+Evidence of a session still open is never pruned to make room for other
+checks; older evidence goes first. If a workspace's hard limit ever removes
+it, the job says "Evidence expired", not that no check matched.
 
 Measured on a synthetic benchmark written for the witness (120 rows per table,
 at least 30 distinct values per column, the destination holding the same rows
@@ -157,6 +165,12 @@ and the destination there is an exact copy, so a pair can only come out
 "consistent". Its false-flag count (0) and swap recall (19 of 399) are
 reported, not claimed. Command:
 `python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
+
+Until that held-out file (`tests/fixtures/mapping_holdout_v1.json`) is on the
+branch, CI runs the held-out gate with a synthetic stand-in
+(`tests/fixtures/witness/holdout_minimal_synthetic.json`) and the job summary
+says "witness held-out: synthetic fixture — real held-out set not yet on this
+branch". Once the real file is present the script uses it on its own.
 
 ## Coverage: which comparison ran
 

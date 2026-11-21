@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -508,12 +509,21 @@ def test_stores_are_capped_and_pruned(monkeypatch, tmp_path):
     import services.mapping_witness_service as svc
 
     monkeypatch.setattr(svc, "MAX_RECORDS_PER_WORKSPACE", 5)
-    for i in range(9):
+    monkeypatch.setattr(svc, "MAX_LIVE_RECORDS_PER_WORKSPACE", 6)
+    real_now = svc._now
+    monkeypatch.setattr(svc, "_now", lambda: "2020-01-01T00:00:00+00:00")
+    for i in range(4):  # records past the evidence window go first
+        svc.save_report({"pairs": [], "n": i}, workspace_id="ws1", session=f"session-{i:04d}", identity="x",
+                        digest=f"{i:064d}")
+    monkeypatch.setattr(svc, "_now", real_now)
+    for i in range(4, 11):
         svc.save_report({"pairs": [], "n": i}, workspace_id="ws1", session=f"session-{i:04d}", identity="x",
                         digest=f"{i:064d}")
     data = svc._DOC.load(part="ws1")
-    kept = [k for k, r in data.items() if isinstance(r, dict) and r.get("workspace_id") == "ws1"]
-    assert len(kept) == 5 and not any(k.endswith(f"{0:064d}") for k in kept)
+    kept = [k for k, r in data.items() if isinstance(r, dict) and r.get("workspace_id") == "ws1"
+            and k.startswith("witness::")]
+    assert len(kept) == 6, kept  # the hard bound
+    assert not any(k.endswith(f"{i:064d}") for k in kept for i in range(5))
     many = [{"source": f"s{i}", "target": f"t{i}", "approved": True} for i in range(1200)]
     for _ in range(3):
         svc.record_map_decisions(workspace_id="ws2", session="session-big1", identity="x", mappings=many,
@@ -566,3 +576,195 @@ def test_the_warehouse_guard_reads_the_resolved_engine(monkeypatch):
 def test_floats_beyond_the_bound_are_compared_as_written_not_missing():
     assert norm(1.5e61) == "1.5e+61"
     assert norm(1.5e61) is not None and norm(1.5e61) != norm(2.5e61)
+
+
+def test_pruning_never_drops_an_open_sessions_evidence_and_says_expired_when_forced(monkeypatch, tmp_path):
+    """Round 3 item 1: newer records elsewhere in the workspace must not erase an open session's check or Keep."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.mapping_witness_service as svc
+    from services.mapping_witness import witness_mappings
+    from tests.helpers import witness_fixtures as F
+
+    monkeypatch.setattr(svc, "MAX_RECORDS_PER_WORKSPACE", 5)
+    maps = F.LOGIN_INTO_EMAIL_ONLY
+    src, dst = F.customers()
+    report = witness_mappings(maps, src, dst, key=F.KEY)
+    [flag] = [p for p in report["pairs"] if p["status"] == "flagged"]
+    digest = svc.mapping_digest(maps, "dest-1")
+    saved = svc.save_report(report, workspace_id="ws1", session="session-open", identity="dest-1", digest=digest,
+                            source="file|a.csv", actor="ann@example.com")
+    svc.record_review(workspace_id="ws1", session="session-open", identity="dest-1", digest=digest,
+                      source=flag["source"], decision="kept", flag_id=flag["flag"]["id"], actor="ann@example.com")
+    for i in range(12):  # other people's checks in the same workspace
+        svc.save_report({"pairs": []}, workspace_id="ws1", session=f"session-other-{i:03d}", identity="x",
+                        digest=f"{i:064d}")
+    snap = svc.build_snapshot(workspace_id="ws1", session="session-open", identity="dest-1", source="file|a.csv",
+                              mappings=maps)
+    assert snap["report_sha256"] == saved["report_sha256"]
+    assert [r["decision"] for r in snap["flag_reviews"]] == ["kept"]
+
+    monkeypatch.setattr(svc, "MAX_LIVE_RECORDS_PER_WORKSPACE", 3)  # the hard bound forces it out
+    svc.save_report({"pairs": []}, workspace_id="ws1", session="session-other-last", identity="x", digest="f" * 64)
+    snap = svc.build_snapshot(workspace_id="ws1", session="session-open", identity="dest-1", source="file|a.csv",
+                              mappings=maps)
+    assert snap["report"] is None
+    assert snap["not_checked_reason"].startswith("Evidence expired")
+
+
+# ── Map → job through the real routes (round 3) ──────────────────────────────
+
+CASES = json.loads((Path(__file__).parent / "fixtures" / "witness" / "source_ref_cases.json").read_text(encoding="utf-8"))
+MAP_DEST = {"kind": "database", "format": "postgresql", "host": "db.internal.test", "port": 5432, "database": "crm",
+            "schema": "public", "table": "customers"}
+RUN_DEST = {"dest_kind": "database", "dest_format": "postgresql", "dest_host": "db.internal.test", "dest_port": "5432",
+            "dest_database": "crm", "dest_schema": "public", "dest_table": "customers"}
+
+
+@pytest.fixture()
+def submitted(monkeypatch):
+    """Requests /transfer/run hands the engine, after the route's own parsing and intake."""
+    import src.transfer.engine as engine_mod
+
+    caught: list = []
+
+    class _Stop(Exception):
+        pass
+
+    def _create(request):
+        caught.append(request)
+        raise _Stop()
+
+    monkeypatch.setattr(engine_mod, "get_transfer_engine", lambda: SimpleNamespace(_create_pending_job=_create))
+    return caught
+
+
+def _run(client, caught, form, *, session, mappings, file_name=None, source_extra=None, headers=None):
+    data = {**form, **RUN_DEST, "mappings_json": json.dumps(mappings), "witness_session_id": session,
+            "skip_preflight": "true", "async_mode": "true", "schema_policy": "manual_review"}
+    if source_extra:
+        data["source_extra_json"] = json.dumps(source_extra)
+    files = {"file": (file_name, b"cust_id,given\n1,Ann\n", "text/csv")} if file_name else None
+    before = len(caught)
+    client.post("/api/v1/transfer/run", data=data, files=files, headers=headers or {})
+    assert len(caught) == before + 1, "the run never reached job creation"
+    return caught[-1]
+
+
+def _map_check(client, src, *, session, source_ref, mappings=None, trigger="auto", headers=None):
+    body = {"mappings": mappings or F.LOGIN_INTO_EMAIL_ONLY, "source_rows": src, "destination": MAP_DEST,
+            "destination_table_exists": False, "session_id": session, "source_ref": source_ref, "trigger": trigger}
+    res = client.post("/api/v1/transfer/mapping-witness", json=body, headers=headers or {})
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+@pytest.mark.parametrize("case", CASES["cases"], ids=[c["id"] for c in CASES["cases"]])
+def test_map_payload_and_run_submission_name_the_same_source(client, submitted, data, monkeypatch, case):
+    """Round 3 item 3: the source Map names and the source the job names meet, through both real routes."""
+    from services.mapping_witness_service import snapshot_for_request
+
+    monkeypatch.setattr("services.data_residency.enforce_request_residency", lambda r: None)
+    src, _ = data
+    out = _map_check(client, src, session="map-session-src1", source_ref=case["map_source_ref"])
+    request = _run(client, submitted, case["run_form"], session="map-session-src1", mappings=F.LOGIN_INTO_EMAIL_ONLY,
+                   file_name=case.get("run_file"), source_extra=case.get("run_source_extra"))
+    snap = snapshot_for_request(request)
+    if case["attaches"]:
+        assert snap["report_sha256"] == out["report_sha256"], snap.get("not_checked_reason")
+    else:
+        assert snap["report"] is None
+
+
+def test_a_rechecked_flag_keeps_its_keep_through_the_routes(client, submitted, data, monkeypatch):
+    """Round 3 item 2: the same inputs checked again (a new report) keep the person's Keep, as the UI shows it."""
+    from services.ai_decision_ledger import KIND_WITNESS_FLAG, build_ledger
+    from services.mapping_witness_service import snapshot_for_request
+
+    monkeypatch.setattr("services.data_residency.enforce_request_residency", lambda r: None)
+    src, _ = data
+    ref = {"kind": "file", "name": "customers.csv"}
+    first = _map_check(client, src, session="map-session-keep1", source_ref=ref)
+    [flag] = [p for p in first["report"]["pairs"] if p["status"] == STATUS_FLAGGED]
+    kept = client.post("/api/v1/transfer/mapping-witness/review", json={
+        "mapping_digest": first["mapping_digest"], "session_id": "map-session-keep1", "destination": MAP_DEST,
+        "source": flag["source"], "decision": "kept", "flag_id": flag["flag"]["id"]})
+    assert kept.status_code == 200, kept.text
+    again = _map_check(client, src, session="map-session-keep1", source_ref=ref, trigger="explicit")
+    assert again["report_sha256"] != first["report_sha256"]
+    [same] = [p for p in again["report"]["pairs"] if p["status"] == STATUS_FLAGGED]
+    assert same["flag"]["id"] == flag["flag"]["id"]
+    request = _run(client, submitted, {"source_kind": "file", "source_format": "csv"}, session="map-session-keep1",
+                   mappings=F.LOGIN_INTO_EMAIL_ONLY, file_name="customers.csv")
+    snap = snapshot_for_request(request)
+    assert snap["report_sha256"] == again["report_sha256"]
+    [row] = [e for e in build_ledger(_job_doc(monkeypatch, request))["entries"] if e["kind"] == KIND_WITNESS_FLAG]
+    assert row["decision"]["status"] == "kept"
+
+
+def test_approvals_and_changes_do_not_carry_over_to_another_source_in_one_session(monkeypatch, tmp_path, data):
+    """Round 3 item 4: one session, the source swapped: Map approvals and changed reviews stay with their source."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.mapping_witness_service as svc
+
+    src, dst = data
+    maps = F.LOGIN_INTO_EMAIL_ONLY
+    identity = "dest-1"
+    digest = svc.mapping_digest(maps, identity)
+    report = witness_mappings(maps, src, dst, key=F.KEY)
+    svc.save_report(report, workspace_id="ws1", session="session-swap", identity=identity, digest=digest,
+                    source="file|a.csv", actor="ann@example.com")
+    svc.record_map_decisions(workspace_id="ws1", session="session-swap", identity=identity, source="file|a.csv",
+                             mappings=[{"source": "given", "target": "first_name", "approved": True}],
+                             actor="ann@example.com")
+    [flag] = [p for p in report["pairs"] if p["status"] == STATUS_FLAGGED]
+    svc.record_review(workspace_id="ws1", session="session-swap", identity=identity, digest=digest,
+                      source=flag["source"], decision="changed", new_target="username", actor="ann@example.com")
+    changed = [{**m, "target": "username"} if m["source"] == flag["source"] else m for m in maps]
+    same = svc.build_snapshot(workspace_id="ws1", session="session-swap", identity=identity, source="file|a.csv",
+                              mappings=changed)
+    assert same["map_decisions"] and same["flag_reviews"]
+    # The same session, now on b.csv with its own check: nothing approved on a.csv comes along.
+    svc.save_report(witness_mappings(changed, src, dst, key=F.KEY), workspace_id="ws1", session="session-swap",
+                    identity=identity, digest=svc.mapping_digest(changed, identity), source="file|b.csv")
+    other = svc.build_snapshot(workspace_id="ws1", session="session-swap", identity=identity, source="file|b.csv",
+                               mappings=changed)
+    assert other["report"] is not None
+    assert other["map_decisions"] == {} and other["flag_reviews"] == []
+
+
+def _job_doc(monkeypatch, request):
+    """The job document create_pending_job writes for a request the run route built."""
+    import src.transfer.engine as engine_mod
+    from src.transfer.job_submission import create_pending_job
+
+    created: list[dict] = []
+    monkeypatch.setattr(engine_mod, "get_mongodb_service",
+                        lambda: SimpleNamespace(create_transfer_job=lambda doc: created.append(doc) or "job-1"))
+    engine = SimpleNamespace(_resolve_saved_connectors=lambda r: None, _claim_idempotency=lambda r, d: None,
+                             _claim_destination=lambda r, d: None, _bind_idempotency_claim=lambda *a: None)
+    monkeypatch.setattr("services.callable_intake.apply_callable_intake", lambda r: None)
+    create_pending_job(engine, request)
+    return {"_id": "job-1", "status": "completed", **created[0]}
+
+
+def test_a_job_run_by_b_in_as_session_credits_a_for_the_check_and_b_for_the_run(client, submitted, data, monkeypatch):
+    """Round 3 item 4: a session id is only a key; the people are those who acted."""
+    from services.ai_decision_ledger import KIND_MAPPING_PROPOSAL, build_ledger
+
+    monkeypatch.setattr("services.data_residency.enforce_request_residency", lambda r: None)
+    monkeypatch.setattr("src.routers.verified_ai_router.actor_from_request", lambda request: "ann@example.com")
+    monkeypatch.setattr("src.routers.transfer_router._actor_email", lambda request: "bob@example.com")
+    src, _ = data
+    ref = {"kind": "file", "name": "customers.csv"}
+    _map_check(client, src, session="map-session-ab01", source_ref=ref, mappings=F.CORRECT_MAPPING)
+    res = client.post("/api/v1/transfer/mapping-witness/decisions", json={
+        "session_id": "map-session-ab01", "destination": MAP_DEST, "source_ref": ref,
+        "mappings": [{"source": "mail", "target": "email", "approved": True}]})
+    assert res.status_code == 200 and res.json()["recorded"] == 1
+    request = _run(client, submitted, {"source_kind": "file", "source_format": "csv"}, session="map-session-ab01",
+                   mappings=F.CORRECT_MAPPING, file_name="customers.csv")
+    assert request.triggered_by == "bob@example.com"
+    ledger = build_ledger(_job_doc(monkeypatch, request))
+    assert ledger["witness"]["checked_by"] == "ann@example.com"
+    row = next(e for e in ledger["entries"] if e["kind"] == KIND_MAPPING_PROPOSAL and e["subject"] == "mail → email")
+    assert row["decision"]["by"] == "ann@example.com" and row["decision"]["run_by"] == "bob@example.com"

@@ -78,6 +78,8 @@ class MapDecision(BaseModel):
 class MapDecisionsRequest(BaseModel):
     session_id: str = Field(..., min_length=8, max_length=128)
     destination: Optional[EndpointDTO] = None
+    #: The source the approvals were given for (as the witness request names it).
+    source_ref: dict[str, str] = Field(default_factory=dict)
     mappings: list[MapDecision] = Field(default_factory=list, max_length=400)
 
 
@@ -199,7 +201,7 @@ async def record_map_decisions_route(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Who approved or changed each pair in Map: the authenticated caller, never a name in the body."""
-    from services.mapping_witness_service import destination_identity, record_map_decisions
+    from services.mapping_witness_service import destination_identity, record_map_decisions, source_identity
     from services.workspace_access import resolve_write_workspace
 
     if body.destination is not None:
@@ -210,7 +212,8 @@ async def record_map_decisions_route(
     def _run() -> int:
         identity = destination_identity(_endpoint(body.destination), workspace)
         return record_map_decisions(workspace_id=workspace, session=body.session_id, identity=identity,
-                                    mappings=[m.model_dump() for m in body.mappings], actor=actor)
+                                    mappings=[m.model_dump() for m in body.mappings], actor=actor,
+                                    source=source_identity(body.source_ref))
 
     recorded = await _off_loop(_run)
     _audit("mapping.decisions_recorded", "mapping:decisions", actor, {
