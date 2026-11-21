@@ -47,6 +47,10 @@ class ToolCallRequest(BaseModel):
 class McpPolicyRequest(BaseModel):
     enabled: bool = True
     allowed_tools: list[str] | None = None
+    # Who may confirm a staged approval, per workspace:
+    # {"default": "interactive"|"four_eyes"|"agent", "workspaces": {id: mode}}.
+    # Omitted keeps the stored policy.
+    confirm: dict | None = None
 
 
 def _mcp_authenticated(http_request: Request) -> bool:
@@ -242,6 +246,17 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
 
     _require_mcp_tool_auth(http_request)
     old = get_mcp_policy()
+    if request.confirm is not None:
+        from services.mcp_confirm_policy import credential_kind
+        from src.services.auth_service import auth_required
+
+        # The confirm policy is the human-in-the-loop switch: an API key or
+        # MCP token (the agent it governs) must not be able to turn it off.
+        if auth_required() and credential_kind(http_request) not in {"cookie_session", "session_token"}:
+            raise HTTPException(
+                status_code=403,
+                detail="The confirm policy can only be changed from an interactive sign-in session.",
+            )
     try:
         new = set_mcp_policy(request.model_dump())
     except ValueError as exc:

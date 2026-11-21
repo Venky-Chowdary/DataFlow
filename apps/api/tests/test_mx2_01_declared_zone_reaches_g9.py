@@ -118,3 +118,10 @@ def test_population_fit_screens_with_the_declared_zone_transform():
         mapping, source_types={"created_at": "TIMESTAMP"}, dest_types={"created_at": "TIMESTAMPTZ"},
     )
     assert got == "assume_timezone:Asia/Kolkata"  # IANA case kept for ZoneInfo
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+import pytest  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

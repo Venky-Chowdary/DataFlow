@@ -1101,7 +1101,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Paste into Cursor Settings → MCP",
             pin: "Cursor → Settings → MCP",
-            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until `confirm_action`. Every confirmed transfer appears in **Job space** with an audit trail. The key's role works like a person's: a Viewer key gets read-only tools, an Operator key can also run and cancel jobs, an Editor key gets everything except deleting connections, and an Admin key gets every tool.",
+            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until a person confirms it. By default that person confirms in Pilot, signed in (the one who staged it, or a workspace admin); an MCP client cannot confirm its own approval unless the workspace's confirm policy is `agent`. Every confirmed transfer appears in **Job space** with an audit trail. The key's role works like a person's: a Viewer key gets read-only tools, an Operator key can also run and cancel jobs, an Editor key gets everything except deleting connections, and an Admin key gets every tool.",
           },
         ],
         code: '{\n  "mcpServers": {\n    "datawrap": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
@@ -1109,7 +1109,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "security",
         title: "Agent security",
-        body: "MCP tools follow workspace roles. Agents cannot read connection secrets; they can only start the operations their key allows. Anything that creates or moves data waits for `confirm_action`, and agent runs pass Validate before they write, like every other run.",
+        body: "MCP tools follow workspace roles. Agents cannot read connection secrets; they can only start the operations their key allows. Anything that creates or moves data waits for a person to confirm it in the product (the workspace confirm policy: `interactive` by default, `four_eyes` for a second admin, `agent` only for unattended automation), and agent runs pass Validate before they write, like every other run.",
       },
     ],
   },

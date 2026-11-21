@@ -67,25 +67,54 @@ preview. Nothing has happened yet. The action runs only when `confirm_action`
 is called with that `ack_id`.
 
 1. Call the staging tool, for example `start_transfer`. You get an `ack_id`.
-2. Show the preview to the person who should approve it.
-3. Call `confirm_action` with the `ack_id` (and an optional `reason`, stored
-   with the approval).
+2. A person reviews the preview and confirms it in the product (Pilot's
+   Confirm button), signed in. Under the default confirm policy the MCP
+   client cannot confirm it itself (see below).
+3. Only in a workspace whose confirm policy is `agent` may the client call
+   `confirm_action` with the `ack_id` (and an optional `reason`, stored with
+   the approval).
 
 Properties of an approval:
 
 - It expires 15 minutes after staging.
-- It is used once. Calling `confirm_action` again with a used `ack_id` returns
-  the original result and does not run the action twice.
+- It is used once. Confirming a used `ack_id` again returns the original
+  result and does not run the action twice.
 - At confirm time the permission for that specific action is checked again
-  against the caller.
+  against the confirming person.
+- A refused confirmation leaves the approval pending and is recorded in the
+  audit log (`pilot.confirm.refused_channel`).
 - Secrets in a staged connector stay on the server. The client receives only
   the `ack_id` and the preview.
 
-Note that `confirm_action` is itself available to any caller who may read the
-workspace; what it will run is limited by the permission check on the staged
-action. The server cannot tell whether a person saw the preview. If your
-client confirms automatically, the person is no longer in the loop. Give MCP
-clients an API key with the lowest role that does the job.
+### Who may confirm (confirm policy)
+
+Before this policy existed, any caller who could read the workspace and do
+the staged kind of change could confirm, on any channel. An MCP client that
+approves its own tool calls automatically therefore removed the human
+approval. Confirmation now has to come from the channel the workspace's
+confirm policy names. It is set per workspace, with a default, in the MCP
+policy (`PUT /api/v1/mcp/policy`, field `confirm`:
+`{"default": "<mode>", "workspaces": {"<workspace id>": "<mode>"}}`):
+
+| Mode | Who may confirm |
+|---|---|
+| `interactive` (default) | A person signed in interactively (browser session or sign-in token): the person who staged it, or a workspace admin. Never through the MCP endpoint, never with a workspace API key or MCP OAuth token. |
+| `four_eyes` | As `interactive`, and the confirmer must be a different person from the one who staged it and hold workspace admin (`workspace.manage`). |
+| `agent` | Any caller with the staged action's permission, on any channel, including `confirm_action` over MCP. The previous behaviour: use only for unattended automation, where there is no human approval. |
+
+- An unknown value, or a policy store that cannot be read, means
+  `interactive`: the check never falls open.
+- An API key stages as the person who created it, so that person confirms
+  from their own signed-in session.
+- The `confirm` part of the policy can only be changed from an interactive
+  session; an API key or MCP token (the agent it governs) gets 403.
+- With platform authentication off (`DATAFLOW_REQUIRE_AUTH=0`) there is no
+  identity to bind: only the MCP channel is refused.
+- Not covered: a person who copies their own sign-in token into an agent has
+  delegated their session. Sign-in tokens expire and the workspace idle
+  policy revokes them; use `four_eyes` where a second person is required.
+
+Give MCP clients an API key with the lowest role that does the job.
 
 ## Tools
 
@@ -193,4 +222,5 @@ The table is generated from the tool registry. Regenerate with
 - `apps/api/src/ai/copilot/tools.py` (`TOOL_DEFINITIONS`)
 - `apps/api/src/ai/copilot/tool_permissions.py`
 - `apps/api/src/ai/copilot/confirm_ack.py`, `apps/api/src/ai/copilot/ack_ledger.py`
+- `apps/api/services/mcp_confirm_policy.py` (confirm policy), `apps/api/tests/test_mcp_confirm_requires_human_channel.py`
 - `apps/api/services/rbac.py`, `apps/api/tests/fixtures/rbac_route_permissions.json`

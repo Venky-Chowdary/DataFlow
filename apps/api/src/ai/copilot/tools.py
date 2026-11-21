@@ -1355,9 +1355,11 @@ TOOL_DEFINITIONS: list[dict] = [
             "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
             "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
             "quarantine, delete connector, enable, update, or delete a schedule). "
-            "This is the same gate as Confirm in the product. Calling the staging "
-            "tool does not move data; confirm_action does. Replaying a consumed "
-            "ack_id returns the original result and does not run the mutation twice."
+            "Works only in a workspace whose confirm policy is 'agent': by default "
+            "a person confirms in the product (Pilot's Confirm), signed in, and this "
+            "tool returns that instruction. Calling the staging tool does not move "
+            "data; confirming does. Replaying a consumed ack_id returns the original "
+            "result and does not run the mutation twice."
         ),
         "input_schema": {
             "type": "object",
