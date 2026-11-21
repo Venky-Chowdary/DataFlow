@@ -251,6 +251,40 @@ def rotate(workspace_id: str | None, *, actor: str) -> dict[str, Any]:
     raise EvidenceKeyUnavailable(KEY_UNAVAILABLE_MESSAGE)
 
 
+def legacy_cutover_at() -> datetime | None:
+    """When evidence keys replaced the login secret here: the oldest keyring.
+
+    Nothing is signed with the login secret once a keyring exists, so a pack
+    filed into the evidence chain after this instant cannot be a genuine
+    legacy pack. ``None`` when no keyring was ever created.
+    """
+    try:
+        coll = _collection()
+        if coll is not None:
+            stamps = [d.get("created_at") for d in coll.find({}, {"created_at": 1})]
+        else:
+            from services.metadata_backend import load_json_doc
+
+            data = load_json_doc(_file_path(), {"keys": {}})
+            stamps = [d.get("created_at") for d in (data.get("keys") or {}).values()
+                      if isinstance(d, dict)]
+    except Exception as exc:  # noqa: BLE001 - unreadable: callers fail closed
+        logger.error("evidence keyring unreadable for the legacy cutover: %s", type(exc).__name__)
+        raise EvidenceKeyUnavailable(KEY_UNAVAILABLE_MESSAGE) from exc
+    times = [t for t in (_parse_time(s) for s in stamps) if t is not None]
+    return min(times) if times else None
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def key_status(workspace_id: str | None) -> dict[str, Any]:
     """Public facts about the keyring: ids, versions and dates, never key material."""
     scope = scope_of(workspace_id)

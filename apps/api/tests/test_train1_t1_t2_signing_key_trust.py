@@ -13,12 +13,24 @@ chain recorded before evidence signing keys existed.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import time
 
 import pytest
 
 from services import evidence_signing_keys as esk
-from services.signed_proof_pack import build_signed_proof_pack, verify_signed_proof_pack
+from services.signed_proof_pack import (
+    LEGACY_AFTER_CUTOVER,
+    LEGACY_ANCHORED,
+    LEGACY_UNANCHORED,
+    build_signed_proof_pack,
+    canonical_json,
+    pack_body_digest_excluding_anchor,
+    sha256_hex,
+    verify_signed_proof_pack,
+)
 
 _LOGIN = b"login-secret-" + b"x" * 40
 
@@ -71,3 +83,43 @@ def test_dropping_the_workspace_id_does_not_find_the_key_in_the_deployment_ring(
     assert any("is not in this deployment's evidence keyring" in e for e in out["errors"]), out
 
 
+def _legacy(job_id: str, extra: dict | None = None) -> dict:
+    body = {"version": "1", "job_id": job_id, "assurance": {}, "gate8": {"passed": True}, **(extra or {})}
+    digest = sha256_hex(canonical_json(body))
+    return {
+        **body,
+        "content_sha256": digest,
+        "signature": {
+            "alg": "HMAC-SHA256", "key_id": "platform_auth_secret",
+            "value": hmac.new(_LOGIN, f"{digest}:{job_id}".encode(), hashlib.sha256).hexdigest(),
+        },
+    }
+
+
+def test_a_new_login_secret_pack_never_verifies(_isolated):
+    _ws_pack()  # evidence keys exist: the cutover has happened
+    forged = _legacy("job-new")
+    out = verify_signed_proof_pack(forged)
+    assert out["ok"] is False
+    assert out["legacy_status"] == LEGACY_UNANCHORED
+    assert out["signing_key"]["legacy_key"] is True
+
+
+def test_a_legacy_pack_recorded_before_the_cutover_verifies(_isolated):
+    old = _legacy("job-old")
+    _isolated(pack_body_digest_excluding_anchor(old))  # filed by the old build
+    time.sleep(0.01)
+    _ws_pack()  # first evidence keyring: the cutover
+    out = verify_signed_proof_pack(old)
+    assert out["ok"] is True, out
+    assert out["legacy_status"] == LEGACY_ANCHORED
+
+
+def test_a_legacy_signature_on_a_pack_recorded_after_the_cutover_is_refused(_isolated):
+    _ws_pack()
+    time.sleep(0.01)
+    late = _legacy("job-late")
+    _isolated(pack_body_digest_excluding_anchor(late))
+    out = verify_signed_proof_pack(late)
+    assert out["ok"] is False
+    assert out["legacy_status"] == LEGACY_AFTER_CUTOVER

@@ -106,8 +106,12 @@ def test_tampered_pack_fails_and_a_key_id_nobody_holds_is_named():
     assert "signing key ev1:0000000000000000 is not in this deployment's evidence keyring" in out["errors"]
 
 
-def test_legacy_login_secret_packs_still_verify_and_are_named_legacy():
-    """A pack issued before evidence keys (key_id platform_auth_secret) keeps verifying."""
+def test_legacy_login_secret_packs_still_verify_and_are_named_legacy(monkeypatch):
+    """A pack issued before evidence keys (key_id platform_auth_secret) keeps
+    verifying when the evidence chain recorded it before the cutover (T2);
+    one it never recorded is refused, named as the legacy key."""
+    from services.signed_proof_pack import LEGACY_UNANCHORED, pack_body_digest_excluding_anchor
+
     body = {"version": "1", "job_id": "job-old", "assurance": {}, "gate8": {"passed": True}}
     digest = sha256_hex(canonical_json(body))
     login = b"login-secret-" + b"x" * 40
@@ -119,6 +123,14 @@ def test_legacy_login_secret_packs_still_verify_and_are_named_legacy():
             "value": hmac.new(login, f"{digest}:job-old".encode(), hashlib.sha256).hexdigest(),
         },
     }
+    refused = verify_signed_proof_pack(legacy)
+    assert refused["ok"] is False and refused["legacy_status"] == LEGACY_UNANCHORED
+    recorded = {"time": "2020-01-01T00:00:00+00:00",
+                "details": {"evidence_sha256": pack_body_digest_excluding_anchor(legacy)}}
+    monkeypatch.setattr(
+        "services.evidence_chain.find_anchor",
+        lambda digest, **_kw: recorded if digest == recorded["details"]["evidence_sha256"] else None,
+    )
     out = verify_signed_proof_pack(legacy)
     assert out["ok"] is True, out
     assert out["signing_key"]["legacy_key"] is True

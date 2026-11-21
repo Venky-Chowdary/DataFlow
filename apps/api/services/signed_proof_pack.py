@@ -396,6 +396,13 @@ def verify_body_detail(
     claimed = str(sig.get("value") or "")
     info = signature_key_info(payload)
     if info["legacy_key"]:
+        # T2: the login secret is not a signing key any more. It verifies only
+        # a pack the evidence chain recorded before evidence keys existed.
+        legacy_status, legacy_error = _legacy_pack_status(payload)
+        info["legacy_status"] = legacy_status
+        if legacy_error:
+            errors.append(legacy_error)
+            return actual_hash, errors, info
         key: bytes | None = _platform_secret()
     else:
         # T1: the envelope's key_scope is not authenticated. A named workspace
@@ -420,6 +427,44 @@ def verify_body_detail(
     if not claimed or not hmac.compare_digest(claimed, expected):
         errors.append("HMAC signature invalid")
     return actual_hash, errors, info
+
+
+#: ``signing_key.legacy_status`` values for a login-secret (legacy) signature.
+LEGACY_ANCHORED = "legacy_anchored_before_cutover"
+LEGACY_UNANCHORED = "legacy_not_in_evidence_chain"
+LEGACY_AFTER_CUTOVER = "legacy_anchored_after_cutover"
+
+
+def _legacy_pack_status(payload: dict[str, Any]) -> tuple[str, str]:
+    """``(status, error)`` for a body signed with the legacy login secret.
+
+    Accepted only when the evidence chain holds a record for this body's
+    content digest filed before the first evidence keyring (the cutover):
+    the chain is append-only and HMAC-chained under its own key, so a body
+    made now and HMAC'd with the login secret has no such record.
+    """
+    from services.evidence_chain import find_anchor
+    from services.evidence_signing_keys import _parse_time, legacy_cutover_at
+
+    digest = pack_body_digest_excluding_anchor(payload)
+    try:
+        record = find_anchor(digest)
+        cutover = legacy_cutover_at()
+    except Exception:  # noqa: BLE001 - cannot establish it: not accepted
+        record, cutover = None, None
+    if not record:
+        return LEGACY_UNANCHORED, (
+            "signed with the legacy login secret and not recorded in the evidence "
+            "chain: a login-secret signature is accepted only for a pack the chain "
+            "recorded before evidence signing keys existed"
+        )
+    filed = _parse_time(record.get("time"))
+    if cutover is not None and (filed is None or filed >= cutover):
+        return LEGACY_AFTER_CUTOVER, (
+            "signed with the legacy login secret, but the evidence chain recorded "
+            "this pack after evidence signing keys replaced it"
+        )
+    return LEGACY_ANCHORED, ""
 
 
 def verify_body(
@@ -1169,10 +1214,13 @@ def verify_signed_proof_pack(pack: dict[str, Any], *, may_use_workspace: Any = N
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
     kind = str(pack.get("kind")) if pack.get("kind") in {PARITY_PACK_KIND, EXIT_PACK_KIND} else "proof_pack"
-    return {
+    out = {
         "ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind,
         "signing_key": key_info,
     }
+    if key_info.get("legacy_status"):
+        out["legacy_status"] = key_info["legacy_status"]
+    return out
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
