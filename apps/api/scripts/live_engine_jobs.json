@@ -115,6 +115,15 @@
       "min_executed": 10,
       "expected_skips": []
     },
+    "parity-scale-pg": {
+      "proves": [],
+      "about": "Parity at Scale (experimental, behind DATAWRAP_PARITY_SCALE): CE1 soundness properties at 2,000 examples, the SQLite driver, the live PostgreSQL rendering and fault-injection tests and the 1M-row benchmark. A feature smoke, not the proof of an engine: api-tests proves PostgreSQL and SQLite.",
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "sqlite"],
+      "min_executed": 150,
+      "expected_skips": []
+    },
     "engine-suite": {
       "proves": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
       "workflow": ".github/workflows/full-suite.yml",

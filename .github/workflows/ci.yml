@@ -888,6 +888,68 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # Parity at Scale (experimental, behind DATAWRAP_PARITY_SCALE): the CE1
+  # soundness properties at 2,000 examples, the SQLite driver, the live
+  # PostgreSQL rendering + fault-injection tests and a 1M-row benchmark that
+  # must find every injected fault within 256 MB. The same test modules also
+  # run (smaller, no benchmark) in the api-tests shards. Not in the required
+  # gate yet: nothing user-facing depends on it until phase 3.
+  parity-scale-pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_PG_TEST_DSN: postgresql://dataflow:dataflow@127.0.0.1:5432/dataflow
+      DATAFLOW_PARITY_CE_EXAMPLES: "2000"
+      DATAFLOW_PARITY_SCALE_BENCH_ROWS: "1000000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start PostgreSQL 16
+        run: bash .github/scripts/start_ci_databases.sh postgres
+
+      - name: Set up Python
+        if: ${{ !cancelled() }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
+
+      - name: Parity at Scale tests and the 1M-row benchmark
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit" "$RUNNER_TEMP/parity-scale"
+          DATAFLOW_PARITY_SCALE_BENCH_OUT="$RUNNER_TEMP/parity-scale/bench_1m.json" \
+          python -m pytest tests/test_parity_scale_ce1.py tests/test_parity_scale_ce1_soundness.py \
+            tests/test_parity_scale_driver_sqlite.py tests/test_parity_scale_pg_live.py \
+            tests/test_parity_scale_bench.py \
+            -v --tb=short -rs --timeout=3000 --junitxml="$RUNNER_TEMP/live-junit/parity-scale.xml"
+
+      - name: No Parity at Scale test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job parity-scale-pg --junit "$RUNNER_TEMP/live-junit/parity-scale.xml" --out "$RUNNER_TEMP/live-engine/parity-scale-pg.json"
+
+      - name: Upload the benchmark result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-scale-pg
+          path: |
+            ${{ runner.temp }}/parity-scale/
+            ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
   # Optional live IT: enable via repo variable ENABLE_ORACLE_CDC=true plus the
   # DATAFLOW_ORACLE_* secrets. The job always runs so the opt-out is a visible
   # skip reason, not an absent job.
@@ -1036,6 +1098,7 @@ jobs:
           ruff check
           --config ruff.toml
           services/decision_kernel
+          services/parity_scale
           services/auth_rate_limit.py
           services/auto_create_lifecycle.py
           services/staging_reaper.py

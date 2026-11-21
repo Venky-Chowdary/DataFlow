@@ -129,13 +129,12 @@ second, as the carrier does.
 
 The plan does not assume the action from the contract's wording. It **reads
 it from the real writer** at plan time
-(`plan.probe_decimal_fit`: `map_rows_for_fingerprint` on one scale-overflow
-and one integer-overflow value, under the run's number locale; a typed
-database source reads as `WIRE`). Measured on this build: under `WIRE` the
-writer holds out every non-fitting value, including under a signed
-`CAST_AND_CONTINUE` contract with `COERCE_NULL` (the job-level write
-quarantine matrix runs after the cell transform). The property tests check
-that the projection and the writer agree value by value.
+(`plan.probe_decimal_fit`: `map_rows_for_fingerprint` on one value of each
+non-fitting class — fraction too long, integer part too long, both, `NaN`,
+infinity — under the run's number locale; a typed database source reads as
+`WIRE`). Each class's action is `keep`, `null` or `hold`. The property tests
+check that the projection and the writer agree value by value, and a SQLite
+write round trip checks what is actually stored.
 
 `fits_decimal` counts integer digits of the *normalised* value, and zero
 normalises to one integer digit: `0` does not fit `NUMERIC(p,p)` in the
@@ -173,6 +172,29 @@ key)"). A match proves the destination holds exactly the same rows with the
 same multiplicity. A difference is reported as rows of content missing from
 and extra in the destination; it is never attributed to a key, and a changed
 cell reads as one missing plus one extra row.
+
+## Divergences the tests found in the product (not in CE1)
+
+CE1 follows Gate-8. Where the tests showed Gate-8's model and an engine or a
+writer disagree, the scan reports a difference — the honest direction — and
+the divergence is recorded here for the owner of that code:
+
+- **PostgreSQL rounds a narrowed instant half away from zero before 1970**
+  (`timestamp(6)` → `timestamp(3)`: `1969-12-31 23:59:59.9995` is stored
+  `…59.999`), while `carrier_instant` rounds half up on the timeline (`00:00:00.000`).
+  Instants after 1970 agree. The live rendering test is restricted to
+  post-1970 instants for that reason.
+- **A `NaN` into a SQLite `NUMERIC(p,s)`**: Gate-8's source replay
+  (`map_rows_for_fingerprint`) holds the row out, while the SQLite writer
+  stores it with NULL.
+- **A signed `CAST_AND_CONTINUE` contract with `COERCE_NULL` does not mean
+  "NULL" everywhere.** Read from the writer (under the `WIRE` number locale a
+  typed database source uses): into `NUMERIC(10,2)` every non-fitting value is
+  held out; into `NUMERIC(6,0)` a value whose fraction does not fit (or that
+  is `NaN` or infinite) is written as NULL, while one whose integer part does
+  not fit is held out. A PostgreSQL `NaN` fits `NUMERIC(10,2)` and is kept.
+  The projection reads each class's action from the writer per column, so it
+  follows whatever the writer does.
 
 ## Versioning
 
