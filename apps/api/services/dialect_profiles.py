@@ -507,10 +507,23 @@ def stores_boolean_as_numeric(driver: str | None) -> bool:
     return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
 
 
+def lacks_boolean_test_predicate(driver: str | None) -> bool:
+    """True when the engine has BOOLEAN but no ``IS [NOT] TRUE`` test.
+
+    Snowflake's ``IS`` forms are only ``IS [NOT] NULL`` and
+    ``IS [NOT] DISTINCT FROM``; ``x IS TRUE`` is ``001003 SQL compilation
+    error: syntax error`` there (D47: every SCD2 and mirror run into
+    Snowflake). DuckDB — and so the fakesnow emulator — accepts it.
+    """
+    return warehouse_sql_quote_dialect(driver) == "snowflake"
+
+
 def sql_bool_is_true(driver: str | None, quoted_column: str) -> str:
-    """Predicate: column is the SQL TRUE / 1 value."""
+    """Predicate: column is the SQL TRUE / 1 value (NULL is not TRUE)."""
     if stores_boolean_as_numeric(driver):
         return f"{quoted_column} = 1"
+    if lacks_boolean_test_predicate(driver):
+        return f"{quoted_column} = TRUE"
     return f"{quoted_column} IS TRUE"
 
 
@@ -518,6 +531,8 @@ def sql_bool_is_not_true(driver: str | None, quoted_column: str) -> str:
     """Predicate: column is FALSE or NULL (SQL ``IS NOT TRUE``)."""
     if stores_boolean_as_numeric(driver):
         return f"({quoted_column} IS NULL OR {quoted_column} = 0)"
+    if lacks_boolean_test_predicate(driver):
+        return f"({quoted_column} IS NULL OR {quoted_column} = FALSE)"
     return f"{quoted_column} IS NOT TRUE"
 
 

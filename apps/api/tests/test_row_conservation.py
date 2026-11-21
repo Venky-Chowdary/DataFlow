@@ -8344,7 +8344,7 @@ def test_sqlserver_scd2_login_failure_is_unmeasured_not_empty(monkeypatch: pytes
 
 
 def test_snowflake_scd2_current_is_true_not_catalog_stats(monkeypatch: pytest.MonkeyPatch):
-    """Snowflake BOOLEAN is_current uses IS TRUE. Never INFORMATION_SCHEMA."""
+    """Snowflake BOOLEAN is_current uses ``= TRUE`` (no IS TRUE there, D47). Never INFORMATION_SCHEMA."""
     engine = _patch_warehouse(
         monkeypatch,
         _ScriptedWarehouseEngine(count=3, count_current=2),
@@ -8357,7 +8357,8 @@ def test_snowflake_scd2_current_is_true_not_catalog_stats(monkeypatch: pytest.Mo
     assert pop[HISTORY_ROWS_KEY] == 3
     current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
     assert current_sql
-    assert any("IS TRUE" in sql.upper() for sql in current_sql)
+    assert any("IS_CURRENT\" = TRUE" in sql.upper() for sql in current_sql)
+    assert all("IS TRUE" not in sql.upper() for sql in current_sql)
     assert all("= 1" not in sql for sql in current_sql)
     assert all("INFORMATION_SCHEMA" not in sql.upper() for sql in engine.sql)
 
@@ -8395,7 +8396,8 @@ def test_redshift_scd2_current_is_true_not_svv_table_info(monkeypatch: pytest.Mo
     assert pop[HISTORY_ROWS_KEY] == 3
     current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
     assert current_sql
-    assert any("IS TRUE" in sql.upper() for sql in current_sql)
+    assert any("IS_CURRENT\" = TRUE" in sql.upper() for sql in current_sql)
+    assert all("IS TRUE" not in sql.upper() for sql in current_sql)
     assert all("= 1" not in sql for sql in current_sql)
     assert all("SVV_TABLE_INFO" not in sql.upper() for sql in engine.sql)
     assert all("to_regclass" not in sql.lower() for sql in engine.sql)

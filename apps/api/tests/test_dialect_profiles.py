@@ -157,12 +157,18 @@ def test_sql_bool_predicates_numeric_vs_ansi():
         assert "IS TRUE" not in sql_bool_is_not_true(dialect, "c").upper()
         assert sql_bool_true_literal(dialect) == "1"
         assert sql_bool_false_literal(dialect) == "0"
-    for dialect in ("postgresql", "mysql", "snowflake"):
+    for dialect in ("postgresql", "mysql"):
         assert not stores_boolean_as_numeric(dialect), dialect
         assert sql_bool_is_true(dialect, "c") == "c IS TRUE"
         assert sql_bool_is_not_true(dialect, "c") == "c IS NOT TRUE"
         assert sql_bool_true_literal(dialect) == "TRUE"
         assert sql_bool_false_literal(dialect) == "FALSE"
+    # Snowflake BOOLEAN has no ``IS [NOT] TRUE`` test (001003, D47).
+    assert not stores_boolean_as_numeric("snowflake")
+    assert sql_bool_is_true("snowflake", "c") == "c = TRUE"
+    assert sql_bool_is_not_true("snowflake", "c") == "(c IS NULL OR c = FALSE)"
+    assert sql_bool_true_literal("snowflake") == "TRUE"
+    assert sql_bool_false_literal("snowflake") == "FALSE"
 
 
 def test_quote_matrix_no_postgres_leak():
