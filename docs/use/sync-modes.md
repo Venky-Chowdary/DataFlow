@@ -160,6 +160,33 @@ inserts, updates and deletes.
 - One job at a time reads a given replication slot, binlog position or
   capture instance.
 
+## MySQL and MariaDB destinations: bulk loads
+
+The PostgreSQL to MySQL fast copy loads with `LOAD DATA LOCAL INFILE`. On
+MySQL the load runs with `unique_checks=0` and `foreign_key_checks=0`; InnoDB
+still enforces the primary key. On MariaDB 10.6 and later both checks stay
+on.
+
+Why: from 10.6, MariaDB loads an empty InnoDB table in a special bulk mode
+when both checks are off (MDEV-515, MDEV-24621). On MariaDB 10.11.14 we
+measured that a load in that mode into a new table, while another session ran
+`SELECT COUNT(*)` on that table, hung both statements: `KILL` had no effect
+and only a server restart cleared it. Any reader can trigger it, such as a BI
+tool or a row count in the UI. With either check left on, the same load and
+reader completed every time.
+
+- **Cost**: none measured. On MariaDB 10.11.14, 200,000 rows through the copy
+  route ran as fast or faster with both checks on (median rows/s, 5 runs each,
+  4 workers: about 100,000 to 142,000 with checks on, 97,000 to 116,000 with
+  them off).
+- **Inherited settings**: a write session on MariaDB 10.6+ that starts with
+  both checks off (from server defaults) gets `unique_checks=1` before it
+  writes, and again before every `LOAD DATA`. `foreign_key_checks` is left
+  as it was.
+- **Not covered**: Datawrap cannot stop other clients from loading your
+  MariaDB server in this mode. Only MariaDB 10.11.14 was measured. MariaDB
+  before 10.6 has no such mode and keeps the MySQL behaviour.
+
 ## Append-only destinations
 
 Some destinations can only add rows (Kafka topics are the main case). On
@@ -188,4 +215,7 @@ publish duplicates that cannot be removed.
 - `apps/api/services/scd2_engine.py`
 - `apps/api/services/cdc_capability.py`, `apps/api/services/cdc_effectively_once.py`,
   `apps/api/services/cdc_lease.py`
+- `apps/api/connectors/mysql_load_data.py` (bulk load session per engine),
+  `apps/api/tests/test_mariadb_bulk_insert_mode_session.py`,
+  `apps/api/tests/test_mariadb_bulk_load_concurrent_reader_live.py`
 - `apps/api/services/connector_capability_registry.py`

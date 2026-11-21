@@ -405,6 +405,9 @@ def _fifo_copy_into_mysql(
             copy_expert_keeping_cancel(src_cur, copy_sql, writer, poll=True)
 
     def _consume(path: str) -> None:
+        # MySQL: unique/FK checks off. MariaDB 10.6+: both stay on, because
+        # off+off into this new empty table starts InnoDB's bulk insert mode,
+        # which hangs the server when anyone counts the table meanwhile.
         apply_mysql_bulk_load_session(dst_cur)
         try:
             # D102: refuse to start the one-statement LOAD after a cancel.

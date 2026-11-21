@@ -1264,6 +1264,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             @event.listens_for(engine, "connect")
             def _mysql_utc_session(dbapi_conn, _connection_record):  # noqa: ANN001
                 pin_mysql_session_utc(dbapi_conn)
+                _guard_mariadb_bulk_insert_pool_session(dbapi_conn)
 
         if _is_oracle_wire(driver.split("+", 1)[0], db_type):
             from connectors.oracle_tstz import pin_oracle_timestamp_format
@@ -1275,6 +1276,25 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
         return engine
     except (NoSuchModuleError, ImportError) as exc:
         raise _dialect_unavailable(url, db_type) from exc
+
+
+def _guard_mariadb_bulk_insert_pool_session(dbapi_conn: Any) -> None:
+    """Pooled MariaDB 10.6+ sessions never start with unique+FK checks both off.
+
+    Both off is what puts an INSERT into an empty table in InnoDB's bulk
+    insert mode, which hangs the server under a concurrent reader (see
+    connectors.mysql_load_data). Best effort: no SQL on non-MariaDB servers.
+    """
+    from connectors.mysql_load_data import guard_mariadb_bulk_insert_session
+
+    try:
+        cur = dbapi_conn.cursor()
+        try:
+            guard_mariadb_bulk_insert_session(cur, dbapi_conn)
+        finally:
+            cur.close()
+    except Exception as exc:  # noqa: BLE001 - a guard must not break the pool
+        logger.debug("MariaDB bulk insert pool guard not applied: %s", exc)
 
 
 def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
