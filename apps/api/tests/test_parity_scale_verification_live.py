@@ -253,19 +253,75 @@ def test_watermark_waits_for_verification_and_moves_only_when_it_passes(tables, 
     assert verification.schedule_waits_for_verification(Sched()) == ""
 
 
+class _Schedule:
+    """A stored schedule as schedule_store returns it (the run under test may not be its latest yet)."""
+
+    def __init__(self, sid: str, cursor_value: str, last_job_id: str = "") -> None:
+        self.id = sid
+        self.cursor_value = cursor_value
+        self.last_job_id = last_job_id
+        self.wait_for_verification = True
+
+
+def _schedules(monkeypatch, *schedules: _Schedule) -> list[tuple[str, dict[str, Any]]]:
+    import services.schedule_store as store
+
+    by_id = {s.id: s for s in schedules}
+    released: list[tuple[str, dict[str, Any]]] = []
+
+    def update(sid: str, data: dict[str, Any]) -> None:
+        released.append((sid, data))
+        by_id[sid].cursor_value = data.get("cursor_value", by_id[sid].cursor_value)
+
+    monkeypatch.setattr(store, "get_schedule", lambda sid: by_id.get(sid))
+    monkeypatch.setattr(store, "update_schedule", update)
+    return released
+
+
 def test_a_failed_verification_never_moves_the_watermark(tables, monkeypatch) -> None:
+    """The schedule exists and holds an older watermark: a failure still never moves it."""
     from services.mongodb_service import get_mongodb_service
     from services.parity_scale import verification
 
     src, dst = tables
     _sql(f'DELETE FROM "{dst}" WHERE id = 5')
     job_id = _job(src, dst)
-    verification.hold_cursor_until_verified("sched-2", job_id, get_mongodb_service().get_job(job_id), "w2")
-    released: list[dict[str, Any]] = []
-    import services.schedule_store as store
-
-    monkeypatch.setattr(store, "update_schedule", lambda sid, data: released.append(data))
+    released = _schedules(monkeypatch, _Schedule("sched-2", "2024-01-01", last_job_id=job_id))
+    assert verification.hold_cursor_until_verified(
+        "sched-2", job_id, get_mongodb_service().get_job(job_id), "2024-06-01") is None
     assert _verify(job_id)["state"] == "failed"
     assert released == []
     job = get_mongodb_service().get_job(job_id)
-    assert verification.hold_cursor_until_verified("sched-2", job_id, job, "w3") is None
+    assert job.get("parity_scale_pending_cursor") is None  # dropped, never applied later
+    assert verification.hold_cursor_until_verified("sched-2", job_id, job, "2024-07-01") is None
+
+
+def test_the_watermark_moves_even_before_the_run_is_recorded_on_the_schedule(tables, monkeypatch) -> None:
+    """Review 11 (race): verification can pass before mark_schedule_run sets last_job_id."""
+    from services.mongodb_service import get_mongodb_service
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    released = _schedules(monkeypatch, _Schedule("sched-3", "2024-01-01", last_job_id="the-previous-run"))
+    verification.hold_cursor_until_verified("sched-3", job_id, get_mongodb_service().get_job(job_id), "2024-06-01")
+    assert _verify(job_id)["state"] == "passed"
+    assert released == [("sched-3", {"cursor_value": "2024-06-01"})]
+
+
+def test_with_no_wait_a_later_run_neither_freezes_nor_rewinds_the_watermark(tables, monkeypatch) -> None:
+    """Review 11: wait_for_verification off, a later run already started (and maybe advanced)."""
+    from services.mongodb_service import get_mongodb_service
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    behind = _Schedule("sched-4", "2024-01-01", last_job_id="a-later-run")
+    ahead = _Schedule("sched-5", "2024-09-01", last_job_id="a-later-run")
+    released = _schedules(monkeypatch, behind, ahead)
+    svc = get_mongodb_service()
+    verification.hold_cursor_until_verified("sched-4", job_id, svc.get_job(job_id), "2024-06-01")
+    assert _verify(job_id)["state"] == "passed"
+    assert released == [("sched-4", {"cursor_value": "2024-06-01"})]  # not frozen behind the later run
+    job_id = _job(*tables)
+    verification.hold_cursor_until_verified("sched-5", job_id, svc.get_job(job_id), "2024-06-01")
+    assert _verify(job_id)["state"] == "passed"
+    assert ahead.cursor_value == "2024-09-01"  # never moved backwards

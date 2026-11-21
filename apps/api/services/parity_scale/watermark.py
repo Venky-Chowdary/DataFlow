@@ -49,8 +49,42 @@ def hold_cursor_until_verified(schedule_id: str, job_id: str, job_doc: dict[str,
     return cursor_value
 
 
+def _comparable(value: Any) -> Any:
+    from datetime import datetime, timezone
+    from decimal import Decimal, InvalidOperation
+
+    text = str(value or "").strip()
+    try:
+        return (0, Decimal(text))
+    except (InvalidOperation, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return (1, parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc))
+    except ValueError:
+        return None
+
+
+def newer(parked: Any, current: Any) -> bool | None:
+    """True when ``parked`` is past ``current``; ``None`` when the two cannot be ordered."""
+    if str(current or "").strip() == "":
+        return True
+    a, b = _comparable(parked), _comparable(current)
+    if a is None or b is None or a[0] != b[0]:
+        return None
+    return a[1] > b[1]
+
+
 def release_cursor(job_id: str, job: dict[str, Any], state: str) -> None:
-    """Apply (on a pass) or drop (otherwise) the watermark this job parked."""
+    """Apply (on a pass) or drop (otherwise) the watermark this job parked.
+
+    The watermark only ever moves forward: it is applied when it is past the
+    schedule's current one, whichever run is the schedule's latest now (with
+    ``wait_for_verification`` off a later run may have started, and the run
+    being verified may finish before its own run is recorded on the
+    schedule). Values that cannot be ordered fall back to "this run is the
+    schedule's latest".
+    """
     pending = job.get(PENDING_FIELD)
     if not isinstance(pending, dict) or state == "running":
         return
@@ -60,10 +94,14 @@ def release_cursor(job_id: str, job: dict[str, Any], state: str) -> None:
     from services.schedule_store import get_schedule, update_schedule
 
     sched = get_schedule(str(pending.get("schedule_id") or ""))
-    # Only the run that is still the schedule's latest moves its watermark.
-    if sched is None or str(sched.last_job_id or "") != str(job_id):
+    if sched is None:
         return
-    update_schedule(sched.id, {"cursor_value": str(pending.get("cursor_value") or "")})
+    parked = str(pending.get("cursor_value") or "")
+    forward = newer(parked, getattr(sched, "cursor_value", ""))
+    if forward is None:
+        forward = str(getattr(sched, "last_job_id", "") or "") == str(job_id)
+    if forward:
+        update_schedule(sched.id, {"cursor_value": parked})
 
 
 def schedule_waits_for_verification(sched: Any) -> str:
