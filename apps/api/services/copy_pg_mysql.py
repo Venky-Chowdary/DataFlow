@@ -424,6 +424,13 @@ def _fifo_copy_into_mysql(
             restore_mysql_bulk_load_session(dst_cur)
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
+        # D302: the caller commits right after this returns. A cancel that
+        # landed while the LOAD sat behind a destination lock (the producer
+        # blocked on the pipe, polling nothing) is the run's outcome, not a
+        # load to commit.
+        from services.cancel_check import poll_cancel
+
+        poll_cancel()
 
     stream_between_cursors(
         prefix="df_pg_mysql_", producer=_produce, consumer=_consume
@@ -455,8 +462,13 @@ def _run_shard(
 ) -> None:
     from connectors.mysql_load_data import mysql_load_data_session_ready
 
+    from services.source_read_cancel import as_cancel, settle_watch, start_watch
+
     src = _pg_connect(source_cfg)
     dst = _mysql_connect(dest_cfg)
+    # D302: a cancel ends this shard's snapshot session even while its LOAD
+    # is stalled on the destination and nothing on this thread can poll.
+    watch = start_watch(src)
     try:
         src.autocommit = False
         with src.cursor() as src_cur, dst.cursor() as dst_cur:
@@ -474,15 +486,21 @@ def _run_shard(
                 table_q=table_q,
                 columns=columns,
             )
+            settle_watch(watch)
             dst.commit()
             src.commit()
-    except Exception:
+    except Exception as exc:
         try:
             dst.rollback()
         except Exception:
             logger.debug("shard mysql rollback skipped", exc_info=True)
+        err = as_cancel(watch, exc)
+        if err is not exc:
+            raise err from exc
         raise
     finally:
+        if watch is not None:
+            watch.stop()
         try:
             src.close()
         except Exception:
@@ -582,8 +600,15 @@ def copy_postgres_to_mysql(
     source_ref = _table_ref(source_schema, source_table)
     table_q = _mysql_ident(dest_table)
 
+    from services.source_read_cancel import as_cancel, settle_watch, start_watch
+
     source_conn = _pg_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)
+    # D302: the run's snapshot session holds AccessShareLock on the source and
+    # pins its xmin until the final commit. A cancel must end it within the
+    # 5 s budget even while a LOAD is stalled on the destination (the FIFO
+    # producer is then blocked on the pipe and polls nothing).
+    watch = start_watch(source_conn)
     created_here = False
     existed_before = False
     reset_empty_dest_on_failure = False
@@ -825,6 +850,9 @@ def copy_postgres_to_mysql(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
+            # The read is over; from here the destination is committed. A
+            # cancel the watch already acted on is the outcome instead.
+            settle_watch(watch)
             if swap_at_end:
                 from services.dest_overwrite_swap import mysql_swap_staged_dest
 
@@ -877,8 +905,11 @@ def copy_postgres_to_mysql(
                 },
                 proof_scope=proof_scope,
             )
-    except Exception:
+    except Exception as exc:
+        err = as_cancel(watch, exc)
         if preserve_dest_on_failure:
+            if err is not exc:
+                raise err from exc
             raise
         if created_here:
             try:
@@ -894,8 +925,12 @@ def copy_postgres_to_mysql(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest truncate after copy failure skipped", exc_info=True)
+        if err is not exc:
+            raise err from exc
         raise
     finally:
+        if watch is not None:
+            watch.stop()
         try:
             source_conn.close()
         except Exception:

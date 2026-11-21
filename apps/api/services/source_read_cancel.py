@@ -54,8 +54,11 @@ class SourceReadCancelWatch:
         self._thread.start()
         return self
 
-    def stop(self) -> None:
+    def stop(self, *, wait: bool = False) -> None:
         self._stop.set()
+        if wait and self._thread.is_alive() and self._thread is not threading.current_thread():
+            # The poll wakes on the event at once; an abort in flight finishes.
+            self._thread.join(timeout=max(self._interval, 1.0) * 5)
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
@@ -94,3 +97,36 @@ def start_watch(conn: Any) -> SourceReadCancelWatch | None:
     if probe is None or conn is None:
         return None
     return SourceReadCancelWatch(conn, probe).start()
+
+
+def settle_watch(watch: SourceReadCancelWatch | None) -> None:
+    """Stop ``watch`` before a commit; ``TransferCancelled`` if it ended the read.
+
+    A route that commits its destination after the read must not race the
+    watch: once this returns, no cancel can close the source under the
+    commit, and a cancel that already did is raised instead of committing.
+    """
+    if watch is None:
+        return
+    watch.stop(wait=True)
+    watch.raise_if_aborted()
+
+
+def as_cancel(
+    watch: SourceReadCancelWatch | None, exc: BaseException
+) -> BaseException:
+    """What to raise for ``exc``: the cancel, when the watch ended the read.
+
+    Closing the source session under a running read surfaces as a driver
+    error ("connection already closed"); the run was cancelled, not failed.
+    """
+    if (
+        watch is not None
+        and watch.aborted is not None
+        and not isinstance(exc, TransferCancelled)
+    ):
+        return TransferCancelled(
+            str(watch.aborted) or "Transfer cancelled by user",
+            superseded=bool(getattr(watch.aborted, "superseded", False)),
+        )
+    return exc
