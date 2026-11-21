@@ -1,10 +1,19 @@
 import { useEffect } from "react";
+import { BRAND_COLORS } from "./brandMark";
 import {
+  DEFAULT_DESCRIPTION,
   DEFAULT_KEYWORDS,
+  OG_IMAGE_PATH,
+  OG_IMAGE_SIZE,
+  SHARE_CARD,
+  SOFTWARE_FEATURES,
   formatDocumentTitle,
   resolveSiteUrl,
   type PageMeta,
 } from "./seo";
+
+/** Browser chrome colour: the mark's tile ink, as in index.html and the manifest. */
+export const THEME_COLOR = BRAND_COLORS.tile;
 
 function upsertMeta(attr: "name" | "property", key: string, content: string) {
   if (!content) return;
@@ -47,7 +56,7 @@ export function applyPageMeta(meta: PageMeta) {
   const keywords = meta.keywords || DEFAULT_KEYWORDS;
   const robots = meta.robots ?? "index, follow";
   const ogType = meta.ogType ?? "website";
-  const ogImage = `${siteUrl}/og-image.png`;
+  const ogImage = `${siteUrl}${OG_IMAGE_PATH}`;
   const pageUrl = meta.canonicalPath
     ? meta.canonicalPath.startsWith("#")
       ? `${siteUrl}/${meta.canonicalPath}`
@@ -65,7 +74,7 @@ export function applyPageMeta(meta: PageMeta) {
   upsertMeta("name", "author", "Datawrap");
   upsertMeta("name", "application-name", "Datawrap");
   upsertMeta("name", "apple-mobile-web-app-title", "Datawrap");
-  upsertMeta("name", "theme-color", "#0f766e");
+  upsertMeta("name", "theme-color", THEME_COLOR);
 
   upsertMeta("property", "og:site_name", "Datawrap");
   upsertMeta("property", "og:title", title);
@@ -73,7 +82,9 @@ export function applyPageMeta(meta: PageMeta) {
   upsertMeta("property", "og:type", ogType);
   upsertMeta("property", "og:url", pageUrl);
   upsertMeta("property", "og:image", ogImage);
-  upsertMeta("property", "og:image:alt", "Datawrap — Universal data transfer platform");
+  upsertMeta("property", "og:image:width", String(OG_IMAGE_SIZE.width));
+  upsertMeta("property", "og:image:height", String(OG_IMAGE_SIZE.height));
+  upsertMeta("property", "og:image:alt", SHARE_CARD.alt);
   upsertMeta("property", "og:locale", "en_US");
   upsertMeta("property", "og:image:type", "image/png");
 
@@ -81,7 +92,7 @@ export function applyPageMeta(meta: PageMeta) {
   upsertMeta("name", "twitter:title", title);
   upsertMeta("name", "twitter:description", description);
   upsertMeta("name", "twitter:image", ogImage);
-  upsertMeta("name", "twitter:image:alt", "Datawrap — Universal data transfer platform");
+  upsertMeta("name", "twitter:image:alt", SHARE_CARD.alt);
 
   upsertLink("canonical", pageUrl);
   // Cache-bust so browsers pick up the workspace mark (same geometry as DtLogo).
@@ -123,8 +134,7 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
         url: siteUrl,
         name: "Datawrap",
         alternateName: ["Datawrap Pilot", "Datawrap Transfer Studio"],
-        description:
-          "Integrity-first data transfer platform — semantic mapping, 9 preflight gates, native CDC, quarantine with replay, and every load verified value by value.",
+        description: DEFAULT_DESCRIPTION,
         inLanguage: "en-US",
         publisher: { "@id": `${siteUrl}/#organization` },
       },
@@ -151,15 +161,7 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
           price: "0",
           priceCurrency: "USD",
         },
-        featureList: [
-          "Database migration",
-          "File to database transfer",
-          "Semantic column mapping",
-          "9 preflight validation gates",
-          "Scheduled pipelines",
-          "MCP server integration",
-          "Datawrap Pilot natural-language ops",
-        ],
+        featureList: [...SOFTWARE_FEATURES],
       },
       {
         "@type": "Organization",

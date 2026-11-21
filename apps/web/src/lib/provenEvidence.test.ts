@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  ALL_CONNECTORS,
+  PROOF_GROUPS,
+  provenBadge,
+  CATALOG_TOTAL,
   CONNECTOR_CLAIMS,
   MARKETING_STACK,
   NOT_PROVEN,
@@ -19,7 +23,6 @@ import {
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_DIRS = [
   path.join(SRC, "pages", "marketing"),
-  path.join(SRC, "components", "landing"),
   path.join(SRC, "components", "marketing"),
 ];
 
@@ -49,7 +52,6 @@ test("public pages publish no hand-typed evidence figure (CLM-5)", () => {
   const files = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
     path.join(SRC, "lib", "provenEvidence.ts"),
   ];
@@ -85,7 +87,6 @@ test("marketing pages never publish CI blockers as product gaps", () => {
   const marketingDirs = [
     path.join(SRC, "pages", "marketing"),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    path.join(SRC, "components", "landing"),
     path.join(SRC, "components", "marketing"),
   ];
   for (const dir of marketingDirs) {
@@ -129,10 +130,42 @@ test("emulator-proven warehouses are never presented as certified on a real acco
   assert.match(warehouses.note, /emulators, not real cloud accounts/);
   const subpage = readFileSync(path.join(SRC, "pages", "marketing", "MarketingSubpage.tsx"), "utf8");
   assert.doesNotMatch(subpage, /Snowflake, BigQuery, Apache Iceberg — MERGE \+ verified"/);
+  // The warehouse solution page states the emulator scope beside its warehouse claims.
+  const story = readFileSync(path.join(SRC, "pages", "marketing", "StoryPages.tsx"), "utf8");
+  assert.match(story, /WAREHOUSE_EMULATOR_NOTE = emulatorScopeNote\(\)/);
   // The catalog's status chip is "Proven in CI", not "Certified".
   const panel = readFileSync(path.join(SRC, "components", "ConnectorCatalogPanel.tsx"), "utf8");
   assert.match(panel, /id: "certified", label: "Proven in CI"/);
   assert.match(panel, /proof_scope === "emulator"/);
+});
+
+test("the catalog lists every driver the copy counts, once", () => {
+  // Headline, coverage panel, matrix total and badges share one unit (P1-2).
+  const drivers = ALL_CONNECTORS.map((c) => c.driver);
+  assert.equal(new Set(drivers).size, drivers.length);
+  assert.equal(CATALOG_TOTAL, PROVEN_DRIVERS + PENDING_DRIVERS);
+  assert.equal(ALL_CONNECTORS.filter((c) => c.proven).length, PROVEN_DRIVERS);
+  assert.equal(MARKETING_STACK.reduce((n, f) => n + f.total, 0), CATALOG_TOTAL);
+  assert.equal(MARKETING_STACK.reduce((n, f) => n + f.provenCount, 0), PROVEN_DRIVERS);
+  const unplaced = ALL_CONNECTORS.filter((c) => c.family === "Other").map((c) => c.driver);
+  assert.deepEqual(unplaced, [], "a counted driver has no family or name");
+});
+
+test("the Proof page's groups hold every proven driver, once", () => {
+  const listed = PROOF_GROUPS.flatMap((g) => g.drivers.map((d) => d.driver));
+  assert.equal(new Set(listed).size, listed.length);
+  assert.equal(listed.length, PROVEN_DRIVERS);
+  assert.equal(listed.length, ALL_CONNECTORS.filter((c) => c.proven).length);
+  assert.ok(listed.includes("pgvector"));
+});
+
+test("emulator-backed proof is labelled as such", () => {
+  for (const row of CONNECTOR_CLAIMS.proof_rows.filter((r) => r.emulated)) {
+    const c = ALL_CONNECTORS.find((x) => x.driver === row.engine);
+    assert.ok(c?.emulated, `${row.engine} is emulated in the evidence`);
+    assert.equal(provenBadge(true), "Proven in CI · emulator");
+  }
+  for (const g of PROOF_GROUPS) for (const d of g.drivers) assert.equal(d.emulated, g.emulated, d.driver);
 });
 
 test("marketing stack badges are derived from CI evidence", () => {
@@ -142,16 +175,16 @@ test("marketing stack badges are derived from CI evidence", () => {
   assert.ok(MARKETING_STACK.length > 0);
   for (const row of MARKETING_STACK) {
     // The badge counts the family's CI-proven members (CLM-7).
-    const family = CONNECTOR_CLAIMS.families.find((f) => f.family === row.family);
-    assert.ok(family, row.family);
-    const proven = family.items.filter((i) => i.proven).length;
-    const onEmulators = proven > 0 && family.items.filter((i) => i.proven && i.emulated).length === proven;
+    const members = ALL_CONNECTORS.filter((c) => c.family === row.family);
+    assert.ok(members.length, row.family);
+    const proven = members.filter((i) => i.proven).length;
+    const onEmulators = proven > 0 && members.filter((i) => i.emulated).length === proven;
     const suffix = onEmulators ? " on emulators" : "";
     const expected =
-      proven === family.items.length ? `Proven in CI${suffix}` : proven > 0 ? `Partly proven in CI${suffix}` : "Implemented";
+      proven === members.length ? `Proven in CI${suffix}` : proven > 0 ? `Partly proven in CI${suffix}` : "Implemented";
     assert.equal(row.badge, expected, row.family);
     // An emulator-proven member is named as such wherever it is listed proven.
-    for (const item of family.items.filter((i) => i.proven && i.emulated)) {
+    for (const item of members.filter((i) => i.emulated)) {
       assert.match(row.proven, new RegExp(`${item.name} \\(emulator\\)`), row.family);
     }
     assert.doesNotMatch(row.items, planned, `${row.family} names a planned driver`);
@@ -169,7 +202,6 @@ test("public pages never name a planned connector or an unbuilt control", () => 
   const marketingFiles = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
   ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
   for (const file of marketingFiles) {
@@ -186,7 +218,6 @@ test("public pages carry no disclaimer copy", () => {
   const marketingFiles = [
     ...sourceFiles(path.join(SRC, "pages", "marketing")),
     path.join(SRC, "pages", "LandingPage.tsx"),
-    ...sourceFiles(path.join(SRC, "components", "landing")),
     ...sourceFiles(path.join(SRC, "components", "marketing")),
   ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
   for (const file of marketingFiles) {
@@ -201,7 +232,6 @@ test("public pages do not sell the catalog as live or native MERGE", () => {
     path.join(SRC, "pages", "marketing"),
     path.join(SRC, "pages", "LandingPage.tsx"),
     path.join(SRC, "pages", "DocsPage.tsx"),
-    path.join(SRC, "components", "landing"),
     path.join(SRC, "components", "marketing"),
     path.join(SRC, "lib", "helpDocs.ts"),
   ];
