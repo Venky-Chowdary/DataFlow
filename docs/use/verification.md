@@ -109,25 +109,45 @@ not compare in full (above the ladder limit) is verified after the write by
 comparing every row inside both databases (see
 [Parity at Scale](../reference/parity-canonical-encoding.md)).
 
+- It runs only when the run read the whole table: a run that read an
+  incremental window, a query or procedure, a limited number of rows, or
+  rows its filter or recipe dropped or diverted is not compared as a whole
+  table, and the report says why. Gate-8's own record then decides.
 - It is its own state. While it runs the Trust Report reads
   **Verification running**; the job's write status is not changed, and
-  sign-off and the "proven" verdict wait until it finishes.
-- A clean result makes the table **proven** when the engine pair is
-  certified for every column type; the signed proof pack then records a
-  full population proof. An uncertified pair reads **no difference found**.
+  sign-off and the "proven" verdict wait until it finishes. A verification
+  whose worker stopped (a restart, a lost replica) does not stay "running":
+  it reads as stopped, is resumed from its checkpoint when the app starts or
+  on its next sweep, and **Re-verify** takes it over.
+- **Proven** needs each side read from one snapshot for the whole comparison:
+  PostgreSQL (one repeatable-read transaction) and MySQL / MariaDB on InnoDB
+  (a consistent-snapshot transaction). Otherwise (SQL Server today, a
+  resumed comparison, another storage engine) a clean result reads
+  **no difference found**: the tables matched at scan time, but writes during
+  the scan were not ruled out. An engine pair not certified for every column
+  type reads the same way. Only a proven result becomes a full population
+  proof in the signed proof pack, and only where Gate-8 itself passed with
+  no fidelity veto.
+- What Gate-8 explained stays explained: quarantined rows, rows skipped by
+  the duplicate policy and rows that were in the destination before an
+  append are not turned into differences.
 - A table with no key is compared as content: the check reads
   **Content match (no key)**, and a difference cannot be attributed to a key.
-- A failed verification makes the report **unexplained** and names the rows.
-- On a schedule, the watermark moves only after verification passed, and the
-  next run waits while it runs (set `wait_for_verification` to false on the
-  schedule to not wait).
+- A verification that found differences makes the report **unexplained** and
+  names the rows.
+- On a schedule, the watermark moves only after verification passed (and
+  only forward), and the next run waits while it runs (set
+  `wait_for_verification` to false on the schedule to not wait).
 
 The Trust Report's difference explorer shows, per verified table, each
 column's differing rows (Columns), the missing, extra, duplicate and changed
 keys (Keys), and the differing values read again from both sides (Values).
-Protected columns never show a value. **Re-verify this table** compares every
-row again. **Copy repair SQL** shows statements that make the destination
-match the source for the named keys; Datawrap never runs them.
+Protected columns never show a value, and their values are never stored with
+the verification. **Re-verify this table** compares every row again.
+**Copy repair SQL** shows statements that make the destination match the
+source for the named keys, with the run's transforms applied; it leaves out
+quarantined rows, rows outside the run and protected columns, and says so.
+Datawrap never runs them.
 
 Tested end to end on PostgreSQL to PostgreSQL. Other engine pairs use the same
 comparison but are not yet tested end to end in this mode.
