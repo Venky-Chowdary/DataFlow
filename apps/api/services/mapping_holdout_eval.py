@@ -40,14 +40,14 @@ SPLITS = ("dev", "test")
 HOLDOUT_FLOORS: dict[str, dict[str, float]] = {
     "test": {"top1": 0.6636, "top3": 0.8909, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
              "auto_coverage": 0.3636, "proposal_precision": 0.9241},
-    "dev": {"top1": 0.75, "top3": 0.9688, "auto_precision": 0.973, "auto_coverage": 0.375,
-            "proposal_precision": 0.9351},
-    "all": {"top1": 0.7039, "top3": 0.9272, "auto_precision": 0.98},
+    "dev": {"top1": 0.7604, "top3": 0.9688, "auto_precision": 1.0, "auto_coverage": 0.375,
+            "proposal_precision": 0.9481},
+    "all": {"top1": 0.7087, "top3": 0.9272, "auto_precision": 0.98},
 }
 HOLDOUT_CEILINGS: dict[str, dict[str, int]] = {
     "test": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
-    "dev": {"neg_auto": 0, "wrong_auto": 1, "neg_proposed": 1},
-    "all": {"neg_auto": 0, "wrong_auto": 1},
+    "dev": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
+    "all": {"neg_auto": 0, "wrong_auto": 0},
 }
 
 

@@ -1,4 +1,4 @@
-"""Accuracy Track A items 2-4: assignment and suggestion policy around map_columns.
+"""Accuracy Track A items 2-5: assignment and suggestion policy around map_columns.
 
 Names here are invented for the tests (none come from the held-out test split,
 which tests/test_mapping_holdout_leak.py polices).
@@ -165,3 +165,40 @@ def test_auto_approve_floor_is_at_or_above_the_dev_calibrated_safe_threshold() -
     # The dev data never supports lowering the floor (n is too small for a
     # 0.95 Wilson bound), so the gate stays where it is.
     assert cal["recommended"] is None or cal["recommended"] >= AUTO_APPROVE_FLOOR, cal
+    # No threshold at or above the product floor falls short of 0.98 on dev.
+    assert cal["highest_unsafe"] is None or cal["highest_unsafe"] < AUTO_APPROVE_FLOOR, cal
+    assert cal["lowest_meeting_target"] is not None and cal["lowest_meeting_target"] <= AUTO_APPROVE_FLOOR
+
+
+# ---------------- item 5: entity vs attribute ----------------
+
+
+def test_id_shaped_entity_column_is_not_auto_mapped_to_an_email_attribute() -> None:
+    src = _typed([("vendor", "VARCHAR", ["ven_8Kx2", "ven_77Qa"]), ("total", "DECIMAL", ["10.00"])])
+    tgt = [{"name": "vendor_email", "inferred_type": "VARCHAR"}, {"name": "vendor_id", "inferred_type": "VARCHAR"},
+           {"name": "total", "inferred_type": "DECIMAL"}]
+    out = _by_source(map_columns(
+        [c["name"] for c in src], [t["name"] for t in tgt], source_schemas=src, target_schemas=tgt,
+        destination_db_type="postgresql", destination_table_exists=True, source_db_type="postgresql",
+    ))
+    row = out["vendor"]
+    assert not (row["target"] == "vendor_email" and not row["requires_review"] and row["confidence"] >= 0.85), row
+    assert row["target"] == "vendor_id"
+
+
+def test_email_samples_still_map_onto_the_email_attribute() -> None:
+    src = _typed([("vendor", "VARCHAR", ["a@b.io", "c@d.org"])])
+    tgt = [{"name": "vendor_email", "inferred_type": "VARCHAR"}, {"name": "vendor_id", "inferred_type": "VARCHAR"}]
+    out = _by_source(map_columns(
+        ["vendor"], ["vendor_email", "vendor_id"], source_schemas=src, target_schemas=tgt,
+        destination_db_type="postgresql", destination_table_exists=True, source_db_type="postgresql",
+    ))
+    assert out["vendor"]["target"] == "vendor_email"
+
+
+def test_masked_samples_do_not_contradict_an_exact_email_name() -> None:
+    src = _typed([("email", "VARCHAR", ["***", "***"])])
+    tgt = [{"name": "email", "inferred_type": "VARCHAR"}]
+    out = map_columns(["email"], ["email"], source_schemas=src, target_schemas=tgt,
+                      destination_db_type="postgresql", destination_table_exists=True)
+    assert out[0]["target"] == "email" and out[0]["confidence"] >= 0.85

@@ -12,7 +12,8 @@ the dev split of the held-out set (tests/fixtures/mapping_holdout_v1.json).
 * :func:`rescore_pairs`: candidate evidence the lexical scorer lacks.
   Abbreviations it has no dictionary entry for (``dsch_dt`` -> ``discharge_date``,
   ``los`` -> ``length_of_stay``) and value patterns in the source samples
-  (an email-shaped column onto the only email column). Inferred pairs always require review.
+  (an email-shaped column onto the only email column; an id-shaped column
+  is not an email). Inferred pairs always require review.
 * :func:`suggestion_policy`: one confidence line (0.70) between "suggest this
   existing column" and "no match, plan a new column", whichever path produced
   the row.
@@ -33,6 +34,7 @@ DECISIVE_MARGIN = 0.05
 SUGGESTION_FLOOR = 0.70
 INFERRED_ABBREVIATION_SCORE = 0.80
 VALUE_PATTERN_MATCH_SCORE = 0.80
+VALUE_PATTERN_CONFLICT_CAP = 0.55
 REVIEW_TAG = "review required"
 
 
@@ -254,6 +256,17 @@ def rescore_pairs(
                 continue
             score, reason = pair_scores[(src, tgt)]
             tkind = tgt_kinds[tgt]
+            # Samples positively of another kind than the destination name says
+            # it holds (an id-shaped column onto ``*_email``). Absence of a
+            # pattern (masked or placeholder samples) is not a contradiction,
+            # and a literal name equality is left to the type grade.
+            if tkind and skind not in ("", "other", tkind) and name_tokens(src) != name_tokens(tgt):
+                if score > VALUE_PATTERN_CONFLICT_CAP:
+                    pair_scores[(src, tgt)] = (
+                        VALUE_PATTERN_CONFLICT_CAP,
+                        f"{reason} · samples are not {tkind} values — {REVIEW_TAG}",
+                    )
+                continue
             if score >= INFERRED_ABBREVIATION_SCORE:
                 continue
             if tkind and skind == tkind and sum(1 for k in tgt_kinds.values() if k == tkind) == 1:
