@@ -397,17 +397,20 @@ def verify_body_detail(
     info = signature_key_info(payload)
     if info["legacy_key"]:
         key: bytes | None = _platform_secret()
-    elif info["key_scope"] == "workspace" and (
-        not info["workspace_id"]
-        or (may_use_workspace is not None and not may_use_workspace(info["workspace_id"]))
-    ):
-        errors.append(
-            "signed with another workspace's evidence key: it can be verified only "
-            "by someone with access to that workspace"
-        )
-        return actual_hash, errors, info
     else:
-        key = key_for(info["workspace_id"] or None, info["key_id"])
+        # T1: the envelope's key_scope is not authenticated. A named workspace
+        # is always the workspace keyring and always the caller's read check;
+        # an empty one is the deployment keyring. The scope reported is where
+        # the key was actually found.
+        workspace = info["workspace_id"]
+        if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+            errors.append(
+                "signed with another workspace's evidence key: it can be verified only "
+                "by someone with access to that workspace"
+            )
+            return actual_hash, errors, info
+        key = key_for(workspace or None, info["key_id"])
+        info["key_scope"] = "workspace" if workspace else "deployment"
     if key is None:
         errors.append(
             f"signing key {info['key_id']} is not in this deployment's evidence keyring"
