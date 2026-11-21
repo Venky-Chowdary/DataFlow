@@ -90,7 +90,10 @@ describe("verdicts, statuses and causes", () => {
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0 }).label, "Match");
     // A clean sample is not a match of every row (review finding 9).
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
-    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
+    // A sample bounds the rate ("in sample"); a full compare that is not proven is "No difference found".
+    const sampled = provenReport({ verdict: "no_difference_found", confidence: { ...provenReport().confidence, method: "sampled" } });
+    assert.equal(verdictPresentation(sampled).label, "No difference in sample");
+    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference found");
     assert.equal(heatCellLabel("sampled"), "No difference in sample");
     // A re-sync runs as its own job (review finding 10): re-read while it applies, never forever.
     const applyingReport = { fixes: [{ ...unexplainedReport().fixes[0], status: "applying" as const }] };

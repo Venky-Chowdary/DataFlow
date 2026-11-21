@@ -366,7 +366,9 @@ export function TrustReportView({
   const signoffAnchor = `parity-signoff-${report.job_id}`;
   const shortcut = signoffShortcut(report);
   // The verdict pill is in the header; the notice says why it cannot be verified.
-  const notice = unverifiableNotice(report, jobStatus);
+  const stoppedVerification = report.verification?.state === "error";
+  // A verification that did not finish is explained once, on its own card below.
+  const notice = stoppedVerification ? null : unverifiableNotice(report, jobStatus);
   const reasonDetail = verdictReasonDetail(report);
   const differLabel = rowsDifferLabel(report);
   const kpis: Array<{ label: string; value: string; figure: boolean }> = [
@@ -454,7 +456,17 @@ export function TrustReportView({
         </p>
       )}
 
-      {verification && <VerificationCard verification={verification} pollStopped={verificationPollStopped} />}
+      {verification && (
+        <VerificationCard
+          verification={verification}
+          pollStopped={verificationPollStopped}
+          canReverify={canReverify}
+          reverifyDeniedReason={reverifyDeniedReason}
+          reverifying={busy?.kind === "reverify"}
+          onReverify={onReverify}
+          reverifyError={explorable.length ? undefined : reverifyError}
+        />
+      )}
 
       <div className="df2-parity-hero">
         <div className="df2-parity-card df2-parity-ring-card">

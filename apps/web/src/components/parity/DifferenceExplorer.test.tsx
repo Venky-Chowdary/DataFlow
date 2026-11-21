@@ -13,7 +13,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TrustReportView, type TrustReportViewProps } from "./TrustReportTab.js";
 import { DifferenceExplorer } from "./DifferenceExplorer.js";
-import { contentMatchReport, provenReport, verifiedWithDifferencesReport, verifyingReport } from "./parityFixtures.js";
+import {
+  contentMatchReport,
+  provenReport,
+  verificationStoppedReport,
+  verifiedWithDifferencesReport,
+  verifyingReport,
+} from "./parityFixtures.js";
 import {
   checkLabel,
   noDifferencesText,
@@ -151,6 +157,30 @@ describe("Trust Report with verification after the write (static)", () => {
     assert.match(t, /Content match \(no key\)/);
     assert.match(t, /differences cannot be attributed to a key/);
     assert.match(html, /<button[^>]*disabled=""[^>]*title="A table with no key has no rows a statement could name\."/);
+  });
+
+  it("a verification that stopped offers re-verify on the card, with the plain reason (review 10)", () => {
+    const html = view(verificationStoppedReport());
+    const t = text(html);
+    assert.match(t, /Could not finish/);
+    assert.match(t, /stopped before it finished/);
+    assert.match(t, /Re-verify orders/);
+    assert.equal(t.match(/stopped before it finished/g)?.length, 1, "the reason is said once");
+    assert.doesNotMatch(t, /Explore differences/); // nothing finished to explore
+    const denied = view(verificationStoppedReport(), { canReverify: false, reverifyDeniedReason: "Ask an editor." });
+    assert.match(denied, /<button[^>]*disabled=""[^>]*title="Ask an editor\."[^>]*>.*?Re-verify orders/);
+  });
+
+  it("every row compared but not proven reads as no difference found, never a sample", () => {
+    const report = provenReport({
+      verdict: "no_difference_found",
+      verdict_reason:
+        "Every row of orders was compared and none differs. The tables matched at scan time, but writes during the scan were not ruled out.",
+    });
+    assert.deepEqual(verdictPresentation(report), { label: "No difference found", tone: "ok" });
+    const t = text(view(report));
+    assert.doesNotMatch(t, /sample/i);
+    assert.match(t, /writes during the scan were not ruled out/);
   });
 
   it("mounts Track W's AI decisions section as given", () => {

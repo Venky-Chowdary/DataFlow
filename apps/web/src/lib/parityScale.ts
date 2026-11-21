@@ -185,7 +185,7 @@ export function verificationHeadline(verification: ParityVerification): string {
     case "incomplete":
       return "Part of a table could not be compared. Re-verify it to compare every row.";
     case "error":
-      return "Verification could not finish. Re-verify the table to compare every row.";
+      return "Verification could not finish.";
     default:
       return verification.reason || "No table needed a separate verification.";
   }

@@ -5,8 +5,9 @@
  * the comparison of every row found.
  */
 
-import { CircleAlert, CircleCheck, Hourglass } from "lucide-react";
+import { CircleAlert, CircleCheck, Hourglass, RefreshCw } from "lucide-react";
 import { useId } from "react";
+import { Button } from "../ui/Button";
 import { badgeClass, formatDateTime, type ParityVerification } from "../../lib/parity";
 import {
   plural,
@@ -19,7 +20,17 @@ export interface VerificationCardProps {
   verification: ParityVerification;
   /** The automatic re-read stopped at its limit while verification still ran. */
   pollStopped?: boolean;
+  /** job.run: a table whose verification stopped or could not compare every row can be re-verified here. */
+  canReverify?: boolean;
+  reverifyDeniedReason?: string;
+  reverifying?: boolean;
+  onReverify?: (table: string) => void;
+  /** Why the last re-verify could not start (shown here when the explorer is not). */
+  reverifyError?: string;
 }
+
+/** Tables the explorer does not cover (no finished comparison): re-verify is offered on the card. */
+const REVERIFY_HERE = new Set(["error", "incomplete"]);
 
 function StateIcon({ state }: { state: string | null }) {
   if (state === "running") return <Hourglass size={16} strokeWidth={2} aria-hidden="true" />;
@@ -27,7 +38,15 @@ function StateIcon({ state }: { state: string | null }) {
   return <CircleAlert size={16} strokeWidth={2} aria-hidden="true" />;
 }
 
-export function VerificationCard({ verification, pollStopped = false }: VerificationCardProps) {
+export function VerificationCard({
+  verification,
+  pollStopped = false,
+  canReverify = false,
+  reverifyDeniedReason,
+  reverifying = false,
+  onReverify,
+  reverifyError,
+}: VerificationCardProps) {
   const titleId = useId();
   const running = verification.state === "running";
   const tone = running ? "is-info" : verification.state === "passed" ? "is-ok" : "is-warn";
@@ -77,10 +96,29 @@ export function VerificationCard({ verification, pollStopped = false }: Verifica
               ) : (
                 table.error && <span className="df2-parity-muted">{table.error}</span>
               )}
+              {onReverify && REVERIFY_HERE.has(table.status) && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onReverify(table.name)}
+                  disabled={!canReverify || reverifying}
+                  loading={reverifying}
+                  loadingLabel="Starting…"
+                  title={canReverify ? "Compare every row of this table again, in both databases." : reverifyDeniedReason}
+                  leadingIcon={<RefreshCw size={14} strokeWidth={2} aria-hidden="true" />}
+                >
+                  Re-verify {table.name}
+                </Button>
+              )}
             </li>
           );
         })}
       </ul>
+      {reverifyError && (
+        <p className="df2-pscale-banner is-danger" role="alert">
+          <span>{reverifyError}</span>
+        </p>
+      )}
       {!running && verification.finished_at && (
         <p className="df2-parity-muted">Finished {formatDateTime(verification.finished_at)}</p>
       )}

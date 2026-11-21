@@ -310,3 +310,27 @@ export function contentMatchReport(over: Partial<ParityReport> = {}): ParityRepo
     ...over,
   });
 }
+
+/** Parity at Scale: the worker stopped (its lease ran out); the API reports the table as an error. */
+export function verificationStoppedReport(over: Partial<ParityReport> = {}): ParityReport {
+  const base = provenReport();
+  return provenReport({
+    version: 2,
+    verdict: "unverifiable",
+    verdict_reason: "Gate-8 compared only part of orders.",
+    parity: { ...base.parity, proven_equal_pct: null },
+    tables: [{ ...base.tables[0], status: "unverifiable", proven_equal_pct: null }],
+    signoff: { ...base.signoff, status: "blocked", blocked_reason: "Verification did not finish; re-verify the table, then sign." },
+    verification: {
+      state: "error",
+      started_at: "2026-11-11T14:00:00Z",
+      finished_at: null,
+      reason: "Verification stopped before it finished (the worker restarted or lost contact). Re-verify the table to compare every row.",
+      tables: [{
+        name: "orders", status: "error", progress: { items_done: 4 }, outcome: null, mode: "R", check_kind: null,
+        error: "Verification stopped before it finished (the worker restarted or lost contact). Re-verify the table to compare every row.",
+      }],
+    },
+    ...over,
+  });
+}

@@ -326,12 +326,19 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /** Verdict pill: what the report concluded, in one short phrase. */
 export function verdictPresentation(
-  report: Pick<ParityReport, "verdict" | "parity"> & { confidence?: Pick<ParityReport["confidence"], "bound_valid"> },
+  report: Pick<ParityReport, "verdict" | "parity"> & {
+    confidence?: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">>;
+  },
 ): { label: string; tone: ParityTone } {
   switch (report.verdict) {
     case "proven":
       return { label: "Proven equal", tone: "ok" };
     case "no_difference_found":
+      if (report.confidence?.method === "full") {
+        // Every row was compared (verification after the write) but proof was not established
+        // (writes during the scan not ruled out, or an uncertified engine pair): not a sample.
+        return { label: "No difference found", tone: "ok" };
+      }
       if (report.confidence?.bound_valid === false) {
         // Not a random sample: it says nothing about the rows it did not check, and sign-off waits.
         return {
@@ -376,6 +383,9 @@ export function noDifferencesText(
     return report.evidence.reconciliation_passed === false
       ? "Gate-8 failed this run, but its evidence names no row that differs, so parity cannot be shown. Re-run the job to localize the difference."
       : "No differences were found, but the check could not cover enough rows to prove a match.";
+  }
+  if (report.verdict === "no_difference_found" && report.confidence.method === "full") {
+    return "Every row was compared and none differs. The report says why that is not proven yet.";
   }
   if (report.verdict === "no_difference_found") {
     return report.confidence.bound_valid === false

@@ -16,6 +16,7 @@ import {
   provenReport,
   signedReport,
   unexplainedReport,
+  verificationStoppedReport,
   verifiedWithDifferencesReport,
   verifyingReport,
 } from "./parityFixtures.js";
@@ -481,6 +482,19 @@ describe("Trust Report actions (jsdom)", () => {
     assert.match(posts[0].url, /\/jobs\/job-31\/verification\/tables\/payments$/);
     assert.ok(calls.some((c) => c.method === "GET" && /\/parity-report/.test(c.url)), "the report is read again");
     assert.match(host!.textContent || "", /Verification running/);
+  });
+
+  it("a stopped verification is re-verified from the card (review 10)", async () => {
+    getReport = () => verificationStoppedReport();
+    onPost = async () =>
+      new Response(JSON.stringify({ state: "running", tables: [{ name: "orders", status: "running", progress: {} }] }), { status: 200 });
+    await mount();
+    calls.length = 0;
+    await click(button("Re-verify orders"));
+    await React.act(async () => settle());
+    const posts = calls.filter((c) => c.method === "POST");
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].url, /\/jobs\/job-31\/verification\/tables\/orders$/);
   });
 
   it("will not accept a difference without a note (review finding 6)", async () => {
