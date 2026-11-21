@@ -77,7 +77,10 @@ const STATUS_ICON: Record<string, IconName> = {
 
 /**
  * One result for a finished run: the job status, one verification verdict
- * (the Trust Report's five words), and read = landed + held + skipped.
+ * (the Trust Report's five words), and the row identity the engine ledger
+ * reports for the run's conservation kind (lib/runResult runReadStatement):
+ * an equation only when the ledger balances and the numbers add up, otherwise
+ * the terms as a list and what does not balance.
  */
 export function RunResultHeader({ jobId, job, verification, load, onRetry, trustReportPrimary = true, detail }: RunResultHeaderProps) {
   const titleId = useId();
@@ -108,7 +111,7 @@ export function RunResultHeader({ jobId, job, verification, load, onRetry, trust
             <span aria-hidden className="df2-run-result-terms">
               {read.terms.map((term, i) => (
                 <span key={term.label} className="df2-run-term-wrap">
-                  {i > 0 && <span className="df2-run-op">{read.identity ? (i === 1 ? "=" : "+") : "·"}</span>}
+                  {i > 0 && <span className="df2-run-op">{term.op ?? "·"}</span>}
                   <span className={`df2-run-term is-${term.tone}`}>
                     <span className="df2-run-term-label">{term.label}</span>
                     <strong>{term.value}</strong>
@@ -116,6 +119,14 @@ export function RunResultHeader({ jobId, job, verification, load, onRetry, trust
                 </span>
               ))}
             </span>
+            {read.balanceText && (
+              <span
+                className={`df2-run-chip is-${read.balance === "unbalanced" ? "danger" : read.balance === "open" ? "warning" : "neutral"}`}
+                aria-hidden
+              >
+                {read.balanceText}
+              </span>
+            )}
             {read.writerReported != null && (
               <span className="df2-run-result-note" aria-hidden>
                 The destination was not counted; the writer reported {plural(read.writerReported, "row")}.

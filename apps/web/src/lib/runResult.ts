@@ -12,7 +12,13 @@
  * not a pass, so "Completed" alone is neutral.
  */
 
-import { isDestMeasured, readConservationLedger, removedOnRead, type LedgerCarrier } from "./conservationLedger";
+import {
+  isDestMeasured,
+  readConservationLedger,
+  removedOnRead,
+  type ConservationLedger,
+  type LedgerCarrier,
+} from "./conservationLedger";
 import { unverifiableNotice, type ParityReport, type ParityVerdict } from "./parity";
 import { jobStatusLabel } from "./uiUtils";
 
@@ -143,17 +149,31 @@ export interface ReadTerm {
   /** Formatted count, or a phrase when the count is unknown. */
   value: string;
   tone: RunTone;
+  /** The operator printed before this term ("=", "+", "−" or "·"); absent on the first term. */
+  op?: "=" | "+" | "−" | "·";
 }
 
+/** Whether the ledger's identity closes, as the API's ledger itself reports it. */
+export type ReadBalance = "balanced" | "unbalanced" | "open" | "unmeasured";
+
 export interface ReadStatement {
-  /** read = landed + held + skipped (+ removed on read), as terms in order; the first is "Read". */
+  /** The terms in order, each carrying the operator before it; the first is "Read" (or the keyed "Dest change"). */
   terms: ReadTerm[];
   /** Plain-text form for screen readers and copy. */
   text: string;
   /** True when the destination was counted independently (not the writer's own report). */
   measured: boolean;
-  /** True when the terms close as read = landed + held + skipped; false prints them as a list. */
+  /**
+   * True only when an equation is printed: the ledger says it balances AND the
+   * numbers shown add up. Never true for numbers that do not satisfy it.
+   */
   identity: boolean;
+  /** The ledger's own verdict: balanced, unbalanced (unaccounted rows), open (not proven) or unmeasured. */
+  balance: ReadBalance;
+  /** The ledger's ``unaccounted`` (read side minus accounted side), when it reports one. */
+  unaccounted: number | null;
+  /** One sentence about the balance when it is not a printed equation, else null. */
+  balanceText: string | null;
   /** Writer-reported rows when the destination was not counted. */
   writerReported: number | null;
 }
@@ -161,10 +181,163 @@ export interface ReadStatement {
 const fmt = (n: number | null | undefined) =>
   n == null || !Number.isFinite(Number(n)) ? null : Number(n).toLocaleString("en-US");
 
+const count = (n: number) => n.toLocaleString("en-US");
+
+const isNum = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+
+type Side = { label: string; value: number | null; tone?: RunTone }[];
+
 /**
- * The row identity in plain words: read = landed + held + skipped. Engine
- * numbers only; when the destination was not counted, "landed" says so and
- * the writer's own count is named as such, never used as the landed figure.
+ * The identity each conservation kind closes on, as apps/api/services/row_conservation.py
+ * states it. ``lhs`` and ``rhs`` add up when the ledger balances; keyed is
+ * dest change = new keys − deletes.
+ */
+interface KindIdentity {
+  lhs: Side;
+  rhs: Side;
+  /** Signs of the rhs terms after the first (keyed subtracts deletes). */
+  rhsOps?: ("+" | "−")[];
+  /** Terms shown after the equation as context, never part of it. */
+  context?: Side;
+}
+
+function heldTone(n: number | null): RunTone {
+  return (n ?? 0) > 0 ? "warning" : "neutral";
+}
+
+function identityFor(ledger: ConservationLedger, job: LedgerCarrier): KindIdentity {
+  const kind = ledger.conservation_kind;
+  const held = ledger.rows_quarantined;
+  const skipped = ledger.rows_skipped;
+  const removed = removedOnRead(ledger);
+  const expanded = Math.max(Number((job.row_accounting as Record<string, unknown> | null | undefined)?.rows_expanded ?? 0) || 0, 0);
+  const tail: Side = [
+    { label: "Held", value: held, tone: heldTone(held) },
+    { label: "Skipped", value: skipped },
+    ...(removed > 0 ? [{ label: "Removed on read", value: removed }] : []),
+  ];
+  if (kind === "keyed") {
+    return {
+      lhs: [{ label: "Dest change", value: ledger.dest_delta }],
+      rhs: [{ label: "New keys", value: ledger.inserts }, { label: "Deletes", value: ledger.deletes }],
+      rhsOps: ["−"],
+      context: [
+        { label: "Read", value: ledger.rows_read },
+        ...(ledger.updates != null ? [{ label: "Updated", value: ledger.updates }] : []),
+        { label: "Held", value: held, tone: heldTone(held) },
+        { label: "Skipped", value: skipped },
+      ],
+    };
+  }
+  if (kind === "mirror" || kind === "scd2") {
+    // read + retained = active (current) + held + skipped + removed. The ledger
+    // reports unaccounted = read + retained − accounted, so retained follows from it exactly.
+    const landed = kind === "mirror" ? ledger.active_count : (ledger.rows_written ?? ledger.current_count ?? ledger.dest_count);
+    const accounted = isNum(landed) ? landed + held + skipped + removed : null;
+    const retained = isNum(ledger.unaccounted) && isNum(ledger.rows_read) && accounted != null
+      ? ledger.unaccounted - ledger.rows_read + accounted
+      : null;
+    return {
+      lhs: [
+        { label: "Read", value: ledger.rows_read },
+        ...(retained != null && retained > 0 ? [{ label: "Retained", value: retained }] : []),
+      ],
+      rhs: [{ label: kind === "mirror" ? "Active" : "Current", value: landed }, ...tail],
+    };
+  }
+  const landed = kind === "append_delta"
+    ? (ledger.dest_delta ?? ledger.rows_written)
+    : kind === "vector"
+      ? (ledger.identity_count ?? ledger.dest_count)
+      : kind === "job_rollup"
+        ? (ledger.rows_written ?? ledger.active_count ?? ledger.dest_count)
+        : ledger.dest_count;
+  return {
+    lhs: [
+      { label: "Read", value: ledger.rows_read },
+      ...(expanded > 0 ? [{ label: "Added by recipe", value: expanded }] : []),
+    ],
+    rhs: [{ label: "Landed", value: landed }, ...tail],
+  };
+}
+
+/** True when every value is known and the two sides add up with their signs. */
+function adds(identity: KindIdentity): boolean {
+  const all = [...identity.lhs, ...identity.rhs];
+  if (!all.every((t) => isNum(t.value))) return false;
+  const left = identity.lhs.reduce((acc, t) => acc + (t.value as number), 0);
+  const right = identity.rhs.reduce((acc, t, i) => {
+    const sign = i > 0 && identity.rhsOps?.[i - 1] === "−" ? -1 : 1;
+    return acc + sign * (t.value as number);
+  }, 0);
+  return left === right;
+}
+
+function streamBalanceText(ledger: ConservationLedger): string | null {
+  const per = ledger.per_stream;
+  if (!per || per.length === 0) return null;
+  const open = per.filter((s) => !s.measured || !s.balanced).length;
+  if (open === 0) return `Every one of the ${count(per.length)} streams balances on its own ledger; their counts are not summed here.`;
+  return `Does not balance: ${count(open)} of ${count(per.length)} streams do not close.`;
+}
+
+function balanceSentence(ledger: ConservationLedger, printed: boolean): { balance: ReadBalance; text: string | null } {
+  if (ledger.balanced) {
+    if (printed) return { balance: "balanced", text: null };
+    if (ledger.conservation_kind === "job_rollup") {
+      return { balance: "balanced", text: streamBalanceText(ledger) ?? "The ledger balances." };
+    }
+    return { balance: "balanced", text: "The ledger balances on terms this summary does not show; open Row accounting for them." };
+  }
+  const n = ledger.unaccounted;
+  if (isNum(n) && n !== 0) {
+    return {
+      balance: "unbalanced",
+      text: n > 0
+        ? `Does not balance: ${count(n)} unaccounted`
+        : `Does not balance: ${count(Math.abs(n))} more in the destination than were read`,
+    };
+  }
+  if (ledger.conservation_kind === "job_rollup") {
+    return { balance: "unbalanced", text: streamBalanceText(ledger) ?? "Does not balance: a stream ledger is open." };
+  }
+  return { balance: "open", text: "Not proven: the row ledger could not close this identity." };
+}
+
+function asTerms(identity: KindIdentity, equation: boolean): ReadTerm[] {
+  const sep = (op: ReadTerm["op"]) => (equation ? op : "·");
+  const show = (t: Side[number]): Omit<ReadTerm, "op"> => ({
+    label: t.label,
+    value: fmt(t.value) ?? "not counted",
+    tone: t.tone ?? "neutral",
+  });
+  const out: ReadTerm[] = [];
+  identity.lhs.forEach((t, i) => out.push({ ...show(t), ...(i > 0 ? { op: sep("+") } : {}) }));
+  identity.rhs.forEach((t, i) => out.push({
+    ...show(t),
+    op: i === 0 ? sep("=") : sep(identity.rhsOps?.[i - 1] ?? "+"),
+  }));
+  for (const t of identity.context ?? []) out.push({ ...show(t), op: "·" });
+  return out;
+}
+
+function termsText(terms: ReadTerm[]): string {
+  return terms
+    .map((t, i) => {
+      const body = `${i === 0 || t.op === "·" ? t.label : t.label.toLowerCase()} ${t.value}`;
+      if (i === 0) return body;
+      return t.op === "·" ? ` · ${body}` : ` ${t.op} ${body}`;
+    })
+    .join("");
+}
+
+/**
+ * The row identity the engine ledger reports for this run's conservation kind:
+ * read (+ retained / added by recipe) = landed + held + skipped (+ removed on
+ * read), or the keyed dest change = new keys − deletes. An equation is printed
+ * only when the ledger says it balances and the numbers shown add up; an
+ * unbalanced ledger says so with its unaccounted rows. When the destination was
+ * not counted, "landed" says so and the writer's own count is named as such.
  */
 export function runReadStatement(
   job: LedgerCarrier & { rejected_rows?: number | null; total_rows?: number | null },
@@ -176,58 +349,46 @@ export function runReadStatement(
     const held = Math.max(0, Number(job.rejected_rows ?? 0) || 0);
     const terms: ReadTerm[] = [
       { label: "Read", value: fmt(job.total_rows) ?? "not reported", tone: "neutral" },
-      { label: "Landed", value: "not counted", tone: "neutral" },
-      { label: "Held", value: held.toLocaleString("en-US"), tone: held > 0 ? "warning" : "neutral" },
+      { label: "Landed", value: "not counted", tone: "neutral", op: "·" },
+      { label: "Held", value: count(held), tone: heldTone(held), op: "·" },
     ];
     return {
       terms,
-      text: `${termsText(terms, false)} · the writer reported ${written}`,
+      text: `${termsText(terms)} · the writer reported ${written}`,
       measured: false,
       identity: false,
+      balance: "unmeasured",
+      unaccounted: null,
+      balanceText: null,
       writerReported: Number(job.records_processed),
     };
   }
   const measured = isDestMeasured(ledger);
-  const kind = ledger.conservation_kind;
-  // Keyed upserts and multi-stream roll-ups do not close as read = landed + held + skipped.
-  const closes = measured && !NON_IDENTITY_KINDS.has(kind);
-  const landedCount = kind === "mirror"
-    ? ledger.active_count
-    : kind === "append_delta" || kind === "keyed"
-      ? (ledger.dest_delta ?? ledger.rows_written)
-      : kind === "job_rollup"
-        ? (ledger.active_count ?? ledger.dest_count)
-        : ledger.dest_count;
+  const identity = identityFor(ledger, job);
+  if (!measured) {
+    // Never a landed figure from the writer: the destination count is named as missing.
+    for (const t of identity.rhs) if (t.label === "Landed" || t.label === "Active" || t.label === "Current" || t.label === "New keys") t.value = null;
+  }
+  const printed = measured && ledger.balanced && adds(identity);
+  const terms = asTerms(identity, printed);
   const writer = ledger.writer_ack ?? ledger.rows_written ?? (job.records_processed ?? null);
-  const held = ledger.rows_quarantined;
-  const removed = removedOnRead(ledger);
-  const terms: ReadTerm[] = [
-    { label: "Read", value: fmt(ledger.rows_read) ?? "not reported", tone: "neutral" },
-    {
-      label: "Landed",
-      value: measured ? (fmt(landedCount) ?? "not counted") : "not counted",
-      tone: "neutral",
-    },
-    { label: "Held", value: held.toLocaleString("en-US"), tone: held > 0 ? "warning" : "neutral" },
-    { label: "Skipped", value: ledger.rows_skipped.toLocaleString("en-US"), tone: "neutral" },
-  ];
-  if (removed > 0) terms.push({ label: "Removed on read", value: removed.toLocaleString("en-US"), tone: "neutral" });
   const writerText = !measured && fmt(writer) ? ` · the writer reported ${fmt(writer)}` : "";
+  // A multi-stream job whose streams do not all close is not "measured" as a
+  // whole, but its per-stream ledgers still say how many streams are open.
+  const perStreamJob = ledger.conservation_kind === "job_rollup" && Boolean(ledger.per_stream?.length);
+  const { balance, text: balanceText } = measured || perStreamJob
+    ? balanceSentence(ledger, printed)
+    : { balance: "unmeasured" as ReadBalance, text: null };
   return {
     terms,
-    text: `${termsText(terms, closes)}${writerText}`,
+    text: `${termsText(terms)}${writerText}${balanceText ? ` · ${balanceText}` : ""}`,
     measured,
-    identity: closes,
+    identity: printed,
+    balance,
+    unaccounted: isNum(ledger.unaccounted) ? ledger.unaccounted : null,
+    balanceText,
     writerReported: measured || writer == null ? null : Number(writer),
   };
-}
-
-const NON_IDENTITY_KINDS = new Set(["keyed", "job_rollup", "write_refused"]);
-
-function termsText(terms: ReadTerm[], identity: boolean): string {
-  if (!identity) return terms.map((t) => `${t.label} ${t.value}`).join(" · ");
-  const [first, ...rest] = terms;
-  return `${first.label} ${first.value} = ${rest.map((t) => `${t.label.toLowerCase()} ${t.value}`).join(" + ")}`;
 }
 
 /**

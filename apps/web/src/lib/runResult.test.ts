@@ -147,18 +147,174 @@ describe("run result: read = landed + held + skipped", () => {
     assert.equal(s?.text, "Read 100 = landed 90 + held 0 + skipped 0 + removed on read 10");
   });
 
-  it("lists keyed upserts without claiming they close as read = landed", () => {
+  it("prints the keyed identity the ledger closes on: dest change = new keys − deletes", () => {
     const s = runReadStatement({
-      row_accounting: { rows_read: 50, dest_delta: 20, inserts: 20, deletes: 0, dest_count: 900, rows_quarantined: 0, rows_skipped: 0, conservation_kind: "keyed", rows_written_source: "dest_count", balanced: true },
+      row_accounting: { rows_read: 50, dest_delta: 20, inserts: 25, deletes: 5, updates: 30, dest_count: 900, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "keyed", rows_written_source: "dest_readback", balanced: true },
     });
-    assert.equal(s?.identity, false);
-    assert.equal(s?.text, "Read 50 · Landed 20 · Held 0 · Skipped 0");
+    assert.equal(s?.identity, true);
+    assert.equal(s?.balance, "balanced");
+    assert.equal(s?.text, "Dest change 20 = new keys 25 − deletes 5 · Read 50 · Updated 30 · Held 0 · Skipped 0");
+    assert.deepEqual(s?.terms.map((t) => t.op ?? ""), ["", "=", "−", "·", "·", "·", "·"]);
   });
 
+  it("never prints a keyed equation the numbers do not satisfy", () => {
+    // Balanced on a term the payload does not carry (an earlier pass's inserts): no "=".
+    const s = runReadStatement({
+      row_accounting: { rows_read: 50, dest_delta: 22, inserts: 20, deletes: 0, dest_count: 900, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "keyed", rows_written_source: "dest_readback", balanced: true },
+    });
+    assert.equal(s?.identity, false);
+    assert.ok(s?.terms.every((t) => t.op === undefined || t.op === "·"));
+    assert.match(s?.balanceText ?? "", /balances on terms this summary does not show/);
+  });
+
+  it("says a keyed ledger is not proven when it could not close", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 50, dest_delta: 18, inserts: 20, deletes: 0, dest_count: 900, rows_quarantined: 2, rows_skipped: 0, unaccounted: null, conservation_kind: "keyed", rows_written_source: "dest_readback", balanced: false },
+    });
+    assert.equal(s?.identity, false);
+    assert.equal(s?.balance, "open");
+    assert.match(s?.text ?? "", /Not proven/);
+    assert.doesNotMatch(s?.text ?? "", /=/);
+  });
   it("falls back to the job's own counts when no ledger was stamped", () => {
     const s = runReadStatement({ status: "failed", records_processed: 88, total_rows: 150, rejected_rows: 0 });
     assert.equal(s?.measured, false);
     assert.equal(s?.writerReported, 88);
     assert.equal(runReadStatement({}), null);
+  });
+});
+
+describe("run result: the identity follows the ledger, never a false equation", () => {
+  it("shows an unbalanced overwrite as a list with its unaccounted rows", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 1000, dest_count: 990, rows_quarantined: 4, rows_skipped: 0, unaccounted: 6, conservation_kind: "overwrite", rows_written_source: "dest_readback", balanced: false },
+    });
+    assert.ok(s);
+    assert.equal(s.identity, false);
+    assert.equal(s.balance, "unbalanced");
+    assert.equal(s.unaccounted, 6);
+    assert.equal(s.balanceText, "Does not balance: 6 unaccounted");
+    assert.equal(s.text, "Read 1,000 · Landed 990 · Held 4 · Skipped 0 · Does not balance: 6 unaccounted");
+    assert.doesNotMatch(s.text, /=/);
+  });
+
+  it("names extra destination rows when the ledger over-accounts", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 100, dest_count: 103, rows_quarantined: 0, rows_skipped: 0, unaccounted: -3, conservation_kind: "overwrite", rows_written_source: "dest_readback", balanced: false },
+    });
+    assert.equal(s?.balanceText, "Does not balance: 3 more in the destination than were read");
+  });
+
+  it("does not print an equation when the ledger says balanced but the shown numbers do not add up", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 100, dest_count: 97, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "overwrite", rows_written_source: "dest_readback", balanced: true },
+    });
+    assert.equal(s?.identity, false);
+    assert.doesNotMatch(s?.text ?? "", /=/);
+  });
+
+  it("includes retained keys in a balanced mirror identity (read + retained = active + held + skipped)", () => {
+    // API: unaccounted = read + retained − (active + held + skipped + removed) = 100 + 3 − 103 = 0.
+    const s = runReadStatement({
+      row_accounting: { rows_read: 100, active_count: 101, dest_count: 120, rows_quarantined: 2, rows_skipped: 0, unaccounted: 0, conservation_kind: "mirror", rows_written_source: "dest_active_readback", balanced: true },
+    });
+    assert.ok(s);
+    assert.equal(s.identity, true);
+    assert.equal(s.text, "Read 100 + retained 3 = active 101 + held 2 + skipped 0");
+    assert.deepEqual(s.terms.map((t) => t.op ?? ""), ["", "+", "=", "+", "+"]);
+  });
+
+  it("keeps the retained term in an unbalanced mirror and shows what is unaccounted", () => {
+    // retained 3, 4 rows lost: unaccounted = 100 + 3 − (97 + 2 + 0) = 4.
+    const s = runReadStatement({
+      row_accounting: { rows_read: 100, active_count: 97, rows_quarantined: 2, rows_skipped: 0, unaccounted: 4, conservation_kind: "mirror", rows_written_source: "dest_active_readback", balanced: false },
+    });
+    assert.equal(s?.identity, false);
+    assert.equal(s?.text, "Read 100 · Retained 3 · Active 97 · Held 2 · Skipped 0 · Does not balance: 4 unaccounted");
+  });
+
+  it("prints a mirror without retained rows as read = active + held + skipped", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 10, active_count: 10, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "mirror", rows_written_source: "dest_active_readback", balanced: true },
+    });
+    assert.equal(s?.text, "Read 10 = active 10 + held 0 + skipped 0");
+  });
+
+  it("includes retained keys in an SCD2 current-row identity", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 50, rows_written: 55, dest_count: 55, current_count: 55, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "scd2", rows_written_source: "current_readback", balanced: true },
+    });
+    assert.equal(s?.identity, true);
+    assert.equal(s?.text, "Read 50 + retained 5 = current 55 + held 0 + skipped 0");
+  });
+
+  it("adds the recipe's expanded rows to the read side", () => {
+    const s = runReadStatement({
+      row_accounting: { rows_read: 10, rows_expanded: 5, dest_count: 15, rows_quarantined: 0, rows_skipped: 0, unaccounted: 0, conservation_kind: "overwrite", rows_written_source: "dest_readback", balanced: true },
+    });
+    assert.equal(s?.text, "Read 10 + added by recipe 5 = landed 15 + held 0 + skipped 0");
+  });
+
+  it("closes a summable multi-stream job on the summed counts", () => {
+    const s = runReadStatement({
+      row_accounting: {
+        rows_read: 300, rows_written: 295, dest_count: 295, rows_quarantined: 5, rows_skipped: 0, unaccounted: 0,
+        conservation_kind: "job_rollup", rows_written_source: "dest_readback", balanced: true, summable: true, stream_count: 2, measured_streams: 2,
+        per_stream: [
+          { stream: "a", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 200, rows_read: 200 },
+          { stream: "b", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 95, rows_read: 100 },
+        ],
+      },
+    });
+    assert.equal(s?.identity, true);
+    assert.equal(s?.text, "Read 300 = landed 295 + held 5 + skipped 0");
+  });
+
+  it("does not sum a mixed multi-stream job and says each stream balances", () => {
+    const s = runReadStatement({
+      row_accounting: {
+        rows_read: null, rows_written: null, rows_quarantined: 0, rows_skipped: 0, unaccounted: null,
+        conservation_kind: "job_rollup", rows_written_source: "per_stream", balanced: true, summable: false, stream_count: 2, measured_streams: 2,
+        per_stream: [
+          { stream: "a", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 200, rows_read: 200 },
+          { stream: "b", measured: true, balanced: true, conservation_kind: "keyed", dest_count: 95, rows_read: 100 },
+        ],
+      },
+    });
+    assert.equal(s?.identity, false);
+    assert.equal(s?.balance, "balanced");
+    assert.match(s?.balanceText ?? "", /Every one of the 2 streams balances/);
+    assert.doesNotMatch(s?.text ?? "", /=/);
+  });
+
+  it("says how many streams of a multi-stream job do not close", () => {
+    const s = runReadStatement({
+      row_accounting: {
+        rows_read: 300, rows_written: 290, dest_count: 290, rows_quarantined: 5, rows_skipped: 0, unaccounted: 5,
+        conservation_kind: "job_rollup", rows_written_source: "dest_readback", balanced: false, summable: true, stream_count: 3, measured_streams: 3,
+        per_stream: [
+          { stream: "a", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 100, rows_read: 100 },
+          { stream: "b", measured: true, balanced: false, conservation_kind: "overwrite", dest_count: 90, rows_read: 100 },
+          { stream: "c", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 100, rows_read: 100 },
+        ],
+      },
+    });
+    assert.equal(s?.identity, false);
+    assert.equal(s?.balance, "unbalanced");
+    assert.equal(s?.balanceText, "Does not balance: 5 unaccounted");
+  });
+
+  it("reports an open multi-stream job by its streams when no total is reported", () => {
+    const s = runReadStatement({
+      row_accounting: {
+        rows_read: null, rows_quarantined: 0, rows_skipped: 0, unaccounted: null,
+        conservation_kind: "job_rollup", rows_written_source: "per_stream", balanced: false, summable: false, stream_count: 2, measured_streams: 2,
+        per_stream: [
+          { stream: "a", measured: true, balanced: false, conservation_kind: "overwrite", dest_count: 90, rows_read: 100 },
+          { stream: "b", measured: true, balanced: true, conservation_kind: "keyed", dest_count: 95, rows_read: 100 },
+        ],
+      },
+    });
+    assert.equal(s?.balanceText, "Does not balance: 1 of 2 streams do not close.");
   });
 });

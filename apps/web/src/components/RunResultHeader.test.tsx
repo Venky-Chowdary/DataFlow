@@ -89,6 +89,30 @@ describe("Run result: one verdict, no contradictions", () => {
     assert.match(html, /Read 1,200 = landed 1,166 \+ held 34 \+ skipped 0/);
   });
 
+  it("an unbalanced ledger never prints an equation: it lists the terms and names the unaccounted rows", () => {
+    const html = view(job({
+      row_accounting: {
+        rows_read: 1200, rows_written: 1190, dest_count: 1190, rows_quarantined: 4, rows_skipped: 0, unaccounted: 6,
+        conservation_kind: "overwrite", rows_written_source: "dest_readback", balanced: false,
+      },
+    }));
+    assert.match(html, /Read 1,200 · Landed 1,190 · Held 4 · Skipped 0 · Does not balance: 6 unaccounted/);
+    assert.match(html, /class="df2-run-chip is-danger"[^>]*>Does not balance: 6 unaccounted</);
+    assert.doesNotMatch(html, /<span class="df2-run-op">=<\/span>/);
+  });
+
+  it("a mirror that kept retained keys prints read + retained = active + held + skipped", () => {
+    const html = view(job({
+      row_accounting: {
+        rows_read: 100, active_count: 101, dest_count: 120, rows_quarantined: 2, rows_skipped: 0, unaccounted: 0,
+        conservation_kind: "mirror", rows_written_source: "dest_active_readback", balanced: true,
+      },
+    }));
+    assert.match(html, /Read 100 \+ retained 3 = active 101 \+ held 2 \+ skipped 0/);
+    const ops = [...html.matchAll(/<span class="df2-run-op">([^<]*)<\/span>/g)].map((m) => m[1]);
+    assert.deepEqual(ops, ["+", "=", "+", "+"]);
+  });
+
   it("a failed run says verification never ran and keeps recovery primary", () => {
     const html = view(job({ status: "failed", error: "Destination refused the write", records_processed: 88 }));
     assert.match(html, /Transfer failed/);
