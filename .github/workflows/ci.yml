@@ -888,6 +888,102 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # Parity at Scale CE matrix (design §5.3): every CE1 rendering per engine and
+  # kind against the Python reference, and every first-wave pair copied by the
+  # real writer and found equal with exact faults, on live PostgreSQL 16,
+  # MySQL 8, MariaDB 11 (its own leg, port 3307) and SQL Server 2022. Also the
+  # writer/Gate-8 agreement tests the matrix found (instant narrowing per
+  # engine, decimal contract classes). Any skip fails the job. The passing
+  # cases become apps/api/data/parity_ce_certification.json (printed between
+  # PARITY_CE_CERTIFICATION markers and uploaded). Not in the required gate.
+  parity-ce-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_PII_HASH_KEY: test-pii-key
+      DATAFLOW_ALLOW_STUB_WRITES: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_PG_TEST_DSN: postgresql://dataflow:dataflow@127.0.0.1:5432/dataflow
+      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MYSQL_PORT: "3306"
+      DATAFLOW_TEST_MYSQL_DB: dataflow
+      DATAFLOW_TEST_MYSQL_USER: dataflow
+      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+      DATAFLOW_TEST_MARIADB_HOST: 127.0.0.1
+      DATAFLOW_TEST_MARIADB_PORT: "3307"
+      DATAFLOW_TEST_MARIADB_DB: dataflow
+      DATAFLOW_TEST_MARIADB_USER: dataflow
+      DATAFLOW_TEST_MARIADB_PASSWORD: dataflow
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
+      DATAFLOW_TEST_MSSQL_USER: sa
+      DATAFLOW_PARITY_CE_REQUIRE: postgresql,mysql,mariadb,sqlserver
+      DATAFLOW_PARITY_CE_LIVE_EXAMPLES: "100"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate a per-run SQL Server SA password (masked)
+        run: |
+          pw="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${pw}"
+          {
+            echo "MSSQL_SA_PASSWORD=${pw}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${pw}"
+          } >> "$GITHUB_ENV"
+
+      - name: Start PostgreSQL, MySQL 8, MariaDB 11 and SQL Server 2022
+        run: bash .github/scripts/start_ci_databases.sh postgres mysql mariadb sqlserver
+
+      - name: Set up Python
+        if: ${{ !cancelled() }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
+          python -c "import pymssql, pymysql, psycopg2"
+
+      - name: CE matrix and writer/Gate-8 agreement on every engine
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit" "$RUNNER_TEMP/parity-ce"
+          DATAFLOW_PARITY_CE_RECORD="$RUNNER_TEMP/parity-ce/record.jsonl" \
+          python -m pytest tests/test_parity_ce_matrix.py tests/test_carrier_instant_engine_rounding.py \
+            tests/test_writer_contract_decimal_classes_live.py \
+            -v --tb=short -rs --timeout=1800 --junitxml="$RUNNER_TEMP/live-junit/parity-ce-matrix.xml"
+
+      - name: No CE matrix test may skip
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job parity-ce-matrix --junit "$RUNNER_TEMP/live-junit/parity-ce-matrix.xml" --out "$RUNNER_TEMP/live-engine/parity-ce-matrix.json"
+
+      - name: Generate the certification file
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/gen_parity_ce_certification.py --record "$RUNNER_TEMP/parity-ce/record.jsonl" \
+            --run-id "${{ github.run_id }}" --out "$RUNNER_TEMP/parity-ce/parity_ce_certification.json" --print
+
+      - name: Upload the certification
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-ce-matrix
+          path: |
+            ${{ runner.temp }}/parity-ce/
+            ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
   # Parity at Scale (experimental, behind DATAWRAP_PARITY_SCALE): the CE1
   # soundness properties at 2,000 examples, the SQLite driver, the live
   # PostgreSQL rendering + fault-injection tests and a 1M-row benchmark that

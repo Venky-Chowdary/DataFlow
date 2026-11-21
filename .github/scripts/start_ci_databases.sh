@@ -30,6 +30,8 @@ AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
 BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
 REDIS_IMAGE="${REDIS_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}"
 MSSQL_IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
+# MariaDB 11 LTS, its own leg (never counted as `mysql`): port 3307.
+MARIADB_IMAGE="${MARIADB_IMAGE:-public.ecr.aws/docker/library/mariadb:11.4}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -93,6 +95,25 @@ start_mysql() {
     docker cp dataflow-ci-mysql:/var/lib/mysql/ca.pem "$ca"
     echo "DATAFLOW_TEST_MYSQL_CA=${ca}" >> "$GITHUB_ENV"
   fi
+}
+
+start_mariadb() {
+  MARIADB_IMAGE=$(pull_image "$MARIADB_IMAGE" "docker.io/library/mariadb:11.4")
+  docker rm -f dataflow-ci-mariadb >/dev/null 2>&1 || true
+  docker run -d --name dataflow-ci-mariadb \
+    -e MARIADB_ROOT_PASSWORD=dataflow \
+    -e MARIADB_DATABASE=dataflow \
+    -e MARIADB_USER=dataflow \
+    -e MARIADB_PASSWORD=dataflow \
+    -p 3307:3306 \
+    "$MARIADB_IMAGE"
+  wait_for "MariaDB" 60 2 mariadb_serving \
+    || { docker logs dataflow-ci-mariadb || true; exit 1; }
+}
+
+mariadb_serving() {
+  docker exec -e MYSQL_PWD=dataflow dataflow-ci-mariadb \
+    mariadb -h 127.0.0.1 -u dataflow -D dataflow -Nse "SELECT 1" >/dev/null 2>&1
 }
 
 start_mongo() {
@@ -324,6 +345,7 @@ for svc in "$@"; do
     postgres) start_postgres ;;
     postgres-cdc) start_postgres_cdc ;;
     mysql) start_mysql ;;
+    mariadb) start_mariadb ;;
     mongo) start_mongo ;;
     gcs) start_gcs ;;
     adls) start_adls ;;
