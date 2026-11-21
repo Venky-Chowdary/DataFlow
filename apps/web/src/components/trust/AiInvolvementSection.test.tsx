@@ -3,7 +3,8 @@
  * what a person decided and which check confirmed it; only a confirming check is green.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
+import { JSDOM } from "jsdom";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AiInvolvementView, aiHeadline } from "./AiInvolvementSection.js";
@@ -57,9 +58,9 @@ describe("AI involvement section", () => {
 
   it("shows origin, decision and check per row", () => {
     const t = text(renderToStaticMarkup(<AiInvolvementView ledger={ledger} />));
-    assert.match(t, /Model suggestion given → first_name anthropic · claude-test Not adopted · ana@example\.com Mapping check: supported/);
-    assert.match(t, /Mapping check given → last_name Deterministic Not reviewed Mapping check: flagged/);
-    assert.match(t, /login → username Deterministic Accepted · ana@example\.com Not checked/);
+    assert.match(t, /Model suggestion given → first_name Mapping check: supported Proposed by anthropic · claude-test · Not adopted · ana@example\.com/);
+    assert.match(t, /Mapping check given → last_name Mapping check: flagged Proposed by the Datawrap mapper · Not reviewed/);
+    assert.match(t, /login → username Not checked Proposed by the Datawrap mapper · Accepted · ana@example\.com/);
     assert.match(t, /Ledger SHA-256 d{64}/);
   });
 
@@ -74,5 +75,30 @@ describe("AI involvement section", () => {
       /No AI proposals or model calls are recorded for this job/);
     assert.match(text(renderToStaticMarkup(<AiInvolvementView ledger={{ ...ledger, status: "unavailable", reason: "The AI decisions ledger could not be built for this pack.", entries: [] }} />)),
       /could not be built/);
+  });
+});
+
+describe("AI decisions client", () => {
+  let dom: JSDOM;
+  before(() => {
+    dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+    Object.assign(globalThis, { window: dom.window, document: dom.window.document,
+      localStorage: dom.window.localStorage, sessionStorage: dom.window.sessionStorage });
+  });
+  after(() => dom.window.close());
+
+  it("treats a body that is not a ledger as an error, never as 'no AI involved'", async () => {
+    const { fetchAiDecisions } = await import("../../lib/aiDecisions.js");
+    const { fetchJobMappingWitness } = await import("../../lib/mappingWitness.js");
+    const saved = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ verdict: "proven" }), { status: 200 })) as typeof fetch;
+    try {
+      await assert.rejects(fetchAiDecisions("job-1"), /could not be read/);
+      assert.equal(await fetchJobMappingWitness("job-1"), null);
+      globalThis.fetch = (async () => new Response(JSON.stringify({ witness: { report: {} } }), { status: 200 })) as typeof fetch;
+      await assert.rejects(fetchJobMappingWitness("job-1"), /could not be read/);
+    } finally {
+      globalThis.fetch = saved;
+    }
   });
 });

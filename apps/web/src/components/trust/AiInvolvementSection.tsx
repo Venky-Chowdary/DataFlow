@@ -33,35 +33,20 @@ export function AiInvolvementView({ ledger }: { ledger: AiDecisionLedger }) {
   return (
     <>
       <p className="df2-parity-muted">{aiHeadline(ledger)}. Sealed into the signed report.</p>
-      <div className="df2-trust-ai-table-wrap">
-        <table className="df2-trust-ai-table">
-          <thead>
-            <tr>
-              <th scope="col">What</th>
-              <th scope="col">Proposed by</th>
-              <th scope="col">Decision</th>
-              <th scope="col">Checked by</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ledger.entries.map((e) => (
-              <tr key={e.id}>
-                <td>
-                  <span className="df2-trust-ai-kind">{KIND_LABEL[e.kind] ?? e.kind}</span>{" "}
-                  <span className="df2-trust-ai-subject">{e.subject}</span>
-                </td>
-                <td>{originLabel(e.origin)}</td>
-                <td>{decisionLabel(e)}</td>
-                <td>
-                  <span className={badgeClass(checkTone(e))} title={e.verification.detail || undefined}>
-                    {checkLabel(e)}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <ul className="df2-trust-ai-list" aria-label="AI decisions">
+        {ledger.entries.map((e) => (
+          <li key={e.id} className="df2-trust-ai-item">
+            <span className="df2-trust-ai-kind">{KIND_LABEL[e.kind] ?? e.kind}</span>
+            <span className="df2-trust-ai-subject">{e.subject}</span>
+            <span className={badgeClass(checkTone(e))} title={e.verification.detail || undefined}>
+              {checkLabel(e)}
+            </span>
+            <span className="df2-trust-ai-detail">
+              Proposed by {originLabel(e.origin)} · {decisionLabel(e)}
+            </span>
+          </li>
+        ))}
+      </ul>
       {ledger.ledger_sha256 && (
         <p className="df2-parity-muted df2-trust-ai-digest">Ledger SHA-256 {ledger.ledger_sha256}</p>
       )}

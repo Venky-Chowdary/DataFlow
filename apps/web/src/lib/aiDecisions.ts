@@ -68,10 +68,19 @@ const CHECK_LABEL: Record<string, string> = {
   none: "Not checked",
 };
 
+const ENGINE_LABEL: Record<string, string> = {
+  semantic_mapper: "the Datawrap mapper",
+  parity_fixes: "Parity Studio",
+  parity_template: "a template",
+};
+
+/** Who proposed it: the provider and model, or the deterministic engine by its product name. */
 export function originLabel(origin: AiOrigin): string {
-  return origin.type === "model"
-    ? `${origin.provider}${origin.model && origin.model !== "unrecorded" ? ` · ${origin.model}` : ""}`
-    : "Deterministic";
+  if (origin.type === "model") {
+    return `${origin.provider}${origin.model && origin.model !== "unrecorded" ? ` · ${origin.model}` : ""}`;
+  }
+  if (origin.engine.startsWith("mapping_witness")) return "the mapping check";
+  return ENGINE_LABEL[origin.engine] ?? "Datawrap (deterministic)";
 }
 
 export function decisionLabel(entry: AiDecisionEntry): string {
@@ -98,5 +107,8 @@ export function checkTone(entry: AiDecisionEntry): AiTone {
 export async function fetchAiDecisions(jobId: string): Promise<AiDecisionLedger> {
   const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/ai-decisions`);
   if (!res.ok) throw new Error(await parseApiError(res, "AI decisions could not be loaded"));
-  return res.json();
+  const body = (await res.json()) as Partial<AiDecisionLedger> | null;
+  // A body that is not a ledger is an error, never an empty ledger ("no AI involved").
+  if (!body || !Array.isArray(body.entries)) throw new Error("AI decisions could not be read");
+  return body as AiDecisionLedger;
 }

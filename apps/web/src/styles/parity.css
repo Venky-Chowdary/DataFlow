@@ -984,32 +984,6 @@
   outline-offset: 2px;
 }
 
-.df2-trust-ai-table-wrap {
-  max-width: 100%;
-  overflow-x: auto;
-}
-
-.df2-trust-ai-table {
-  width: 100%;
-  margin-top: var(--df-space-2);
-  border-collapse: collapse;
-  font-size: var(--df-fs-sm);
-}
-
-.df2-trust-ai-table th,
-.df2-trust-ai-table td {
-  padding: var(--df-space-1) var(--df-space-2);
-  border-bottom: 1px solid var(--df-border);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-.df2-trust-ai-table th {
-  color: var(--df-text-tertiary);
-  font-weight: 600;
-}
-
 .df2-trust-ai-kind {
   color: var(--df-text-tertiary);
   font-size: var(--df-fs-xs);
@@ -1020,4 +994,8 @@
   font-family: var(--df-font-mono);
   font-size: var(--df-fs-xs);
   overflow-wrap: anywhere;
+}
+
+.df2-trust-ai-all {
+  margin-top: var(--df-space-2);
 }

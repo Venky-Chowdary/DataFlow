@@ -79,30 +79,17 @@ export function MappingEvidenceView({ record }: { record: WitnessRecord | null }
       )}
       <details className="df2-trust-ai-details">
         <summary>Every mapped column</summary>
-        <div className="df2-trust-ai-table-wrap">
-        <table className="df2-trust-ai-table">
-          <thead>
-            <tr>
-              <th scope="col">Column</th>
-              <th scope="col">Result</th>
-              <th scope="col">Why</th>
-            </tr>
-          </thead>
-          <tbody>
-            {record.report.pairs.map((p) => (
-              <tr key={p.source}>
-                <td>
-                  {p.source} → {p.target}
-                </td>
-                <td>
-                  <span className={badgeClass(TONE[p.status])}>{STATUS_LABEL[p.status]}</span>
-                </td>
-                <td>{p.flag?.reason ?? p.reason}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
+        <ul className="df2-trust-ai-list df2-trust-ai-all" aria-label="Every mapped column">
+          {record.report.pairs.map((p) => (
+            <li key={p.source} className="df2-trust-ai-item">
+              <span className="df2-trust-ai-subject">
+                {p.source} → {p.target}
+              </span>
+              <span className={badgeClass(TONE[p.status])}>{STATUS_LABEL[p.status]}</span>
+              <span className="df2-trust-ai-detail">{p.flag?.reason ?? p.reason}</span>
+            </li>
+          ))}
+        </ul>
       </details>
     </>
   );

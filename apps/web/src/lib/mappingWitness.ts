@@ -120,7 +120,10 @@ export async function reviewWitnessFlag(body: {
 export async function fetchJobMappingWitness(jobId: string): Promise<WitnessRecord | null> {
   const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/mapping-witness`);
   if (!res.ok) throw new Error(await parseApiError(res, "Mapping evidence could not be loaded"));
-  return (await res.json()).witness ?? null;
+  const body = (await res.json()) as { witness?: WitnessRecord | null } | null;
+  const witness = body?.witness ?? null;
+  if (witness && !Array.isArray(witness.report?.pairs)) throw new Error("Mapping evidence could not be read");
+  return witness;
 }
 
 /** Flagged pairs by lower-cased source name. */
