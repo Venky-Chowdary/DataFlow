@@ -220,8 +220,11 @@ def test_live_check_violations_are_isolated_by_splitting(dest, monkeypatch):
             cur.execute(f'DROP TABLE IF EXISTS "{src}"')
             if dest == "postgresql":
                 cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+            # The quarantine side table the run's held rows went to.
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}_df_quarantine"')
         pconn.close()
         if mconn is not None:
             with mconn.cursor() as cur:
                 cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+                cur.execute(f"DROP TABLE IF EXISTS `{dst}_df_quarantine`")
             mconn.close()

@@ -127,7 +127,7 @@ def expected_row(g: int) -> tuple:
         None if g % 17 == 0 else (g * 7919) % 100000 - 50000,
         None if g % 13 == 0 else decimal.Decimal((g * 104729) % 100000000).scaleb(-4),
         None if g % 19 == 0 else g / 8.0,
-        None if g % 23 == 0 else _dt.datetime(2020, 1, 1) + _dt.timedelta(seconds=(g * 37) % 157680000),
+        None if g % 23 == 0 else _dt.datetime(2020, 1, 1) + _dt.timedelta(seconds=(g * 37) % 157680000),  # noqa: DTZ001 - TIMESTAMP without zone
         None if g % 29 == 0 else _dt.date(2000, 1, 1) + _dt.timedelta(days=g % 9000),
         None if g % 11 == 0 else g % 2 == 0,
         f"label-{g}",

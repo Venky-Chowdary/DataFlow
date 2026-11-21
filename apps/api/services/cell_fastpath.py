@@ -750,8 +750,8 @@ _PROBES: dict[str, tuple[Any, ...]] = {
     "decimal": (Decimal("0"), Decimal("1"), Decimal("-1.5"), Decimal("20.9458"), Decimal("100.00"),
                 Decimal("-0.0001"), 7, "0", "12.5", "-3.25", "1000"),
     "double": (0.125, -2.5, 1e-7, 123456.789, 1.0, 3, "0.375", "-1.25", "1e-07"),
-    "timestamp": (datetime(2020, 1, 1, 0, 0, 37), datetime(1999, 12, 31, 23, 59, 59),
-                  datetime(2024, 2, 29, 12, 0, 0, 500000), "2020-01-01T00:01:14",
+    "timestamp": (datetime(2020, 1, 1, 0, 0, 37), datetime(1999, 12, 31, 23, 59, 59),  # noqa: DTZ001
+                  datetime(2024, 2, 29, 12, 0, 0, 500000), "2020-01-01T00:01:14",  # noqa: DTZ001 - naive probes
                   "2024-02-29T23:59:59"),
     "date": (date(2000, 1, 2), date(2024, 2, 29), "2000-01-02", "2024-12-31"),
     "bool": (True, False, 0, 1, "true", "false", "1", "0"),
