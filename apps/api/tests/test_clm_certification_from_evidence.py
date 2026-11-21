@@ -152,3 +152,32 @@ def test_role_wording_is_generated_from_the_picker_flags(evidence) -> None:
             assert not row.get("source_ready"), row["id"]
         if "source-only" in text or "source only" in text:
             assert not row.get("dest_ready"), row["id"]
+
+
+def test_an_emulator_only_proof_is_never_labelled_certified(evidence) -> None:
+    """P0-4: Snowflake and BigQuery are proven on emulators (fakesnow, goccy).
+
+    The tile keeps the certified tier the schedule gate reads, but every label
+    a user or buyer sees names the emulator; a real engine's label does not.
+    """
+    doc = _doc("snowflake", "bigquery", "postgresql")
+    for engine in ("snowflake", "bigquery"):
+        doc["engines"][engine]["emulated"] = True
+    evidence(doc)
+    for cid in ("snowflake", "bigquery"):
+        row = _row(cid)
+        assert row["certification_tier"] == "certified"
+        assert row["proof_scope"] == "emulator"
+        assert row["ci_evidence"]["emulated"] is True
+        assert "emulator" in row["capability_label"]
+        assert "certified" not in row["capability_label"].lower()
+    pg = _row("postgresql")
+    assert pg["proof_scope"] == "live"
+    assert "emulator" not in pg["capability_label"]
+
+
+def test_an_unproven_tile_has_no_proof_scope(evidence) -> None:
+    evidence(_doc("postgresql"))
+    row = _row("snowflake")
+    assert row["certification_tier"] == "implemented"
+    assert row["proof_scope"] == ""

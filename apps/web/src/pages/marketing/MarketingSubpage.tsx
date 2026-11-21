@@ -604,7 +604,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <div className="lp-shell lp-cust3-metrics-row">
           {[
             ["Migrations", "Database cutover with identity, FK, and Unicode carry"],
-            ["Warehouses", "Snowflake, BigQuery, Apache Iceberg — MERGE + verified"],
+            ["Warehouses", "Snowflake, BigQuery, Apache Iceberg — MERGE + read-back (Snowflake and BigQuery proven on emulators, not real accounts)"],
             ["Lakes", "Amazon S3, ADLS, Google Cloud Storage — exact decimals"],
             ["CDC", "Snapshot, stream from the database log, resume"],
           ].map(([title, body], i) => (

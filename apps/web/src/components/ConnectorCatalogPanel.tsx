@@ -13,7 +13,8 @@ import { CATEGORY_LABELS, catalogCategoryLabel } from "../lib/catalogCategories"
 const STATIC_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const STATUS_FILTERS = [
-  { id: "certified", label: "Certified" },
+  // Emulator-proven warehouses are in this tier too; their tile says so.
+  { id: "certified", label: "Proven in CI" },
   { id: "implemented", label: "Not yet proven" },
   { id: "live", label: "Transfer-ready" },
   { id: "source_only", label: "Source only" },
@@ -45,6 +46,10 @@ function statusBadge(item: CatalogConnector) {
   // proof is never green (CLM-7).
   if (tier === "implemented") {
     return { cls: "df2-badge-run", label: item.capability_label || "Implemented — not yet proven" };
+  }
+  if (item.transfer_ready && item.proof_scope === "emulator") {
+    // Proven against an emulator, not a real account: never the green badge.
+    return { cls: "df2-badge-run", label: item.capability_label || "Proven on an emulator only" };
   }
   if (item.transfer_ready) {
     return { cls: "df2-badge-live", label: item.capability_label || "Certified" };

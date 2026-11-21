@@ -698,7 +698,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Click New connection — Choose a connector dialog",
             pin: "Top-right → New connection",
-            body: "Click **New connection** (top-right). A modal dialog opens: **Choose a connector**.\n\nUse category chips (**Databases**, **Data Warehouses**, **Files & Formats**, …), search, and status filters (**Certified**, **Not yet proven**, **Transfer-ready**, **Source only**, **Test only**, **Planned**). Transfer-ready cards show badges such as **Full Transfer**.\n\nPick a driver — for example **PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV / TSV**, or a SQLAlchemy generic. Do not schedule **Planned** catalog entries in production.",
+            body: "Click **New connection** (top-right). A modal dialog opens: **Choose a connector**.\n\nUse category chips (**Databases**, **Data Warehouses**, **Files & Formats**, …), search, and status filters (**Proven in CI**, **Not yet proven**, **Transfer-ready**, **Source only**, **Test only**, **Planned**). Transfer-ready cards show badges such as **Full Transfer**.\n\nPick a driver — for example **PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV / TSV**, or a SQLAlchemy generic. Do not schedule **Planned** catalog entries in production.",
             figure: {
               src: WORKSPACE_SHOT.connectorsWizard,
               alt: "Choose a connector dialog with category chips, readiness filters, and connector cards",
@@ -749,6 +749,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         body: "Catalog tiles are not the same as production drivers. Each connector shows one of these readiness states. Only routes with transfer-ready evidence get the production badge — everything else stays labelled honestly.",
         steps: [
           "**Certified** — the CI jobs that prove this engine ran green with no skipped test; safe for production schedules after Test passed.",
+          "**Proven on an emulator only** — Snowflake and BigQuery: their CI jobs ran green against emulators (fakesnow, the BigQuery emulator), not a real cloud account. The tile says so; prove the route on your own account before relying on it.",
           "**Implemented — not yet proven** — the driver runs transfers, but no green CI run proves its engine yet; not offered for production schedules.",
           "**Source only** — readable; no transfer-ready write path.",
           "**Test only** — auth works; write path is not transfer-ready.",
@@ -758,7 +759,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "native",
         title: "Native drivers & SQLAlchemy",
-        body: "A connector is **Certified** only when the CI jobs that prove its engine ran green with no skipped test; an engine that runs but has no such run yet is labelled **Implemented — not yet proven** and is not offered for production schedules. The connector catalog shows each tile's tier. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. **Run unique-engine matrix** is the live src×dst cartesian (Postgres, MySQL, Mongo, SQL Server, Oracle, object stores, warehouses on emulators). Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
+        body: "A connector is **Certified** only when the CI jobs that prove its engine ran green with no skipped test against the real engine (Snowflake and BigQuery are proven on emulators only and labelled that way); an engine that runs but has no such run yet is labelled **Implemented — not yet proven** and is not offered for production schedules. The connector catalog shows each tile's tier. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. **Run unique-engine matrix** is the live src×dst cartesian (Postgres, MySQL, Mongo, SQL Server, Oracle, object stores, warehouses on emulators). Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
       },
     ],
   },

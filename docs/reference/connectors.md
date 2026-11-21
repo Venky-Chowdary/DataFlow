@@ -23,8 +23,11 @@ python docs/tools/gen_connector_matrix.py
 - **Certified means proven in CI.** A connector is Certified only when a CI
   job that proves its engine ran green with none of that engine's tests
   skipped. A connector that works but has no such run is "Implemented, not yet
-  proven". What the CI workflows are configured to start never counts. An
-  emulator run is marked as such; it is not the real cloud service.
+  proven". What the CI workflows are configured to start never counts.
+- **An emulator is not Certified.** Snowflake and BigQuery are proven in CI
+  against emulators (fakesnow and the goccy BigQuery emulator), not real cloud
+  accounts. Their tier reads "Proven on an emulator only, not on a real
+  account" here and in the product.
 - The CI evidence is the same file the product's public claims are generated
   from: `apps/api/data/connector_ci_evidence.json`. It names the CI run it came
   from (see the Counts table). A newer run changes this page only after that
@@ -76,7 +79,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `airtable` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `asana` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `bigcommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Proven on an emulator only, not on a real account | proven (against an emulator) |
 | `brevo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `calendly` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `clickup` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
@@ -126,7 +129,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `shopify` | yes | yes | needs cursor | no | no | no | - | no | Planned; not offered as transfer-ready | not proven: no CI job proves it |
 | `singer_tap` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `slack` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Proven on an emulator only, not on a real account | proven (against an emulator) |
 | `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Certified | proven |
 | `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Certified | proven |
 | `stripe` | yes | yes | needs cursor | no | no | no | - | no | Implemented, not yet proven; destination role not offered as transfer-ready | not proven: no CI job proves it |

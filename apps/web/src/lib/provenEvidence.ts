@@ -77,6 +77,26 @@ export const PROVEN_CDC_SOURCES: string[] = CONNECTOR_CLAIMS.cdc_sources
   .filter((s) => s.proven)
   .map((s) => s.name);
 
+/**
+ * Proven drivers whose only CI proof ran against an emulator (Snowflake on
+ * fakesnow, BigQuery on the goccy emulator). They are never presented as
+ * certified on a real account (P0-4).
+ */
+export const EMULATOR_PROVEN_NAMES: string[] = Array.from(
+  new Set(
+    CONNECTOR_CLAIMS.families.flatMap((f) =>
+      f.items.filter((i) => i.proven && i.emulated).map((i) => i.name),
+    ),
+  ),
+);
+
+/** "Snowflake and BigQuery are proven against emulators, not real cloud accounts." */
+export function emulatorScopeNote(names: string[] = EMULATOR_PROVEN_NAMES): string {
+  if (names.length === 0) return "";
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${list} ${names.length === 1 ? "is" : "are"} proven against ${names.length === 1 ? "an emulator" : "emulators"}, not real cloud accounts.`;
+}
+
 /** "N drivers proven in CI" — the one public driver count. */
 export function provenDriversPhrase(count: number = PROVEN_DRIVERS): string {
   return `${count} ${count === 1 ? "driver" : "drivers"} proven in CI`;
@@ -89,17 +109,24 @@ export function provenDriversPhrase(count: number = PROVEN_DRIVERS): string {
 export function catalogHonestyLead(
   provenCount: number = PROVEN_DRIVERS,
   pendingCount: number = PENDING_DRIVERS,
+  emulatorNames: string[] = EMULATOR_PROVEN_NAMES,
 ): string {
   // Not "each verifies the load": file exports and several destinations have no
   // independent read-back (CLM-6). The claim is the CI run, and only that.
   const proven = `${provenDriversPhrase(provenCount)}: each one's CI jobs ran green with no skipped test.`;
+  const scope = emulatorNames.length > 0 ? ` ${emulatorScopeNote(emulatorNames)}` : "";
   return pendingCount > 0
-    ? `${proven} ${pendingCount} more are implemented and running their CI proof.`
-    : proven;
+    ? `${proven}${scope} ${pendingCount} more are implemented and running their CI proof.`
+    : `${proven}${scope}`;
 }
 
 /** Public family badge, derived from which members CI proves. */
-export type CatalogFamilyBadge = "Proven in CI" | "Partly proven in CI" | "Implemented";
+export type CatalogFamilyBadge =
+  | "Proven in CI"
+  | "Partly proven in CI"
+  | "Proven in CI on emulators"
+  | "Partly proven in CI on emulators"
+  | "Implemented";
 
 /**
  * Internal operator ledger — not rendered on marketing pages.
@@ -169,7 +196,7 @@ const FAMILY_NOTES: Record<string, string> = {
   Databases:
     "Identity, foreign keys, CHECK constraints, and indexes carry on create-new, and CDC reads the database log where the engine offers one.",
   "Warehouses & lakehouse":
-    "Create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg connects to a REST catalog or a filesystem warehouse.",
+    "Create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg connects to a REST catalog or a filesystem warehouse. CI proves Snowflake and BigQuery against emulators, not real cloud accounts.",
   "Object storage":
     "S3-compatible endpoints, s3:// URLs and prefixes, with decimals landing exact and every row accounted for.",
   Files: "Typed reads and exports for the common file formats, through the same map and gates.",
@@ -182,9 +209,11 @@ const FAMILY_NOTES: Record<string, string> = {
     "Reverse-ETL into Salesforce and HubSpot, incremental Stripe reads on the created cursor, and REST sources with the same map, gates, and verification.",
 };
 
-function familyBadge(proven: number, total: number): CatalogFamilyBadge {
-  if (total > 0 && proven === total) return "Proven in CI";
-  if (proven > 0) return "Partly proven in CI";
+function familyBadge(proven: number, total: number, emulated = 0): CatalogFamilyBadge {
+  // A family proven only against emulators says so on its badge.
+  const onEmulators = proven > 0 && emulated === proven;
+  if (total > 0 && proven === total) return onEmulators ? "Proven in CI on emulators" : "Proven in CI";
+  if (proven > 0) return onEmulators ? "Partly proven in CI on emulators" : "Partly proven in CI";
   return "Implemented";
 }
 
@@ -199,12 +228,18 @@ export const MARKETING_STACK: ReadonlyArray<{
   badge: CatalogFamilyBadge;
   note: string;
 }> = CONNECTOR_CLAIMS.families.map((f) => {
-  const provenNames = f.items.filter((i) => i.proven).map((i) => i.name);
+  const provenNames = f.items
+    .filter((i) => i.proven)
+    .map((i) => (i.emulated ? `${i.name} (emulator)` : i.name));
   return {
     family: f.family,
     items: f.items.map((i) => i.name).join(", "),
     proven: provenNames.join(", "),
-    badge: familyBadge(provenNames.length, f.items.length),
+    badge: familyBadge(
+      provenNames.length,
+      f.items.length,
+      f.items.filter((i) => i.proven && i.emulated).length,
+    ),
     note: FAMILY_NOTES[f.family] ?? "",
   };
 });

@@ -40,6 +40,17 @@ SNAPSHOT = Path(__file__).resolve().parents[1] / "data" / "connector_ci_evidence
 CERTIFIED_TIER = "certified"
 IMPLEMENTED_TIER = "implemented"
 IMPLEMENTED_LABEL = "Implemented — not yet proven"
+# An engine whose only proof is a green run against an emulator (fakesnow,
+# the goccy BigQuery emulator) is never called "Certified" where a user or a
+# buyer reads it: no real cloud account has run it (P0-4).
+EMULATOR_SUFFIX = "proven on an emulator only"
+EMULATOR_TIER_LABEL = "Proven on an emulator — not on a real account"
+
+
+def emulator_label(label: str) -> str:
+    """``label`` with the emulator scope stated, e.g. ``Full transfer — proven on an emulator only``."""
+    base = (label or "").strip()
+    return f"{base} — {EMULATOR_SUFFIX}" if base else EMULATOR_TIER_LABEL
 
 #: In-process engines: the api-tests job runs them inside the test process.
 FILES_ENGINE = "files"
@@ -138,6 +149,16 @@ def proof_for(catalog_id: str, driver: str, *, alias: bool = False) -> dict[str,
 
 def driver_proven(driver: str) -> bool:
     return engine_proven(engine_for(driver))
+
+
+def engine_emulated(engine: str) -> bool:
+    """True when the engine's CI proof ran against an emulator, not the real service."""
+    record = (evidence_snapshot().get("engines") or {}).get(engine) or {}
+    return bool(engine) and bool(record.get("emulated"))
+
+
+def driver_emulated(driver: str) -> bool:
+    return engine_emulated(engine_for(driver))
 
 
 def proven_and_pending(drivers: list[str]) -> dict[str, list[str]]:
