@@ -54,19 +54,29 @@ not approved is to fail the job, never to continue silently.
 **Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
 cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is
 Oracle, Validate counts the empty strings in each source text column that will
-be `NOT NULL` there, over the source rows (bounded; the gate says when it saw
-only a preview). If there are none, nothing is shown. If there are some, the
-run is blocked and the gate names the column and the count:
+be `NOT NULL` there, the same way in Studio, over the API, in Pilot and at
+Execute. A SQL source counts them itself; otherwise Validate reads the rows the
+run will read (with its filter, incremental window and transform). If there
+are none, nothing is shown. If there are some, the run is blocked and the gate
+names the column and the count. If Validate could not count them exactly (only
+a preview could be read, the scan stopped, or the source could not be read), a
+new table's column is blocked too, and the gate says empty strings could not be
+ruled out:
 
 - **New table:** one option, "Create `<col>` as NULL-able; empty strings land
   as NULL". Approving it signs a risk contract (over MCP:
   `risk_acceptance: {"option": "oracle_empty_as_null", "columns": [...],
   "approved_by": ..., "reason": ...}`). Only that column loses `NOT NULL`. After
-  the write, Gate-8 lists those rows under `explained_changes` with the
-  contract's id, and the proof pack lists the contract.
+  the write, Gate-8 lists the rows this run wrote under `explained_changes`
+  with the contract's id, and the proof pack lists the contract. When the
+  run's rows cannot be named (an append without a key list), Gate-8 reports
+  "NULL cells in this column: N (table-wide)" and does not call them
+  explained. A contract applies only to the column pair, table and workspace
+  it was signed for.
 - **Existing table:** Datawrap never alters the column. Add a `DEFAULT` to it
   or map a transform that writes a non-empty value, then validate again.
-- **Key column:** cannot be made NULL-able; map a transform instead.
+- **Key column** (the run's key, or the destination's or source's primary
+  key): cannot be made NULL-able; map a transform instead.
 
 When a route's mapping confidence is below the mode's floor, review the
 mapping in the Map step and run Validate again. Nothing is written until that
