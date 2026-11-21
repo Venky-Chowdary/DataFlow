@@ -651,15 +651,27 @@ def test_d407_retry_of_own_create_is_not_dest_schema_drift():
     assert err is None, err
     assert art is not None
 
-    widened = {**live, "name": "varchar(80)"}
-    err_w, art_w = _gate(widened)
-    assert err_w and "drifted" in err_w.lower()
-    assert art_w is None
+    # The exact-DDL test is the D407 retry exception's own condition (review
+    # Q3): a widened or extra column does not qualify for it. What such a
+    # table gets is then the create-new dest-exists hold's answer, as before
+    # #435 (it judges the mapped shape, not the carriers).
+    from services.decision_kernel.execute_gate import _planned_create_still_holds
 
-    extra = {**live, "note": "int"}
-    err_x, art_x = _gate(extra)
-    assert err_x and "drifted" in err_x.lower()
-    assert art_x is None
+    def _exception_holds(types: dict[str, str]) -> bool:
+        return _planned_create_still_holds(
+            planned=planned, live_column_types=types, destination_table_exists=True,
+            mappings=maps, dest_column_names=list(types), source_column_names=["id", "name", "qty"],
+            column_nullability=None, column_defaults=None, identity_columns=None,
+            generated_columns=None, schema_policy="", dest_db="mysql",
+        )[0]
+
+    assert _exception_holds(live)
+    assert not _exception_holds({**live, "name": "varchar(80)"})
+    assert not _exception_holds({**live, "note": "int"})
+    for drifted in ({**live, "name": "varchar(80)"}, {**live, "note": "int"}):
+        hold, _ = _gate(drifted, plan_created_destination=False)
+        held, _ = _gate(drifted)
+        assert (hold is None) == (held is None), (drifted, hold, held)
 
     err_src, art_src = _gate(live, source_fingerprint="1122334455667788")
     assert err_src and "source schema" in err_src.lower()

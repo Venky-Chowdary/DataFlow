@@ -260,26 +260,62 @@ def _legacy_plan_holds(
     return True
 
 
+def _datawrap_owned_columns() -> frozenset[str]:
+    """Columns Datawrap itself adds to a table it writes (never a Map target)."""
+    from services.dest_require_primary_key import SURROGATE_KEY_COLUMN
+    from services.mirror_engine import SOFT_DELETE_AT_COLUMN, SOFT_DELETE_COLUMN
+    from services.scd2_engine import SCD2_COLUMNS
+    from services.shape_models import ROUTE_COLUMN
+
+    return frozenset(
+        c.lower() for c in (
+            SURROGATE_KEY_COLUMN, SOFT_DELETE_COLUMN, SOFT_DELETE_AT_COLUMN,
+            *SCD2_COLUMNS, ROUTE_COLUMN, "_df_lsn", "df_lsn",
+        )
+    )
+
+
+def _catalog_token(type_sql: str, dest_db: str) -> str:
+    """Planned or catalog spelling, folded the way introspection reports it.
+
+    ``catalog_read_back`` is the dialect's own canonicaliser (``timestamp with
+    time zone`` is ``TIMESTAMPTZ``, ``decimal(10, 2)`` is ``DECIMAL(10,2)``,
+    ``tinyint(1)`` is ``BOOLEAN``); widths and scales stay.
+    """
+    text = str(type_sql or "")
+    if dest_db:
+        from services.schema_introspect import catalog_read_back
+
+        text = catalog_read_back(dest_db, text) or text
+    return _ddl_compare_token(text)
+
+
 def planned_ddl_matches_live(
     planned: Mapping[str, str] | None,
     live: Mapping[str, str] | None,
+    *,
+    dest_db: str = "",
 ) -> bool:
     """True when the live table is exactly the DDL this plan would create.
 
     Same column set, same carrier. An added column or a widened VARCHAR is
-    drift. Empty on either side is not a match.
+    drift. A column Datawrap adds itself (the approved ``_dw_row_id``, mirror
+    ``_deleted`` / ``_deleted_at``, SCD2 history columns, ``_df_route``) is
+    not, unless the plan maps it. Empty on either side is not a match.
     """
     if not planned or not live:
         return False
     want = {
-        str(name).strip().lower(): _ddl_compare_token(typ)
+        str(name).strip().lower(): _catalog_token(typ, dest_db)
         for name, typ in planned.items()
         if str(name).strip()
     }
+    owned = _datawrap_owned_columns()
     have = {
-        str(name).strip().lower(): _ddl_compare_token(typ)
+        str(name).strip().lower(): _catalog_token(typ, dest_db)
         for name, typ in live.items()
-        if str(name).strip()
+        if str(name).strip() and (str(name).strip().lower() not in owned
+                                  or str(name).strip().lower() in want)
     }
     if not want or set(want) != set(have):
         return False
@@ -299,6 +335,7 @@ def _planned_create_still_holds(
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
     schema_policy: str,
+    dest_db: str = "",
 ) -> tuple[bool, str]:
     """(holds, shape_error). Shape error is a real contract break.
 
@@ -307,7 +344,7 @@ def _planned_create_still_holds(
     """
     if destination_table_exists is not True:
         return False, ""
-    if not planned_ddl_matches_live(planned, live_column_types):
+    if not planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db):
         return False, ""
     shape_err = dest_exists_shape_error(
         mappings=mappings,
@@ -607,14 +644,6 @@ def enforce_decision_artifact(
                     None,
                 )
             if dest_fp and supplied.dest_fingerprint != dest_fp:
-                if live_column_types and not planned_ddl_matches_live(
-                    dict(supplied.ddl.column_ddl or {}), live_column_types
-                ):
-                    return (
-                        "Decision Artifact dest schema drifted since Validate — "
-                        "re-run Validate before Execute.",
-                        None,
-                    )
                 if not supplied.dest_fingerprint:
                     holds, hold_err = _dest_exists_hold(supplied.content_hash, supplied)
                     if holds:
@@ -688,6 +717,7 @@ def enforce_decision_artifact(
                         identity_columns=identity_columns,
                         generated_columns=generated_columns,
                         schema_policy=schema_policy,
+                        dest_db=dest_db,
                     )
                     if shape_err:
                         return (shape_err, None)
