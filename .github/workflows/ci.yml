@@ -997,7 +997,12 @@ jobs:
   oracle-live:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
-    name: oracle-live
+    # TEMPORARY (flake measurement): three independent runs per push.
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3]
+    name: oracle-live (${{ matrix.attempt }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -1175,7 +1180,7 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job oracle-live --junit "$RUNNER_TEMP/live-junit/oracle-files.xml" --junit "$RUNNER_TEMP/live-junit/oracle-cells.xml" --junit "$RUNNER_TEMP/live-junit/oracle-deny.xml" --out "$RUNNER_TEMP/live-engine/oracle-live.json"
+          python scripts/check_live_skips.py --job oracle-live --junit "$RUNNER_TEMP/live-junit/oracle-files.xml" --junit "$RUNNER_TEMP/live-junit/oracle-cells.xml" --junit "$RUNNER_TEMP/live-junit/oracle-deny.xml" --label attempt=${{ matrix.attempt }} --out "$RUNNER_TEMP/live-engine/oracle-live-${{ matrix.attempt }}.json"
 
       - name: Oracle container log (tail)
         if: ${{ failure() }}
@@ -1185,7 +1190,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: oracle-live-junit
+          name: oracle-live-junit-${{ matrix.attempt }}
           path: ${{ runner.temp }}/live-junit/
           if-no-files-found: warn
 
@@ -1193,7 +1198,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: live-engine-oracle-live
+          name: live-engine-oracle-live-${{ matrix.attempt }}
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
@@ -1204,7 +1209,12 @@ jobs:
   kafka-live:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
-    name: kafka-live
+    # TEMPORARY (flake measurement): three independent runs per push.
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3]
+    name: kafka-live (${{ matrix.attempt }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -1301,7 +1311,7 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job kafka-live --junit "$RUNNER_TEMP/live-junit/kafka-files.xml" --junit "$RUNNER_TEMP/live-junit/kafka-cells.xml" --out "$RUNNER_TEMP/live-engine/kafka-live.json"
+          python scripts/check_live_skips.py --job kafka-live --junit "$RUNNER_TEMP/live-junit/kafka-files.xml" --junit "$RUNNER_TEMP/live-junit/kafka-cells.xml" --label attempt=${{ matrix.attempt }} --out "$RUNNER_TEMP/live-engine/kafka-live-${{ matrix.attempt }}.json"
 
       - name: Kafka broker log (tail)
         if: ${{ failure() }}
@@ -1311,7 +1321,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: kafka-live-junit
+          name: kafka-live-junit-${{ matrix.attempt }}
           path: ${{ runner.temp }}/live-junit/
           if-no-files-found: warn
 
@@ -1319,7 +1329,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: live-engine-kafka-live
+          name: live-engine-kafka-live-${{ matrix.attempt }}
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
