@@ -57,6 +57,7 @@ MAX_PER_SOURCE = 5
 MAX_RECORDS_PER_WORKSPACE = 300
 #: Evidence older than this at submit is not used.
 MAX_EVIDENCE_AGE = timedelta(hours=24)
+CLOCK_SKEW = timedelta(minutes=5)
 #: Columns per keyed read (the key is added), and reads per check.
 READ_BATCH_COLUMNS = 60
 MAX_READ_BATCHES = 4
@@ -427,7 +428,9 @@ def _fresh(at: Any, taken: datetime) -> bool:
         when = datetime.fromisoformat(str(at))
     except ValueError:
         return False
-    return taken - MAX_EVIDENCE_AGE <= when <= taken
+    # A check saved by another API node a moment "after" this submit is the same
+    # session's evidence: allow for clock skew between nodes, never for days.
+    return taken - MAX_EVIDENCE_AGE <= when <= taken + CLOCK_SKEW
 
 
 def build_snapshot(*, workspace_id: str, session: str, identity: str, source: str,

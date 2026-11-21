@@ -417,6 +417,24 @@ def test_evidence_from_another_file_or_too_old_is_not_checked(data_dir, calls):
     assert later["report"] is None
 
 
+def test_evidence_saved_by_a_node_with_a_slightly_fast_clock_still_counts(data_dir, calls):
+    """Two API nodes: the check was saved on one whose clock runs a little ahead of the submitting node."""
+    from datetime import datetime, timedelta, timezone
+
+    from services.mapping_witness_service import build_snapshot, destination_identity
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    saved = _witness_on_map(maps)[3]
+    assert saved
+    identity = destination_identity(_dest(), WS)
+    slow = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    assert build_snapshot(workspace_id=WS, session=SESSION, identity=identity, source=SOURCE, mappings=maps,
+                          taken_at=slow)["report"] is not None
+    days_before = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    assert build_snapshot(workspace_id=WS, session=SESSION, identity=identity, source=SOURCE, mappings=maps,
+                          taken_at=days_before)["report"] is None
+
+
 def test_fabricated_rows_in_another_session_do_not_clear_this_sessions_flag(data_dir, calls):
     from services.mapping_witness_service import destination_identity, mapping_digest, save_report
 
