@@ -41,25 +41,52 @@ describe("tableProgressRows", () => {
     assert.equal(rows[1].rows, null);
   });
 
-  it("Verify runs for every loaded table during reconcile, and is done once Gate-8 recorded", () => {
+  it("Verify runs for every loaded table during reconcile", () => {
     const loaded = { people: { status: "completed", rows: 6 }, orders: { status: "completed", rows: 3 }, items: { status: "completed", rows: 5 } };
     const verifying = tableProgressRows({ ...base, status: "running", phase: "reconcile", stream_progress: loaded }, { reconciling: true });
     assert.ok(verifying.every((r) => r.state === "verifying" && r.verify === "active"));
-    const finished = tableProgressRows({
-      ...base, status: "completed", reconciliation: { passed: true },
-      destination_summary: { streams: [{ name: "people", status: "completed", records_processed: 6 }, { name: "orders", status: "completed", records_processed: 3 }, { name: "items", status: "completed", records_processed: 5 }] },
-    });
-    assert.deepEqual(states(finished), ["people:checked:done/done/done:6", "orders:checked:done/done/done:3", "items:checked:done/done/done:5"]);
   });
 
-  it("after a failure, stages after the stop read Not run, never Done", () => {
+  // Review UI2 #1: Gate-8 compares the last table of a multi-table run only.
+  const streams = [{ name: "people", status: "completed", records_processed: 6 }, { name: "orders", status: "completed", records_processed: 3 }, { name: "items", status: "completed", records_processed: 5 }];
+  it("marks Verify done only on the table Gate-8 compared; the others read Not compared", () => {
+    const finished = tableProgressRows({ ...base, status: "completed", reconciliation: { passed: true, compared_stream: "items" }, destination_summary: { streams } });
+    assert.deepEqual(states(finished), ["people:loaded:done/done/not_compared:6", "orders:loaded:done/done/not_compared:3", "items:checked:done/done/done:5"]);
+    const older = tableProgressRows({ ...base, status: "completed", reconciliation: { passed: true }, destination_summary: { streams } });
+    assert.deepEqual(older.map((r) => r.verify), ["not_compared", "not_compared", "done"], "no compared_stream: the last table");
+  });
+
+  it("shows a recorded mismatch on the compared table, never all green", () => {
+    const rows = tableProgressRows({ ...base, status: "completed_with_warnings", reconciliation: { passed: false, compared_stream: "items" }, destination_summary: { streams } });
+    assert.deepEqual(states(rows).at(-1), "items:mismatch:done/done/failed:5");
+    assert.ok(rows.every((r) => r.state !== "checked"));
+  });
+
+  it("a resumed table shows the rows its earlier pass wrote", () => {
+    const resumed = tableProgressRows({ ...base, status: "completed", reconciliation: { passed: true, compared_stream: "items" },
+      destination_summary: { streams: [{ name: "people", status: "completed", records_processed: 0, rows_from_earlier_pass: 6 }, ...streams.slice(1)] } });
+    assert.equal(resumed[0].rows, 6);
+    assert.equal(resumed[0].rowsFromEarlierPass, true);
+  });
+
+  // Review UI2 #7: undo drops earlier tables' records; the stopped table is named.
+  it("blames the table the run stopped on, and shows rolled-back tables", () => {
+    const rows = tableProgressRows({ ...base, status: "failed", stopped_stream: "orders", undone_streams: ["people"], stream_progress: {} });
+    assert.deepEqual(states(rows), [
+      "people:rolled_back:done/undone/not_run:-",
+      "orders:failed:failed/failed/not_run:-",
+      "items:not_run:not_run/not_run/not_run:-",
+    ]);
+  });
+
+  it("after a failure with no stop record, stages after the stop read Not run, never Done", () => {
     const rows = tableProgressRows({ ...base, status: "failed", stream_progress: { people: { status: "completed", rows: 6 } } });
     assert.deepEqual(states(rows), [
       "people:loaded:done/done/not_run:6",
       "orders:failed:failed/failed/not_run:-",
       "items:not_run:not_run/not_run/not_run:-",
     ]);
-    const cancelled = tableProgressRows({ ...base, status: "cancelled", stream_progress: { people: { status: "completed", rows: 6 } } });
+    const cancelled = tableProgressRows({ ...base, status: "cancelled", stopped_stream: "orders", stream_progress: { people: { status: "completed", rows: 6 } } });
     assert.equal(cancelled[1].state, "stopped");
   });
 });

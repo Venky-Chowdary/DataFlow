@@ -242,6 +242,7 @@ def run_non_cdc_multi_stream_sequential(
         record_stream_completed,
         forget_stream_started,
         record_stream_started,
+        record_stream_stopped,
         skip_reason,
     )
 
@@ -530,6 +531,9 @@ def run_non_cdc_multi_stream_sequential(
                             str(getattr(destination, "format", "") or ""), destination, stream_name
                         ) or ""
                     ),
+                )
+                record_stream_stopped(
+                    str(job_id or ""), stream_name, list(getattr(exc, "multi_stream_undo", None) or [])
                 )
                 record_stream_health(
                     stream_health,

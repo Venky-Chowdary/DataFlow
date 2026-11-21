@@ -2103,6 +2103,8 @@ export function streamJobProgress(
         ? raw.stream_progress as JobProgress["stream_progress"]
         : undefined,
       stream_names: Array.isArray(raw.stream_names) ? raw.stream_names.map(String) : selectedStreamNames(raw.transfer_request),
+      stopped_stream: raw.stopped_stream ? String(raw.stopped_stream) : null,
+      undone_streams: Array.isArray(raw.undone_streams) ? raw.undone_streams.map(String) : null,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,

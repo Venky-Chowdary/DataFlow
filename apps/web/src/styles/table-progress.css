@@ -41,7 +41,10 @@
 }
 .df2-tp-stage[data-state="done"] .df2-tp-stage-bar { border-color: var(--df-success-text); background: var(--df-success-text); }
 .df2-tp-stage[data-state="failed"] .df2-tp-stage-bar { border-color: var(--df-danger-text); background: var(--df-danger-text); }
-.df2-tp-stage[data-state="not_run"] .df2-tp-stage-bar { border-style: dashed; background: transparent; }
+.df2-tp-stage[data-state="not_run"] .df2-tp-stage-bar,
+.df2-tp-stage[data-state="not_compared"] .df2-tp-stage-bar { border-style: dashed; background: transparent; }
+.df2-tp-stage[data-state="undone"] .df2-tp-stage-bar { border-color: var(--df-warning-text); background: transparent; }
+.df2-tp-row[data-state="mismatch"] .df2-tp-state { color: var(--df-danger-text); }
 .df2-tp-stage-label { color: var(--df-text-secondary); font-size: var(--df-fs-xs); }
 .df2-tp-rows { color: var(--df-text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
 .df2-tp-done-toggle {

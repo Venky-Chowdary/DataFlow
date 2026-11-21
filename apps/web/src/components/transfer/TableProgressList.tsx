@@ -26,7 +26,9 @@ const STATE_ICON: Record<TableState, IconName> = {
   verifying: "verify",
   loaded: "check",
   checked: "success",
+  mismatch: "verdict-unexplained",
   failed: "error",
+  rolled_back: "undo",
   stopped: "pause",
   not_run: "minus",
 };
@@ -60,7 +62,9 @@ function Row({ row }: { row: TableProgressRow }) {
       <span className="df2-tp-stages">
         {STAGES.map((s) => <Stage key={s.id} label={s.label} state={row[s.id]} />)}
       </span>
-      <span className="df2-tp-rows">{row.rows == null ? "" : `${plural(row.rows, "row")} written`}</span>
+      <span className="df2-tp-rows">
+        {row.rows == null ? "" : row.rowsFromEarlierPass ? `${plural(row.rows, "row")} from an earlier pass` : `${plural(row.rows, "row")} written`}
+      </span>
     </li>
   );
 }

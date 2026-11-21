@@ -663,6 +663,10 @@ export interface StreamProgressEntry {
 export interface JobProgress extends TransferJob {
   /** Per-table progress of a multi-table run: the table loading now and the finished ones. */
   stream_progress?: Record<string, StreamProgressEntry>;
+  /** The table a multi-table pass stopped on (failed or cancelled there). */
+  stopped_stream?: string | null;
+  /** Tables whose rows that stop rolled back. */
+  undone_streams?: string[] | null;
 
   /** True when the API recorded the count as unknown (null), e.g. a cancel it could not attribute. */
   records_processed_unknown?: boolean;

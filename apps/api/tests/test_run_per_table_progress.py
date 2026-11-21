@@ -71,3 +71,39 @@ def test_a_table_that_stops_leaves_only_finished_tables_recorded(monkeypatch):
     resume_mod.forget_stream_started(job_id, "orders")
     resume_mod.forget_stream_started(job_id, "people")  # a finished table is never dropped this way
     assert sorted(svc.get_job(job_id)["stream_progress"]) == ["people"]
+
+
+def test_a_failed_pass_names_the_table_it_stopped_on(tmp_path, _resumable, monkeypatch):  # noqa: F811
+    """Review UI2 #7: undo drops earlier tables' records, so the screen needs the stopped table's name."""
+    import src.transfer.stream as stream_mod
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.engine import UniversalTransferEngine
+
+    src, dst, specs = _seed(tmp_path)
+    engine, job = UniversalTransferEngine(), "ptf" + uuid.uuid4().hex[:16]
+    real = stream_mod.stream_database_transfer
+
+    def boom(source, *args, **kwargs):
+        if str(source.table) == "orders":
+            raise RuntimeError("destination refused a row")
+        return real(source, *args, **kwargs)
+
+    monkeypatch.setattr(stream_mod, "stream_database_transfer", boom)
+    result = engine.execute_tracked(_request(src, dst, specs), job)
+    assert result.success is False
+    doc = get_mongodb_service().get_job(job) or {}
+    assert doc.get("stopped_stream") == "orders"
+    assert isinstance(doc.get("undone_streams"), list)
+    assert "orders" not in (doc.get("stream_progress") or {}), "no running entry is left behind"
+
+
+def test_gate8_names_the_one_table_it_compared_on_a_multi_table_run():
+    """Review UI2 #1: Gate-8 compares the last table only; the report says which."""
+    from services.reconcile_coverage import qualify_multi_stream_reconciliation
+
+    summary = {"multi_stream": True, "streams": [{"name": "people"}, {"name": "orders"}]}
+    out = qualify_multi_stream_reconciliation(
+        {"passed": True, "assurance_level": "full_checksum", "source_rows": 3, "target_rows": 3}, summary)
+    assert out["compared_stream"] == "orders" and out["checksum_scope"] == "last_stream"
+    again = qualify_multi_stream_reconciliation({"passed": True, "checksum_scope": "last_stream"}, summary)
+    assert again["compared_stream"] == "orders"
