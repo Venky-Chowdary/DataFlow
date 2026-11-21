@@ -13,7 +13,7 @@ in `load_methods`.
 | Path | When | What moves the rows | Rough speed |
 |---|---|---|---|
 | Server-to-server copy (`copy_binary_server_to_server`, `copy_text_load_data_*`, …) | Identity routes: every column is a plain carry onto the same type, append / overwrite / upsert / identity incremental, no source filter, no foreign-key guard, no risk contract on a column, no resume | `COPY` / `LOAD DATA` between the engines; rows never enter Python | the copy step: about 60,000 rows/s locally (PostgreSQL → PostgreSQL, 100k rows in 1.7 s), plus Gate-8 |
-| Streaming row path (`insert`) | Everything else: transforms, cross-engine type changes, foreign-key orphan checks, signed risk contracts, source filters, resumed runs | Python reads a page, converts every cell, quarantines unfit cells, binds and inserts, and fingerprints every cell for Gate-8 | 440–540 rows/s per process on the mixed table, Gate-8 included (table below) |
+| Streaming row path (`insert`) | Everything else: transforms, cross-engine type changes, foreign-key orphan checks, signed risk contracts, source filters, resumed runs | Python reads a page, converts every cell, quarantines unfit cells, binds and inserts, and fingerprints every cell for Gate-8 | 450–550 rows/s per process on the mixed table, Gate-8 included (table below) |
 
 Both paths keep the same guarantees: NULL and `''` stay distinct, held rows
 are quarantined with a reason, the row accounting balances, and Gate-8
@@ -38,23 +38,26 @@ Local machine: 4 vCPU, PostgreSQL 16, MariaDB 10.11, Python 3.13, 2026-11-21.
 
 | Route, 100k rows | Path | Before (70cb4669c) rows/s | After rows/s | Verification s before → after | Peak RSS before → after |
 |---|---|---|---|---|---|
-| PostgreSQL → PostgreSQL | row path (`--row-path`) | 208 | 512 | 259 → 106 | 577 → 540 MB |
-| PostgreSQL → PostgreSQL | default: binary copy after this change (was the row path) | 208 | 1,623 | 259 → 57 | 577 → 515 MB |
-| PostgreSQL → MariaDB | row path | 212 | 442 | 260 → 120 | 584 → 579 MB |
-| MariaDB → PostgreSQL | row path | 234 | 539 | 277 → 102 | 568 → 538 MB |
+| PostgreSQL → PostgreSQL | row path (`--row-path`) | 244 | 524 | 231 → 100 | 581 → 536 MB |
+| PostgreSQL → PostgreSQL | default: binary copy after this change (was the row path) | 244 | 1,768 | 231 → 52 | 581 → 516 MB |
+| PostgreSQL → MariaDB | row path | 236 | 446 | 227 → 125 | 603 → 549 MB |
+| MariaDB → PostgreSQL | row path | 271 | 550 | 236 → 94 | 572 → 530 MB |
 
-The phases of the PostgreSQL → PostgreSQL row-path run, before → after:
-transform and write 212 s → 81 s, in-stream checksum 63 s → 29 s, Gate-8
-reconciliation 196 s → 78 s. On the copy route the copy itself took 1.7 s for
-100k rows; the rest of the 62 s was Gate-8, almost all of it the in-memory
-ladder described next. Other processes shared the machine during both sets
-of runs, so treat differences under about 10% as noise.
+These seven runs ran one after another on one machine (load average 0.7 at
+the start, up to 5–10 later from other work on it). The phases of the
+PostgreSQL → PostgreSQL row-path run, before → after: transform and write
+171 s → 82 s, in-stream checksum 54 s → 30 s, Gate-8 reconciliation 177 s →
+71 s. On the copy route the copy itself took 1.7 s for 100k rows; the rest of
+the 57 s was Gate-8, almost all of it the in-memory ladder described next.
 
 CI (`throughput-smoke`, GitHub-hosted `ubuntu-latest`, MySQL 8.0, Python
 3.12, 200k rows, run 44923502709): PostgreSQL → PostgreSQL 3,276 rows/s on the
 default binary copy and 558 on the forced row path, PostgreSQL → MySQL 953,
 MySQL → PostgreSQL 642; every route passed the independent cell check; peak
 RSS 850–910 MB (at 200k the ladder below holds both populations in memory).
+A second job on a later commit ran every route at about half those rates on a
+slower runner (run 44936017037), so the smoke scales its floors by a CPU
+calibration of the runner (`benchmarks/throughput_smoke.py`).
 
 At or below 250,000 rows Gate-8 also runs the in-memory verification ladder
 (column aggregates L2 and cell localisation L4/L5); above it the ladder is

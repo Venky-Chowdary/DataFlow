@@ -4,32 +4,35 @@
     "Each entry runs benchmarks/db_throughput.py at the smoke size (200k rows) and fails the job",
     "below min_rows_per_second. rows/s is over the whole engine call, Gate-8 included; at 200k the",
     "in-memory verification ladder runs too, so it is lower than a 1M run on the same route.",
-    "A floor sits well under the rate the route reaches on a hosted runner so runner noise does not",
-    "flap the gate, and above the rate of the code before the per-column fast paths (about 210-235",
-    "rows/s on the row path, 100k rows, 70cb4669c, local), so losing them trips it. First CI run",
-    "(44923502709, ubuntu-latest, 200k rows): pg-pg 3276, pg-pg-row 558, pg-mysql 953, mysql-pg 642",
-    "rows/s; floors are about 60% of those. Raise a floor only with the CI artifacts that justify it."
+    "Floors are set against a machine whose calibrate() takes reference_calibration_seconds (the",
+    "local 4-vCPU box, 2026-11-21: 0.39 s). On a slower runner the smoke scales each floor down by",
+    "reference / measured (never up): two hosted-runner jobs on the same commit ran 2x apart",
+    "(runs 44923502709 and 44936017037). Local clean rates, 100k rows, after -> floor:",
+    "pg-pg copy 1768 -> 1000, pg-pg row path 524 -> 300, pg-mysql (MariaDB) 446 -> 300,",
+    "mysql-pg 550 -> 330. The code before the fast paths ran 236-271 rows/s on the row path there,",
+    "so losing them trips the gate. Raise a floor only with the CI artifacts that justify it."
   ],
   "routes": {
     "pg-pg": {
       "route": "pg-pg",
       "row_path": false,
-      "min_rows_per_second": 2000
+      "min_rows_per_second": 1000
     },
     "pg-pg-row": {
       "route": "pg-pg",
       "row_path": true,
-      "min_rows_per_second": 350
+      "min_rows_per_second": 300
     },
     "pg-mysql": {
       "route": "pg-mysql",
       "row_path": false,
-      "min_rows_per_second": 550
+      "min_rows_per_second": 300
     },
     "mysql-pg": {
       "route": "mysql-pg",
       "row_path": false,
-      "min_rows_per_second": 400
+      "min_rows_per_second": 330
     }
-  }
+  },
+  "reference_calibration_seconds": 0.39
 }

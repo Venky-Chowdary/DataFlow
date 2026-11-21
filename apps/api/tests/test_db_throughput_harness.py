@@ -77,3 +77,11 @@ def test_smoke_floors_cover_every_route_with_a_floor():
     for name, cfg in routes.items():
         assert cfg["route"] in {f"{a}-{b}" for a in db_throughput.ENGINES for b in db_throughput.ENGINES}
         assert float(cfg["min_rows_per_second"]) > 0, name
+
+
+def test_floors_scale_down_only_for_a_slower_runner():
+    assert throughput_smoke.effective_floor(300, 0.4, 0.8) == 150
+    assert throughput_smoke.effective_floor(300, 0.4, 0.2) == 300
+    assert throughput_smoke.effective_floor(300, 0, 0.8) == 300
+    assert throughput_smoke.load_floors()["reference_calibration_seconds"] > 0
+    assert 0 < throughput_smoke.calibrate(rounds=1) < 60
