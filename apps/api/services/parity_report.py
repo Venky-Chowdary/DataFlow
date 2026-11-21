@@ -908,6 +908,10 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     elif verdict == "verifying":
         status = "blocked"
         blocked_reason = "Verification is still running; sign once every row has been compared."
+    elif (report.get("verification") or {}).get("state") == "error":
+        # A verification that did not finish decides nothing: an earlier result is not signed in its place.
+        status = "blocked"
+        blocked_reason = "Verification did not finish; re-verify the table, then sign."
     elif unexplained > 0:
         status = "blocked"
         blocked_reason = f"{unexplained:,} row(s) still hold an unexplained difference."
@@ -1021,11 +1025,11 @@ def build_parity_report(
         "_cache": cache,
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
-    report["signoff"] = _signoff(state, report)
     verification = _verification_block(job)
     if verification:
         # Only on a job verified after the write: other reports (and their digests) are unchanged.
         report["verification"] = verification
+    report["signoff"] = _signoff(state, report)
     return report
 
 

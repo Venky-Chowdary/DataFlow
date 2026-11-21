@@ -229,3 +229,28 @@ def test_a_slot_wait_keeps_the_lease_alive(monkeypatch) -> None:
     monkeypatch.setattr(lease, "renew", lambda job_id, token: renewed.append(token))
     verification._take_slot("job-1", "tok")
     assert renewed == ["tok", "tok"]
+
+
+@live
+def test_a_failed_reverify_never_leaves_the_earlier_match_standing(tables, monkeypatch) -> None:
+    """Defect 7: the record is superseded when a re-verify starts; sign-off and the pack follow the block."""
+    from services.parity_scale import verification
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    src, dst = tables
+    job_id = _job(src, dst)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    assert _report(job_id)["verdict"] == "proven"
+
+    def unreachable(_spec: Any) -> Any:
+        raise ConnectionError("the destination went away")
+
+    monkeypatch.setattr(verification, "plan_for", unreachable)
+    assert verification.start_for_job(job_id, only_table=dst, force=True, background=False)["state"] == "error"
+    recon = _svc().get_job(job_id)["reconciliation"]
+    assert recon["parity_at_scale"]["outcome"] == "error"
+    assert classify_post_write_assurance(recon)["migration_proven"] is False
+    report = _report(job_id)
+    assert report["verdict"] != "proven"
+    assert report["signoff"]["status"] == "blocked"
+    assert "did not finish" in report["signoff"]["blocked_reason"]

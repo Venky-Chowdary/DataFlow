@@ -420,8 +420,17 @@ def start_for_job(
         tables.append({"name": spec["name"], "scan_id": scan_id, "status": RUNNING, "progress": {},
                        "started_at": _now(), "evidence": None, "error": None})
         block.update({"state": RUNNING, "started_at": _now(), "finished_at": None, "tables": tables, "reason": ""})
-        # One scan's checkpoints at a time: a restart drops the previous scan's.
-        write_if_held(job_id, token, {"parity_scale": block, CHECKPOINTS: {}})
+        # One scan's checkpoints at a time: a restart drops the previous scan's. The
+        # previous result is superseded now, so a re-verify that fails never leaves an
+        # earlier match standing in the reconciliation the proof pack signs.
+        previous = (job.get("reconciliation") or {}).get("parity_at_scale") or {}
+        write_if_held(job_id, token, {
+            "parity_scale": block, CHECKPOINTS: {},
+            "reconciliation.parity_at_scale": {
+                "outcome": "running", "scan_id": scan_id, "table": spec["name"], "started_at": _now(),
+                "superseded_scan_id": previous.get("scan_id") if isinstance(previous, dict) else None,
+            },
+        })
     except BaseException:
         release(job_id, token)
         _unregister(job_id, worker)
@@ -551,6 +560,9 @@ def _finish_table(job_id: str, name: str, token: str, *, status: str, evidence: 
             "changed_rows": diff.get("changed_rows"),
             "table": name, "finished_at": _now(),
         }})
+    elif status == "error":
+        write_if_held(job_id, token, {"reconciliation.parity_at_scale": {
+            "outcome": "error", "scan_id": scan_id, "table": name, "finished_at": _now()}})
     if block["state"] in {"failed", "incomplete", "error"}:
         _notify(job_id, job, block)
     release_cursor(job_id, _service().get_job(job_id) or {}, block["state"])
