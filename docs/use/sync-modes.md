@@ -57,6 +57,22 @@ trigger incremental reads or upsert writes.
 
 `full_refresh_overwrite` replaces the table. `full_refresh_append` adds to it.
 
+Overwrite of an existing warehouse object keeps its security metadata
+(NF-1). Validate shows, per engine, what is kept and what is not
+(gate `g_overwrite_governance`):
+
+| Destination | How the overwrite runs | Kept | Not kept / caveats |
+|---|---|---|---|
+| Snowflake | The live table is kept: a zero-copy `CLONE` is the backup, the live table is emptied with `TRUNCATE` and loaded in place. | Grants, masking and row access policies, tags, streams, clustering key, comments (the object is never renamed, dropped or recreated). | `TRUNCATE` + reload reaches stream consumers as delete-all and insert-all. A failed run restores the rows with `INSERT OVERWRITE` when the table has no masking or row access policy; otherwise it copies every grant, policy and tag onto the backup and swaps it in (`ALTER TABLE ... SWAP WITH`), and a stream on the table then goes stale. When the policies cannot be read, the restore stops with both tables kept and says which one holds the previous rows. Columns the run does not write stay (NULL); a type the table cannot take fails the run. |
+| BigQuery | Copy job to a backup, then the table is deleted. A table with access control (table IAM, row access policies, column policy tags) is re-created empty with its schema (policy tags kept), partitioning, clustering, labels and description, then its row access policies, then its IAM policy, before any row is written. The backup carries the same row access policies and IAM while it exists. | Policy tags, row access policies, table IAM, labels, description, partitioning, clustering. | The previous table's time-travel and change history, search / vector indexes and table constraints. A governed table is never copied by query (a query reads through row filters and masking): with rows in the streaming buffer the overwrite is refused until the buffer flushes. Access control the connector cannot read refuses the overwrite, and blocks Validate, unless the destination DDL is approved. A failed run re-applies the access control after copying the backup back (a short window with dataset-level access only). |
+| Elasticsearch | The live index is kept: cloned to a write-blocked backup, emptied with delete-by-query, loaded in place. | Aliases (filtered aliases included), settings, lifecycle policy, mappings. | A field type the mapping cannot take fails the run. A failed run replaces the index with a clone of the backup and re-adds its aliases. |
+
+Proof is unit-level, on fakesnow and in-memory BigQuery / Elasticsearch
+fakes (`tests/test_nf1_overwrite_keeps_security_metadata.py`). It has not
+been run against real Snowflake or BigQuery accounts: fakesnow has no
+roles, grants, policies, tags or `SWAP`, and the BigQuery emulator has no
+IAM or row access policies.
+
 Append and continuity: Gate-8 verifies the rows a run wrote, so rows from
 earlier runs are outside its scope. To cover that gap, after each successful
 run the engine stores a fingerprint of the whole destination table. Before the

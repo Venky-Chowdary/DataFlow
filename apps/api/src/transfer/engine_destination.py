@@ -846,7 +846,12 @@ def _clear_destination_table(
         # back when every row was then quarantined: keep the previous
         # generation aside and let _settle_overwrite_backup restore or drop it.
         try:
-            backup = retire_set_aside(aside, cfg, table_name, schema)
+            from services.overwrite_governance_gate import APPROVAL_KEY
+
+            backup = retire_set_aside(
+                aside, cfg, table_name, schema,
+                governance_loss_approved=bool((destination.extra or {}).get(APPROVAL_KEY)),
+            )
         except TableDropError as exc:
             logger.error("full_refresh set-aside failed for %s: %s", table_name, exc)
             raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc

@@ -111,6 +111,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services import pii_guard
 
 from services.create_ddl_gate import refuse_unapproved_create
+from services.overwrite_governance_gate import stamp_overwrite_governance_approval
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -1794,6 +1795,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
             )
             refuse_unapproved_create(request, dest_table_exists_flag)
+            stamp_overwrite_governance_approval(request)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3296,6 +3298,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
             )
             refuse_unapproved_create(request, dest_table_exists_flag)
+            stamp_overwrite_governance_approval(request)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4476,6 +4479,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
             )
             refuse_unapproved_create(request, dest_table_exists_flag)
+            stamp_overwrite_governance_approval(request)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
