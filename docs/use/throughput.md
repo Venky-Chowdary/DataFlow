@@ -59,6 +59,18 @@ A second job on a later commit ran every route at about half those rates on a
 slower runner (run 44936017037), so the smoke scales its floors by a CPU
 calibration of the runner (`benchmarks/throughput_smoke.py`).
 
+At 1M rows (same machine, 2026-11-21, under heavy load from other work —
+load average 2–18 during these runs):
+
+| Route, 1M rows | Before rows/s | After rows/s | Wall | Verification s | Peak RSS |
+|---|---|---|---|---|---|
+| PostgreSQL → MariaDB, row path | 275 | 623 | 60.6 → 26.8 min | 1,038 → 591 | 484 → 480 MB |
+| PostgreSQL → PostgreSQL, default path | not run at 1M (was the row path: 244 at 100k) | 27,820 (binary copy) | 36 s | 6 | 183 MB |
+
+All three 1M runs passed the independent cell check on all 1M rows. Above 250k
+rows the ladder does not run, so the PostgreSQL → PostgreSQL copy verifies by
+the in-database digest and count alone and finishes in seconds.
+
 At or below 250,000 rows Gate-8 also runs the in-memory verification ladder
 (column aggregates L2 and cell localisation L4/L5); above it the ladder is
 skipped and says so (`coverage_limit`), so per-row cost at 1M rows is lower
@@ -136,9 +148,9 @@ checksum), peak RSS of the process, and the independent check.
 
 ## Not covered
 
-- No 1M+ result is published from this machine yet: local disk did not hold
-  two 1M-row copies of the table next to the other work on it. The
-  dispatch workflow is the place for those runs.
+- 1M rows was measured on two routes only (above); MariaDB → PostgreSQL at
+  1M was not run. Nothing above 1M was run locally; the dispatch workflow is
+  the place for 10M / 100M.
 - SQL Server, Oracle, Snowflake and BigQuery routes are not in the harness.
 - Parallel table workers: a multi-table job runs its tables in parallel where
   the engine already did; nothing here changed that.
