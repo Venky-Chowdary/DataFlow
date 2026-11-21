@@ -60,6 +60,7 @@
 @import "./explain.css";
 @import "./gate-checklist.css";
 @import "./table-progress.css";
+@import "./connection-test.css";
 /* Public hero system — authority for the marketing hero band + hero drawings. */
 @import "./marketing-hero.css";
 
