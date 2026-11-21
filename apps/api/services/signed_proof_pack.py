@@ -551,6 +551,7 @@ def classify_post_write_assurance(
             ),
         }
 
+    reasons = full_checksum_missing_reasons(recon, checksum_match=checksum_match)
     return {
         "claim_level": "none",
         "post_write_verified": False,
@@ -558,11 +559,85 @@ def classify_post_write_assurance(
         "population_proof": False,
         "referential_integrity_proven": ri_proven,
         "checksum_match": checksum_match,
+        "not_proven_reasons": reasons,
         "note": (
-            "Gate-8 lacks eligible whole-transfer scope, independent source re-read "
-            "provenance, or matching digests — refuse migration proven claim."
+            "Not proven: " + " ".join(reasons)
+            if reasons
+            else (
+                "Gate-8 lacks eligible whole-transfer scope, independent source re-read "
+                "provenance, or matching digests — refuse migration proven claim."
+            )
         ),
     }
+
+
+#: How each source-digest provenance was obtained, in an operator's words.
+_PROVENANCE_PLAIN = {
+    "write_pass_fingerprints": (
+        "the source checksum was computed from the rows as Datawrap read them for "
+        "the write, not from a second, independent read of the source after the write"
+    ),
+    "writer_ack": (
+        "the source checksum is the writer's own account of what it wrote, so the "
+        "comparison checks the write against itself"
+    ),
+    "staging_snapshot_digest": (
+        "the source checksum was taken from the staged snapshot of this run, not from "
+        "an independent re-read of the source after the write"
+    ),
+}
+
+
+def full_checksum_missing_reasons(
+    recon: dict[str, Any] | None, *, checksum_match: bool | None = None
+) -> list[str]:
+    """Which conditions of the full-checksum proof this Gate-8 report does not meet.
+
+    Plain sentences, one per missing condition (D381): a certificate that says
+    NOT PROVEN while source and destination agree on every row must say what
+    was not established, not "lacks eligible scope or provenance".
+    """
+    recon = recon if isinstance(recon, dict) else {}
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    if checksum_match is None:
+        checksum_match = bool(src and tgt and src == tgt) and recon.get("checksum_match") is not False
+    out: list[str] = []
+    if recon.get("passed") is not True:
+        out.append("Gate-8 did not pass.")
+    if not checksum_match:
+        out.append(
+            "Source and destination checksums were not both computed and equal."
+            if not (src and tgt)
+            else "The source and destination checksums differ."
+        )
+    coverage = str(recon.get("coverage") or "").lower()
+    if coverage not in {"", "full_checksum"}:
+        out.append(
+            f"The comparison that ran covered {coverage.replace('_', ' ')}, not every "
+            "value of every row."
+        )
+    scope = str(recon.get("checksum_scope") or "")
+    if scope not in {"", "whole_table", "verify_time_population_digest"}:
+        out.append(
+            f"The checksum covered {scope.replace('_', ' ')}, not the whole table."
+        )
+    provenance = str(recon.get("source_checksum_provenance") or "")
+    if provenance != "independent_source_reread":
+        why = _PROVENANCE_PLAIN.get(
+            provenance,
+            (
+                f"the source checksum came from '{provenance}'"
+                if provenance
+                else "no record says how the source checksum was obtained"
+            )
+            + ", not from an independent re-read of the source after the write",
+        )
+        out.append(
+            why[0].upper() + why[1:] + ", so a value the source read itself got wrong "
+            "would be on both sides and still match."
+        )
+    return out
 
 
 def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
