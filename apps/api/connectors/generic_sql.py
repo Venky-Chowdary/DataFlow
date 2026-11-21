@@ -461,24 +461,10 @@ def _mssql_odbc_driver() -> str | None:
 
 
 def _mssql_drivername_for(cfg: Mapping[str, Any]) -> str:
-    """The SQL Server DBAPI for this connector (``sqlserver_driver``, host policy).
+    """The SQL Server DBAPI for this connector (``connectors.mssql_security``)."""
+    from connectors.mssql_security import driver_for
 
-    Refuses (``SqlServerSecurityError``) rather than fall back to FreeTDS when
-    the connector or the host requires the Microsoft driver.
-    """
-    from connectors.mssql_security import select_driver
-
-    try:
-        import pymssql  # noqa: F401
-
-        has_pymssql = True
-    except Exception:  # noqa: BLE001 - absent or broken wheel
-        has_pymssql = False
-    return select_driver(
-        with_connection_options(cfg),
-        odbc_installed=bool(_mssql_odbc_driver()),
-        pymssql_installed=has_pymssql,
-    )
+    return driver_for(cfg)
 
 
 def _mssql_drivername() -> str:
@@ -860,6 +846,9 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
             user = form_user or parsed.user
             password = form_password if form_password.strip() else parsed.password
             raw = rebuild_url(parsed, user=user, password=password)
+        from connectors.mssql_security import check_mssql_url
+
+        check_mssql_url(raw, cfg)  # a mssql+pymssql:// string obeys the TLS policy too
         return _normalize_sqlalchemy_url_string(raw, db_type)
 
     if not db_type:
@@ -1236,16 +1225,9 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         connect_args = _connect_args_for(url, cfg)
         if "pyodbc" in driver and "mssql" in driver:
-            from connectors.mssql_security import odbc_attrs_before
+            from connectors.mssql_security import with_access_token
 
-            token = odbc_attrs_before(cfg)
-            if token:
-                # Entra ID access token (SQL_COPT_SS_ACCESS_TOKEN), next to the
-                # login timeout pyodbc already takes as a pre-connect attribute.
-                connect_args = {
-                    **connect_args,
-                    "attrs_before": {**dict(connect_args.get("attrs_before") or {}), **token},
-                }
+            connect_args = with_access_token(connect_args, cfg)  # Entra ID token, if any
         url_head = (url if isinstance(url, str) else str(driver)).lower()
         mysql_tls = None
         if "pymysql" in driver or url_head.startswith(("mysql", "mariadb")):
@@ -1305,12 +1287,13 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             or "mysql" in driver
             or "mariadb" in driver
         ):
+            from connectors.mysql_load_data import guard_mariadb_bulk_insert_pool_session
             from services.timezone_policy import pin_mysql_session_utc
 
             @event.listens_for(engine, "connect")
             def _mysql_utc_session(dbapi_conn, _connection_record):  # noqa: ANN001
                 pin_mysql_session_utc(dbapi_conn)
-                _guard_mariadb_bulk_insert_pool_session(dbapi_conn)
+                guard_mariadb_bulk_insert_pool_session(dbapi_conn)
 
         if _is_oracle_wire(driver.split("+", 1)[0], db_type):
             from connectors.oracle_tstz import pin_oracle_timestamp_format
@@ -1322,25 +1305,6 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
         return engine
     except (NoSuchModuleError, ImportError) as exc:
         raise _dialect_unavailable(url, db_type) from exc
-
-
-def _guard_mariadb_bulk_insert_pool_session(dbapi_conn: Any) -> None:
-    """Pooled MariaDB 10.6+ sessions never start with unique+FK checks both off.
-
-    Both off is what puts an INSERT into an empty table in InnoDB's bulk
-    insert mode, which hangs the server under a concurrent reader (see
-    connectors.mysql_load_data). Best effort: no SQL on non-MariaDB servers.
-    """
-    from connectors.mysql_load_data import guard_mariadb_bulk_insert_session
-
-    try:
-        cur = dbapi_conn.cursor()
-        try:
-            guard_mariadb_bulk_insert_session(cur, dbapi_conn)
-        finally:
-            cur.close()
-    except Exception as exc:  # noqa: BLE001 - a guard must not break the pool
-        logger.debug("MariaDB bulk insert pool guard not applied: %s", exc)
 
 
 def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:

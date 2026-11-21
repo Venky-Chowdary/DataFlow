@@ -1041,7 +1041,7 @@ def read_sqlserver_rows(
     conn = connect_sqlserver_dbapi({
         **dict(options or {}),
         "host": host, "port": port, "database": database or "master",
-        "username": username or "sa", "password": password,
+        "username": username, "password": password,
     })
     try:
         cur = conn.cursor()

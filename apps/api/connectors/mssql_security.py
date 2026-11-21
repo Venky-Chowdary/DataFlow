@@ -224,25 +224,84 @@ def transport_summary(cfg: Mapping[str, Any], drivername: str) -> dict[str, Any]
 _FREETDS_CANNOT = ("server_certificate", "ssl_ca", "hostname_in_certificate")
 
 
+def _pymssql_installed() -> bool:
+    try:
+        import pymssql  # noqa: F401
+    except Exception:  # noqa: BLE001 - absent or broken wheel
+        return False
+    return True
+
+
+def _odbc_installed() -> bool:
+    from connectors.generic_sql import _mssql_odbc_driver
+
+    return bool(_mssql_odbc_driver())
+
+
+def driver_for(cfg: Mapping[str, Any]) -> str:
+    """The SQL Server DBAPI for this connector on this host (see :func:`select_driver`)."""
+    from connectors.generic_sql import with_connection_options
+
+    return select_driver(
+        with_connection_options(cfg),
+        odbc_installed=_odbc_installed(),
+        pymssql_installed=_pymssql_installed(),
+    )
+
+
 def needs_odbc(cfg: Mapping[str, Any]) -> bool:
     """True when a SQL Server connection for ``cfg`` must not be made over FreeTDS.
 
-    The connector chose the Microsoft driver, signs in with Entra ID, declares
-    TLS FreeTDS cannot honour (encryption required, a pinned certificate), or
-    the host requires verified TLS. Read-back paths that dial pymssql directly
-    (Gate-8, the verification ladder, target samples) use this so they never
-    downgrade a connection the writer made over verified TLS.
+    Whenever :func:`select_driver` would pick the Microsoft driver (it is
+    installed and the connector did not choose ``freetds``), when the connector
+    signs in with Entra ID or declares TLS FreeTDS cannot honour, or when the
+    host requires verified TLS. Read-back paths that dial pymssql directly
+    (Gate-8, the verification ladder, target samples) and the fast path's
+    fallback use this, so a connection the writer made over verified TLS is
+    never read back, or retried after a certificate failure, over FreeTDS.
     """
     choice = driver_choice(cfg)
     if choice == "odbc" or is_entra(cfg):
         return True
     if choice == "freetds":
         return False
-    if require_verified_tls():
+    if require_verified_tls() or _odbc_installed():
         return True
     if any(_opt(cfg, key) for key in _FREETDS_CANNOT):
         return True
     return _opt(cfg, "encrypt").lower() in ("yes", "true", "1", "strict", "mandatory")
+
+
+def with_access_token(connect_args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """pyodbc connect args with the Entra ID access token added to ``attrs_before``.
+
+    The login timeout pyodbc already takes there (attribute 103) is kept.
+    """
+    token = odbc_attrs_before(cfg)
+    if not token:
+        return connect_args
+    return {**connect_args, "attrs_before": {**dict(connect_args.get("attrs_before") or {}), **token}}
+
+
+def check_mssql_url(raw: str, cfg: Mapping[str, Any]) -> None:
+    """A SQL Server connection string obeys the same driver policy as host/port.
+
+    ``mssql+pymssql://`` (FreeTDS, no certificate verification) is refused
+    when the host requires verified TLS or the connector needs the Microsoft
+    driver, unless the connector chose ``sqlserver_driver=freetds``.
+    """
+    scheme = str(raw or "").split("://", 1)[0].strip().lower()
+    if scheme != "mssql+pymssql":
+        return
+    if driver_choice(cfg) == "freetds":
+        return
+    if require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg):
+        raise SqlServerSecurityError(
+            "This SQL Server connection string uses mssql+pymssql (FreeTDS, which does not "
+            "verify the server certificate), and this host or connector requires verified TLS. "
+            "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
+            "an unverified connection."
+        )
 
 
 def connect_sqlserver_dbapi(

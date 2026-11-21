@@ -209,7 +209,7 @@ def test_transport_summary_labels_freetds_as_unverified():
 # ------------------------------------------------- read-backs do not downgrade
 
 
-def test_read_back_paths_follow_the_connector(monkeypatch):
+def test_read_back_paths_follow_the_connector(monkeypatch, no_odbc):
     monkeypatch.delenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", raising=False)
     assert needs_odbc({}) is False
     assert needs_odbc({"encrypt": "yes"}) is True
@@ -264,3 +264,65 @@ def test_copy_fast_path_never_retries_a_failed_verified_handshake_on_freetds(mon
         AssertionError("downgraded to FreeTDS")))
     with pytest.raises(copy.FastPathUnavailable, match="certificate verify failed"):
         copy._ss_connect({"host": "h", "database": "d", "encrypt": "yes"})
+
+
+# ------------------------------------------- review: no unverified fallback
+
+
+def test_read_backs_use_the_microsoft_driver_whenever_it_would_be_chosen(odbc):
+    """Review: with driver auto, pyodbc installed and no host flag, Gate-8 and the
+    ladder still dialled FreeTDS (unverified)."""
+    assert needs_odbc({}) is True
+    assert needs_odbc({"sqlserver_driver": "freetds"}) is False
+
+
+def test_copy_fast_path_does_not_retry_a_certificate_failure_on_freetds_with_auto(odbc, monkeypatch):
+    import connectors.generic_sql as generic
+    from services import copy_sqlserver_sqlserver as copy
+
+    def _fail(**_: Any) -> Any:
+        raise RuntimeError("[08001] SSL Provider: certificate verify failed: unable to connect")
+
+    freetds: list[dict] = []
+    monkeypatch.setattr(generic, "get_connection", _fail)
+    monkeypatch.setattr(copy, "_pymssql_connect", lambda cfg: freetds.append(cfg) or object())
+    with pytest.raises(copy.FastPathUnavailable, match="certificate verify failed"):
+        copy._ss_connect({"host": "h", "database": "d"})
+    assert freetds == [], "a certificate failure was retried over FreeTDS"
+
+
+def test_pymssql_connection_string_obeys_the_host_policy(monkeypatch, no_odbc):
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    cfg = {"type": "sqlserver", "connection_string": "mssql+pymssql://u:p@db.example.test:1433/sales"}
+    with pytest.raises(SqlServerSecurityError, match="mssql\\+pymssql"):
+        gs._build_url_unconfined(dict(cfg))
+    # The labelled opt-out still works.
+    assert str(gs._build_url_unconfined({**cfg, "sqlserver_driver": "freetds"})).startswith("mssql+pymssql://")
+    monkeypatch.delenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS")
+    with pytest.raises(SqlServerSecurityError):
+        gs._build_url_unconfined({**cfg, "authentication": "entra_managed_identity"})
+
+
+def test_managed_identity_read_back_sends_no_default_username(monkeypatch):
+    """Review: ``username or "sa"`` broke a system-assigned managed identity read-back."""
+    import connectors.generic_sql as generic
+    from services import reconciliation
+
+    dialled: list[dict] = []
+
+    def _get_connection(**kwargs: Any) -> Any:
+        dialled.append(kwargs)
+        raise RuntimeError("stop after the dial")
+
+    monkeypatch.setattr(generic, "get_connection", _get_connection)
+    reconciliation.verify_sqlserver_table(
+        host="h", port=1433, database="d", username="", password="", connection_string="",
+        table_name="t", options={"authentication": "entra_managed_identity"},
+    )
+    assert dialled and dialled[0]["username"] == ""
+    url = gs._build_url_unconfined(gs.with_connection_options({
+        "type": "sqlserver", "host": "h", "database": "d", "username": dialled[0]["username"],
+        "authentication": "entra_managed_identity",
+    })) if gs._mssql_odbc_driver() else None
+    if url is not None:
+        assert url.username is None
