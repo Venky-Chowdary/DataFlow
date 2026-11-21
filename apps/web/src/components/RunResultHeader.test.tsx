@@ -194,3 +194,10 @@ describe("Gate-8 after the write", () => {
     assert.match(before, /Pre-write simulation/);
   });
 });
+
+describe("Run result: explain the verdict", () => {
+  it("offers an Explain button beside the verdict chip", () => {
+    const html = view(job({}));
+    assert.match(html, /data-verdict="unverifiable"[\s\S]*?<button type="button" class="df2-explain-trigger" aria-label="Explain this verdict"/);
+  });
+});

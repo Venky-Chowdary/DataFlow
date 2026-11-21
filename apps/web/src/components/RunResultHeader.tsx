@@ -1,6 +1,8 @@
 import { useEffect, useId, useState } from "react";
 import { DtIcon, type IconName } from "./DtIcon";
 import { VerdictChip } from "./ui/VerdictChip";
+import { ExplainPopover } from "./ui/ExplainPopover";
+import { explainVerdict } from "../lib/explainCatalog";
 import { Button } from "./ui/Button";
 import { fetchParityReport } from "../lib/api";
 import { hashForScreen } from "../lib/appNavigation";
@@ -91,6 +93,7 @@ export function RunResultHeader({ jobId, job, verification, load, onRetry, trust
   const cancelled = status.title === "Transfer cancelled";
   const icon = cancelled ? "x" : STATUS_ICON[tone] ?? "check";
   const trustHref = hashForScreen("jobs", { jobId, panel: "trust-report" });
+  const chipState = verification.verdict ?? (load.kind === "loading" ? "checking" : "not_loaded");
 
   return (
     <section className={`df2-run-result is-${tone}`} aria-labelledby={titleId} data-verdict={verification.verdict ?? "none"}>
@@ -101,12 +104,9 @@ export function RunResultHeader({ jobId, job, verification, load, onRetry, trust
         <div className="df2-run-result-head">
           <h2 id={titleId} className="df2-run-result-title">{status.title}</h2>
           <span aria-live="polite">
-            <VerdictChip
-              state={verification.verdict ?? (load.kind === "loading" ? "checking" : "not_loaded")}
-              prefix="Verification:"
-              title={verification.reason || undefined}
-            />
+            <VerdictChip state={chipState} prefix="Verification:" title={verification.reason || undefined} />
           </span>
+          <ExplainPopover explanation={explainVerdict(chipState)} label="Explain this verdict" />
         </div>
         {verification.reason && <p className="df2-run-result-reason">{verification.reason}</p>}
         {detail && <p className="df2-run-result-reason">{detail}</p>}

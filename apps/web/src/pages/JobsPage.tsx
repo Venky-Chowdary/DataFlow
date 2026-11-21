@@ -19,6 +19,8 @@ import { applyJobsFacets, useJobsGridState } from "../components/jobs/useJobsGri
 import { useJobsKpis } from "../components/jobs/useJobsKpis";
 import { useJobVerdicts } from "../components/jobs/useJobVerdicts";
 import { VerdictChip } from "../components/ui/VerdictChip";
+import { ExplainPopover } from "../components/ui/ExplainPopover";
+import { explainVerdict } from "../lib/explainCatalog";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -362,7 +364,13 @@ function JobLineageLinks({
 
 /** The drawer header's verdict: the same chip and word as the grid row. */
 function SelectedVerdict({ row }: { row: TransferJob }) {
-  return <VerdictChip state={jobVerdict(row)} unexplainedRows={row.parity_verdict?.unexplained} title={jobVerdictTitle(row)} />;
+  const state = jobVerdict(row);
+  return (
+    <>
+      <VerdictChip state={state} unexplainedRows={row.parity_verdict?.unexplained} title={jobVerdictTitle(row)} />
+      <ExplainPopover explanation={explainVerdict(state)} label="Explain this verdict" />
+    </>
+  );
 }
 
 export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, onLoadPage, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
