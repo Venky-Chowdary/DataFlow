@@ -6,7 +6,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { describeEvery, parseCron, previewNextRuns, unevenMinuteStep } from "./scheduleNextRuns.ts";
+import { readFileSync } from "node:fs";
+import { describeEvery, parseCron, cronNextRuns, previewNextRuns, unevenMinuteStep } from "./scheduleNextRuns.ts";
+
+const FIXTURE = JSON.parse(readFileSync(new URL("./__fixtures__/cron_next_runs.json", import.meta.url), "utf8")) as {
+  cases: { cron: string; zone: string; after: string; runs: string[]; error?: string }[];
+};
 
 const SERVER: [string, string, string, string[]][] = [
   ["10 10 * * *", "UTC", "2026-11-21T10:00:00Z", ["2026-11-21T10:10:00Z", "2026-11-22T10:10:00Z", "2026-11-23T10:10:00Z", "2026-11-24T10:10:00Z", "2026-11-25T10:10:00Z"]],
@@ -20,6 +25,28 @@ const SERVER: [string, string, string, string[]][] = [
   ["15 9 * * MON-FRI", "Europe/London", "2026-03-27T00:00:00Z", ["2026-03-27T09:15:00Z", "2026-03-30T08:15:00Z", "2026-03-31T08:15:00Z", "2026-04-01T08:15:00Z", "2026-04-02T08:15:00Z"]],
   ["0 0 31 * *", "Asia/Kolkata", "2026-11-21T10:00:00Z", ["2026-12-30T18:30:00Z", "2027-01-30T18:30:00Z", "2027-03-30T18:30:00Z", "2027-05-30T18:30:00Z", "2027-07-30T18:30:00Z"]],
 ];
+
+describe("differential: the scheduler's own next_run over a random corpus (review UI2 #9)", () => {
+  it(`agrees on all ${FIXTURE.cases.length} cases (crons x zones x DST gaps and overlaps)`, () => {
+    assert.ok(FIXTURE.cases.length > 300);
+    const mismatches: string[] = [];
+    for (const c of FIXTURE.cases) {
+      const after = new Date(c.after);
+      let got: string[] | string;
+      try {
+        const cron = parseCron(c.cron);
+        const runs = cronNextRuns(cron, c.zone, after, 5).map((d) => d.toISOString().replace(".000", ""));
+        const p = previewNextRuns({ mode: "cron", preset: "", cron: c.cron, timeZone: c.zone, now: after });
+        got = p.kind === "invalid" && p.never ? "CronNeverFiresError" : runs;
+      } catch {
+        got = "CronError";
+      }
+      const want = c.error ? c.error : c.runs;
+      if (JSON.stringify(got) !== JSON.stringify(want)) mismatches.push(`${c.cron} @ ${c.zone} after ${c.after}: got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
+    }
+    assert.deepEqual(mismatches.slice(0, 8), [], `${mismatches.length} mismatches`);
+  });
+});
 
 describe("previewNextRuns matches the scheduler", () => {
   for (const [cron, timeZone, now, expected] of SERVER) {
@@ -62,13 +89,18 @@ describe("rolling cadences", () => {
   it("*/7 is every 7 minutes from the previous run, not a clock cron", () => {
     assert.equal(unevenMinuteStep("*/7 * * * *"), 7);
     assert.equal(unevenMinuteStep("*/5 * * * *"), null);
-    const p = previewNextRuns({ mode: "cron", preset: "", cron: "*/7 * * * *", timeZone: "UTC", now: new Date("2026-11-21T10:00:00Z"), lastRunAt: "2026-11-21T09:58:00Z" });
+    const p = previewNextRuns({ mode: "cron", preset: "", cron: "*/7 * * * *", timeZone: "UTC", now: new Date("2026-11-21T10:00:00Z"), storedNextRunAt: "2026-11-21T10:05:00Z" });
     assert.equal(p.kind, "rolling");
     if (p.kind !== "rolling") return;
-    assert.equal(p.runs[0].toISOString(), "2026-11-21T10:05:00.000Z");
+    assert.equal(p.runs[0].toISOString(), "2026-11-21T10:05:00.000Z", "an unchanged cadence keeps its stored slot");
     assert.equal(p.runs[4].toISOString(), "2026-11-21T10:33:00.000Z");
+    const changed = previewNextRuns({ mode: "cron", preset: "", cron: "*/7 * * * *", timeZone: "UTC", now: new Date("2026-11-21T10:00:00Z"), storedNextRunAt: "2026-11-21T10:05:00Z", cadenceChanged: true });
+    assert.equal(changed.kind === "rolling" && changed.runs[0].toISOString(), "2026-11-21T10:07:00.000Z", "a changed cadence re-anchors at save, like the server");
   });
-  it("presets roll from the last run, or from save when there is none", () => {
+  it("a paused schedule has no runs", () => {
+    assert.deepEqual(previewNextRuns({ mode: "cron", preset: "", cron: "0 9 * * *", timeZone: "UTC", paused: true }), { kind: "paused" });
+  });
+  it("presets roll from the stored slot, or from save when there is none", () => {
     const daily = previewNextRuns({ mode: "preset", preset: "daily", cron: "", timeZone: "UTC", now: new Date("2026-11-21T10:00:00Z") });
     assert.equal(daily.kind === "rolling" && daily.fromLastRun, false);
     assert.equal(daily.kind === "rolling" && daily.runs[0].toISOString(), "2026-11-22T10:00:00.000Z");

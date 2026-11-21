@@ -16,10 +16,12 @@
  *   it runs every N minutes from the previous run (R12-002).
  * - Presets are rolling intervals from the previous run, not clock times.
  *
- * cron-parser (MIT) generates candidate instants quickly; every candidate is
- * re-checked against the server's rules before it is shown.
+ * The times are found the way the server finds them, so they agree exactly
+ * (a differential test replays a corpus the scheduler itself computed:
+ * lib/__fixtures__/cron_next_runs.json): each local day in the zone whose
+ * month / day fields match, each matching wall time on it, and every real
+ * instant that wall time names (none in a DST gap, two in an overlap).
  */
-import { CronExpressionParser } from "cron-parser";
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -155,14 +157,95 @@ export function isValidTimeZone(timeZone: string): boolean {
 export type NextRunsPreview =
   | { kind: "clock"; runs: Date[]; timeZone: string; dstChange: Date | null }
   | { kind: "rolling"; everyMinutes: number; runs: Date[]; fromLastRun: boolean }
-  | { kind: "invalid"; message: string }
+  | { kind: "paused" }
+  | { kind: "invalid"; message: string; never?: boolean }
   | { kind: "empty" };
 
 const PRESET_MINUTES: Record<string, number> = { hourly: 60, daily: 24 * 60, weekly: 7 * 24 * 60 };
+/** The server's search horizon (cron_schedule.FIRE_HORIZON_DAYS). */
+const HORIZON_DAYS = 4 * 366;
+const DAY_MS = 86_400_000;
+
+function offsetMinutes(at: Date, timeZone: string): number {
+  const label = wallClock(at, timeZone).offset; // "GMT+10:30", "GMT-05:00", "GMT"
+  const m = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(label);
+  if (!m) return 0;
+  return (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+}
+
+function matchesDay(cron: ParsedCron, month: number, day: number, dow: number): boolean {
+  if (!cron.months.has(month)) return false;
+  const domOk = cron.days.has(day);
+  const dowOk = cron.dow.has(dow);
+  if (cron.domRestricted && cron.dowRestricted) return domOk || dowOk;
+  if (cron.domRestricted) return domOk;
+  if (cron.dowRestricted) return dowOk;
+  return true;
+}
+
+/**
+ * Every instant strictly after `after` whose wall clock in `timeZone`
+ * matches `cron`, the first `count` of them, in time order. Mirrors
+ * cron_schedule.next_run chained `count` times.
+ */
+export function cronNextRuns(cron: ParsedCron, timeZone: string, after: Date, count: number): Date[] {
+  // The server starts at the next whole minute after `after`.
+  const startMs = Math.floor(after.getTime() / 60_000) * 60_000 + 60_000;
+  const minutes = [...cron.minutes].sort((a, b) => a - b);
+  const hours = [...cron.hours].sort((a, b) => a - b);
+  const found: number[] = [];
+  // Local calendar days, starting the day before the start's local date (a zone ahead of UTC).
+  const startWall = wallClock(new Date(startMs), timeZone);
+  const startYear = Number(new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).format(new Date(startMs)));
+  void startWall.dow;
+  let cursor = Date.UTC(startYear, startWall.month - 1, startWall.day) - DAY_MS;
+  let extraDays = -1;
+  // The server searches HORIZON_DAYS from each run (next_run is chained), so the
+  // window restarts at every found run.
+  let lastHit = 0;
+  for (let i = 0; i - lastHit < HORIZON_DAYS + 3; i += 1, cursor += DAY_MS) {
+    const before = found.length;
+    const d = new Date(cursor);
+    const y = d.getUTCFullYear(), mo = d.getUTCMonth() + 1, da = d.getUTCDate(), dow = d.getUTCDay();
+    if (matchesDay(cron, mo, da, dow)) {
+      // Offsets that can apply around this local day (before and after a change).
+      const offsets = new Set([-DAY_MS, 0, DAY_MS, 2 * DAY_MS].map((delta) => offsetMinutes(new Date(cursor + delta), timeZone)));
+      for (const h of hours) {
+        for (const m of minutes) {
+          const local = Date.UTC(y, mo - 1, da, h, m);
+          for (const off of offsets) {
+            const utc = local - off * 60_000;
+            if (utc < startMs || found.includes(utc)) continue;
+            const w = wallClock(new Date(utc), timeZone);
+            if (w.hour === h && w.minute === m && w.day === da && w.month === mo) found.push(utc);
+          }
+        }
+      }
+    }
+    if (found.length > before) lastHit = i;
+    if (found.length >= count && extraDays < 0) extraDays = 2; // a day or two more: DST can reorder across midnight
+    if (extraDays >= 0 && extraDays-- === 0) break;
+  }
+  return found.sort((a, b) => a - b).slice(0, count).map((ms) => new Date(ms));
+}
+
+/** True when no calendar day in the server's horizon matches (cron_schedule.assert_can_fire). */
+function neverFires(cron: ParsedCron, after: Date): boolean {
+  let day = Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate());
+  for (let i = 0; i < HORIZON_DAYS; i += 1, day += DAY_MS) {
+    const d = new Date(day);
+    if (matchesDay(cron, d.getUTCMonth() + 1, d.getUTCDate(), d.getUTCDay())) return false;
+  }
+  return true;
+}
 
 /**
  * The next `count` runs, as the server will compute them.
- * `lastRunAt` anchors a rolling cadence; without it the cadence starts at save.
+ *
+ * Rolling cadences (presets, and *\/N not dividing 60) are measured from an
+ * anchor the way the server sets it: an unchanged cadence keeps the stored
+ * next run (`storedNextRunAt`); a new or changed cadence is re-anchored when
+ * it is saved, i.e. now. A paused schedule (or one created paused) has none.
  */
 export function previewNextRuns(input: {
   mode: "preset" | "cron";
@@ -170,22 +253,25 @@ export function previewNextRuns(input: {
   cron: string;
   timeZone: string;
   now?: Date;
-  lastRunAt?: string | null;
+  /** The schedule's stored next run, used only while its cadence is unchanged. */
+  storedNextRunAt?: string | null;
+  cadenceChanged?: boolean;
+  paused?: boolean;
   count?: number;
 }): NextRunsPreview {
   const count = input.count ?? 5;
   const now = input.now ?? new Date();
+  if (input.paused) return { kind: "paused" };
   const rolling = (everyMinutes: number): NextRunsPreview => {
-    const last = input.lastRunAt ? Date.parse(input.lastRunAt) : NaN;
-    const base = Number.isFinite(last) ? last : now.getTime();
     const step = everyMinutes * 60_000;
-    let first = base + step;
-    // A rolling cadence whose next due time is past runs on the next beat.
+    const stored = input.storedNextRunAt && !input.cadenceChanged ? Date.parse(input.storedNextRunAt) : NaN;
+    // Saved now: the server computes now + interval. An unchanged cadence keeps its stored slot.
+    let first = Number.isFinite(stored) ? stored : now.getTime() + step;
     while (first <= now.getTime()) first += step;
     return {
       kind: "rolling",
       everyMinutes,
-      fromLastRun: Number.isFinite(last),
+      fromLastRun: Number.isFinite(stored),
       runs: Array.from({ length: count }, (_, i) => new Date(first + i * step)),
     };
   };
@@ -202,47 +288,17 @@ export function previewNextRuns(input: {
   } catch (error) {
     return { kind: "invalid", message: error instanceof Error ? error.message : "This cron expression is not valid." };
   }
-
-  let iterator;
-  try {
-    iterator = CronExpressionParser.parse(expr, { currentDate: now, tz: input.timeZone });
-  } catch {
-    return { kind: "invalid", message: "No date in the next four years matches this expression." };
-  }
-  const runs: Date[] = [];
-  const seen = new Set<number>();
-  const add = (at: Date) => {
-    if (at.getTime() <= now.getTime() || seen.has(at.getTime())) return;
-    seen.add(at.getTime());
-    runs.push(at);
-  };
-  // Bounded: a day-of-month rule like "31" skips months, never more than a few hundred candidates.
-  for (let guard = 0; runs.length < count && guard < 500; guard += 1) {
-    let candidate: Date;
-    try {
-      candidate = iterator.next().toDate();
-    } catch {
-      break;
-    }
-    const wall = wallClock(candidate, input.timeZone);
-    if (!matches(cron, wall)) continue; // shifted into a time a DST change skipped: the server does not run then
-    add(candidate);
-    // A wall time that happens twice (clocks go back) runs twice on the server.
-    const again = new Date(candidate.getTime() + 60 * 60_000);
-    const wallAgain = wallClock(again, input.timeZone);
-    if (wallAgain.hour === wall.hour && wallAgain.minute === wall.minute && matches(cron, wallAgain)) add(again);
-  }
-  runs.sort((a, b) => a.getTime() - b.getTime());
-  const shown = runs.slice(0, count);
-  if (!shown.length) return { kind: "invalid", message: "No date in the next four years matches this expression." };
+  if (neverFires(cron, now)) return { kind: "invalid", message: "No date in the next four years matches this expression.", never: true };
+  const runs = cronNextRuns(cron, input.timeZone, now, count);
+  if (!runs.length) return { kind: "invalid", message: "No date in the next four years matches this expression.", never: true };
   let dstChange: Date | null = null;
-  for (let i = 1; i < shown.length; i += 1) {
-    if (wallClock(shown[i - 1], input.timeZone).offset !== wallClock(shown[i], input.timeZone).offset) {
-      dstChange = shown[i];
+  for (let i = 1; i < runs.length; i += 1) {
+    if (wallClock(runs[i - 1], input.timeZone).offset !== wallClock(runs[i], input.timeZone).offset) {
+      dstChange = runs[i];
       break;
     }
   }
-  return { kind: "clock", runs: shown, timeZone: input.timeZone, dstChange };
+  return { kind: "clock", runs, timeZone: input.timeZone, dstChange };
 }
 
 /** "Mon 23 Nov, 09:00" in the given zone. */

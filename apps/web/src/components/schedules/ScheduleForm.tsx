@@ -578,7 +578,14 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           preset={interval}
           cron={cron}
           timeZone={timezone}
-          lastRunAt={initial?.last_run_at}
+          storedNextRunAt={initial?.next_run_at}
+          cadenceChanged={
+            !initial
+            || cadenceMode !== (initial.cron ? "cron" : "preset")
+            || (cadenceMode === "cron" ? cron.trim() !== (initial.cron ?? "").trim() : interval !== storedSchedulePreset(initial))
+            || timezone !== (initial.timezone ?? "UTC")
+          }
+          paused={isEdit ? initial?.enabled === false : missingValidateMappings}
         />
       </section>
 

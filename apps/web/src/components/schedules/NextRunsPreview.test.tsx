@@ -19,7 +19,9 @@ describe("NextRunsPreview", () => {
     const times = [...out.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g)].map((m) => [m[1], m[2]]);
     assert.equal(times.length, 5);
     assert.deepEqual(times[0], ["2026-11-23T09:00:00.000Z", "Mon 23 Nov, 09:00"]);
-    assert.match(out, /aria-live="polite"/);
+    // Review UI2 #11: only one short line is live, never the heading and five rows.
+    assert.doesNotMatch(out, /<section[^>]*aria-live/);
+    assert.match(out, /<p class="df2-sr-only" aria-live="polite">Next run Mon 23 Nov, 09:00\.<\/p>/);
   });
 
   it("says why a cron cannot run, instead of listing nothing", () => {
@@ -29,12 +31,20 @@ describe("NextRunsPreview", () => {
 
   it("explains rolling cadences: no fixed clock time", () => {
     const preset = html({ mode: "preset", preset: "hourly" });
-    assert.match(preset, /Runs every hour, counted from the previous run \(the first one after you save\)\. There is no fixed clock time\./);
+    assert.match(preset, /Runs every hour, counted from the previous run \(counting starts when you save\)\. There is no fixed clock time\./);
     assert.match(html({ cron: "*/7 * * * *" }), /Runs every 7 minutes/);
   });
 
   it("notes a clock change among the five", () => {
     const out = html({ cron: "15 9 * * MON-FRI", timeZone: "Europe/London", now: new Date("2026-03-27T00:00:00Z") });
     assert.match(out, /Clocks change in Europe\/London before Mon 30 Mar, 09:15; the times above include it\./);
+  });
+});
+
+describe("NextRunsPreview: paused (review UI2 #9)", () => {
+  it("a paused schedule, or one created paused, lists no runs", () => {
+    const out = html({ cron: "0 9 * * *", paused: true });
+    assert.match(out, /Paused — no runs scheduled\./);
+    assert.doesNotMatch(out, /<time /);
   });
 });

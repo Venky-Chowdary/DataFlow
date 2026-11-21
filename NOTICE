@@ -302,7 +302,6 @@ cliui: ISC
 cmdk: MIT
 color-convert: MIT
 color-name: MIT
-cron-parser: MIT
 d3-color: ISC
 d3-dispatch: ISC
 d3-drag: ISC
@@ -322,7 +321,6 @@ get-nonce: MIT
 is-fullwidth-code-point: MIT
 locate-path: MIT
 lucide-react: ISC
-luxon: MIT
 p-limit: MIT
 p-locate: MIT
 p-try: MIT
