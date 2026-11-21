@@ -99,6 +99,20 @@ jobs:
         run: |
           python -m pytest tests/test_evidence_pack.py -q --tb=short
 
+      # Blind held-out mapping benchmark (tests/fixtures/mapping_holdout_v1.json).
+      # Floors/ceilings in services/mapping_holdout_eval.py, measured values,
+      # ratchet only: auto-approve precision >= 0.98, no column without a true
+      # counterpart auto-mapped, top-1/top-3 floors. The leak check fails when a
+      # test-split answer appears in dictionaries, synonyms, training data or
+      # mapping fixtures (tune on the dev split only).
+      - name: Held-out mapping gate + leak check
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .:../../packages/preflight/src
+        run: |
+          python -m pytest tests/test_mapping_holdout_gate.py tests/test_mapping_holdout_leak.py -q --tb=short
+          { echo "### Held-out mapping benchmark (test split)"; echo '```'; python scripts/run_mapping_holdout.py --split test; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: God-module size budgets (Phase F8)
         working-directory: apps/api
         run: |

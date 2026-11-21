@@ -181,6 +181,30 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
             "transfer or a Map UI session."
         ),
     },
+    {
+        "id": "holdout_mapping",
+        "claim": "Blind held-out mapping accuracy (test split, never tuned on)",
+        "buyer_line": (
+            "On the test split of a blind held-out set (tables of renames, abbreviations, "
+            "five languages, JSON paths and public schemas), auto-approved mappings meet the "
+            "precision floor, no column without a true counterpart is auto-mapped, and the "
+            "right column is in the top 3 at the measured rate."
+        ),
+        # Floors mirror services.mapping_holdout_eval.HOLDOUT_FLOORS["test"].
+        "floors": {
+            "top1": 0.5909,
+            "top3": 0.8818,
+            "auto_precision": 0.98,
+            "neg_auto_zero": 1,
+            "min_matchable": 100,
+        },
+        "honesty": (
+            "One author, about 230 columns; the test split is about half of it, so a 95% "
+            "interval on top-1 is roughly +/-9 points. Typed schemas with samples against an "
+            "existing PostgreSQL table. Not a customer schema study and not an external "
+            "benchmark (Valentine, MIMIC-OMOP)."
+        ),
+    },
 ]
 
 
@@ -609,6 +633,18 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     }
 
 
+def measure_holdout_mapping() -> dict[str, Any]:
+    from services.mapping_holdout_eval import evaluate
+
+    overall = evaluate("test")["overall"]
+    return {
+        **{k: v for k, v in overall.items()},
+        "neg_auto_zero": int(overall["neg_auto"] == 0),
+        "min_matchable": overall["n_matchable"],
+        "split": "test",
+    }
+
+
 _MEASUREMENTS: dict[str, Callable[[], dict[str, Any]]] = {
     "hungarian_assignment": measure_hungarian_vs_greedy,
     "native_type_canonicalization": measure_native_types,
@@ -619,6 +655,7 @@ _MEASUREMENTS: dict[str, Callable[[], dict[str, Any]]] = {
     "pair_assurance_offline": measure_pair_assurance_offline,
     "abbreviation_coverage": measure_abbreviation_coverage,
     "create_new_type_risk_stamp": measure_create_new_type_risk,
+    "holdout_mapping": lambda: measure_holdout_mapping(),
 }
 
 

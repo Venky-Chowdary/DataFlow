@@ -1,0 +1,4098 @@
+{
+ "schema_version": 1,
+ "name": "mapping_holdout_v1",
+ "authored": "2026-11-21",
+ "provenance": "Blind held-out mapping benchmark. Written before reading the mapper's ABBREVIATIONS, synonym or schematic dictionaries and never tuned against. One author; public-schema tables (Synthea, OMOP person, Salesforce Contact, HubSpot contact, Stripe Charge) recalled from public documentation.",
+ "split_method": "Table-level split, stratified by bucket (the single-table 'negatives' bucket is pooled with 'real_world_standard', which holds the other negatives). Inside each stratum tables are ordered by sha256('datawrap-holdout-v1:' + id); the first ceil(n/2) are 'test', the rest 'dev'. Tune only on dev. The test split's answers must never appear in dictionaries, synonym lists or other fixtures (tests/test_mapping_holdout_leak.py).",
+ "destination": {
+  "destination_db_type": "postgresql",
+  "destination_table_exists": true
+ },
+ "known_overlap_at_freeze": {
+  "recorded_at": "2026-11-21, origin/feature/Cleanup 32bdc4ba6, before any tuning on this set",
+  "note": "Test-split answers that the mapper's dictionaries, synonym lists, training data or mapping fixtures already contained when the set was frozen. They are real contamination and part of why some test columns map. tests/test_mapping_holdout_leak.py fails on any overlap not listed here.",
+  "entries": [
+   [
+    "dict:abbreviations",
+    "avail_bal",
+    "available_balance"
+   ],
+   [
+    "dict:abbreviations",
+    "bol_no",
+    "bill_of_lading_number"
+   ],
+   [
+    "dict:abbreviations",
+    "e_mail",
+    "email"
+   ],
+   [
+    "dict:abbreviations",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:abbreviations",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:abbreviations",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "dict:abbreviations",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:abbreviations",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "dict:abbreviations",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "dict:abbreviations:acct",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:abbreviations:addr",
+    "addr_ln1",
+    "address_line_1"
+   ],
+   [
+    "dict:abbreviations:addr",
+    "addr_ln2",
+    "address_line_2"
+   ],
+   [
+    "dict:abbreviations:bal",
+    "avail_bal",
+    "available_balance"
+   ],
+   [
+    "dict:abbreviations:bal",
+    "cls_bal",
+    "closing_balance"
+   ],
+   [
+    "dict:abbreviations:bal",
+    "opn_bal",
+    "opening_balance"
+   ],
+   [
+    "dict:abbreviations:birthdate",
+    "BIRTHDATE",
+    "birth_datetime"
+   ],
+   [
+    "dict:abbreviations:cd",
+    "brnch_cd",
+    "branch_code"
+   ],
+   [
+    "dict:abbreviations:cd",
+    "carr_cd",
+    "carrier_code"
+   ],
+   [
+    "dict:abbreviations:cd",
+    "cntry_cd",
+    "country_code"
+   ],
+   [
+    "dict:abbreviations:cd",
+    "pstl_cd",
+    "postal_code"
+   ],
+   [
+    "dict:abbreviations:cd",
+    "st_cd",
+    "state_code"
+   ],
+   [
+    "dict:abbreviations:cnt",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "dict:abbreviations:cntry",
+    "cntry_cd",
+    "country_code"
+   ],
+   [
+    "dict:abbreviations:cust",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:abbreviations:dept",
+    "dept",
+    "department_name"
+   ],
+   [
+    "dict:abbreviations:dt",
+    "pod_dt",
+    "proof_of_delivery_date"
+   ],
+   [
+    "dict:abbreviations:dt",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "dict:abbreviations:eta",
+    "eta",
+    "estimated_arrival"
+   ],
+   [
+    "dict:abbreviations:lat",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:abbreviations:lng",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:abbreviations:no",
+    "bldg_no",
+    "building_number"
+   ],
+   [
+    "dict:abbreviations:no",
+    "bol_no",
+    "bill_of_lading_number"
+   ],
+   [
+    "dict:abbreviations:no",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:abbreviations:no",
+    "pro_no",
+    "pro_number"
+   ],
+   [
+    "dict:abbreviations:prod",
+    "prod_typ",
+    "product_type"
+   ],
+   [
+    "dict:abbreviations:qty",
+    "items[].qty",
+    "quantity"
+   ],
+   [
+    "dict:abbreviations:qty",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:abbreviations:zip",
+    "customer.address.zip",
+    "postal_code"
+   ],
+   [
+    "dict:abbreviations:zip",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "dict:synonyms",
+    "active",
+    "is_active"
+   ],
+   [
+    "dict:synonyms",
+    "brand",
+    "manufacturer"
+   ],
+   [
+    "dict:synonyms",
+    "date",
+    "transaction_date"
+   ],
+   [
+    "dict:synonyms",
+    "date_of_birth",
+    "birth_date"
+   ],
+   [
+    "dict:synonyms",
+    "e_mail",
+    "email"
+   ],
+   [
+    "dict:synonyms",
+    "forename",
+    "first_name"
+   ],
+   [
+    "dict:synonyms",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:synonyms",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:synonyms",
+    "phone",
+    "telephone"
+   ],
+   [
+    "dict:synonyms",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:synonyms",
+    "start_date",
+    "hire_date"
+   ],
+   [
+    "dict:synonyms",
+    "surname",
+    "last_name"
+   ],
+   [
+    "dict:synonyms",
+    "value",
+    "amount"
+   ],
+   [
+    "dict:synonyms",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "dict:synonyms:addr",
+    "addr_ln1",
+    "address_line_1"
+   ],
+   [
+    "dict:synonyms:addr",
+    "addr_ln2",
+    "address_line_2"
+   ],
+   [
+    "dict:synonyms:brand",
+    "brand",
+    "manufacturer"
+   ],
+   [
+    "dict:synonyms:dept",
+    "dept",
+    "department_name"
+   ],
+   [
+    "dict:synonyms:dt",
+    "pod_dt",
+    "proof_of_delivery_date"
+   ],
+   [
+    "dict:synonyms:dt",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "dict:synonyms:forename",
+    "forename",
+    "first_name"
+   ],
+   [
+    "dict:synonyms:items",
+    "items[].qty",
+    "quantity"
+   ],
+   [
+    "dict:synonyms:lat",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:synonyms:lng",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:synonyms:mail",
+    "e_mail",
+    "email"
+   ],
+   [
+    "dict:synonyms:phone",
+    "phone",
+    "telephone"
+   ],
+   [
+    "dict:synonyms:qty",
+    "items[].qty",
+    "quantity"
+   ],
+   [
+    "dict:synonyms:qty",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:synonyms:salary",
+    "salary",
+    "annual_compensation"
+   ],
+   [
+    "dict:synonyms:st",
+    "st_cd",
+    "state_code"
+   ],
+   [
+    "dict:synonyms:surname",
+    "surname",
+    "last_name"
+   ],
+   [
+    "dict:synonyms:town",
+    "home_town",
+    "city"
+   ],
+   [
+    "dict:synonyms:value",
+    "value",
+    "amount"
+   ],
+   [
+    "dict:synonyms:wt",
+    "gr_wt",
+    "gross_weight"
+   ],
+   [
+    "dict:token_abbreviations",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:token_abbreviations",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:token_abbreviations",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:token_abbreviations",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "dict:token_abbreviations:acct",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:token_abbreviations:addr",
+    "addr_ln1",
+    "address_line_1"
+   ],
+   [
+    "dict:token_abbreviations:addr",
+    "addr_ln2",
+    "address_line_2"
+   ],
+   [
+    "dict:token_abbreviations:bal",
+    "avail_bal",
+    "available_balance"
+   ],
+   [
+    "dict:token_abbreviations:bal",
+    "cls_bal",
+    "closing_balance"
+   ],
+   [
+    "dict:token_abbreviations:bal",
+    "opn_bal",
+    "opening_balance"
+   ],
+   [
+    "dict:token_abbreviations:cnt",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "dict:token_abbreviations:cust",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:token_abbreviations:dept",
+    "dept",
+    "department_name"
+   ],
+   [
+    "dict:token_abbreviations:dest",
+    "dest_whse",
+    "destination_warehouse"
+   ],
+   [
+    "dict:token_abbreviations:dt",
+    "pod_dt",
+    "proof_of_delivery_date"
+   ],
+   [
+    "dict:token_abbreviations:dt",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "dict:token_abbreviations:lat",
+    "lat",
+    "latitude"
+   ],
+   [
+    "dict:token_abbreviations:lng",
+    "lng",
+    "longitude"
+   ],
+   [
+    "dict:token_abbreviations:no",
+    "bldg_no",
+    "building_number"
+   ],
+   [
+    "dict:token_abbreviations:no",
+    "bol_no",
+    "bill_of_lading_number"
+   ],
+   [
+    "dict:token_abbreviations:no",
+    "cust_acct_no",
+    "customer_account_number"
+   ],
+   [
+    "dict:token_abbreviations:no",
+    "pro_no",
+    "pro_number"
+   ],
+   [
+    "dict:token_abbreviations:orig",
+    "orig_whse",
+    "origin_warehouse"
+   ],
+   [
+    "dict:token_abbreviations:pkg",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "dict:token_abbreviations:prod",
+    "prod_typ",
+    "product_type"
+   ],
+   [
+    "dict:token_abbreviations:qty",
+    "items[].qty",
+    "quantity"
+   ],
+   [
+    "dict:token_abbreviations:qty",
+    "qty",
+    "quantity"
+   ],
+   [
+    "dict:token_abbreviations:st",
+    "st_cd",
+    "state_code"
+   ],
+   [
+    "dict:token_abbreviations:zip",
+    "customer.address.zip",
+    "postal_code"
+   ],
+   [
+    "dict:token_abbreviations:zip",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "avail_bal",
+    "available_balance"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "bol_no",
+    "bill_of_lading_number"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "date",
+    "transaction_date"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/scripts/generate_enterprise_mapping_golden.py",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "avail_bal",
+    "available_balance"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "bol_no",
+    "bill_of_lading_number"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "date_of_birth",
+    "birth_date"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "lat",
+    "latitude"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "lng",
+    "longitude"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "pkg_cnt",
+    "package_count"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "stmt_dt",
+    "statement_date"
+   ],
+   [
+    "line:apps/api/services/semantic_abbreviations.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "cost",
+    "unit_cost"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "forename",
+    "first_name"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "payment.amount",
+    "amount"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "phone",
+    "telephone"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "price",
+    "list_price"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "start_date",
+    "hire_date"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "surname",
+    "last_name"
+   ],
+   [
+    "line:apps/api/services/semantic_analyzer.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/services/semantic_types.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/services/semantic_types.py",
+    "phone",
+    "telephone"
+   ],
+   [
+    "line:apps/api/services/semantic_types.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "brand",
+    "manufacturer"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "color",
+    "colour"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "date_of_birth",
+    "birth_date"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "forename",
+    "first_name"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "lat",
+    "latitude"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "lng",
+    "longitude"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "phone",
+    "telephone"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "start_date",
+    "hire_date"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "surname",
+    "last_name"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "tz",
+    "time_zone"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/semantic_patterns.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "active",
+    "is_active"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "brand",
+    "manufacturer"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "date",
+    "transaction_date"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "date_of_birth",
+    "birth_date"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "forename",
+    "first_name"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "lat",
+    "latitude"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "lng",
+    "longitude"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "phone",
+    "telephone"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "start_date",
+    "hire_date"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "surname",
+    "last_name"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "value",
+    "amount"
+   ],
+   [
+    "line:apps/api/src/ai/knowledge/synonyms.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "date_of_birth",
+    "birth_date"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "e_mail",
+    "email"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "forename",
+    "first_name"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "lat",
+    "latitude"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "lng",
+    "longitude"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "phone",
+    "telephone"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "surname",
+    "last_name"
+   ],
+   [
+    "line:apps/api/src/ai/semantic_engine.py",
+    "zip",
+    "postal_code"
+   ],
+   [
+    "line:apps/api/tests/fixtures/mapping_golden.json",
+    "lat",
+    "latitude"
+   ],
+   [
+    "line:apps/api/tests/fixtures/mapping_golden.json",
+    "lng",
+    "longitude"
+   ],
+   [
+    "line:apps/api/tests/fixtures/mapping_golden.json",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/tests/fixtures/mapping_golden_hard_cases.json",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/tests/fixtures/procedure_destination_matrix.json",
+    "_id",
+    "order_id"
+   ],
+   [
+    "line:apps/api/tests/test_cross_type_accuracy.py",
+    "created",
+    "created_at"
+   ],
+   [
+    "line:apps/api/tests/test_execute_tracked_schema_mapping_matrix.py",
+    "active",
+    "is_active"
+   ],
+   [
+    "line:apps/api/tests/test_llm_mapping.py",
+    "payment.amount",
+    "amount"
+   ],
+   [
+    "line:apps/api/tests/test_mapper.py",
+    "_id",
+    "order_id"
+   ],
+   [
+    "line:apps/api/tests/test_mapper.py",
+    "payment.amount",
+    "amount"
+   ],
+   [
+    "line:apps/api/tests/test_mapper.py",
+    "start_date",
+    "hire_date"
+   ],
+   [
+    "line:apps/api/tests/test_mapping_pipeline.py",
+    "_id",
+    "order_id"
+   ],
+   [
+    "line:apps/api/tests/test_mapping_studio_router.py",
+    "_id",
+    "order_id"
+   ],
+   [
+    "line:apps/api/tests/test_mapping_studio_services.py",
+    "_id",
+    "order_id"
+   ],
+   [
+    "line:apps/api/tests/test_mapping_studio_services.py",
+    "qty",
+    "quantity"
+   ],
+   [
+    "line:apps/api/tests/test_mapping_studio_services.py",
+    "surname",
+    "last_name"
+   ],
+   [
+    "line:packages/ml/src/ml/data/synthetic_v1.jsonl",
+    "payment.amount",
+    "amount"
+   ],
+   [
+    "line:packages/ml/src/ml/synthetic/factory.py",
+    "date",
+    "transaction_date"
+   ],
+   [
+    "line:packages/ml/src/ml/synthetic/factory.py",
+    "payment.amount",
+    "amount"
+   ],
+   [
+    "line:packages/ml/src/ml/synthetic/factory.py",
+    "value",
+    "amount"
+   ]
+  ]
+ },
+ "tables": [
+  {
+   "id": "hr_synonyms",
+   "bucket": "renames",
+   "split": "test",
+   "source_db": "mysql",
+   "source": [
+    {
+     "name": "surname",
+     "type": "VARCHAR",
+     "samples": [
+      "Smith",
+      "Garcia"
+     ]
+    },
+    {
+     "name": "forename",
+     "type": "VARCHAR",
+     "samples": [
+      "Ann",
+      "Luis"
+     ]
+    },
+    {
+     "name": "date_of_birth",
+     "type": "DATE",
+     "samples": [
+      "1980-02-01",
+      "1975-11-30"
+     ]
+    },
+    {
+     "name": "start_date",
+     "type": "DATE",
+     "samples": [
+      "2019-04-01"
+     ]
+    },
+    {
+     "name": "salary",
+     "type": "DECIMAL",
+     "samples": [
+      "85000.00",
+      "120500.50"
+     ]
+    },
+    {
+     "name": "dept",
+     "type": "VARCHAR",
+     "samples": [
+      "Finance",
+      "R&D"
+     ]
+    },
+    {
+     "name": "manager",
+     "type": "INTEGER",
+     "samples": [
+      "1042",
+      "877"
+     ]
+    },
+    {
+     "name": "phone",
+     "type": "VARCHAR",
+     "samples": [
+      "+1 415 555 0101"
+     ]
+    },
+    {
+     "name": "e_mail",
+     "type": "VARCHAR",
+     "samples": [
+      "ann@x.com"
+     ]
+    },
+    {
+     "name": "home_town",
+     "type": "VARCHAR",
+     "samples": [
+      "Austin",
+      "Leeds"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "employee_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "birth_date",
+     "type": "DATE"
+    },
+    {
+     "name": "hire_date",
+     "type": "DATE"
+    },
+    {
+     "name": "annual_compensation",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "department_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "supervisor_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "telephone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "termination_date",
+     "type": "DATE"
+    }
+   ],
+   "gold": {
+    "surname": "last_name",
+    "forename": "first_name",
+    "date_of_birth": "birth_date",
+    "start_date": "hire_date",
+    "salary": "annual_compensation",
+    "dept": "department_name",
+    "manager": "supervisor_id",
+    "phone": "telephone",
+    "e_mail": "email",
+    "home_town": "city"
+   }
+  },
+  {
+   "id": "crm_synonyms",
+   "bucket": "renames",
+   "split": "dev",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "company",
+     "type": "VARCHAR",
+     "samples": [
+      "Acme Corp"
+     ]
+    },
+    {
+     "name": "job_title",
+     "type": "VARCHAR",
+     "samples": [
+      "CFO"
+     ]
+    },
+    {
+     "name": "mobile",
+     "type": "VARCHAR",
+     "samples": [
+      "+44 7700 900123"
+     ]
+    },
+    {
+     "name": "zip",
+     "type": "VARCHAR",
+     "samples": [
+      "02134",
+      "94107"
+     ]
+    },
+    {
+     "name": "state",
+     "type": "VARCHAR",
+     "samples": [
+      "CA",
+      "NY"
+     ]
+    },
+    {
+     "name": "country",
+     "type": "VARCHAR",
+     "samples": [
+      "US",
+      "GB"
+     ]
+    },
+    {
+     "name": "website",
+     "type": "VARCHAR",
+     "samples": [
+      "https://acme.com"
+     ]
+    },
+    {
+     "name": "lead_source",
+     "type": "VARCHAR",
+     "samples": [
+      "Webinar",
+      "Referral"
+     ]
+    },
+    {
+     "name": "owner",
+     "type": "VARCHAR",
+     "samples": [
+      "u_123"
+     ]
+    },
+    {
+     "name": "created",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-02 10:00:00"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "account_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "title",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "mobile_phone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "region",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "country_code",
+     "type": "CHAR"
+    },
+    {
+     "name": "url",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "source_channel",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "assigned_user",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "industry",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "annual_revenue",
+     "type": "DECIMAL"
+    }
+   ],
+   "gold": {
+    "company": "account_name",
+    "job_title": "title",
+    "mobile": "mobile_phone",
+    "zip": "postal_code",
+    "state": "region",
+    "country": "country_code",
+    "website": "url",
+    "lead_source": "source_channel",
+    "owner": "assigned_user",
+    "created": "created_at"
+   }
+  },
+  {
+   "id": "retail_synonyms",
+   "bucket": "renames",
+   "split": "test",
+   "source_db": "sqlserver",
+   "source": [
+    {
+     "name": "price",
+     "type": "DECIMAL",
+     "samples": [
+      "19.99"
+     ]
+    },
+    {
+     "name": "cost",
+     "type": "DECIMAL",
+     "samples": [
+      "7.10"
+     ]
+    },
+    {
+     "name": "stock",
+     "type": "INTEGER",
+     "samples": [
+      "42",
+      "0"
+     ]
+    },
+    {
+     "name": "barcode",
+     "type": "VARCHAR",
+     "samples": [
+      "012345678905"
+     ]
+    },
+    {
+     "name": "brand",
+     "type": "VARCHAR",
+     "samples": [
+      "Nike"
+     ]
+    },
+    {
+     "name": "category",
+     "type": "VARCHAR",
+     "samples": [
+      "Shoes"
+     ]
+    },
+    {
+     "name": "weight",
+     "type": "INTEGER",
+     "samples": [
+      "350",
+      "1200"
+     ]
+    },
+    {
+     "name": "color",
+     "type": "VARCHAR",
+     "samples": [
+      "red"
+     ]
+    },
+    {
+     "name": "size",
+     "type": "VARCHAR",
+     "samples": [
+      "XL",
+      "42"
+     ]
+    },
+    {
+     "name": "discontinued",
+     "type": "BOOLEAN",
+     "samples": [
+      "true",
+      "false"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "list_price",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "unit_cost",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "quantity_on_hand",
+     "type": "INTEGER"
+    },
+    {
+     "name": "upc",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "manufacturer",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "product_category",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "weight_grams",
+     "type": "INTEGER"
+    },
+    {
+     "name": "colour",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "size_label",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "is_active",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "product_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "supplier_id",
+     "type": "INTEGER"
+    }
+   ],
+   "gold": {
+    "price": "list_price",
+    "cost": "unit_cost",
+    "stock": "quantity_on_hand",
+    "barcode": "upc",
+    "brand": "manufacturer",
+    "category": "product_category",
+    "weight": "weight_grams",
+    "color": "colour",
+    "size": "size_label",
+    "discontinued": null
+   }
+  },
+  {
+   "id": "hr_abbrev",
+   "bucket": "abbreviations",
+   "split": "dev",
+   "source_db": "oracle",
+   "source": [
+    {
+     "name": "emp_no",
+     "type": "NUMBER",
+     "samples": [
+      "10001"
+     ]
+    },
+    {
+     "name": "emp_fnm",
+     "type": "VARCHAR2",
+     "samples": [
+      "Ann"
+     ]
+    },
+    {
+     "name": "emp_lnm",
+     "type": "VARCHAR2",
+     "samples": [
+      "Lee"
+     ]
+    },
+    {
+     "name": "hire_dt",
+     "type": "DATE",
+     "samples": [
+      "2019-04-01"
+     ]
+    },
+    {
+     "name": "term_dt",
+     "type": "DATE",
+     "samples": [
+      "2023-01-31"
+     ]
+    },
+    {
+     "name": "mgr_emp_no",
+     "type": "NUMBER",
+     "samples": [
+      "10002"
+     ]
+    },
+    {
+     "name": "dept_cd",
+     "type": "VARCHAR2",
+     "samples": [
+      "FIN"
+     ]
+    },
+    {
+     "name": "job_cd",
+     "type": "VARCHAR2",
+     "samples": [
+      "ENG3"
+     ]
+    },
+    {
+     "name": "sal_amt",
+     "type": "NUMBER",
+     "samples": [
+      "85000"
+     ]
+    },
+    {
+     "name": "ssn_last4",
+     "type": "CHAR",
+     "samples": [
+      "1234"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "employee_number",
+     "type": "INTEGER"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "hire_date",
+     "type": "DATE"
+    },
+    {
+     "name": "termination_date",
+     "type": "DATE"
+    },
+    {
+     "name": "manager_employee_number",
+     "type": "INTEGER"
+    },
+    {
+     "name": "department_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "job_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "salary_amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "ssn_last_four",
+     "type": "CHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "emp_no": "employee_number",
+    "emp_fnm": "first_name",
+    "emp_lnm": "last_name",
+    "hire_dt": "hire_date",
+    "term_dt": "termination_date",
+    "mgr_emp_no": "manager_employee_number",
+    "dept_cd": "department_code",
+    "job_cd": "job_code",
+    "sal_amt": "salary_amount",
+    "ssn_last4": "ssn_last_four"
+   }
+  },
+  {
+   "id": "address_abbrev",
+   "bucket": "abbreviations",
+   "split": "test",
+   "source_db": "mysql",
+   "source": [
+    {
+     "name": "addr_ln1",
+     "type": "VARCHAR",
+     "samples": [
+      "1 Main St"
+     ]
+    },
+    {
+     "name": "addr_ln2",
+     "type": "VARCHAR",
+     "samples": [
+      "Apt 4"
+     ]
+    },
+    {
+     "name": "cty",
+     "type": "VARCHAR",
+     "samples": [
+      "Austin"
+     ]
+    },
+    {
+     "name": "st_cd",
+     "type": "CHAR",
+     "samples": [
+      "TX"
+     ]
+    },
+    {
+     "name": "pstl_cd",
+     "type": "VARCHAR",
+     "samples": [
+      "73301"
+     ]
+    },
+    {
+     "name": "cntry_cd",
+     "type": "CHAR",
+     "samples": [
+      "US"
+     ]
+    },
+    {
+     "name": "lat",
+     "type": "DECIMAL",
+     "samples": [
+      "30.2672"
+     ]
+    },
+    {
+     "name": "lng",
+     "type": "DECIMAL",
+     "samples": [
+      "-97.7431"
+     ]
+    },
+    {
+     "name": "tz",
+     "type": "VARCHAR",
+     "samples": [
+      "America/Chicago"
+     ]
+    },
+    {
+     "name": "bldg_no",
+     "type": "VARCHAR",
+     "samples": [
+      "12B"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "address_line_1",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "address_line_2",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "state_code",
+     "type": "CHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "country_code",
+     "type": "CHAR"
+    },
+    {
+     "name": "latitude",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "longitude",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "time_zone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "building_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "county",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "addr_ln1": "address_line_1",
+    "addr_ln2": "address_line_2",
+    "cty": "city",
+    "st_cd": "state_code",
+    "pstl_cd": "postal_code",
+    "cntry_cd": "country_code",
+    "lat": "latitude",
+    "lng": "longitude",
+    "tz": "time_zone",
+    "bldg_no": "building_number"
+   }
+  },
+  {
+   "id": "clinical_abbrev",
+   "bucket": "abbreviations",
+   "split": "dev",
+   "source_db": "sqlserver",
+   "source": [
+    {
+     "name": "pt_id",
+     "type": "INTEGER",
+     "samples": [
+      "5521"
+     ]
+    },
+    {
+     "name": "mrn",
+     "type": "VARCHAR",
+     "samples": [
+      "MRN000123"
+     ]
+    },
+    {
+     "name": "adm_dt",
+     "type": "DATETIME",
+     "samples": [
+      "2024-02-01 08:00"
+     ]
+    },
+    {
+     "name": "dsch_dt",
+     "type": "DATETIME",
+     "samples": [
+      "2024-02-05 12:00"
+     ]
+    },
+    {
+     "name": "dx_cd",
+     "type": "VARCHAR",
+     "samples": [
+      "E11.9",
+      "I10"
+     ]
+    },
+    {
+     "name": "px_cd",
+     "type": "VARCHAR",
+     "samples": [
+      "0DTJ4ZZ"
+     ]
+    },
+    {
+     "name": "attd_phys",
+     "type": "VARCHAR",
+     "samples": [
+      "Dr. Patel"
+     ]
+    },
+    {
+     "name": "los",
+     "type": "INTEGER",
+     "samples": [
+      "4"
+     ]
+    },
+    {
+     "name": "drg",
+     "type": "VARCHAR",
+     "samples": [
+      "470"
+     ]
+    },
+    {
+     "name": "ins_plan",
+     "type": "VARCHAR",
+     "samples": [
+      "Medicare A"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "patient_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "medical_record_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "admission_date",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "discharge_date",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "diagnosis_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "procedure_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "attending_physician",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "length_of_stay",
+     "type": "INTEGER"
+    },
+    {
+     "name": "drg_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "insurance_plan",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "ward",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "pt_id": "patient_id",
+    "mrn": "medical_record_number",
+    "adm_dt": "admission_date",
+    "dsch_dt": "discharge_date",
+    "dx_cd": "diagnosis_code",
+    "px_cd": "procedure_code",
+    "attd_phys": "attending_physician",
+    "los": "length_of_stay",
+    "drg": "drg_code",
+    "ins_plan": "insurance_plan"
+   }
+  },
+  {
+   "id": "bank_abbrev",
+   "bucket": "abbreviations",
+   "split": "test",
+   "source_db": "oracle",
+   "source": [
+    {
+     "name": "cust_acct_no",
+     "type": "VARCHAR2",
+     "samples": [
+      "0012345678"
+     ]
+    },
+    {
+     "name": "stmt_dt",
+     "type": "DATE",
+     "samples": [
+      "2024-03-31"
+     ]
+    },
+    {
+     "name": "opn_bal",
+     "type": "NUMBER",
+     "samples": [
+      "1000.00"
+     ]
+    },
+    {
+     "name": "cls_bal",
+     "type": "NUMBER",
+     "samples": [
+      "1250.75"
+     ]
+    },
+    {
+     "name": "avail_bal",
+     "type": "NUMBER",
+     "samples": [
+      "1100.00"
+     ]
+    },
+    {
+     "name": "ovdft_lmt",
+     "type": "NUMBER",
+     "samples": [
+      "500"
+     ]
+    },
+    {
+     "name": "int_accr",
+     "type": "NUMBER",
+     "samples": [
+      "3.21"
+     ]
+    },
+    {
+     "name": "ytd_int",
+     "type": "NUMBER",
+     "samples": [
+      "12.04"
+     ]
+    },
+    {
+     "name": "brnch_cd",
+     "type": "VARCHAR2",
+     "samples": [
+      "LDN01"
+     ]
+    },
+    {
+     "name": "prod_typ",
+     "type": "VARCHAR2",
+     "samples": [
+      "SAVINGS"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "customer_account_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "statement_date",
+     "type": "DATE"
+    },
+    {
+     "name": "opening_balance",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "closing_balance",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "available_balance",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "overdraft_limit",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "interest_accrued",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "year_to_date_interest",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "branch_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "product_type",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "currency",
+     "type": "CHAR"
+    }
+   ],
+   "gold": {
+    "cust_acct_no": "customer_account_number",
+    "stmt_dt": "statement_date",
+    "opn_bal": "opening_balance",
+    "cls_bal": "closing_balance",
+    "avail_bal": "available_balance",
+    "ovdft_lmt": "overdraft_limit",
+    "int_accr": "interest_accrued",
+    "ytd_int": "year_to_date_interest",
+    "brnch_cd": "branch_code",
+    "prod_typ": "product_type"
+   }
+  },
+  {
+   "id": "logistics_abbrev",
+   "bucket": "abbreviations",
+   "split": "test",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "shpmt_id",
+     "type": "VARCHAR",
+     "samples": [
+      "SH-1001"
+     ]
+    },
+    {
+     "name": "orig_whse",
+     "type": "VARCHAR",
+     "samples": [
+      "DAL1"
+     ]
+    },
+    {
+     "name": "dest_whse",
+     "type": "VARCHAR",
+     "samples": [
+      "ATL2"
+     ]
+    },
+    {
+     "name": "carr_cd",
+     "type": "VARCHAR",
+     "samples": [
+      "UPSN"
+     ]
+    },
+    {
+     "name": "pro_no",
+     "type": "VARCHAR",
+     "samples": [
+      "123456789"
+     ]
+    },
+    {
+     "name": "bol_no",
+     "type": "VARCHAR",
+     "samples": [
+      "BOL-778"
+     ]
+    },
+    {
+     "name": "pkg_cnt",
+     "type": "INTEGER",
+     "samples": [
+      "3"
+     ]
+    },
+    {
+     "name": "gr_wt",
+     "type": "DECIMAL",
+     "samples": [
+      "120.5"
+     ]
+    },
+    {
+     "name": "eta",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-05-01 17:00"
+     ]
+    },
+    {
+     "name": "pod_dt",
+     "type": "DATE",
+     "samples": [
+      "2024-05-02"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "shipment_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "origin_warehouse",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "destination_warehouse",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "carrier_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "pro_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "bill_of_lading_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "package_count",
+     "type": "INTEGER"
+    },
+    {
+     "name": "gross_weight",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "estimated_arrival",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "proof_of_delivery_date",
+     "type": "DATE"
+    },
+    {
+     "name": "freight_cost",
+     "type": "DECIMAL"
+    }
+   ],
+   "gold": {
+    "shpmt_id": "shipment_id",
+    "orig_whse": "origin_warehouse",
+    "dest_whse": "destination_warehouse",
+    "carr_cd": "carrier_code",
+    "pro_no": "pro_number",
+    "bol_no": "bill_of_lading_number",
+    "pkg_cnt": "package_count",
+    "gr_wt": "gross_weight",
+    "eta": "estimated_arrival",
+    "pod_dt": "proof_of_delivery_date"
+   }
+  },
+  {
+   "id": "de_customers",
+   "bucket": "multilingual",
+   "split": "test",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "kundennummer",
+     "type": "INTEGER",
+     "samples": [
+      "100234"
+     ]
+    },
+    {
+     "name": "vorname",
+     "type": "VARCHAR",
+     "samples": [
+      "Jürgen"
+     ]
+    },
+    {
+     "name": "nachname",
+     "type": "VARCHAR",
+     "samples": [
+      "Müller"
+     ]
+    },
+    {
+     "name": "geburtsdatum",
+     "type": "DATE",
+     "samples": [
+      "1970-05-04"
+     ]
+    },
+    {
+     "name": "strasse",
+     "type": "VARCHAR",
+     "samples": [
+      "Hauptstr. 5"
+     ]
+    },
+    {
+     "name": "postleitzahl",
+     "type": "VARCHAR",
+     "samples": [
+      "10115"
+     ]
+    },
+    {
+     "name": "ort",
+     "type": "VARCHAR",
+     "samples": [
+      "Berlin"
+     ]
+    },
+    {
+     "name": "telefonnummer",
+     "type": "VARCHAR",
+     "samples": [
+      "+49 30 1234"
+     ]
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR",
+     "samples": [
+      "j@m.de"
+     ]
+    },
+    {
+     "name": "erstellt_am",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2023-01-01 09:00"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "customer_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "birth_date",
+     "type": "DATE"
+    },
+    {
+     "name": "street",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "phone_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "country",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "kundennummer": "customer_id",
+    "vorname": "first_name",
+    "nachname": "last_name",
+    "geburtsdatum": "birth_date",
+    "strasse": "street",
+    "postleitzahl": "postal_code",
+    "ort": "city",
+    "telefonnummer": "phone_number",
+    "email": "email",
+    "erstellt_am": "created_at"
+   }
+  },
+  {
+   "id": "es_customers",
+   "bucket": "multilingual",
+   "split": "test",
+   "source_db": "mysql",
+   "source": [
+    {
+     "name": "id_cliente",
+     "type": "INTEGER",
+     "samples": [
+      "5501"
+     ]
+    },
+    {
+     "name": "nombre",
+     "type": "VARCHAR",
+     "samples": [
+      "María"
+     ]
+    },
+    {
+     "name": "apellido",
+     "type": "VARCHAR",
+     "samples": [
+      "López"
+     ]
+    },
+    {
+     "name": "fecha_nacimiento",
+     "type": "DATE",
+     "samples": [
+      "1988-07-12"
+     ]
+    },
+    {
+     "name": "direccion",
+     "type": "VARCHAR",
+     "samples": [
+      "Calle Mayor 1"
+     ]
+    },
+    {
+     "name": "ciudad",
+     "type": "VARCHAR",
+     "samples": [
+      "Madrid"
+     ]
+    },
+    {
+     "name": "codigo_postal",
+     "type": "VARCHAR",
+     "samples": [
+      "28013"
+     ]
+    },
+    {
+     "name": "telefono",
+     "type": "VARCHAR",
+     "samples": [
+      "+34 91 123"
+     ]
+    },
+    {
+     "name": "correo",
+     "type": "VARCHAR",
+     "samples": [
+      "m@l.es"
+     ]
+    },
+    {
+     "name": "fecha_alta",
+     "type": "DATE",
+     "samples": [
+      "2022-09-01"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "customer_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "birth_date",
+     "type": "DATE"
+    },
+    {
+     "name": "address",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "phone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "signup_date",
+     "type": "DATE"
+    },
+    {
+     "name": "country",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "id_cliente": "customer_id",
+    "nombre": "first_name",
+    "apellido": "last_name",
+    "fecha_nacimiento": "birth_date",
+    "direccion": "address",
+    "ciudad": "city",
+    "codigo_postal": "postal_code",
+    "telefono": "phone",
+    "correo": "email",
+    "fecha_alta": "signup_date"
+   }
+  },
+  {
+   "id": "fr_invoices",
+   "bucket": "multilingual",
+   "split": "dev",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "numero_facture",
+     "type": "VARCHAR",
+     "samples": [
+      "F-2024-001"
+     ]
+    },
+    {
+     "name": "date_facture",
+     "type": "DATE",
+     "samples": [
+      "2024-01-15"
+     ]
+    },
+    {
+     "name": "montant_ht",
+     "type": "DECIMAL",
+     "samples": [
+      "100.00"
+     ]
+    },
+    {
+     "name": "montant_ttc",
+     "type": "DECIMAL",
+     "samples": [
+      "120.00"
+     ]
+    },
+    {
+     "name": "tva",
+     "type": "DECIMAL",
+     "samples": [
+      "20.00"
+     ]
+    },
+    {
+     "name": "devise",
+     "type": "CHAR",
+     "samples": [
+      "EUR"
+     ]
+    },
+    {
+     "name": "client",
+     "type": "VARCHAR",
+     "samples": [
+      "Dupont SA"
+     ]
+    },
+    {
+     "name": "date_echeance",
+     "type": "DATE",
+     "samples": [
+      "2024-02-15"
+     ]
+    },
+    {
+     "name": "statut",
+     "type": "VARCHAR",
+     "samples": [
+      "payée"
+     ]
+    },
+    {
+     "name": "remise",
+     "type": "DECIMAL",
+     "samples": [
+      "5.00"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "invoice_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "invoice_date",
+     "type": "DATE"
+    },
+    {
+     "name": "net_amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "gross_amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "vat_amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "currency",
+     "type": "CHAR"
+    },
+    {
+     "name": "customer_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "due_date",
+     "type": "DATE"
+    },
+    {
+     "name": "status",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "discount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "notes",
+     "type": "TEXT"
+    }
+   ],
+   "gold": {
+    "numero_facture": "invoice_number",
+    "date_facture": "invoice_date",
+    "montant_ht": "net_amount",
+    "montant_ttc": "gross_amount",
+    "tva": "vat_amount",
+    "devise": "currency",
+    "client": "customer_name",
+    "date_echeance": "due_date",
+    "statut": "status",
+    "remise": "discount"
+   }
+  },
+  {
+   "id": "pt_products",
+   "bucket": "multilingual",
+   "split": "test",
+   "source_db": "mysql",
+   "source": [
+    {
+     "name": "produto",
+     "type": "VARCHAR",
+     "samples": [
+      "Camisa"
+     ]
+    },
+    {
+     "name": "preco",
+     "type": "DECIMAL",
+     "samples": [
+      "59.90"
+     ]
+    },
+    {
+     "name": "quantidade",
+     "type": "INTEGER",
+     "samples": [
+      "2"
+     ]
+    },
+    {
+     "name": "estoque",
+     "type": "INTEGER",
+     "samples": [
+      "140"
+     ]
+    },
+    {
+     "name": "fornecedor",
+     "type": "VARCHAR",
+     "samples": [
+      "Têxtil SA"
+     ]
+    },
+    {
+     "name": "categoria",
+     "type": "VARCHAR",
+     "samples": [
+      "Vestuário"
+     ]
+    },
+    {
+     "name": "descricao",
+     "type": "TEXT",
+     "samples": [
+      "Camisa azul"
+     ]
+    },
+    {
+     "name": "data_cadastro",
+     "type": "DATE",
+     "samples": [
+      "2023-03-03"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "product_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "price",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "quantity",
+     "type": "INTEGER"
+    },
+    {
+     "name": "stock_level",
+     "type": "INTEGER"
+    },
+    {
+     "name": "supplier",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "category",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "description",
+     "type": "TEXT"
+    },
+    {
+     "name": "created_date",
+     "type": "DATE"
+    },
+    {
+     "name": "sku",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "produto": "product_name",
+    "preco": "price",
+    "quantidade": "quantity",
+    "estoque": "stock_level",
+    "fornecedor": "supplier",
+    "categoria": "category",
+    "descricao": "description",
+    "data_cadastro": "created_date"
+   }
+  },
+  {
+   "id": "nl_customers",
+   "bucket": "multilingual",
+   "split": "dev",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "klantnummer",
+     "type": "INTEGER",
+     "samples": [
+      "778"
+     ]
+    },
+    {
+     "name": "voornaam",
+     "type": "VARCHAR",
+     "samples": [
+      "Sanne"
+     ]
+    },
+    {
+     "name": "achternaam",
+     "type": "VARCHAR",
+     "samples": [
+      "de Vries"
+     ]
+    },
+    {
+     "name": "woonplaats",
+     "type": "VARCHAR",
+     "samples": [
+      "Utrecht"
+     ]
+    },
+    {
+     "name": "postcode",
+     "type": "VARCHAR",
+     "samples": [
+      "3511 AB"
+     ]
+    },
+    {
+     "name": "geboortedatum",
+     "type": "DATE",
+     "samples": [
+      "1991-10-10"
+     ]
+    },
+    {
+     "name": "telefoon",
+     "type": "VARCHAR",
+     "samples": [
+      "+31 30 123"
+     ]
+    },
+    {
+     "name": "bedrag",
+     "type": "DECIMAL",
+     "samples": [
+      "12.50"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "customer_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "birth_date",
+     "type": "DATE"
+    },
+    {
+     "name": "phone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "klantnummer": "customer_id",
+    "voornaam": "first_name",
+    "achternaam": "last_name",
+    "woonplaats": "city",
+    "postcode": "postal_code",
+    "geboortedatum": "birth_date",
+    "telefoon": "phone",
+    "bedrag": "amount"
+   }
+  },
+  {
+   "id": "stringly_typed",
+   "bucket": "type_mismatch",
+   "split": "test",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "id",
+     "type": "VARCHAR",
+     "samples": [
+      "3f2b9c1e-7d4a-4c1b-9a51-2f7e8d6c0a11"
+     ]
+    },
+    {
+     "name": "created",
+     "type": "VARCHAR",
+     "samples": [
+      "2024-03-01T10:00:00Z",
+      "2024-03-02T11:30:00Z"
+     ]
+    },
+    {
+     "name": "amount",
+     "type": "VARCHAR",
+     "samples": [
+      "19.99",
+      "250.00"
+     ]
+    },
+    {
+     "name": "active",
+     "type": "VARCHAR",
+     "samples": [
+      "Y",
+      "N"
+     ]
+    },
+    {
+     "name": "qty",
+     "type": "VARCHAR",
+     "samples": [
+      "3",
+      "12"
+     ]
+    },
+    {
+     "name": "zip",
+     "type": "INTEGER",
+     "samples": [
+      "2134",
+      "94107"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "id",
+     "type": "UUID"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "is_active",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "quantity",
+     "type": "INTEGER"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "notes",
+     "type": "TEXT"
+    }
+   ],
+   "gold": {
+    "id": "id",
+    "created": "created_at",
+    "amount": "amount",
+    "active": "is_active",
+    "qty": "quantity",
+    "zip": "postal_code"
+   }
+  },
+  {
+   "id": "generic_names_by_type",
+   "bucket": "type_mismatch",
+   "split": "test",
+   "source_db": "mysql",
+   "source": [
+    {
+     "name": "date",
+     "type": "DATE",
+     "samples": [
+      "2024-01-01",
+      "2024-01-02"
+     ]
+    },
+    {
+     "name": "value",
+     "type": "DECIMAL",
+     "samples": [
+      "10.50",
+      "99.00"
+     ]
+    },
+    {
+     "name": "code",
+     "type": "CHAR",
+     "samples": [
+      "USD",
+      "EUR"
+     ]
+    },
+    {
+     "name": "ref",
+     "type": "VARCHAR",
+     "samples": [
+      "INV-1001",
+      "INV-1002"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "transaction_date",
+     "type": "DATE"
+    },
+    {
+     "name": "amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "currency_code",
+     "type": "CHAR"
+    },
+    {
+     "name": "invoice_number",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "description",
+     "type": "TEXT"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    }
+   ],
+   "gold": {
+    "date": "transaction_date",
+    "value": "amount",
+    "code": "currency_code",
+    "ref": "invoice_number"
+   }
+  },
+  {
+   "id": "sessions_by_type",
+   "bucket": "type_mismatch",
+   "split": "dev",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "start",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-01 10:00"
+     ]
+    },
+    {
+     "name": "end",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-01 10:20"
+     ]
+    },
+    {
+     "name": "user",
+     "type": "INTEGER",
+     "samples": [
+      "1001"
+     ]
+    },
+    {
+     "name": "duration",
+     "type": "INTEGER",
+     "samples": [
+      "1200"
+     ]
+    },
+    {
+     "name": "ip",
+     "type": "VARCHAR",
+     "samples": [
+      "10.0.0.1"
+     ]
+    },
+    {
+     "name": "agent",
+     "type": "VARCHAR",
+     "samples": [
+      "Mozilla/5.0 (X11)"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "session_start",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "session_end",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "user_id",
+     "type": "BIGINT"
+    },
+    {
+     "name": "duration_seconds",
+     "type": "INTEGER"
+    },
+    {
+     "name": "ip_address",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "user_agent",
+     "type": "TEXT"
+    },
+    {
+     "name": "country",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "start": "session_start",
+    "end": "session_end",
+    "user": "user_id",
+    "duration": "duration_seconds",
+    "ip": "ip_address",
+    "agent": "user_agent"
+   }
+  },
+  {
+   "id": "mongo_orders_nested",
+   "bucket": "nested_json",
+   "split": "test",
+   "source_db": "mongodb",
+   "source": [
+    {
+     "name": "_id",
+     "type": "OBJECTID",
+     "samples": [
+      "65a1f0c2e4b0a1b2c3d4e5f6"
+     ]
+    },
+    {
+     "name": "customer.name",
+     "type": "VARCHAR",
+     "samples": [
+      "Ann Lee"
+     ]
+    },
+    {
+     "name": "customer.email",
+     "type": "VARCHAR",
+     "samples": [
+      "ann@x.com"
+     ]
+    },
+    {
+     "name": "customer.address.city",
+     "type": "VARCHAR",
+     "samples": [
+      "Austin"
+     ]
+    },
+    {
+     "name": "customer.address.zip",
+     "type": "VARCHAR",
+     "samples": [
+      "73301"
+     ]
+    },
+    {
+     "name": "items[].sku",
+     "type": "VARCHAR",
+     "samples": [
+      "SKU-1"
+     ]
+    },
+    {
+     "name": "items[].qty",
+     "type": "INTEGER",
+     "samples": [
+      "2"
+     ]
+    },
+    {
+     "name": "payment.method",
+     "type": "VARCHAR",
+     "samples": [
+      "card"
+     ]
+    },
+    {
+     "name": "payment.amount",
+     "type": "DECIMAL",
+     "samples": [
+      "42.00"
+     ]
+    },
+    {
+     "name": "createdAt",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-01T00:00:00Z"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "order_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "customer_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "customer_email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "sku",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "quantity",
+     "type": "INTEGER"
+    },
+    {
+     "name": "payment_method",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "status",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "_id": "order_id",
+    "customer.name": "customer_name",
+    "customer.email": "customer_email",
+    "customer.address.city": "city",
+    "customer.address.zip": "postal_code",
+    "items[].sku": "sku",
+    "items[].qty": "quantity",
+    "payment.method": "payment_method",
+    "payment.amount": "amount",
+    "createdAt": "created_at"
+   }
+  },
+  {
+   "id": "event_json",
+   "bucket": "nested_json",
+   "split": "dev",
+   "source_db": "kafka",
+   "source": [
+    {
+     "name": "event.type",
+     "type": "VARCHAR",
+     "samples": [
+      "page_view"
+     ]
+    },
+    {
+     "name": "event.ts",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-01T00:00:00Z"
+     ]
+    },
+    {
+     "name": "user.id",
+     "type": "VARCHAR",
+     "samples": [
+      "u_1"
+     ]
+    },
+    {
+     "name": "user.profile.firstName",
+     "type": "VARCHAR",
+     "samples": [
+      "Ann"
+     ]
+    },
+    {
+     "name": "user.profile.lastName",
+     "type": "VARCHAR",
+     "samples": [
+      "Lee"
+     ]
+    },
+    {
+     "name": "context.device.os",
+     "type": "VARCHAR",
+     "samples": [
+      "iOS"
+     ]
+    },
+    {
+     "name": "context.ip",
+     "type": "VARCHAR",
+     "samples": [
+      "10.1.1.1"
+     ]
+    },
+    {
+     "name": "properties.revenue",
+     "type": "DECIMAL",
+     "samples": [
+      "9.99"
+     ]
+    },
+    {
+     "name": "properties.currency",
+     "type": "CHAR",
+     "samples": [
+      "USD"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "event_type",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "event_timestamp",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "user_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "last_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "device_os",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "ip_address",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "revenue",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "currency",
+     "type": "CHAR"
+    },
+    {
+     "name": "session_id",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "event.type": "event_type",
+    "event.ts": "event_timestamp",
+    "user.id": "user_id",
+    "user.profile.firstName": "first_name",
+    "user.profile.lastName": "last_name",
+    "context.device.os": "device_os",
+    "context.ip": "ip_address",
+    "properties.revenue": "revenue",
+    "properties.currency": "currency"
+   }
+  },
+  {
+   "id": "camel_json",
+   "bucket": "nested_json",
+   "split": "test",
+   "source_db": "mongodb",
+   "source": [
+    {
+     "name": "orderId",
+     "type": "VARCHAR",
+     "samples": [
+      "O-1"
+     ]
+    },
+    {
+     "name": "orderDate",
+     "type": "DATE",
+     "samples": [
+      "2024-02-02"
+     ]
+    },
+    {
+     "name": "shipTo.postalCode",
+     "type": "VARCHAR",
+     "samples": [
+      "10001"
+     ]
+    },
+    {
+     "name": "shipTo.countryCode",
+     "type": "CHAR",
+     "samples": [
+      "US"
+     ]
+    },
+    {
+     "name": "lineItems.unitPrice",
+     "type": "DECIMAL",
+     "samples": [
+      "5.00"
+     ]
+    },
+    {
+     "name": "lineItems.productId",
+     "type": "VARCHAR",
+     "samples": [
+      "P-9"
+     ]
+    },
+    {
+     "name": "totalAmount",
+     "type": "DECIMAL",
+     "samples": [
+      "15.00"
+     ]
+    },
+    {
+     "name": "isPaid",
+     "type": "BOOLEAN",
+     "samples": [
+      "true"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "order_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "order_date",
+     "type": "DATE"
+    },
+    {
+     "name": "ship_postal_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "ship_country",
+     "type": "CHAR"
+    },
+    {
+     "name": "unit_price",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "product_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "total_amount",
+     "type": "DECIMAL"
+    },
+    {
+     "name": "paid",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "tracking_number",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "orderId": "order_id",
+    "orderDate": "order_date",
+    "shipTo.postalCode": "ship_postal_code",
+    "shipTo.countryCode": "ship_country",
+    "lineItems.unitPrice": "unit_price",
+    "lineItems.productId": "product_id",
+    "totalAmount": "total_amount",
+    "isPaid": "paid"
+   }
+  },
+  {
+   "id": "synthea_to_omop_person",
+   "bucket": "real_world_standard",
+   "split": "test",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "Id",
+     "type": "VARCHAR",
+     "samples": [
+      "b9c610cd-28a6-4636-ccb6-c7a0d2a4cb85"
+     ]
+    },
+    {
+     "name": "BIRTHDATE",
+     "type": "DATE",
+     "samples": [
+      "1989-05-25"
+     ]
+    },
+    {
+     "name": "DEATHDATE",
+     "type": "DATE",
+     "samples": []
+    },
+    {
+     "name": "SSN",
+     "type": "VARCHAR",
+     "samples": [
+      "999-76-6866"
+     ]
+    },
+    {
+     "name": "DRIVERS",
+     "type": "VARCHAR",
+     "samples": [
+      "S99984236"
+     ]
+    },
+    {
+     "name": "PASSPORT",
+     "type": "VARCHAR",
+     "samples": [
+      "X19277260X"
+     ]
+    },
+    {
+     "name": "PREFIX",
+     "type": "VARCHAR",
+     "samples": [
+      "Mr."
+     ]
+    },
+    {
+     "name": "FIRST",
+     "type": "VARCHAR",
+     "samples": [
+      "José"
+     ]
+    },
+    {
+     "name": "LAST",
+     "type": "VARCHAR",
+     "samples": [
+      "Gómez"
+     ]
+    },
+    {
+     "name": "SUFFIX",
+     "type": "VARCHAR",
+     "samples": []
+    },
+    {
+     "name": "MAIDEN",
+     "type": "VARCHAR",
+     "samples": []
+    },
+    {
+     "name": "MARITAL",
+     "type": "CHAR",
+     "samples": [
+      "M"
+     ]
+    },
+    {
+     "name": "RACE",
+     "type": "VARCHAR",
+     "samples": [
+      "white"
+     ]
+    },
+    {
+     "name": "ETHNICITY",
+     "type": "VARCHAR",
+     "samples": [
+      "hispanic"
+     ]
+    },
+    {
+     "name": "GENDER",
+     "type": "CHAR",
+     "samples": [
+      "M"
+     ]
+    },
+    {
+     "name": "BIRTHPLACE",
+     "type": "VARCHAR",
+     "samples": [
+      "Boston MA US"
+     ]
+    },
+    {
+     "name": "ADDRESS",
+     "type": "VARCHAR",
+     "samples": [
+      "888 Hickle Ferry"
+     ]
+    },
+    {
+     "name": "CITY",
+     "type": "VARCHAR",
+     "samples": [
+      "Springfield"
+     ]
+    },
+    {
+     "name": "STATE",
+     "type": "VARCHAR",
+     "samples": [
+      "Massachusetts"
+     ]
+    },
+    {
+     "name": "COUNTY",
+     "type": "VARCHAR",
+     "samples": [
+      "Hampden County"
+     ]
+    },
+    {
+     "name": "ZIP",
+     "type": "VARCHAR",
+     "samples": [
+      "01106"
+     ]
+    },
+    {
+     "name": "LAT",
+     "type": "DECIMAL",
+     "samples": [
+      "42.15"
+     ]
+    },
+    {
+     "name": "LON",
+     "type": "DECIMAL",
+     "samples": [
+      "-72.58"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "person_id",
+     "type": "BIGINT"
+    },
+    {
+     "name": "gender_concept_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "year_of_birth",
+     "type": "INTEGER"
+    },
+    {
+     "name": "month_of_birth",
+     "type": "INTEGER"
+    },
+    {
+     "name": "day_of_birth",
+     "type": "INTEGER"
+    },
+    {
+     "name": "birth_datetime",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "race_concept_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "ethnicity_concept_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "location_id",
+     "type": "BIGINT"
+    },
+    {
+     "name": "provider_id",
+     "type": "BIGINT"
+    },
+    {
+     "name": "care_site_id",
+     "type": "BIGINT"
+    },
+    {
+     "name": "person_source_value",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "gender_source_value",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "gender_source_concept_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "race_source_value",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "race_source_concept_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "ethnicity_source_value",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "ethnicity_source_concept_id",
+     "type": "INTEGER"
+    }
+   ],
+   "gold": {
+    "Id": "person_source_value",
+    "BIRTHDATE": "birth_datetime",
+    "DEATHDATE": null,
+    "SSN": null,
+    "DRIVERS": null,
+    "PASSPORT": null,
+    "PREFIX": null,
+    "FIRST": null,
+    "LAST": null,
+    "SUFFIX": null,
+    "MAIDEN": null,
+    "MARITAL": null,
+    "RACE": "race_source_value",
+    "ETHNICITY": "ethnicity_source_value",
+    "GENDER": "gender_source_value",
+    "BIRTHPLACE": null,
+    "ADDRESS": null,
+    "CITY": null,
+    "STATE": null,
+    "COUNTY": null,
+    "ZIP": null,
+    "LAT": null,
+    "LON": null
+   }
+  },
+  {
+   "id": "salesforce_to_hubspot_contact",
+   "bucket": "real_world_standard",
+   "split": "dev",
+   "source_db": "salesforce",
+   "source": [
+    {
+     "name": "Id",
+     "type": "VARCHAR",
+     "samples": [
+      "0035g00000AbCdE"
+     ]
+    },
+    {
+     "name": "FirstName",
+     "type": "VARCHAR",
+     "samples": [
+      "Ann"
+     ]
+    },
+    {
+     "name": "LastName",
+     "type": "VARCHAR",
+     "samples": [
+      "Lee"
+     ]
+    },
+    {
+     "name": "Email",
+     "type": "VARCHAR",
+     "samples": [
+      "ann@x.com"
+     ]
+    },
+    {
+     "name": "Phone",
+     "type": "VARCHAR",
+     "samples": [
+      "415-555-0101"
+     ]
+    },
+    {
+     "name": "MobilePhone",
+     "type": "VARCHAR",
+     "samples": [
+      "415-555-0102"
+     ]
+    },
+    {
+     "name": "Title",
+     "type": "VARCHAR",
+     "samples": [
+      "CFO"
+     ]
+    },
+    {
+     "name": "MailingStreet",
+     "type": "VARCHAR",
+     "samples": [
+      "1 Main St"
+     ]
+    },
+    {
+     "name": "MailingCity",
+     "type": "VARCHAR",
+     "samples": [
+      "Austin"
+     ]
+    },
+    {
+     "name": "MailingState",
+     "type": "VARCHAR",
+     "samples": [
+      "TX"
+     ]
+    },
+    {
+     "name": "MailingPostalCode",
+     "type": "VARCHAR",
+     "samples": [
+      "73301"
+     ]
+    },
+    {
+     "name": "MailingCountry",
+     "type": "VARCHAR",
+     "samples": [
+      "USA"
+     ]
+    },
+    {
+     "name": "LeadSource",
+     "type": "VARCHAR",
+     "samples": [
+      "Web"
+     ]
+    },
+    {
+     "name": "Birthdate",
+     "type": "DATE",
+     "samples": [
+      "1980-01-01"
+     ]
+    },
+    {
+     "name": "Department",
+     "type": "VARCHAR",
+     "samples": [
+      "Finance"
+     ]
+    },
+    {
+     "name": "AccountId",
+     "type": "VARCHAR",
+     "samples": [
+      "0015g00000XyZ"
+     ]
+    },
+    {
+     "name": "OwnerId",
+     "type": "VARCHAR",
+     "samples": [
+      "0055g00000Q1"
+     ]
+    },
+    {
+     "name": "CreatedDate",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-01-01T00:00:00Z"
+     ]
+    },
+    {
+     "name": "LastModifiedDate",
+     "type": "TIMESTAMP",
+     "samples": [
+      "2024-02-01T00:00:00Z"
+     ]
+    },
+    {
+     "name": "HasOptedOutOfEmail",
+     "type": "BOOLEAN",
+     "samples": [
+      "false"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "hs_object_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "firstname",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "lastname",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "phone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "mobilephone",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "jobtitle",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "address",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "city",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "state",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "zip",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "country",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "hs_analytics_source",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "date_of_birth",
+     "type": "DATE"
+    },
+    {
+     "name": "associatedcompanyid",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "hubspot_owner_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "createdate",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "lastmodifieddate",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "hs_email_optout",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "lifecyclestage",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "Id": null,
+    "FirstName": "firstname",
+    "LastName": "lastname",
+    "Email": "email",
+    "Phone": "phone",
+    "MobilePhone": "mobilephone",
+    "Title": "jobtitle",
+    "MailingStreet": "address",
+    "MailingCity": "city",
+    "MailingState": "state",
+    "MailingPostalCode": "zip",
+    "MailingCountry": "country",
+    "LeadSource": "hs_analytics_source",
+    "Birthdate": "date_of_birth",
+    "Department": null,
+    "AccountId": "associatedcompanyid",
+    "OwnerId": "hubspot_owner_id",
+    "CreatedDate": "createdate",
+    "LastModifiedDate": "lastmodifieddate",
+    "HasOptedOutOfEmail": "hs_email_optout"
+   }
+  },
+  {
+   "id": "stripe_charges_to_payments",
+   "bucket": "real_world_standard",
+   "split": "dev",
+   "source_db": "stripe",
+   "source": [
+    {
+     "name": "id",
+     "type": "VARCHAR",
+     "samples": [
+      "ch_3Mx"
+     ]
+    },
+    {
+     "name": "amount",
+     "type": "INTEGER",
+     "samples": [
+      "1999"
+     ]
+    },
+    {
+     "name": "amount_refunded",
+     "type": "INTEGER",
+     "samples": [
+      "0"
+     ]
+    },
+    {
+     "name": "currency",
+     "type": "VARCHAR",
+     "samples": [
+      "usd"
+     ]
+    },
+    {
+     "name": "customer",
+     "type": "VARCHAR",
+     "samples": [
+      "cus_9s6"
+     ]
+    },
+    {
+     "name": "created",
+     "type": "INTEGER",
+     "samples": [
+      "1700000000"
+     ]
+    },
+    {
+     "name": "description",
+     "type": "VARCHAR",
+     "samples": [
+      "Order 1"
+     ]
+    },
+    {
+     "name": "receipt_email",
+     "type": "VARCHAR",
+     "samples": [
+      "a@x.com"
+     ]
+    },
+    {
+     "name": "status",
+     "type": "VARCHAR",
+     "samples": [
+      "succeeded"
+     ]
+    },
+    {
+     "name": "paid",
+     "type": "BOOLEAN",
+     "samples": [
+      "true"
+     ]
+    },
+    {
+     "name": "refunded",
+     "type": "BOOLEAN",
+     "samples": [
+      "false"
+     ]
+    },
+    {
+     "name": "payment_method",
+     "type": "VARCHAR",
+     "samples": [
+      "pm_1"
+     ]
+    },
+    {
+     "name": "failure_code",
+     "type": "VARCHAR",
+     "samples": [
+      "card_declined"
+     ]
+    },
+    {
+     "name": "failure_message",
+     "type": "VARCHAR",
+     "samples": [
+      "Your card was declined."
+     ]
+    },
+    {
+     "name": "balance_transaction",
+     "type": "VARCHAR",
+     "samples": [
+      "txn_1"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "payment_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "amount_cents",
+     "type": "BIGINT"
+    },
+    {
+     "name": "refunded_amount_cents",
+     "type": "BIGINT"
+    },
+    {
+     "name": "currency_code",
+     "type": "CHAR"
+    },
+    {
+     "name": "customer_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    },
+    {
+     "name": "description",
+     "type": "TEXT"
+    },
+    {
+     "name": "customer_email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "payment_status",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "is_paid",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "is_refunded",
+     "type": "BOOLEAN"
+    },
+    {
+     "name": "payment_method_id",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "error_code",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "error_message",
+     "type": "TEXT"
+    },
+    {
+     "name": "ledger_entry_id",
+     "type": "VARCHAR"
+    }
+   ],
+   "gold": {
+    "id": "payment_id",
+    "amount": "amount_cents",
+    "amount_refunded": "refunded_amount_cents",
+    "currency": "currency_code",
+    "customer": "customer_id",
+    "created": "created_at",
+    "description": "description",
+    "receipt_email": "customer_email",
+    "status": "payment_status",
+    "paid": "is_paid",
+    "refunded": "is_refunded",
+    "payment_method": "payment_method_id",
+    "failure_code": "error_code",
+    "failure_message": "error_message",
+    "balance_transaction": "ledger_entry_id"
+   }
+  },
+  {
+   "id": "etl_noise_negatives",
+   "bucket": "negatives",
+   "split": "test",
+   "source_db": "postgresql",
+   "source": [
+    {
+     "name": "internal_notes",
+     "type": "TEXT",
+     "samples": [
+      "call back"
+     ]
+    },
+    {
+     "name": "legacy_flag",
+     "type": "CHAR",
+     "samples": [
+      "X"
+     ]
+    },
+    {
+     "name": "etl_batch_id",
+     "type": "BIGINT",
+     "samples": [
+      "991"
+     ]
+    },
+    {
+     "name": "row_hash",
+     "type": "CHAR",
+     "samples": [
+      "a94a8fe5cc"
+     ]
+    }
+   ],
+   "target": [
+    {
+     "name": "customer_id",
+     "type": "INTEGER"
+    },
+    {
+     "name": "first_name",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "email",
+     "type": "VARCHAR"
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP"
+    }
+   ],
+   "gold": {
+    "internal_notes": null,
+    "legacy_flag": null,
+    "etl_batch_id": null,
+    "row_hash": null
+   }
+  }
+ ]
+}
