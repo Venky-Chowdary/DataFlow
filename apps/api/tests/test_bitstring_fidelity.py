@@ -29,8 +29,8 @@ def test_pg_bitstring_carriers_preserved():
     assert normalize_logical_type("BIT(32)") == "binary"
     assert normalize_logical_type("BIT(1)") == "boolean"
     assert is_bitstring_carrier("BIT(32)") is True
-    # DW-D320: sized BIT(1) is a one-bit string on MySQL/PG, not bare BIT boolean.
-    assert is_bitstring_carrier("BIT(1)") is True
+    # BIT(1) stays boolean polarity. MySQL CREATE spells BIT(1) separately.
+    assert is_bitstring_carrier("BIT(1)") is False
     assert parse_bitstring_width("BIT VARYING(16)") == 16
 
 
@@ -62,9 +62,14 @@ def test_bitstring_wire_and_quarantine():
         assert "0/1" in str(exc)
     assert normalize_sql_bind_value("1010", "BIT(4)", engine="postgresql") == "1010"
 
-    assert coerce_bitstring_wire("10", width=4) == "0010"
-    assert coerce_bitstring_wire("10101010", width=8) == "10101010"
-    assert coerce_bitstring_wire(b"101", width=16) == "0000000000000101"
+    # Short BIT(n) is refused on the shared path (PostgreSQL pads on the right).
+    try:
+        coerce_bitstring_wire("10", width=4)
+        raise AssertionError("expected length refusal")
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+    # ASCII bytes are the integer, not bit text: b'1' is 49, not the bit 1.
+    assert coerce_bitstring_wire(b"1", width=None) == "00110001"
     details: list[dict] = []
     out = quarantine_unfit_bitstrings(
         [("1010",), ("YWJj",), ("10",)],
@@ -73,5 +78,5 @@ def test_bitstring_wire_and_quarantine():
         details,
         policy="quarantine",
     )
-    assert out == [("1010",), ("0010",)]
-    assert len(details) == 1
+    assert out == [("1010",)]
+    assert len(details) == 2

@@ -77,25 +77,46 @@ def test_d320_varbit_left_pads_into_mysql_bit_and_bit1_stays_bit():
     from connectors.sql_bind import bind_bitstring_wire, coerce_bitstring_wire
     from connectors.sql_bind_route import BindRoute
     from services.decision_kernel.type_invent import ddl_type
+    from services.type_system import is_bitstring_carrier
 
     assert ddl_type("mysql", "BIT(1)") == "BIT(1)"
     assert ddl_type("mysql", "bit(8)") == "BIT(8)"
-    assert coerce_bitstring_wire("101", width=16, varying=False) == "0000000000000101"
+    # BIT(1) stays a boolean carrier. Only the MySQL CREATE spelling is BIT(1).
+    assert is_bitstring_carrier("BIT(1)") is False
     assert coerce_bitstring_wire("10101010", width=8) == "10101010"
+    # Shared path does not left-pad (PostgreSQL refuses a short BIT(n)).
+    try:
+        coerce_bitstring_wire("101", width=16, varying=False)
+        raise AssertionError("expected length refusal")
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+    # b'01' is the integer 12337, not the bit text "01".
+    assert coerce_bitstring_wire(b"01", width=None).startswith("00110000")
     route = BindRoute(
         kind="bitstring", upper="BIT(16)", ddl_arg="16", eng="mysql",
         bit_width=16, bit_varying=False,
     )
     assert bind_bitstring_wire("101010101010", route) == int("0000101010101010", 2)
+    pg = BindRoute(
+        kind="bitstring", upper="BIT(16)", ddl_arg="16", eng="postgresql",
+        bit_width=16, bit_varying=False,
+    )
+    try:
+        bind_bitstring_wire("101", pg)
+        raise AssertionError("postgres must not left-pad")
+    except ValueError:
+        pass
 
 
-def test_sync_now_content_hash_holds_when_ddl_is_unchanged():
-    """PR 392 follow-up: a saved schedule whose Map DDL did not change must run."""
-    from services.conversion_contract import approved_mapping_ddl_fingerprint
+def test_sync_now_relaxes_only_dest_exists_not_source_mode_or_policy():
+    """Dest appearing after Validate is not drift. A changed source fingerprint,
+    sync mode, or error policy still is. The stored hash is not rewritten.
+    """
     from services.decision_kernel.execute_gate import (
         build_artifact_from_mappings,
         enforce_decision_artifact,
     )
+    from services.schedule_decision_stamp import decision_hash_for_sync
     from services.schema_fingerprint import fingerprint_schema
 
     maps = [{
@@ -106,39 +127,61 @@ def test_sync_now_content_hash_holds_when_ddl_is_unchanged():
         "confidence": 0.99,
         "create_new": True,
     }]
-    old_fp = fingerprint_schema(["id", "note"], {"id": "BIGINT", "note": "TEXT"})
+    src_fp = fingerprint_schema(["id"], {"id": "BIGINT"})
+    drifted_fp = fingerprint_schema(["id", "tier"], {"id": "BIGINT", "tier": "INTEGER"})
+    assert src_fp != drifted_fp
     stamped = build_artifact_from_mappings(
         maps,
         dest_db="mysql",
         source_db="mysql",
-        source_fingerprint=old_fp,
+        source_fingerprint=src_fp,
         dest_fingerprint="",
         sync_mode="incremental_append",
+        error_policy="quarantine",
         route_id="validate:mysql",
         artifact_id="da_inline",
         created_at="1970-01-01T00:00:00+00:00",
     )
-    saved = [{**maps[0], "confidence": 0.72}]
-    ddl = approved_mapping_ddl_fingerprint(saved, dest_db="mysql")
-    live_src = fingerprint_schema(["id", "note"], {"id": "bigint", "note": "varchar"})
     dest_types = {"id": "bigint"}
     live_dest = fingerprint_schema(["id"], dest_types)
-    err, art = enforce_decision_artifact(
-        mappings=saved,
-        dest_db="mysql",
-        source_db="mysql",
-        approved_content_hash=stamped.content_hash,
-        approved_ddl_identity_hash=ddl,
-        source_fingerprint=live_src,
-        dest_fingerprint=live_dest,
-        destination_table_exists=True,
-        dest_column_names=["id"],
-        source_column_names=["id"],
-        sync_mode="incremental_append",
-        schema_policy="manual_review",
-    )
+
+    def _run(**overrides):
+        args = dict(
+            mappings=maps,
+            dest_db="mysql",
+            source_db="mysql",
+            approved_content_hash=stamped.content_hash,
+            source_fingerprint=src_fp,
+            dest_fingerprint=live_dest,
+            destination_table_exists=True,
+            dest_column_names=["id"],
+            source_column_names=["id"],
+            sync_mode="incremental_append",
+            error_policy="quarantine",
+        )
+        args.update(overrides)
+        return enforce_decision_artifact(**args)
+
+    err, art = _run()
     assert err is None, err
     assert art is not None
+
+    err_src, art_src = _run(source_fingerprint=drifted_fp)
+    assert err_src and art_src is None
+
+    err_mode, art_mode = _run(sync_mode="full_refresh_overwrite")
+    assert err_mode and art_mode is None
+
+    err_pol, art_pol = _run(error_policy="fail")
+    assert err_pol and art_pol is None
+
+    stored = stamped.content_hash
+    assert decision_hash_for_sync({
+        "approved_decision_artifact_hash": stored,
+        "sync_mode": "full_refresh_overwrite",
+        "mappings": maps,
+        "approved_ddl_identity_hash": "ab" * 32,
+    }) == stored.lower()
 
 
 def test_sync_now_still_refuses_a_real_map_edit_and_unaccounted_column():
@@ -190,52 +233,70 @@ def test_sync_now_still_refuses_a_real_map_edit_and_unaccounted_column():
         dest_column_names=["id"],
         source_column_names=["id", "tier"],
         schema_policy="manual_review",
-        sync_mode="cdc",
     )
     assert err2 is not None and "tier" in err2 and art2 is None
     err3, art3 = enforce_decision_artifact(
         mappings=maps,
-        dest_db="mysql",
+        dest_db="postgresql",
         approved_content_hash=stamped.content_hash,
-        approved_ddl_identity_hash=approved_mapping_ddl_fingerprint(maps, dest_db="mysql"),
+        approved_ddl_identity_hash=ddl,
         dest_fingerprint=live,
         destination_table_exists=True,
         dest_column_names=["id"],
         source_column_names=["id", "tier"],
         schema_policy="propagate_columns",
-        sync_mode="cdc",
     )
     assert err3 is None, err3
     assert art3 is not None
 
 
-def test_d334_echoed_stamp_widens_and_managed_table_approves_evolution():
+def test_d334_managed_table_widens_non_key_columns_only():
     from services.schema_drift import (
         destination_evolution_approved,
+        managed_non_key_widen_only,
         plan_destination_evolution,
     )
 
-    assert destination_evolution_approved("manual_review", managed_table=True)
+    assert not destination_evolution_approved("manual_review", managed_table=True)
     assert not destination_evolution_approved("type_locked", managed_table=True)
     assert destination_evolution_approved("propagate_columns")
+    assert managed_non_key_widen_only(
+        "manual_review", managed_table=True, acknowledged=False
+    )
+    assert not managed_non_key_widen_only(
+        "manual_review", managed_table=False, acknowledged=False
+    )
+    assert not managed_non_key_widen_only(
+        "propagate_columns", managed_table=True, acknowledged=False
+    )
     maps = [{
         "source": "status",
         "target": "status",
         "source_type": "varchar(10)",
         "target_type": "varchar(10)",
         "confidence": 0.99,
+    }, {
+        "source": "id",
+        "target": "id",
+        "source_type": "varchar(10)",
+        "target_type": "varchar(10)",
+        "confidence": 0.99,
     }]
-    planned, types, applied = plan_destination_evolution(
+    # Propagate adds the new column. manual_review on an owned table does not.
+    _planned, types, applied = plan_destination_evolution(
         maps,
-        source_columns=["status", "tier"],
-        source_schema={"status": "varchar(30)", "tier": "integer"},
-        dest_types={"status": "varchar(10)"},
+        source_columns=["status", "id", "tier"],
+        source_schema={"status": "varchar(30)", "id": "varchar(20)", "tier": "integer"},
+        dest_types={"status": "varchar(10)", "id": "varchar(10)"},
         dest_db="postgresql",
-        adopt_unmapped=True,
+        adopt_unmapped=False,
+        key_groups=[["id"]],
+        key_widens_approved=False,
     )
     assert types["status"].lower().startswith("varchar(30)")
-    assert any(a.get("source") == "tier" for a in applied)
-    assert any(m.get("source") == "tier" for m in planned)
+    assert types["id"].lower().startswith("varchar(10)")
+    assert not any(a.get("source") == "tier" for a in applied)
+    assert not any(str(a.get("target") or "").lower() == "id" and a.get("kind") == "widen_type" for a in applied)
 
 
 def test_d335_add_column_does_not_keep_the_boundary_row_on_append():
@@ -318,21 +379,27 @@ def test_d407_retry_of_own_create_is_not_dest_schema_drift():
     live["name"] = name_ddl.lower()
     live_fp = fingerprint_schema(list(live), live)
 
-    def _gate(types: dict[str, str]):
-        return enforce_decision_artifact(
+    src_fp = "aabbccddeeff0011"
+
+    def _gate(types: dict[str, str], **overrides):
+        args = dict(
             mappings=maps,
             dest_db="mysql",
             source_db="postgresql",
             approved_content_hash=stamped.content_hash,
             artifact_payload=stamped.to_dict(),
-            source_fingerprint="1122334455667788",
+            source_fingerprint=src_fp,
             dest_fingerprint=fingerprint_schema(list(types), types),
             destination_table_exists=True,
             dest_column_names=list(types),
             source_column_names=["id", "name", "qty"],
             live_column_types=types,
             sync_mode="incremental_deduped",
+            error_policy="quarantine",
+            plan_created_destination=True,
         )
+        args.update(overrides)
+        return enforce_decision_artifact(**args)
 
     err, art = _gate(live)
     assert err is None, err
@@ -347,7 +414,48 @@ def test_d407_retry_of_own_create_is_not_dest_schema_drift():
     err_x, art_x = _gate(extra)
     assert err_x and "drifted" in err_x.lower()
     assert art_x is None
-    assert live_fp
+
+    err_src, art_src = _gate(live, source_fingerprint="1122334455667788")
+    assert err_src and "source schema" in err_src.lower()
+    assert art_src is None
+
+    err_mode, art_mode = _gate(live, sync_mode="full_refresh_overwrite")
+    assert err_mode and "sync_mode" in err_mode.lower()
+    assert art_mode is None
+
+    # Validated against a table that already existed. A later fingerprint
+    # change is drift even when the column types still look like the plan
+    # and this run did not create the table.
+    prior = fingerprint_schema(["id", "name", "qty"], {"id": "BIGINT", "name": "VARCHAR(40)", "qty": "BIGINT"})
+    preexisting = build_artifact_from_mappings(
+        maps,
+        dest_db="mysql",
+        source_db="postgresql",
+        source_fingerprint=src_fp,
+        dest_fingerprint=prior,
+        sync_mode="incremental_deduped",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    err_own, art_own = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="mysql",
+        source_db="postgresql",
+        approved_content_hash=preexisting.content_hash,
+        artifact_payload=preexisting.to_dict(),
+        source_fingerprint=src_fp,
+        dest_fingerprint="0123456789abcdef",
+        destination_table_exists=True,
+        dest_column_names=list(live),
+        source_column_names=["id", "name", "qty"],
+        live_column_types=live,
+        sync_mode="incremental_deduped",
+        error_policy="quarantine",
+        plan_created_destination=False,
+    )
+    assert err_own and "drifted" in err_own.lower()
+    assert art_own is None
 
 
 def test_mysql_3750_is_a_plan_time_finding_not_a_raw_driver_error():

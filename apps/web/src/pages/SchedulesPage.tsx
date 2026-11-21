@@ -437,7 +437,7 @@ export function SchedulesPage({
         confirmLabel: "Open Transfer Studio",
         cancelLabel: "Stay here",
       });
-      if (openStudio) onStartTransfer?.();
+      if (openStudio) openStudioFromSchedule(id);
       return;
     }
     const source = connectors.find((row) => row.id === sched?.source_connector_id);

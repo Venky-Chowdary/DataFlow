@@ -321,6 +321,7 @@ def _plan_schema_auto_propagate(
     from services.schema_drift import (
         PROPAGATE_POLICIES,
         destination_evolution_approved,
+        managed_non_key_widen_only,
         plan_destination_evolution,
     )
 
@@ -333,8 +334,11 @@ def _plan_schema_auto_propagate(
         and dest_declares_column_ddl(
             str(getattr(request.destination, "format", "") or "")
         )
-        and destination_evolution_approved(
-            schema_policy, acknowledged=acknowledged, managed_table=managed_table
+        and (
+            destination_evolution_approved(schema_policy, acknowledged=acknowledged)
+            or managed_non_key_widen_only(
+                schema_policy, acknowledged=acknowledged, managed_table=managed_table
+            )
         )
     ):
         mappings, _evolved_types, _ = plan_destination_evolution(
@@ -343,11 +347,11 @@ def _plan_schema_auto_propagate(
             source_schema=schema,
             dest_types=dest_schema_types,
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
-            adopt_unmapped=schema_policy in PROPAGATE_POLICIES or managed_table,
+            adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             key_groups=_key_groups,
             max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
             key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
-            key_widens_approved=acknowledged or managed_table,
+            key_widens_approved=acknowledged,
         )
     if not evolution.get("should_propagate"):
         return mappings

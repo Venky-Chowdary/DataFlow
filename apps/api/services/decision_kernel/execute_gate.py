@@ -189,10 +189,22 @@ def _ddl_compare_token(type_sql: str) -> str:
     shown = _INT_DISPLAY_WIDTH.match(text)
     if shown:
         base = shown.group(1).upper()
-        return "INT" if base == "INTEGER" else base
-    if text == "INTEGER":
-        return "INT"
-    return text
+        return "INT" if base in {"INTEGER", "INT4"} else ("BIGINT" if base == "INT8" else base)
+    head, sep, rest = text.partition("(")
+    head = {
+        "NUMERIC": "DECIMAL",
+        "NUMBER": "DECIMAL",
+        "CHARACTER VARYING": "VARCHAR",
+        "CHAR VARYING": "VARCHAR",
+        "INTEGER": "INT",
+        "INT4": "INT",
+        "INT8": "BIGINT",
+        "BOOL": "BOOLEAN",
+        "CHARACTER": "CHAR",
+    }.get(head.strip(), head.strip())
+    if head in {"TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT"}:
+        return head
+    return f"{head}({rest}" if sep else head
 
 
 def planned_ddl_matches_live(
@@ -261,32 +273,6 @@ def _planned_create_still_holds(
 
 def _policy_propagates(schema_policy: str | None) -> bool:
     return str(schema_policy or "").strip().lower() in {"propagate_columns", "propagate_all"}
-
-
-def _ddl_hash_matches(
-    mappings: list[dict[str, Any]] | None,
-    dest_db: str,
-    approved_ddl_identity_hash: str,
-) -> bool:
-    """True when the Map→DDL fingerprint is the one Validate stored.
-
-    Confidence, capability hashes and schema fingerprints are not part of this
-    fingerprint. A Sync Now whose saved rows still produce it has not changed
-    the Map contract, even when the Decision Artifact content hash moved.
-    """
-    approved = (approved_ddl_identity_hash or "").strip().lower()
-    if len(approved) != 64:
-        return False
-    from services.conversion_contract import (
-        approved_mapping_ddl_fingerprint,
-        carry_stream_maps,
-    )
-
-    current = approved_mapping_ddl_fingerprint(
-        carry_stream_maps(list(mappings or []), mappings),
-        dest_db=(dest_db or "").strip().lower(),
-    ).lower()
-    return bool(current) and current == approved
 
 
 def dest_exists_shape_error(
@@ -486,6 +472,7 @@ def enforce_decision_artifact(
     approved_ddl_identity_hash: str = "",
     schema_policy: str = "",
     live_column_types: dict[str, str] | None = None,
+    plan_created_destination: bool = False,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -554,32 +541,92 @@ def enforce_decision_artifact(
                     None,
                 )
             if dest_fp and supplied.dest_fingerprint != dest_fp:
+                if live_column_types and not planned_ddl_matches_live(
+                    dict(supplied.ddl.column_ddl or {}), live_column_types
+                ):
+                    return (
+                        "Decision Artifact dest schema drifted since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
                 if not supplied.dest_fingerprint:
                     holds, hold_err = _dest_exists_hold(supplied.content_hash)
                     if holds:
                         return (None, supplied)
                     if hold_err:
                         return (hold_err, None)
-                # DW-D407: retry of a cancelled create-new whose table is still
-                # the planned DDL. The fingerprint moved because the table now
-                # exists, not because someone else altered it.
-                held, shape_err = _planned_create_still_holds(
-                    planned=dict(supplied.ddl.column_ddl or {}),
-                    live_column_types=live_column_types,
-                    destination_table_exists=destination_table_exists,
-                    mappings=mappings,
-                    dest_column_names=dest_column_names,
-                    source_column_names=source_column_names,
-                    column_nullability=column_nullability,
-                    column_defaults=column_defaults,
-                    identity_columns=identity_columns,
-                    generated_columns=generated_columns,
-                    schema_policy=schema_policy,
+                # These checks run before any create-new exception. A changed
+                # source fingerprint, sync mode, error policy, or approved
+                # hash is drift even when the live columns still match.
+                if (
+                    src_fp
+                    and supplied.source_fingerprint
+                    and supplied.source_fingerprint != src_fp
+                ):
+                    return (
+                        "Decision Artifact source schema drifted since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if (
+                    sync_mode
+                    and supplied.sync_mode
+                    and sync_mode != supplied.sync_mode
+                ):
+                    return (
+                        "Decision Artifact sync_mode changed since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if (
+                    error_policy
+                    and supplied.error_policy
+                    and error_policy != supplied.error_policy
+                ):
+                    return (
+                        "Decision Artifact error_policy changed since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if approved and approved != supplied.content_hash.lower():
+                    return (
+                        "Decision Artifact content_hash does not match approved hash — "
+                        "refuse write.",
+                        None,
+                    )
+                source_same = (supplied.source_fingerprint or "") == (src_fp or "")
+                mode_same = (not sync_mode) or sync_mode == (supplied.sync_mode or sync_mode)
+                policy_same = (not error_policy) or error_policy == (
+                    supplied.error_policy or error_policy
                 )
-                if shape_err:
-                    return (shape_err, None)
-                if held:
-                    return (None, supplied)
+                hash_same = (not approved) or approved == supplied.content_hash.lower()
+                # DW-D407: only a create-new plan (empty dest fingerprint) whose
+                # table this job created, and only after the checks above.
+                if (
+                    not supplied.dest_fingerprint
+                    and plan_created_destination
+                    and source_same
+                    and mode_same
+                    and policy_same
+                    and hash_same
+                ):
+                    held, shape_err = _planned_create_still_holds(
+                        planned=dict(supplied.ddl.column_ddl or {}),
+                        live_column_types=live_column_types,
+                        destination_table_exists=destination_table_exists,
+                        mappings=mappings,
+                        dest_column_names=dest_column_names,
+                        source_column_names=source_column_names,
+                        column_nullability=column_nullability,
+                        column_defaults=column_defaults,
+                        identity_columns=identity_columns,
+                        generated_columns=generated_columns,
+                        schema_policy=schema_policy,
+                    )
+                    if shape_err:
+                        return (shape_err, None)
+                    if held:
+                        return (None, supplied)
                 return (
                     "Decision Artifact dest schema drifted since Validate — "
                     "re-run Validate before Execute.",
@@ -646,47 +693,6 @@ def enforce_decision_artifact(
             return (None, current)
         if hold_err:
             return (hold_err, None)
-        # Saved schedule Sync Now: the Map→DDL fingerprint still matches
-        # Validate, and dest-exists shape is clean. Capability hashes,
-        # confidence and fingerprint spellings are not a Map edit. A real
-        # target-type edit changes the DDL fingerprint and still refuses.
-        if destination_table_exists is True and _ddl_hash_matches(
-            mappings, dest_engine, approved_ddl_identity_hash
-        ):
-            shape_err = dest_exists_shape_error(
-                mappings=mappings,
-                dest_column_names=dest_column_names,
-                source_column_names=source_column_names,
-                column_nullability=column_nullability,
-                column_defaults=column_defaults,
-                identity_columns=identity_columns,
-                generated_columns=generated_columns,
-                schema_policy=schema_policy,
-            )
-            if shape_err:
-                return (shape_err, None)
-            return (None, current)
-        # No stored DDL hash to prove the Map. The live table matching the
-        # plan is still the create this run left behind (DW-D407), not a
-        # license to accept a Map whose DDL hash disagrees.
-        if not str(approved_ddl_identity_hash or "").strip():
-            held, shape_err = _planned_create_still_holds(
-                planned=dict(current.ddl.column_ddl or {}),
-                live_column_types=live_column_types,
-                destination_table_exists=destination_table_exists,
-                mappings=mappings,
-                dest_column_names=dest_column_names,
-                source_column_names=source_column_names,
-                column_nullability=column_nullability,
-                column_defaults=column_defaults,
-                identity_columns=identity_columns,
-                generated_columns=generated_columns,
-                schema_policy=schema_policy,
-            )
-            if shape_err:
-                return (shape_err, None)
-            if held:
-                return (None, current)
         return (
             "Decision Artifact content_hash mismatch — Map/DDL drifted "
             "since Validate. Re-run Validate before Execute.",

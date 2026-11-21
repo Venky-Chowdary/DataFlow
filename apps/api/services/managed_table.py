@@ -1,9 +1,9 @@
 """Whether a destination table was created by Datawrap.
 
 The ownership comment (``datawrap:managed`` or the legacy ``dataflow:managed``)
-is the signal. A managed table may widen in the same type family and gain
-columns on the next run (DW-D334). A probe that cannot read the comment
-answers false — an operator-owned table is not altered on that guess.
+is the signal. An owned table may widen non-key columns in the same type
+family (DW-D334). ADD COLUMN still requires propagate. A probe that cannot
+read the comment answers false — an operator-owned table is not altered.
 """
 
 from __future__ import annotations
@@ -48,15 +48,16 @@ def read_table_comment(
 
 
 def _pg_comment(config: Mapping[str, Any], schema: str, table: str) -> str:
-    import psycopg2
+    from connectors.postgresql_conn import get_connection
 
-    conn = psycopg2.connect(
-        host=str(config.get("host") or "localhost"),
+    conn = get_connection(
+        host=str(config.get("host") or ""),
         port=int(config.get("port") or 5432),
-        dbname=str(config.get("database") or config.get("dbname") or ""),
-        user=str(config.get("username") or config.get("user") or ""),
+        database=str(config.get("database") or config.get("dbname") or ""),
+        username=str(config.get("username") or config.get("user") or ""),
         password=str(config.get("password") or ""),
-        connect_timeout=3,
+        connection_string=str(config.get("connection_string") or ""),
+        ssl=bool(config.get("ssl")),
     )
     try:
         with conn.cursor() as cur:

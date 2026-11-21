@@ -1908,17 +1908,10 @@ def coerce_bitstring_wire(
         return bound
     bits: str
     if isinstance(value, (bytes, bytearray, memoryview)):
-        raw = bytes(value)
-        try:
-            text = raw.decode("ascii")
-        except UnicodeDecodeError:
-            text = ""
-        # A 0/1 digit string stored as ASCII is the bit text, not eight bits
-        # per character. Expanding it overflowed BIT(n) and quarantined the row.
-        if re.fullmatch(r"[01]+", text or ""):
-            bits = text
-        else:
-            bits = "".join(f"{b:08b}" for b in raw)
+        # Raw bytes are MSB-first bits. ASCII ``b'01'`` is the integer 12337
+        # (or 49 for one byte), not the bit text ``"01"``. PostgreSQL bit/varbit
+        # arrives as a str of 0/1 digits; only that form is bit text.
+        bits = "".join(f"{b:08b}" for b in bytes(value))
     else:
         text = str(value).strip()
         text = _refuse_empty_specialty(text, 'BIT')
@@ -1937,14 +1930,10 @@ def coerce_bitstring_wire(
                 raise ValueError(
                     f"bitstring length {len(bits)} exceeds BIT VARYING({width})"
                 )
-        elif len(bits) > width:
+        elif len(bits) != width:
             raise ValueError(
                 f"bitstring length {len(bits)} does not match BIT({width})"
             )
-        elif len(bits) < width:
-            # PostgreSQL BIT(n) left-pads. VARBIT into MySQL BIT(n) is the
-            # same integer with leading zeros, not a length mismatch (DW-D320).
-            bits = bits.zfill(width)
     return bits
 
 
@@ -1960,8 +1949,27 @@ def bind_bitstring_wire(value: Any, route: BindRoute) -> Any:
     integer value of those bits: BIT(8) stores one byte, not eight characters.
     NULL stays NULL. A value that is not a bit string still raises.
     """
+    width = route.bit_width
+    # MySQL BIT(n) stores the integer. PostgreSQL VARBIT is shorter than the
+    # fixed BIT(n) it lands in; MySQL wants the leading zeros. PostgreSQL
+    # itself pads on the right and refuses a short BIT(n) — do not pad there.
+    if (
+        route.eng in _MYSQL_BIT_ENGINES
+        and width
+        and not route.bit_varying
+    ):
+        bits = coerce_bitstring_wire(value, width=width, varying=True)
+        if bits is None:
+            return None
+        if len(bits) > width:
+            raise ValueError(
+                f"bitstring length {len(bits)} does not match BIT({width})"
+            )
+        if len(bits) < width:
+            bits = bits.zfill(width)
+        return int(bits, 2)
     bits = coerce_bitstring_wire(
-        value, width=route.bit_width, varying=route.bit_varying
+        value, width=width, varying=route.bit_varying
     )
     if bits is None or route.eng not in _MYSQL_BIT_ENGINES:
         return bits

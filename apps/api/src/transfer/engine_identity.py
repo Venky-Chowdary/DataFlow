@@ -9,6 +9,7 @@ the write rather than passing it through unproven.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,22 @@ def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
     return {"source_kind": kind, "source_format": fmt}
 
 
+def plan_created_destination(request: Any, table_exists: bool | None) -> bool:
+    """True when this plan's CREATE left the live table (ownership comment).
+
+    A pre-existing table does not carry the Datawrap comment, so a retry
+    into someone else's table is not this exception (DW-D407).
+    """
+    if table_exists is not True:
+        return False
+    try:
+        from src.transfer.engine_schema_propagation import _destination_is_managed
+
+        return bool(_destination_is_managed(request))
+    except Exception:
+        return False
+
+
 def _enforce_decision_artifact_once(
     pf: dict | None,
     mappings: list,
@@ -186,6 +203,7 @@ def _enforce_decision_artifact_once(
     source_connector_id: str = "",
     approved_ddl_identity_hash: str = "",
     schema_policy: str = "",
+    plan_created_destination: bool = False,
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -299,6 +317,7 @@ def _enforce_decision_artifact_once(
         approved_ddl_identity_hash=approved_ddl_identity_hash,
         schema_policy=schema_policy,
         live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
+        plan_created_destination=bool(plan_created_destination),
     )
     return err, (art.to_dict() if art is not None else None)
 

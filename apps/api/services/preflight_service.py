@@ -403,6 +403,7 @@ def run_file_preflight(
         PROPAGATE_POLICIES,
         destination_evolution_approved,
         effective_schema_policy,
+        managed_non_key_widen_only,
     )
     from services.timezone_policy import declared_source_column_types
 
@@ -838,10 +839,15 @@ def run_file_preflight(
         and not dest_recreated
         and destination_column_types
         and dest_declares_column_ddl(destination_db_type)
-        and destination_evolution_approved(
-            schema_policy,
-            acknowledged=schema_drift_acknowledged,
-            managed_table=managed_table,
+        and (
+            destination_evolution_approved(
+                schema_policy, acknowledged=schema_drift_acknowledged
+            )
+            or managed_non_key_widen_only(
+                schema_policy,
+                acknowledged=schema_drift_acknowledged,
+                managed_table=managed_table,
+            )
         )
     ):
         from services.schema_drift import (
@@ -855,12 +861,12 @@ def run_file_preflight(
                 source_schema=column_types or {},
                 dest_types=destination_column_types,
                 dest_db=str(destination_db_type or ""),
-                adopt_unmapped=schema_policy in PROPAGATE_POLICIES or managed_table,
+                adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
                 key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                            contract_primary_key, destination_indexes_meta),
                 max_part_bytes=dest_key_limit(destination_indexes_meta),
                 key_charsets=dest_key_charsets(destination_indexes_meta),
-                key_widens_approved=bool(schema_drift_acknowledged) or managed_table,
+                key_widens_approved=bool(schema_drift_acknowledged),
             )
         )
 

@@ -372,6 +372,9 @@ class ScheduleResponse(BaseModel):
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
     mapping_count: int = 0
+    #: ``missing`` when the schedule has no persisted Map contract. Run now
+    #: must not invent one. ``present`` when at least one mapping row is stored.
+    mapping_contract: str = ""
     # Autopilot: the finding this schedule is parked on, and the standing
     # authority (if any) that lets later identical runs proceed unattended.
     approval_request: dict[str, Any] = Field(default_factory=dict)
@@ -408,6 +411,7 @@ class ScheduleResponse(BaseModel):
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
+        data["mapping_contract"] = "present" if mappings else "missing"
         # Paused / parked schedules do not fire — surface no next run (M24/D96).
         from services.schedule_store import visible_next_run_at
 

@@ -1273,19 +1273,40 @@ def destination_evolution_approved(
     """Whether additive destination evolution (widen, ADD COLUMN) is approved.
 
     Propagate policies approve it up front; ``manual_review`` approves it after
-    the drift acknowledgement. A table Datawrap created (``datawrap:managed`` /
-    ``dataflow:managed``) is widened in the same type family and gains new
-    columns on the next run without a separate acknowledgement (DW-D334).
-    ``type_locked`` / ``pause_on_change`` / ``block_all`` never ALTER — the
-    run fails closed on bind instead. Validate and Execute both ask this, so
-    they cannot disagree.
+    the drift acknowledgement. ``type_locked`` / ``pause_on_change`` /
+    ``block_all`` never ALTER. A Datawrap-owned table does not flip this to
+    true: that approved ADD COLUMN and key widening with propagate off.
+    Non-key same-family widens on an owned table are
+    :func:`managed_non_key_widen_only`. Validate and Execute both ask these,
+    so they cannot disagree.
+
+    ``managed_table`` is accepted and ignored so a caller cannot reintroduce
+    the manual_review auto-approval.
     """
+    del managed_table
     policy = normalize_schema_policy(schema_policy)
     if policy in {"type_locked", "pause_on_change", "block_all"}:
         return False
-    if managed_table:
-        return True
     return policy in PROPAGATE_POLICIES or (acknowledged and policy == "manual_review")
+
+
+def managed_non_key_widen_only(
+    schema_policy: str | None,
+    *,
+    acknowledged: bool = False,
+    managed_table: bool = False,
+) -> bool:
+    """Same-family widen of non-key columns on a table Datawrap created.
+
+    Not an approval of the evolution policy. ADD COLUMN stays propagate-only.
+    Key widening stays acknowledgement-only. ``manual_review`` is not approved.
+    """
+    if not managed_table:
+        return False
+    if destination_evolution_approved(schema_policy, acknowledged=acknowledged):
+        return False
+    policy = normalize_schema_policy(schema_policy)
+    return policy not in {"type_locked", "pause_on_change", "block_all"}
 
 
 def plan_destination_evolution(
