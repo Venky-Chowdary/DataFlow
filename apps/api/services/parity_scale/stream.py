@@ -110,8 +110,8 @@ def stream_compare(
     try:
         conn.execute("PRAGMA journal_mode=OFF")
         conn.execute("PRAGMA synchronous=OFF")
-        for table in ("s", "d"):
-            conn.execute(f"CREATE TABLE {table} (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
+        conn.execute("CREATE TABLE s (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
+        conn.execute("CREATE TABLE d (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
         result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch)
         result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed, batch=batch)
         if keyed:

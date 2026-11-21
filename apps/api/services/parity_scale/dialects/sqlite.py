@@ -316,7 +316,8 @@ class SqliteSide(Side):
         width = len(self.key_cols)
         select = ", ".join(x for x in (self._key_args, self._cols(columns)) if x)
         held = f" WHERE NOT psd1_held({self._row_args})" if self.is_source and self.engine_cols else ""
-        cur = self.conn.execute(f"SELECT {select} FROM {self._table_ref}{held}")
+        sql = f"SELECT {select} FROM {self._table_ref}{held}"
+        cur = self.conn.execute(sql)
         try:
             while True:
                 rows = cur.fetchmany(batch)

@@ -229,7 +229,8 @@ class SqlSide(Side):
         single_int = len(self.key_cols) == 1 and self.key_cols[0].kind == "integer"
         if single_int and strategy in {"auto", "linear"}:
             key = self.quoted_keys()[0]
-            low, high = self.execute(f"SELECT MIN({key}), MAX({key}) FROM {self.table_ref}", [])[0]
+            bounds_sql = f"SELECT MIN({key}), MAX({key}) FROM {self.table_ref}"
+            low, high = self.execute(bounds_sql, [])[0]
             if low is None:
                 return [], "linear"
             step = max(1, -(-(int(high) - int(low) + 1) // units))
