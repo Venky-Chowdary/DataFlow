@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { introspectTransferEndpoints } from "../../lib/api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { fetchWorkspaceSettings, introspectTransferEndpoints } from "../../lib/api";
 import { resolveDriverType } from "../../lib/connectorTypes";
 import { ObjectNameCombobox } from "../transfer/ObjectNameCombobox";
 import { sourceTableMissingFromCatalog } from "../../lib/sourceObjectPick";
@@ -8,6 +8,7 @@ import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
 import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
+import { NextRunsPreview } from "./NextRunsPreview";
 import { ContractBindField } from "../contracts/ContractBindField";
 import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
 import {
@@ -81,21 +82,6 @@ const COMMON_TIMEZONES = [
   "Australia/Sydney",
 ];
 
-function formatWhen(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
 export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel, onOpenStudio }: ScheduleFormProps) {
   const isEdit = Boolean(initial);
   const mappingCount = initial?.mapping_count ?? (Array.isArray(initial?.mappings) ? initial.mappings.length : 0);
@@ -112,7 +98,28 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     storedSchedulePreset(initial),
   );
   const [cron, setCron] = useState(initial?.cron ?? "");
-  const [timezone, setTimezone] = useState(initial?.timezone ?? "UTC");
+  const [timezone, setTimezoneValue] = useState(initial?.timezone ?? "UTC");
+  const timezoneTouched = useRef(Boolean(initial));
+  const setTimezone = (next: string) => {
+    timezoneTouched.current = true;
+    setTimezoneValue(next);
+  };
+  // A new schedule starts in the workspace's time zone (Settings), not UTC.
+  useEffect(() => {
+    if (timezoneTouched.current) return;
+    let live = true;
+    fetchWorkspaceSettings()
+      .then((settings) => {
+        const zone = String(settings?.timezone || "").trim();
+        if (live && zone && !timezoneTouched.current) setTimezoneValue(zone);
+      })
+      .catch(() => {
+        /* keep UTC: the form says which zone it uses */
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Sync
   const [syncMode, setSyncMode] = useState(initial?.sync_mode ?? "full_refresh_overwrite");
@@ -566,12 +573,13 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           </div>
         )}
 
-        <p className="df2-sched-nextrun">
-          <DtIcon name="activity" size={13} />
-          {initial?.next_run_at
-            ? <>Next run: <strong>{formatWhen(initial.next_run_at)}</strong>{cadenceMode === "cron" ? ` (${timezone})` : " · rolling interval"}</>
-            : "Next run is computed once the schedule is saved."}
-        </p>
+        <NextRunsPreview
+          mode={cadenceMode}
+          preset={interval}
+          cron={cron}
+          timeZone={timezone}
+          lastRunAt={initial?.last_run_at}
+        />
       </section>
 
       {/* Panel: Sync mode */}

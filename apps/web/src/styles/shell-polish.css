@@ -1684,7 +1684,8 @@ textarea.df2-pilot-composer textarea {
 
 .df2-cadence-tile span:last-child {
   font-size: 12px;
-  color: var(--df-text-muted);
+  /* Secondary, not muted: the muted ink fails AA on the active tile's tint in dark. */
+  color: var(--df-text-secondary);
 }
 
 .df2-cadence-tile .dt-nav-icon {

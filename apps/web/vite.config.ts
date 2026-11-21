@@ -77,6 +77,12 @@ export default defineConfig({
           if (norm.includes("@xyflow") || norm.includes("/components/transfer/TransformFlow")) {
             return "studio-canvas";
           }
+          // The schedule preview's cron engine (cron-parser + luxon, no React):
+          // only the Schedules screens import it, so it stays out of the
+          // vendor chunk every page downloads.
+          if (norm.includes("/node_modules/cron-parser/") || norm.includes("/node_modules/luxon/")) {
+            return "schedule-cron";
+          }
           if (id.includes("node_modules")) {
             // React, react-dom, scheduler and every React-dependent package
             // (zustand, use-sync-external-store, ...) must share one chunk.

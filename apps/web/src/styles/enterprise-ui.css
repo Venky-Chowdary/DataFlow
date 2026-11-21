@@ -11349,7 +11349,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: transparent;
   font-size: 12px;
   font-weight: 600;
-  color: #64748b;
+  color: var(--df-text-secondary);
   cursor: pointer;
   transition: background 0.16s, color 0.16s;
 }
@@ -11413,7 +11413,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: transparent;
   font-size: 12.5px;
   font-weight: 600;
-  color: #64748b;
+  color: var(--df-text-secondary);
   cursor: pointer;
   transition: background 0.16s, color 0.16s;
 }
