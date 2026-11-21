@@ -30,6 +30,7 @@ BACKEND_CHECKS = (
     "no-config-transfer",
     "mapping-evidence",
     "ai-offline-correctness",
+    "ai-benchmarks",
     "pilot-answer-quality",
     "gitops",
     "security",
