@@ -206,7 +206,7 @@ jobs:
           OLLAMA_HOST: "http://127.0.0.1:9"
         run: |
           python -m pytest tests/test_ai_benchmarks.py tests/test_mapping_witness.py \
-            tests/test_ai_decision_ledger.py -q --tb=short
+            tests/test_mapping_witness_review.py tests/test_ai_decision_ledger.py -q --tb=short
 
       - name: Upload benchmark report
         if: always()
