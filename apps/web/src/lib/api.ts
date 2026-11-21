@@ -1896,6 +1896,18 @@ export async function cancelJob(jobId: string): Promise<{ success: boolean; job_
 }
 
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
+/** The selected table names of a job's request, in order (never its endpoints or secrets). */
+function selectedStreamNames(request: unknown): string[] | undefined {
+  if (!request || typeof request !== "object") return undefined;
+  const contracts = (request as { stream_contracts?: unknown }).stream_contracts;
+  if (!Array.isArray(contracts)) return undefined;
+  const names = contracts
+    .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === "object" && (c as Record<string, unknown>).selected !== false)
+    .map((c) => String(c.name ?? c.stream ?? "").trim())
+    .filter(Boolean);
+  return names.length ? [...new Set(names)] : undefined;
+}
+
 export function streamJobProgress(
   jobId: string,
   onUpdate: (delivery: ProgressDelivery) => void,
@@ -2085,6 +2097,12 @@ export function streamJobProgress(
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
       streams: streamHealth.length ? streamHealth : undefined,
+      // Per-table progress on the Run screen (UI pass 2): the table loading
+      // now, the finished ones, and the run's table names in engine order.
+      stream_progress: raw.stream_progress && typeof raw.stream_progress === "object"
+        ? raw.stream_progress as JobProgress["stream_progress"]
+        : undefined,
+      stream_names: Array.isArray(raw.stream_names) ? raw.stream_names.map(String) : selectedStreamNames(raw.transfer_request),
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,

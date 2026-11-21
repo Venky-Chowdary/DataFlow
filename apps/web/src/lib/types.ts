@@ -647,7 +647,23 @@ export interface OpenedJournal extends ParsedUpload {
   };
 }
 
+/** One table of a multi-table run (job.stream_progress, services/multi_stream_resume.py). */
+export interface StreamProgressEntry {
+  status: "running" | "completed" | string;
+  stream?: string;
+  table?: string;
+  /** Rows this pass wrote to the table (completed entries). */
+  rows?: number;
+  started_at?: string;
+  at?: string;
+  /** The job's row counter when the table started: each table's writer counts its own rows. */
+  counter_at_start?: number;
+}
+
 export interface JobProgress extends TransferJob {
+  /** Per-table progress of a multi-table run: the table loading now and the finished ones. */
+  stream_progress?: Record<string, StreamProgressEntry>;
+
   /** True when the API recorded the count as unknown (null), e.g. a cancel it could not attribute. */
   records_processed_unknown?: boolean;
   progress_pct: number;

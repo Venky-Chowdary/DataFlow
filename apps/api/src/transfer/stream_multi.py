@@ -240,6 +240,8 @@ def run_non_cdc_multi_stream_sequential(
         completed_streams,
         forget_all_progress,
         record_stream_completed,
+        forget_stream_started,
+        record_stream_started,
         skip_reason,
     )
 
@@ -392,6 +394,8 @@ def run_non_cdc_multi_stream_sequential(
             rows = 0
             summary: dict[str, Any] = {}
             stream_limit = remaining_limit if limit > 0 else 0
+            # The Run screen's per-table progress: this table is loading now.
+            record_stream_started(str(job_id or ""), stream_name)
             source_patch, dest_patch = patches_for_stream(raw)
             if session_plan is not None:
                 dest_patch = strip_session_hooks(dest_patch)
@@ -508,6 +512,7 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
+                forget_stream_started(str(job_id or ""), stream_name)
                 # This stream's cleared table goes back now, while the endpoint
                 # still names it; the engine's settle would put the backup on
                 # the request's table instead (and leave this one empty).

@@ -67,6 +67,8 @@ import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
 import { EmbeddingUsageSummary } from "./transfer/EmbeddingUsageSummary";
 import { plural } from "../lib/plural";
 import { Callout } from "./ui/Callout";
+import { TableProgressList } from "./transfer/TableProgressList";
+import { tableProgressRows } from "../lib/tableProgress";
 import { RunResultHeader, useRunVerification } from "./RunResultHeader";
 import { shortJobId } from "../lib/jobGrid";
 
@@ -2142,6 +2144,8 @@ export function JobTheaterView({
           />
         </section>
       )}
+
+      <TableProgressList rows={tableProgressRows(job, { reconciling })} />
 
       <div className="df2-run-log">
         <LiveEventLog
