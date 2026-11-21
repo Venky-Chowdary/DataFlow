@@ -20,6 +20,7 @@ from services.copy_oracle_oracle import (  # noqa: E402
     oracle_family_name,
     oracle_same_instance,
 )
+from tests.helpers.live_env import oracle_creds, oracle_dsn  # noqa: E402
 
 
 def test_oracle_same_instance_requires_service():
@@ -46,6 +47,12 @@ def _oracle_password() -> str:
     return "dataflow"
 
 
+def _ora_live() -> dict:
+    """Oracle from the environment (the oracle-live CI job exports DATAFLOW_ORACLE_*),
+    else the compose desktop lab's XE (XEPDB1)."""
+    return {**oracle_creds(default_service="XEPDB1"), "password": _oracle_password()}
+
+
 def _oracle_or_skip():
     try:
         with socket.create_connection(("127.0.0.1", 1521), timeout=1):
@@ -56,13 +63,13 @@ def _oracle_or_skip():
 
 def _cfg() -> dict:
     return {
-        "host": "127.0.0.1",
-        "port": 1521,
-        "database": "XEPDB1",
-        "service_name": "XEPDB1",
-        "username": "dataflow",
-        "password": _oracle_password(),
-        "schema": "DATAFLOW",
+        "host": _ora_live()["host"],
+        "port": _ora_live()["port"],
+        "database": _ora_live()["database"],
+        "service_name": _ora_live()["database"],
+        "username": _ora_live()["username"],
+        "password": _ora_live()["password"],
+        "schema": _ora_live()["schema"],
     }
 
 
@@ -71,9 +78,9 @@ def _connect():
     oracledb = pytest.importorskip("oracledb")
     try:
         conn = oracledb.connect(
-            user="dataflow",
-            password=_oracle_password(),
-            dsn="127.0.0.1:1521/XEPDB1",
+            user=_ora_live()["username"],
+            password=_ora_live()["password"],
+            dsn=oracle_dsn(_ora_live()),
         )
     except Exception as exc:
         pytest.skip(f"Oracle auth failed: {exc}")

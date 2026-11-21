@@ -459,15 +459,21 @@ def _build_db_endpoint(
                 ),
             },
         ),
+        # The oracle-live CI job (Oracle Database Free, FREEPDB1) exports
+        # DATAFLOW_ORACLE_*; without them, the compose desktop lab's XE.
         "oracle": EndpointConfig(
             kind="database",
             format="oracle",
-            host="127.0.0.1",
-            port=1521,
-            database="XEPDB1",
-            username="dataflow",
+            host=os.environ.get("DATAFLOW_ORACLE_HOST") or "127.0.0.1",
+            port=int(os.environ.get("DATAFLOW_ORACLE_PORT") or 1521),
+            database=os.environ.get("DATAFLOW_ORACLE_SERVICE") or "XEPDB1",
+            username=os.environ.get("DATAFLOW_ORACLE_USER") or "dataflow",
             password=_oracle_sku_password(),
-            schema="DATAFLOW",
+            schema=(
+                os.environ.get("DATAFLOW_ORACLE_SCHEMA")
+                or os.environ.get("DATAFLOW_ORACLE_USER")
+                or "DATAFLOW"
+            ).upper(),
             table="payments_oracle",
         ),
         "kafka": EndpointConfig(

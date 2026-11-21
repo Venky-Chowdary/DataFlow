@@ -87,9 +87,20 @@
       "workflow": ".github/workflows/ci.yml",
       "mode": "engine_scoped",
       "engines": ["oracle", "postgresql", "mysql", "mongodb", "sqlserver", "sqlite", "files"],
-      "container": "Oracle Database 23ai Free (gvenzl/oracle-free slim-faststart) in ARCHIVELOG with supplemental logging: the real engine, not an emulator. Peers: PostgreSQL, MySQL, MongoDB, SQL Server.",
+      "container": "Oracle Database 23ai Free (gvenzl/oracle-free faststart, with RMAN) in ARCHIVELOG with supplemental logging: the real engine, not an emulator. Peers: PostgreSQL, MySQL, MongoDB, SQL Server.",
       "min_executed": 100,
-      "expected_skips": []
+      "expected_skips": [
+        {
+          "test": "tests/test_d356_oracle_proof_stored_column_spelling.py::*mariadb*",
+          "reason": "MariaDB not reachable",
+          "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
+        },
+        {
+          "test": "tests/test_d357_oracle_plan_type_matches_created_column.py::*mariadb*",
+          "reason": "MariaDB not reachable",
+          "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
+        }
+      ]
     },
     "kafka-live": {
       "proves": ["kafka"],

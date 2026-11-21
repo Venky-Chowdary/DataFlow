@@ -945,6 +945,33 @@ jobs:
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
           DATAFLOW_ORACLE_SCHEMA: ${{ secrets.DATAFLOW_ORACLE_SCHEMA }}
 
+      - name: Oracle destination privilege probe denies a SELECT-only login (live)
+        id: oracle_deny
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        env:
+          # Step-level env outranks the job's: this step logs in as the
+          # read-only user tests/oracle_ci_init.sql creates.
+          DATAFLOW_ORACLE_PRIVILEGE_DENY: "1"
+          DATAFLOW_ORACLE_USER: DATAFLOW_RO
+          DATAFLOW_ORACLE_SCHEMA: DATAFLOW
+          DATAFLOW_ORACLE_TABLE: DF_DENY_PROBE
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          set -o pipefail
+          python -m pytest \
+            tests/test_saas_privilege_deny_live.py::test_live_oracle_select_only_is_denied \
+            -v --tb=short -rfEs --timeout=300 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-deny.xml" 2>&1 | tee "$RUNNER_TEMP/oracle-deny.log"
+
+      - name: Failing Oracle test ids
+        if: ${{ !cancelled() }}
+        run: |
+          echo "### Failing Oracle live tests" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP"/oracle-*.log | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP"/oracle-*.log | tail -4 || true
+
       - name: No Oracle live test may skip
         if: ${{ !cancelled() }}
         working-directory: apps/api
@@ -960,7 +987,7 @@ jobs:
           if-no-files-found: warn
 
   # Oracle proven on every backend change, with no secrets: Oracle Database
-  # 23ai Free (gvenzl/oracle-free slim-faststart, the real engine under the
+  # 23ai Free (gvenzl/oracle-free faststart, the real engine under the
   # Oracle Free Use Terms, which allow testing) in a container, ARCHIVELOG +
   # supplemental logging + the LogMiner common user (tests/oracle_ci_init.sql).
   # Runs the Oracle connector, copy fast paths, LogMiner CDC and the Oracle
@@ -995,6 +1022,9 @@ jobs:
       DATAFLOW_ORACLE_CDB_SERVICE: FREE
       DATAFLOW_ORACLE_LOGMINER_USER: C##DATAFLOW
       DATAFLOW_ORACLE_CONTAINER: dataflow-ci-oracle
+      # The container is this job's alone: the purged-archive fail-closed
+      # test may delete one of its archived logs (RMAN, in the image).
+      DATAFLOW_RUN_ORACLE_REDO_GAP_LIVE: "1"
       DATAFLOW_TEST_ORACLE_HOST: 127.0.0.1
       DATAFLOW_TEST_ORACLE_PORT: "1521"
       DATAFLOW_TEST_ORACLE_SERVICE: FREEPDB1
@@ -1028,6 +1058,9 @@ jobs:
           {
             echo "DATAFLOW_ORACLE_PASSWORD=${ora}"
             echo "DATAFLOW_TEST_ORACLE_PASSWORD=${ora}"
+            # SYS/SYSTEM share it (the image's ORACLE_PASSWORD); one test
+            # logs in as SYSTEM under this spelling.
+            echo "DF_TEST_ORACLE_PASSWORD=${ora}"
             echo "MSSQL_SA_PASSWORD=${mssql}"
             echo "DATAFLOW_TEST_MSSQL_PASSWORD=${mssql}"
             echo "DATAFLOW_SQLSERVER_PASSWORD=${mssql}"
@@ -1070,11 +1103,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/live-junit"
           # Every Oracle test module, by name, plus the Oracle-only modules
           # whose name does not say so.
+          set -o pipefail
           python -m pytest \
             tests/test_*oracle*.py \
             tests/test_cdc_poll_reconnects_live.py \
-            -v --tb=short -rs --timeout=900 --durations=25 \
-            --junitxml="$RUNNER_TEMP/live-junit/oracle-files.xml"
+            -v --tb=short -rfEs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-files.xml" 2>&1 | tee "$RUNNER_TEMP/oracle-files.log"
 
       - name: Oracle cells of the cross-engine suites (live)
         id: oracle_cells
@@ -1083,6 +1117,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/live-junit"
+          set -o pipefail
           python -m pytest \
             tests/test_production_sku_matrix.py \
             tests/test_execute_tracked_universal_matrix.py \
@@ -1104,14 +1139,42 @@ jobs:
             tests/test_keyed_readback_scope.py \
             tests/test_r10_fidelity_run2_e2e.py \
             -k "oracle" \
-            -v --tb=short -rs --timeout=900 --durations=25 \
-            --junitxml="$RUNNER_TEMP/live-junit/oracle-cells.xml"
+            --deselect tests/test_saas_privilege_deny_live.py::test_live_oracle_select_only_is_denied \
+            -v --tb=short -rfEs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-cells.xml" 2>&1 | tee "$RUNNER_TEMP/oracle-cells.log"
+
+      - name: Oracle destination privilege probe denies a SELECT-only login (live)
+        id: oracle_deny
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
+        working-directory: apps/api
+        shell: bash
+        env:
+          # Step-level env outranks the job's: this step logs in as the
+          # read-only user tests/oracle_ci_init.sql creates.
+          DATAFLOW_ORACLE_PRIVILEGE_DENY: "1"
+          DATAFLOW_ORACLE_USER: DATAFLOW_RO
+          DATAFLOW_ORACLE_SCHEMA: DATAFLOW
+          DATAFLOW_ORACLE_TABLE: DF_DENY_PROBE
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          set -o pipefail
+          python -m pytest \
+            tests/test_saas_privilege_deny_live.py::test_live_oracle_select_only_is_denied \
+            -v --tb=short -rfEs --timeout=300 \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-deny.xml" 2>&1 | tee "$RUNNER_TEMP/oracle-deny.log"
+
+      - name: Failing Oracle test ids
+        if: ${{ !cancelled() }}
+        run: |
+          echo "### Failing Oracle live tests" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP"/oracle-*.log | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP"/oracle-*.log | tail -4 || true
 
       - name: No Oracle live test may skip
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job oracle-live --junit "$RUNNER_TEMP/live-junit/oracle-files.xml" --junit "$RUNNER_TEMP/live-junit/oracle-cells.xml" --out "$RUNNER_TEMP/live-engine/oracle-live.json"
+          python scripts/check_live_skips.py --job oracle-live --junit "$RUNNER_TEMP/live-junit/oracle-files.xml" --junit "$RUNNER_TEMP/live-junit/oracle-cells.xml" --junit "$RUNNER_TEMP/live-junit/oracle-deny.xml" --out "$RUNNER_TEMP/live-engine/oracle-live.json"
 
       - name: Oracle container log (tail)
         if: ${{ failure() }}
@@ -1196,9 +1259,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/live-junit"
+          set -o pipefail
           python -m pytest tests/test_*kafka*.py \
-            -v --tb=short -rs --timeout=900 --durations=25 \
-            --junitxml="$RUNNER_TEMP/live-junit/kafka-files.xml"
+            -v --tb=short -rfEs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/kafka-files.xml" 2>&1 | tee "$RUNNER_TEMP/kafka-files.log"
 
       - name: Kafka cells of the cross-engine suites (live)
         id: kafka_cells
@@ -1207,6 +1271,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/live-junit"
+          set -o pipefail
           python -m pytest \
             tests/test_production_sku_matrix.py \
             tests/test_execute_tracked_universal_matrix.py \
@@ -1221,8 +1286,15 @@ jobs:
             tests/test_wave_aa_accuracy.py \
             tests/test_wave_u_accuracy.py \
             -k "kafka" \
-            -v --tb=short -rs --timeout=900 --durations=25 \
-            --junitxml="$RUNNER_TEMP/live-junit/kafka-cells.xml"
+            -v --tb=short -rfEs --timeout=900 --durations=25 \
+            --junitxml="$RUNNER_TEMP/live-junit/kafka-cells.xml" 2>&1 | tee "$RUNNER_TEMP/kafka-cells.log"
+
+      - name: Failing Kafka test ids
+        if: ${{ !cancelled() }}
+        run: |
+          echo "### Failing Kafka live tests" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP"/kafka-*.log | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP"/kafka-*.log | tail -4 || true
 
       - name: No Kafka live test may skip
         if: ${{ !cancelled() }}

@@ -17,7 +17,7 @@
 #              tests/sqlserver_cdc_init.sql. The SA password is read from
 #              MSSQL_SA_PASSWORD (a per-run value the workflow generates and
 #              masks); it is never written on a command line or in this file.
-#   oracle — Oracle Database 23ai Free (gvenzl/oracle-free slim-faststart: the
+#   oracle — Oracle Database 23ai Free (gvenzl/oracle-free faststart: the
 #              real database engine, not an emulator), switched to ARCHIVELOG
 #              with supplemental logging, then tests/oracle_ci_init.sql creates
 #              the PDB login DATAFLOW and the LogMiner common user C##DATAFLOW.
@@ -41,9 +41,11 @@ BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
 REDIS_IMAGE="${REDIS_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}"
 MSSQL_IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 # Pinned: a new Oracle release must not change what CI proves unannounced.
+# The regular faststart flavour (1.7 GB compressed), not slim (1.3 GB): slim
+# drops RMAN, which the purged-archive fail-closed LogMiner test needs.
 # ghcr.io first (no Docker Hub anonymous-pull quota), Docker Hub as fallback.
-ORACLE_IMAGE="${ORACLE_IMAGE:-ghcr.io/gvenzl/oracle-free:23.26.4-slim-faststart}"
-ORACLE_IMAGE_FALLBACK="${ORACLE_IMAGE_FALLBACK:-docker.io/gvenzl/oracle-free:23.26.4-slim-faststart}"
+ORACLE_IMAGE="${ORACLE_IMAGE:-ghcr.io/gvenzl/oracle-free:23.26.4-faststart}"
+ORACLE_IMAGE_FALLBACK="${ORACLE_IMAGE_FALLBACK:-docker.io/gvenzl/oracle-free:23.26.4-faststart}"
 KAFKA_IMAGE="${KAFKA_IMAGE:-docker.io/apache/kafka:3.9.0}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
