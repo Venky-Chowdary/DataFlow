@@ -104,6 +104,7 @@ def _calibrated_confidence(
 
 
 from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
+from services.mapping_assignment_policy import pin_decisive_pairs  # noqa: E402
 
 
 
@@ -1532,7 +1533,9 @@ def map_columns(
 
     assigned_sources: set[str] = set()
     dest_collisions = _dest_fold_collisions(target_columns)
-    pinned = _pin_exact_name_pairs(source_columns, target_columns)
+    pinned = pin_decisive_pairs(
+        _pin_exact_name_pairs(source_columns, target_columns), source_columns, target_columns, pair_scores
+    )
     optimal = {src: (tgt, *pair_scores[(src, tgt)]) for src, tgt in pinned.items()}
     optimal.update(
         _optimal_assignment(
