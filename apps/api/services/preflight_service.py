@@ -2218,14 +2218,42 @@ def run_file_preflight(
         can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
         destination_table=str(destination_table or ""), mappings=write_maps,
     )
+    # D396 / D377: a server that forces a PRIMARY KEY and a source with none —
+    # Datawrap's surrogate row key, only on the operator's DDL approval.
+    require_pk_gate: dict[str, Any] | None = None
+    if destination_connected:
+        try:
+            from services.dest_require_primary_key import require_primary_key_gate
+
+            require_pk_gate = require_primary_key_gate(
+                acknowledged=bool(ddl_changes_acknowledged),
+                destination_table=str(destination_table or ""),
+                dest_db_type=destination_db_type,
+                destination_config=destination_config,
+                table_exists=dest_table_exists,
+                sync_mode=sync_mode,
+                key_hint=contract_primary_key or ",".join(destination_pk_columns or []),
+                mappings=write_maps,
+                source={
+                    "config": source_config,
+                    "connector_id": source_connector_id,
+                    "table": source_table,
+                },
+            )
+        except Exception as _rpk_exc:  # noqa: BLE001 — G6 still judges the CREATE
+            logger.warning("require-primary-key gate skipped: %s", _rpk_exc, exc_info=_rpk_exc)
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
     upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
     upsert_ddl_blocked = upsert_ddl_blocked or dup_dest_gate is not None
+    upsert_ddl_blocked = upsert_ddl_blocked or bool(
+        require_pk_gate and require_pk_gate.get("status") == "block"
+    )
     enriched_blockers.extend(
         blockers_from_gates(
-            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None)
+            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None),
+            (require_pk_gate, None),
         )
     )
     extra_gates: list[dict[str, Any]] = (
@@ -2235,6 +2263,7 @@ def run_file_preflight(
         + ([dup_dest_gate] if dup_dest_gate else [])
         + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
+        + ([require_pk_gate] if require_pk_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )
