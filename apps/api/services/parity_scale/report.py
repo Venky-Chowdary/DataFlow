@@ -165,4 +165,6 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
         "mode": evidence.get("mode"),
         "scan_id": evidence.get("scan_id"),
         "ce_stricter_than_fp": int(diff.get("ce_stricter_than_fp") or 0),
+        # "pinned" (one snapshot per side) or "not_established": only pinned may read proven.
+        "consistency": str((evidence.get("consistency") or {}).get("kind") or "not_established"),
     }

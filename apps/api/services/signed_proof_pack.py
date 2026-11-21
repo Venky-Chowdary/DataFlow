@@ -370,12 +370,33 @@ def classify_post_write_assurance(
         return {**base, "claim_level": "failed", "migration_proven": False, "population_proof": False,
                 "checksum_match": False,
                 "note": "Parity at Scale compared every row and found differences — migration not proven."}
-    if scan.get("outcome") == "match" and scan.get("complete") is True and scan.get("certified") is True:
+    if scan_proves_population(recon):
         return {**base, "claim_level": "full_checksum", "post_write_verified": True, "migration_proven": True,
                 "population_proof": True, "checksum_match": True,
                 "source_checksum_provenance": "engine_segment_digest",
                 "note": "Every row compared inside both databases (Parity at Scale) and none differs."}
     return base
+
+
+def scan_proves_population(reconciliation: dict[str, Any] | None) -> bool:
+    """A Parity at Scale scan that may stand as a full population proof (design §4.2).
+
+    Every unit compared, nothing differs, every in-engine column kind
+    certified for the server pair, and each side read from one snapshot
+    (consistency ``pinned``): without that, writes during the scan were not
+    ruled out and the match proves only that the tables matched at scan time.
+    """
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict):
+        return False
+    consistency = scan.get("consistency") if isinstance(scan.get("consistency"), dict) else {}
+    return (
+        scan.get("outcome") == "match"
+        and scan.get("complete") is True
+        and scan.get("certified") is True
+        and consistency.get("kind") == "pinned"
+    )
 
 
 def _classify_gate8_assurance(
@@ -773,12 +794,9 @@ def proof_pack_evidence_completeness_errors(
         recon = reconciliation if isinstance(reconciliation, dict) else {}
         src = str(recon.get("source_checksum") or "").strip()
         tgt = str(recon.get("target_checksum") or "").strip()
-        scan = recon.get("parity_at_scale")
-        # A complete, certified Parity at Scale match is an independent re-read
-        # of both populations, compared unit by unit (digests per segment).
-        scan_match = isinstance(scan, dict) and scan.get("outcome") == "match" and bool(
-            scan.get("complete")) and bool(scan.get("certified"))
-        if (not src or not tgt or src != tgt) and not scan_match:
+        # A complete, certified, pinned Parity at Scale match is an independent
+        # re-read of both populations, compared unit by unit (digests per segment).
+        if (not src or not tgt or src != tgt) and not scan_proves_population(recon):
             errors.append(
                 "migration_proven refused: independent matching checksums required"
             )

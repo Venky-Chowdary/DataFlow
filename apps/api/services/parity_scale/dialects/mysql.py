@@ -203,6 +203,32 @@ class MySQLSide(SqlSide):
         else:
             cur.execute("SET SESSION max_execution_time = %s", (max(1, int(seconds * 1000)),))
 
+    def pin(self) -> dict[str, Any]:
+        """``START TRANSACTION WITH CONSISTENT SNAPSHOT``: one InnoDB snapshot for the rest of the scan.
+
+        Only InnoDB keeps a consistent read view; any other storage engine is
+        not pinned. A statement error (a timeout) rolls back the statement
+        only, so the snapshot is kept.
+        """
+        self.conn.rollback()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT ENGINE FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+                (self.schema or "", self.table),
+            )
+            row = cur.fetchone()
+            engine = str((row or [""])[0] or "")
+            if engine.lower() != "innodb":
+                return {"kind": "not_established",
+                        "reason": f"the table's storage engine ({engine or 'unknown'}) keeps no consistent snapshot"}
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
+            cur.execute("SELECT UTC_TIMESTAMP(6)")
+            at = cur.fetchone()[0]
+        self.pinned = True
+        return {"kind": "pinned", "method": "consistent_snapshot_transaction", "at": str(at)}
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import pymysql
 
@@ -211,17 +237,20 @@ class MySQLSide(SqlSide):
                 self._timeout(cur)
                 cur.execute(sql, list(params))
                 rows = list(cur.fetchall())
-            self.conn.commit()
+            if not self.pinned:
+                self.conn.commit()
             return rows
         except pymysql.err.OperationalError as exc:
-            self.conn.rollback()
+            if not self.pinned:
+                self.conn.rollback()
             if exc.args and exc.args[0] in _TIMEOUT_CODES:
                 raise timeout_error(exc) from exc
             raise
         except UnitTimeout:
             raise
         except Exception:
-            self.conn.rollback()
+            if not self.pinned:
+                self.conn.rollback()
             raise
 
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
@@ -237,4 +266,5 @@ class MySQLSide(SqlSide):
                 yield from rows
         finally:
             cur.close()
-            self.conn.commit()
+            if not self.pinned:  # a pinned scan keeps its transaction (and its snapshot)
+                self.conn.commit()

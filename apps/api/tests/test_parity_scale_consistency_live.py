@@ -1,0 +1,167 @@
+"""Parity at Scale phase 3: "proven" needs each side read from one snapshot (review defect 3, design §4.2).
+
+The scan pins each side to one snapshot for its whole length (PostgreSQL:
+one REPEATABLE READ transaction with a savepoint per statement; MySQL/MariaDB
+InnoDB: START TRANSACTION WITH CONSISTENT SNAPSHOT) and records exactly what
+it established. Only ``pinned`` may become "proven" or a full population
+proof; otherwise the verdict is "no difference found" with the plain
+statement that writes during the scan were not ruled out.
+"""
+
+from __future__ import annotations
+
+import sys
+import uuid
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import parity_engines  # noqa: E402
+from test_parity_scale_verification_live import _env, _job, _report, _sql, tables  # noqa: E402,F401
+
+
+def _svc():
+    from services.mongodb_service import get_mongodb_service
+
+    return get_mongodb_service()
+
+
+def _scan_with_a_write_midway(job_id: str, *, pin: bool, write) -> dict[str, Any]:
+    """Run the job's scan in slices; after the first units, ``write`` changes the source."""
+    from services.parity_scale import verification
+    from services.parity_scale.driver import ParityScan, ScanConfig
+    from services.parity_scale.store import MemoryScanStore
+
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    scan = ParityScan.start(verification.plan_for(spec), store=MemoryScanStore(),
+                            open_side=verification.side_opener(spec),
+                            config=ScanConfig(segment_rows=300, pin_snapshot=pin, mode="R"))
+    while scan.state["items_done"] < 2:
+        scan.run(max_seconds=0.01)
+    write()
+    while not scan.done:
+        scan.run(max_seconds=5)
+    return scan.result()
+
+
+pg = pytest.mark.skipif(not parity_engines.available("postgresql"),
+                        reason="PostgreSQL not reachable (DATAFLOW_PG_TEST_DSN)")
+
+
+@pg
+def test_a_pinned_scan_reads_one_snapshot_while_the_source_moves(tables) -> None:
+    src, dst = tables
+    job_id = _job(src, dst)
+    # A write to the last rows while the first units are being compared.
+    moved = _scan_with_a_write_midway(job_id, pin=True,
+                                      write=lambda: _sql(f'DELETE FROM "{src}" WHERE id > 2990'))
+    assert moved["consistency"]["kind"] == "pinned", moved["consistency"]
+    assert moved["consistency"]["source"]["method"] == "repeatable_read_transaction"
+    assert moved["outcome"] == "match"  # the destination equals the source as of the source snapshot
+
+
+@pg
+def test_without_a_snapshot_the_same_write_shows_and_nothing_is_established(tables) -> None:
+    src, dst = tables
+    job_id = _job(src, dst)
+    moved = _scan_with_a_write_midway(job_id, pin=False,
+                                      write=lambda: _sql(f'DELETE FROM "{src}" WHERE id > 2990'))
+    assert moved["consistency"]["kind"] == "not_established"
+    assert moved["outcome"] == "differences_found"  # the control: the write really lands mid-scan
+
+
+@pg
+def test_verification_pins_and_only_a_pinned_match_is_proven(tables, monkeypatch) -> None:
+    from services.parity_scale import verification
+    from services.parity_scale.dialects.base import Side
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    job_id = _job(*tables)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    recon = _svc().get_job(job_id)["reconciliation"]
+    assert recon["parity_at_scale"]["consistency"]["kind"] == "pinned"
+    assert _report(job_id)["verdict"] == "proven"
+    assert classify_post_write_assurance(recon)["migration_proven"] is True
+
+    # The same scan where an engine cannot pin: matched at scan time, nothing more.
+    from services.parity_scale.dialects.postgresql import PostgresSide
+
+    monkeypatch.setattr(PostgresSide, "pin", Side.pin)
+    job_id = _job(*tables)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    recon = _svc().get_job(job_id)["reconciliation"]
+    assert recon["parity_at_scale"]["consistency"]["kind"] == "not_established"
+    report = _report(job_id)
+    assert report["verdict"] == "no_difference_found"
+    assert "writes during the scan were not ruled out" in report["verdict_reason"]
+    assert report["tables"][0]["consistency"] == "not_established"
+    assessed = classify_post_write_assurance(recon)
+    assert assessed["migration_proven"] is False and assessed.get("source_checksum_provenance") != "engine_segment_digest"
+
+
+@pg
+def test_a_resumed_scan_is_not_pinned(tables) -> None:
+    from services.parity_scale import verification
+    from services.parity_scale.driver import ParityScan, ScanConfig
+    from services.parity_scale.store import MemoryScanStore
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    store = MemoryScanStore()
+    plan = verification.plan_for(spec)
+    scan = ParityScan.start(plan, store=store, open_side=verification.side_opener(spec),
+                            config=ScanConfig(segment_rows=300, pin_snapshot=True, mode="R"))
+    while scan.state["items_done"] < 3:
+        scan.run(max_seconds=0.01)
+    scan.close()
+    resumed = ParityScan.resume(scan.state["scan_id"], store=store, open_side=verification.side_opener(spec),
+                                plan=plan)
+    while not resumed.done:
+        resumed.run(max_seconds=5)
+    evidence = resumed.result()
+    assert evidence["outcome"] == "match"
+    assert evidence["consistency"]["kind"] == "not_established"
+    assert "resumed" in " ".join(evidence["consistency"]["reasons"])
+
+
+def _mysql_usable() -> bool:
+    if not parity_engines.available("mysql"):
+        return False
+    try:
+        parity_engines.connect("mysql").close()
+        return True
+    except Exception:  # noqa: BLE001 — a reachable port with other credentials is not usable here
+        return False
+
+
+@pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
+def test_mysql_innodb_pins_a_consistent_snapshot() -> None:
+    from services.parity_scale.dialects.mysql import MySQLSide
+    from services.parity_scale.plan import build_plan
+
+    table = f"psd1_pin_{uuid.uuid4().hex[:8]}"
+    conn = parity_engines.connect("mysql")
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, v INT) ENGINE=InnoDB")
+        cur.execute(f"INSERT INTO `{table}` VALUES (1, 1), (2, 2)")
+    conn.commit()
+    try:
+        plan = build_plan([{"source": "id", "target": "id"}, {"source": "v", "target": "v"}],
+                          source_types={"id": "bigint", "v": "int"}, dest_types={"id": "bigint", "v": "int"},
+                          source_engine="mysql", dest_engine="mysql", key_columns=["id"])
+        side = MySQLSide(role="source", plan=plan, table=table, connection=parity_engines.connect("mysql"))
+        info = side.pin()
+        assert info["kind"] == "pinned"
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM `{table}` WHERE id = 2")
+        conn.commit()
+        assert int(side.execute(f"SELECT COUNT(*) FROM `{table}`", [])[0][0]) == 2  # the pinned snapshot
+        side.close()
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        conn.commit()
+        conn.close()

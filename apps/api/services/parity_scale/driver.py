@@ -78,6 +78,9 @@ class ScanConfig:
     #: Target columns whose values must never be stored (masked, hashed, redacted
     #: or omitted by the run): examples and causes keep the column, never a value.
     protected: tuple[str, ...] = ()
+    #: Read each side from one snapshot for the whole scan (verification after
+    #: the write sets it): only then can "every row matched" be a proof.
+    pin_snapshot: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ScanConfig":
@@ -131,6 +134,7 @@ def _new_state(scan_id: str, plan: TablePlan, config: ScanConfig, mode: str, mod
         "stream": None,
         "examples": {"missing_content": [], "extra_content": []},
         "systematic": None,
+        "consistency": {},
         "resumed": 0,
         "started_at": utc_now(),
         "finished_at": None,
@@ -226,8 +230,24 @@ class ParityScan:
         if role not in self._sides:
             side = self._open_side(role, self.plan)
             side.set_timeout(self.config.statement_timeout_s)
+            if self.config.pin_snapshot:
+                self._pin(role, side)
             self._sides[role] = side
         return self._sides[role]
+
+    def _pin(self, role: str, side: Side) -> None:
+        """Pin the side to one snapshot and record exactly what that established."""
+        consistency = self.state.setdefault("consistency", {})
+        if role in consistency:
+            # The side was opened before (a resumed scan): the earlier part of
+            # the scan read another snapshot, so nothing pins the whole scan.
+            consistency["broken"] = (
+                f"the {role} was read again after the scan resumed, from a later snapshot"
+            )
+        try:
+            consistency[role] = side.pin()
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is recorded, not fatal
+            consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
 
     def close(self) -> None:
         if self._pool is not None:

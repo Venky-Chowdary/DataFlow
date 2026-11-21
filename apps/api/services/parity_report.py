@@ -579,6 +579,7 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
             "key_attribution": ev.scale.get("key_attribution"),
             "certified": ev.scale.get("certified"),
             "certification_pair": ev.scale.get("certification_pair"),
+            "consistency": ev.scale.get("consistency"),
         } if ev.scale else {}),
     }
 
@@ -779,6 +780,14 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
         return "no_difference_found", (
             f"Every row of {', '.join(uncertified[:5])} was compared and none differs, but this engine pair "
             "is not certified for every column type, so the report does not say proven."
+        )
+    moving = [t["name"] for t in tables if t.get("check") in {"segment_diff", "multiset_digest"}
+              and t.get("consistency") != "pinned"]
+    if moving:
+        # Design §4.2: proven needs each side read from one snapshot (pinned).
+        return "no_difference_found", (
+            f"Every row of {', '.join(moving[:5])} was compared and none differs. The tables matched at "
+            "scan time, but writes during the scan were not ruled out."
         )
     content = [t["name"] for t in tables if t.get("check") == "multiset_digest"]
     if content:

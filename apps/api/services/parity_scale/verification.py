@@ -481,7 +481,7 @@ def _run(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: b
     plan = plan_for(spec)
     opener = side_opener(spec)
     cfg = config or ScanConfig(keys_stored_cap=2000, max_wall_seconds=WALL_SECONDS)
-    cfg = replace(cfg, protected=tuple(spec.get("protected") or ()))
+    cfg = replace(cfg, protected=tuple(spec.get("protected") or ()), pin_snapshot=True)
     if spec.get("key_protected"):
         # The key itself is protected: no key value is stored; rows are counted, not named.
         # Hash buckets (mode H) keep no key value in the queue either, unlike key-range bounds.

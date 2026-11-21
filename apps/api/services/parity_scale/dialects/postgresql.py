@@ -259,9 +259,45 @@ class PostgresSide(SqlSide):
     def held_predicate(self) -> str:
         return fit_held_predicate(self, decimal_fit_classes)
 
+    def pin(self) -> dict[str, Any]:
+        """One REPEATABLE READ, READ ONLY transaction for the rest of the scan (one snapshot).
+
+        Each statement then runs under a savepoint, so a statement that times
+        out is rolled back to it and the snapshot is kept.
+        """
+        self.conn.rollback()
+        self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_current_snapshot()::text, now()::text")
+            snapshot, at = cur.fetchone()
+        self.pinned = True
+        return {"kind": "pinned", "method": "repeatable_read_transaction", "snapshot": str(snapshot), "at": str(at)}
+
+    def _execute_pinned(self, sql: str, params: Sequence[Any]) -> list[tuple[Any, ...]]:
+        import psycopg2
+
+        with self.conn.cursor() as cur:
+            cur.execute("SAVEPOINT psd1_statement")
+        try:
+            with self.conn.cursor() as cur:
+                if self.timeout_seconds:
+                    cur.execute("SET LOCAL statement_timeout = %s", (int(self.timeout_seconds * 1000),))
+                cur.execute(sql, list(params))
+                rows = cur.fetchall()
+                cur.execute("RELEASE SAVEPOINT psd1_statement")
+            return rows
+        except Exception as exc:
+            with self.conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT psd1_statement")
+            if isinstance(exc, psycopg2.errors.QueryCanceled):
+                raise timeout_error(exc) from exc
+            raise
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import psycopg2
 
+        if self.pinned:
+            return self._execute_pinned(sql, params)
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
@@ -307,4 +343,5 @@ class PostgresSide(SqlSide):
                 yield from rows
         finally:
             cur.close()
-            self.conn.rollback()
+            if not self.pinned:  # a pinned scan keeps its transaction (and its snapshot)
+                self.conn.rollback()

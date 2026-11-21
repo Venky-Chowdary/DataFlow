@@ -81,6 +81,16 @@ class Side(ABC):
         self.table = table
         self.schema = schema
         self.timeout_seconds: float | None = None
+        #: Set by :meth:`pin`: every later statement reads one snapshot of the table.
+        self.pinned = False
+
+    def pin(self) -> dict[str, Any]:
+        """Read every later statement from one snapshot; what was established, in words.
+
+        ``{"kind": "pinned", ...}`` only when the engine guarantees it; any
+        other answer is ``not_established`` with the reason.
+        """
+        return {"kind": "not_established", "reason": f"snapshot pinning is not implemented for {type(self).__name__}"}
 
     # column lists in plan order -------------------------------------------------
     def column_name(self, col: ColumnPlan) -> str:

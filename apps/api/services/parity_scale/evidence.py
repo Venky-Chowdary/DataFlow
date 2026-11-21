@@ -28,6 +28,29 @@ TAMPER_NOTE = (
 )
 
 
+NOT_ESTABLISHED_NOTE = (
+    "The tables matched at scan time, but writes during the scan were not ruled out."
+)
+
+
+def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
+    """What the scan established about writes during it, and nothing more.
+
+    ``pinned``: each side was read from one snapshot for the whole scan, so the
+    comparison is of the destination as of its snapshot against the source as
+    of its snapshot. Anything else is ``not_established`` with the reasons.
+    """
+    recorded = state.get("consistency") or {}
+    sides = {role: recorded.get(role) or {} for role in ("source", "destination")}
+    reasons = [str(recorded["broken"])] if recorded.get("broken") else []
+    for role, info in sides.items():
+        if info.get("kind") != "pinned":
+            reasons.append(f"{role}: {info.get('reason') or 'read statement by statement, not from one snapshot'}")
+    if not reasons:
+        return {"kind": "pinned", "source": sides["source"], "destination": sides["destination"]}
+    return {"kind": "not_established", "reasons": reasons, "note": NOT_ESTABLISHED_NOTE}
+
+
 def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
     plan = state["plan"]
     columns = plan["columns"]
@@ -144,10 +167,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "units": dict(units),
         "differences": differences,
         "outcome": outcome,
-        "consistency": {
-            "kind": "not_established",
-            "note": "Per-statement reads of a possibly moving source; pinned and quiesced scans are phase 4.",
-        },
+        "consistency": consistency_of(state),
         "statements": state["statements"],
         "elapsed_s": state["elapsed_s"],
         "started_at": state["started_at"],
