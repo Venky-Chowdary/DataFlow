@@ -420,7 +420,7 @@ export function SchedulesPage({
       const mapped = planned.mapping_count ?? planned.mappings?.length ?? 0;
       toast({
         title: "Mappings planned",
-        message: `"${sched.name}": ${mapped} column${mapped === 1 ? "" : "s"} mapped and Validate passed. Run now can start it.`,
+        message: `"${sched.name}": ${mapped} column${mapped === 1 ? "" : "s"} mapped and Validate passed. Run now can start it; enable it to resume its cadence.`,
         tone: "success",
       });
       closeForm();

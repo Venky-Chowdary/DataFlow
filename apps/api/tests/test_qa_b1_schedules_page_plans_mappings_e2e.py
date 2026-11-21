@@ -94,7 +94,7 @@ def test_schedules_page_create_plans_validates_and_runs(client):
         h.drop_table("postgresql", f"{t}_d")
 
 
-def test_plan_mappings_arms_an_existing_draft(client):
+def test_plan_mappings_plans_an_existing_draft_and_leaves_it_paused(client):
     src, dst = _connectors()
     t = _source()
     try:
@@ -103,7 +103,8 @@ def test_plan_mappings_arms_an_existing_draft(client):
         planned = client.post(f"/api/v1/schedules/{sched_id}/plan-mappings")
         assert planned.status_code == 200, planned.text
         body = planned.json()
-        assert body.get("enabled") is True and len(body.get("mappings") or []) == 3, body
+        # Planning does not change whether it runs on its cadence (review Q5).
+        assert body.get("enabled") is False and len(body.get("mappings") or []) == 3, body
         again = client.post(f"/api/v1/schedules/{sched_id}/plan-mappings")
         assert again.status_code == 409
     finally:

@@ -94,7 +94,7 @@ export function persistedMappingRows(raw: unknown): Array<Record<string, unknown
  */
 export const NO_MAPPINGS_RUN_MESSAGE =
   "This schedule has no column mappings, so a run cannot start and no job was created. "
-  + "Plan mappings maps the columns and runs Validate for this source and destination, then arms the schedule. "
+  + "Plan mappings maps the columns and runs Validate for this source and destination; enable the schedule to resume its cadence. "
   + "Or open Transfer Studio for this schedule, map the columns, run Validate, and Schedule from the Studio footer.";
 
 export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {

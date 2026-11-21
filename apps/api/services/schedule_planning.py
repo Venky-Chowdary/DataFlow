@@ -30,7 +30,8 @@ class SchedulePlanRefused(ValueError):
 NO_MAPPINGS_RUN_REFUSAL = (
     "This schedule has no column mappings, so a run cannot start and no job was "
     "created. Choose “Plan mappings” on the schedule (Datawrap maps the columns "
-    "and runs Validate for this source and destination, then arms the schedule), "
+    "and runs Validate for this source and destination; enable the schedule to resume "
+    "its cadence), "
     "or open Transfer Studio with this source and destination, map the columns, "
     "run Validate, and Schedule from the Studio footer."
 )
@@ -72,6 +73,9 @@ def plan_schedule_route(payload: dict[str, Any]) -> dict[str, Any]:
         primary_key=key,
         cursor_column=str(payload.get("cursor_column") or ""),
         cursor_semantics=str(payload.get("cursor_semantics") or ""),
+        # Plan where this schedule's runs write (QA review Q5).
+        dest_schema=str(payload.get("dest_schema") or ""),
+        dest_database=str(payload.get("dest_database") or ""),
     )
     if not planned.success:
         raise SchedulePlanRefused(
