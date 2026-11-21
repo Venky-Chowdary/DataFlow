@@ -79,9 +79,14 @@ def _name(row: dict[str, Any]) -> str:
 def _tier_sentence(row: dict[str, Any]) -> str:
     tier = row.get("certification_tier")
     if tier == "certified":
-        emulated = bool((row.get("ci_evidence") or {}).get("emulated"))
-        where = " against its emulator" if emulated else ""
-        return f"{_name(row)} is Certified: a green CI run proves its engine{where}."
+        if bool((row.get("ci_evidence") or {}).get("emulated")):
+            # Never "Certified" for an emulator run (P0-4): it proves the load,
+            # MERGE and read-back logic, not a real cloud account.
+            return (
+                f"{_name(row)} is proven on an emulator only: a green CI run proves its "
+                "load against the emulator, not a real cloud account."
+            )
+        return f"{_name(row)} is Certified: a green CI run proves its engine."
     if tier == "implemented":
         return (
             f"{_name(row)} is Implemented — not yet proven: it runs, but no green CI run "

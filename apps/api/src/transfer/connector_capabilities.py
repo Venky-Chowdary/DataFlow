@@ -1476,8 +1476,12 @@ def driver_environment_gap(catalog_id: str) -> str:
         and not driver_available(driver, cid)
         and not _is_uncertified_driver_alias(cid, driver)
     ):
+        from services.connector_proof import proof_for
+
+        evidence = proof_for(cid, driver)
+        word = _proof_word("emulator" if evidence.get("emulated") else "live", True)
         return (
-            f"{cid} is Certified but its driver package is not loadable here — "
+            f"{cid} is {word} but its driver package is not loadable here — "
             f"{_driver_install_hint(driver)}. "
             "This is an environment gap, not a Planned connector."
         )
