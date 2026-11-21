@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEMO_ROUTE, WORKSPACE_SHOT } from "./workspaceShots";
+import { DEMO_ROUTE, SHOT_PIXELS, WORKSPACE_SHOT } from "./workspaceShots";
 import { listAllHelpDocs } from "./helpDocs";
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,55 +27,95 @@ function helpDocFigureSources(): string[] {
 }
 
 describe("marketing product photography", () => {
-  it("home hero stages the Studio map on the demo route, and the run screenshots stay off the homepage", () => {
+  it("home renders the product as UI in code, with no raster screenshots", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /ProductShot/);
-    assert.match(home, /src=\{WORKSPACE_SHOT\.transferMapStage\}/);
+    assert.match(home, /<StatementHero \/>/);
+    assert.doesNotMatch(home, /ProductShot|<img/);
     assert.doesNotMatch(home, /transferValidateVerdict|jobTrustCard/);
     assert.doesNotMatch(home, /Postgres to Snowflake, start to finish/);
-    assert.match(home, /DEMO_ROUTE\.source/);
     assert.doesNotMatch(home, /ProofLoopArt/);
     assert.doesNotMatch(home, /Trust Report 92/);
     assert.equal(DEMO_ROUTE.source, "PostgreSQL · public.sales_orders");
     assert.equal(DEMO_ROUTE.dest, "Snowflake · DW_DEMO.SALES_ORDERS_REPORTING");
   });
 
-  it("typed chips clip to the plate so Snowflake.orders cannot paint past the border", () => {
-    const art = readFileSync(join(webRoot, "components/marketing/hero-art/HeroArtFrame.tsx"), "utf8");
-    assert.match(art, /clipPath/);
-    const css = readFileSync(join(webRoot, "styles/marketing-hero.css"), "utf8");
-    assert.match(css, /\.lp-product-shot-route span \{[\s\S]*?text-overflow:\s*ellipsis/);
-    assert.match(css, /\.lp-product-shot-viewport \{[\s\S]*?overflow:\s*hidden/);
-    assert.match(css, /\.lp-product-shot-viewport img \{[\s\S]*?object-fit:\s*contain/);
-    assert.match(css, /\.lp-sol-v2 \.lp-mkt-body[\s\S]*?1080px/);
+  it("captures reserve their size, paint a placeholder, and disappear on error", () => {
+    const shot = readFileSync(join(webRoot, "components/marketing/ProductShot.tsx"), "utf8");
+    assert.match(shot, /width=\{size\.width\}/);
+    assert.match(shot, /height=\{size\.height\}/);
+    assert.match(shot, /aspectRatio/);
+    assert.match(shot, /onError=/);
+    const css = readFileSync(join(webRoot, "styles/marketing-system.css"), "utf8");
+    assert.match(css, /\.mk-crop-frame \{[\s\S]*?overflow:\s*hidden[\s\S]*?background:/);
+    assert.doesNotMatch(css, /filter:\s*brightness/);
   });
 
-  it("home workflow and feature tiles take every image from WORKSPACE_SHOT", () => {
+  it("home takes no image from outside WORKSPACE_SHOT", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
-    assert.match(home, /shot: WORKSPACE_SHOT\.transferSource/);
-    assert.match(home, /shot: WORKSPACE_SHOT\.schedulesHistory/);
     assert.doesNotMatch(home, /\/docs\/screenshots\//);
     assert.doesNotMatch(home, /MappingCinema|ProofCinema|ObservabilityInAction/);
   });
 
-  it("product and solution heroes frame live workspace shots, not schematic SVGs", () => {
-    const surfaces = readFileSync(join(webRoot, "pages/marketing/ProductSurfaces.tsx"), "utf8");
-    assert.match(surfaces, /ProductShot/);
-    assert.match(surfaces, /WORKSPACE_SHOT\.jobTrust/);
-    assert.match(surfaces, /WORKSPACE_SHOT\.transferMap/);
-    assert.match(surfaces, /WORKSPACE_SHOT\.schedulesHistory/);
+  it("product and solution pages draw the product in code, with no raster crops among the frames", () => {
+    // Pass 5: a bitmap between coded frames read as a cut-off screenshot
+    // ("ign-off and evidence pack"), so these pages show the product only as
+    // UI rendered in code, the same as home.
+    const files = [
+      "pages/marketing/StoryPages.tsx",
+      "pages/marketing/StoryPage.tsx",
+      "components/marketing/StoryPanels.tsx",
+      "components/marketing/StoryScenes.tsx",
+    ];
+    for (const file of files) {
+      const src = readFileSync(join(webRoot, file), "utf8");
+      assert.doesNotMatch(src, /ProductShot|<img|WORKSPACE_SHOT|\/docs\/screenshots\//, file);
+    }
+    const surfaces = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
     assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
     assert.doesNotMatch(surfaces, /MappingCinema|ProofCinema|CdcCinema/);
     assert.doesNotMatch(surfaces, /Job Theater/);
+  });
+
+  it("step labels on each story page follow the five steps, once each", () => {
+    const order = ["Plan", "Validate", "Execute", "Verify", "Evidence"];
+    const surfaces = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
+    for (const page of surfaces.split("export function ").slice(1)) {
+      const labels = [...page.matchAll(/\{ step: "(\w+)"/g)].map((m) => m[1]);
+      const idx = labels.map((l) => order.indexOf(l));
+      assert.ok(idx.every((v) => v >= 0), page.slice(0, 30));
+      assert.equal(new Set(labels).size, labels.length, `${page.slice(0, 30)} repeats a step`);
+      assert.deepEqual([...idx].sort((a, b) => a - b), idx, `${page.slice(0, 30)} is out of order`);
+    }
+  });
+
+  it("every screenshot's recorded size matches its WebP header", () => {
+    for (const [name, [w, h]] of Object.entries(SHOT_PIXELS)) {
+      const buf = readFileSync(join(shotDir, name));
+      const chunk = buf.subarray(12, 16).toString("ascii");
+      let width = 0;
+      let height = 0;
+      if (chunk === "VP8X") {
+        width = 1 + buf.readUIntLE(24, 3);
+        height = 1 + buf.readUIntLE(27, 3);
+      } else if (chunk === "VP8 ") {
+        width = buf.readUInt16LE(26) & 0x3fff;
+        height = buf.readUInt16LE(28) & 0x3fff;
+      } else if (chunk === "VP8L") {
+        const bits = buf.readUInt32LE(21);
+        width = (bits & 0x3fff) + 1;
+        height = ((bits >> 14) & 0x3fff) + 1;
+      }
+      assert.deepEqual([width, height], [w, h], name);
+    }
+    for (const name of readdirSync(shotDir)) assert.ok(name in SHOT_PIXELS, `${name} has no recorded size`);
   });
 
   it("docs and product reels share ProductShot chrome so labels cannot overflow", () => {
     const reel = readFileSync(join(webRoot, "components/docs/DocsShotReel.tsx"), "utf8");
     assert.match(reel, /lp-product-shot-chrome/);
     assert.match(reel, /lp-product-shot-surface/);
-    const shared = readFileSync(join(webRoot, "pages/marketing/productPageShared.tsx"), "utf8");
-    assert.match(shared, /WORKSPACE_SHOT/);
-    assert.doesNotMatch(shared, /\/docs\/screenshots\//);
+    const stories = readFileSync(join(webRoot, "pages/marketing/StoryPages.tsx"), "utf8");
+    assert.doesNotMatch(stories, /\/docs\/screenshots\//);
   });
 
   it("every WORKSPACE_SHOT path is a WebP file that ships in public/", () => {

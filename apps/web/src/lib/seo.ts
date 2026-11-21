@@ -1,5 +1,7 @@
 /** SEO + browser tab metadata for every app screen / category. */
 
+import { CATALOG_TOTAL, PROVEN_DRIVERS, cdcSourcesPhrase } from "./provenEvidence";
+import { PUBLIC_PAGE_META } from "./publicNavigation";
 import type { Screen } from "./types";
 
 export interface PageMeta {
@@ -13,16 +15,15 @@ export interface PageMeta {
 }
 
 const BASE_TITLE = "Datawrap";
-const DEFAULT_DESCRIPTION =
-  "Integrity-first data transfer — semantic mapping, G1–G9 preflight, native CDC, quarantine with replay, and every load verified value by value.";
+/** The home page's own description: the site states it once, everything else reuses it. */
+const DEFAULT_DESCRIPTION = PUBLIC_PAGE_META.home.description;
 const DEFAULT_KEYWORDS =
   "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, Datawrap";
 
 export const PAGE_META: Record<Screen | "login", PageMeta> = {
   landing: {
-    title: "Universal Data Transfer Platform",
-    description:
-      "Move data between databases, warehouses, files, streams, and APIs. Semantic mapping, G1–G9 preflight, native CDC, and value-by-value verification.",
+    title: PUBLIC_PAGE_META.home.title,
+    description: PUBLIC_PAGE_META.home.description,
     keywords:
       "data transfer platform, database migration tool, file to database, PostgreSQL to Snowflake, data sync, ETL platform, semantic mapping",
     ogType: "website",
@@ -112,7 +113,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   docs: {
     title: "Documentation",
     description:
-      "How Datawrap moves, maps, and validates any data — architecture, preflight rules, connector coverage, and security.",
+      "How Datawrap moves, maps, and validates data — architecture, preflight rules, connector coverage, and security.",
     keywords:
       "Datawrap documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
     robots: "noindex",
@@ -169,5 +170,51 @@ export const DEFAULT_PAGE_META: PageMeta = {
   keywords: DEFAULT_KEYWORDS,
   ogType: "website",
 };
+
+/**
+ * What the structured data (JSON-LD) lists as features. Each line is a claim a
+ * public page already makes: nine core gates (Transfer, helpDocs), the
+ * read-back (home), CDC sources from CI evidence, quarantine with replay,
+ * typed watermarks (Schedules), and the Enterprise controls. `index.html`
+ * carries the same list for crawlers that do not run scripts; a test keeps
+ * the two equal.
+ */
+export const SOFTWARE_FEATURES: readonly string[] = [
+  "Database migration",
+  "File to database transfer",
+  "Semantic column mapping",
+  "Nine core preflight gates before any write",
+  "Read-back of the destination after the write",
+  `Native CDC for ${cdcSourcesPhrase()}`,
+  "Scheduled pipelines with typed watermarks",
+  "Quarantine with replay",
+  "SSO, SCIM, and tamper-evident audit log",
+];
+
+/**
+ * The share card. The query string changes when the card is regenerated, so
+ * Slack, LinkedIn and X fetch the new card instead of their cached copy.
+ * `index.html` carries the same URL for crawlers that do not run scripts.
+ */
+export const OG_IMAGE_PATH = "/og-image.png?v=every-row-1";
+export const OG_IMAGE_SIZE = { width: 1200, height: 630 } as const;
+
+/**
+ * Copy for the share card (`og-image.png`) and the social covers, which
+ * `scripts/export-brand-icons.mjs` and `scripts/export-social-brand.mjs`
+ * render. Every line is one the site already says: the home hero, the home
+ * statement's label, the Transfer page's gates, and the connector count from
+ * CI evidence. Tests hold each line to its source.
+ */
+export const SHARE_CARD = {
+  headline: "Every row, accounted for.",
+  statementLabel: "Example statement for one run",
+  facts: [
+    "Nine core gates before any write.",
+    `${PROVEN_DRIVERS} of ${CATALOG_TOTAL} drivers proven in CI.`,
+  ],
+  /** og:image:alt — says what the picture shows. */
+  alt: "Datawrap. Every row, accounted for. An example run: rows read equal rows landed, plus held, plus skipped.",
+} as const;
 
 export { BASE_TITLE, DEFAULT_DESCRIPTION, DEFAULT_KEYWORDS };
