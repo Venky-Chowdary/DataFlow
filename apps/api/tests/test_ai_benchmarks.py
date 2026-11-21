@@ -206,3 +206,46 @@ def test_live_without_a_key_is_not_run_never_a_pass(tmp_path):
     assert proc.returncode == bench.EXIT_NOT_RUN, proc.stdout + proc.stderr
     assert "**NOT RUN**" in summary.read_text(encoding="utf-8")
     assert "PASS" not in summary.read_text(encoding="utf-8")
+
+
+def _ci_benchmark_step():
+    """The ai-benchmarks replay step of ci.yml: its env, working directory and command line."""
+    import yaml
+
+    workflow = yaml.safe_load((API_ROOT.parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    [step] = [s for s in workflow["jobs"]["ai-benchmarks"]["steps"]
+              if "scripts/run_ai_benchmarks.py" in str(s.get("run", ""))]
+    script = step["run"].replace("\\\n", " ")
+    [line] = [ln.strip() for ln in script.splitlines() if "scripts/run_ai_benchmarks.py" in ln]
+    return step, line
+
+
+def test_the_exact_ci_command_passes(tmp_path):
+    """N1: run the command line exactly as ci.yml has it, so the workflow and the script cannot drift apart."""
+    import os
+    import shlex
+
+    step, line = _ci_benchmark_step()
+    assert step["working-directory"] == "apps/api"
+    argv = shlex.split(line.replace("$RUNNER_TEMP", str(tmp_path)))
+    assert argv[:2] == ["python", "scripts/run_ai_benchmarks.py"]
+    env = {**os.environ, **{k: str(v) for k, v in step.get("env", {}).items()}, "RUNNER_TEMP": str(tmp_path)}
+    done = subprocess.run([sys.executable, *argv[1:]], cwd=API_ROOT.parents[1] / step["working-directory"],
+                          env=env, capture_output=True, text=True, timeout=900)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    summary = (tmp_path / "ai_benchmarks.md").read_text(encoding="utf-8")
+    assert "**PASS**" in summary
+    if not bench.STANDARD_HOLDOUT.exists():
+        assert bench.SYNTHETIC_NOTE in summary
+
+
+def test_a_synthetic_holdout_yields_to_the_real_one_once_present(monkeypatch, tmp_path):
+    real = tmp_path / "mapping_holdout_v1.json"
+    monkeypatch.setattr(bench, "STANDARD_HOLDOUT", real)
+    assert bench.choose_holdout(str(SYNTHETIC_HOLDOUT)) == SYNTHETIC_HOLDOUT
+    real.write_text(json.dumps({"tables": []}), encoding="utf-8")
+    assert bench.choose_holdout(str(SYNTHETIC_HOLDOUT)) == real
+    other = tmp_path / "another_real.json"
+    other.write_text(json.dumps({"tables": []}), encoding="utf-8")
+    assert bench.choose_holdout(str(other)) == other
+    assert bench.choose_holdout(None) == real

@@ -45,7 +45,27 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 os.environ.setdefault("DATAFLOW_TRAINING", "off")
 
 EXIT_NOT_RUN = 78
-HOLDOUT_PATH = API_ROOT / "tests" / "fixtures" / "mapping_holdout_v1.json"
+STANDARD_HOLDOUT = API_ROOT / "tests" / "fixtures" / "mapping_holdout_v1.json"
+HOLDOUT_PATH = STANDARD_HOLDOUT
+SYNTHETIC_NOTE = "witness held-out: synthetic fixture — real held-out set not yet on this branch"
+
+
+def is_synthetic(path: Path) -> bool:
+    """A fixture that labels itself synthetic (stands in until the real held-out set is on the branch)."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("synthetic") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def choose_holdout(requested: str | None) -> Path:
+    """--holdout names the fixture; a synthetic stand-in yields to the real set once it is present."""
+    if not requested:
+        return STANDARD_HOLDOUT
+    path = Path(requested)
+    if STANDARD_HOLDOUT.exists() and is_synthetic(path):
+        return STANDARD_HOLDOUT
+    return path
 
 #: (file under apps/api, enclosing function) of every model call → its suite.
 CALL_SITES: dict[tuple[str, str], str] = {
@@ -603,6 +623,8 @@ def markdown(report: dict[str, Any]) -> str:
         return "\n".join(lines + [f"**NOT RUN** — {report['not_run']}", ""])
     lines.append(f"**{'PASS' if report['passed'] else 'FAIL'}** — {report['suites_passed']}/{len(report['suites'])} suites")
     lines.append("")
+    if (report.get("holdout") or {}).get("synthetic"):
+        lines += [f"_{SYNTHETIC_NOTE}_", ""]
     lines.append("| Suite | Result | Metrics (floor) |")
     lines.append("|---|---|---|")
     for s in report["suites"]:
@@ -627,14 +649,16 @@ def main() -> int:
     ap.add_argument("--out")
     ap.add_argument("--summary")
     ap.add_argument("--record", help="live mode: write recorded cassettes into this directory")
-    ap.add_argument("--holdout", help="the held-out mapping benchmark (default: tests/fixtures/mapping_holdout_v1.json)")
+    ap.add_argument("--holdout", help="the held-out mapping benchmark (default: tests/fixtures/mapping_holdout_v1.json; "
+                                      "a fixture labelled synthetic is used only while that file is absent)")
     ap.add_argument("--seal-prompts", action="store_true",
                     help="replay mode: store each case's request digests in its cassette (after editing a cassette)")
     args = ap.parse_args()
     global HOLDOUT_PATH
-    if args.holdout:
-        HOLDOUT_PATH = Path(args.holdout)
+    HOLDOUT_PATH = choose_holdout(args.holdout)
     report: dict[str, Any] = {"mode": args.mode, "at": datetime.now(timezone.utc).isoformat()}
+    if "mapping_witness" in (args.suite or SUITES):
+        report["holdout"] = {"path": str(HOLDOUT_PATH), "synthetic": is_synthetic(HOLDOUT_PATH)}
     if args.mode == "live":
         provider = live_provider()
         if not provider:

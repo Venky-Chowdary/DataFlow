@@ -189,7 +189,11 @@ jobs:
           OLLAMA_HOST: "http://127.0.0.1:9"
         run: |
           set +e
+          # The real held-out set (tests/fixtures/mapping_holdout_v1.json) is not on this
+          # branch yet: the synthetic stand-in runs the gate, the summary says so, and the
+          # script takes the real file on its own once it is present.
           python scripts/run_ai_benchmarks.py --mode replay \
+            --holdout tests/fixtures/witness/holdout_minimal_synthetic.json \
             --out "$RUNNER_TEMP/ai_benchmarks.json" --summary "$RUNNER_TEMP/ai_benchmarks.md"
           status=$?
           cat "$RUNNER_TEMP/ai_benchmarks.md" >> "$GITHUB_STEP_SUMMARY"
