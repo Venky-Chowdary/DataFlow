@@ -304,14 +304,19 @@ def _l2_same_value(left: Any, right: Any) -> bool:
     return normalize_cell(left) == normalize_cell(right)
 
 
-def _l2_sum_decimal(text: str) -> Decimal | None:
+_UNPARSED: Any = object()
+
+
+def _l2_sum_decimal(text: str, *, parsed: Any = _UNPARSED) -> Decimal | None:
     """Decimal contribution of one L2 cell.
 
     Strict bool tokens are ``1``/``0`` on the fingerprint path. Summing the
     raw ``true``/``false`` wire left the source sum unset while SQLite's
     ``1``/``0`` summed, and the ladder vetoed a matching checksum.
+    ``parsed`` is ``_try_decimal(text)`` when the caller already has it.
     """
-    parsed = _try_decimal(text)
+    if parsed is _UNPARSED:
+        parsed = _try_decimal(text)
     if parsed is not None:
         return parsed
     from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
@@ -397,6 +402,15 @@ def _wire_less(left: str, right: str) -> bool:
     return left < right
 
 
+def _wire_less_parsed(
+    left: str, left_n: Decimal | None, right: str, right_n: Decimal | None
+) -> bool:
+    """``_wire_less(left, right)`` given ``_try_decimal`` of both sides."""
+    if left_n is not None and right_n is not None:
+        return left_n < right_n
+    return left < right
+
+
 def compare_present_wires(left: str, right: str) -> int:
     """``-1`` / ``0`` / ``1`` using the same order as L2 min/max."""
     if _wire_less(left, right):
@@ -419,6 +433,11 @@ def compute_column_aggregates(
     sum_ok = {c: True for c in columns}
     distinct: dict[str, set[str]] = {c: set() for c in columns}
     fingerprints: dict[str, list[str]] = {c: [] for c in columns}
+    # The parsed decimal of the current min / max. ``_wire_less`` parses both
+    # sides on every call; holding the extremes' parse turns five decimal
+    # parses per cell into one, in the same order (``_wire_less_parsed``).
+    min_dec: dict[str, Decimal | None] = {c: None for c in columns}
+    max_dec: dict[str, Decimal | None] = {c: None for c in columns}
     from services.reconciliation import normalize_cell
 
     for rec in rows:
@@ -433,12 +452,15 @@ def compute_column_aggregates(
             non_null[col] += 1
             distinct[col].add(text)
             fingerprints[col].append(normalize_cell(text))
-            if mins[col] is None or _wire_less(text, mins[col]):
+            parsed = _try_decimal(text)
+            if mins[col] is None or _wire_less_parsed(text, parsed, mins[col], min_dec[col]):
                 mins[col] = text
-            if maxs[col] is None or _wire_less(maxs[col], text):
+                min_dec[col] = parsed
+            if maxs[col] is None or _wire_less_parsed(maxs[col], max_dec[col], text, parsed):
                 maxs[col] = text
+                max_dec[col] = parsed
             if sum_ok[col]:
-                d = _l2_sum_decimal(text)
+                d = _l2_sum_decimal(text, parsed=parsed)
                 if d is None:
                     sum_ok[col] = False
                     sums[col] = None

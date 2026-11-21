@@ -46,6 +46,12 @@ def temporal_cell_unfit_reason(raw: Any, typ: str, *, dest_db: str = "") -> str:
 def _temporal_unfit_reason(
     raw: Any, typ: str, *, dest_db: str, check_fsp: bool, check_tz: bool
 ) -> str:
+    from services.cell_fastpath import temporal_fits
+
+    if temporal_fits(raw, typ, dest_db):
+        # A plain ISO date / timestamp into a planned DATE / TIMESTAMP column:
+        # none of the checks below has a reason for it.
+        return ""
     from connectors.writer_common import (
         _mysql_timestamp_range_violation,
         _time_out_of_carrier_range,

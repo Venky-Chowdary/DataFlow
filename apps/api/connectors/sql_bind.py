@@ -24,6 +24,7 @@ from connectors.sql_bind_route import BindRoute, bind_route
 from connectors.sql_temporal import coerce_sql_temporal
 from services.value_serializer import absent_sql_bind as _absent_sql_bind
 from services.value_serializer import unescape_wire_text
+from services import cell_fastpath as _cell_fastpath
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
@@ -1671,6 +1672,11 @@ def coerce_float_wire(
             )
         return num
 
+    if ddl_type:
+        # A plain double of a planned DOUBLE column (services.cell_fastpath).
+        fast = _cell_fastpath.fast_float(value, ddl_type, engine)
+        if fast is not _cell_fastpath.MISS:
+            return fast
     handled, bound = _absent_sql_bind(value)
     if handled:
         return bound
@@ -2408,6 +2414,26 @@ _BIND_DISPATCH: dict[str, Any] = {
 
 
 def normalize_sql_bind_value(
+    value: Any,
+    ddl_type: str,
+    *,
+    engine: str = "",
+) -> Any:
+    """Bind ``value`` for ``ddl_type`` (see ``_normalize_sql_bind_value_full``).
+
+    An ordinary cell of a planned column is answered by
+    ``services.cell_fastpath.fast_bind``: the same value the full bind returns
+    for it, without the generic dispatch. Everything else — every refusal and
+    every coercion — takes the full path.
+    """
+    if ddl_type:
+        fast = _cell_fastpath.fast_bind(value, ddl_type, engine)
+        if fast is not _cell_fastpath.MISS:
+            return fast
+    return _normalize_sql_bind_value_full(value, ddl_type, engine=engine)
+
+
+def _normalize_sql_bind_value_full(
     value: Any,
     ddl_type: str,
     *,

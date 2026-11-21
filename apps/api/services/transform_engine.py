@@ -10,6 +10,7 @@ import hmac
 import json
 from services.brand_env import getenv_brand
 from services.pii_hash_keys import KEY_UNAVAILABLE_MESSAGE
+from services import cell_fastpath as _cell_fastpath
 import re
 import unicodedata
 import uuid as uuid_lib
@@ -33,6 +34,10 @@ _PLAIN_ASCII_INT_RE = re.compile(r"^-?[0-9]{1,38}$")
 _PLAIN_ASCII_DECIMAL_RE = re.compile(r"[+-]?[0-9]+(?:\.(?:[0-9]{1,2}|[0-9]{4,}))?\Z")
 #: Already-canonical ISO calendar date, which needs validation but no pattern search.
 _ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+#: ISO date and clock (space or ``T``), optional 1-6 fraction digits, no zone.
+_ISO_STAMP_RE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[ T]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]{1,6})?\Z"
+)
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _ISO_YEAR_FIRST_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}(?:[ T].*)?$")
@@ -1051,6 +1056,20 @@ def _parse_date_worker(value: str, with_time: bool, date_locale: str) -> str | N
         except ValueError:
             return None
         return text
+    iso_stamp = _ISO_STAMP_RE.match(text)
+    if iso_stamp is not None:
+        # ``YYYY-MM-DD[ T]HH:MM:SS[.f]``: no DATE_PATTERNS entry has a clock,
+        # so the sweep below fails them all and then, with_time, the first
+        # year-first DATE_WITH_TIME pattern of this exact shape parses it.
+        # That parse is the calendar fields when they form a datetime; any
+        # other outcome is left to the sweep itself.
+        if not with_time:
+            return None
+        year, month, day, hour, minute, second = (int(g) for g in iso_stamp.groups())
+        try:
+            return datetime(year, month, day, hour, minute, second).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
     if not _DATE_LIKE_RE.search(text):
         return None
     if text.lower() in NULL_SENTINELS:
@@ -1425,6 +1444,8 @@ def decimal_wire_value(value: Any) -> Decimal | None:
         return parsed if parsed.is_finite() else None
     text = str(value).strip()
     if not text:
+        return None
+    if _cell_fastpath.text_is_never_a_decimal(text):
         return None
     rendered = _parse_decimal(text)
     if rendered is None:
@@ -2633,7 +2654,13 @@ def apply_transform(
     Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
     identity/string transforms so ``''`` ≠ SQL NULL on VARCHAR round-trips;
     typed transforms still coerce empty → None.
+
+    A plain text cell under a canonical cast is answered by
+    ``services.cell_fastpath.fast_transform`` (the same result).
     """
+    fast = _cell_fastpath.fast_transform(raw, transform)
+    if fast is not _cell_fastpath.MISS:
+        return fast
     canon = normalize_engine_transform(transform)
     if str(transform or "").strip() and canon is None:
         return None, (

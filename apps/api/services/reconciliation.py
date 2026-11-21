@@ -61,6 +61,7 @@ from services.transform_engine import (
     set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
+from services import cell_fastpath as _cell_fastpath
 from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
     BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
@@ -3851,6 +3852,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             return f"{dt}T00:00:00"
     return _text_cell(text)
 
+
+_fingerprint_for_reconcile_full, _normalize_cell_full = fingerprint_for_reconcile, normalize_cell
+fingerprint_for_reconcile, normalize_cell = _cell_fastpath.install(
+    fingerprint_for_reconcile, normalize_cell
+)
 
 def _checksum_datetime_utc_wall(
     iso_text: str, *, original: str | None = None, mark_aware: bool = False
