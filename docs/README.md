@@ -26,6 +26,7 @@ verified. Where the product does not do something, the page says so.
 | [use/sync-modes.md](use/sync-modes.md) | Full refresh, append, upsert, mirror, incremental, SCD2 and CDC: guarantees and limits |
 | [use/verification.md](use/verification.md) | Validate, Gate-8, the L1 to L5 ladder, and what proven, sampled and unverifiable mean |
 | [use/parity-studio.md](use/parity-studio.md) | The Trust Report, fixes, sign-off and exports |
+| [use/exit-readiness.md](use/exit-readiness.md) | Reversibility (per-column analysis, the Validate gate, the rollback posture) and exit readiness rehearsals |
 | [use/pilot.md](use/pilot.md) | What the assistant can and cannot do, and its use of AI models |
 | [use/api.md](use/api.md) | Authentication, route groups, errors and pagination |
 | [use/mcp.md](use/mcp.md) | The MCP server: tools, permissions and the confirmation model |

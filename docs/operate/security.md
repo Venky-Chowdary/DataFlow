@@ -204,6 +204,14 @@ The playground (`/api/v1/query`) runs reads only. The guards, from
   with `DATAWRAP_SECRETS_KEY`; production refuses to serve without the key.
   `DATAWRAP_SECRETS_BACKEND=aws_secretsmanager` stores them in AWS Secrets
   Manager instead.
+- Evidence (proof packs, Migration Certificates, signed Trust Reports, Exit
+  Evidence Packs) is HMAC-signed with a per-workspace evidence signing key,
+  stored encrypted like other secrets and separate from the login secret.
+  With `SECRETS_KEY` set (production requires it), rotating `AUTH_SECRET` no
+  longer invalidates evidence; packs signed before
+  this change name the legacy key `platform_auth_secret` and verify only while
+  that `AUTH_SECRET` is kept. See
+  [../use/verification.md](../use/verification.md#how-evidence-is-signed-and-verified).
 - A workspace can bring its own key. Connector secrets are then wrapped with
   that key, and the platform key wraps the workspace key. The key records are
   kept in MongoDB when it is connected, else in a local file (see

@@ -74,8 +74,11 @@ were checked against the code.
   caller binding, platform credentials and URL parity.
 - **Verification** (PR 411). Fingerprints v2, honest source filters and
   lossy-type flags.
-- **Multi-stream runs** (PR 413). Each stream is written, verified, exported
-  and measured on its own object.
+- **Multi-stream runs** (PR 413). Each stream is written, exported and
+  measured (row counts) on its own object. Gate-8 compares values for the last
+  stream only; the other streams have their row counts compared, so a
+  multi-table Trust Report is "unverifiable". (Corrected: this entry first
+  said each stream was "verified".)
 - **File transfers** (PR 414). A file transfer's date order no longer stays
   pinned on its thread.
 - **Pilot grounding** (PR 405). Workspace-isolated sources, an egress gate

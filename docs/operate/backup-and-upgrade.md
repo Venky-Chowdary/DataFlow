@@ -28,6 +28,7 @@ When MongoDB is connected, these records live there:
 | Saved connectors (credentials encrypted) | `connectors` |
 | Data contracts | `contracts`, `contract_breakers` |
 | Audit events and audit signing keys | `audit_events`, `audit_chain_keys` |
+| Evidence signing keys (proof packs, certificates, signed Trust Reports, Exit Evidence Packs), encrypted with `SECRETS_KEY` | `evidence_signing_keys` |
 | Incremental and CDC positions | `sync_cursors` |
 | Accounts, workspaces, memberships, sessions, invitations, MFA, SCIM, SSO state | several account collections |
 | Control-plane stores: workspace settings, customer-managed key records, resource ACLs, notification channels, Validate run history, transform drafts, CDC mapping reviews, the MCP call log, audit tip anchors | `control_plane_docs`, `control_plane_records`, `control_plane_items` |
@@ -100,7 +101,7 @@ Apply the same retention and access rules to these as to the source data.
 
 | Priority | What | Why |
 |---|---|---|
-| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials cannot be decrypted. Without the audit keys, old audit records cannot be verified. Keep them in your secret manager, not only on the host. |
+| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials and the evidence signing keys cannot be decrypted, so signed packs can no longer be verified. Without the audit keys, old audit records cannot be verified. Packs signed before evidence keys existed (key id `platform_auth_secret`) verify only with the `AUTH_SECRET` they were signed under. Keep them in your secret manager, not only on the host. |
 | 2 | MongoDB, database `datatransfer` | Jobs, schedules, connectors, audit events, accounts, CDC and incremental positions. |
 | 3 | The data directory | Workspace settings, customer-managed keys, plans, ACLs, anchors. |
 | 4 | Upload and export locations | Only if you need to resume jobs from uploaded files or keep exports. |
