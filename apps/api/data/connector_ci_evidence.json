@@ -141,9 +141,10 @@
     "kafka": {
       "drivers": [],
       "emulated": false,
-      "live_verified": true,
+      "live_verified": false,
       "missing_results": [
         "engine-suite",
+        "kafka-live",
         "engine-suite[shard=1]",
         "engine-suite[shard=2]",
         "engine-suite[shard=3]",
@@ -155,21 +156,8 @@
         "engine-suite",
         "kafka-live"
       ],
-      "runs": [
-        {
-          "engine_skips": 0,
-          "executed": 426,
-          "job": "kafka-live",
-          "labels": {},
-          "not_run_reason": "",
-          "run_id": "44932873967",
-          "sha": "3e0a9cd539507e4e50cb54ab506e1ecd4eed581d",
-          "status": "green",
-          "unexpected_skips": 0,
-          "workflow": ".github/workflows/ci.yml"
-        }
-      ],
-      "status": "ci_green"
+      "runs": [],
+      "status": "no_ci_result"
     },
     "mongodb": {
       "drivers": [],
@@ -892,14 +880,13 @@
       "status": "ci_green"
     }
   },
-  "generated_at": "2026-11-21T19:36:52.684825+00:00",
+  "generated_at": "2026-11-21T22:27:43.220052+00:00",
   "honesty_note": "live_verified means a CI job that proves the engine ran green in the runs supplied here. Workflow configuration alone never makes an engine live-verified.",
   "jobs_reported": [
     "api-tests",
     "cdc-matrix",
     "cdc-oracle",
     "cdc-sqlserver",
-    "kafka-live",
     "no-config-transfer",
     "oracle-live",
     "warehouse-sku"
@@ -907,7 +894,6 @@
   "live_verified": [
     "bigquery",
     "files",
-    "kafka",
     "mongodb",
     "mysql",
     "oracle",

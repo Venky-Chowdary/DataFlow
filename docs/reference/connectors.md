@@ -64,12 +64,12 @@ These numbers count different things. Quote the first one as "connectors that ca
 | Count | Value | What it counts |
 |---|---|---|
 | Transfer-live drivers | 46 | Unique driver and file-format types that can run a transfer on this server right now (two-way, destination-only, file and first-class source-only), excluding fixture-only SDK sources. The public count. |
-| CI-proven drivers | 23 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (avro, bigquery, csv, excel, fixed_width, json, jsonl, kafka, mongodb, mysql, ndjson, oracle, orc, parquet, pgvector, postgresql, redis, snowflake, sqlite, sqlserver, tsv, xml, yaml). The other 23 are implemented but not yet proven. Evidence: CI run 44932873967, recorded 2026-11-21. |
+| CI-proven drivers | 22 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (avro, bigquery, csv, excel, fixed_width, json, jsonl, mongodb, mysql, ndjson, oracle, orc, parquet, pgvector, postgresql, redis, snowflake, sqlite, sqlserver, tsv, xml, yaml). The other 24 are implemented but not yet proven. Evidence: CI run 44932873967, recorded 2026-11-21. |
 | Transfer-ready catalog drivers | 35 | Unique drivers behind those tiles. Smaller than transfer_live_drivers because several tiles share one driver and file formats are not tiles here. |
 | Transfer-ready catalog ids | 82 | Catalog ids marked transfer-ready, hosted twins included. |
 | CDC source engines | 5 | Registry entries the Validate gate accepts as a CDC source. (mongodb, mysql, oracle, postgresql, sqlserver) |
 | Catalog tiles | 647 | All tiles in the connector catalog. By status: beta: 30, live: 111, planned: 506. |
-| Catalog tiles by tier | - | certified: 71, implemented: 37, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
+| Catalog tiles by tier | - | certified: 69, implemented: 39, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
 
 ### Drivers
 
@@ -100,7 +100,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `influxdb` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `intercom` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `jira` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `kafka` | yes | yes | needs cursor | no | yes | no | - | yes | Certified | proven |
+| `kafka` | yes | yes | needs cursor | no | yes | no | - | yes | Implemented, not yet proven | not proven: no result recorded for the proving job |
 | `klaviyo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `linear` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `mailchimp` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |

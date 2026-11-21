@@ -51,7 +51,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "bigquery": "ci_green",
     "files": "ci_green",
     "gcs": "no_ci_job",
-    "kafka": "ci_green",
+    "kafka": "no_ci_result",
     "mongodb": "ci_green",
     "mysql": "ci_green",
     "oracle": "ci_green",
@@ -61,7 +61,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "sqlite": "ci_green",
     "sqlserver": "ci_green"
   },
-  "evidence_generated_at": "2026-11-21T19:36:52.684825+00:00",
+  "evidence_generated_at": "2026-11-21T22:27:43.220052+00:00",
   "evidence_run_id": "44932873967",
   "families": [
     {
@@ -222,7 +222,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "kafka",
           "emulated": false,
           "name": "Apache Kafka",
-          "proven": true
+          "proven": false
         }
       ]
     },
@@ -291,7 +291,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       ]
     }
   ],
-  "pending_count": 23,
+  "pending_count": 24,
   "pending_drivers": [
     "adls",
     "couchbase",
@@ -304,6 +304,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "hubspot",
     "iceberg",
     "influxdb",
+    "kafka",
     "milvus",
     "neo4j",
     "pdf",
@@ -335,15 +336,6 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
         "api-tests"
       ],
       "name": "File formats"
-    },
-    {
-      "emulated": false,
-      "engine": "kafka",
-      "executed": 426,
-      "jobs": [
-        "kafka-live"
-      ],
-      "name": "Apache Kafka"
     },
     {
       "emulated": false,
@@ -425,7 +417,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       "name": "SQL Server"
     }
   ],
-  "proven_count": 23,
+  "proven_count": 22,
   "proven_drivers": [
     "avro",
     "bigquery",
@@ -434,7 +426,6 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "fixed_width",
     "json",
     "jsonl",
-    "kafka",
     "mongodb",
     "mysql",
     "ndjson",

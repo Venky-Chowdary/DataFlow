@@ -98,3 +98,21 @@ def test_public_pages_carry_no_untraceable_evidence_block() -> None:
         assert "_results.json" not in text, path  # artifacts that no longer ship
     evidence = (WEB / "lib" / "provenEvidence.ts").read_text(encoding="utf-8")
     assert 'from "./connectorClaims.generated"' in evidence
+
+
+def test_kafka_is_not_certified_until_kafka_live_is_green_twice_on_its_head_configuration(monkeypatch) -> None:
+    """Owner decision (review of feature/ci-live-oracle): one green kafka-live run
+    without the Redis peer is not enough. Kafka stays at its previous tier until
+    two consecutive green runs with the Redis peer; the lead flips it then."""
+    from services import connector_proof
+    from services.catalog_service import get_connector_by_id
+
+    monkeypatch.delenv(connector_proof.EVIDENCE_ENV, raising=False)
+    connector_proof.reset_cache()
+    claims = _report().build_claims()
+    assert "kafka" not in claims["proven_drivers"] and "kafka" in claims["pending_drivers"]
+    assert not connector_proof.driver_proven("kafka")
+    row = get_connector_by_id("kafka") or {}
+    assert row.get("certification_tier") != "certified", row.get("certification_tier")
+    # Oracle stays proven by oracle-live.
+    assert "oracle" in claims["proven_drivers"]
