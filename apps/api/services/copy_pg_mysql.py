@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from services.brand_env import getenv_brand
 from services.code_crosswalk import declared_crosswalk
@@ -486,9 +486,12 @@ def _run_shard(
                 table_q=table_q,
                 columns=columns,
             )
+            # No abort may start once the destination commits (D302).
             settle_watch(watch)
             dst.commit()
-            src.commit()
+            # The rows have landed; ending the read-only snapshot cannot undo
+            # them, so a failure here is not this shard's outcome.
+            _end_source_read(src)
     except Exception as exc:
         try:
             dst.rollback()
@@ -523,7 +526,15 @@ def _launch_copy_shards(
     table_q: str,
     target_cols: list[str],
     max_parallel: int = 1,
+    before_commit: Callable[[], None] | None = None,
 ) -> None:
+    """Run the COPY shards; the one-COPY path commits ``dest_conn`` itself.
+
+    ``before_commit`` runs right before that commit (the coordinator settles
+    its D302 cancel watch there). Shard waves each settle their own.
+    """
+    from services.cancel_check import poll_cancel
+
     if not copy_sqls:
         return
     if len(copy_sqls) == 1:
@@ -534,11 +545,16 @@ def _launch_copy_shards(
             table_q=table_q,
             columns=target_cols,
         )
+        if before_commit is not None:
+            before_commit()
         dest_conn.commit()
         return
     parallel = max(1, min(int(max_parallel or len(copy_sqls)), _MAX_WORKERS))
     errors: list[BaseException] = []
     for offset in range(0, len(copy_sqls), parallel):
+        # A cancel between waves starts no further shard (each would open a
+        # session, import the snapshot and begin a LOAD only to be cancelled).
+        poll_cancel()
         batch = copy_sqls[offset:offset + parallel]
         threads: list[threading.Thread] = []
         for sql in batch:
@@ -562,6 +578,16 @@ def _launch_copy_shards(
             t.join()
         if errors:
             raise errors[0]
+
+
+def _end_source_read(conn: Any) -> None:
+    """Commit the read-only source snapshot after the rows landed; never raises."""
+    if conn is None or getattr(conn, "closed", 0):
+        return  # a D302 cancel already ended it on the server
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - the write is committed already
+        logger.warning("ending the source snapshot after the load failed: %s", exc)
 
 
 def copy_postgres_to_mysql(
@@ -600,15 +626,26 @@ def copy_postgres_to_mysql(
     source_ref = _table_ref(source_schema, source_table)
     table_q = _mysql_ident(dest_table)
 
-    from services.source_read_cancel import as_cancel, settle_watch, start_watch
+    from services.source_read_cancel import (
+        as_cancel,
+        settle_watch,
+        start_watch,
+        stop_watch,
+    )
 
     source_conn = _pg_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)
     # D302: the run's snapshot session holds AccessShareLock on the source and
-    # pins its xmin until the final commit. A cancel must end it within the
+    # pins its xmin until the read is over. A cancel must end it within the
     # 5 s budget even while a LOAD is stalled on the destination (the FIFO
     # producer is then blocked on the pipe and polls nothing).
     watch = start_watch(source_conn)
+    #: The watch whose abort means "this run was cancelled". Cleared once the
+    #: rows have landed: a later error is not a cancel, and a later cancel is
+    #: the engine's "cancel landed after the write" with the exact count.
+    cancel_watch = watch
+    swap_at_end = False
+    swapped = False
     created_here = False
     existed_before = False
     reset_empty_dest_on_failure = False
@@ -827,7 +864,17 @@ def copy_postgres_to_mysql(
                 table_q=table_q,
                 target_cols=target_cols,
                 max_parallel=workers,
+                # One COPY: settle right before its destination commit.
+                before_commit=lambda: settle_watch(watch),
             )
+            # Every shard has committed (or the one COPY has, after settling):
+            # the read is over. Stop the watch without raising (a cancel that
+            # ended only the coordinator's idle snapshot after the shards
+            # landed is a cancel after the write) and end the snapshot now,
+            # before the destination-side proofs.
+            stop_watch(watch)
+            cancel_watch = None
+            _end_source_read(source_conn)
 
             dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
@@ -850,9 +897,6 @@ def copy_postgres_to_mysql(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
-            # The read is over; from here the destination is committed. A
-            # cancel the watch already acted on is the outcome instead.
-            settle_watch(watch)
             if swap_at_end:
                 from services.dest_overwrite_swap import mysql_swap_staged_dest
 
@@ -862,8 +906,8 @@ def copy_postgres_to_mysql(
                     staging_q=table_q,
                     trash_q=_mysql_ident(swap_trash_table),
                 )
+                swapped = True
             dest_conn.commit()
-            source_conn.commit()
             proof = f"dest_count:{dest_count}"
             partition_proof = [
                 {
@@ -906,8 +950,12 @@ def copy_postgres_to_mysql(
                 proof_scope=proof_scope,
             )
     except Exception as exc:
-        err = as_cancel(watch, exc)
-        if preserve_dest_on_failure:
+        err = as_cancel(cancel_watch, exc)
+        # A staged overwrite's table is run-scoped (random name) and never
+        # resumed: keeping it "for resume" only orphaned a df_ow_* copy of the
+        # whole load beside the untouched destination.
+        staged = swap_at_end and not swapped
+        if preserve_dest_on_failure and not staged:
             if err is not exc:
                 raise err from exc
             raise

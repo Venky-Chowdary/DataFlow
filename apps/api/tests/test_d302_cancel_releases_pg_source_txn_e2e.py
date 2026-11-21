@@ -26,11 +26,14 @@ it did, the cancel arrived after the read had finished.
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 import uuid
 
 import pytest
+
+from services.error_handling import TransferCancelled
 
 
 def _source_lock_holders(pg, table: str) -> list[tuple]:
@@ -84,6 +87,27 @@ def _paced_source(pg, table: str) -> str:
             f"SELECT id, {pace}(id, a)::varchar(40) AS a, n FROM {table}"
         )
     return view
+
+
+def _assert_engine_cancelled(store, job_id: str, result: dict, my, dst_t: str) -> int:
+    """The engine itself ended the run as cancelled, and its ledger is exact.
+
+    The test writes ``status="cancelled"`` the way the API does, so the status
+    alone proves nothing. These fields are written only by the engine's
+    cancel path: the run's own result, and the cancel outcome counted on the
+    destination. Returns the rows that landed.
+    """
+    r = result.get("r")
+    assert r is not None and r.success is False, r
+    raw = str((getattr(r, "error_details", None) or {}).get("raw") or "")
+    assert raw.startswith("Transfer cancelled by user"), raw
+    job = store.get_job(job_id) or {}
+    assert job.get("phase") == "cancelled", (job.get("phase"), job.get("message"))
+    outcome = job.get("cancel_outcome") or {}
+    assert outcome, job.get("message")
+    landed = _dest_count(my, dst_t)
+    assert outcome.get("rows_committed") == landed, (outcome, landed)
+    return landed
 
 
 def _wait_released(pg, table: str, budget: float) -> list[tuple]:
@@ -221,8 +245,8 @@ def test_cancel_ends_the_source_read_transaction_within_5s(monkeypatch, row_path
         worker.join(120)
         assert not worker.is_alive(), "the cancelled job is still running"
         assert not _source_lock_holders(pg, src_t)
-        job = store.get_job(job_id) or {}
-        assert str(job.get("status")) == "cancelled", (job.get("status"), job.get("message"))
+        landed = _assert_engine_cancelled(store, job_id, result, my, dst_t)
+        assert landed < rows, "the read finished before the cancel"
     finally:
         worker.join(30)
         _teardown(pg, my, src_t, dst_t)
@@ -323,8 +347,7 @@ def test_cancel_releases_the_source_while_a_writer_is_stuck(monkeypatch, workers
         locked = False
         worker.join(120)
         assert not worker.is_alive(), "the cancelled job is still running"
-        job = store.get_job(job_id) or {}
-        assert str(job.get("status")) == "cancelled", (job.get("status"), job.get("message"))
+        _assert_engine_cancelled(store, job_id, result, my, dst_t)
     finally:
         if locked:
             blocker.rollback()
@@ -411,13 +434,63 @@ def test_cancel_releases_the_source_while_a_copy_load_is_stuck(monkeypatch, shar
         locked = False
         worker.join(120)
         assert not worker.is_alive(), "the cancelled job is still running"
-        job = store.get_job(job_id) or {}
-        assert str(job.get("status")) == "cancelled", (job.get("status"), job.get("message"))
         # The cancel landed before the LOAD returned: nothing is committed.
-        assert _dest_count(my, dst_t) == 0
+        assert _assert_engine_cancelled(store, job_id, result, my, dst_t) == 0
     finally:
         if locked:
             blocker.rollback()
         blocker.close()
         worker.join(120)
+        _teardown(pg, my, src_t, dst_t)
+
+
+def test_a_cancelled_overwrite_leaves_no_stage_table(monkeypatch):
+    """A keyed overwrite stages into a run-scoped ``df_ow_*`` table and swaps
+    it in at the end. A cancel (or failure) before the swap used to keep that
+    stage "for resume" (PK mode), but its name is random per run and nothing
+    resumes into it: a full copy of the load was orphaned beside the
+    untouched destination. The stage must go; the destination stays as it was."""
+    from services import cancel_check
+    from services.copy_pg_mysql import copy_postgres_to_mysql
+
+    p, c, pg, my, src_t, dst_t = _setup(3000)
+    with my.cursor() as cur:
+        cur.execute(f"CREATE TABLE `{dst_t}` (id INT PRIMARY KEY, a VARCHAR(40), n INT)")
+        cur.execute(f"INSERT INTO `{dst_t}` VALUES (-1, 'keep', 0), (-2, 'keep', 0)")
+
+    def cfg(creds: dict) -> dict:
+        return {
+            "host": creds["host"], "port": int(creds["port"]),
+            "database": creds["database"], "username": creds["username"],
+            "password": creds["password"],
+        }
+
+    def cancelled(_rows=None):
+        raise TransferCancelled("Transfer cancelled by user")
+
+    def run():
+        cancel_check.set_cancel_probe(cancelled)
+        copy_postgres_to_mysql(
+            source_cfg=cfg(p), source_schema="public", source_table=src_t,
+            dest_cfg=cfg(c), dest_table=dst_t,
+            pairs=[("id", "id"), ("a", "a"), ("n", "n")],
+            mysql_ddls=["INT", "VARCHAR(40)", "INT"],
+            replace_destination=True,
+        )
+
+    try:
+        with pytest.raises(TransferCancelled):
+            contextvars.copy_context().run(run)
+        with my.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name LIKE %s",
+                (f"df_ow_{dst_t}%",),
+            )
+            stages = [r[0] for r in cur.fetchall()]
+            cur.execute(f"SELECT id FROM `{dst_t}` ORDER BY id")  # nosec B608
+            kept = [r[0] for r in cur.fetchall()]
+        assert stages == [], stages
+        assert kept == [-2, -1], kept
+    finally:
         _teardown(pg, my, src_t, dst_t)

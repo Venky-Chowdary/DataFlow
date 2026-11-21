@@ -47,6 +47,8 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
@@ -790,9 +792,13 @@ def stream_between_cursors(
     try:
         consumer(path)
     except BaseException:
-        # Opening a FIFO blocks until the other end appears: a producer that
-        # never got there would hold this join forever, so the failing path
-        # waits briefly and lets the real exception out.
+        # Opening a FIFO for writing blocks until a reader opens it. A consumer
+        # that failed before opening it (a cancel caught before the LOAD, a
+        # refused session) left the producer parked in open() for good: the
+        # joins below ran out (30 s + 120 s) and the thread leaked. Open the
+        # read end ourselves and drop it: the producer's open() returns and its
+        # next write fails on the closed pipe, so it stops at once.
+        _release_fifo_writer(path, pump)
         pump.join(timeout=30)
         raise
     finally:
@@ -801,6 +807,28 @@ def stream_between_cursors(
     if failure:
         raise failure[0]
     return "fifo"
+
+
+def _release_fifo_writer(path: str, pump: threading.Thread, budget: float = 30.0) -> None:
+    """Let ``pump``, a writer on the FIFO at ``path`` with no reader, stop.
+
+    Opens the read end (non-blocking) and closes it again, repeatedly, while
+    the writer lives: a writer parked in ``open()`` returns, and its next
+    write fails with a broken pipe. Repeated because the writer may reach
+    ``open()`` only after a first release.
+    """
+    deadline = time.monotonic() + budget
+    while pump.is_alive() and time.monotonic() < deadline:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            logger.debug("copy stream reader release skipped", exc_info=True)
+            return
+        try:
+            pump.join(timeout=0.05)
+        finally:
+            os.close(fd)
+        pump.join(timeout=0.05)
 
 
 def _discard_stream_path(path: str, directory: str) -> None:
