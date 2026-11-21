@@ -21,17 +21,16 @@ import type {
 } from "../../lib/types";
 import { isLocalPreflight } from "../../lib/localPreflight";
 import {
-  CORE_ENGINE_GATE_IDS,
   GATE_CATALOG,
   blockerTitle,
   compareGateDisplayOrder,
   countGateStatuses,
   gateCatalogEntry,
-  gateDisplayCode,
   gateLabel,
   isInternalGateId,
 } from "../../lib/preflightGates";
 import { ErrorState } from "../ui/ErrorState";
+import { GateChecklist } from "./GateChecklist";
 import { plural } from "../../lib/plural";
 import { preflightHardDeleteWarning } from "../../lib/mirrorDeleteMode";
 import type { ValidateProgress } from "../../lib/engineProgress";
@@ -102,8 +101,6 @@ function metaForGate(id: string): GateMeta {
 }
 
 /** Core engine gates shown while Validate is pending / running. */
-const CORE_ENGINE_KEYS = new Set<string>(CORE_ENGINE_GATE_IDS);
-const CORE_GATE_META = GATE_META.filter((g) => CORE_ENGINE_KEYS.has(g.key));
 
 function formatDuration(ms: number | undefined): string {
   if (ms == null || Number.isNaN(ms)) return "";
@@ -175,6 +172,11 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   return extras.filter(Boolean).slice(0, 12);
 }
 
+/** The checklist's finding lines: the same extraction the gate panel used. */
+function checklistFindings(gate: { details?: Record<string, unknown> | null }): string[] {
+  return issueTextsFromDetails(gate.details);
+}
+
 type PrivilegeProbeMeta = {
   status?: string;
   method?: string;
@@ -232,25 +234,6 @@ function validateRunningLine(progress: ValidateProgress | null | undefined): str
   if (String(progress?.phase || progress?.status || "") === "queued") return "Queued · starting checks";
   return "Running checks on the source, destination and mappings";
 }
-
-/** Gate tiles say their status with an icon as well as colour (P2-10). */
-const GATE_STATUS_ICON: Record<string, IconName> = {
-  pass: "success",
-  block: "error",
-  warn: "warning",
-  skip: "minus",
-  running: "spinner",
-  pending: "clock",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  pass: "Passed",
-  block: "Blocked",
-  skip: "Skipped",
-  warn: "Review",
-  running: "Running",
-  pending: "Pending",
-};
 
 interface ValidateDashboardProps {
   preflight: PreflightResult | null;
@@ -867,7 +850,6 @@ export function ValidateDashboard({
   const dashCta = dashboardCtaVariant;
   const ddlGate = pendingDdlApproval(preflight);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [repairOpen, setRepairOpen] = useState(false);
@@ -883,7 +865,6 @@ export function ValidateDashboard({
     if (badDataControlled) onBadDataFixOpenChange?.(open);
     else setInternalBadDataOpen(open);
   };
-  const [pickedGateKey, setPickedGateKey] = useState("");
   const [gatesOpen, setGatesOpen] = useState(false);
   const [proofOpen, setProofOpen] = useState(false);
   const [remediating, setRemediating] = useState(false);
@@ -1217,15 +1198,6 @@ export function ValidateDashboard({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  // Show every gate result as soon as the engine returns — operators must be able
-  // to read rules/status before Run. duration_ms still appears on each card.
-  useEffect(() => {
-    if (running || !preflight?.gates?.length) {
-      setRevealCount(0);
-      return;
-    }
-    setRevealCount(preflight.gates.length);
-  }, [running, preflight?.run_id, preflight?.gates]);
 
   const proof = preflight?.proof_bundle;
   // Missing transfer_decision must never default to approve — Run requires
@@ -1253,14 +1225,6 @@ export function ValidateDashboard({
     : (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
   const reviewCount = countsFromGates ? gateCounts.review : 0;
   const pendingCount = countsFromGates ? gateCounts.pending : 0;
-  /** Prefer live engine gates so PENDING cards aren't shown for rules that never ran. */
-  const displayGates: GateMeta[] = running
-    ? CORE_GATE_META
-    : (preflight?.gates?.length
-      ? [...preflight.gates]
-        .sort((left, right) => compareGateDisplayOrder(left.id, right.id))
-        .map((g) => metaForGate(g.id))
-      : [...CORE_GATE_META].sort((left, right) => compareGateDisplayOrder(left.key, right.key)));
 
   const decisionTone = decision === "block"
     ? "block"
@@ -1434,82 +1398,6 @@ export function ValidateDashboard({
 
   // While validating: all gates pending/queued — never fake a green "pass" mid-flight.
   // After results: reveal in order using real duration_ms.
-  const statusForGate = (
-    meta: GateMeta,
-    index: number,
-  ): {
-    status: string;
-    message: string;
-    issues: string[];
-    durationMs?: number;
-    privilegeProbe: PrivilegeProbeMeta | null;
-    evidenceScope: Record<string, unknown> | null;
-  } => {
-    const gate = gateByKey.get(meta.key) ?? gateByKey.get(meta.key.replace(/^g\d+_/, ""));
-    if (running) {
-      return {
-        status: "pending",
-        message: "Queued — engine returns all gate results when the pass finishes",
-        issues: [],
-        privilegeProbe: null,
-        evidenceScope: null,
-      };
-    }
-    if (gate) {
-      const revealed = index < revealCount;
-      if (!revealed && revealCount < (preflight?.gates?.length ?? 0)) {
-        return {
-          status: "pending",
-          message: "Result ready — revealing…",
-          issues: [],
-          privilegeProbe: null,
-          evidenceScope: null,
-        };
-      }
-      const privilegeProbe = privilegeProbeFromDetails(gate.details);
-      const stagingProbe = stagingProbeFromDetails(gate.details);
-      const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
-      const evidenceScope = (gate.details?.evidence_scope
-        && typeof gate.details.evidence_scope === "object")
-        ? (gate.details.evidence_scope as Record<string, unknown>)
-        : null;
-      // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
-      if (gate.status === "pass" && (privilegeProbe?.method || stagingProbe?.status) && meta.key === "g2_destination") {
-        const soft: string[] = [];
-        if (privilegeProbe?.method) soft.push(`Probe: ${privilegeProbe.method}`);
-        if (privilegeProbe?.status === "unavailable" && privilegeProbe.detail) {
-          soft.push(privilegeProbe.detail);
-        }
-        if (stagingProbe?.status) soft.push(`COPY staging: ${stagingProbe.status}`);
-        if (stagingProbe?.status && stagingProbe.status !== "ok" && stagingProbe.detail) {
-          soft.push(stagingProbe.detail);
-        }
-        return {
-          status: gate.status,
-          message: gate.message,
-          issues: soft,
-          durationMs: gate.duration_ms,
-          privilegeProbe,
-          evidenceScope,
-        };
-      }
-      return {
-        status: gate.status,
-        message: gate.message,
-        issues,
-        durationMs: gate.duration_ms,
-        privilegeProbe,
-        evidenceScope,
-      };
-    }
-    return {
-      status: "pending",
-      message: "Awaiting validation run.",
-      issues: [],
-      privilegeProbe: null,
-      evidenceScope: null,
-    };
-  };
 
   const runStrip = async () => {
     if (!onStripControlChars) return;
@@ -1733,19 +1621,6 @@ export function ValidateDashboard({
     onApplyAction?.(action);
   };
 
-  const gateRank: Record<string, number> = { block: 0, warn: 1, running: 2, pending: 3, pass: 4 };
-  const gateViews = displayGates.map((meta, index) => ({
-    meta,
-    index,
-    ...statusForGate(meta, index),
-  })).sort((a, b) => (
-    compactVerdict ? (gateRank[a.status] ?? 9) - (gateRank[b.status] ?? 9) : 0
-  ));
-  const activeGate = gateViews.find((gate) => gate.meta.key === pickedGateKey)
-    ?? gateViews.find((gate) => gate.status === "block")
-    ?? gateViews.find((gate) => gate.status === "warn")
-    ?? gateViews.find((gate) => gate.status === "running")
-    ?? gateViews[0];
 
   return (
     <section className={`df2-vd df2-vd-${heroTone}${compactVerdict ? " is-compact-verdict" : ""}${gatesOpen ? " is-gates-open" : ""}${proofOpen ? " is-proof-open" : ""}`} aria-label="Validation dashboard">
@@ -3092,148 +2967,16 @@ export function ValidateDashboard({
 
       {/* While running, the hero carries the one progress line: no tiles that
           claim a gate list the engine has not returned yet (P1-14). */}
+      {/* The checks as a ranked checklist (UI pass 2): what blocks first,
+          then what could not run, what needs review; passed collapsed. */}
       {!running && preflight && (
-      <div className="df2-vd-rules">
-        <div className="df2-vd-rules-head">
-          <DtIcon name="verify" size={16} />
-          <strong>Validation rules</strong>
-          <span>
-            {preflight?.gates?.length ? `${plural(preflight.gates.length, "check")} · ` : ""}
-            confidence floor {(confidenceThreshold * 100).toFixed(0)}%
-          </span>
-        </div>
-        <div className="df2-vd-rule-tabs" role="tablist" aria-label="Validation rules">
-          {gateViews.map((gate) => {
-            const selected = activeGate?.meta.key === gate.meta.key;
-            return (
-              <button
-                key={`${gate.meta.key}-${gate.index}`}
-                type="button"
-                role="tab"
-                id={`df2-vd-tab-${gate.meta.key}`}
-                className={`df2-vd-rule-tab status-${gate.status}${selected ? " is-active" : ""}`}
-                aria-selected={selected}
-                aria-controls="df2-vd-rule-panel"
-                tabIndex={selected ? 0 : -1}
-                onClick={() => setPickedGateKey(gate.meta.key)}
-              >
-                <span className="df2-vd-rule-tab-top">
-                  <span className="df2-vd-rule-code">{gateDisplayCode(gate.meta.key)}</span>
-                  <span className={`df2-vd-rule-dot status-${gate.status}`} aria-hidden>
-                    <DtIcon name={GATE_STATUS_ICON[gate.status] ?? "clock"} size={14} chrome="product" />
-                  </span>
-                </span>
-                <span className="df2-vd-rule-tab-label">{gate.meta.label}</span>
-                <span className="df2-sr-only">{STATUS_LABEL[gate.status] ?? gate.status}</span>
-              </button>
-            );
-          })}
-        </div>
-        {activeGate && (() => {
-          const { meta, status, message, issues, durationMs, privilegeProbe, evidenceScope } = activeGate;
-          const scopeCoverage = evidenceScope?.coverage != null ? String(evidenceScope.coverage) : "";
-          const scopeSample = typeof evidenceScope?.sample_rows === "number" ? evidenceScope.sample_rows : null;
-          const scopeCols = typeof evidenceScope?.columns === "number" ? evidenceScope.columns : null;
-          const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
-          const showPrivilege = status !== "pending" && Boolean(privilegeProbe && (privilegeProbe.method || privilegeProbe.status));
-          const destExistence = status !== "pending" && /g2_destination|destination/i.test(meta.key)
-            ? (() => {
-              const gate = gateByKey.get(meta.key);
-              const exists = gate?.details?.table_exists;
-              if (exists === true) return "table exists";
-              if (exists === false) return "create-new";
-              if (/unknown|existence/i.test(message || "")) return "existence unknown";
-              return null;
-            })()
-            : null;
-          const showDuration = status !== "pending" && durationMs != null && durationMs > 0;
-          const showScope = status !== "pending" && Boolean(evidenceScope);
-          return (
-            <article
-              className={`df2-vd-rule status-${status}`}
-              role="tabpanel"
-              id="df2-vd-rule-panel"
-              aria-labelledby={`df2-vd-tab-${meta.key}`}
-              data-gate={meta.key}
-            >
-              <div className="df2-vd-rule-top">
-                <span className="df2-vd-rule-ident">
-                  <span className="df2-vd-rule-code">{gateDisplayCode(meta.key)}</span>
-                  <span className="df2-vd-rule-icon" aria-hidden>
-                    <DtIcon name={meta.icon} size={14} />
-                  </span>
-                  <strong className="df2-vd-rule-label">{meta.label}</strong>
-                </span>
-                <span className={`df2-vd-rule-status status-${status}`}>
-                  {status === "pass" && <DtIcon name="check" size={11} />}
-                  {status === "block" && <DtIcon name="x" size={11} />}
-                  {status === "warn" && <DtIcon name="alert" size={11} />}
-                  {status === "running" && <Spinner size="sm" label="" />}
-                  {STATUS_LABEL[status] ?? status}
-                </span>
-              </div>
-              <p className="df2-vd-rule-desc">{meta.rule}</p>
-              {status !== "pending" && message ? (
-                <p className="df2-vd-rule-msg">{message}</p>
-              ) : status === "pending" ? (
-                <p className="df2-vd-rule-msg is-pending-note">Not run yet</p>
-              ) : null}
-              {(showScope || showPrivilege || destExistence || showDuration) && (
-                <div className="df2-vd-rule-foot">
-                  {showScope && (
-                    <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
-                      <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
-                        {scopeCoverage === "sample"
-                          ? "Sample"
-                          : scopeCoverage === "full_schema"
-                            ? "Full schema"
-                            : scopeCoverage === "full_selected"
-                              ? "Full selected"
-                              : scopeCoverage === "pending"
-                                ? "Pending"
-                                : "Scope"}
-                      </span>
-                      {scopeSample != null && (
-                        <span>{Number(scopeSample).toLocaleString()} row{Number(scopeSample) === 1 ? "" : "s"}</span>
-                      )}
-                      {scopeCols != null && (
-                        <span>{Number(scopeCols).toLocaleString()} col{Number(scopeCols) === 1 ? "" : "s"}</span>
-                      )}
-                    </p>
-                  )}
-                  {showPrivilege && privilegeProbe && (
-                    <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
-                      {privilegeProbe.status && <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>}
-                      {privilegeProbe.method && <span className="df2-vd-priv-method">{privilegeProbe.method}</span>}
-                      {privilegeProbe.engine && <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>}
-                      {privilegeProbe.can_create_table != null && (
-                        <span className="df2-vd-priv-method">create={privilegeProbe.can_create_table ? "yes" : "no"}</span>
-                      )}
-                      {privilegeProbe.can_write != null && (
-                        <span className="df2-vd-priv-method">write={privilegeProbe.can_write ? "yes" : "no"}</span>
-                      )}
-                    </div>
-                  )}
-                  {destExistence && (
-                    <div className="df2-vd-priv-probe status-unknown">
-                      <span className="df2-vd-priv-chip">{destExistence}</span>
-                    </div>
-                  )}
-                  {showDuration && <p className="df2-vd-rule-dur">Engine {formatDuration(durationMs)}</p>}
-                </div>
-              )}
-              {issues.length > 0 && (
-                <ul className="df2-vd-rule-issues">
-                  {issues.slice(0, 4).map((issue) => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                  {issues.length > 4 && <li>+{issues.length - 4} more</li>}
-                </ul>
-              )}
-            </article>
-          );
-        })()}
-      </div>
+        <GateChecklist
+          gates={preflight.gates ?? []}
+          findingsOf={checklistFindings}
+          order={compareGateDisplayOrder}
+          onRerun={onRunPreflight ? () => { void onRunPreflight(); } : undefined}
+          note={`confidence floor ${(confidenceThreshold * 100).toFixed(0)}%`}
+        />
       )}
 
       {reconciliation && (

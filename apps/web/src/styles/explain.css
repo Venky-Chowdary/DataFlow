@@ -1,0 +1,88 @@
+/* "Explain" button and popover (components/ui/ExplainPopover.tsx). Tokens only. */
+.df2-explain-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+  min-height: 28px;
+  padding: 0 var(--df-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-md);
+  background: transparent;
+  color: var(--df-text-secondary);
+  font: inherit;
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+  cursor: pointer;
+}
+.df2-explain-trigger:hover {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+.df2-explain-trigger:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+.df2-explain-trigger[data-state="open"] {
+  border-color: var(--df-border-strong);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+.df2-explain {
+  position: relative;
+  z-index: var(--df-z-menu);
+  width: min(360px, calc(100vw - 32px));
+  padding: var(--df-space-3) var(--df-space-4) var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface-raised);
+  box-shadow: var(--df-shadow-md);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-field);
+  line-height: 1.45;
+}
+.df2-explain:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+.df2-explain-title {
+  margin: 0 var(--df-space-5) var(--df-space-2) 0;
+  font-weight: var(--df-fw-semibold);
+}
+.df2-explain-list {
+  display: grid;
+  gap: var(--df-space-2);
+  margin: 0;
+}
+.df2-explain-list dt {
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+}
+.df2-explain-list dd {
+  margin: 0;
+}
+.df2-explain-source {
+  margin: var(--df-space-3) 0 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-chip);
+}
+.df2-explain-close {
+  position: absolute;
+  top: var(--df-space-2);
+  right: var(--df-space-2);
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--df-radius-md);
+  background: transparent;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+.df2-explain-close:hover { background: var(--df-surface-muted); color: var(--df-text-primary); }
+.df2-explain-close:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
