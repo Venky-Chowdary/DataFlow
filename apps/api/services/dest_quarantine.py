@@ -238,6 +238,11 @@ def write_dest_quarantine(
         mappings,
         validation_mode="balanced",
         write_mode="insert",
+        # Each finding's id is the table's key. A keyless DLQ table is refused
+        # outright by a server that forces a PRIMARY KEY (MySQL 3750 / MariaDB
+        # 1173) — QA batch 1: a quarantining run to Aiven MySQL failed on its
+        # own evidence table although the data table was keyed.
+        conflict_columns=["_df_qid"],
         job_id=f"{job_id}_dlq" if job_id else None,
     )
     table = endpoint.table or dlq_table_name("import")
