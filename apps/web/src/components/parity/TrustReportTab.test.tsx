@@ -10,7 +10,15 @@ import type { Root } from "react-dom/client";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TrustReportTab, TrustReportView, type TrustReportViewProps } from "./TrustReportTab.js";
-import { failedRunReport, provenApiWordingReport, provenReport, signedReport, unexplainedReport } from "./parityFixtures.js";
+import {
+  failedRunReport,
+  provenApiWordingReport,
+  provenReport,
+  signedReport,
+  unexplainedReport,
+  verifiedWithDifferencesReport,
+  verifyingReport,
+} from "./parityFixtures.js";
 import type { ParityReport } from "../../lib/parity.js";
 
 const noop = () => {};
@@ -356,6 +364,9 @@ describe("Trust Report actions (jsdom)", () => {
       if (method === "GET" && failGet) {
         return new Response(JSON.stringify({ detail: "Job not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
       }
+      if (method === "GET" && /\/verification\/tables\/[^/]+\/columns$/.test(url)) {
+        return new Response(JSON.stringify({ table: "payments", rows_compared: 0, complete: true, columns: [] }), { status: 200 });
+      }
       if (method === "GET") return new Response(JSON.stringify(getReport()), { status: 200 });
       return onPost(url);
     }) as typeof fetch;
@@ -454,6 +465,22 @@ describe("Trust Report actions (jsdom)", () => {
     assert.match(t, /4 keys re-checked; 0 differ\./);
     assert.match(t, /Round 1/);
     assert.equal(button("Explain again").disabled, false);
+  });
+
+  it("re-verify one table: posts for that table only, then re-reads the report (Parity at Scale)", async () => {
+    getReport = () => verifiedWithDifferencesReport();
+    onPost = async () =>
+      new Response(JSON.stringify({ state: "running", tables: [{ name: "payments", status: "running", progress: {} }] }), { status: 200 });
+    await mount();
+    calls.length = 0;
+    getReport = () => verifyingReport({ version: 3 }); // verification does not bump the report version
+    await click(button("Re-verify this table"));
+    await React.act(async () => settle());
+    const posts = calls.filter((c) => c.method === "POST");
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].url, /\/jobs\/job-31\/verification\/tables\/payments$/);
+    assert.ok(calls.some((c) => c.method === "GET" && /\/parity-report/.test(c.url)), "the report is read again");
+    assert.match(host!.textContent || "", /Verification running/);
   });
 
   it("will not accept a difference without a note (review finding 6)", async () => {

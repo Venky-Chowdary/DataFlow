@@ -102,6 +102,36 @@ strongest form is a five-layer ladder:
   digest covers rows this job never wrote. That difference is classified as a
   matter of scope, not reported as corruption.
 
+### Verification after the write (experimental)
+
+Behind `DATAWRAP_PARITY_SCALE=1`, a completed job whose table Gate-8 could
+not compare in full (above the ladder limit) is verified after the write by
+comparing every row inside both databases (see
+[Parity at Scale](../reference/parity-canonical-encoding.md)).
+
+- It is its own state. While it runs the Trust Report reads
+  **Verification running**; the job's write status is not changed, and
+  sign-off and the "proven" verdict wait until it finishes.
+- A clean result makes the table **proven** when the engine pair is
+  certified for every column type; the signed proof pack then records a
+  full population proof. An uncertified pair reads **no difference found**.
+- A table with no key is compared as content: the check reads
+  **Content match (no key)**, and a difference cannot be attributed to a key.
+- A failed verification makes the report **unexplained** and names the rows.
+- On a schedule, the watermark moves only after verification passed, and the
+  next run waits while it runs (set `wait_for_verification` to false on the
+  schedule to not wait).
+
+The Trust Report's difference explorer shows, per verified table, each
+column's differing rows (Columns), the missing, extra, duplicate and changed
+keys (Keys), and the differing values read again from both sides (Values).
+Protected columns never show a value. **Re-verify this table** compares every
+row again. **Copy repair SQL** shows statements that make the destination
+match the source for the named keys; Datawrap never runs them.
+
+Tested end to end on PostgreSQL to PostgreSQL. Other engine pairs use the same
+comparison but are not yet tested end to end in this mode.
+
 ### What a passing checksum does not prove
 
 - It does not prove referential integrity between tables.
@@ -116,6 +146,8 @@ Each table in a result carries the kind of check that ran.
 |---|---|---|
 | `full_checksum` | Every row compared by checksum | Proof for the rows compared |
 | `key_diff` | Every row compared by key | Proof for the rows compared |
+| `segment_diff` | Every row compared inside both databases, by key (verification after the write) | Proof for the rows compared, on a certified engine pair |
+| `multiset_digest` | Every row compared as content, for a table with no key ("Content match (no key)") | Proof the contents match; a difference cannot be attributed to a key |
 | `sampled` | Values compared on a sample of rows | An estimate with a stated bound, when the sample was a random draw. Nothing, about rows outside it, when it was not. |
 | `count_only` | Only row counts compared | Says nothing about values |
 | `none` | Nothing compared | No evidence |

@@ -255,3 +255,58 @@ export function summaryFixture(over: Partial<ParitySummary> = {}): ParitySummary
     ...over,
   };
 }
+
+/** Parity at Scale: the write finished and every row is still being compared (owner decision 2). */
+export function verifyingReport(over: Partial<ParityReport> = {}): ParityReport {
+  const base = provenReport();
+  return provenReport({
+    version: 2,
+    verdict: "verifying",
+    verdict_reason: "Verification is running for orders: every row is being compared. Sign-off and cutover wait until it finishes.",
+    parity: { ...base.parity, proven_equal_pct: null },
+    tables: [{ ...base.tables[0], check: "verifying", status: "verifying", proven_equal_pct: null }],
+    signoff: { ...base.signoff, status: "blocked", blocked_reason: "Verification is still running; sign once every row has been compared." },
+    verification: {
+      state: "running",
+      started_at: "2026-11-11T14:00:00Z",
+      finished_at: null,
+      reason: "",
+      tables: [{ name: "orders", status: "running", progress: { items_done: 12, items_queued: 36 }, outcome: null, mode: "R", check_kind: null }],
+    },
+    ...over,
+  });
+}
+
+/** Parity at Scale: verification ended and found rows that differ (the explorer names them). */
+export function verifiedWithDifferencesReport(over: Partial<ParityReport> = {}): ParityReport {
+  const base = unexplainedReport();
+  return unexplainedReport({
+    tables: base.tables.map((t) => ({ ...t, check: "segment_diff", check_label: "Every row compared inside both databases", certified: true })),
+    verification: {
+      state: "failed",
+      started_at: "2026-11-11T14:00:00Z",
+      finished_at: "2026-11-11T14:03:00Z",
+      reason: "",
+      tables: [{ name: "payments", status: "failed", progress: {}, outcome: "differences_found", mode: "R", check_kind: "segment_diff" }],
+    },
+    ...over,
+  });
+}
+
+/** Parity at Scale: a keyless table whose content matches ("Content match (no key)"). */
+export function contentMatchReport(over: Partial<ParityReport> = {}): ParityReport {
+  const base = provenReport();
+  return provenReport({
+    verdict_reason:
+      "No differences: the destination matches the source. orders: content match (no key) — every row has an identical counterpart; the table has no key, so a difference could not be attributed to a key.",
+    tables: [{ ...base.tables[0], check: "multiset_digest", check_label: "Content match (no key)", key_attribution: "cannot_attribute_to_key", certified: true }],
+    verification: {
+      state: "passed",
+      started_at: "2026-11-11T14:00:00Z",
+      finished_at: "2026-11-11T14:01:00Z",
+      reason: "",
+      tables: [{ name: "orders", status: "passed", progress: {}, outcome: "match", mode: "R", check_kind: "multiset_digest" }],
+    },
+    ...over,
+  });
+}

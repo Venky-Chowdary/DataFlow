@@ -1590,6 +1590,8 @@ export interface ScheduleInput {
   retry_backoff_seconds: number;
   notify_on_failure: boolean;
   notify_on_success: boolean;
+  /** Parity at Scale: the next run waits while the previous one is verified (default true). */
+  wait_for_verification?: boolean;
   enabled: boolean;
   /** upsert (default) | skip_duplicates | append. Empty stays the runner default. */
   duplicate_policy?: "upsert" | "skip_duplicates" | "append" | "dedupe_skip" | string;
@@ -1711,6 +1713,8 @@ export interface PipelineSchedule {
   retry_backoff_seconds: number;
   notify_on_failure: boolean;
   notify_on_success: boolean;
+  /** Parity at Scale: the next run waits while the previous one is verified (default true). */
+  wait_for_verification?: boolean;
   enabled: boolean;
   duplicate_policy?: string;
   in_file_dedupe?: string;
