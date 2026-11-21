@@ -19,15 +19,20 @@ def test_overwrite_keeps_relational_table_and_still_drops_warehouses():
         assert overwrite_clear_kind(engine) == "empty", engine
         assert dest_schema_is_recreated_on_overwrite(engine) is False, engine
     assert overwrite_clear_kind("mongodb") == "rename_collection"
+    # Snowflake is not emptied by the relational path: its set-aside keeps
+    # the live table (NF-1), so the live DDL is the contract, as for SQL.
     assert overwrite_clear_kind("snowflake") == "drop"
-    assert dest_schema_is_recreated_on_overwrite("snowflake") is True
+    assert dest_schema_is_recreated_on_overwrite("snowflake") is False
+    assert dest_schema_is_recreated_on_overwrite("bigquery") is True
     truncate_sql, delete_sql = overwrite_empty_statements("postgresql", '"public"."users"')
     assert "TRUNCATE" in truncate_sql and "RESTART IDENTITY" in truncate_sql
     assert delete_sql.startswith("DELETE FROM")
     assert overwrite_empty_statements("sqlite", '"users"')[0] == ""
 
 
-def test_snowflake_overwrite_still_clears_doomed_types():
+def test_snowflake_overwrite_binds_the_kept_table_types():
+    """NF-1: the overwrite loads the live Snowflake table in place, so its
+    column types are this run's contract (they used to be cleared as doomed)."""
     from src.transfer.engine import _destination_schema_probe
     from src.transfer.models import EndpointConfig
 
@@ -36,6 +41,24 @@ def test_snowflake_overwrite_still_clears_doomed_types():
         "src.transfer.endpoint_intelligence.introspect_endpoint",
         return_value={
             "schema": {"id": "NUMBER", "name": "VARCHAR(64)"},
+            "schema_nullability": {"id": False},
+            "table_exists": True,
+        },
+    ):
+        schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_overwrite")
+    assert exists is True
+    assert schema == {"id": "NUMBER", "name": "VARCHAR(64)"}
+
+
+def test_bigquery_overwrite_still_clears_doomed_types():
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="bigquery", table="users")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        return_value={
+            "schema": {"id": "INT64", "name": "STRING"},
             "schema_nullability": {"id": False},
             "table_exists": True,
         },

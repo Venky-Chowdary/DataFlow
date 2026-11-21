@@ -155,9 +155,11 @@ def test_crm_overwrite_does_not_recreate_schema() -> None:
 
     assert dest_schema_is_recreated_on_overwrite("salesforce") is False
     assert dest_schema_is_recreated_on_overwrite("hubspot") is False
-    # Relational overwrite empties in place. Snowflake still replaces the object.
+    # Relational overwrite empties in place, and so does Snowflake since NF-1
+    # (the live table keeps its grants and policies). BigQuery replaces it.
     assert dest_schema_is_recreated_on_overwrite("postgresql") is False
-    assert dest_schema_is_recreated_on_overwrite("snowflake") is True
+    assert dest_schema_is_recreated_on_overwrite("snowflake") is False
+    assert dest_schema_is_recreated_on_overwrite("bigquery") is True
     gate = _gate(
         destination_db_type="salesforce",
         destination_column_types={"amount": "DECIMAL(18,2)"},

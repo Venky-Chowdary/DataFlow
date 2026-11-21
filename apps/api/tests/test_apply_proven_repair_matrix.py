@@ -230,7 +230,10 @@ def test_relational_overwrite_binds_the_kept_table() -> None:
     assert applyable_widen_actions(report) == []
 
 
-@pytest.mark.parametrize("dest_db,narrow", (("snowflake", "NUMBER(5,2)"),))
+# Snowflake left this list with NF-1: its overwrite keeps the live table
+# (CLONE backup, TRUNCATE, load in place), so the live DDL binds like a
+# relational overwrite. BigQuery still recreates an ungoverned table.
+@pytest.mark.parametrize("dest_db,narrow", (("bigquery", "NUMERIC(5,2)"),))
 def test_overwrite_recreate_is_applyable(dest_db: str, narrow: str) -> None:
     """Overwrite drops/recreates — Map type is the write bind, Apply may widen it."""
     mappings = [{"source": "measure", "target": "measure", "target_type": narrow}]

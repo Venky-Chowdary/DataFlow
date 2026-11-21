@@ -94,7 +94,27 @@ def test_g19_skips_on_append_so_g3_owns_the_live_narrowing() -> None:
     assert _by_id(pf)[GATE]["status"] == "skip"
 
 
-def test_snowflake_overwrite_still_blocks_when_it_replaces_a_narrow_column() -> None:
+def test_bigquery_overwrite_still_blocks_when_it_replaces_a_narrow_column() -> None:
+    # BigQuery is the warehouse whose overwrite still recreates the table.
+    pf = run_file_preflight(
+        **{
+            **_BASE,
+            "columns": ["name"],
+            "column_types": {"name": "VARCHAR(200)"},
+            "mappings": [{"source": "name", "target": "name", "confidence": 0.99}],
+            "sample_rows": [{"name": "x" * 40}],
+            "destination_db_type": "bigquery",
+        },
+        destination_column_types={"name": "STRING(10)"},
+    )
+    gate = _by_id(pf)[GATE]
+    assert gate["status"] == "block", gate
+    assert "name" in gate["message"]
+
+
+def test_snowflake_overwrite_keeps_the_narrow_column_and_blocks_the_fit() -> None:
+    """NF-1: Snowflake loads the kept table in place, so nothing is replaced
+    (G19 skips) and the 40-character values are judged against VARCHAR(10)."""
     pf = run_file_preflight(
         **{
             **_BASE,
@@ -106,9 +126,8 @@ def test_snowflake_overwrite_still_blocks_when_it_replaces_a_narrow_column() -> 
         },
         destination_column_types={"name": "VARCHAR(10)"},
     )
-    gate = _by_id(pf)[GATE]
-    assert gate["status"] == "block", gate
-    assert "name" in gate["message"]
+    assert _by_id(pf)[GATE]["status"] == "skip"
+    assert pf["passed"] is False
 
 
 def test_signed_continue_contract_demotes_g19_to_warn() -> None:
@@ -130,7 +149,7 @@ def test_signed_continue_contract_demotes_g19_to_warn() -> None:
             "columns": ["name"],
             "column_types": {"name": "VARCHAR(200)"},
             "sample_rows": [{"name": "x" * 40}],
-            "destination_db_type": "snowflake",
+            "destination_db_type": "bigquery",
             "mappings": [
                 {
                     "source": "name",
@@ -140,7 +159,7 @@ def test_signed_continue_contract_demotes_g19_to_warn() -> None:
                 }
             ],
         },
-        destination_column_types={"name": "VARCHAR(10)"},
+        destination_column_types={"name": "STRING(10)"},
     )
     gate = _by_id(pf)[GATE]
     assert gate["status"] == "warn", gate
