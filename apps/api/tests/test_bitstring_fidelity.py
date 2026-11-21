@@ -29,7 +29,8 @@ def test_pg_bitstring_carriers_preserved():
     assert normalize_logical_type("BIT(32)") == "binary"
     assert normalize_logical_type("BIT(1)") == "boolean"
     assert is_bitstring_carrier("BIT(32)") is True
-    assert is_bitstring_carrier("BIT(1)") is False
+    # DW-D320: sized BIT(1) is a one-bit string on MySQL/PG, not bare BIT boolean.
+    assert is_bitstring_carrier("BIT(1)") is True
     assert parse_bitstring_width("BIT VARYING(16)") == 16
 
 
@@ -37,6 +38,8 @@ def test_bitstring_ddl_not_bytea():
     assert ddl_type("postgresql", "BIT(32)") == "BIT(32)"
     assert ddl_type("postgresql", "BIT VARYING(16)") == "BIT VARYING(16)"
     assert ddl_type("mysql", "BIT(32)") == "BIT(32)"
+    assert ddl_type("mysql", "BIT(1)") == "BIT(1)"
+    assert ddl_type("mysql", "BIT VARYING(16)") == "BIT(16)"
     # Engines without bitstring → VARCHAR of 0/1 digits, never BYTEA invent.
     assert "BYTEA" not in ddl_type("snowflake", "BIT(32)").upper()
     assert "BINARY" not in ddl_type("snowflake", "BIT(32)").upper()
@@ -59,6 +62,9 @@ def test_bitstring_wire_and_quarantine():
         assert "0/1" in str(exc)
     assert normalize_sql_bind_value("1010", "BIT(4)", engine="postgresql") == "1010"
 
+    assert coerce_bitstring_wire("10", width=4) == "0010"
+    assert coerce_bitstring_wire("10101010", width=8) == "10101010"
+    assert coerce_bitstring_wire(b"101", width=16) == "0000000000000101"
     details: list[dict] = []
     out = quarantine_unfit_bitstrings(
         [("1010",), ("YWJj",), ("10",)],
@@ -67,5 +73,5 @@ def test_bitstring_wire_and_quarantine():
         details,
         policy="quarantine",
     )
-    assert out == [("1010",)]
-    assert len(details) == 2
+    assert out == [("1010",), ("0010",)]
+    assert len(details) == 1

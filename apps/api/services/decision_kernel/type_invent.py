@@ -815,6 +815,16 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     if enum_ddl:
         return enum_ddl
     logical = normalize_logical_type(inferred)
+    # PostgreSQL BIT(1) normalizes to boolean, but MySQL create-new must keep
+    # the bit string (DW-D320). BOOLEAN there is a different column.
+    _bit_sized = re.match(
+        r"^BIT\s*\(\s*(\d+)\s*\)$",
+        strip_identity_qualifier(inferred or "").upper(),
+    )
+    if _bit_sized and db in {"mysql", "mariadb", "tidb"}:
+        _bit_w = int(_bit_sized.group(1))
+        if _bit_w >= 1:
+            return f"BIT({min(_bit_w, 64)})"
     if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
         return _decimal_ddl_for_dest(db, inferred)
     if logical == LOGICAL_VECTOR:

@@ -184,6 +184,8 @@ def _enforce_decision_artifact_once(
     source_kind: str = "",
     source_format: str = "",
     source_connector_id: str = "",
+    approved_ddl_identity_hash: str = "",
+    schema_policy: str = "",
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -294,6 +296,8 @@ def _enforce_decision_artifact_once(
         destination_table_exists=destination_table_exists,
         dest_column_names=dest_names,
         source_column_names=source_names,
+        approved_ddl_identity_hash=approved_ddl_identity_hash,
+        schema_policy=schema_policy,
     )
     return err, (art.to_dict() if art is not None else None)
 

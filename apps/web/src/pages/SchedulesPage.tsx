@@ -429,6 +429,17 @@ export function SchedulesPage({
   const handleScheduleSync = async (id: string, mode: "sync" | "full") => {
     if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((row) => row.id === id);
+    if (sched && scheduleNeedsStudio(sched)) {
+      const openStudio = await confirm({
+        title: "Mapping contract required",
+        message:
+          "This schedule has no persisted column mappings. Run now does not start a job. Open Transfer Studio, map the columns, run Validate, then schedule from the completed run.",
+        confirmLabel: "Open Transfer Studio",
+        cancelLabel: "Stay here",
+      });
+      if (openStudio) onStartTransfer?.();
+      return;
+    }
     const source = connectors.find((row) => row.id === sched?.source_connector_id);
     const dest = connectors.find((row) => row.id === sched?.dest_connector_id);
     setRunningId(id);

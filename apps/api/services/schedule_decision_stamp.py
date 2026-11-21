@@ -83,6 +83,66 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
     return found
 
 
+def decision_hash_for_sync(merged: dict[str, Any]) -> str:
+    """Hash Sync Now should send for an already-saved schedule.
+
+    Re-saving is not required. When the stored Decision Artifact hash no
+    longer replays (capability hash, confidence, or fingerprint spelling
+    moved) but the Map→DDL fingerprint Validate stored still matches these
+    rows, return the hash Execute accepts for the saved rows. A real Map
+    edit changes that DDL fingerprint and the stored hash is left in place
+    so Execute still refuses it.
+    """
+    approved = str(merged.get("approved_decision_artifact_hash") or "").strip().lower()
+    if len(approved) != 64:
+        return approved
+    hashes = replay_decision_hashes(merged)
+    if approved in hashes:
+        return approved
+    stored_ddl = str(merged.get("approved_ddl_identity_hash") or "").strip().lower()
+    if len(stored_ddl) != 64 or not hashes:
+        return approved
+    from services.conversion_contract import (
+        approved_mapping_ddl_fingerprint,
+        bind_stream_maps,
+    )
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    dest, _source = _engines(merged)
+    if not dest:
+        return approved
+    current = approved_mapping_ddl_fingerprint(
+        bind_stream_maps(
+            persisted_mapping_rows(merged.get("mappings")),
+            list(merged.get("stream_contracts") or []),
+            dest_db=dest,
+        ),
+        dest_db=dest,
+    ).lower()
+    if current != stored_ddl:
+        return approved
+    from services.decision_kernel import build_artifact_from_mappings
+
+    mode = str(merged.get("sync_mode") or "").strip() or "full_refresh_overwrite"
+    art = build_artifact_from_mappings(
+        bind_stream_maps(
+            persisted_mapping_rows(merged.get("mappings")),
+            list(merged.get("stream_contracts") or []),
+            dest_db=dest,
+        ),
+        dest_db=dest,
+        source_db=_source,
+        source_fingerprint="",
+        dest_fingerprint="",
+        sync_mode=mode,
+        route_id=f"validate:{dest}",
+        tenant_id="anonymous",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    return art.content_hash or approved
+
+
 def align_schedule_decision_hash(merged: dict[str, Any]) -> None:
     """Point a non-matching stamp at the replay hash of the rows being saved.
 

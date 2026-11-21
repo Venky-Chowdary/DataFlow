@@ -106,9 +106,28 @@ def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequ
             for variable in _REQUIRE_PK_VARIABLES:
                 value = None
                 try:
-                    cur.execute(f"SELECT @@{variable}")
-                    row = cur.fetchone()
-                    value = row[0] if row else None
+                    # Session is what this connection's CREATE obeys. GLOBAL is
+                    # what the next connection still enforces when a session
+                    # read comes back off (Aiven). Either ON is a requirement.
+                    # A privilege error on GLOBAL falls back to the session value.
+                    try:
+                        cur.execute(f"SELECT @@{variable}, @@GLOBAL.{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    except pymysql.err.MySQLError as global_exc:
+                        if _mysql_errno(global_exc) == _ER_UNKNOWN_SYSTEM_VARIABLE:
+                            raise
+                        cur.execute(f"SELECT @@{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    value = next(
+                        (
+                            item
+                            for item in values
+                            if item is not None and str(item).strip().upper() in {"1", "ON", "TRUE"}
+                        ),
+                        values[0] if values else None,
+                    )
                 except pymysql.err.MySQLError as exc:
                     if _mysql_errno(exc) != _ER_UNKNOWN_SYSTEM_VARIABLE:
                         logger.warning("require-primary-key probe: %s unreadable: %s",
@@ -239,6 +258,24 @@ def source_catalog_for_create(source: Mapping[str, Any] | None, mappings: list[d
     except Exception as exc:  # noqa: BLE001 — no catalog means a types-only CREATE
         logger.debug("source catalog for the create-key check failed: %s", exc)
         return None
+
+
+def mysql_create_primary_key_message(exc: BaseException, *, table: str = "") -> str | None:
+    """Turn MySQL 3750 into the plan-time finding, or None for any other error.
+
+    Preflight asks the server variable first. This is the backstop when that
+    probe did not run and CREATE itself is refused (DW keyless append).
+    """
+    if _mysql_errno(exc) != 3750:
+        return None
+    name = table or "the destination table"
+    return (
+        f"The destination server refused CREATE TABLE {name} without a PRIMARY KEY "
+        "(MySQL error 3750, sql_require_primary_key or innodb_force_primary_key). "
+        "Validate should have blocked this before Execute. Run upsert with a key "
+        "so Datawrap creates PRIMARY KEY on it, or create the table yourself with "
+        "a primary key. A keyless append cannot CREATE on this server."
+    )
 
 
 def keyless_create_refusal(

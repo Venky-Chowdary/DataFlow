@@ -9,11 +9,33 @@ import {
   isEmptyMappingFinding,
   persistedMappingRows,
   scheduleNeedsStudio,
+  scheduleFormSaveBlock,
   studioIntentConnectorsReady,
   scheduleCreateOpensStudio,
   studioIntentFromSchedule,
 } from "./scheduleApprovalCta";
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
+
+test("incremental Save says why it is disabled until a cursor is chosen", () => {
+  assert.match(
+    scheduleFormSaveBlock({
+      showCursor: true,
+      cursorColumn: "",
+      needsPrimaryKey: false,
+      primaryKey: "",
+    }),
+    /Cursor column is required/,
+  );
+  assert.equal(
+    scheduleFormSaveBlock({
+      showCursor: true,
+      cursorColumn: "updated_at",
+      needsPrimaryKey: false,
+      primaryKey: "",
+    }),
+    "",
+  );
+});
 
 test("empty mapping is a plan change, not a signature", () => {
   assert.equal(isEmptyMappingFinding("EMPTY_MAPPING_CONTRACT", ""), true);
@@ -61,6 +83,7 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
     dest_table: "orders_dw",
   } as PipelineSchedule;
   assert.equal(scheduleNeedsStudio(sched), true);
+  assert.equal(scheduleNeedsStudio({ ...sched, enabled: true, last_status: "ok", needs_approval: false }), true);
   assert.deepEqual(studioIntentFromSchedule(sched), {
     step: "source",
     replaceRoute: true,

@@ -385,6 +385,27 @@ def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     return normalize_sync_mode(mode)
 
 
+def _sync_decision_hash(sched: Any) -> str:
+    """Content hash for this beat. Unchanged Map DDL is re-stamped in memory."""
+    from services.schedule_decision_stamp import decision_hash_for_sync
+
+    merged = {
+        "mappings": list(getattr(sched, "mappings", None) or []),
+        "stream_contracts": list(getattr(sched, "stream_contracts", None) or []),
+        "sync_mode": getattr(sched, "sync_mode", "") or "",
+        "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
+        "source_connector_id": getattr(sched, "source_connector_id", "") or "",
+        "workspace_id": getattr(sched, "workspace_id", "") or "",
+        "approved_decision_artifact_hash": getattr(sched, "approved_decision_artifact_hash", "") or "",
+        "approved_ddl_identity_hash": getattr(sched, "approved_ddl_identity_hash", "") or "",
+        "source_schema_fingerprint": getattr(sched, "source_schema_fingerprint", "") or "",
+    }
+    try:
+        return decision_hash_for_sync(merged)
+    except Exception:
+        return str(merged["approved_decision_artifact_hash"] or "")
+
+
 def build_schedule_request(
     sched, src: dict, dst: dict, *, resync_mode: str = "", triggered_by: str = ""
 ):
@@ -641,9 +662,7 @@ def build_schedule_request(
             getattr(sched, "approved_shape_recipe_hash", "") or ""
         ),
         approved_set_hash=str(getattr(sched, "approved_set_hash", "") or ""),
-        approved_decision_artifact_hash=str(
-            getattr(sched, "approved_decision_artifact_hash", "") or ""
-        ),
+        approved_decision_artifact_hash=_sync_decision_hash(sched),
         approved_ddl_identity_hash=str(
             getattr(sched, "approved_ddl_identity_hash", "") or ""
         ),

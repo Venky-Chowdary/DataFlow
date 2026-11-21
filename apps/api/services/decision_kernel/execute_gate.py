@@ -166,6 +166,105 @@ def build_artifact_from_mappings(
     )
 
 
+def _policy_propagates(schema_policy: str | None) -> bool:
+    return str(schema_policy or "").strip().lower() in {"propagate_columns", "propagate_all"}
+
+
+def _ddl_hash_matches(
+    mappings: list[dict[str, Any]] | None,
+    dest_db: str,
+    approved_ddl_identity_hash: str,
+) -> bool:
+    """True when the Map→DDL fingerprint is the one Validate stored.
+
+    Confidence, capability hashes and schema fingerprints are not part of this
+    fingerprint. A Sync Now whose saved rows still produce it has not changed
+    the Map contract, even when the Decision Artifact content hash moved.
+    """
+    approved = (approved_ddl_identity_hash or "").strip().lower()
+    if len(approved) != 64:
+        return False
+    from services.conversion_contract import (
+        approved_mapping_ddl_fingerprint,
+        carry_stream_maps,
+    )
+
+    current = approved_mapping_ddl_fingerprint(
+        carry_stream_maps(list(mappings or []), mappings),
+        dest_db=(dest_db or "").strip().lower(),
+    ).lower()
+    return bool(current) and current == approved
+
+
+def dest_exists_shape_error(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    dest_column_names: list[str] | None,
+    source_column_names: list[str] | None,
+    column_nullability: dict[str, bool] | None = None,
+    column_defaults: dict[str, str] | None = None,
+    identity_columns: list[str] | None = None,
+    generated_columns: list[str] | None = None,
+    schema_policy: str = "",
+) -> str:
+    """Shape refusals after dest exists. Empty string means the Map still holds.
+
+    ``propagate_columns`` adopts a new source column instead of parking the
+    run on "extra source column(s) unaccounted" (DW-D344). Propagation off
+    still parks. NOT NULL holes and false friends stay refusals either way.
+    """
+    maps = [m for m in (mappings or []) if isinstance(m, dict)]
+    dests = [str(c) for c in (dest_column_names or []) if str(c).strip()]
+    dest_l = {_norm_col(c) for c in dests}
+    for m in write_mappings(maps):
+        tgt = str(m.get("target") or "").strip()
+        if tgt and _norm_col(tgt) not in dest_l:
+            return (
+                "Decision Artifact dest schema drifted since Validate — "
+                "mapped column missing after dest exists. Re-run Validate before Execute."
+            )
+    sources = [str(c) for c in (source_column_names or []) if str(c).strip()] or [
+        str(m.get("source") or "").strip()
+        for m in maps
+        if str(m.get("source") or "").strip()
+    ]
+    verdict = classify_dest_exists_shape(
+        destination_table_exists=True,
+        source_columns=sources,
+        dest_columns=dests,
+        mappings=maps,
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+    )
+    shape = str(verdict.get("shape") or "")
+    if shape in {SHAPE_CREATE_NEW, SHAPE_UNKNOWN, SHAPE_PENDING}:
+        return (
+            "Destination existence unproven — not treating as create-new. "
+            "Reload destination schema before Execute."
+        )
+    unfilled = list(verdict.get("unfilled_required") or [])
+    if unfilled:
+        return (
+            "Decision Artifact dest schema drifted since Validate — dest-only "
+            f"NOT NULL without a mapping: {', '.join(unfilled[:6])}. Re-run Validate."
+        )
+    unaccounted = list(verdict.get("unaccounted_sources") or [])
+    if unaccounted and not _policy_propagates(schema_policy):
+        return (
+            "Decision Artifact dest schema drifted since Validate — extra source "
+            f"column(s) unaccounted: {', '.join(unaccounted[:6])}. Re-run Validate."
+        )
+    false_friends = list(verdict.get("false_friend_sources") or [])
+    if false_friends:
+        return (
+            "Decision Artifact dest schema drifted since Validate — false-friend "
+            f"column(s): {', '.join(false_friends[:6])}. Re-run Validate."
+        )
+    return ""
+
+
 def create_new_validate_holds_after_dest_exists(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -186,6 +285,7 @@ def create_new_validate_holds_after_dest_exists(
     generated_columns: list[str] | None = None,
     tenant_id: str = "",
     route_id: str = "",
+    schema_policy: str = "",
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -253,58 +353,18 @@ def create_new_validate_holds_after_dest_exists(
             break
     if not matched:
         return False, ""
-    dest_l = {_norm_col(c) for c in dests}
-    for m in write_mappings(maps):
-        tgt = str(m.get("target") or "").strip()
-        if tgt and _norm_col(tgt) not in dest_l:
-            return (
-                False,
-                "Decision Artifact dest schema drifted since Validate — "
-                "mapped column missing after dest exists. Re-run Validate before Execute.",
-            )
-    sources = [str(c) for c in (source_column_names or []) if str(c).strip()] or [
-        str(m.get("source") or "").strip()
-        for m in maps
-        if str(m.get("source") or "").strip()
-    ]
-    verdict = classify_dest_exists_shape(
-        destination_table_exists=True,
-        source_columns=sources,
-        dest_columns=dests,
+    shape_err = dest_exists_shape_error(
         mappings=maps,
+        dest_column_names=dests,
+        source_column_names=source_column_names,
         column_nullability=column_nullability,
         column_defaults=column_defaults,
         identity_columns=identity_columns,
         generated_columns=generated_columns,
+        schema_policy=schema_policy,
     )
-    shape = str(verdict.get("shape") or "")
-    if shape in {SHAPE_CREATE_NEW, SHAPE_UNKNOWN, SHAPE_PENDING}:
-        return (
-            False,
-            "Destination existence unproven — not treating as create-new. "
-            "Reload destination schema before Execute.",
-        )
-    unfilled = list(verdict.get("unfilled_required") or [])
-    if unfilled:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — dest-only "
-            f"NOT NULL without a mapping: {', '.join(unfilled[:6])}. Re-run Validate.",
-        )
-    unaccounted = list(verdict.get("unaccounted_sources") or [])
-    if unaccounted:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — extra source "
-            f"column(s) unaccounted: {', '.join(unaccounted[:6])}. Re-run Validate.",
-        )
-    false_friends = list(verdict.get("false_friend_sources") or [])
-    if false_friends:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — false-friend "
-            f"column(s): {', '.join(false_friends[:6])}. Re-run Validate.",
-        )
+    if shape_err:
+        return False, shape_err
     return True, ""
 
 
@@ -330,6 +390,8 @@ def enforce_decision_artifact(
     column_defaults: dict[str, str] | None = None,
     identity_columns: list[str] | None = None,
     generated_columns: list[str] | None = None,
+    approved_ddl_identity_hash: str = "",
+    schema_policy: str = "",
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -363,6 +425,7 @@ def enforce_decision_artifact(
             generated_columns=generated_columns,
             tenant_id=tenant_id,
             route_id=route_id,
+            schema_policy=schema_policy,
         )
 
     if artifact_payload:
@@ -469,6 +532,26 @@ def enforce_decision_artifact(
             return (None, current)
         if hold_err:
             return (hold_err, None)
+        # Saved schedule Sync Now: the Map→DDL fingerprint still matches
+        # Validate, and dest-exists shape is clean. Capability hashes,
+        # confidence and fingerprint spellings are not a Map edit. A real
+        # target-type edit changes the DDL fingerprint and still refuses.
+        if destination_table_exists is True and _ddl_hash_matches(
+            mappings, dest_engine, approved_ddl_identity_hash
+        ):
+            shape_err = dest_exists_shape_error(
+                mappings=mappings,
+                dest_column_names=dest_column_names,
+                source_column_names=source_column_names,
+                column_nullability=column_nullability,
+                column_defaults=column_defaults,
+                identity_columns=identity_columns,
+                generated_columns=generated_columns,
+                schema_policy=schema_policy,
+            )
+            if shape_err:
+                return (shape_err, None)
+            return (None, current)
         return (
             "Decision Artifact content_hash mismatch — Map/DDL drifted "
             "since Validate. Re-run Validate before Execute.",

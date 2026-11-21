@@ -507,10 +507,23 @@ def stores_boolean_as_numeric(driver: str | None) -> bool:
     return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
 
 
+def _snowflake_boolean(driver: str | None) -> bool:
+    """Snowflake BOOLEAN has no ``IS TRUE`` / ``IS [NOT] DISTINCT FROM``.
+
+    ``col IS TRUE`` compiles as ``unexpected 'IS'`` (001003). ``= TRUE`` and
+    ``EQUAL_NULL``-equivalent ``(col IS NULL OR col = FALSE)`` are the legal
+    forms. SCD2 ``is_current`` and mirror ``_deleted`` both use these helpers.
+    """
+    kind = (driver or "").strip().lower()
+    return kind == "snowflake" or kind.startswith("snowflake")
+
+
 def sql_bool_is_true(driver: str | None, quoted_column: str) -> str:
     """Predicate: column is the SQL TRUE / 1 value."""
     if stores_boolean_as_numeric(driver):
         return f"{quoted_column} = 1"
+    if _snowflake_boolean(driver):
+        return f"{quoted_column} = TRUE"
     return f"{quoted_column} IS TRUE"
 
 
@@ -518,6 +531,10 @@ def sql_bool_is_not_true(driver: str | None, quoted_column: str) -> str:
     """Predicate: column is FALSE or NULL (SQL ``IS NOT TRUE``)."""
     if stores_boolean_as_numeric(driver):
         return f"({quoted_column} IS NULL OR {quoted_column} = 0)"
+    if _snowflake_boolean(driver):
+        # Same three-valued result as ``IS NOT TRUE``: FALSE and NULL match,
+        # TRUE does not. Snowflake rejects the ``IS`` spelling.
+        return f"({quoted_column} IS NULL OR {quoted_column} = FALSE)"
     return f"{quoted_column} IS NOT TRUE"
 
 

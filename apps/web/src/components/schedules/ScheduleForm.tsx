@@ -10,6 +10,7 @@ import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
 import { ContractBindField } from "../contracts/ContractBindField";
 import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
+import { scheduleFormSaveBlock } from "../../lib/scheduleApprovalCta";
 import {
   DATE_LOCALES,
   DEFAULT_SYNC_MODE_IDS,
@@ -307,6 +308,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     return `Up to ${maxRetries} retr${maxRetries === 1 ? "y" : "ies"} — linear backoff before attempts: ${delays.join(", ")}${suffix}.`;
   }, [maxRetries, retryBackoff]);
 
+  const saveBlock = scheduleFormSaveBlock({
+    showCursor,
+    cursorColumn,
+    needsPrimaryKey: duplicatePolicy !== "append",
+    primaryKey,
+  });
   const canSubmit = Boolean(
     name.trim()
     && sourceId
@@ -315,7 +322,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && destTable.trim()
     && (!callable || procedureText.trim())
     && (cadenceMode === "preset" || cron.trim())
-    && (duplicatePolicy === "append" || primaryKey.trim())
+    && !saveBlock
     && !contractBlock,
   );
 
@@ -605,8 +612,23 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <div className="df2-form-row df2-sched-cursor-row">
             {showCursor && (
               <div className="df2-field">
-                <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
-                <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
+                <label className="df2-label" htmlFor="sched-cursor">
+                  Cursor column <span className="df2-req" aria-hidden="true">required</span>
+                </label>
+                <input
+                  id="sched-cursor"
+                  className="df2-input"
+                  value={cursorColumn}
+                  onChange={(e) => setCursorColumn(e.target.value)}
+                  placeholder="updated_at"
+                  required
+                  aria-required="true"
+                  aria-invalid={showCursor && !cursorColumn.trim()}
+                  aria-describedby="sched-cursor-hint"
+                />
+                <span id="sched-cursor-hint" className="df2-field-hint">
+                  Required for incremental and CDC. Save stays off until this column is set.
+                </span>
                 <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
               </div>
             )}
@@ -1017,12 +1039,19 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
 
       <div className="df2-card-footer df2-card-footer--form">
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onCancel}>Cancel</button>
+        {saveBlock && (
+          <p className="df2-field-hint" role="status" id="sched-save-block">
+            {saveBlock}
+          </p>
+        )}
         <Button
           type="submit"
           variant="primary"
           loading={saving}
           loadingLabel="Saving…"
           disabled={saving || !canSubmit || connectors.length < 2}
+          title={saveBlock || undefined}
+          aria-describedby={saveBlock ? "sched-save-block" : undefined}
         >
           {isEdit ? "Save changes" : "Save schedule"}
         </Button>

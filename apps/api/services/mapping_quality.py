@@ -468,6 +468,18 @@ def _json_text_into_json_column(src_logical: str, tgt_logical: str, samples: lis
     return True
 
 
+def _lossless_uuid_varchar36(source_type: str, target_type: str, dest_db: str) -> bool:
+    """True for UUID → exact 36-char wire on an engine with no UUID type (DW-D72)."""
+    from services.dest_dialect_facts import dest_has_no_uuid_type
+    from services.type_system import normalize_logical_type, uuid_exact_wire_carrier
+
+    return bool(
+        normalize_logical_type(source_type) == "uuid"
+        and uuid_exact_wire_carrier(target_type)
+        and dest_has_no_uuid_type(dest_db)
+    )
+
+
 def classify_mapping_confidence(
     mapping: dict,
     *,
@@ -817,6 +829,13 @@ def refine_mappings_with_quality(
             destination_db_type=destination_db_type,
         )
         conf = apply_confidence_class(conf, classification)
+        src_t = str(out.get("source_type") or out.get("inferred_type") or "")
+        tgt_t = str(out.get("target_type") or out.get("dest_type") or "")
+        if _lossless_uuid_varchar36(src_t, tgt_t, destination_db_type):
+            conf = max(conf, 0.99)
+            out["requires_review"] = False
+            if str(out.get("fidelity") or "").lower() in {"", "cast"}:
+                out["fidelity"] = "preserve"
         out["confidence"] = round(conf, 3)
         out["confidence_class"] = classification["confidence_class"]
         out["confidence_class_label"] = classification["confidence_class_label"]

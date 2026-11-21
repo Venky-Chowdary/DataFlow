@@ -90,11 +90,27 @@ export function persistedMappingRows(raw: unknown): Array<Record<string, unknown
 
 export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {
   if (isEmptyMappingFinding(sched.approval_code, sched.approval_finding)) return true;
-  const count = sched.mapping_count ?? (Array.isArray(sched.mappings) ? sched.mappings.length : undefined);
-  if (count === 0 && (sched.needs_approval || sched.last_status === "needs_approval" || !sched.enabled)) {
-    return true;
-  }
+  const count = sched.mapping_count ?? (Array.isArray(sched.mappings) ? persistedMappingRows(sched.mappings).length : undefined);
+  // No persisted contract: Run now must not start a job that dies as
+  // EMPTY_MAPPING_CONTRACT. Open Transfer Studio instead.
+  if (count === 0) return true;
   return false;
+}
+
+/** Why Save is disabled. Empty means the form can submit. */
+export function scheduleFormSaveBlock(input: {
+  showCursor: boolean;
+  cursorColumn: string;
+  needsPrimaryKey: boolean;
+  primaryKey: string;
+}): string {
+  if (input.showCursor && !input.cursorColumn.trim()) {
+    return "Cursor column is required for incremental and CDC. Choose the column the source advances, then Save.";
+  }
+  if (input.needsPrimaryKey && !input.primaryKey.trim()) {
+    return "Primary key is required unless duplicate handling is append.";
+  }
+  return "";
 }
 
 /** Wait for the connector list before consuming a schedule→Studio token. */

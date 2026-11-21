@@ -815,13 +815,33 @@ def run_file_preflight(
     # since Validate" compares it with the live table at Execute, which has not
     # been ALTERed yet.
     live_destination_types = dict(destination_column_types or {})
+    managed_table = False
+    if (
+        destination_table_exists is True
+        and not dest_recreated
+        and destination_config
+        and destination_table
+    ):
+        try:
+            from services.managed_table import destination_table_is_managed
+
+            managed_table = destination_table_is_managed(
+                str(destination_db_type or ""),
+                destination_config,
+                schema=str((destination_config or {}).get("schema") or ""),
+                table=str(destination_table),
+            )
+        except Exception:
+            managed_table = False
     if (
         destination_table_exists is True
         and not dest_recreated
         and destination_column_types
         and dest_declares_column_ddl(destination_db_type)
         and destination_evolution_approved(
-            schema_policy, acknowledged=schema_drift_acknowledged
+            schema_policy,
+            acknowledged=schema_drift_acknowledged,
+            managed_table=managed_table,
         )
     ):
         from services.schema_drift import (
@@ -835,12 +855,12 @@ def run_file_preflight(
                 source_schema=column_types or {},
                 dest_types=destination_column_types,
                 dest_db=str(destination_db_type or ""),
-                adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+                adopt_unmapped=schema_policy in PROPAGATE_POLICIES or managed_table,
                 key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                            contract_primary_key, destination_indexes_meta),
                 max_part_bytes=dest_key_limit(destination_indexes_meta),
                 key_charsets=dest_key_charsets(destination_indexes_meta),
-                key_widens_approved=bool(schema_drift_acknowledged),
+                key_widens_approved=bool(schema_drift_acknowledged) or managed_table,
             )
         )
 

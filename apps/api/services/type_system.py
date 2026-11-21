@@ -5124,9 +5124,13 @@ def is_bitstring_carrier(inferred: str | None) -> bool:
 
     Bare ``BIT`` / ``BIT(1)`` normalize to boolean and are excluded.
     """
+    text = strip_identity_qualifier(inferred).upper()
+    # Sized BIT(n), including BIT(1), is a bit string on PostgreSQL and MySQL.
+    # Bare ``BIT`` (SQL Server boolean) has no width and stays out of this set.
+    if text and re.search(r"\b(?:VARBIT|BIT\s+VARYING|BIT)\s*\(\s*\d+\s*\)", text):
+        return True
     if normalize_logical_type(inferred) != LOGICAL_BINARY:
         return False
-    text = strip_identity_qualifier(inferred).upper()
     if not text:
         return False
     return bool(re.search(r"\b(?:VARBIT|BIT\s+VARYING|BIT)\b", text))

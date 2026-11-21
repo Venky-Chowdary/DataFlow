@@ -150,6 +150,37 @@ def _mapping_review_waits_for_evolution(request: Any) -> bool:
     )
 
 
+def _destination_is_managed(request: Any) -> bool:
+    """True when the destination table carries Datawrap's ownership comment."""
+    dest = getattr(request, "destination", None)
+    if dest is None:
+        return False
+    table = str(getattr(dest, "table", "") or getattr(dest, "collection", "") or "")
+    if not table:
+        return False
+    cfg = {
+        "host": getattr(dest, "host", "") or "",
+        "port": getattr(dest, "port", None),
+        "database": getattr(dest, "database", "") or "",
+        "username": getattr(dest, "username", "") or "",
+        "password": getattr(dest, "password", "") or "",
+        "schema": getattr(dest, "schema", "") or "",
+        "connection_string": getattr(dest, "connection_string", "") or "",
+        "ssl": bool(getattr(dest, "ssl", False)),
+    }
+    try:
+        from services.managed_table import destination_table_is_managed
+
+        return destination_table_is_managed(
+            str(getattr(dest, "format", "") or ""),
+            cfg,
+            schema=str(cfg["schema"] or ""),
+            table=table,
+        )
+    except Exception:
+        return False
+
+
 def destination_evolution_approved_for(request: Any) -> bool:
     """Whether this request's policy alone would apply destination evolution (propagate_*)."""
     from services.schema_drift import destination_evolution_approved, effective_schema_policy
@@ -273,6 +304,9 @@ def _plan_schema_auto_propagate(
         evolution["additive"] = _additive
 
     acknowledged = bool(getattr(request, "schema_drift_acknowledged", False))
+    managed_table = False
+    if not destination_evolution_approved_for(request) and not acknowledged:
+        managed_table = _destination_is_managed(request)
     if execute_must_pause(evolution, schema_drift_acknowledged=acknowledged):
         raise SchemaPropagationRefused(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
@@ -299,7 +333,9 @@ def _plan_schema_auto_propagate(
         and dest_declares_column_ddl(
             str(getattr(request.destination, "format", "") or "")
         )
-        and destination_evolution_approved(schema_policy, acknowledged=acknowledged)
+        and destination_evolution_approved(
+            schema_policy, acknowledged=acknowledged, managed_table=managed_table
+        )
     ):
         mappings, _evolved_types, _ = plan_destination_evolution(
             mappings,
@@ -307,11 +343,11 @@ def _plan_schema_auto_propagate(
             source_schema=schema,
             dest_types=dest_schema_types,
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
-            adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+            adopt_unmapped=schema_policy in PROPAGATE_POLICIES or managed_table,
             key_groups=_key_groups,
             max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
             key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
-            key_widens_approved=acknowledged,
+            key_widens_approved=acknowledged or managed_table,
         )
     if not evolution.get("should_propagate"):
         return mappings

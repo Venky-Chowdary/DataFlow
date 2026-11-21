@@ -1908,7 +1908,17 @@ def coerce_bitstring_wire(
         return bound
     bits: str
     if isinstance(value, (bytes, bytearray, memoryview)):
-        bits = "".join(f"{b:08b}" for b in bytes(value))
+        raw = bytes(value)
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError:
+            text = ""
+        # A 0/1 digit string stored as ASCII is the bit text, not eight bits
+        # per character. Expanding it overflowed BIT(n) and quarantined the row.
+        if re.fullmatch(r"[01]+", text or ""):
+            bits = text
+        else:
+            bits = "".join(f"{b:08b}" for b in raw)
     else:
         text = str(value).strip()
         text = _refuse_empty_specialty(text, 'BIT')
@@ -1927,10 +1937,14 @@ def coerce_bitstring_wire(
                 raise ValueError(
                     f"bitstring length {len(bits)} exceeds BIT VARYING({width})"
                 )
-        elif len(bits) != width:
+        elif len(bits) > width:
             raise ValueError(
                 f"bitstring length {len(bits)} does not match BIT({width})"
             )
+        elif len(bits) < width:
+            # PostgreSQL BIT(n) left-pads. VARBIT into MySQL BIT(n) is the
+            # same integer with leading zeros, not a length mismatch (DW-D320).
+            bits = bits.zfill(width)
     return bits
 
 
