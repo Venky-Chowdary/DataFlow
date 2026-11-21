@@ -345,8 +345,14 @@ def test_keyless_duplicate_and_missing_rows(admin, mode) -> None:
     assert diff["extra_content_examples"][0][0] == "42"
 
 
-def test_approved_lossy_cast_written_by_the_real_writer(admin, monkeypatch) -> None:
-    """DECIMAL(12,4) → NUMERIC(10,2) under a signed contract, written by the PostgreSQL writer."""
+@pytest.mark.parametrize("signed", [True, False], ids=["coerce_null_contract", "no_contract"])
+def test_approved_lossy_cast_written_by_the_real_writer(admin, signed) -> None:
+    """DECIMAL(12,4) → NUMERIC(10,2), written by the PostgreSQL writer.
+
+    Under a signed CAST_AND_CONTINUE / COERCE_NULL contract every value that
+    does not fit is written as NULL; without one it is held out. Either way
+    the scan's projection replays what the writer did and the copy matches.
+    """
     from connectors.postgresql_writer import write_mapped_rows
     from services.migration_risk_contract import create_migration_risk_contract
     from services.transform_engine import reset_active_number_locale, set_active_number_locale
@@ -354,19 +360,22 @@ def test_approved_lossy_cast_written_by_the_real_writer(admin, monkeypatch) -> N
     src, dst = _name(admin, "lossy_s"), _name(admin, "lossy_d")
     run_sql(admin, f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, amt numeric(12,4))',
             f"INSERT INTO \"{src}\" SELECT g, CASE WHEN g % 50 = 0 THEN g + 0.1234 "  # does not fit (scale)
-            "WHEN g % 77 = 0 THEN 99999999.5 "                                        # does not fit (both)
+            "WHEN g % 77 = 0 THEN 99999999.5 "                                        # the widest value that fits
             "ELSE round(g * 1.25, 2) END FROM generate_series(1, 4000) g",
             f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, amt numeric(10,2))')
-    contract = create_migration_risk_contract(
-        column="amt", source_type="numeric(12,4)", destination_type="numeric(10,2)",
-        approved_by="qa@example.com", reason="accepted narrowing", execution_policy="CAST_AND_CONTINUE",
-        quarantine_policy="COERCE_NULL",
-    )
-    mappings = [{"source": "id", "target": "id"},
-                {"source": "amt", "target": "amt", "risk_contract": contract.to_dict()}]
+    amt_map: dict[str, Any] = {"source": "amt", "target": "amt"}
+    if signed:
+        amt_map["risk_contract"] = create_migration_risk_contract(
+            column="amt", source_type="numeric(12,4)", destination_type="numeric(10,2)",
+            approved_by="qa@example.com", reason="accepted narrowing", execution_policy="CAST_AND_CONTINUE",
+            quarantine_policy="COERCE_NULL",
+        ).to_dict()
+    mappings = [{"source": "id", "target": "id"}, amt_map]
     with admin[0].cursor() as cur:
         cur.execute(f'SELECT id, amt FROM "{src}" ORDER BY id')
         rows = [list(r) for r in cur.fetchall()]
+        cur.execute(f'SELECT count(*) FROM "{src}" WHERE id % 50 = 0')
+        unfit = cur.fetchone()[0]
     cfg = _cfg()
     token = set_active_number_locale("WIRE")
     try:
@@ -380,10 +389,12 @@ def test_approved_lossy_cast_written_by_the_real_writer(admin, monkeypatch) -> N
         reset_active_number_locale(token)
     assert result.ok, result.error
     with admin[0].cursor() as cur:
-        cur.execute(f'SELECT count(*) FROM "{dst}"')
-        landed = cur.fetchone()[0]
-    held = 4000 - landed
-    assert held > 0
+        cur.execute(f'SELECT count(*), count(amt) FROM "{dst}"')
+        landed, non_null = cur.fetchone()
+    if signed:
+        assert (landed, non_null) == (4000, 4000 - unfit)
+    else:
+        assert landed == 4000 - unfit
     plan = plan_of({"id": "bigint", "amt": "numeric(12,4)"}, mappings=mappings,
                    dest_types={"id": "bigint", "amt": "numeric(10,2)"})
     amt = {c.source: c for c in plan.columns}["amt"]
@@ -391,12 +402,17 @@ def test_approved_lossy_cast_written_by_the_real_writer(admin, monkeypatch) -> N
     for mode in ("R", "H"):
         ev = scan_pg(src, dst, plan, mode=mode)
         assert ev["outcome"] == "match", ev["differences"]
-        assert ev["population"]["held_out"] == {"fit_excluded": held}
+        assert ev["population"]["held_out"] == {"fit_excluded": 0 if signed else unfit}
         assert ev["population"]["rows_source"] == landed
-    # The row the writer should have held out, written rounded instead.
-    run_sql(admin, f'INSERT INTO "{dst}" VALUES (50, 50.12)')
-    ev = scan_pg(src, dst, plan, mode="R")
-    assert keys(ev["differences"], "extra_keys") == [50]
+    # The value the contract said to NULL / hold, written rounded instead.
+    if signed:
+        run_sql(admin, f'UPDATE "{dst}" SET amt = 50.12 WHERE id = 50')
+        ev = scan_pg(src, dst, plan, mode="R")
+        assert keys(ev["differences"], "changed_keys") == [50]
+    else:
+        run_sql(admin, f'INSERT INTO "{dst}" VALUES (50, 50.12)')
+        ev = scan_pg(src, dst, plan, mode="R")
+        assert keys(ev["differences"], "extra_keys") == [50]
 
 
 def test_float_residue_is_judged_equal_by_the_fingerprint(admin) -> None:
