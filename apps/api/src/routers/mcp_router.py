@@ -257,8 +257,26 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
                 status_code=403,
                 detail="The confirm policy can only be changed from an interactive sign-in session.",
             )
+    payload = request.model_dump()
+    if request.confirm is not None:
+        from services.mcp_confirm_policy import merge_confirm_change
+        from services.rbac import holds_platform_admin_role
+        from services.effective_role import workspace_id_from_request_headers
+        from src.services.auth_service import auth_required
+
+        try:
+            payload["confirm"] = merge_confirm_change(
+                old.get("confirm"), request.confirm,
+                platform_admin=not auth_required()
+                or holds_platform_admin_role(getattr(http_request.state, "user", None)),
+                caller_workspace=workspace_id_from_request_headers(http_request.headers) or "",
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
-        new = set_mcp_policy(request.model_dump())
+        new = set_mcp_policy(payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     append_audit_event(
