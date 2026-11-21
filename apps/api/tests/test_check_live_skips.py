@@ -487,3 +487,22 @@ def test_an_unexpected_oracle_live_skip_turns_the_job_red(test: str, message: st
     result = check("oracle-live", _oracle_live_cases([(test, message)]), load_manifest())
     assert result.status == "red" and result.exit_code() == 1
     assert [u["test"] for u in result.unexpected] == [test]
+
+
+def test_the_oracle_live_replay_is_the_real_82_and_no_allowlist_entry_is_stale() -> None:
+    """Round 2 F: the fixture holds the 82 skips of that run, and every
+    oracle-live allowlist entry matches one of them (none is stale)."""
+    data = json.loads(ORACLE_LIVE_SKIPS.read_text(encoding="utf-8"))
+    assert len(data["skips"]) == 82
+    assert len({s["test"] for s in data["skips"]}) == 82
+    result = check("oracle-live", _oracle_live_cases(), load_manifest())
+    # d356 / d357 are allowlisted but this run's MariaDB legs are both present.
+    assert not result.stale_allowlist, result.stale_allowlist
+
+
+def test_the_no_endpoint_template_entry_never_excuses_oracle_itself() -> None:
+    """Round 2 G: a missing template for the oracle driver is a real gap."""
+    test = "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_postgresql_to_database_oracle]"
+    result = check("oracle-live", _oracle_live_cases([(test, "No endpoint template for driver 'oracle'")]),
+                   load_manifest())
+    assert [u["test"] for u in result.unexpected] == [test]

@@ -101,18 +101,13 @@
           "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
         },
         {
-          "test": "tests/test_d350_pipeline_default_on_empty.py::*mariadb*",
-          "reason": "MariaDB not reachable",
-          "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
-        },
-        {
           "test": "tests/test_d226_case_oracle_follows_source_case_mapping.py::*",
           "reason": "TimescaleDB not configured",
           "why": "The TimescaleDB source leg needs a Timescale server; this job does not start one. The PostgreSQL source legs of the same test run."
         },
         {
           "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[[]*oracle*]",
-          "reason": "^No endpoint template for driver '",
+          "reason": "^No endpoint template for driver '(?!oracle')",
           "why": "SaaS/API, graph and time-series drivers have no live endpoint in CI (each needs a vendor account or server). These Oracle routes are not proven by this job; the Oracle writer and reader are proven by the database routes that run."
         },
         {

@@ -1,5 +1,5 @@
 {
- "source": "oracle-live job 136935340067, CI run 44932873967 (3e0a9cd53): every skipped test id with its pytest skip message, from the job log; the two d350 MariaDB skips (one per junit file, files and cells steps) are from the job's short summary",
+ "source": "oracle-live job 136935340067, CI run 44932873967 (3e0a9cd53): every skipped test id with its pytest skip message, from the job log (82). The short summary's 'test_d350...py:279' lines are the d356 and d357 MariaDB legs: that is the location of the _mariadb_conn helper they import.",
  "executed": 740,
  "skips": [
   {
@@ -327,11 +327,7 @@
    "message": "No endpoint template for driver 'zoho_crm'"
   },
   {
-   "test": "tests/test_d350_pipeline_default_on_empty.py::test_live_typed_pair_defaults_empty_and_the_proof_verifies[sqlserver-mariadb]",
-   "message": "MariaDB not reachable (DATAFLOW_TEST_MARIADB_*, :3307)"
-  },
-  {
-   "test": "tests/test_d350_pipeline_default_on_empty.py::test_live_typed_pair_defaults_empty_and_the_proof_verifies[sqlserver-mariadb]",
+   "test": "tests/test_d357_oracle_plan_type_matches_created_column.py::test_live_plan_types_equal_the_created_oracle_columns[mariadb]",
    "message": "MariaDB not reachable (DATAFLOW_TEST_MARIADB_*, :3307)"
   }
  ]
