@@ -263,6 +263,29 @@ export function removedOnRead(ledger: ConservationLedger): number {
   );
 }
 
+/**
+ * Mirror and SCD2 identities include rows kept from earlier runs:
+ * read + retained = active (current) + held + skipped + removed. The engine
+ * reports unaccounted = read + retained − accounted, so retained follows from
+ * it exactly; null when any term is missing.
+ */
+function retainedRows(ledger: ConservationLedger, landed: number | null | undefined): number | null {
+  const read = num(ledger.rows_read);
+  const unaccounted = num(ledger.unaccounted);
+  const land = num(landed);
+  if (read == null || unaccounted == null || land == null) return null;
+  const accounted = land
+    + Math.max(num(ledger.rows_quarantined) ?? 0, 0)
+    + Math.max(num(ledger.rows_skipped) ?? 0, 0)
+    + removedOnRead(ledger);
+  return unaccounted - read + accounted;
+}
+
+function retainedTerm(ledger: ConservationLedger, landed: number | null | undefined): string {
+  const retained = retainedRows(ledger, landed);
+  return retained != null && retained > 0 ? ` + retained ${fmt(retained)}` : "";
+}
+
 function removedTerm(ledger: ConservationLedger): string {
   const removed = removedOnRead(ledger);
   return removed ? ` + removed on read ${fmt(removed)}` : "";
@@ -285,13 +308,13 @@ export function ledgerEquation(ledger: ConservationLedger): string {
     return `job closed iff every stream is closed (${fmt(ledger.measured_streams)}/${fmt(ledger.stream_count)} measured)`;
   }
   if (kind === "mirror") {
-    return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
+    return `read ${fmt(ledger.rows_read)}${retainedTerm(ledger, ledger.active_count)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "vector") {
     return `read ${fmt(ledger.rows_read)} = identities ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "scd2") {
-    return `read ${fmt(ledger.rows_read)} = current ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
+    return `read ${fmt(ledger.rows_read)}${retainedTerm(ledger, ledger.dest_count)} = current ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "append_delta") {
     return `dest Δ ${fmt(ledger.dest_delta)} = COUNT(*) after ${fmt(ledger.dest_count)} − before ${fmt(ledger.dest_count_before)}`;
