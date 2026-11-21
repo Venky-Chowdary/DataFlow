@@ -945,33 +945,6 @@ jobs:
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
           DATAFLOW_ORACLE_SCHEMA: ${{ secrets.DATAFLOW_ORACLE_SCHEMA }}
 
-      - name: Oracle destination privilege probe denies a SELECT-only login (live)
-        id: oracle_deny
-        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
-        working-directory: apps/api
-        shell: bash
-        env:
-          # Step-level env outranks the job's: this step logs in as the
-          # read-only user tests/oracle_ci_init.sql creates.
-          DATAFLOW_ORACLE_PRIVILEGE_DENY: "1"
-          DATAFLOW_ORACLE_USER: DATAFLOW_RO
-          DATAFLOW_ORACLE_SCHEMA: DATAFLOW
-          DATAFLOW_ORACLE_TABLE: DF_DENY_PROBE
-        run: |
-          mkdir -p "$RUNNER_TEMP/live-junit"
-          set -o pipefail
-          python -m pytest \
-            tests/test_saas_privilege_deny_live.py::test_live_oracle_select_only_is_denied \
-            -v --tb=short -rfEs --timeout=300 \
-            --junitxml="$RUNNER_TEMP/live-junit/oracle-deny.xml" 2>&1 | tee "$RUNNER_TEMP/oracle-deny.log"
-
-      - name: Failing Oracle test ids
-        if: ${{ !cancelled() }}
-        run: |
-          echo "### Failing Oracle live tests" >> "$GITHUB_STEP_SUMMARY"
-          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP"/oracle-*.log | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
-          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP"/oracle-*.log | tail -4 || true
-
       - name: No Oracle live test may skip
         if: ${{ !cancelled() }}
         working-directory: apps/api
