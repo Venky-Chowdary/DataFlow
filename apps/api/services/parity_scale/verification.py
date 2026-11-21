@@ -169,6 +169,11 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     mappings = mappings_of(job)
     if not mappings:
         return None, "the job has no column map"
+    from services.parity_scale.scope import scope_refusal
+
+    refusal = scope_refusal(job)
+    if refusal:
+        return None, refusal
     t2s = target_to_source(job)
     key_targets = key_columns_of(job)
     return {

@@ -141,8 +141,12 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
             cause=cause(UNEXPLAINED, "These rows differ inside the databases and were not examined cell by "
                         "cell (more differing keys than the report keeps).", explained=False),
         ))
-    ev.observations = obs
-    # The scan compared every row: it supersedes Gate-8's coverage-limited evidence.
+    # The scan compared every row: it supersedes Gate-8's coverage-limited evidence,
+    # except what Gate-8 explained (quarantine, skipped by policy, rows from before
+    # an append, transforms): that stays explained (services.parity_scale.scope).
+    from services.parity_scale.scope import merge_explained
+
+    ev.observations = merge_explained(list(ev.observations), obs)
     ev.gate8_unaccounted = False
     ev.capped = False
     ev.note = ""
