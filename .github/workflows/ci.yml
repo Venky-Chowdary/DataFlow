@@ -1,8 +1,18 @@
 name: PR Workflow
 
+# One run per change. A push runs CI only on the integration branches below
+# (the health of a base after a merge). Every other branch gets its CI from
+# its pull request: with "feature/**" here, each push to a PR branch ran the
+# whole workflow twice (once for the push, once for the pull request), and the
+# two runs did not cancel each other. A branch with no PR yet gets CI by
+# opening a draft PR.
 on:
   push:
-    branches: ["feature/**"]
+    branches:
+      - "feature/Cleanup"
+      - "feature/fix-qa-bug-fixes"
+      - "feature/version2bugfixes"
+      - "feature/Venkat-Analysis"
   pull_request:
     branches: [main, "feature/**"]
   workflow_call:
