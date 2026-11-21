@@ -1,0 +1,844 @@
+{
+ "_comment": "CE1 golden vectors. Expected fields are written by hand in tests/data/gen_ce1_vectors.py (digests from the hand-written canonical bytes), never produced by ce1.py. 'HELD' means the write contract held the row out.",
+ "ce_version": "CE1",
+ "fields": [
+  {
+   "name": "null",
+   "kind": "integer",
+   "value": null,
+   "side": "destination",
+   "spec": {
+    "dest_type": "bigint",
+    "dest_engine": "postgresql"
+   },
+   "expected": "N"
+  },
+  {
+   "name": "int zero",
+   "kind": "integer",
+   "value": {
+    "$i": "0"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "bigint",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:0"
+  },
+  {
+   "name": "int negative",
+   "kind": "integer",
+   "value": {
+    "$i": "-42"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "bigint",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:-42"
+  },
+  {
+   "name": "int big",
+   "kind": "integer",
+   "value": {
+    "$i": "9223372036854775807"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "bigint",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V19:9223372036854775807"
+  },
+  {
+   "name": "int bool true",
+   "kind": "integer",
+   "value": true,
+   "side": "destination",
+   "spec": {
+    "dest_type": "bigint",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:1"
+  },
+  {
+   "name": "int as text (sqlite)",
+   "kind": "integer",
+   "value": "5",
+   "side": "destination",
+   "spec": {
+    "dest_type": "INTEGER",
+    "dest_engine": "sqlite"
+   },
+   "expected": "Xtext:1:5"
+  },
+  {
+   "name": "bool true",
+   "kind": "boolean",
+   "value": true,
+   "side": "destination",
+   "spec": {
+    "dest_type": "boolean",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:1"
+  },
+  {
+   "name": "bool false",
+   "kind": "boolean",
+   "value": false,
+   "side": "destination",
+   "spec": {
+    "dest_type": "boolean",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:0"
+  },
+  {
+   "name": "bool carrier int 2",
+   "kind": "boolean",
+   "value": {
+    "$i": "2"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "boolean",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:2"
+  },
+  {
+   "name": "decimal trailing zeros",
+   "kind": "decimal",
+   "value": {
+    "$d": "12.3400"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric(12,4)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V5:12.34"
+  },
+  {
+   "name": "decimal integral",
+   "kind": "decimal",
+   "value": {
+    "$d": "1E+2"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:100"
+  },
+  {
+   "name": "decimal negative zero",
+   "kind": "decimal",
+   "value": {
+    "$d": "-0.00"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric(12,2)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:0"
+  },
+  {
+   "name": "decimal small",
+   "kind": "decimal",
+   "value": {
+    "$d": "0.0000000150"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V11:0.000000015"
+  },
+  {
+   "name": "decimal negative",
+   "kind": "decimal",
+   "value": {
+    "$d": "-12.5"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V5:-12.5"
+  },
+  {
+   "name": "decimal NaN",
+   "kind": "decimal",
+   "value": {
+    "$d": "NaN"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:NaN"
+  },
+  {
+   "name": "decimal Infinity",
+   "kind": "decimal",
+   "value": {
+    "$d": "-Infinity"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V9:-Infinity"
+  },
+  {
+   "name": "decimal int value",
+   "kind": "decimal",
+   "value": {
+    "$i": "7"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:7"
+  },
+  {
+   "name": "decimal as REAL (sqlite) is the REAL's shortest decimal",
+   "kind": "decimal",
+   "value": {
+    "$f": "12.5"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "NUMERIC(10,2)",
+    "dest_engine": "sqlite"
+   },
+   "expected": "V4:12.5"
+  },
+  {
+   "name": "decimal as inexact REAL (sqlite)",
+   "kind": "decimal",
+   "value": {
+    "$f": "0.30000000000000004"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "NUMERIC(10,2)",
+    "dest_engine": "sqlite"
+   },
+   "expected": "V19:0.30000000000000004"
+  },
+  {
+   "name": "REAL in a PostgreSQL decimal kind stays foreign",
+   "kind": "decimal",
+   "value": {
+    "$f": "12.5"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
+   },
+   "expected": "Xreal:4:12.5"
+  },
+  {
+   "name": "text ascii",
+   "kind": "text",
+   "value": "abc",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:abc"
+  },
+  {
+   "name": "text empty",
+   "kind": "text",
+   "value": "",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V0:"
+  },
+  {
+   "name": "text trailing space kept",
+   "kind": "text",
+   "value": "ab ",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:ab "
+  },
+  {
+   "name": "text supplementary",
+   "kind": "text",
+   "value": "a😀b",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V6:a😀b"
+  },
+  {
+   "name": "text combining mark not normalised",
+   "kind": "text",
+   "value": "é",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:é"
+  },
+  {
+   "name": "text case kept",
+   "kind": "text",
+   "value": "ABC",
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3:ABC"
+  },
+  {
+   "name": "text digest width",
+   "kind": "text",
+   "value": "hello",
+   "side": "destination",
+   "spec": {
+    "dest_type": "text",
+    "width": "digest",
+    "dest_engine": "postgresql"
+   },
+   "expected": "D2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  },
+  {
+   "name": "text empty is null (oracle)",
+   "kind": "text",
+   "value": "",
+   "side": "destination",
+   "spec": {
+    "dest_type": "VARCHAR2(20)",
+    "dest_engine": "oracle",
+    "empty_is_null": true
+   },
+   "expected": "N"
+  },
+  {
+   "name": "text int storage class (sqlite)",
+   "kind": "text",
+   "value": {
+    "$i": "5"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "TEXT",
+    "dest_engine": "sqlite"
+   },
+   "expected": "Xinteger:1:5"
+  },
+  {
+   "name": "char blank pad trimmed",
+   "kind": "char",
+   "value": "ab   ",
+   "side": "destination",
+   "spec": {
+    "dest_type": "char(5)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V2:ab"
+  },
+  {
+   "name": "char leading space kept",
+   "kind": "char",
+   "value": " ab",
+   "side": "destination",
+   "spec": {
+    "dest_type": "char(5)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V3: ab"
+  },
+  {
+   "name": "date epoch",
+   "kind": "date",
+   "value": {
+    "$date": "1970-01-01"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "date",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V1:0"
+  },
+  {
+   "name": "date pre-epoch",
+   "kind": "date",
+   "value": {
+    "$date": "1969-12-31"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "date",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V2:-1"
+  },
+  {
+   "name": "date leap day",
+   "kind": "date",
+   "value": {
+    "$date": "2024-02-29"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "date",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V5:19782"
+  },
+  {
+   "name": "date infinity",
+   "kind": "date",
+   "value": "infinity",
+   "side": "destination",
+   "spec": {
+    "dest_type": "date",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V4:+inf"
+  },
+  {
+   "name": "timestamp us",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123456"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp(6)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V16:1704067200123456"
+  },
+  {
+   "name": "timestamp pre-epoch",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "1969-12-31T23:59:59.999999"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp(6)",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V2:-1"
+  },
+  {
+   "name": "timestamp ms exact",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123000"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V13:1704067200123"
+  },
+  {
+   "name": "timestamp ms finer than precision",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123456"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "Xus:16:1704067200123456"
+  },
+  {
+   "name": "timestamp ms projected half up",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V13:1704067200124"
+  },
+  {
+   "name": "timestamp pre-2000 projected for PostgreSQL rounds half away from 2000",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "1969-12-31T23:59:59.999500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V2:-1"
+  },
+  {
+   "name": "timestamp pre-epoch projected for MySQL rounds half up",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "1969-12-31T23:59:59.999500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "DATETIME(3)",
+    "digits": 3,
+    "dest_engine": "mysql"
+   },
+   "expected": "V1:0"
+  },
+  {
+   "name": "timestamp 2000 boundary projected for PostgreSQL",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2000-01-01T00:00:00.000500"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "timestamp(3)",
+    "digits": 3,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V12:946684800001"
+  },
+  {
+   "name": "timestamp 100ns units (datetime2(7))",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123456"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "datetime2(7)",
+    "digits": 7,
+    "dest_engine": "sqlserver"
+   },
+   "expected": "V17:17040672001234560"
+  },
+  {
+   "name": "timestamptz to utc",
+   "kind": "timestamptz",
+   "value": {
+    "$dt": "2024-01-01T02:00:00+02:00"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp with time zone",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V16:1704067200000000"
+  },
+  {
+   "name": "timestamp infinity",
+   "kind": "timestamp",
+   "value": "-infinity",
+   "side": "destination",
+   "spec": {
+    "dest_type": "timestamp",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V4:-inf"
+  },
+  {
+   "name": "time us",
+   "kind": "time",
+   "value": {
+    "$t": "10:00:00.500000"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "time",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V11:36000500000"
+  },
+  {
+   "name": "time projected no wrap",
+   "kind": "time",
+   "value": {
+    "$t": "23:59:59.999900"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "time(0)",
+    "digits": 0,
+    "dest_engine": "postgresql"
+   },
+   "expected": "V5:86399"
+  },
+  {
+   "name": "uuid object",
+   "kind": "uuid",
+   "value": {
+    "$u": "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "uuid",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V36:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+  },
+  {
+   "name": "uuid text upper",
+   "kind": "uuid",
+   "value": "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11",
+   "side": "destination",
+   "spec": {
+    "dest_type": "uuid",
+    "dest_engine": "postgresql"
+   },
+   "expected": "V36:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+  },
+  {
+   "name": "uuid braces not canonical",
+   "kind": "uuid",
+   "value": "{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}",
+   "side": "destination",
+   "spec": {
+    "dest_type": "uuid",
+    "dest_engine": "postgresql"
+   },
+   "expected": "Xtext:38:{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}"
+  },
+  {
+   "name": "binary",
+   "kind": "binary",
+   "value": {
+    "$b": "AAEC/w=="
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "bytea",
+    "width": "digest",
+    "dest_engine": "postgresql"
+   },
+   "expected": "D3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56"
+  },
+  {
+   "name": "binary empty",
+   "kind": "binary",
+   "value": {
+    "$b": ""
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "bytea",
+    "width": "digest",
+    "dest_engine": "postgresql"
+   },
+   "expected": "De3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+   "name": "native real (sqlite)",
+   "kind": "native",
+   "value": {
+    "$f": "-0.0"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "REAL",
+    "dest_engine": "sqlite"
+   },
+   "expected": "Xreal:4:-0.0"
+  },
+  {
+   "name": "decimal fit exact",
+   "kind": "decimal",
+   "value": {
+    "$d": "12.3400"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "numeric(10,2)",
+    "decimal_fit": {
+     "precision": 10,
+     "scale": 2,
+     "dest_db": "postgresql",
+     "actions": {
+      "scale": "null",
+      "int": "hold",
+      "both": "hold",
+      "nan": "null",
+      "inf": "hold"
+     }
+    },
+    "dest_engine": "postgresql"
+   },
+   "expected": "V5:12.34"
+  },
+  {
+   "name": "decimal fit scale overflow nulls",
+   "kind": "decimal",
+   "value": {
+    "$d": "12.345"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "numeric(10,2)",
+    "decimal_fit": {
+     "precision": 10,
+     "scale": 2,
+     "dest_db": "postgresql",
+     "actions": {
+      "scale": "null",
+      "int": "hold",
+      "both": "hold",
+      "nan": "null",
+      "inf": "hold"
+     }
+    },
+    "dest_engine": "postgresql"
+   },
+   "expected": "N"
+  },
+  {
+   "name": "decimal fit int overflow held",
+   "kind": "decimal",
+   "value": {
+    "$d": "123456789"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "numeric(10,2)",
+    "decimal_fit": {
+     "precision": 10,
+     "scale": 2,
+     "dest_db": "postgresql",
+     "actions": {
+      "scale": "null",
+      "int": "hold",
+      "both": "hold",
+      "nan": "null",
+      "inf": "hold"
+     }
+    },
+    "dest_engine": "postgresql"
+   },
+   "expected": "HELD"
+  },
+  {
+   "name": "decimal fit zero into numeric(2,2) held (writer quirk)",
+   "kind": "decimal",
+   "value": {
+    "$d": "0"
+   },
+   "side": "source",
+   "spec": {
+    "dest_type": "numeric(2,2)",
+    "decimal_fit": {
+     "precision": 2,
+     "scale": 2,
+     "dest_db": "postgresql",
+     "actions": {
+      "scale": "hold",
+      "int": "hold",
+      "both": "hold",
+      "nan": "hold",
+      "inf": "hold"
+     }
+    },
+    "dest_engine": "postgresql"
+   },
+   "expected": "HELD"
+  },
+  {
+   "name": "json null on scalar column (D144)",
+   "kind": "text",
+   "value": {
+    "$json_null": true
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "varchar(20)",
+    "dest_engine": "s3"
+   },
+   "expected": "N"
+  },
+  {
+   "name": "json null on document column (D144)",
+   "kind": "native",
+   "value": {
+    "$json_null": true
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "json",
+    "dest_engine": "s3"
+   },
+   "expected": "V4:null"
+  }
+ ],
+ "rows": [
+  {
+   "name": "row: (1, NULL, 'a')",
+   "kinds": [
+    "integer",
+    "text",
+    "text"
+   ],
+   "values": [
+    {
+     "$i": "1"
+    },
+    null,
+    "a"
+   ],
+   "expected": "V1:1NV1:a",
+   "sha256": "6ad782a208f9eba556847c481b870cd60f5c2413d72a4d4a12fea307b7f5b242",
+   "a": "781236692818979749",
+   "b": "469636910294699222"
+  },
+  {
+   "name": "row: field boundary cannot be forged",
+   "kinds": [
+    "text",
+    "text"
+   ],
+   "values": [
+    "a",
+    "V1:b"
+   ],
+   "expected": "V1:aV4:V1:b",
+   "sha256": "3f1c15b9d87e3496073ac712d3d71ab84d0f57bdf861cfe8432dfb534d2e670e",
+   "a": "1088769097862100118",
+   "b": "520947590592142008"
+  }
+ ]
+}

@@ -19,6 +19,14 @@ which is why :func:`engine_checksum_comparable` demands the same engine family
 different text, and a text digest would call that a mismatch. Where the
 precondition does not hold the caller keeps the Python fingerprint path, which
 knows how to make those two equal.
+
+Parity at Scale (``services.parity_scale``) folds this module in as its
+PostgreSQL dialect: the SQL of the digest below now lives in
+``services/parity_scale/dialects/postgresql.py`` beside the CE1 rendering, and
+:func:`postgresql_ce1_population_digest` is the same whole-table digest under
+CE1 ("mode R with one segment"). Gate-8 keeps calling the md5 digest — its
+output is unchanged — until phase 3 of the design switches it over behind
+``DATAWRAP_PARITY_SCALE``.
 """
 
 from __future__ import annotations
@@ -35,10 +43,11 @@ _SUPPORTED_ENGINES: Final[frozenset[str]] = frozenset(
     {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase"}
 )
 
-#: Hex width of an md5 digest. Every field is reduced to exactly this many
-#: characters before the row is assembled, which is what makes the row rendering
-#: injective without needing a separator: a value cannot forge a field boundary
-#: because there are no boundaries to forge, only fixed-width blocks.
+#: Hex width of an md5 digest. Every field of the md5 digest is reduced to
+#: exactly this many characters before the row is assembled, which is what makes
+#: the row rendering injective without needing a separator: a value cannot forge
+#: a field boundary because there are no boundaries to forge, only fixed-width
+#: blocks. (CE1 gets the same property from length prefixes.)
 #:
 #: A separator would have been simpler and wrong. Any byte chosen as a separator
 #: can legitimately appear inside a text column, and the moment it does,
@@ -179,28 +188,13 @@ def postgresql_checksum_sql(
     """``SELECT count, digest`` over every row of ``table_ref``.
 
     Each row renders to one text value, is hashed with md5, and the leading 64
-    bits are summed as ``numeric``. Summing rather than aggregating in order is
-    what makes the result independent of scan order; ``numeric`` rather than
-    ``bigint`` is what keeps a wide table from overflowing the accumulator.
+    bits are summed as ``numeric`` (see the PostgreSQL dialect of Parity at
+    Scale, which owns the SQL). The NULL flag rides inside the hashed text so
+    NULL and the empty string cannot digest alike.
     """
-    from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+    from services.parity_scale.dialects.postgresql import legacy_md5_checksum_sql
 
-    fields = []
-    for col in columns:
-        quoted = quote_sql_identifier(require_safe_identifier(col, preserve_case=True))
-        # The IS NULL flag rides inside the hashed text so that NULL and the
-        # empty string cannot digest alike — the same distinction the Python
-        # fingerprint path draws, and one that has already been a real bug here.
-        fields.append(
-            f"md5(coalesce({quoted}::text, '') || ({quoted} IS NULL)::text)"
-        )
-    row_text = " || ".join(fields)
-    where_sql = f" WHERE {where}" if (where or "").strip() else ""
-    return (
-        "SELECT count(*)::bigint AS n, "
-        f"coalesce(sum(('x' || substr(md5({row_text}), 1, 15))::bit(60)::bigint::numeric), 0) AS digest "
-        f"FROM {table_ref}{where_sql}"  # nosec B608 — identifiers quoted above
-    )
+    return legacy_md5_checksum_sql(table_ref, columns, where=where)
 
 
 def postgresql_engine_checksum(
@@ -224,3 +218,30 @@ def postgresql_engine_checksum(
         checksum=str(row[1]),
         scope="engine_population",
     )
+
+
+def postgresql_ce1_population_digest(
+    connection: Any,
+    plan: Any,
+    *,
+    role: str,
+    table: str,
+    schema: str = "public",
+) -> EngineChecksum | None:
+    """The CE1 digest of a whole table: Parity at Scale mode R with one segment.
+
+    ``plan`` is a :class:`services.parity_scale.plan.TablePlan`; ``role`` is
+    ``source`` (projections replayed) or ``destination``. Returns ``None`` while
+    ``DATAWRAP_PARITY_SCALE`` is off, so no caller can reach it by accident.
+    The checksum text is ``psd1:<Σa>:<Σb>``: never comparable with an md5
+    digest, so a mixed comparison fails rather than passes.
+    """
+    from services.parity_scale import parity_scale_enabled
+
+    if not parity_scale_enabled():
+        return None
+    from services.parity_scale.dialects.postgresql import PostgresSide
+
+    side = PostgresSide(role=role, plan=plan, table=table, schema=schema, connection=connection)
+    count, sum_a, sum_b = side.range_digest(None, None)
+    return EngineChecksum(row_count=count, checksum=f"psd1:{sum_a}:{sum_b}", scope="ce1_population")

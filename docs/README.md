@@ -46,6 +46,7 @@ verified. Where the product does not do something, the page says so.
 | Page | What it covers |
 |---|---|
 | [reference/connectors.md](reference/connectors.md) | Capability matrix and CI proof for every driver and file format (generated) |
+| [reference/parity-canonical-encoding.md](reference/parity-canonical-encoding.md) | Parity at Scale's canonical row encoding (CE1). Engineering specification of an experimental feature behind a flag; not yet part of any verdict |
 | [API_VERSIONING.md](API_VERSIONING.md) | The API version policy as implemented |
 | [WEBHOOK_SIGNING.md](WEBHOOK_SIGNING.md) | How to verify a webhook signature |
 | [SCIM.md](SCIM.md) | Provisioning users and groups from an identity provider |

@@ -115,6 +115,24 @@
       "min_executed": 10,
       "expected_skips": []
     },
+    "parity-ce-matrix": {
+      "proves": [],
+      "about": "Parity at Scale CE matrix (experimental): CE1 renderings per engine and kind, first-wave pairs copied by the real writer, and the writer/Gate-8 agreement tests, on PostgreSQL, MySQL 8, MariaDB 11 (its own leg) and SQL Server. Certifies CE1, not the engines: other jobs prove those.",
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "sqlserver"],
+      "min_executed": 80,
+      "expected_skips": []
+    },
+    "parity-scale-pg": {
+      "proves": [],
+      "about": "Parity at Scale (experimental, behind DATAWRAP_PARITY_SCALE): CE1 soundness properties at 2,000 examples, the SQLite driver, the live PostgreSQL rendering and fault-injection tests and the 1M-row benchmark. A feature smoke, not the proof of an engine: api-tests proves PostgreSQL and SQLite.",
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "sqlite"],
+      "min_executed": 150,
+      "expected_skips": []
+    },
     "engine-suite": {
       "proves": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
       "workflow": ".github/workflows/full-suite.yml",

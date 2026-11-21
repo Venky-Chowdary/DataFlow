@@ -493,6 +493,30 @@ _MYSQL_STRICT_MODES = (
 )
 
 
+def _fractional_rounding_modes(cur: Any) -> tuple[str, ...]:
+    """``TIME_ROUND_FRACTIONAL`` on MariaDB 10.4+, else nothing.
+
+    MariaDB truncates the fractional seconds a narrower ``DATETIME(n)`` /
+    ``TIME(n)`` cannot hold; MySQL rounds them. Rounding on both makes what
+    lands equal the instant Gate-8 models (``services.carrier_instant``), so a
+    faithful narrowing is not reported as a difference and a real one is.
+    """
+    try:
+        cur.execute("SELECT VERSION()")
+        row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 — a version probe never blocks a write
+        logger.info("Could not read the server version: %s", exc)
+        return ()
+    version = str((row or [""])[0] or "")
+    if "mariadb" not in version.lower():
+        return ()
+    try:
+        major, minor = (int(x) for x in version.split("-", 1)[0].split(".")[:2])
+    except ValueError:
+        return ()
+    return ("TIME_ROUND_FRACTIONAL",) if (major, minor) >= (10, 4) else ()
+
+
 def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
     """Append fail-closed sql_mode flags without wiping existing session modes."""
     try:
@@ -508,10 +532,15 @@ def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
         return
     parts = [p.strip().upper() for p in str(current).split(",") if p.strip()]
     changed = False
-    for mode in _MYSQL_STRICT_MODES:
+    for mode in (*_MYSQL_STRICT_MODES, *_fractional_rounding_modes(cur)):
         if mode not in parts:
             parts.append(mode)
             changed = True
+    if "TIME_TRUNCATE_FRACTIONAL" in parts:
+        # MySQL's opt-in truncation: what lands must be the rounded instant
+        # Gate-8 models (services.carrier_instant), never a silently cut one.
+        parts.remove("TIME_TRUNCATE_FRACTIONAL")
+        changed = True
     if not changed:
         return
     # Modes are fixed constants / server-returned tokens — not user input.
