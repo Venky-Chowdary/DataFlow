@@ -100,6 +100,7 @@ import {
   latchDeepLink,
   nextListSelection,
   shouldApplyInitialJobFocus,
+  selectionCommandsEnabled,
 } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
@@ -288,6 +289,8 @@ interface JobsPageProps {
   /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
   onStartTransfer?: (intent?: JobsStudioIntent) => void;
   initialJobId?: string;
+  /** False while another screen is shown (the page stays mounted). */
+  active?: boolean;
   /** Deep-link panel (e.g. mapping-proof). */
   initialPanel?: string;
 }
@@ -375,7 +378,7 @@ function SelectedVerdict({ row }: { row: TransferJob }) {
   );
 }
 
-export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, onLoadPage, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
+export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, onLoadPage, onStartTransfer, initialJobId, initialPanel, active = true }: JobsPageProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
@@ -820,6 +823,19 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
 
   const handleRetry = useCallback(async (jobId: string | null = selectedId) => {
     if (!jobId) return;
+    // Retry starts a new write job: always confirmed in the app dialog (review UI2 #3).
+    const target = recentJobs.find((j) => j._id === jobId) ?? pageHistory?.jobs.find((j) => j._id === jobId);
+    const accepted = await confirm({
+      title: "Retry this job from the start?",
+      message: "A new job reads the source again from the beginning and writes to the destination.",
+      confirmLabel: "Retry from start",
+      cancelLabel: "Keep as is",
+      facts: [
+        { label: "Job", value: target ? jobDisplayName(target, nameOverrides[target._id]) : shortJobId(jobId) },
+        { label: "Job ID", value: shortJobId(jobId) },
+      ],
+    });
+    if (!accepted) return;
     setRetrying(true);
     try {
       const result = await retryJob(jobId);
@@ -849,7 +865,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     } finally {
       setRetrying(false);
     }
-  }, [selectedId, onRefresh, onStartTransfer, toast]);
+  }, [selectedId, onRefresh, onStartTransfer, toast, confirm, recentJobs, pageHistory, nameOverrides]);
 
   const focusJob = useCallback((jobId: string) => {
     const id = jobId.trim();
@@ -990,7 +1006,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   // The command menu lists what can be done to the selected job first (UI pass 2).
   const runActionsRef = useRef(runActions);
   runActionsRef.current = runActions;
-  const commandJob = selected && selectedId === selected._id ? selected : null;
+  // Only a job the person picked, on the visible Jobs screen, with its detail open (review UI2 #3).
+  const commandJob = selectionCommandsEnabled({ active, explicitPick, panelOpen }) && selected && selectedId === selected._id ? selected : null;
   useEffect(() => {
     if (!commandJob) return undefined;
     const items = runActionsRef.current.rowMenuItems(commandJob).filter((item) => !item.disabled && item.id !== "open");

@@ -98,3 +98,88 @@ describe("shortcuts", () => {
     return import("../../lib/commandRegistry.js").then(({ getSelectionActions }) => assert.equal(getSelectionActions()?.title, "b"));
   });
 });
+
+describe("shell keys (review UI2 #6, #11)", () => {
+  const key = (k: string, extra: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; defaultPrevented: boolean; target: EventTarget | null }> = {}) =>
+    ({ key: k, metaKey: false, ctrlKey: false, altKey: false, defaultPrevented: false, target: document.body, ...extra });
+
+  it("Ctrl+K and Cmd+K open the menu; ? opens the sheet, even from a drawer", async () => {
+    const { shellShortcut } = await import("../../lib/commandRegistry.js");
+    assert.equal(shellShortcut(key("k", { ctrlKey: true })), "menu");
+    assert.equal(shellShortcut(key("K", { metaKey: true })), "menu");
+    const drawer = document.createElement("div");
+    drawer.setAttribute("role", "dialog");
+    const button = document.createElement("button");
+    drawer.appendChild(button);
+    document.body.appendChild(drawer);
+    assert.equal(shellShortcut(key("?", { target: button })), "shortcuts");
+    drawer.remove();
+  });
+
+  it("leaves typing, already-handled keys and the canvas palette's Ctrl+K alone", async () => {
+    const { shellShortcut } = await import("../../lib/commandRegistry.js");
+    const input = document.createElement("input");
+    assert.equal(shellShortcut(key("?", { target: input })), null);
+    assert.equal(shellShortcut(key("k", { ctrlKey: true, defaultPrevented: true })), null);
+    const canvas = document.createElement("div");
+    canvas.setAttribute("data-owns-command-key", "");
+    document.body.appendChild(canvas);
+    assert.equal(shellShortcut(key("k", { ctrlKey: true })), null, "the visible canvas owns Ctrl+K");
+    const kept = document.createElement("div");
+    kept.hidden = true;
+    kept.appendChild(canvas);
+    document.body.appendChild(kept);
+    assert.equal(shellShortcut(key("k", { ctrlKey: true })), "menu", "a canvas kept mounted behind another screen does not");
+    kept.remove();
+  });
+});
+
+describe("Escape closes only the top overlay (review UI2 #6)", () => {
+  it("a Dialog underneath ignores an Escape the menu handled", async () => {
+    const { Dialog } = await import("./Dialog.js");
+    const { pushOverlay } = await import("../../lib/overlayStack.js");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    let closed = 0;
+    await act(async () => root.render(createElement(Dialog, { open: true, onClose: () => { closed += 1; }, title: "Add a computed column" }, createElement("input"))));
+    const menu = document.createElement("div");
+    document.body.appendChild(menu);
+    const pop = pushOverlay(menu);
+    await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    assert.equal(closed, 0, "the menu is on top");
+    pop();
+    const handled = new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    handled.preventDefault();
+    await act(async () => { document.dispatchEvent(handled); });
+    assert.equal(closed, 0, "an Escape another layer took is not reused");
+    await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    assert.equal(closed, 1);
+    await act(async () => root.unmount());
+  });
+});
+
+describe("selection gating (review UI2 #3)", () => {
+  it("offers job actions only for an explicit pick on the visible Jobs screen with its detail open", async () => {
+    const { selectionCommandsEnabled } = await import("../../lib/jobSelection.js");
+    assert.equal(selectionCommandsEnabled({ active: true, explicitPick: true, panelOpen: true }), true);
+    assert.equal(selectionCommandsEnabled({ active: true, explicitPick: false, panelOpen: true }), false, "auto-selected first row");
+    assert.equal(selectionCommandsEnabled({ active: false, explicitPick: true, panelOpen: true }), false, "Jobs kept mounted behind another screen");
+    assert.equal(selectionCommandsEnabled({ active: true, explicitPick: true, panelOpen: false }), false, "drawer closed");
+  });
+});
+
+describe("the menu joins the overlay stack while open (review UI2 #6)", () => {
+  it("is the top overlay, so a Dialog underneath keeps its typed input on Escape", async () => {
+    const { isTopOverlay } = await import("../../lib/overlayStack.js");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => root.render(createElement(CommandMenu, {
+      open: true, onOpenChange: () => {}, navItems: [], jobs: [], connectors: [], schedules: [], onNavigate: () => {}, onShowShortcuts: () => {},
+    })));
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    assert.equal(isTopOverlay(document.querySelector<HTMLElement>(".df2-cmdk-content")), true);
+    await act(async () => root.unmount());
+  });
+});

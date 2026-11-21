@@ -6,7 +6,8 @@
  * returns focus to where it was.
  */
 import { Command } from "cmdk";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
+import { pushOverlay } from "../../lib/overlayStack";
 import type { IconName } from "../icons/iconMap";
 import { useSelectionActions } from "../../lib/commandRegistry";
 import type { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
@@ -33,6 +34,20 @@ export function CommandMenu({ open, onOpenChange, navItems, jobs, connectors, sc
     window.setTimeout(fn, 0);
   };
   const recentJobs = useMemo(() => jobs.slice(0, MAX_RECORDS * 4), [jobs]);
+  // On the app's overlay stack while open: Escape closes this menu only, never
+  // a dialog underneath it (review UI2 #6).
+  useEffect(() => {
+    if (!open) return undefined;
+    let pop = () => {};
+    const timer = window.setTimeout(() => {
+      const content = document.querySelector<HTMLElement>(".df2-cmdk-content");
+      if (content) pop = pushOverlay(content);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      pop();
+    };
+  }, [open]);
   return (
     <Command.Dialog
       open={open}

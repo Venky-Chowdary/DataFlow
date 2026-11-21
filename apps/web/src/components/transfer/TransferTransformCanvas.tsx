@@ -729,6 +729,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   return (
     <div
       className="df2-studio-next df2-canvas"
+      data-owns-command-key=""
       data-view={viewMode}
       data-testid="transform-canvas"
       data-document={documentKind(graph)}

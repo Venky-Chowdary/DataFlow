@@ -12,7 +12,7 @@ import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { CommandMenu } from "./components/ui/CommandMenu";
 import { ShortcutsSheet } from "./components/ui/ShortcutsSheet";
-import { isTypingTarget } from "./lib/commandRegistry";
+import { shellShortcut } from "./lib/commandRegistry";
 import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
 import { FirstRunWorkspace } from "./components/ui/FirstRunWorkspace";
 import { StatusPopover } from "./components/StatusPopover";
@@ -290,13 +290,13 @@ function AppShell({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const action = shellShortcut(e);
+      if (action === "menu") {
         // The command menu (UI pass 2): actions for the selection, pages, records.
         e.preventDefault();
         setShortcutsOpen(false);
         setCommandOpen((open) => !open);
-      } else if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey && !isTypingTarget(e.target)
-        && !document.querySelector('[role="dialog"]')) {
+      } else if (action === "shortcuts") {
         e.preventDefault();
         setShortcutsOpen(true);
       } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
@@ -1049,6 +1049,7 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("jobs")}`} hidden={screen !== "jobs"} aria-hidden={screen !== "jobs"}>
                 <PageErrorBoundary label="Job Theater">
                   <JobsPage
+                    active={screen === "jobs"}
                     jobs={jobs}
                     history={jobHistory}
                     onLoadPage={fetchJobs}

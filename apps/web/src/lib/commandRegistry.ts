@@ -87,3 +87,32 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   const tag = el.tagName.toLowerCase();
   return tag === "input" || tag === "textarea" || tag === "select" || Boolean(el.isContentEditable);
 }
+
+export interface ShellKey {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  defaultPrevented: boolean;
+  target: EventTarget | null;
+}
+
+/**
+ * What the app shell does with a key press (review UI2 #6 / #11):
+ * Cmd/Ctrl+K opens the command menu unless a visible screen owns that key
+ * (the Transform canvas has its own palette); "?" opens the shortcuts sheet
+ * from anywhere outside a text field, drawers included. A key another
+ * handler already took (defaultPrevented) is left alone.
+ */
+export function shellShortcut(event: ShellKey, doc: Pick<Document, "querySelectorAll"> = document): "menu" | "shortcuts" | null {
+  if (event.defaultPrevented) return null;
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+    const owners = Array.from(doc.querySelectorAll<HTMLElement>("[data-owns-command-key]"));
+    if (owners.some((el) => !el.closest("[hidden]"))) return null;
+    return "menu";
+  }
+  if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target)) {
+    return "shortcuts";
+  }
+  return null;
+}
