@@ -186,7 +186,14 @@ is written:
 - SCD2 history tables are refused on such a server: create the history table
   yourself with an `AUTO_INCREMENT` primary key and run SCD2 into it.
 - The tables Datawrap creates beside the data (the quarantine table, the
-  mirror key-staging table, the CDC apply table) declare a key too.
+  mirror key-staging table, the CDC apply table) declare a key too. An array
+  child table (normalize or hybrid array policy) uses its parent key columns
+  plus the ordinal as its PRIMARY KEY there, all NOT NULL; the parent key
+  columns are `VARCHAR` sized to InnoDB's 3,072-byte key (766 characters for
+  one column), and a longer parent key is refused before anything is written.
+- If the probe did not run and the server refuses a `CREATE` anyway (MySQL
+  error 3750), the run stops with that finding and asks you to re-run
+  Validate, instead of the raw driver error.
 
 PostgreSQL and SQL Server have no such server setting, so the check does not
 apply there.
@@ -208,8 +215,9 @@ apply there.
 - `apps/api/services/append_continuity.py`
 - `apps/api/connectors/merge_registry.py`
 - `apps/api/services/dest_require_primary_key.py`, `apps/api/connectors/mysql_writer.py`
-  (`tests/test_d396_require_primary_key_surrogate_e2e.py`, live on MariaDB
-  with `innodb_force_primary_key=ON`)
+  (`tests/test_d396_require_primary_key_surrogate_e2e.py`,
+  `tests/test_qa_b1_forced_key_array_child_e2e.py`, live on MariaDB with
+  `innodb_force_primary_key=ON`)
 - `apps/api/services/mirror_engine.py`
 - `apps/api/services/copy_incremental.py`
 - `apps/api/services/scd2_engine.py`

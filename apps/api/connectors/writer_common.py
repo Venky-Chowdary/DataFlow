@@ -2595,6 +2595,12 @@ def early_array_strategy_gate(
     return "; ".join(issues) if issues else None
 
 
+def _forces_primary_key(cursor: Any) -> bool:
+    from services.dest_require_primary_key import server_forces_primary_key_on
+
+    return server_forces_primary_key_on(cursor)[0]
+
+
 def flush_normalized_child_batches(
     *,
     headers: list[str],
@@ -2662,18 +2668,18 @@ def flush_normalized_child_batches(
             table_q = _qualified(child)
             col_q = ", ".join(quote_sql_identifier(c, quote) for c in cols)
             if create_table:
-                col_defs = ", ".join(
-                    f"{quote_sql_identifier(c, quote)} {t}"
-                    for c, t in zip(cols, types)
-                )
-                # columns = parent_keys + ordinal + value cols — unique for at-least-once.
-                pk_n = int(batch.get("parent_key_count") or 1)
-                uniq_cols = cols[: max(1, pk_n) + 1]
-                uniq_sql = ", ".join(quote_sql_identifier(c, quote) for c in uniq_cols)
-                ddl = (
-                    f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}, "
-                    f"UNIQUE ({uniq_sql}))"
-                )
+                # parent keys + ordinal: UNIQUE, or the PRIMARY KEY a forced-key
+                # MySQL-family server demands (structural_array.child_table_key_ddl).
+                from services.structural_array import child_table_key_ddl
+
+                pk_n = max(1, int(batch.get("parent_key_count") or 1))
+                forced = quote == "`" and cursor is not None and _forces_primary_key(cursor)
+                body, width = child_table_key_ddl(cols, types, pk_n, quote=quote, forced_primary_key=forced)
+                too_long = sum(1 for r in rows if width and any(len(str(v)) > width for v in r[:pk_n]))
+                if too_long:
+                    errors.append(f"child table {child!r}: {too_long} row(s) have a parent key longer than {width} characters, the widest PRIMARY KEY column this server allows")
+                    return {"ok": False, "rows_written": written, "tables": tables, "errors": errors}
+                ddl = f"CREATE TABLE IF NOT EXISTS {table_q} ({body})"
                 if cursor is not None:
                     cursor.execute(ddl)
                 elif sa_conn is not None:
