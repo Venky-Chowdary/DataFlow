@@ -167,6 +167,30 @@ those, only append modes are accepted. Overwrite, upsert, deduped, mirror and
 SCD2 are refused at Validate, because they would run as a plain append and
 publish duplicates that cannot be removed.
 
+## Destinations that require a primary key
+
+Some MySQL servers refuse any `CREATE TABLE` without a primary key
+(`sql_require_primary_key=ON`, as on Aiven; on MariaDB,
+`innodb_force_primary_key=ON`). Validate reads that setting before anything
+is written:
+
+- If the source table has a primary key, the table Datawrap creates uses it,
+  in every sync mode, append included. A later append that would repeat a
+  stored key is then refused at Validate with the keyed modes to use instead.
+- If the source has no key (or a query result is the source, or the append
+  policy lets keys repeat), Validate blocks and shows the fix: Datawrap can
+  add its own row key, `_dw_row_id BIGINT AUTO_INCREMENT PRIMARY KEY`
+  (`INVISIBLE` on MySQL 8.0.23 and later, a plain column on MariaDB). It is
+  added only after you approve that destination change. The job records it as
+  a Datawrap-added column, and parity never compares it.
+- SCD2 history tables are refused on such a server: create the history table
+  yourself with an `AUTO_INCREMENT` primary key and run SCD2 into it.
+- The tables Datawrap creates beside the data (the quarantine table, the
+  mirror key-staging table, the CDC apply table) declare a key too.
+
+PostgreSQL and SQL Server have no such server setting, so the check does not
+apply there.
+
 ## Not covered
 
 - `reverse_etl`: the mode exists and is used for application destinations
@@ -183,6 +207,9 @@ publish duplicates that cannot be removed.
 - `apps/api/services/execution_engine_contract.py`, `apps/api/services/job_status.py`
 - `apps/api/services/append_continuity.py`
 - `apps/api/connectors/merge_registry.py`
+- `apps/api/services/dest_require_primary_key.py`, `apps/api/connectors/mysql_writer.py`
+  (`tests/test_d396_require_primary_key_surrogate_e2e.py`, live on MariaDB
+  with `innodb_force_primary_key=ON`)
 - `apps/api/services/mirror_engine.py`
 - `apps/api/services/copy_incremental.py`
 - `apps/api/services/scd2_engine.py`
