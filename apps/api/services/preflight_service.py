@@ -816,24 +816,16 @@ def run_file_preflight(
     # since Validate" compares it with the live table at Execute, which has not
     # been ALTERed yet.
     live_destination_types = dict(destination_column_types or {})
-    managed_table = False
-    if (
-        destination_table_exists is True
-        and not dest_recreated
-        and destination_config
-        and destination_table
-    ):
-        try:
-            from services.managed_table import destination_table_is_managed
+    from services.managed_table import owned_for_evolution
 
-            managed_table = destination_table_is_managed(
-                str(destination_db_type or ""),
-                destination_config,
-                schema=str((destination_config or {}).get("schema") or ""),
-                table=str(destination_table),
-            )
-        except Exception:
-            managed_table = False
+    managed_table = owned_for_evolution(
+        str(destination_db_type or ""),
+        destination_config,
+        schema=str((destination_config or {}).get("schema") or ""),
+        table=str(destination_table or ""),
+        table_exists=destination_table_exists,
+        dest_recreated=bool(dest_recreated),
+    )
     if (
         destination_table_exists is True
         and not dest_recreated

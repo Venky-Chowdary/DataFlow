@@ -186,6 +186,11 @@ def _ddl_compare_token(type_sql: str) -> str:
         flags=re.I,
     )
     text = text.upper().strip()
+    # MySQL reports BOOLEAN as tinyint(1) and sometimes BIT(1). JSON is json.
+    if re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}:
+        return "BOOLEAN"
+    if text in {"JSON", "JSONB"}:
+        return "JSON"
     shown = _INT_DISPLAY_WIDTH.match(text)
     if shown:
         base = shown.group(1).upper()

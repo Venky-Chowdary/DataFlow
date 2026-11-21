@@ -869,7 +869,9 @@ def _fit_predicate(
 
             def _bit_reason(value: Any) -> str | None:
                 try:
-                    coerce_bitstring_wire(value, width=width, varying=varying)
+                    coerce_bitstring_wire(
+                        value, width=width, varying=varying, engine=dest_db
+                    )
                 except ValueError as exc:
                     return str(exc)
                 return None

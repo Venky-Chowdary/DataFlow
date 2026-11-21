@@ -34,6 +34,8 @@ def quarantine_unfit_bitstrings(
     target_types: list[str],
     rejected_details: list[dict[str, Any]],
     policy: str,
+    *,
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out cells that are not valid 0/1 bitstrings or exceed BIT(n)/VARBIT(n).
 
@@ -69,6 +71,7 @@ def quarantine_unfit_bitstrings(
                     cells[col_idx],
                     width=parse_bitstring_width(typ),
                     varying=is_varying_bitstring_carrier(typ),
+                    engine=dest_db,
                 )
             except ValueError as exc:
                 sample = cell_to_string(cells[col_idx])[:120]

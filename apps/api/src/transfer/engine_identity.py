@@ -167,7 +167,7 @@ def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
     return {"source_kind": kind, "source_format": fmt}
 
 
-def plan_created_destination(request: Any, table_exists: bool | None) -> bool:
+def destination_created_by_plan(request: Any, table_exists: bool | None) -> bool:
     """True when this plan's CREATE left the live table (ownership comment).
 
     A pre-existing table does not carry the Datawrap comment, so a retry
@@ -204,6 +204,7 @@ def _enforce_decision_artifact_once(
     approved_ddl_identity_hash: str = "",
     schema_policy: str = "",
     plan_created_destination: bool = False,
+    request: Any = None,
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -213,6 +214,17 @@ def _enforce_decision_artifact_once(
     """
     from services.decision_kernel import enforce_decision_artifact
 
+    if request is not None:
+        if not approved_ddl_identity_hash:
+            approved_ddl_identity_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+        if not schema_policy:
+            schema_policy = str(getattr(request, "schema_policy", "") or "")
+        if not plan_created_destination:
+            plan_created_destination = destination_created_by_plan(
+                request, destination_table_exists
+            )
     approved = (approved_decision_artifact_hash or "").strip()
     payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
     if pf and not payload and not approved:

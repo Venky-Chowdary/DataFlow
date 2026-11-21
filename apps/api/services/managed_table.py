@@ -11,6 +11,29 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+def owned_for_evolution(
+    db_type: str,
+    config: Mapping[str, Any] | None,
+    *,
+    schema: str = "",
+    table: str = "",
+    table_exists: bool | None = None,
+    dest_recreated: bool = False,
+) -> bool:
+    """Whether preflight may treat this destination as Datawrap-owned.
+
+    One call so the preflight module does not grow a probe of its own.
+    """
+    if table_exists is not True or dest_recreated or not config or not str(table or "").strip():
+        return False
+    try:
+        return destination_table_is_managed(
+            db_type, config, schema=schema, table=table
+        )
+    except Exception:
+        return False
+
+
 def destination_table_is_managed(
     db_type: str,
     config: Mapping[str, Any] | None,

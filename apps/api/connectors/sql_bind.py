@@ -1892,11 +1892,17 @@ def coerce_rowversion_wire(value: Any) -> bytes | None:
     return decoded
 
 
+# MySQL BIT(n) is n bits. A short PostgreSQL varbit left-pads into that width.
+# PostgreSQL itself pads BIT(n) on the right and refuses a short value.
+_MYSQL_BIT_ENGINES = frozenset({"mysql", "mariadb", "tidb"})
+
+
 def coerce_bitstring_wire(
     value: Any,
     *,
     width: int | None = None,
     varying: bool = False,
+    engine: str = "",
 ) -> str | None:
     """Normalize BIT/VARBIT wire to a ``0``/``1`` digit string.
 
@@ -1931,15 +1937,14 @@ def coerce_bitstring_wire(
                     f"bitstring length {len(bits)} exceeds BIT VARYING({width})"
                 )
         elif len(bits) != width:
-            raise ValueError(
-                f"bitstring length {len(bits)} does not match BIT({width})"
-            )
+            eng = (engine or "").strip().lower()
+            if eng in _MYSQL_BIT_ENGINES and len(bits) < width:
+                bits = bits.zfill(width)
+            else:
+                raise ValueError(
+                    f"bitstring length {len(bits)} does not match BIT({width})"
+                )
     return bits
-
-
-# MySQL BIT(n) is n bits. The 0/1 digit string is n characters, and MySQL
-# rejects it with "Data too long" (PostgreSQL BIT(8) '10101010' → MySQL BIT(8)).
-_MYSQL_BIT_ENGINES = frozenset({"mysql", "mariadb", "tidb"})
 
 
 def bind_bitstring_wire(value: Any, route: BindRoute) -> Any:

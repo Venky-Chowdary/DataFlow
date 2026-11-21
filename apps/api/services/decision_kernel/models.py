@@ -226,13 +226,39 @@ def _drop_empty(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Planner estimates and clock fields. A later scoring pass must not make an
+# unchanged Map look like drift. Structural identity is the source fingerprint,
+# column types, DDL, sync mode, error policy, keys, and transforms.
+_NON_STRUCTURAL_HASH_KEYS = frozenset({
+    "content_hash",
+    "policy_signature",
+    "created_at",
+    "artifact_id",
+    "confidence",
+    "calibration_reason",
+    "score",
+    "score_gap",
+    "alternatives",
+})
+
+
+def _structural_hash_body(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _structural_hash_body(item)
+            for key, item in value.items()
+            if str(key) not in _NON_STRUCTURAL_HASH_KEYS
+        }
+    if isinstance(value, list):
+        return [_structural_hash_body(item) for item in value]
+    if isinstance(value, tuple):
+        return [_structural_hash_body(item) for item in value]
+    return value
+
+
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """Stable SHA-256 over canonical JSON (excludes content_hash / signatures)."""
-    body = {
-        k: v
-        for k, v in payload.items()
-        if k not in {"content_hash", "policy_signature", "created_at", "artifact_id"}
-    }
+    """Stable SHA-256 over the structural decision (not confidence or clocks)."""
+    body = _structural_hash_body(dict(payload))
     raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 

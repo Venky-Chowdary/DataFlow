@@ -40,6 +40,163 @@ def test_d47_scd2_error_keeps_the_snowflake_syntax_line():
     assert "0 batch" in text
 
 
+def test_d320_mysql_write_quarantine_keeps_short_varbit():
+    """The write quarantine pre-check is the path every SQL writer runs first."""
+    from connectors.writer_common import apply_write_quarantine_matrix
+
+    # Three short varbit values and two that already fill BIT(16). id 2's
+    # BIT(8) is the exact mask from the QA table.
+    rows = [
+        (1, "1", "00000001", "1"),
+        (2, "0", "10101010", "101"),
+        (3, "1", "11110000", "11"),
+        (4, "0", "00001111", "1010101010101010"),
+        (5, "1", "11111111", "1111000011110000"),
+    ]
+    cols = ["id", "b1", "b8", "bv"]
+    types = ["BIGINT", "BIT(1)", "BIT(8)", "BIT(16)"]
+    details: list[dict] = []
+    kept = apply_write_quarantine_matrix(
+        rows, cols, types, details, "quarantine", dest_db="mysql"
+    )
+    assert details == []
+    assert len(kept) == 5
+    assert kept[1][2] == "10101010"
+    assert kept[1][3] == "0000000000000101"
+    pg_details: list[dict] = []
+    pg_kept = apply_write_quarantine_matrix(
+        rows, cols, types, pg_details, "quarantine", dest_db="postgresql"
+    )
+    assert len(pg_kept) == 2
+    assert len(pg_details) == 3
+    from services.population_fit_scan import (
+        CARRIER_BYTES,
+        BoundedTarget,
+        _fit_predicate,
+    )
+
+    mysql_fit = _fit_predicate(
+        BoundedTarget(source="bv", target="bv", target_type="BIT(16)", carrier=CARRIER_BYTES),
+        dest_db="mysql",
+        dialect_label="mysql",
+    )
+    pg_fit = _fit_predicate(
+        BoundedTarget(source="bv", target="bv", target_type="BIT(16)", carrier=CARRIER_BYTES),
+        dest_db="postgresql",
+        dialect_label="postgresql",
+    )
+    assert mysql_fit("101") is None
+    assert pg_fit("101") is not None
+
+
+def test_mysql_boolean_and_json_are_the_planned_ddl():
+    from services.decision_kernel.execute_gate import planned_ddl_matches_live
+
+    assert planned_ddl_matches_live(
+        {"flag": "BOOLEAN", "payload": "JSON"},
+        {"flag": "tinyint(1)", "payload": "json"},
+    )
+    assert planned_ddl_matches_live({"flag": "BOOLEAN"}, {"flag": "bit(1)"})
+    assert not planned_ddl_matches_live({"flag": "BOOLEAN"}, {"flag": "tinyint(4)"})
+    assert not planned_ddl_matches_live(
+        {"name": "VARCHAR(40)"}, {"name": "varchar(80)"}
+    )
+
+
+def test_confidence_only_change_keeps_the_decision_hash():
+    """A scoring pass is not Map drift. A target-type change still is.
+
+    On the previous hash, confidence was inside the digest, so this refused.
+    """
+    from services.decision_kernel.execute_gate import (
+        build_artifact_from_mappings,
+        enforce_decision_artifact,
+    )
+    from services.schema_fingerprint import fingerprint_schema
+
+    def _maps(confidence: float, target_type: str = "BIGINT") -> list[dict]:
+        return [{
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": target_type,
+            "confidence": confidence,
+            "create_new": True,
+        }]
+
+    src_fp = fingerprint_schema(["id"], {"id": "BIGINT"})
+    high = build_artifact_from_mappings(
+        _maps(0.99),
+        dest_db="mysql",
+        source_db="mysql",
+        source_fingerprint=src_fp,
+        dest_fingerprint="",
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    low = build_artifact_from_mappings(
+        _maps(0.72),
+        dest_db="mysql",
+        source_db="mysql",
+        source_fingerprint=src_fp,
+        dest_fingerprint="",
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    assert high.content_hash == low.content_hash
+    edited = build_artifact_from_mappings(
+        _maps(0.99, "VARCHAR(8)"),
+        dest_db="mysql",
+        source_db="mysql",
+        source_fingerprint=src_fp,
+        dest_fingerprint="",
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    assert edited.content_hash != high.content_hash
+    live = fingerprint_schema(["id"], {"id": "bigint"})
+    err, art = enforce_decision_artifact(
+        mappings=_maps(0.72),
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=high.content_hash,
+        source_fingerprint=src_fp,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        source_column_names=["id"],
+        live_column_types={"id": "bigint"},
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+    )
+    assert err is None, err
+    assert art is not None
+    err_type, art_type = enforce_decision_artifact(
+        mappings=_maps(0.99, "VARCHAR(8)"),
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=high.content_hash,
+        source_fingerprint=src_fp,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        source_column_names=["id"],
+        live_column_types={"id": "bigint"},
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+    )
+    assert err_type and art_type is None
+
+
 def test_d72_uuid_varchar36_on_snowflake_is_full_confidence():
     from services.create_new_risk_stamp import apply_create_new_risk_stamps
     from services.mapping_quality import refine_mappings_with_quality

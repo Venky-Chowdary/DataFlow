@@ -553,7 +553,6 @@ from .engine_kafka import (  # noqa: E402
 from .engine_identity import (  # noqa: E402,F401 — re-export
     _enforce_ddl_identity,
     _enforce_decision_artifact,
-    plan_created_destination as _plan_created_destination,
     _inline_stamp_ddl_identity,
     decision_artifact_source,
     _operator_contract_maps,
@@ -2093,13 +2092,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
-                approved_ddl_identity_hash=str(
-                    getattr(request, "approved_ddl_identity_hash", "") or ""
-                ),
-                schema_policy=str(getattr(request, "schema_policy", "") or ""),
-                plan_created_destination=_plan_created_destination(
-                    request, dest_table_exists_flag
-                ),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -3537,13 +3530,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
-                approved_ddl_identity_hash=str(
-                    getattr(request, "approved_ddl_identity_hash", "") or ""
-                ),
-                schema_policy=str(getattr(request, "schema_policy", "") or ""),
-                plan_created_destination=_plan_created_destination(
-                    request, dest_table_exists_flag
-                ),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -4697,13 +4684,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
-                approved_ddl_identity_hash=str(
-                    getattr(request, "approved_ddl_identity_hash", "") or ""
-                ),
-                schema_policy=str(getattr(request, "schema_policy", "") or ""),
-                plan_created_destination=_plan_created_destination(
-                    request, dest_table_exists_flag
-                ),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
