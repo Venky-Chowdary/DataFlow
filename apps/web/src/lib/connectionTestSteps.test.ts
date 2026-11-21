@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConnectionTestChecklist } from "../components/connections/ConnectionTestChecklist.tsx";
-import { connectionTestSteps, grantFixes } from "./connectionTestSteps.ts";
+import { connectionTestSteps, grantFixes, isSqlGrantEngine } from "./connectionTestSteps.ts";
 
 const states = (r: Parameters<typeof connectionTestSteps>[0]) => connectionTestSteps(r).map((s) => `${s.id}:${s.state}`);
 
@@ -18,6 +18,9 @@ describe("connectionTestSteps: where the test stopped, from the API's error code
   it("stops at the failing step; later steps did not run", () => {
     assert.deepEqual(states({ success: false, code: "network.connect_timeout" }), ["reach:failed", "sign_in:not_run", "catalog:not_run", "privileges:not_run"]);
     assert.deepEqual(states({ success: false, code: "network.tls_untrusted" })[0], "reach:failed");
+    // Review UI2 #10: a settings or driver problem dialled nothing.
+    assert.deepEqual(states({ success: false, code: "config.driver_missing" }), ["settings:failed", "reach:not_run", "sign_in:not_run", "catalog:not_run", "privileges:not_run"]);
+    assert.match(connectionTestSteps({ success: false, code: "config.driver_missing" })[0].detail, /driver/);
     assert.deepEqual(states({ success: false, code: "auth.password_rejected" }), ["reach:passed", "sign_in:failed", "catalog:not_run", "privileges:not_run"]);
     assert.deepEqual(states({ success: false, code: "access.database_not_granted" }), ["reach:passed", "sign_in:passed", "catalog:failed", "privileges:not_run"]);
     assert.deepEqual(states({ success: false, code: "object.schema_not_found" })[2], "catalog:failed");
@@ -28,7 +31,7 @@ describe("connectionTestSteps: where the test stopped, from the API's error code
   });
 });
 
-describe("grantFixes", () => {
+describe("grantFixes (review UI2 #5)", () => {
   it("quotes what the person typed for the engine", () => {
     const pg = grantFixes({ type: "postgresql", username: 'etl"user', database: "sales", schema: "raw" });
     assert.equal(pg.length, 2);
@@ -36,12 +39,31 @@ describe("grantFixes", () => {
     assert.match(pg[1].sql, /GRANT USAGE, CREATE ON SCHEMA "raw" TO "etl""user";/);
     const my = grantFixes({ type: "mysql", username: "o'brien", database: "shop" });
     assert.match(my[1].sql, /ON `shop`\.\* TO 'o''brien'@'%';/);
-    assert.match(grantFixes({ type: "sqlserver", username: "etl", database: "dw" })[1].sql, /GRANT ALTER ON SCHEMA::\[dbo\] TO \[etl\];/);
-    assert.match(grantFixes({ type: "snowflake", role: "LOADER", database: "DW", warehouse: "WH" })[0].sql, /GRANT USAGE ON WAREHOUSE "WH" TO ROLE "LOADER";/);
   });
-  it("uses placeholders for what is missing and stays empty for non-SQL sources", () => {
-    assert.match(grantFixes({ type: "postgresql" })[0].sql, /TO "<user>";/);
+  it("Snowflake leaves plain names unquoted (they fold to upper case) and quotes only what needs it", () => {
+    const sf = grantFixes({ type: "snowflake", role: "loader", database: "analytics", warehouse: "compute_wh", schema: "raw" });
+    assert.match(sf[0].sql, /GRANT USAGE ON WAREHOUSE compute_wh TO ROLE loader;/);
+    assert.match(sf[1].sql, /GRANT USAGE, CREATE TABLE ON SCHEMA analytics\.raw TO ROLE loader;/);
+    assert.match(grantFixes({ type: "snowflake", role: "my role", database: "d", schema: "s" })[0].sql, /TO ROLE "my role";/);
+  });
+  it("Redshift has no CONNECT on a database", () => {
+    const rs = grantFixes({ type: "redshift", username: "etl", database: "dev", schema: "raw" });
+    assert.doesNotMatch(rs.map((f) => f.sql).join("\n"), /CONNECT/);
+  });
+  it("never defaults the schema: it comes from the form, the failure, or a placeholder", () => {
+    assert.match(grantFixes({ type: "postgresql", username: "etl", database: "sales", message: "permission denied for schema raw" })[1].sql, /ON SCHEMA "raw"/);
+    const unknown = grantFixes({ type: "postgresql" })[0].sql;
+    assert.match(unknown, /ON SCHEMA <schema> TO <user>;/);
+    assert.doesNotMatch(unknown, /public/);
+    assert.doesNotMatch(grantFixes({ type: "sqlserver", username: "etl", database: "dw" })[1].sql, /dbo/);
+  });
+  it("the SQL Server destination set can read back what it writes", () => {
+    assert.match(grantFixes({ type: "sqlserver", username: "etl", database: "dw", schema: "stage" })[1].sql, /db_datareader ADD MEMBER \[etl\];[\s\S]*GRANT ALTER ON SCHEMA::\[stage\] TO \[etl\];/);
+  });
+  it("applies to SQL engines only", () => {
     assert.deepEqual(grantFixes({ type: "csv" }), []);
+    assert.equal(isSqlGrantEngine("csv"), false);
+    assert.equal(isSqlGrantEngine("postgresql"), true);
   });
 });
 

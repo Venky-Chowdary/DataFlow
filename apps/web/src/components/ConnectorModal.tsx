@@ -10,6 +10,7 @@ import type { CatalogConnector } from "../lib/api";
 import type { Connector } from "../lib/types";
 import { saveConnector, testConnection, updateConnector, uploadFile } from "../lib/api";
 import { ConnectionTestChecklist } from "./connections/ConnectionTestChecklist";
+import { isSqlGrantEngine } from "../lib/connectionTestSteps";
 import {
   connectorAcceptsUpload,
   connectorFieldsFromUpload,
@@ -957,10 +958,10 @@ export function ConnectorModal({
                     </div>
                     <p className="df2-conn-probe-msg">{splitReference(testResult.message).text}</p>
                     <ErrorReferenceChip reference={splitReference(testResult.message).reference} />
-                    <ConnectionTestChecklist
+                    {isSqlGrantEngine(resolvedType || type) && <ConnectionTestChecklist
                       result={testResult}
                       connection={{ type: resolvedType || type, username, database, schema, warehouse, role: authRole }}
-                    />
+                    />}
                     {!testResult.success && (testResult.code === "network.tls_required" || testResult.code === "network.tls_untrusted") && (
                       <p className="df2-conn-probe-hint">
                         Look for the <strong>SSL / TLS</strong> toggle in the fields above — local

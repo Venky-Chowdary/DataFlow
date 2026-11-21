@@ -51,7 +51,7 @@ export function ConnectionTestChecklist({
   connection: { type: string; username?: string; database?: string; schema?: string; warehouse?: string; role?: string };
 }) {
   const steps = connectionTestSteps(result);
-  const fixes = grantFixes(connection);
+  const fixes = grantFixes({ ...connection, message: result.message });
   const grantFailed = steps.some((s) => (s.id === "privileges" || s.id === "catalog") && s.state === "failed");
   return (
     <div className="df2-ctest">
@@ -70,7 +70,7 @@ export function ConnectionTestChecklist({
       {fixes.length > 0 && (
         <details className="df2-ctest-grants" open={grantFailed}>
           <summary>{grantFailed ? "Grants to fix this" : "Grants a transfer needs"}</summary>
-          <p className="df2-ctest-grants-note">Run as an administrator of the database. Values you typed are filled in.</p>
+          <p className="df2-ctest-grants-note">Run as an administrator of the database. Values you typed are filled in; replace anything in angle brackets.</p>
           {fixes.map((fix) => (
             <div key={fix.purpose} className="df2-ctest-grant">
               <div className="df2-ctest-grant-head">
