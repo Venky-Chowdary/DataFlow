@@ -26,15 +26,23 @@ export interface AiDecisionEntry {
   origin: AiOrigin;
   inputs_sha256: string;
   proposal: Record<string, unknown>;
-  decision: { status: string; by: string | null; at: string | null; how: string };
+  decision: {
+    status: string;
+    by: string | null;
+    at: string | null;
+    how: string;
+    run_by?: string | null;
+    run_kind?: "person" | "schedule" | "unrecorded";
+  };
   verification: { check: string; status: string; detail?: string };
 }
 
 export interface AiDecisionLedger {
   version: string;
   job_id: string;
-  status?: "unavailable";
+  status?: "complete" | "partial" | "unavailable";
   reason?: string;
+  problems?: string[];
   entries: AiDecisionEntry[];
   counts?: { total: number; by_kind: Record<string, number>; by_origin: Record<string, number>; model_calls: number };
   ledger_sha256?: string;
@@ -51,11 +59,12 @@ export const KIND_LABEL: Record<string, string> = {
 
 const DECISION_LABEL: Record<string, string> = {
   accepted: "Accepted",
-  changed: "Changed by a person",
+  changed: "Changed in Map",
+  approved: "Approved in Map",
   rejected: "Not adopted",
   held: "Held for review",
   kept: "Kept",
-  unreviewed: "Not reviewed",
+  unreviewed: "Not reviewed in Map",
   informational: "No decision needed",
 };
 
@@ -85,7 +94,8 @@ export function originLabel(origin: AiOrigin): string {
 
 export function decisionLabel(entry: AiDecisionEntry): string {
   const base = DECISION_LABEL[entry.decision.status] ?? entry.decision.status.replace(/_/g, " ");
-  return entry.decision.by ? `${base} · ${entry.decision.by}` : base;
+  const who = entry.decision.by ? `${base} · ${entry.decision.by}` : base;
+  return entry.decision.run_kind === "schedule" ? `${who} · run by schedule ${entry.decision.run_by ?? ""}`.trim() : who;
 }
 
 export function checkLabel(entry: AiDecisionEntry): string {

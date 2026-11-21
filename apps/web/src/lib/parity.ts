@@ -154,6 +154,8 @@ export interface ParityApproval {
   /** The report version and content digest this approval attests. */
   version?: number;
   content_sha256?: string;
+  /** Which attested content the digest covers (2 adds the AI decisions ledger; absent = 1). */
+  content_version?: number;
 }
 
 export interface ParitySignoff {
@@ -203,6 +205,8 @@ export interface ParityEvidence {
 export interface ParityReport {
   job_id: string;
   generated_at: string;
+  /** Digest of the AI decisions ledger's decision rows; sign-off content v2 attests it. */
+  ai_decisions_attested_sha256?: string | null;
   /** Bumps on every state change; a lower version is older news. */
   version: number;
   verdict: ParityVerdict;

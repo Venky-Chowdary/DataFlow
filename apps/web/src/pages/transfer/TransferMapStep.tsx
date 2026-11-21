@@ -46,6 +46,7 @@ import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
 import { MapIssueList, mapIssueSummary, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
 import { useMappingWitness } from "../../components/mapping/useMappingWitness";
+import { isWarehouse, recordMapDecisions } from "../../lib/mappingWitness";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -244,13 +245,32 @@ export function TransferMapStep({
     () => (catalogState.catalog?.columns ?? []).filter((c) => c.primaryKey).map((c) => c.name),
     [catalogState.catalog],
   );
+  const witnessRows = useMemo(
+    () => columnMappings.map((m) => ({
+      source: m.source,
+      target: m.target,
+      createNew: m.createNew,
+      destType: m.destType,
+      omitted: isIntentionalOmit(m),
+    })),
+    [columnMappings],
+  );
+  const witnessCandidates = useMemo(
+    () => (catalogState.catalog?.columns ?? []).map((c) => c.name),
+    [catalogState.catalog],
+  );
   const witness = useMappingWitness({
-    mappings: columnMappings,
+    rows: witnessRows,
     sampleRows,
-    destEndpoint: remapEnabled ? destEndpoint : null,
+    destEndpoint: destEndpoint ?? null,
     targetKeyColumns: witnessKeys,
+    candidateColumns: witnessCandidates,
     destTableExists,
     dateLocale,
+    // Wait for the destination catalog (and its keys) when there is one to read.
+    catalogReady: !(remapEnabled && destEndpoint) || (!catalogState.loading
+      && (catalogState.catalog !== null || Boolean(catalogState.error))),
+    warehouse: isWarehouse(destType),
   });
   // Once the operator edits, the rows they are working on must not jump out
   // of view because the issues-first filter re-evaluated behind them.
@@ -473,6 +493,15 @@ export function TransferMapStep({
       .filter((m) => normalizeColumnName(m.source) !== normalizeColumnName(m.target))
       .map((m) => ({ source: m.source, target: m.target }))
       .filter((p) => !rememberedRef.current.has(`${p.source}\u0000${p.target}`));
+    // Who approved or changed each pair: recorded server-side for the AI decisions ledger.
+    const decided = columnMappings
+      .filter((m) => !isIntentionalOmit(m) && m.target && (m.approved || m.operatorTarget))
+      .map((m) => ({ source: m.source, target: m.target, approved: Boolean(m.approved), changed: Boolean(m.operatorTarget) }));
+    if (decided.length) {
+      void recordMapDecisions(destEndpoint ?? null, decided).catch(() => {
+        /* Evidence only: Validate never depends on it; the ledger then says "not reviewed". */
+      });
+    }
     if (remapEnabled && learned.length && destEndpoint) {
       for (const p of learned) rememberedRef.current.add(`${p.source}\u0000${p.target}`);
       void recordMappingMemory(learned, destEndpoint).catch(() => {
@@ -943,6 +972,19 @@ export function TransferMapStep({
                 witnessFlags={witness.flags}
                 onWitnessReview={setFocusSource}
               />
+              {witness.needsCheck && (
+                <div className="df2-witness-bar" role="note">
+                  <span>Values in this warehouse are checked only when you ask: it runs a query.</span>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-ghost df2-btn-xs"
+                    onClick={witness.check}
+                    disabled={witness.loading}
+                  >
+                    Check mapping
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

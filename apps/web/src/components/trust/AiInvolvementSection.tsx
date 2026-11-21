@@ -27,12 +27,19 @@ export function AiInvolvementView({ ledger }: { ledger: AiDecisionLedger }) {
   if (ledger.status === "unavailable") {
     return <p className="df2-parity-muted">{ledger.reason ?? "The AI decisions ledger is unavailable."}</p>;
   }
+  const partial = ledger.status === "partial" ? (
+    <p className="df2-parity-muted" role="note">
+      Partial: {(ledger.problems ?? []).join(" ")}
+    </p>
+  ) : null;
   if (!ledger.entries.length) {
+    if (partial) return partial;
     return <p className="df2-parity-muted">No AI proposals or model calls are recorded for this job.</p>;
   }
   return (
     <>
       <p className="df2-parity-muted">{aiHeadline(ledger)}. Sealed into the signed report.</p>
+      {partial}
       <ul className="df2-trust-ai-list" aria-label="AI decisions">
         {ledger.entries.map((e) => (
           <li key={e.id} className="df2-trust-ai-item">

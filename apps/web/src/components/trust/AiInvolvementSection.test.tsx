@@ -70,6 +70,15 @@ describe("AI involvement section", () => {
     assert.equal(decisionLabel(entry({ decision: { status: "held", by: null, at: null, how: "" } })), "Held for review");
   });
 
+  it("names the Map approver, the schedule that ran it, and a partial ledger", () => {
+    const scheduled = entry({ decision: { status: "approved", by: "dee@example.com", at: null, how: "",
+      run_by: "nightly", run_kind: "schedule" } });
+    assert.equal(decisionLabel(scheduled), "Approved in Map · dee@example.com · run by schedule nightly");
+    const t = text(renderToStaticMarkup(<AiInvolvementView ledger={{ ...ledger, status: "partial",
+      problems: ["The AI-egress chain could not be read, so model calls may be missing."] }} />));
+    assert.match(t, /Partial: The AI-egress chain could not be read/);
+  });
+
   it("says so when nothing is recorded or the ledger could not be built", () => {
     assert.match(text(renderToStaticMarkup(<AiInvolvementView ledger={{ ...ledger, entries: [] }} />)),
       /No AI proposals or model calls are recorded for this job/);

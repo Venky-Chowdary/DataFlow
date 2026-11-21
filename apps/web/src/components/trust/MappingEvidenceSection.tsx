@@ -7,7 +7,8 @@ import {
   STATUS_LABEL,
   fetchJobMappingWitness,
   type WitnessPair,
-  type WitnessRecord,
+  type WitnessReport,
+  type WitnessSnapshot,
   type WitnessStatus,
 } from "../../lib/mappingWitness";
 
@@ -16,6 +17,7 @@ const TONE: Record<WitnessStatus, ParityTone> = {
   consistent: "muted",
   flagged: "warn",
   differs: "muted",
+  not_comparable: "muted",
   no_evidence: "muted",
 };
 
@@ -24,8 +26,8 @@ function plural(n: number, one: string, many = `${one}s`): string {
 }
 
 /** One sentence: what the witness looked at and what it found. */
-export function witnessHeadline(record: WitnessRecord): string {
-  const s = record.report.summary;
+export function witnessHeadline(report: WitnessReport): string {
+  const s = report.summary;
   const parts = [plural(s.pairs, "mapped column")];
   if (s.witnessed) parts.push(`${s.witnessed.toLocaleString("en-US")} confirmed by values`);
   if (s.flagged) parts.push(`${s.flagged.toLocaleString("en-US")} to review`);
@@ -33,12 +35,17 @@ export function witnessHeadline(record: WitnessRecord): string {
   return parts.join(" · ");
 }
 
-function decisionText(record: WitnessRecord, pair: WitnessPair): string {
-  const d = record.decisions.find((x) => x.source === pair.source);
-  if (!d) return "Not reviewed";
-  return d.decision === "changed"
-    ? `Changed to ${d.new_target ?? "another column"} by ${d.by}`
-    : `Kept by ${d.by}`;
+function decisionText(snapshot: WitnessSnapshot, pair: WitnessPair): string {
+  const kept = (snapshot.flag_reviews ?? []).find(
+    (r) => r.decision === "kept" && r.source.toLowerCase() === pair.source.toLowerCase(),
+  );
+  if (kept) return `Kept by ${kept.by}`;
+  const approval = snapshot.map_decisions?.[pair.source];
+  // An approval given after the flag was shown is a decision on the flag (the ledger reads it the same way).
+  if (approval?.approved && approval.at >= (snapshot.report_recorded_at ?? "")) {
+    return `Approved in Map after the flag by ${approval.by}`;
+  }
+  return "Not reviewed";
 }
 
 /**
@@ -46,22 +53,32 @@ function decisionText(record: WitnessRecord, pair: WitnessPair): string {
  * each mapped pair means what it says. Self-contained (it loads its own data)
  * so the Trust Report layout can mount it anywhere.
  */
-export function MappingEvidenceView({ record }: { record: WitnessRecord | null }) {
+export function MappingEvidenceView({ record }: { record: WitnessSnapshot | null }) {
   if (!record) {
+    return (
+      <p className="df2-parity-muted">
+        This job was submitted before mapping evidence was recorded with each run.
+      </p>
+    );
+  }
+  if (record.status !== "ok") {
+    return <p className="df2-parity-muted">{record.reason ?? "The mapping evidence is unavailable for this job."}</p>;
+  }
+  if (!record.report) {
     return (
       <p className="df2-parity-muted">
         No mapping check ran for the mapping this job used. Map runs it when the sample is loaded.
       </p>
     );
   }
-  const flagged = record.report.pairs.filter((p) => p.status === "flagged");
+  const report = record.report;
+  const resolved = (record.flag_reviews ?? []).filter((r) => r.decision === "changed");
+  const flagged = report.pairs.filter((p) => p.status === "flagged");
   return (
     <>
       <p className="df2-parity-muted">
-        {witnessHeadline(record)}. {MODE_LABEL[record.report.mode]}
-        {record.report.sample.matching_keys
-          ? ` (${plural(record.report.sample.matching_keys, "matching key")}).`
-          : "."}
+        {witnessHeadline(report)}. {MODE_LABEL[report.mode]}
+        {report.sample.matching_keys ? ` (${plural(report.sample.matching_keys, "matching key")}).` : "."}
       </p>
       {flagged.length > 0 && (
         <ul className="df2-trust-ai-list" aria-label="Flagged mappings">
@@ -77,10 +94,25 @@ export function MappingEvidenceView({ record }: { record: WitnessRecord | null }
           ))}
         </ul>
       )}
+      {resolved.length > 0 && (
+        <ul className="df2-trust-ai-list" aria-label="Flags resolved before the run">
+          {resolved.map((r) => (
+            <li key={`${r.source}-${r.flagged_target}`} className="df2-trust-ai-item">
+              <span className="df2-trust-ai-subject">
+                {r.source} → {r.flagged_target}
+              </span>
+              <span className={badgeClass("ok")}>Resolved</span>
+              <span className="df2-trust-ai-detail">
+                Flagged earlier; changed to {r.new_target} by {r.by}, which this job ran.
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       <details className="df2-trust-ai-details">
         <summary>Every mapped column</summary>
         <ul className="df2-trust-ai-list df2-trust-ai-all" aria-label="Every mapped column">
-          {record.report.pairs.map((p) => (
+          {report.pairs.map((p) => (
             <li key={p.source} className="df2-trust-ai-item">
               <span className="df2-trust-ai-subject">
                 {p.source} → {p.target}
@@ -96,7 +128,7 @@ export function MappingEvidenceView({ record }: { record: WitnessRecord | null }
 }
 
 export function MappingEvidenceSection({ jobId }: { jobId: string }) {
-  const [record, setRecord] = useState<WitnessRecord | null>(null);
+  const [record, setRecord] = useState<WitnessSnapshot | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
   useEffect(() => {

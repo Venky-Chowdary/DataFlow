@@ -1807,3 +1807,13 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+.df2-witness-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  margin-top: var(--df-space-2);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
