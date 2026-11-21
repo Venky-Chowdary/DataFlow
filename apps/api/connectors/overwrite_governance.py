@@ -174,29 +174,41 @@ def _sf_literal(value: str) -> str:
     return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
+def _sf_grantee(name: str) -> str:
+    """A grantee as SHOW GRANTS names it, quoted (``DB.ROLE`` for a database role)."""
+    return ".".join(_q(part) for part in str(name).split("."))
+
+
 def snowflake_reconcile(
-    cur: Any, *, source: SnowflakeGovernance, target: SnowflakeGovernance, target_ref: str
+    cur: Any,
+    *,
+    source: SnowflakeGovernance,
+    target: SnowflakeGovernance,
+    target_ref: str,
+    skip_unreadable: bool = False,
 ) -> list[str]:
     """Put on ``target_ref`` every grant, direct policy and tag ``source`` has and it lacks.
 
     Returns the statements run. Raises :class:`GovernanceNotPreserved` when an
     item of ``source`` is unknown (unreadable) or a statement is refused: the
     caller must then not publish ``target_ref`` under the live name.
+    ``skip_unreadable`` (a loss approved at Validate) reconciles only the
+    categories both sides could read.
     """
     unknown = [item for item in source.unreadable]
     unknown += [f"{item} (on the backup)" for item in target.unreadable]
-    if unknown:
+    if unknown and not skip_unreadable:
         raise GovernanceNotPreserved(target_ref, [f"unreadable {u}" for u in unknown])
     statements: list[str] = []
     have = set(target.grants or [])
-    for privilege, kind, grantee in source.grants or []:
+    for privilege, kind, grantee in (source.grants if target.grants is not None else None) or []:
         if (privilege, kind, grantee) in have:
             continue
         statements.append(
-            f"GRANT {privilege} ON TABLE {target_ref} TO {_SF_GRANTEE_KINDS[kind]} {grantee}"
+            f"GRANT {privilege} ON TABLE {target_ref} TO {_SF_GRANTEE_KINDS[kind]} {_sf_grantee(grantee)}"
         )
     have_policies = {(p["kind"], p["policy"], p["column"]) for p in target.policies or []}
-    for p in source.policies or []:
+    for p in (source.policies if target.policies is not None else None) or []:
         if (p["kind"], p["policy"], p["column"]) in have_policies:
             continue
         if p["kind"] == "ROW_ACCESS_POLICY":
@@ -215,7 +227,7 @@ def snowflake_reconcile(
         else:
             raise GovernanceNotPreserved(target_ref, [f"{p['kind'].lower()} {p['policy']}"])
     have_tags = {(t["tag"], t["value"], t["column"]) for t in target.tags or []}
-    for t in source.tags or []:
+    for t in (source.tags if target.tags is not None else None) or []:
         if (t["tag"], t["value"], t["column"]) in have_tags:
             continue
         if t["column"]:
@@ -451,8 +463,9 @@ def describe_overwrite_governance(db_type: str) -> dict[str, Any] | None:
         return {
             "engine": "snowflake",
             "mechanism": (
-                "The live table is kept: a zero-copy CLONE is the backup, the live table is "
-                "emptied with TRUNCATE and loaded in place."
+                "The live table is kept: its grants, policies and tags are read first, a zero-copy "
+                "CLONE (TRANSIENT for a transient table) is the backup and is given the same grants, "
+                "policies and tags, then the live table is emptied with TRUNCATE and loaded in place."
             ),
             "preserved": [
                 "grants", "masking and row access policies", "object tags", "streams on the table",
@@ -460,12 +473,16 @@ def describe_overwrite_governance(db_type: str) -> dict[str, Any] | None:
             ],
             "on_failure": (
                 "A failed run puts the previous rows back with INSERT OVERWRITE when the table has no "
-                "masking or row access policy. Otherwise it swaps the backup clone in (ALTER TABLE ... "
-                "SWAP WITH) after copying every grant, policy and tag the live table has onto it; a "
-                "stream on the table then follows the swapped-out object and goes stale."
+                "masking or row access policy. Otherwise it swaps the governed backup clone in "
+                "(ALTER TABLE ... SWAP WITH); a stream on the table then follows the swapped-out "
+                "object and goes stale. If that cannot finish, both tables stay and the error names "
+                "the exact SWAP / DROP statements that put the previous rows back."
             ),
             "not_preserved": [],
             "notes": [
+                "Grants, policies or tags the connector's role cannot read block Validate and refuse "
+                "the overwrite before any change, unless the destination DDL is approved.",
+                "A TEMPORARY table is refused: its backup could not outlive the session.",
                 "TRUNCATE plus reload reaches stream consumers as delete-all and insert-all.",
                 "Columns the table has and the run does not write stay (NULL); a type the "
                 "table cannot take fails the run and restores the previous rows.",

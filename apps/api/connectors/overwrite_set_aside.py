@@ -208,8 +208,10 @@ def _sf_rename(src: str, dst: str) -> str:
     return f"ALTER TABLE {src} RENAME TO {dst}"
 
 
-def _sf_clone(bak: str, live: str, *, copy_grants: bool) -> str:
-    return f"CREATE TABLE {bak} CLONE {live}" + (" COPY GRANTS" if copy_grants else "")
+def _sf_clone(bak: str, live: str, *, copy_grants: bool, transient: bool = False) -> str:
+    # A TRANSIENT table clones only into a TRANSIENT table.
+    kind = "TRANSIENT TABLE" if transient else "TABLE"
+    return f"CREATE {kind} {bak} CLONE {live}" + (" COPY GRANTS" if copy_grants else "")
 
 
 def _sf_truncate(ref: str) -> str:
@@ -232,27 +234,37 @@ def _sf_insert_overwrite(live: str, bak: str, cols: str) -> str:
     return f"INSERT OVERWRITE INTO {live} ({cols}) SELECT {cols} FROM {bak}"  # nosec B608 - quoted ids
 
 
+def _sf_recovery(live_ref: str, bak_ref: str) -> str:
+    """Exact operator steps when an automatic Snowflake restore could not finish."""
+    return (
+        f"The rows from before this run are in {bak_ref}; {live_ref} holds this run's "
+        f"partial load. To put the previous rows back run: ALTER TABLE {live_ref} SWAP WITH "
+        f"{bak_ref}; DROP TABLE {bak_ref};  (or, to keep this run's rows: DROP TABLE {bak_ref};)"
+    )
+
+
 class _Snowflake:
-    """Keep the live table; the backup is a zero-copy clone.
+    """Keep the live table; the backup is a zero-copy clone carrying its governance.
 
     The success path never renames, drops or recreates the live table, so its
     grants, masking and row access policies, tags, streams, clustering key and
-    comments stay on it (NF-1). The previous design renamed the live table
-    aside and let the writer create a new one: every one of those went with
-    the renamed object and was dropped at commit.
+    comments stay on it (NF-1).
 
-    retire:  CREATE TABLE <bak> CLONE <live> [COPY GRANTS]; TRUNCATE TABLE <live>
+    retire:  read the table's grants, policies and tags (refuse, before any
+             change, when they cannot be read and the loss was not approved);
+             CREATE [TRANSIENT] TABLE <bak> CLONE <live> [COPY GRANTS]; copy
+             onto <bak> every grant, policy and tag it lacks (so the backup is
+             protected like the table, and a restore needs only a SWAP);
+             TRUNCATE TABLE <live>. Any failure before TRUNCATE drops the clone.
     discard: DROP TABLE <bak>
-    restore: no masking / row access policy on the table:
+    restore: no masking / row access policy on the table (read now):
                  INSERT OVERWRITE INTO <live> (cols) SELECT cols FROM <bak>
-             (the live object keeps everything; Snowflake documents that
-             INSERT OVERWRITE keeps the table's access privileges)
-             otherwise: copy every grant, policy and tag the live table has
-             onto <bak>, then ALTER TABLE <live> SWAP WITH <bak> and drop the
-             swapped-out replacement. Reading the backup back through a
-             masking or row access policy could copy masked values or drop
-             filtered rows; a swap moves the stored data as it is. A stream on
-             the table follows the swapped-out object and goes stale.
+             otherwise (or unknown): ALTER TABLE <live> SWAP WITH <bak>, then
+             drop the swapped-out replacement. Reading the backup back through
+             a masking or row access policy could copy masked values; a swap
+             moves the stored data as it is (a stream on the table goes stale).
+             A restore that cannot finish leaves both tables and says exactly
+             which statements put the previous rows back.
     """
 
     @staticmethod
@@ -283,11 +295,39 @@ class _Snowflake:
             return SnowflakeGovernance(grants=[], policies=[], tag_policies=[], tags=[])
         return snowflake_governance(cur, ref, database=str(cfg.get("database") or ""))
 
+    @staticmethod
+    def _kind(cur: Any, schema: str, name: str) -> str:
+        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent)."""
+        try:
+            cur.execute(
+                "SELECT table_type, is_transient FROM information_schema.tables "
+                "WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s",
+                (schema, name),
+            )
+            row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 - CLONE then reports a mismatch itself
+            logger.info("Snowflake table kind of %s unread: %s", name, exc)
+            return "permanent"
+        if not row:
+            return "permanent"
+        if "TEMPORARY" in str(row[0] or "").upper():
+            return "temporary"
+        return "transient" if str(row[1] or "").upper() in ("YES", "Y", "TRUE") else "permanent"
+
+    @staticmethod
+    def _emulator(conn: Any) -> bool:
+        from connectors.snowflake_writer import _is_fakesnow_connection
+
+        return _is_fakesnow_connection(conn)
+
     def retire(
         self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
     ) -> str | None:
+        from connectors.overwrite_governance import GovernanceNotPreserved, snowflake_reconcile
+
         sch = schema or cfg.get("schema", "PUBLIC")
         conn = _snowflake_connection(cfg, schema)
+        emulator = self._emulator(conn)
         try:
             with conn.cursor() as cur:
                 live = self._resolve(cur, sch, table_name)
@@ -306,19 +346,36 @@ class _Snowflake:
                 if not live:
                     return None
                 live_ref, bak_ref = self._ref(sch, live), self._ref(sch, backup)
+                kind = self._kind(cur, sch, live)
+                if kind == "temporary":
+                    raise TableDropError(
+                        live, "a TEMPORARY table's backup would vanish with this session; "
+                        "overwrite into a permanent or transient table",
+                    )
+                # Read before any change: unreadable governance refuses here,
+                # never after the table was emptied.
+                source = self._governance(cur, live_ref, cfg, emulator=emulator)
+                if source.unreadable and not approved:
+                    raise GovernanceNotPreserved(live, [f"unreadable {u}" for u in source.unreadable])
+                transient = kind == "transient"
                 try:
-                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=True))
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=True, transient=transient))
                 except Exception as exc:  # noqa: BLE001 - a role may not copy grants
                     logger.info("CLONE ... COPY GRANTS refused for %s (%s); cloning without", live, exc)
-                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=False))
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=False, transient=transient))
                 try:
+                    snowflake_reconcile(
+                        cur, source=source,
+                        target=self._governance(cur, bak_ref, cfg, emulator=emulator),
+                        target_ref=bak_ref, skip_unreadable=approved,
+                    )
                     cur.execute(_sf_truncate(live_ref))
                 except Exception:
                     # Nothing was emptied: drop the clone so the next run is
                     # not refused for a backup next to a live table.
                     try:
                         cur.execute(_sf_drop(bak_ref))
-                    except Exception:  # noqa: BLE001 - report the truncate failure
+                    except Exception:  # noqa: BLE001 - report the first failure
                         logger.warning("Could not drop backup clone %s", backup, exc_info=True)
                     raise
             return backup
@@ -341,25 +398,20 @@ class _Snowflake:
                     cur.execute(_sf_rename(bak_ref, self._ref(sch, original)))
                     return
                 live_ref = self._ref(sch, live)
-                from connectors.snowflake_writer import _is_fakesnow_connection
-
-                emulator = _is_fakesnow_connection(conn)
-                live_gov = self._governance(cur, live_ref, cfg, emulator=emulator)
-                if live_gov.has_policies is False:
-                    self._restore_in_place(cur, sch, live, backup)
-                    return
-                from connectors.overwrite_governance import snowflake_reconcile
-
-                # Governed (or unknown): the backup must carry what the live
-                # table carries before it is published under the live name.
-                snowflake_reconcile(
-                    cur,
-                    source=live_gov,
-                    target=self._governance(cur, bak_ref, cfg, emulator=emulator),
-                    target_ref=bak_ref,
-                )
-                cur.execute(_sf_swap(live_ref, bak_ref))
-                cur.execute(_sf_drop(bak_ref))
+                try:
+                    gov = self._governance(cur, live_ref, cfg, emulator=self._emulator(conn))
+                    if gov.has_policies is False:
+                        self._restore_in_place(cur, sch, live, backup)
+                        return
+                    # Governed or unknown: the backup carries the table's
+                    # governance since retire; swap the stored data back.
+                    cur.execute(_sf_swap(live_ref, bak_ref))
+                except Exception as exc:
+                    raise TableDropError(live, f"{exc}. {_sf_recovery(live_ref, bak_ref)}") from exc
+                try:
+                    cur.execute(_sf_drop(bak_ref))
+                except Exception as exc:  # noqa: BLE001 - the previous rows are back
+                    logger.warning("Swapped-out replacement %s not dropped: %s", backup, exc)
         finally:
             _close_quietly(conn)
 

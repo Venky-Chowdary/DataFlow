@@ -197,9 +197,11 @@ def test_snowflake_truncate_refusal_drops_the_clone_and_keeps_rows(snowflake, mo
 class _ScriptedCursor:
     """A Snowflake cursor that answers the governance reads from a script."""
 
-    def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset()):
+    def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset(),
+                 kind: tuple[str, str] = ("BASE TABLE", "NO")):
         self.governance = governance
         self.refuse = refuse
+        self.kind = kind
         self.executed: list[str] = []
         self._rows: list[tuple] = []
         self.description: list[tuple] | None = None
@@ -224,11 +226,16 @@ class _ScriptedCursor:
             self._answer(gov.get("column_tags", []))
         elif "TAG_REFERENCES(" in sql:
             self._answer(gov.get("table_tags", []))
+        elif "is_transient" in sql:
+            self.description, self._rows = [("TABLE_TYPE",), ("IS_TRANSIENT",)], [self.kind]
         else:
             self.description, self._rows = None, []
 
     def fetchall(self) -> list[tuple]:
         return list(self._rows)
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
 
 
 _GRANT = {"privilege": "SELECT", "granted_to": "ROLE", "grantee_name": "ANALYST"}
@@ -264,7 +271,7 @@ def test_snowflake_governance_read_and_reconcile_statements():
     ran = snowflake_reconcile(cur, source=source, target=target, target_ref='"PUBLIC"."T__DF_BAK"')
 
     assert ran == [
-        'GRANT SELECT ON TABLE "PUBLIC"."T__DF_BAK" TO ROLE ANALYST',
+        'GRANT SELECT ON TABLE "PUBLIC"."T__DF_BAK" TO ROLE "ANALYST"',
         'ALTER TABLE "PUBLIC"."T__DF_BAK" MODIFY COLUMN "SSN" SET MASKING POLICY "GOV"."POL"."SSN_MASK"',
         'ALTER TABLE "PUBLIC"."T__DF_BAK" ADD ROW ACCESS POLICY "GOV"."POL"."REGION_RAP" ON ("REGION")',
         'ALTER TABLE "PUBLIC"."T__DF_BAK" MODIFY COLUMN "SSN" SET TAG "GOV"."TAGS"."PII" = \'ssn\'',
@@ -282,7 +289,7 @@ def test_snowflake_reconcile_skips_what_the_clone_already_carries():
     assert ran == []
 
 
-def _restore_with(cur: _ScriptedCursor, monkeypatch) -> None:
+def _scripted(cur: _ScriptedCursor, monkeypatch, *, live_exists: bool = True, bak_exists: bool = False) -> None:
     import connectors.overwrite_set_aside as osa
 
     class _Conn:
@@ -292,49 +299,129 @@ def _restore_with(cur: _ScriptedCursor, monkeypatch) -> None:
         def close(self) -> None:
             pass
 
-    cur.__enter__ = lambda: cur  # type: ignore[attr-defined]
     monkeypatch.setattr(osa, "_snowflake_connection", lambda cfg, schema: _Conn())
     monkeypatch.setattr(_ScriptedCursor, "__enter__", lambda self: self, raising=False)
     monkeypatch.setattr(_ScriptedCursor, "__exit__", lambda self, *a: False, raising=False)
-    monkeypatch.setattr(_Snowflake, "_resolve", staticmethod(lambda c, s, name: name))
-    restore_set_aside("snowflake", {"database": "DB", "schema": "PUBLIC"}, "T", "T__DF_BAK", "PUBLIC")
+
+    def _resolve(c: Any, s: str, name: str) -> str | None:
+        if name.endswith("__DF_BAK"):
+            return name if bak_exists else None
+        return name if live_exists else None
+
+    monkeypatch.setattr(_Snowflake, "_resolve", staticmethod(_resolve))
 
 
-def test_snowflake_governed_restore_swaps_a_reconciled_backup(monkeypatch):
-    """A masked table is not read back through its policy: the backup is swapped in,
-    after it was given every grant, policy and tag the live table has."""
-    live = {"grants": [_GRANT], "policies": [_MASK]}
-    cur = _ScriptedCursor({"LIVE": live, "BAK": {}})
+_SF_CFG = {"database": "DB", "schema": "PUBLIC"}
 
-    _restore_with(cur, monkeypatch)
 
-    run = [s for s in cur.executed if not s.startswith(("SHOW", "SELECT"))]
-    assert run == [
-        'GRANT SELECT ON TABLE "PUBLIC"."T__DF_BAK" TO ROLE ANALYST',
+def _changes(cur: _ScriptedCursor) -> list[str]:
+    return [s for s in cur.executed if not s.startswith(("SHOW", "SELECT"))]
+
+
+def test_snowflake_retire_puts_the_governance_on_the_clone_before_truncating(monkeypatch):
+    """The backup is protected like the table from the moment it exists, so a
+    restore needs only a SWAP."""
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT], "policies": [_MASK]}, "BAK": {}})
+    _scripted(cur, monkeypatch)
+
+    assert retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC") == "T__DF_BAK"
+
+    assert _changes(cur) == [
+        'CREATE TABLE "PUBLIC"."T__DF_BAK" CLONE "PUBLIC"."T" COPY GRANTS',
+        'GRANT SELECT ON TABLE "PUBLIC"."T__DF_BAK" TO ROLE "ANALYST"',
         'ALTER TABLE "PUBLIC"."T__DF_BAK" MODIFY COLUMN "SSN" SET MASKING POLICY "GOV"."POL"."SSN_MASK"',
+        'TRUNCATE TABLE "PUBLIC"."T"',
+    ]
+
+
+def test_snowflake_unreadable_policies_refuse_before_any_change(monkeypatch):
+    """Review of NF-1: the table used to be emptied first and the restore then
+    refused for unreadable policies, stranding the rows in the backup."""
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT]}, "BAK": {}}, refuse={"POLICY_REFERENCES"})
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="unreadable masking and row access policies"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_unreadable_policies_proceed_with_the_approval(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT]}, "BAK": {}}, refuse={"POLICY_REFERENCES"})
+    _scripted(cur, monkeypatch)
+
+    retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC", governance_loss_approved=True)
+
+    assert _changes(cur)[-1] == 'TRUNCATE TABLE "PUBLIC"."T"'
+    assert 'GRANT SELECT ON TABLE "PUBLIC"."T__DF_BAK" TO ROLE "ANALYST"' in _changes(cur)
+
+
+def test_snowflake_refused_reapply_drops_the_clone_and_never_truncates(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {"policies": [_MASK]}, "BAK": {}}, refuse={"SET MASKING POLICY"})
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="SET MASKING POLICY"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert not any(s.startswith("TRUNCATE") for s in cur.executed)
+    assert _changes(cur)[-1] == 'DROP TABLE IF EXISTS "PUBLIC"."T__DF_BAK"'
+
+
+def test_snowflake_transient_table_is_cloned_as_transient(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind=("BASE TABLE", "YES"))
+    _scripted(cur, monkeypatch)
+
+    retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur)[0] == 'CREATE TRANSIENT TABLE "PUBLIC"."T__DF_BAK" CLONE "PUBLIC"."T" COPY GRANTS'
+
+
+def test_snowflake_temporary_table_is_refused_before_any_change(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind=("TEMPORARY TABLE", "NO"))
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="TEMPORARY"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_governed_restore_swaps_the_backup_back(monkeypatch):
+    """A masked table is not read back through its policy: the stored data is swapped."""
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT], "policies": [_MASK]}, "BAK": {}})
+    _scripted(cur, monkeypatch, bak_exists=True)
+
+    restore_set_aside("snowflake", _SF_CFG, "T", "T__DF_BAK", "PUBLIC")
+
+    assert _changes(cur) == [
         'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"',
         'DROP TABLE IF EXISTS "PUBLIC"."T__DF_BAK"',
     ]
+
+
+def test_snowflake_restore_with_unreadable_policies_still_swaps(monkeypatch):
+    """Unknown policies at restore time: the reconciled backup is swapped in,
+    never a refusal that leaves the table empty."""
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT]}, "BAK": {}}, refuse={"POLICY_REFERENCES"})
+    _scripted(cur, monkeypatch, bak_exists=True)
+
+    restore_set_aside("snowflake", _SF_CFG, "T", "T__DF_BAK", "PUBLIC")
+
+    assert 'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"' in _changes(cur)
     assert not any("INSERT OVERWRITE" in s for s in cur.executed)
 
 
-def test_snowflake_restore_with_unreadable_policies_keeps_both(monkeypatch):
-    """Policies unknown: neither a read-back (masked values) nor a swap (maybe unmasked)."""
-    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT]}, "BAK": {}}, refuse={"POLICY_REFERENCES"})
+def test_snowflake_failed_swap_names_the_exact_recovery(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {"policies": [_MASK]}, "BAK": {}}, refuse={"SWAP WITH"})
+    _scripted(cur, monkeypatch, bak_exists=True)
 
-    with pytest.raises(TableDropError, match="unreadable masking and row access policies"):
-        _restore_with(cur, monkeypatch)
+    with pytest.raises(TableDropError) as info:
+        restore_set_aside("snowflake", _SF_CFG, "T", "T__DF_BAK", "PUBLIC")
 
-    assert not any(w in s for s in cur.executed for w in ("SWAP", "DROP", "INSERT OVERWRITE"))
-
-
-def test_snowflake_refused_reapply_does_not_swap(monkeypatch):
-    cur = _ScriptedCursor({"LIVE": {"policies": [_MASK]}, "BAK": {}}, refuse={"SET MASKING POLICY"})
-
-    with pytest.raises(TableDropError, match="SET MASKING POLICY"):
-        _restore_with(cur, monkeypatch)
-
-    assert not any("SWAP" in s or s.startswith("DROP") for s in cur.executed)
+    message = str(info.value)
+    assert 'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"; DROP TABLE "PUBLIC"."T__DF_BAK";' in message
+    assert "The rows from before this run are in" in message
+    assert not any(s.startswith("DROP") for s in cur.executed)
 
 
 # ----------------------------------------------------------------- BigQuery
@@ -654,11 +741,39 @@ def _gate(db_type: str, *, acknowledged: bool = False, probe: Any = None, sync_m
     )
 
 
-def test_gate_discloses_snowflake_and_elasticsearch_without_blocking():
-    for engine in ("snowflake", "elasticsearch"):
-        gate = _gate(engine)
-        assert gate["status"] == "pass" and gate["details"]["requires_approval"] is False
-        assert gate["details"]["preserved"] and "on_failure" in gate["details"]
+def test_gate_discloses_elasticsearch_without_blocking():
+    gate = _gate("elasticsearch")
+    assert gate["status"] == "pass" and gate["details"]["requires_approval"] is False
+    assert gate["details"]["preserved"] and "on_failure" in gate["details"]
+
+
+def test_gate_probes_snowflake_and_blocks_unreadable_policies():
+    """Review of NF-1: the Snowflake gate passed without reading anything."""
+    seen: list[str] = []
+
+    def probe(cfg: dict, table: str) -> dict:
+        seen.append(table)
+        return {"ran": True, "governed": True, "unreadable": ["masking and row access policies"], "message": ""}
+
+    gate = _gate("snowflake", probe=probe)
+    assert seen == ["orders"]
+    assert gate["status"] == "block"
+    assert "POLICY_REFERENCES" in gate["message"]
+    assert _gate("snowflake", probe=probe, acknowledged=True)["status"] == "pass"
+    ok = _gate("snowflake", probe=lambda c, t: {"ran": True, "governed": True, "unreadable": []})
+    assert ok["status"] == "pass" and "keeps the live object" in ok["message"]
+    assert _gate("snowflake", probe=lambda c, t: {"ran": False, "message": "timed out"})["status"] == "block"
+
+
+def test_snowflake_probe_reads_the_live_table(snowflake):
+    """The real probe on fakesnow: an emulator table governs nothing, so it passes."""
+    from services.overwrite_governance_gate import probe_snowflake_governance
+
+    cfg, table = snowflake
+    _seed(table)
+    assert probe_snowflake_governance({**cfg, "schema": "PUBLIC"}, table) == {
+        "ran": True, "governed": False, "unreadable": [], "message": "",
+    }
 
 
 def test_gate_blocks_bigquery_when_access_control_cannot_be_read():
