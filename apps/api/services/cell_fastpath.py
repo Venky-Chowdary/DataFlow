@@ -593,15 +593,57 @@ def text_is_never_a_decimal(text: str) -> bool:
     currency code is only stripped as a whitespace-delimited word, and a bare
     one leaves nothing to parse); digits joined by inner dashes (a date).
     """
-    if getattr(_off, "on", False) or not text.isascii():
+    if getattr(_off, "on", False):
         return False
+    if not text.isascii():
+        return _non_ascii_never_a_decimal(text)
     if not _NOT_A_NUMBER_CHARS.isdisjoint(text):
         return True
     if _SPACE_RE.search(text):
-        return False
+        # A currency code / regional mark is stripped only as a whole
+        # whitespace-delimited word; a word with any other letter stays.
+        return any(
+            _LETTER_NOT_E_RE.search(word) and word.upper() not in _removable_words()
+            for word in text.split()
+        )
     if _LETTER_NOT_E_RE.search(text):
         return True
     return _DASHED_DIGITS_RE.match(text) is not None
+
+
+_REMOVABLE: frozenset[str] | None = None
+
+
+def _removable_words() -> frozenset[str]:
+    """Upper-cased words ``_CURRENCY_RE`` may strip as a whole word (and a superset)."""
+    global _REMOVABLE
+    if _REMOVABLE is None:
+        from services.transform_engine import _CURRENCY_CODES
+
+        words = {w.upper() for w in _CURRENCY_CODES.split("|")}
+        words |= {"US$", "A$", "C$", "HK$", "NZ$", "S$", "MX$", "R$", "CA$", "AU$", "SG$",
+                  "RS", "RS.", "RP", "RM", "KR", "FT", "LEI", "CHF", "FR", "FR.", "SFR"}
+        _REMOVABLE = frozenset(words)
+    return _REMOVABLE
+
+
+def _non_ascii_never_a_decimal(text: str) -> bool:
+    """Non-ASCII text without whitespace holding a letter nothing strips.
+
+    After NFKC (what the parser applies first) a letter that is not an
+    exponent ``e`` and not one of the currency symbols (some symbols are
+    letters, e.g. ``Ξ``) survives every rule; a currency code is only removed
+    as a whitespace-delimited word, so without whitespace it can only be the
+    whole text, which then leaves nothing to parse.
+    """
+    import unicodedata
+
+    from services.transform_engine import _CURRENCY_SYMBOLS
+
+    folded = unicodedata.normalize("NFKC", text)
+    if any(ch.isspace() for ch in folded):
+        return False
+    return any(ch.isalpha() and ch not in "eE" and ch not in _CURRENCY_SYMBOLS for ch in folded)
 
 
 # --------------------------------------------------------------------------

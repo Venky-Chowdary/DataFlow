@@ -289,7 +289,13 @@ def test_decimal_parse_fast_reject_matches_full_path():
     corpus += [str(v) for v in corpus if not isinstance(v, str)]
     corpus += ["USD", "US$5", "5USD", "Rs.5", "kr", "EUR 1.234,50", "1_000", "e5", "1e5", "E",
                "2024-01-01", "1-", "-1", "1-2", "(1,234)", "12%", "1:2", "{1}", "Infinity",
-               "label-1", "x1", "0x10", "١٢٣", "１２３", "1 000", "1 000"]
+               "label-1", "x1", "0x10", "١٢٣", "１２３", "1 000", "1 000",
+               "note abc 12", "12 USD", "USD 12", "usd 12", "Rs. 5", "Rs 5", "kr 5", "5 kr",
+               "CHF 5.50", "Fr. 5", "SFr 5", "1 000 EUR", "label 1", "1 e 5", "US$ 5", "A$ 5",
+               "\u039e5", "\u0141 5", "T\u014dky\u014d", "\u0394\u03bf\u03ba\u03b9\u03bc\u03ae",
+               "caf\u00e9 5", "\uff15 \uff45", "\uff15\uff45\uff13", "\u216b", "1\u20442", "\u00b2",
+               "\u20ac 5", "5 \u20ac", "lei 5", "z\u0142 5", "5\u3000kr", "DOGE 1", "1INCH 5",
+               "e 5", "E5", "K\u010d 5", "5K\u010d", "\u043b\u0432 5"]
     for number_locale, date_locale, strict in PINS:
         tn = set_active_number_locale(number_locale)
         ts = set_strict_number_reading(strict)
