@@ -19,7 +19,7 @@
 import { gateDisplayCode, gateLabel, GATE_CATALOG } from "./preflightGates";
 import { plural } from "./plural";
 
-export type CheckOutcome = "blocking" | "could_not_run" | "review" | "passed" | "not_applicable" | "pending";
+export type CheckOutcome = "blocking" | "could_not_run" | "review" | "passed" | "after_run" | "not_applicable" | "pending";
 
 export interface GateLike {
   id: string;
@@ -29,23 +29,31 @@ export interface GateLike {
 }
 
 /**
- * Words the engine uses when a check was stopped rather than answered
- * (packages/preflight gates.py "hosted G13 unavailable", probe timeouts,
- * refused catalog reads). A skip without them is "does not apply".
+ * The outcome of one gate, from the engine's structured fields only (never
+ * its message text, review UI2 #4):
+ *
+ * - `rule_id` ending ".post_write": a proof that runs after the load (control
+ *   totals, destination foreign keys): "Checked after the run";
+ * - `unmeasured`, `remediation_kind: retry_validate` or an error: the check
+ *   was stopped, nothing was proven: "Could not run";
+ * - `declared: false`, `applicable: false`, a schemaless destination, or a
+ *   run that recreates no table (G19): "Not applicable";
+ * - any other skip, and any status the UI does not know: "Could not run"
+ *   (never counted as passed).
  */
-const COULD_NOT_RUN = /\b(unavailable|could not|couldn't|cannot|can't|failed to|timed? ?out|time-?out|unreachable|not reachable|refused|denied|error|exception|not available)\b/i;
-
 export function gateOutcome(gate: GateLike): CheckOutcome {
   const status = String(gate.status || "").toLowerCase();
   if (status === "pass") return "passed";
   if (status === "block") return "blocking";
   if (status === "warn" || status === "review") return "review";
-  if (status === "skip") {
-    const details = gate.details || {};
-    const errored = Boolean(details.error) || String(details.status || "").toLowerCase() === "unavailable";
-    return errored || COULD_NOT_RUN.test(String(gate.message || "")) ? "could_not_run" : "not_applicable";
-  }
-  return "pending";
+  if (status === "running" || status === "pending") return "pending";
+  if (status !== "skip") return "could_not_run";
+  const d = gate.details || {};
+  if (String(d.rule_id || "").endsWith(".post_write")) return "after_run";
+  if (d.unmeasured === true || d.remediation_kind === "retry_validate" || d.error) return "could_not_run";
+  if (d.declared === false || d.applicable === false || d.schemaless === true) return "not_applicable";
+  if ("dest_recreated" in d && (d.dest_recreated === false || d.destination_table_exists !== true)) return "not_applicable";
+  return "could_not_run";
 }
 
 export interface FindingGroup {
@@ -66,15 +74,27 @@ function sentence(text: string): string {
  * Group "object: cause" lines by cause. A line with no object prefix is its
  * own cause. Order follows the first occurrence of each cause.
  */
+/** Labels the engine puts before a colon that are not objects ("Probe: …", "Error: …"). */
+const NOT_OBJECTS = new Set([
+  "probe", "error", "errors", "engine", "warning", "note", "reason", "hint", "status", "detail", "details",
+  "message", "cause", "fix", "privilege status", "copy staging", "info", "action", "sample", "rule",
+]);
+
+/**
+ * Group "object: cause" lines by cause. A line with no object prefix (or a
+ * label prefix such as "Probe:") is its own cause. Order follows the first
+ * occurrence of each cause.
+ */
 export function groupFindingsByCause(lines: string[]): FindingGroup[] {
   const groups = new Map<string, FindingGroup>();
   for (const raw of lines) {
     const line = String(raw || "").trim();
     if (!line) continue;
     // "email: value too long" / "column email: ..." / "orders.email — ..."
-    const m = /^(?:column\s+)?([A-Za-z_][\w.$"`[\]]{0,80})\s*(?::|—|–)\s+(.+)$/.exec(line);
-    const object = m ? m[1].replace(/["`[\]]/g, "") : "";
-    const cause = sentence(m ? m[2] : line).replace(/\.$/, "");
+    const m = /^(?:column\s+)?([A-Za-z_][\w.$"`[\]]{0,80}(?: [a-z]+)?)\s*(?::|—|–)\s+(.+)$/.exec(line);
+    const isObject = Boolean(m) && !NOT_OBJECTS.has(m![1].toLowerCase()) && !/\s/.test(m![1]);
+    const object = isObject ? m![1].replace(/["`[\]]/g, "") : "";
+    const cause = sentence(isObject ? m![2] : line).replace(/\.$/, "");
     const key = cause.toLowerCase();
     const group = groups.get(key) ?? { cause, objects: [], count: 0 };
     group.count += 1;
@@ -84,11 +104,21 @@ export function groupFindingsByCause(lines: string[]): FindingGroup[] {
   return [...groups.values()];
 }
 
-/** "Value too long for VARCHAR(120) · 3 columns" (objects counted when more than one). */
-export function findingGroupLine(group: FindingGroup, noun = "column"): string {
-  if (group.objects.length > 1) return `${group.cause} · ${plural(group.objects.length, noun)}`;
-  if (group.objects.length === 1) return `${group.cause} · ${group.objects[0]}`;
-  return group.count > 1 ? `${group.cause} · ${plural(group.count, "time")}` : group.cause;
+/** Objects shown before "and N more" (the rest behind "Show all"). */
+export const OBJECTS_SHOWN = 4;
+
+/**
+ * "Value too long for VARCHAR(120): email, full_name, city" — a blocker
+ * always names its objects (review UI2 #8); a long list is cut after
+ * OBJECTS_SHOWN with "and N more", the full list one click away.
+ */
+export function findingGroupLine(group: FindingGroup, all = false): string {
+  if (group.objects.length) {
+    const shown = all ? group.objects : group.objects.slice(0, OBJECTS_SHOWN);
+    const more = group.objects.length - shown.length;
+    return `${group.cause}: ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+  }
+  return group.count > 1 ? `${group.cause} (${plural(group.count, "time")})` : group.cause;
 }
 
 export interface ChecklistRow {
@@ -118,7 +148,7 @@ export function scopeLine(details: Record<string, unknown> | null | undefined): 
 }
 
 export interface ChecklistGroup {
-  id: Exclude<CheckOutcome, "not_applicable" | "pending">;
+  id: Exclude<CheckOutcome, "not_applicable">;
   title: string;
   rows: ChecklistRow[];
   /** Passed starts collapsed: it is evidence, not work. */
@@ -133,9 +163,11 @@ export interface Checklist {
 }
 
 const GROUPS: { id: ChecklistGroup["id"]; title: string }[] = [
+  { id: "pending", title: "Running" },
   { id: "blocking", title: "Blocking" },
   { id: "could_not_run", title: "Could not run" },
   { id: "review", title: "Needs review" },
+  { id: "after_run", title: "Checked after the run" },
   { id: "passed", title: "Passed" },
 ];
 
@@ -155,7 +187,7 @@ export function buildChecklist(
   order: (a: string, b: string) => number = () => 0,
 ): Checklist {
   const counts: Record<CheckOutcome, number> = {
-    blocking: 0, could_not_run: 0, review: 0, passed: 0, not_applicable: 0, pending: 0,
+    blocking: 0, could_not_run: 0, review: 0, passed: 0, after_run: 0, not_applicable: 0, pending: 0,
   };
   const rows: ChecklistRow[] = [...(gates || [])]
     .sort((a, b) => order(a.id, b.id))
@@ -169,7 +201,7 @@ export function buildChecklist(
         rule: ruleFor(gate.id),
         outcome,
         message: String(gate.message || "").trim(),
-        findings: outcome === "passed" || outcome === "not_applicable" ? [] : groupFindingsByCause(findingsOf(gate)),
+        findings: outcome === "passed" || outcome === "not_applicable" || outcome === "after_run" ? [] : groupFindingsByCause(findingsOf(gate)),
         scope: outcome === "not_applicable" ? "" : scopeLine(gate.details),
         durationMs: typeof (gate as { duration_ms?: number }).duration_ms === "number"
           ? (gate as { duration_ms?: number }).duration_ms
@@ -180,7 +212,7 @@ export function buildChecklist(
     groups: GROUPS.map((g) => ({
       ...g,
       rows: rows.filter((r) => r.outcome === g.id),
-      collapsedByDefault: g.id === "passed",
+      collapsedByDefault: g.id === "passed" || g.id === "after_run",
     })).filter((g) => g.rows.length > 0),
     notApplicable: rows.filter((r) => r.outcome === "not_applicable"),
     pending: rows.filter((r) => r.outcome === "pending"),
@@ -194,6 +226,8 @@ export function checklistSummary(counts: Record<CheckOutcome, number>): string {
   if (counts.blocking) parts.push(`${counts.blocking.toLocaleString()} blocking`);
   if (counts.could_not_run) parts.push(`${counts.could_not_run.toLocaleString()} could not run`);
   if (counts.review) parts.push(`${counts.review.toLocaleString()} to review`);
+  if (counts.pending) parts.push(`${counts.pending.toLocaleString()} running`);
+  if (counts.after_run) parts.push(`${counts.after_run.toLocaleString()} checked after the run`);
   if (counts.passed) parts.push(`${counts.passed.toLocaleString()} passed`);
   if (counts.not_applicable) parts.push(`${counts.not_applicable.toLocaleString()} not applicable`);
   return parts.join(" · ");
@@ -204,6 +238,7 @@ export const OUTCOME_WORD: Record<CheckOutcome, string> = {
   blocking: "Failed",
   could_not_run: "Could not run",
   review: "Review",
+  after_run: "Checked after the run",
   passed: "Passed",
   not_applicable: "Not applicable",
   pending: "Running",

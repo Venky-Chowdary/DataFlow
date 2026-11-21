@@ -35,8 +35,8 @@ const gates = [
   { id: "g1_source", status: "pass", message: "ok" },
   { id: "g2_destination", status: "pass", message: "ok" },
   { id: "g3_schema_contract", status: "block", message: "3 columns narrow", details: { issue_texts: ["a: too long", "b: too long"] } },
-  { id: "g13_source_coverage", status: "skip", message: "Source coverage skipped — hosted G13 unavailable" },
-  { id: "g22_dest_referential_integrity", status: "skip", message: "No foreign keys were declared on this route." },
+  { id: "g13_source_coverage", status: "skip", message: "Source coverage check could not run: the service that runs it did not answer.", details: { unmeasured: true } },
+  { id: "g22_dest_referential_integrity", status: "skip", message: "No foreign keys were declared on this route.", details: { declared: false } },
 ];
 
 async function mount(onRerun?: () => void) {
@@ -68,7 +68,7 @@ describe("GateChecklist", () => {
     const skipped = host.querySelector('[data-gate="g13_source_coverage"]')!;
     assert.equal(failed.querySelector(".df2-check-word")?.textContent, "Failed");
     assert.equal(skipped.querySelector(".df2-check-word")?.textContent, "Could not run");
-    assert.equal(failed.querySelector(".df2-check-findings")?.textContent, "Too long · 2 columns");
+    assert.equal(failed.querySelector(".df2-check-findings")?.textContent, "Too long: a, b");
     assert.equal(host.querySelector('[data-gate="g1_source"]'), null, "passed rows start collapsed");
     const passedToggle = [...host.querySelectorAll(".df2-check-group-title button")][2] as HTMLButtonElement;
     await act(async () => passedToggle.click());
@@ -100,5 +100,26 @@ describe("GateChecklist", () => {
     assert.ok(pop, "popover opened");
     assert.match(pop!.textContent || "", /This check failed, so Run stays locked until it passes/);
     assert.match(pop!.textContent || "", /not by AI/);
+  });
+});
+
+describe("GateChecklist accessibility (review UI2 #11)", () => {
+  it("Show all is a real, focusable button and the tab stop survives a collapse", async () => {
+    const many = [{ id: "g3_schema_contract", status: "block", message: "narrow", details: { issue_texts: ["a: x", "b: x", "c: x", "d: x", "e: x"] } },
+      { id: "g13_source_coverage", status: "skip", details: { unmeasured: true } }];
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => root.render(createElement(GateChecklist, { gates: many, findingsOf: (g: { details?: Record<string, unknown> | null }) => (g.details?.issue_texts as string[]) ?? [] })));
+    const more = host.querySelector<HTMLButtonElement>(".df2-check-more")!;
+    assert.notEqual(more.tabIndex, -1);
+    assert.equal(more.getAttribute("aria-expanded"), "false");
+    await act(async () => more.click());
+    assert.equal(host.querySelector('[data-gate="g3_schema_contract"] .df2-check-findings')?.textContent, "X: a, b, c, d, e");
+    const rows = () => [...host.querySelectorAll<HTMLElement>("[data-check-row]")];
+    rows()[1].focus();
+    const blockingToggle = host.querySelector<HTMLButtonElement>(".df2-check-group-title button")!;
+    await act(async () => blockingToggle.click());
+    assert.deepEqual(rows().map((r) => r.tabIndex), [0], "one tab stop remains");
   });
 });

@@ -54,7 +54,9 @@ export function explainGate(gateId: string, outcome: CheckOutcome, message = "")
         source: CATALOG_SOURCE,
       };
     case "review":
-      return { title, what, result: `This check found something to look at. It does not lock Run.${said}`, next: "Read the findings and decide whether they are expected for this route.", source: CATALOG_SOURCE };
+      return { title, what, result: `This check found something a person should look at.${said}`, next: "Read the findings. Validate's decision at the top says whether Run is open; while it reads Review, Run stays locked.", source: CATALOG_SOURCE };
+    case "after_run":
+      return { title, what, result: "This proof needs the loaded data, so it runs after the transfer, not in Validate.", next: "Nothing to do now. The result appears in the run's Trust Report.", source: CATALOG_SOURCE };
     case "not_applicable":
       return { title, what, result: "Nothing on this route needs this check, so it did not run.", next: "Nothing to do.", source: CATALOG_SOURCE };
     case "pending":

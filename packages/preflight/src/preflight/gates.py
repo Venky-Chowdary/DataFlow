@@ -4317,8 +4317,8 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G9_SYNC_CONTRACT,
             status=GateStatus.SKIP,
-            message="Sync contract skipped — hosted cursor gate unavailable",
-            details={"source_read_mode": mode, "sync_mode": sync},
+            message="Sync contract check could not run: the service that runs it did not answer.",
+            details={"source_read_mode": mode, "sync_mode": sync, "unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
 
@@ -4331,8 +4331,8 @@ def gate_g13_source_coverage(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G13_SOURCE_COVERAGE,
             status=GateStatus.SKIP,
-            message="Source coverage skipped — hosted G13 unavailable",
-            details={},
+            message="Source coverage check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     _coverage, gate = build_source_coverage_gate(
@@ -4351,8 +4351,8 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
             status=GateStatus.SKIP,
-            message="Destination requirements skipped — hosted G14 unavailable",
-            details={},
+            message="Destination requirements check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     dest_columns = _live_dest_column_names(dest)
@@ -4369,8 +4369,8 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
             status=GateStatus.SKIP,
-            message="Destination requirements not applicable",
-            details={},
+            message="Destination requirements do not apply to this route.",
+            details={"applicable": False},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     return _host_gate_to_result(GateId.G14_DESTINATION_REQUIREMENTS, gate, start)
@@ -4385,8 +4385,8 @@ def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G15_DEST_EXISTS_SHAPE,
             status=GateStatus.SKIP,
-            message="Dest-exists shape skipped — hosted G15 unavailable",
-            details={},
+            message="Destination shape check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     dest_cols = _live_dest_column_names(dest)

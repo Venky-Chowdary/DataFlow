@@ -238,7 +238,7 @@ def build_dest_schema_replacement_gate(
                 "carrier for a recreate to replace"
             ),
             "duration_ms": 0,
-            "details": {"destination_db_type": destination_db_type},
+            "details": {"destination_db_type": destination_db_type, "applicable": False},
         }
 
     findings = find_silent_replacements(

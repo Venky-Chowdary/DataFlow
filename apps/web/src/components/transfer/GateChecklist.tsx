@@ -13,6 +13,7 @@ import {
   buildChecklist,
   checklistSummary,
   findingGroupLine,
+  OBJECTS_SHOWN,
   OUTCOME_WORD,
   type CheckOutcome,
   type ChecklistRow,
@@ -28,6 +29,7 @@ const OUTCOME_ICON: Record<CheckOutcome, IconName> = {
   could_not_run: "verdict-not-checked",
   review: "warning",
   passed: "success",
+  after_run: "clock",
   not_applicable: "minus",
   pending: "spinner",
 };
@@ -50,6 +52,7 @@ function CheckRow({
   const explanation = explainGate(row.id, row.outcome, row.message);
   const findings = showAll ? row.findings : row.findings.slice(0, FINDINGS_SHOWN);
   const quiet = row.outcome === "passed" || row.outcome === "not_applicable";
+  const cut = row.findings.length > FINDINGS_SHOWN || row.findings.some((g) => g.objects.length > OBJECTS_SHOWN);
   return (
     <li
       className="df2-check"
@@ -74,13 +77,13 @@ function CheckRow({
         {!quiet && findings.length > 0 && (
           <ul className="df2-check-findings">
             {findings.map((group) => (
-              <li key={group.cause}>{findingGroupLine(group)}</li>
+              <li key={group.cause}>{findingGroupLine(group, showAll)}</li>
             ))}
           </ul>
         )}
-        {!quiet && row.findings.length > FINDINGS_SHOWN && (
-          <button type="button" className="df2-check-more" onClick={() => setShowAll((v) => !v)} tabIndex={-1}>
-            {showAll ? "Show fewer" : `Show ${row.findings.length - FINDINGS_SHOWN} more`}
+        {!quiet && cut && (
+          <button type="button" className="df2-check-more" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "Show fewer" : "Show all"}
           </button>
         )}
       </div>
@@ -199,6 +202,9 @@ export function GateChecklist({
     }
   };
 
+  // The roving tab stop must land on a row that exists after a collapse or a re-run.
+  const visibleRows = groups.reduce((n, g) => n + ((toggled[g.id] ?? g.collapsedByDefault) ? 0 : g.rows.length), 0);
+  const tabStop = visibleRows ? Math.min(focusIndex, visibleRows - 1) : -1;
   let base = 0;
   return (
     <div className="df2-vd-rules df2-checklist" ref={listRef} onKeyDown={onKeyDown}>
@@ -221,7 +227,7 @@ export function GateChecklist({
             rows={group.rows}
             collapsed={collapsed}
             onToggle={() => setToggled((prev) => ({ ...prev, [group.id]: !collapsed }))}
-            focusIndex={focusIndex}
+            focusIndex={tabStop}
             baseIndex={base}
             onRerun={onRerun}
             onFocusIndex={setFocusIndex}
