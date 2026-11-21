@@ -109,12 +109,13 @@ did; they never round and never invent a value the writer did not write.
 
 **Instants.** The source instant is quantised exactly as
 `carrier_instant.quantize_instant_for_carrier` does for the destination
-carrier: drop a `datetime2(7)` 100 ns tick when `d ≤ 6`, then round the
-microsecond field half **up**. On the epoch axis that is
-`floor((u + step/2) / step)` for instants before 1970 as well. (The design
-text said "half away from zero"; the code rounds half up on the timeline, and
-CE1 follows the code.) A `TIME` that would round past midnight keeps its
-second, as the carrier does.
+carrier, which models each engine's measured rule: drop a `datetime2(7)`
+100 ns tick when `d ≤ 6`, then round. MySQL, MariaDB (under the write
+session's `TIME_ROUND_FRACTIONAL`) and SQL Server round half up on the
+timeline (`floor((u + step/2) / step)`); PostgreSQL rounds half away from zero
+around its 2000-01-01 epoch, so an instant before 2000 rounds half down. A
+`TIME` that would round past midnight keeps its second, as the carrier model
+does.
 
 **Approved lossy decimal casts (fit-or-contract).** For a destination
 `NUMERIC(p,s)` narrower than the source:
@@ -173,28 +174,34 @@ same multiplicity. A difference is reported as rows of content missing from
 and extra in the destination; it is never attributed to a key, and a changed
 cell reads as one missing plus one extra row.
 
-## Divergences the tests found in the product (not in CE1)
+## Mismatches the tests found in the product, and their fixes
 
-CE1 follows Gate-8. Where the tests showed Gate-8's model and an engine or a
-writer disagree, the scan reports a difference — the honest direction — and
-the divergence is recorded here for the owner of that code:
+Parity at Scale's tests found three places where the writer, Gate-8 and the
+destination disagreed. Each is fixed so that what Gate-8 models is what landed:
 
-- **PostgreSQL rounds a narrowed instant half away from zero before 1970**
-  (`timestamp(6)` → `timestamp(3)`: `1969-12-31 23:59:59.9995` is stored
-  `…59.999`), while `carrier_instant` rounds half up on the timeline (`00:00:00.000`).
-  Instants after 1970 agree. The live rendering test is restricted to
-  post-1970 instants for that reason.
-- **A `NaN` into a SQLite `NUMERIC(p,s)`**: Gate-8's source replay
-  (`map_rows_for_fingerprint`) holds the row out, while the SQLite writer
-  stores it with NULL.
-- **A signed `CAST_AND_CONTINUE` contract with `COERCE_NULL` does not mean
-  "NULL" everywhere.** Read from the writer (under the `WIRE` number locale a
-  typed database source uses): into `NUMERIC(10,2)` every non-fitting value is
-  held out; into `NUMERIC(6,0)` a value whose fraction does not fit (or that
-  is `NaN` or infinite) is written as NULL, while one whose integer part does
-  not fit is held out. A PostgreSQL `NaN` fits `NUMERIC(10,2)` and is kept.
-  The projection reads each class's action from the writer per column, so it
-  follows whatever the writer does.
+- **Instant narrowing.** PostgreSQL keeps timestamps as microseconds since
+  2000-01-01 and rounds a narrowing half away from zero on that axis, so
+  `1999-12-31 23:59:59.9995` lands as `…59.999`; `carrier_instant` rounded
+  half up on the timeline. It now models PostgreSQL's rule (and CE1 and the
+  PostgreSQL dialect follow it). MariaDB truncated where MySQL rounds; the
+  MySQL-family write session now sets `TIME_ROUND_FRACTIONAL` on MariaDB
+  10.4+ (and drops MySQL's `TIME_TRUNCATE_FRACTIONAL`), so both servers store
+  the rounded instant Gate-8 models. Live tests:
+  `apps/api/tests/test_carrier_instant_engine_rounding.py`.
+- **A Decimal `NaN` or infinity reached the writer as SQL NULL.** The source
+  row spool serialised it through a JSON default that reads `value != value`
+  as "missing", so it was written as NULL without any contract saying so. The
+  spool now keeps the `NaN` / `Infinity` token; PostgreSQL `NUMERIC(p,s)`
+  stores `NaN` (the bind now accepts it, as `fits_decimal` always did), and
+  every other non-fitting value follows the contract below.
+- **A signed `CAST_AND_CONTINUE` contract with `COERCE_NULL` was not honoured
+  by the write-time type matrix**, which used the job posture and held the row
+  out. The matrix now resolves the column's signed contract: every class of
+  non-fitting decimal (fraction too long, integer part too long, both, `NaN`,
+  infinity) is written as NULL under such a contract and held out without
+  one, and Gate-8's replay predicts exactly that. Live tests on SQLite,
+  PostgreSQL, MySQL and MariaDB:
+  `apps/api/tests/test_writer_contract_decimal_classes_live.py`.
 
 ## Versioning
 
