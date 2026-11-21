@@ -11,6 +11,12 @@ import { CadenceTiles } from "../ui/CadenceTiles";
 import { ContractBindField } from "../contracts/ContractBindField";
 import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
 import {
+  scheduleCreatePlanFields,
+  schedulePrimaryKeyRequired,
+  scheduleSaveBlockedReason,
+  scheduleSaveBlockers,
+} from "../../lib/scheduleFormReadiness";
+import {
   DATE_LOCALES,
   DEFAULT_SYNC_MODE_IDS,
   NUMBER_LOCALES,
@@ -63,6 +69,8 @@ interface ScheduleFormProps {
   onSubmit: (input: Partial<ScheduleInput>) => void;
   onCancel: () => void;
   onOpenStudio?: () => void;
+  /** Edit of a mapping-less schedule: plan it server-side (mapping + Validate). */
+  onPlanMappings?: () => void;
 }
 
 const COMMON_TIMEZONES = [
@@ -96,7 +104,7 @@ function formatWhen(iso: string | null | undefined): string {
   }
 }
 
-export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel, onOpenStudio }: ScheduleFormProps) {
+export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel, onOpenStudio, onPlanMappings }: ScheduleFormProps) {
   const isEdit = Boolean(initial);
   const mappingCount = initial?.mapping_count ?? (Array.isArray(initial?.mappings) ? initial.mappings.length : 0);
   const missingValidateMappings = scheduleCreateMustPauseWithoutMappings(mappingCount);
@@ -307,17 +315,29 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     return `Up to ${maxRetries} retr${maxRetries === 1 ? "y" : "ies"} — linear backoff before attempts: ${delays.join(", ")}${suffix}.`;
   }, [maxRetries, retryBackoff]);
 
-  const canSubmit = Boolean(
-    name.trim()
-    && sourceId
-    && destId
-    && sourceTable.trim()
-    && destTable.trim()
-    && (!callable || procedureText.trim())
-    && (cadenceMode === "preset" || cron.trim())
-    && (duplicatePolicy === "append" || primaryKey.trim())
-    && !contractBlock,
-  );
+  // One answer for "can this be saved?" and "what is missing?" (QA D344):
+  // the disabled Save button says why, and the field it needs is marked.
+  const saveBlockers = scheduleSaveBlockers({
+    name,
+    sourceId,
+    destId,
+    sourceTable,
+    destTable,
+    callable,
+    procedureText,
+    cadenceMode,
+    cron,
+    syncMode,
+    duplicatePolicy,
+    primaryKey,
+    contractBlock,
+  });
+  const canSubmit = saveBlockers.length === 0;
+  const saveBlockedReason = connectors.length < 2
+    ? "To save: add a source and a destination connection first."
+    : scheduleSaveBlockedReason(saveBlockers);
+  const missingField = new Set(saveBlockers.map((b) => b.field));
+  const primaryKeyRequired = schedulePrimaryKeyRequired(syncMode, duplicatePolicy);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -384,7 +404,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       contract_id: contractId.trim(),
       require_signed_contract: requireSigned && Boolean(contractId.trim()),
       require_reversibility: requireReversibility,
-      ...(isEdit || !missingValidateMappings ? {} : { enabled: false }),
+      // A new schedule with no mapping contract is planned server-side (the
+      // Studio plan: mapping + Validate) and saved only when it would run.
+      ...scheduleCreatePlanFields(isEdit, mappingCount),
       // Never PATCH empty Validate hashes — "" is not None and wipes Studio stamps.
     });
   };
@@ -401,11 +423,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <div className="df2-sched-mapping-gap" role="status">
           <p className="df2-field-hint">
             {isEdit
-              ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map."
-              : "This form does not store a mapping contract. Save creates a paused draft, then opens Transfer Studio. The beat will not invent an auto-map. This is a recurring sync, not a DAG."}
+              ? "This pipeline has no persisted Validate mappings, so Run now cannot start it. Plan mappings maps the columns and runs Validate for this source and destination, then arms it; or map it yourself in Transfer Studio."
+              : "Save plans this schedule the way Transfer Studio does: Datawrap reads both schemas, maps the columns and runs Validate, and saves the schedule only if that plan would run. To review the mapping yourself first, open Transfer Studio."}
           </p>
+          {isEdit && onPlanMappings && (
+            <Button type="button" size="sm" variant="primary" onClick={onPlanMappings}>
+              Plan mappings
+            </Button>
+          )}
           {onOpenStudio && (
-            <Button type="button" size="sm" variant="primary" onClick={onOpenStudio}>
+            <Button type="button" size="sm" variant={isEdit && onPlanMappings ? "secondary" : "primary"} onClick={onOpenStudio}>
               Open Transfer Studio
             </Button>
           )}
@@ -607,7 +634,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
               <div className="df2-field">
                 <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
                 <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
-                <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
+                <span className="df2-field-hint">
+                  Watermark column tracked between runs for incremental / CDC sync. Optional here: when it
+                  is empty, planning picks the table's single change-time column or tells you to name one.
+                </span>
               </div>
             )}
             {showCursor && (
@@ -632,19 +662,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             )}
             {showPrimaryKey && (
               <div className="df2-field">
-                <label className="df2-label" htmlFor="sched-pk">Primary key{syncMode === "scd2" || syncMode === "mirror" ? " (required)" : ""}</label>
+                <label className="df2-label" htmlFor="sched-pk">Primary key{primaryKeyRequired ? " (required)" : ""}</label>
                 <input
                   id="sched-pk"
                   className="df2-input"
                   value={primaryKey}
                   onChange={(e) => setPrimaryKey(e.target.value)}
                   placeholder="id"
-                  required={
-                    syncMode === "scd2"
-                    || syncMode === "mirror"
-                    || duplicatePolicy === "upsert"
-                    || duplicatePolicy === "skip_duplicates"
-                  }
+                  required={primaryKeyRequired}
+                  aria-required={primaryKeyRequired}
+                  aria-invalid={missingField.has("sched-pk") || undefined}
                 />
                 <span className="df2-field-hint">
                   {syncMode === "scd2"
@@ -1017,12 +1044,18 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
 
       <div className="df2-card-footer df2-card-footer--form">
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onCancel}>Cancel</button>
+        {!saving && saveBlockedReason && (
+          <p id="sched-save-why" className="df2-field-hint df2-sched-save-why" role="status">
+            {saveBlockedReason}
+          </p>
+        )}
         <Button
           type="submit"
           variant="primary"
           loading={saving}
           loadingLabel="Saving…"
           disabled={saving || !canSubmit || connectors.length < 2}
+          aria-describedby={saveBlockedReason ? "sched-save-why" : undefined}
         >
           {isEdit ? "Save changes" : "Save schedule"}
         </Button>
