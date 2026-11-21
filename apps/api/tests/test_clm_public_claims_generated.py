@@ -39,9 +39,16 @@ def test_committed_snapshot_names_the_ci_run_it_came_from() -> None:
     assert str(doc.get("source_run") or "").startswith("https://github.com/"), doc.get("source_run")
     for engine, record in doc["engines"].items():
         assert record["live_verified"] == (record["status"] == "ci_green"), engine
-        for run in record.get("runs") or []:
-            if record["live_verified"]:
-                assert run["status"] == "green" and not run["engine_skips"], (engine, run)
+        if not record["live_verified"]:
+            continue
+        runs = record.get("runs") or []
+        # A live-verified engine has a green, skip-free proving run and no
+        # red one. An opt-in job that did not run (cdc-oracle without its
+        # secrets) is recorded as not_run beside it, never as a pass.
+        assert any(r["status"] == "green" for r in runs), (engine, runs)
+        for run in runs:
+            assert run["status"] in {"green", "not_run"}, (engine, run)
+            assert not run["engine_skips"], (engine, run)
 
 
 def test_generated_web_claims_match_the_evidence(monkeypatch) -> None:
@@ -66,9 +73,15 @@ def test_proven_count_is_the_evidence_not_a_constant(monkeypatch) -> None:
     assert claims["proven_count"] + claims["pending_count"] == len(declared)
     for driver in claims["proven_drivers"]:
         assert connector_proof.driver_proven(driver), driver
-    # Kafka and the vector stores have no proving CI job (CLM-11).
-    for driver in ("kafka", "qdrant", "weaviate", "pinecone", "milvus", "elasticsearch"):
+    # The vector stores and Elasticsearch have no proving CI job (CLM-11).
+    for driver in ("qdrant", "weaviate", "pinecone", "milvus", "elasticsearch"):
         assert driver in claims["pending_drivers"], driver
+    # Kafka and Oracle are proven only by their container jobs' green runs.
+    snap = connector_proof.evidence_snapshot()
+    for driver, job in (("kafka", "kafka-live"), ("oracle", "oracle-live")):
+        record = (snap.get("engines") or {}).get(driver) or {}
+        green_jobs = {r["job"] for r in record.get("runs") or [] if r["status"] == "green"}
+        assert (driver in claims["proven_drivers"]) == (job in green_jobs), (driver, green_jobs)
 
 
 def test_public_pages_carry_no_untraceable_evidence_block() -> None:

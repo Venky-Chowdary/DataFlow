@@ -43,7 +43,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "driver": "oracle",
       "name": "Oracle",
-      "proven": false
+      "proven": true
     }
   ],
   "engine_status": {
@@ -51,18 +51,18 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "bigquery": "ci_green",
     "files": "ci_green",
     "gcs": "no_ci_job",
-    "kafka": "no_ci_result",
+    "kafka": "ci_green",
     "mongodb": "ci_green",
     "mysql": "ci_green",
-    "oracle": "not_run",
+    "oracle": "ci_green",
     "postgresql": "ci_green",
     "redis": "ci_green",
     "snowflake": "ci_green",
     "sqlite": "ci_green",
     "sqlserver": "ci_green"
   },
-  "evidence_generated_at": "2026-11-14T20:25:16.792820+00:00",
-  "evidence_run_id": "43623907668",
+  "evidence_generated_at": "2026-11-21T19:36:52.684825+00:00",
+  "evidence_run_id": "44932873967",
   "families": [
     {
       "family": "Databases",
@@ -101,7 +101,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "oracle",
           "emulated": false,
           "name": "Oracle",
-          "proven": false
+          "proven": true
         }
       ]
     },
@@ -222,7 +222,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
           "driver": "kafka",
           "emulated": false,
           "name": "Apache Kafka",
-          "proven": false
+          "proven": true
         }
       ]
     },
@@ -291,7 +291,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       ]
     }
   ],
-  "pending_count": 25,
+  "pending_count": 23,
   "pending_drivers": [
     "adls",
     "couchbase",
@@ -304,10 +304,8 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "hubspot",
     "iceberg",
     "influxdb",
-    "kafka",
     "milvus",
     "neo4j",
-    "oracle",
     "pdf",
     "pinecone",
     "qdrant",
@@ -332,7 +330,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "emulated": false,
       "engine": "files",
-      "executed": 44578,
+      "executed": 45444,
       "jobs": [
         "api-tests"
       ],
@@ -340,8 +338,17 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     },
     {
       "emulated": false,
+      "engine": "kafka",
+      "executed": 426,
+      "jobs": [
+        "kafka-live"
+      ],
+      "name": "Apache Kafka"
+    },
+    {
+      "emulated": false,
       "engine": "mongodb",
-      "executed": 44863,
+      "executed": 45729,
       "jobs": [
         "api-tests",
         "cdc-matrix",
@@ -352,7 +359,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "emulated": false,
       "engine": "mysql",
-      "executed": 44863,
+      "executed": 45729,
       "jobs": [
         "api-tests",
         "cdc-matrix",
@@ -362,8 +369,17 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     },
     {
       "emulated": false,
+      "engine": "oracle",
+      "executed": 740,
+      "jobs": [
+        "oracle-live"
+      ],
+      "name": "Oracle"
+    },
+    {
+      "emulated": false,
       "engine": "postgresql",
-      "executed": 44863,
+      "executed": 45729,
       "jobs": [
         "api-tests",
         "cdc-matrix",
@@ -374,7 +390,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "emulated": false,
       "engine": "redis",
-      "executed": 44840,
+      "executed": 45706,
       "jobs": [
         "api-tests",
         "cdc-matrix"
@@ -393,7 +409,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     {
       "emulated": false,
       "engine": "sqlite",
-      "executed": 44578,
+      "executed": 45444,
       "jobs": [
         "api-tests"
       ],
@@ -409,7 +425,7 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
       "name": "SQL Server"
     }
   ],
-  "proven_count": 21,
+  "proven_count": 23,
   "proven_drivers": [
     "avro",
     "bigquery",
@@ -418,9 +434,11 @@ export const CONNECTOR_CLAIMS: ConnectorClaims = {
     "fixed_width",
     "json",
     "jsonl",
+    "kafka",
     "mongodb",
     "mysql",
     "ndjson",
+    "oracle",
     "orc",
     "parquet",
     "pgvector",
