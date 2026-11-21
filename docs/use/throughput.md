@@ -20,7 +20,10 @@ are quarantined with a reason, the row accounting balances, and Gate-8
 verifies the destination against an independent source re-read.
 
 A PostgreSQL → PostgreSQL table with a `jsonb` column now takes the binary
-copy (`jsonb` → `jsonb` is a plain carry; the copy moves the stored datum).
+copy when the destination column is `jsonb` too or does not exist yet
+(`jsonb` → `jsonb` is a plain carry; the copy moves the stored datum). Into an
+existing `text` or `json` column the cast decides the stored text, so that
+route stays on the row path in every mode.
 Before, the `json` cast the mapper stamps on JSON columns sent every such
 table down the row path. A `json` (text) column still takes the row path.
 
@@ -108,7 +111,11 @@ What changed, with no change to any result:
   (about `2k·log2(n/k)` attempts for `k` bad rows in `n`, instead of `n`).
   Rows land or are held out exactly as before, in the same order, each with
   its own error. SQL Server and the generic SQL writer still salvage row by
-  row. A cancel is polled before every attempt: nothing lands after the poll
+  row, and so does MySQL into a non-transactional table (MyISAM, Aria,
+  MEMORY): a failed multi-row INSERT there keeps the rows before its bad row.
+  On such a table a chunk with a refused row already fails the run today
+  (the chunk INSERT wrote those rows before the per-row salvage retried
+  them; measured on 70cb4669c too) — an open gap, not changed here. A cancel is polled before every attempt: nothing lands after the poll
   that sees it. On MySQL each salvage attempt commits, so up to one in-flight
   sub-batch (at most half a chunk) can land between the cancel request and
   that poll, where row-by-row landed at most one row; the cancel still reports
@@ -121,9 +128,14 @@ What changed, with no change to any result:
 the durable checkpoint shows committed batches, starts a new process that
 resumes the same job, and checks every cell of the destination against the
 source: PostgreSQL ↔ PostgreSQL, MariaDB ↔ MariaDB, PostgreSQL → MariaDB and
-MariaDB → PostgreSQL, in `full_refresh_overwrite` and `incremental_deduped`.
-No row is lost or duplicated in any of the eight cases. Append resume is
-refused by design (see [sync modes](sync-modes.md)).
+MariaDB → PostgreSQL, in `full_refresh_overwrite`, `incremental_deduped`,
+`full_refresh_append` and `incremental_append`. No row is lost or duplicated
+in any of the sixteen cases. In the append modes, where a rerun from the start
+would duplicate, a destination trigger counts what the second process writes:
+never more than the rows after the checkpoint it resumed from (rows that
+landed after the last checkpoint save are re-applied through the write
+ledger, not duplicated). The same test with the second process started
+without `resume` fails all eight append cases.
 
 ## Run it yourself
 
@@ -138,9 +150,12 @@ The report holds rows/s over the whole engine call, the engine's phase
 profile, verification seconds (Gate-8 reconciliation plus the in-stream
 checksum), peak RSS of the process, and the independent check.
 
-- CI: the `throughput-smoke` job in `.github/workflows/ci.yml` runs 200k rows
-  per route on every PR against the floors in
-  `apps/api/benchmarks/throughput_floors.json`.
+- CI: the `throughput-smoke` job in `.github/workflows/ci.yml` runs 100k
+  rows on the row path (PostgreSQL → PostgreSQL and PostgreSQL → MySQL) on
+  every PR against the floors in `apps/api/benchmarks/throughput_floors.json`,
+  scaled to the runner by a CPU calibration (never below 75% of a floor). It
+  is report-only — not in the Required PR gate — until it has five
+  consecutive green runs.
 - 10M / 100M: the manual **Throughput benchmark** workflow
   (`.github/workflows/throughput-benchmark.yml`). A hosted runner fits 10M
   rows of this table on disk; 100M needs a self-hosted runner, and on the row

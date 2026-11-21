@@ -3005,7 +3005,7 @@ def write_mapped_rows(
                                 except Exception as range_exc:
                                     try:
                                         cur.execute("ROLLBACK TO SAVEPOINT df_rows_sp")
-                                    except Exception as exc:
+                                    except Exception as exc:  # noqa: BLE001 - a lost savepoint stops the salvage below
                                         if not (_held_overwrite() and _held_overwrite().active):
                                             try:
                                                 conn.rollback()

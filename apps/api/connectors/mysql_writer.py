@@ -657,6 +657,29 @@ def _mysql_materialize_mapped_batch(
     )
 
 
+_SPLIT_SAFE_ENGINES = frozenset({"INNODB"})
+
+
+def _split_salvage_safe(cur: Any, table_name: str) -> bool:
+    """True when a failed multi-row INSERT into ``table_name`` leaves nothing behind.
+
+    Only a transactional engine (InnoDB) rolls a failed statement back whole;
+    MyISAM / Aria / MEMORY keep the rows before the bad one. Unknown → False.
+    """
+    try:
+        cur.execute(
+            "SELECT ENGINE FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+            (table_name,),
+        )
+        row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - an unknown engine salvages row by row
+        logger.debug("table engine probe failed", exc_info=True)
+        return False
+    engine = (row[0] if row and not isinstance(row, dict) else (row or {}).get("ENGINE")) or ""
+    return str(engine).upper() in _SPLIT_SAFE_ENGINES
+
+
 @writer_restore_guard
 def write_mapped_rows(
     *,
@@ -1866,14 +1889,21 @@ def write_mapped_rows(
                                 chunk_written += hi - lo
                                 return True
 
-                            # Split the failed chunk until the bad rows stand alone
-                            # (connectors.batch_salvage): good halves commit as
-                            # batches, bad rows take the per-row path above.
-                            salvage_in_order(
-                                len(write_batch),
-                                attempt_range=_salvage_range,
-                                salvage_row=_salvage_one,
-                            )
+                            if _split_salvage_safe(cur, table_name):
+                                # Split the failed chunk until the bad rows stand alone
+                                # (connectors.batch_salvage): good halves commit as
+                                # batches, bad rows take the per-row path above.
+                                salvage_in_order(
+                                    len(write_batch),
+                                    attempt_range=_salvage_range,
+                                    salvage_row=_salvage_one,
+                                )
+                            else:
+                                # A non-transactional table keeps the rows a failed
+                                # multi-row INSERT wrote before its bad row: a batch
+                                # retry would write them twice. Row by row there.
+                                for row_i in range(len(write_batch)):
+                                    _salvage_one(row_i)
                             if use_ledger and chunk_written:
                                 try:
                                     mark_raw_chunk_committed(
