@@ -510,6 +510,7 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     # Mapping Witness: reads a bounded sample like Map and stores evidence; never changes a mapping.
     ("POST", "/api/v1/transfer/mapping-witness", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/mapping-witness/review", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/mapping-witness/decisions", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/plans", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/route", Permission.JOB_PLAN),
     ("POST", "/api/v1/preflight/run", Permission.JOB_PLAN),

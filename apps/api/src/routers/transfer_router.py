@@ -707,6 +707,12 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
             prior_mappings=list(body.prior_mappings or []),
             job_id=str(body.job_id or "").strip(),
         )
+    if body.destination is not None and any(
+        isinstance(m.get("engine_suggestion"), dict) and m["engine_suggestion"].get("llm_provider")
+        for m in result["mappings"]
+    ):
+        # The AI decisions ledger reads model suggestions from the server's own record of this answer.
+        await asyncio.to_thread(_record_model_suggestions, request, body, result)
     from services.schema_drift_map_review import flag_rename_suggestions
 
     flag_rename_suggestions(
@@ -750,6 +756,21 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "nested_fields": nested_fields,
         "correlation_id": get_correlation_id(),
     }
+
+
+def _record_model_suggestions(request: Request, body: MapColumnsRequest, result: dict[str, Any]) -> None:
+    from services.mapping_witness_service import destination_identity, record_model_suggestions
+
+    from ..transfer.models import EndpointConfig
+
+    try:
+        workspace = resolve_write_workspace(request, request.headers.get("X-Workspace-Id", ""))
+        dest = body.destination
+        endpoint = EndpointConfig.from_dict(dest.kind, dest.model_dump(by_alias=True))
+        record_model_suggestions(workspace_id=workspace, identity=destination_identity(endpoint, workspace),
+                                 mappings=list(result["mappings"]), llm=result.get("llm"))
+    except Exception as exc:  # noqa: BLE001 - Map answers whatever the evidence store does
+        logging.getLogger(__name__).warning("model suggestions not recorded: %s", type(exc).__name__)
 
 
 async def _map_key_columns(body: MapColumnsRequest, request: Request) -> tuple[list[str], str]:

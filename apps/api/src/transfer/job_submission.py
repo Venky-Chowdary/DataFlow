@@ -102,6 +102,11 @@ def create_pending_job(engine: Any, request: Any) -> str:
     proof = engine_module._mapping_proof_for_request(request)
     if proof:
         job_doc["mapping_proof"] = proof
+    # Mapping Witness evidence for exactly this mapping and destination, frozen at
+    # submit: the Trust Report and the AI decisions ledger read only this copy.
+    from services.mapping_witness_service import snapshot_for_request
+
+    job_doc["mapping_witness"] = snapshot_for_request(request)
 
     claim = engine._claim_idempotency(request, job_doc)
     request_fields = engine_module.lifecycle_events.job_requested_fields(request)

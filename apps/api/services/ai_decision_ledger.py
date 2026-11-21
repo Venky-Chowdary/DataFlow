@@ -77,126 +77,169 @@ def _lower(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _witness_check(witness: dict[str, Any] | None, source: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """(verification, the witness pair) for one source column."""
-    report = (witness or {}).get("report") or {}
-    pair = next((p for p in report.get("pairs") or [] if p.get("source") == source), None)
+def _witness_check(snapshot: dict[str, Any] | None, source: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(verification, the witness pair) for one source column, from the job's snapshot only."""
+    report = (snapshot or {}).get("report") or {}
+    pair = next((p for p in report.get("pairs") or [] if str(p.get("source") or "").casefold()
+                 == source.casefold()), None)
     if not pair:
         return {"check": "none", "status": "not_checked",
-                "detail": "No Mapping Witness report for this mapping."}, None
+                "detail": "No Mapping Witness report for the mapping this job ran."}, None
     flag = pair.get("flag") or {}
-    detail = flag.get("reason") or pair.get("reason") or ""
     return {
         "check": "mapping_witness",
         "status": pair.get("status"),
         "mode": report.get("mode"),
-        "detail": detail,
-        "report_sha256": report.get("inputs_sha256"),
+        "detail": flag.get("reason") or pair.get("reason") or "",
+        "report_sha256": (snapshot or {}).get("report_sha256"),
         "checked_at": report.get("generated_at"),
     }, pair
 
 
-def _mapping_entries(job: dict[str, Any], witness: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _run_by(req: dict[str, Any]) -> tuple[str | None, str]:
+    """(who or what started the run, "schedule" | "person" | "unrecorded")."""
+    who = str(req.get("triggered_by") or "").strip()
+    if not who:
+        return None, "unrecorded"
+    if who.startswith("schedule:"):
+        return who.split(":", 1)[1] or "schedule", "schedule"
+    return who, "person"
+
+
+def _mapping_entries(job: dict[str, Any], snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    from services.mapping_witness import mapped_pairs
     from services.parity_evidence import mappings_of, request_of
 
     req = request_of(job)
-    ran_by = str(req.get("triggered_by") or "") or None
+    run_by, run_kind = _run_by(req)
     ran_at = job.get("started_at") or job.get("created_at")
+    map_decisions = (snapshot or {}).get("map_decisions") or {}
+    suggestions = dict((snapshot or {}).get("model_suggestions") or {})
+    rows = {str(m.get("source") or "").casefold(): m for m in mappings_of(job)}
     out: list[dict[str, Any]] = []
-    for m in mappings_of(job):
-        source = str(m.get("source") or "")
-        target = str(m.get("target") or "")
-        if m.get("intentional_omit") or m.get("intentionalOmit") or not target:
-            continue
-        overrides = m.get("user_overrides") if isinstance(m.get("user_overrides"), dict) else {}
-        changed = bool(m.get("user_override") or overrides.get("user_override"))
-        verification, pair = _witness_check(witness, source)
-        if pair is None and not changed:
-            verification = {**verification, "detail": "Accepted on human judgement; no data check ran."}
+    for p in mapped_pairs(list(rows.values())):
+        source, target = p["source"], p["target"]
+        m = rows.get(source.casefold()) or {}
+        verification, pair = _witness_check(snapshot, source)
+        approval = map_decisions.get(source) if isinstance(map_decisions.get(source), dict) else None
+        if approval and approval.get("changed"):
+            status, how = "changed", "A person chose this target in Map."
+        elif approval and approval.get("approved"):
+            status, how = "approved", "A person approved this target in Map."
+        else:
+            status, how = "unreviewed", "No Map approval is recorded; the job ran the proposed target."
+        if pair is None:
+            verification = {**verification, "detail": verification["detail"]
+                            + (" Approved on human judgement." if approval else "")}
         inputs = {
-            "source": source, "source_type": m.get("source_type") or m.get("inferred_type"),
-            "target": target, "target_type": m.get("target_type") or m.get("dest_type"),
-            "method": m.get("method") or m.get("assignment_strategy"), "create_new": bool(m.get("create_new")),
+            "source": source, "source_type": p["source_type"], "target": target, "target_type": p["target_type"],
+            "method": m.get("method") or m.get("assignment_strategy"), "create_new": p["create_new"],
         }
         out.append(_entry(
             KIND_MAPPING_PROPOSAL, f"{source} → {target}",
             {"type": ORIGIN_DETERMINISTIC, "engine": "semantic_mapper",
              "method": str(m.get("method") or m.get("assignment_strategy") or "deterministic")},
             inputs=inputs,
-            proposal={"target": target, "create_new": bool(m.get("create_new")),
-                      "confidence": m.get("confidence")},
-            decision={
-                "status": "changed" if changed else "accepted",
-                "by": ran_by,
-                "at": ran_at,
-                "how": "A person set this target in Map." if changed else "The job ran with this target.",
-            },
+            proposal={"target": target, "create_new": p["create_new"], "confidence": m.get("confidence")},
+            decision={"status": status, "by": (approval or {}).get("by"), "at": (approval or {}).get("at"),
+                      "how": how, "run_by": run_by, "run_kind": run_kind, "run_at": ran_at},
             verification=verification,
         ))
-        suggestion = m.get("engine_suggestion") if isinstance(m.get("engine_suggestion"), dict) else None
-        if suggestion and (suggestion.get("target") or suggestion.get("transform")):
-            suggested = str(suggestion.get("target") or target)
-            same_transform = not suggestion.get("transform") or _lower(suggestion.get("transform")) == _lower(
-                m.get("transform") or m.get("transformation"))
-            adopted = _lower(suggested) == _lower(target) and same_transform
-            held = bool(m.get("llm_invented_transform")) and not changed
-            if pair and pair.get("status") == "witnessed" and _lower(suggested) != _lower(target):
-                s_verify = {"check": "mapping_witness", "status": "contradicted",
-                            "detail": f"The witness confirmed {target} on matching keys, not {suggested}."}
-            elif pair and _lower(((pair.get("flag") or {}).get("suggested_target"))) == _lower(suggested):
-                s_verify = {"check": "mapping_witness", "status": "supported",
-                            "detail": f"The witness found the values in {suggested}."}
-            else:
-                s_verify = {"check": "none", "status": "not_checked",
-                            "detail": "No data check judged this suggestion."}
-            out.append(_entry(
-                KIND_MODEL_SUGGESTION, f"{source} → {suggested}",
-                {"type": ORIGIN_MODEL, "provider": suggestion.get("llm_provider") or "unrecorded",
-                 "model": suggestion.get("llm_model") or "unrecorded"},
-                inputs={**inputs, "suggested_target": suggested, "suggested_transform": suggestion.get("transform")},
-                proposal={"target": suggested, "transform": suggestion.get("transform"),
-                          "confidence": suggestion.get("confidence")},
-                decision={
-                    "status": "held" if held else ("accepted" if adopted else "rejected"),
-                    "by": ran_by,
-                    "at": ran_at,
-                    "how": ("Held for review: a model-invented transform is never applied on its own."
-                            if held else ("The column ran with the model's suggestion." if adopted
-                                          else "The deterministic target ran; the suggestion was not adopted.")),
-                },
-                verification=s_verify,
-            ))
+        # A model suggestion: the server's record from Map, else one carried on an API-run row.
+        # A suggestion with no named provider is a deterministic alternative, not a model's.
+        sug = suggestions.get(source)
+        if not sug:
+            raw = m.get("engine_suggestion") if isinstance(m.get("engine_suggestion"), dict) else {}
+            if raw.get("llm_provider"):
+                sug = {"suggested_target": raw.get("target") or target, "suggested_transform": raw.get("transform"),
+                       "provider": raw.get("llm_provider"), "model": raw.get("llm_model") or "unrecorded"}
+        if not sug:
+            continue
+        suggested = str(sug.get("suggested_target") or target)
+        same_transform = not sug.get("suggested_transform") or _lower(sug.get("suggested_transform")) == _lower(
+            m.get("transform") or m.get("transformation"))
+        adopted = _lower(suggested) == _lower(target) and same_transform
+        held = bool(m.get("llm_invented_transform")) and not adopted
+        flag_target = _lower(((pair or {}).get("flag") or {}).get("suggested_target"))
+        if pair and pair.get("status") == "witnessed" and _lower(suggested) != _lower(target):
+            s_verify = {"check": "mapping_witness", "status": "contradicted",
+                        "detail": f"The witness confirmed {target} on matching keys, not {suggested}."}
+        elif pair and flag_target and flag_target == _lower(suggested):
+            s_verify = {"check": "mapping_witness", "status": "supported",
+                        "detail": f"The witness found the values in {suggested}."}
+        else:
+            s_verify = {"check": "none", "status": "not_checked", "detail": "No data check judged this suggestion."}
+        out.append(_entry(
+            KIND_MODEL_SUGGESTION, f"{source} → {suggested}",
+            {"type": ORIGIN_MODEL, "provider": str(sug.get("provider")), "model": str(sug.get("model"))},
+            inputs={**inputs, "suggested_target": suggested, "suggested_transform": sug.get("suggested_transform"),
+                    "payload_sha256": sug.get("payload_sha256")},
+            proposal={"target": suggested, "transform": sug.get("suggested_transform")},
+            decision={
+                "status": "held" if held else ("accepted" if adopted else "rejected"),
+                "by": (approval or {}).get("by") if adopted else None,
+                "at": (approval or {}).get("at") if adopted else None,
+                "how": ("Held for review: a model-invented transform is never applied on its own."
+                        if held else ("The column ran with the model's suggestion." if adopted
+                                      else "The deterministic target ran; the suggestion was not adopted.")),
+                "run_by": run_by, "run_kind": run_kind,
+            },
+            verification=s_verify,
+        ))
     return out
 
 
-def _witness_entries(witness: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _witness_entries(job: dict[str, Any], snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Flags on what ran (kept or not reviewed), and earlier flags resolved by changing to what ran."""
     from services.mapping_witness import WITNESS_VERSION, flagged_pairs
 
-    if not witness:
+    if not snapshot:
         return []
-    report = witness.get("report") or {}
-    decisions = {d.get("source"): d for d in witness.get("decisions") or [] if isinstance(d, dict)}
+    report = snapshot.get("report") or {}
+    reviews = [r for r in snapshot.get("flag_reviews") or [] if isinstance(r, dict)]
+    approvals = snapshot.get("map_decisions") or {}
+    recorded_at = str(snapshot.get("report_recorded_at") or "")
     out: list[dict[str, Any]] = []
     for pair in flagged_pairs(report):
         flag = pair.get("flag") or {}
-        review = decisions.get(pair["source"])
+        kept = next((r for r in reviews if r.get("decision") == "kept"
+                     and str(r.get("source") or "").casefold() == pair["source"].casefold()), None)
+        approval = approvals.get(pair["source"]) if isinstance(approvals.get(pair["source"]), dict) else None
+        if kept:
+            decision = {"status": "kept", "by": kept.get("by"), "at": kept.get("at"),
+                        "how": "The reviewer looked at the flag and kept the mapping."}
+        elif approval and approval.get("approved") and str(approval.get("at") or "") >= recorded_at:
+            decision = {"status": "kept", "by": approval.get("by"), "at": approval.get("at"),
+                        "how": "Approved in Map after the flag was shown."}
+        else:
+            decision = {"status": "unreviewed", "by": None, "at": None,
+                        "how": "No one reviewed this flag; the job ran the flagged mapping."}
         out.append(_entry(
             KIND_WITNESS_FLAG, f"{pair['source']} → {pair['target']}",
             {"type": ORIGIN_DETERMINISTIC, "engine": report.get("version") or WITNESS_VERSION},
-            inputs={"report_sha256": report.get("inputs_sha256"), "source": pair["source"],
+            inputs={"report_sha256": snapshot.get("report_sha256"), "source": pair["source"],
                     "target": pair["target"], "kind": flag.get("kind")},
             proposal={"flag": flag.get("kind"), "reason": flag.get("reason"),
                       "suggested_target": flag.get("suggested_target")},
-            decision=(
-                {"status": "kept" if review.get("decision") == "kept" else "changed", "by": review.get("by"),
-                 "at": review.get("at"),
-                 "how": ("The reviewer kept the mapping." if review.get("decision") == "kept"
-                         else f"The reviewer changed the target to {review.get('new_target') or 'another column'}.")}
-                if review else {"status": "unreviewed", "by": None, "at": None, "how": "No one reviewed this flag."}
-            ),
+            decision=decision,
             verification={"check": "mapping_witness", "status": "flagged", "mode": flag.get("basis"),
-                          "detail": pair.get("reason"), "report_sha256": report.get("inputs_sha256"),
+                          "detail": pair.get("reason"), "report_sha256": snapshot.get("report_sha256"),
                           "checked_at": report.get("generated_at")},
+        ))
+    for r in reviews:
+        if r.get("decision") != "changed":
+            continue
+        out.append(_entry(
+            KIND_WITNESS_FLAG, f"{r.get('source')} → {r.get('flagged_target')}",
+            {"type": ORIGIN_DETERMINISTIC, "engine": WITNESS_VERSION},
+            inputs={"report_sha256": r.get("report_sha256"), "source": r.get("source"),
+                    "target": r.get("flagged_target"), "kind": r.get("flag_kind")},
+            proposal={"flag": r.get("flag_kind"), "reason": None, "suggested_target": None},
+            decision={"status": "changed", "by": r.get("by"), "at": r.get("at"),
+                      "how": f"Flagged on an earlier mapping; the reviewer changed the target to {r.get('new_target')}, "
+                             "which this job ran."},
+            verification={"check": "mapping_witness", "status": "flagged", "mode": None,
+                          "detail": "Flagged before the change.", "report_sha256": r.get("report_sha256")},
         ))
     return out
 
@@ -273,22 +316,69 @@ def _call_entries(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+#: Rows that record a decision (what approvers attest); wording and model-call rows are sealed, not attested.
+ATTESTED_KINDS = (KIND_MAPPING_PROPOSAL, KIND_MODEL_SUGGESTION, KIND_WITNESS_FLAG, KIND_PARITY_FIX)
+
+
+def attested_sha256(entries: list[dict[str, Any]]) -> str:
+    """Digest of the decision rows: approvals of a report bind to it (parity_signoff content v2).
+
+    What was proposed, decided, by whom and how it checked out; not when (timestamps
+    are presentation, as in content v1), so re-reading an unchanged job keeps approvals.
+    """
+    view = [
+        {
+            "kind": e.get("kind"), "subject": e.get("subject"), "origin": e.get("origin"),
+            "inputs_sha256": e.get("inputs_sha256"), "proposal": e.get("proposal"),
+            "decision": {k: (e.get("decision") or {}).get(k) for k in ("status", "by", "run_by", "run_kind")},
+            "verification": {k: (e.get("verification") or {}).get(k) for k in ("check", "status")},
+        }
+        for e in entries if e.get("kind") in ATTESTED_KINDS
+    ]
+    return _sha(view)
+
+
+def attested_digest_for_job(job: dict[str, Any]) -> str | None:
+    """The attested digest without reading the egress chain (decision rows never need it)."""
+    from services.mapping_witness_service import snapshot_of, snapshot_sha256
+
+    try:
+        snapshot = snapshot_of(job)
+        if snapshot is not None and (snapshot.get("status") != "ok" or snapshot_sha256(snapshot) != snapshot.get("sha256")):
+            snapshot = None
+        entries = _mapping_entries(job, snapshot) + _witness_entries(job, snapshot) + _parity_entries(job, [])
+        return attested_sha256(entries)
+    except Exception as exc:  # noqa: BLE001 - a report read never fails on the ledger
+        logger.warning("ai ledger attested digest unavailable: %s", type(exc).__name__)
+        return None
+
+
 def build_ledger(job: dict[str, Any]) -> dict[str, Any]:
-    """The ledger for one job, deterministic for a given job document and chain."""
+    """The ledger for one job, from its own records; anything unreadable makes it "partial", never silent."""
     from services.ai_egress import manifests_for_job
-    from services.mapping_witness_service import record_for_job
+    from services.mapping_witness_service import snapshot_of, snapshot_sha256
 
     job_id = str(job.get("_id") or job.get("id") or job.get("job_id") or "")
-    witness = record_for_job(job)
+    problems: list[str] = []
+    snapshot = snapshot_of(job)
+    if snapshot is None:
+        problems.append("The job carries no mapping evidence snapshot (submitted before it existed).")
+    elif snapshot.get("status") != "ok":
+        problems.append(str(snapshot.get("reason") or "The mapping evidence snapshot is unavailable."))
+        snapshot = None
+    elif snapshot_sha256(snapshot) != snapshot.get("sha256"):
+        problems.append("The mapping evidence snapshot does not match its digest; it was not used.")
+        snapshot = None
     try:
         calls = manifests_for_job(job_id) if job_id else []
     except Exception as exc:  # noqa: BLE001 - an unreadable chain is reported, not hidden
         logger.info("ai ledger: egress chain unreadable (%s)", type(exc).__name__)
+        problems.append("The AI-egress chain could not be read, so model calls may be missing.")
         calls = []
     calls = sorted(calls, key=lambda c: str(c.get("sealed_at") or ""))
     entries = (
-        _mapping_entries(job, witness)
-        + _witness_entries(witness)
+        _mapping_entries(job, snapshot)
+        + _witness_entries(job, snapshot)
         + _parity_entries(job, calls)
         + _call_entries(calls)
     )
@@ -299,17 +389,20 @@ def build_ledger(job: dict[str, Any]) -> dict[str, Any]:
         ORIGIN_MODEL: sum(1 for e in entries if e["origin"]["type"] == ORIGIN_MODEL),
         ORIGIN_DETERMINISTIC: sum(1 for e in entries if e["origin"]["type"] == ORIGIN_DETERMINISTIC),
     }
-    report = (witness or {}).get("report") or {}
+    report = (snapshot or {}).get("report") or {}
     return {
         "version": LEDGER_VERSION,
         "job_id": job_id,
+        "status": "partial" if problems else "complete",
+        "problems": problems,
         "entries": entries,
         "counts": {"total": len(entries), "by_kind": counts, "by_origin": by_origin,
                    "model_calls": len(calls)},
-        "witness": ({"report_sha256": report.get("inputs_sha256"), "mode": report.get("mode"),
-                     "generated_at": report.get("generated_at"), "summary": report.get("summary")}
-                    if witness else None),
+        "witness": ({"snapshot_sha256": snapshot.get("sha256"), "report_sha256": snapshot.get("report_sha256"),
+                     "mode": report.get("mode"), "generated_at": report.get("generated_at"),
+                     "summary": report.get("summary")} if snapshot else None),
         "ledger_sha256": _sha(entries),
+        "attested_sha256": attested_sha256(entries),
         "honesty": _HONESTY,
     }
 
@@ -336,6 +429,8 @@ def markdown_lines(ledger: dict[str, Any] | None) -> list[str]:
     entries = ledger.get("entries") or []
     if ledger.get("status") == "unavailable":
         return lines + [str(ledger.get("reason") or "Unavailable.")]
+    if ledger.get("status") == "partial":
+        lines += ["**Partial:** " + " ".join(str(p) for p in ledger.get("problems") or []), ""]
     if not entries:
         return lines + ["No AI proposals or model calls are recorded for this job."]
     lines += ["| What | Proposed by | Decision | Checked by |", "|---|---|---|---|"]
@@ -345,6 +440,8 @@ def markdown_lines(ledger: dict[str, Any] | None) -> list[str]:
                else f"{origin.get('engine')} (deterministic)")
         decision = e["decision"]
         dec = decision["status"] + (f" by {decision['by']}" if decision.get("by") else "")
+        if decision.get("run_kind") == "schedule":
+            dec += f"; run by schedule {decision.get('run_by')}"
         ver = e["verification"]
         check = ver["check"].replace("_", " ") + f": {str(ver.get('status') or '').replace('_', ' ')}"
         subject = str(e["subject"]).replace("|", "\\|")

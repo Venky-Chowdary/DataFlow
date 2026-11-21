@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -227,22 +228,42 @@ def test_witness_route_returns_evidence_and_review_records_the_person(client, da
     assert missing.status_code == 404
 
 
-def test_job_finds_the_witness_for_exactly_the_mapping_it_ran(monkeypatch, tmp_path, data):
+def test_map_and_job_name_the_same_destination_however_it_was_spelled(monkeypatch, tmp_path, data):
+    """Review finding 2: Map hashed the raw DTO, the job the resolved endpoint; they never met."""
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
-    from services.mapping_witness_service import mapping_digest, record_for_job, save_report
+    from fastapi.testclient import TestClient
 
-    src, dst = data
-    dest = {"kind": "database", "format": "postgresql", "database": "crm", "schema": "public", "table": "customers"}
-    report = witness_mappings(F.SWAPPED_NAMES, src, dst, key=F.KEY)
-    save_report(report, workspace_id="ws1", digest=mapping_digest(F.SWAPPED_NAMES, dest))
-    job = {"_id": "j1", "transfer_request": {"workspace_id": "ws1", "destination": dest,
-                                             "mappings": list(reversed(F.SWAPPED_NAMES))}}
-    record = record_for_job(job)
-    assert record and record["report"]["summary"]["flagged"] == 2
-    other = {**job, "transfer_request": {**job["transfer_request"], "mappings": F.CORRECT_MAPPING}}
-    assert record_for_job(other) is None
-    foreign = {**job, "transfer_request": {**job["transfer_request"], "workspace_id": "ws2"}}
-    assert record_for_job(foreign) is None
+    from services.mapping_witness_service import destination_identity, snapshot_for_request
+    from src.main import app
+    from src.transfer.models import EndpointConfig
+
+    src, _ = data
+    maps = F.LOGIN_INTO_EMAIL_ONLY + [{"source": "legacy_flag", "target": "legacy_flag", "intentional_omit": True}]
+    # Map: blank schema, port 0 (Studio's defaults), an omitted row still carrying its target.
+    map_side = {"kind": "database", "format": "postgresql", "host": "db.internal.test", "port": 0,
+                "database": "crm", "schema": "", "table": "customers"}
+    out = TestClient(app).post("/api/v1/transfer/mapping-witness", json={
+        "mappings": maps, "source_rows": src, "destination": map_side, "destination_table_exists": False,
+    })
+    assert out.status_code == 200, out.text
+    # Job: the resolved endpoint (schema public, port 5432); the omitted row sent as Execute sends it.
+    job_dest = EndpointConfig(kind="database", format="postgresql", host="db.internal.test", port=5432,
+                              database="crm", schema="public", table="customers")
+    job_maps = F.LOGIN_INTO_EMAIL_ONLY + [{"source": "legacy_flag", "target": "", "transform": "omit",
+                                           "intentional_omit": True}]
+    snap = snapshot_for_request(SimpleNamespace(workspace_id="", destination=job_dest, mappings=job_maps))
+    assert snap["status"] == "ok" and snap["mapping_digest"] == out.json()["mapping_digest"]
+    assert snap["report"]["summary"]["flagged"] == 1
+    # The same table spelled other ways is one identity; another table is not.
+    sf = dict(kind="database", format="snowflake", host="acme.snowflakecomputing.com", database="DW",
+              table="ORDERS")
+    assert destination_identity({**sf, "schema": ""}) == destination_identity({**sf, "schema": "PUBLIC"})
+    mongo_uri = {"kind": "database", "format": "mongodb", "collection": "orders",
+                 "connection_string": "mongodb://app:pw@mongo.internal.test:27017/shop"}
+    mongo_fields = {"kind": "database", "format": "mongodb", "collection": "orders", "host": "mongo.internal.test",
+                    "port": 27017, "database": "shop"}
+    assert destination_identity(mongo_uri) == destination_identity(mongo_fields)
+    assert destination_identity({**map_side, "table": "orders"}) != destination_identity(map_side)
 
 
 # ── live PostgreSQL: the destination is read by the server, keyed ────────────
@@ -291,3 +312,122 @@ def test_live_postgres_destination_is_read_by_key_and_the_swap_is_flagged(data):
     finally:
         cur.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.close()
+
+
+def test_live_witness_dial_obeys_the_workspace_egress_allowlist(data, monkeypatch):
+    """The destination read binds the workspace's allowlist; no process-wide allowlist is set."""
+    import psycopg2
+
+    import services.egress_guard as egress_guard
+
+    try:
+        conn = psycopg2.connect(host=PG["host"], port=PG["port"], dbname=PG["database"], user=PG["username"],
+                                password=PG["password"], connect_timeout=3)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"project PostgreSQL not reachable: {exc}")
+    conn.autocommit = True
+    for env in ("DATAFLOW_EGRESS_ALLOWLIST", "DATAWRAP_EGRESS_ALLOWLIST"):
+        monkeypatch.setenv(env, "")
+    monkeypatch.setattr(egress_guard, "_workspace_egress_entries",
+                        lambda ws: ["127.0.0.0/8", "::1/128"] if ws == "ws-allowed" else [])
+    table = f"witness_{uuid.uuid4().hex[:8]}"
+    src, dst = data
+    cur = conn.cursor()
+    cur.execute(f'CREATE TABLE "{table}" (customer_id INT PRIMARY KEY, first_name TEXT, last_name TEXT)')
+    try:
+        cur.executemany(f'INSERT INTO "{table}" VALUES (%s,%s,%s)',
+                        [(d["customer_id"], d["first_name"], d["last_name"]) for d in dst[:30]])
+        from services.mapping_witness_service import run_witness
+        from src.transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig(kind="database", format="postgresql", schema="public", table=table, **PG)
+        maps = [m for m in F.SWAPPED_NAMES if m["source"] in ("cust_id", "given", "family")]
+        allowed = run_witness(mappings=maps, source_rows=src, destination_endpoint=endpoint, key=F.KEY,
+                              destination_table_exists=True, workspace_id="ws-allowed")
+        assert allowed["mode"] == MODE_KEYED, allowed["notes"]
+        denied = run_witness(mappings=maps, source_rows=src, destination_endpoint=endpoint, key=F.KEY,
+                             destination_table_exists=True, workspace_id="ws-denied")
+        assert denied["mode"] == MODE_SOURCE_ONLY
+        assert denied["notes"] == ["The destination could not be read, so only source values were checked."]
+    finally:
+        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+        conn.close()
+
+
+def test_a_warehouse_is_read_only_when_asked(data, monkeypatch):
+    import services.mapping_witness_service as svc
+    from src.transfer.models import EndpointConfig
+
+    reads: list[list[str]] = []
+    monkeypatch.setattr(svc, "read_rows", lambda *a, **kw: reads.append(kw["columns"]) or [])
+    src, _ = data
+    wh = EndpointConfig(kind="database", format="snowflake", host="acme.snowflakecomputing.com", database="DW",
+                        schema="PUBLIC", table="CUSTOMERS")
+    auto = svc.run_witness(mappings=F.CORRECT_MAPPING, source_rows=src, destination_endpoint=wh, key=F.KEY,
+                           destination_table_exists=True)
+    assert reads == [] and "only when you choose Check mapping" in auto["notes"][0]
+    svc.run_witness(mappings=F.CORRECT_MAPPING, source_rows=src, destination_endpoint=wh, key=F.KEY,
+                    destination_table_exists=True, trigger="explicit", candidate_columns=["region", "x; DROP"])
+    # Named columns only (never SELECT *): the key, the mapped targets, the catalog's candidates.
+    assert reads == [["customer_id", "first_name", "last_name", "email", "username", "joined_on", "balance",
+                      "region"]]
+
+
+def test_submit_freezes_the_evidence_onto_the_job(monkeypatch, tmp_path, data):
+    """Review finding 1: the job carries its own copy; later reports for the same mapping change nothing."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import src.transfer.engine as engine_mod
+    from services.mapping_witness_service import destination_identity, mapping_digest, save_report
+    from src.transfer.job_submission import create_pending_job
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    created: list[dict] = []
+    monkeypatch.setattr(engine_mod, "get_mongodb_service",
+                        lambda: SimpleNamespace(create_transfer_job=lambda doc: created.append(doc) or "job-1"))
+    engine = SimpleNamespace(_resolve_saved_connectors=lambda r: None, _claim_idempotency=lambda r, d: None,
+                             _claim_destination=lambda r, d: None, _bind_idempotency_claim=lambda *a: None)
+    dest = EndpointConfig(kind="database", format="postgresql", host="db.internal.test", port=5432,
+                          database="crm", schema="public", table="customers")
+    src, dst = data
+    identity = destination_identity(dest, "ws1")
+    digest = mapping_digest(F.SWAPPED_NAMES, identity)
+    save_report(witness_mappings(F.SWAPPED_NAMES, src, dst, key=F.KEY), workspace_id="ws1", identity=identity,
+                digest=digest)
+    request = TransferRequest(source=EndpointConfig(kind="database", format="postgresql", table="legacy"),
+                              destination=dest, mappings=list(F.SWAPPED_NAMES), workspace_id="ws1",
+                              skip_preflight=True)
+    monkeypatch.setattr("services.data_residency.enforce_request_residency", lambda r: None)
+    monkeypatch.setattr("services.callable_intake.apply_callable_intake", lambda r: None)
+    assert create_pending_job(engine, request) == "job-1"
+    snap = created[0]["mapping_witness"]
+    assert snap["status"] == "ok" and snap["mapping_digest"] == digest
+    assert snap["report"]["summary"]["flagged"] == 2
+
+
+def test_the_route_answers_within_its_deadline(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import time as _time
+
+    from fastapi.testclient import TestClient
+
+    import services.mapping_witness_service as svc
+    import src.routers.verified_ai_router as router_mod
+    from src.main import app
+
+    monkeypatch.setattr(router_mod, "WITNESS_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(svc, "run_witness", lambda **kw: _time.sleep(3) or {})
+    started = _time.monotonic()
+    res = TestClient(app).post("/api/v1/transfer/mapping-witness", json={"mappings": F.CORRECT_MAPPING})
+    assert res.status_code == 504 and _time.monotonic() - started < 2.5
+
+
+def test_hostile_cells_through_the_route_are_a_200(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    rows = [{"amount_cents": "1e1000000"} for _ in range(50)] + [{"amount_cents": "1e999999"} for _ in range(50)]
+    res = TestClient(app).post("/api/v1/transfer/mapping-witness", json={
+        "mappings": [{"source": "amount_cents", "target": "amount_cents"}], "source_rows": rows})
+    assert res.status_code == 200, res.text

@@ -385,6 +385,7 @@
   "POST /api/v1/transfer/introspect": "job.plan",
   "POST /api/v1/transfer/map": "job.plan",
   "POST /api/v1/transfer/mapping-witness": "job.plan",
+  "POST /api/v1/transfer/mapping-witness/decisions": "job.plan",
   "POST /api/v1/transfer/mapping-witness/review": "job.plan",
   "POST /api/v1/transfer/mapping/auto-map": "job.plan",
   "POST /api/v1/transfer/mapping/destination-columns": "job.plan",

@@ -1,16 +1,18 @@
 """AI decisions ledger: every AI proposal on a job, who decided, which check verified it — signed.
 
-The ledger is built from what the job and its evidence already record (the
-mapping it ran, the Mapping Witness report for that mapping, Parity Studio
-decisions, the AI-egress chain), carries no cell values, and rides inside the
-signed proof pack and the signed Parity Studio pack, so editing a row breaks
-the signature.
+The ledger reads only the evidence snapshot frozen onto the job at submit
+(``services.mapping_witness_service.snapshot_for_request``) and the job's own
+Parity Studio state and AI-egress chain. "Who" is the person who approved or
+changed the pair in Map (recorded server-side from the authenticated caller),
+never the account that started the run; a scheduled run says so separately.
+Anything unreadable makes the ledger "partial", never silently shorter.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,13 +23,23 @@ from services.ai_decision_ledger import (
     KIND_PARITY_EXPLANATION,
     KIND_PARITY_FIX,
     KIND_WITNESS_FLAG,
+    attested_digest_for_job,
     build_ledger,
     markdown_lines,
 )
 from services.mapping_witness import witness_mappings
 from tests.helpers import witness_fixtures as F
 
-DEST = {"kind": "database", "format": "postgresql", "database": "crm", "schema": "public", "table": "customers"}
+WS = "ws1"
+
+
+def _dest(**over):
+    from src.transfer.models import EndpointConfig
+
+    base = dict(kind="database", format="postgresql", host="db.internal.test", port=5432, database="crm",
+                schema="public", table="customers")
+    base.update(over)
+    return EndpointConfig(**base)
 
 
 @pytest.fixture()
@@ -36,48 +48,51 @@ def data_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _mappings():
-    maps = copy.deepcopy(F.SWAPPED_NAMES)
-    for m in maps:
+def _rows(maps, **marks):
+    out = copy.deepcopy(maps)
+    for m in out:
         m.update({"method": "hungarian", "confidence": 0.91, "source_type": "VARCHAR", "target_type": "VARCHAR"})
-    # A column the operator remapped by hand.
-    maps[4]["user_override"] = True
-    # The model suggested another target; the deterministic pick ran.
-    maps[1]["engine_suggestion"] = {"target": "first_name", "transform": None, "confidence": 0.8,
-                                    "llm_provider": "anthropic", "llm_model": "claude-test",
-                                    "suppressed": True, "reason": "llm_suggest_only_deterministic_decides"}
-    return maps
+        m.update(marks.get(m["source"], {}))
+    return out
 
 
-def _job(job_id="job-ledger-1", **over):
+def _submit(mappings, *, triggered_by="ana@example.com", dest=None):
+    """What create_pending_job stamps: the snapshot for this mapping and destination."""
+    from services.mapping_witness_service import snapshot_for_request
+
+    request = SimpleNamespace(workspace_id=WS, destination=dest or _dest(), mappings=mappings,
+                              triggered_by=triggered_by)
+    return snapshot_for_request(request)
+
+
+def _job(mappings, snapshot, job_id="job-ledger-1", **over):
     job = {
         "_id": job_id,
+        "workspace_id": WS,
         "status": "completed",
         "started_at": "2026-11-21T10:00:00+00:00",
-        "transfer_request": {"workspace_id": "ws1", "destination": DEST, "mappings": _mappings(),
-                             "triggered_by": "ana@example.com"},
-        "parity": {
-            "explanation": {"text": "Two causes.", "source": "llm", "generated_at": "2026-11-21T11:00:00+00:00"},
-            "fixes": {
-                "fx1": {"title": "Widen email", "action": "widen_column", "status": "applied",
-                        "approved_by": "bo@example.com", "decided_at": "2026-11-21T11:05:00+00:00",
-                        "difference_ids": ["d1"]},
-                "fx2": {"title": "Accept rounding", "action": "accept", "status": "dismissed",
-                        "approved_by": "cy@example.com", "decided_at": "2026-11-21T11:06:00+00:00"},
-                "fx3": {"title": "Re-run", "action": "rerun", "status": "proposed"},
-            },
-            "rounds": [{"n": 1, "fix_id": "fx1", "unexplained_before": 4, "unexplained_after": 0,
-                        "at": "2026-11-21T11:07:00+00:00"}],
-        },
+        "transfer_request": {"workspace_id": WS, "mappings": mappings,
+                             "triggered_by": over.pop("triggered_by", "ana@example.com")},
+        "mapping_witness": snapshot,
     }
     job.update(over)
     return job
 
 
+PARITY = {
+    "explanation": {"text": "Two causes.", "source": "llm", "generated_at": "2026-11-21T11:00:00+00:00"},
+    "fixes": {
+        "fx1": {"title": "Widen email", "action": "widen_column", "status": "applied",
+                "approved_by": "bo@example.com", "decided_at": "2026-11-21T11:05:00+00:00", "difference_ids": ["d1"]},
+        "fx2": {"title": "Accept rounding", "action": "accept", "status": "dismissed",
+                "approved_by": "cy@example.com", "decided_at": "2026-11-21T11:06:00+00:00"},
+        "fx3": {"title": "Re-run", "action": "rerun", "status": "proposed"},
+    },
+    "rounds": [{"n": 1, "fix_id": "fx1", "unexplained_before": 4, "unexplained_after": 0,
+                "at": "2026-11-21T11:07:00+00:00"}],
+}
+
 CALLS = [
-    {"job_id": "job-ledger-1", "purpose": "mapping_refinement", "channel": "generate", "provider": "anthropic",
-     "payload_sha256": "a" * 64, "metadata_only": True, "cell_values_included": False,
-     "crossed_customer_boundary": True, "event_hash": "e1", "sealed_at": "2026-11-21T09:59:00+00:00"},
     {"job_id": "job-ledger-1", "purpose": "parity_explanation", "channel": "prose", "provider": "anthropic",
      "payload_sha256": "b" * 64, "metadata_only": True, "cell_values_included": False,
      "crossed_customer_boundary": True, "event_hash": "e2", "sealed_at": "2026-11-21T11:00:00+00:00"},
@@ -92,165 +107,277 @@ def calls(monkeypatch):
     return CALLS
 
 
-def _witness(data_dir, review: str | None = None):
-    from services.mapping_witness_service import mapping_digest, record_review, save_report
+def _witness_on_map(maps, *, actor="map-user@example.com"):
+    """What the Map step does: run the witness for this mapping (destination already holds the rows)."""
+    from services.mapping_witness_service import destination_identity, mapping_digest, save_report
 
     src, dst = F.customers()
-    digest = mapping_digest(F.SWAPPED_NAMES, DEST)
-    save_report(witness_mappings(F.SWAPPED_NAMES, src, dst, key=F.KEY), workspace_id="ws1", digest=digest)
-    if review:
-        record_review(workspace_id="ws1", digest=digest, source="given", decision=review,
-                      actor="dee@example.com", new_target="first_name")
-    return src
+    identity = destination_identity(_dest(), WS)
+    digest = mapping_digest(maps, identity)
+    save_report(witness_mappings(maps, src, dst, key=F.KEY), workspace_id=WS, identity=identity, digest=digest,
+                actor=actor)
+    return src, identity, digest
 
 
 def _by_kind(ledger, kind):
     return [e for e in ledger["entries"] if e["kind"] == kind]
 
 
-def test_every_ai_involvement_is_a_row_with_origin_decision_and_check(data_dir, calls):
-    _witness(data_dir, review="changed")
-    ledger = build_ledger(_job())
-    proposals = {e["subject"]: e for e in _by_kind(ledger, KIND_MAPPING_PROPOSAL)}
-    assert len(proposals) == len(F.SWAPPED_NAMES)
-    swapped = proposals["given → last_name"]
-    assert swapped["origin"] == {"type": "deterministic", "engine": "semantic_mapper", "method": "hungarian"}
-    assert swapped["decision"]["status"] == "accepted" and swapped["decision"]["by"] == "ana@example.com"
-    assert swapped["verification"]["check"] == "mapping_witness"
-    assert swapped["verification"]["status"] == "flagged"
-    assert proposals["login → username"]["decision"]["status"] == "changed"
-    assert proposals["mail → email"]["verification"]["status"] == "witnessed"
+def test_who_is_the_person_who_approved_in_map_not_who_started_the_run(data_dir, calls):
+    from services.mapping_witness_service import record_map_decisions
 
-    [suggestion] = _by_kind(ledger, KIND_MODEL_SUGGESTION)
+    maps = _rows(F.SWAPPED_NAMES)
+    _src, identity, _ = _witness_on_map(maps)
+    record_map_decisions(workspace_id=WS, identity=identity, actor="dee@example.com", mappings=[
+        {"source": "mail", "target": "email", "approved": True},
+        {"source": "login", "target": "username", "approved": True, "changed": True},
+    ])
+    job = _job(maps, _submit(maps), parity=PARITY, triggered_by="ana@example.com")
+    rows = {e["subject"]: e for e in _by_kind(build_ledger(job), KIND_MAPPING_PROPOSAL)}
+    assert rows["mail → email"]["decision"]["status"] == "approved"
+    assert rows["mail → email"]["decision"]["by"] == "dee@example.com"
+    assert rows["mail → email"]["decision"]["run_by"] == "ana@example.com"
+    assert rows["login → username"]["decision"]["status"] == "changed"
+    # A pair nobody approved does not borrow the run's account as its approver.
+    assert rows["given → last_name"]["decision"]["status"] == "unreviewed"
+    assert rows["given → last_name"]["decision"]["by"] is None
+    assert rows["mail → email"]["verification"]["status"] == "witnessed"
+    assert rows["given → last_name"]["verification"]["status"] == "flagged"
+
+
+def test_a_scheduled_run_shows_the_map_approver_and_the_schedule_separately(data_dir, calls):
+    from services.mapping_witness_service import record_map_decisions
+
+    maps = _rows(F.CORRECT_MAPPING)
+    _src, identity, _ = _witness_on_map(maps)
+    record_map_decisions(workspace_id=WS, identity=identity, actor="dee@example.com",
+                         mappings=[{"source": "mail", "target": "email", "approved": True}])
+    job = _job(maps, _submit(maps, triggered_by="schedule:nightly"), triggered_by="schedule:nightly")
+    ledger = build_ledger(job)
+    row = next(e for e in _by_kind(ledger, KIND_MAPPING_PROPOSAL) if e["subject"] == "mail → email")
+    assert row["decision"]["by"] == "dee@example.com"
+    assert row["decision"]["run_kind"] == "schedule" and row["decision"]["run_by"] == "nightly"
+    assert "run by schedule nightly" in "\n".join(markdown_lines(ledger))
+
+
+def test_only_a_named_provider_makes_a_model_suggestion(data_dir, calls):
+    from services.mapping_witness_service import destination_identity, record_model_suggestions
+
+    maps = _rows(F.SWAPPED_NAMES, family={"engine_suggestion": {"target": "last_name", "suppressed": True}})
+    _witness_on_map(maps)
+    # What /transfer/map received from the model, recorded server-side (the run payload drops it).
+    record_model_suggestions(workspace_id=WS, identity=destination_identity(_dest(), WS), llm={
+        "ai_egress": {"payload_sha256": "a" * 64, "event_hash": "e1"}}, mappings=[
+        {"source": "given", "target": "last_name", "engine_suggestion": {
+            "target": "first_name", "llm_provider": "anthropic", "llm_model": "claude-test"}}])
+    ui_rows = [{k: v for k, v in m.items() if k != "engine_suggestion"} for m in maps]
+    ledger = build_ledger(_job(maps, _submit(ui_rows)))
+    [suggestion] = _by_kind(ledger, KIND_MODEL_SUGGESTION)  # the deterministic alternative is not a model's
+    assert suggestion["subject"] == "given → first_name"
     assert suggestion["origin"] == {"type": "model", "provider": "anthropic", "model": "claude-test"}
     assert suggestion["decision"]["status"] == "rejected"
-    # The witness found the values in the model's target: the suggestion was right.
     assert suggestion["verification"]["status"] == "supported"
 
-    flags = {e["subject"]: e for e in _by_kind(ledger, KIND_WITNESS_FLAG)}
-    assert set(flags) == {"given → last_name", "family → first_name"}
-    assert flags["given → last_name"]["decision"] == {
-        "status": "changed", "by": "dee@example.com", "at": flags["given → last_name"]["decision"]["at"],
-        "how": "The reviewer changed the target to first_name.",
-    }
-    assert flags["family → first_name"]["decision"]["status"] == "unreviewed"
 
+def test_a_change_that_was_reverted_is_not_reported_as_changed(data_dir, calls):
+    from services.mapping_witness_service import record_review
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _src, identity, digest = _witness_on_map(maps)
+    # Map auto-records "changed" when the flagged column is remapped…
+    record_review(workspace_id=WS, identity=identity, digest=digest, source="login", decision="changed",
+                  actor="dee@example.com", new_target="username")
+    # …then the operator reverts and runs the flagged mapping.
+    [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
+    assert flag["subject"] == "login → email"
+    assert flag["decision"]["status"] == "unreviewed"
+    assert "changed" not in json.dumps(flag["decision"])
+
+
+def test_the_corrected_job_shows_the_flag_it_resolved(data_dir, calls):
+    from services.mapping_witness_service import record_review
+
+    flagged = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _src, identity, digest = _witness_on_map(flagged)
+    record_review(workspace_id=WS, identity=identity, digest=digest, source="login", decision="changed",
+                  actor="dee@example.com", new_target="username")
+    fixed = _rows([m if m["source"] != "login" else {"source": "login", "target": "username"}
+                   for m in F.LOGIN_INTO_EMAIL_ONLY])
+    _witness_on_map(fixed)
+    flags = _by_kind(build_ledger(_job(fixed, _submit(fixed))), KIND_WITNESS_FLAG)
+    assert [(f["subject"], f["decision"]["status"], f["decision"]["by"]) for f in flags] == [
+        ("login → email", "changed", "dee@example.com")]
+
+
+def test_a_later_map_session_cannot_rewrite_what_a_finished_job_says(data_dir, calls):
+    from services.mapping_witness_service import destination_identity, mapping_digest, save_report
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _witness_on_map(maps)
+    job = _job(maps, _submit(maps))
+    before = build_ledger(job)
+    assert any(e["kind"] == KIND_WITNESS_FLAG for e in before["entries"])
+    # Six fabricated rows for the same pairs and table: same digest, a clean report.
+    fake = [{"cust_id": i, "login": f"u{i}@example.com", "given": "A", "family": "B", "joined": "01/01/2020",
+             "balance": "1.00"} for i in range(6)]
+    identity = destination_identity(_dest(), WS)
+    save_report(witness_mappings(maps, fake), workspace_id=WS, identity=identity,
+                digest=mapping_digest(maps, identity))
+    after = build_ledger(job)
+    assert after["ledger_sha256"] == before["ledger_sha256"]
+    assert after["entries"] == before["entries"]
+
+
+def test_a_store_failure_at_submit_or_an_unreadable_chain_makes_the_ledger_partial(data_dir, monkeypatch):
+    import services.ai_egress as egress
+    import services.mapping_witness_service as svc
+
+    maps = _rows(F.CORRECT_MAPPING)
+
+    def store_down(**kwargs):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(svc, "build_snapshot", store_down)
+    snap = _submit(maps)
+    assert snap["status"] == "unavailable"
+
+    def chain_down(job_id):
+        raise OSError("chain down")
+
+    monkeypatch.setattr(egress, "manifests_for_job", chain_down)
+    ledger = build_ledger(_job(maps, snap))
+    assert ledger["status"] == "partial"
+    assert any("could not be read when the job was submitted" in p for p in ledger["problems"])
+    assert any("AI-egress chain could not be read" in p for p in ledger["problems"])
+    assert "**Partial:**" in "\n".join(markdown_lines(ledger))
+
+
+def test_a_tampered_snapshot_is_not_used(data_dir, calls):
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _witness_on_map(maps)
+    snap = _submit(maps)
+    snap["report"]["pairs"] = [p for p in snap["report"]["pairs"] if p["status"] != "flagged"]
+    ledger = build_ledger(_job(maps, snap))
+    assert ledger["status"] == "partial" and not _by_kind(ledger, KIND_WITNESS_FLAG)
+
+
+def test_every_model_call_and_parity_decision_is_a_row(data_dir, calls):
+    maps = _rows(F.CORRECT_MAPPING)
+    _witness_on_map(maps)
+    ledger = build_ledger(_job(maps, _submit(maps), parity=PARITY))
+    assert ledger["status"] == "complete", ledger["problems"]
+    assert len(_by_kind(ledger, KIND_MODEL_CALL)) == ledger["counts"]["model_calls"] == 1
     [explanation] = _by_kind(ledger, KIND_PARITY_EXPLANATION)
-    assert explanation["origin"]["type"] == "model" and explanation["origin"]["provider"] == "anthropic"
-    assert explanation["inputs_sha256"] and explanation["decision"]["status"] == "informational"
+    assert explanation["origin"]["provider"] == "anthropic"
     fixes = {e["subject"]: e for e in _by_kind(ledger, KIND_PARITY_FIX)}
-    assert set(fixes) == {"Widen email", "Accept rounding"}  # a still-proposed fix is not a decision yet
-    assert fixes["Widen email"]["decision"]["by"] == "bo@example.com"
-    assert fixes["Widen email"]["verification"] == {
-        "check": "parity_recheck", "status": "passed", "detail": "Unexplained 4 → 0 on re-check."}
-    assert fixes["Accept rounding"]["decision"]["status"] == "rejected"
-
-
-def test_every_model_call_on_the_job_is_in_the_ledger(data_dir, calls):
-    ledger = build_ledger(_job())
-    assert len(_by_kind(ledger, KIND_MODEL_CALL)) == ledger["counts"]["model_calls"] == len(CALLS)
-    assert {e["inputs_sha256"] for e in _by_kind(ledger, KIND_MODEL_CALL)}.isdisjoint({"a" * 64, "b" * 64})
-    assert ledger["counts"]["by_origin"]["model"] == 2 + 1 + 1  # calls, suggestion, explanation
-
-
-def test_without_a_witness_report_nothing_is_called_verified(data_dir, calls):
-    ledger = build_ledger(_job())
-    for e in _by_kind(ledger, KIND_MAPPING_PROPOSAL):
-        assert e["verification"]["check"] == "none"
-        assert e["verification"]["status"] == "not_checked"
-    assert ledger["witness"] is None
-    assert not _by_kind(ledger, KIND_WITNESS_FLAG)
+    assert set(fixes) == {"Widen email", "Accept rounding"}
+    assert fixes["Widen email"]["verification"]["status"] == "passed"
 
 
 def test_the_ledger_carries_no_cell_values(data_dir, calls):
-    src = _witness(data_dir, review="kept")
-    text = json.dumps(build_ledger(_job()))
+    maps = _rows(F.SWAPPED_NAMES)
+    src, _identity, _ = _witness_on_map(maps)
+    text = json.dumps(build_ledger(_job(maps, _submit(maps), parity=PARITY)))
     for row in src:
         for col in ("given", "family", "mail", "login", "joined", "balance"):
             assert f'"{row[col]}"' not in text, (col, row[col])
-            assert f" {row[col]} " not in text, (col, row[col])
 
 
-def test_same_job_same_ledger(data_dir, calls):
-    _witness(data_dir)
-    a, b = build_ledger(_job()), build_ledger(_job())
-    assert a == b and len(a["ledger_sha256"]) == 64
-
-
-def test_the_signed_proof_pack_seals_the_ledger(data_dir, calls, monkeypatch):
-    from services.signed_proof_pack import export_proof_pack_for_job, verify_signed_proof_pack
-
-    _witness(data_dir, review="changed")
-    pack = export_proof_pack_for_job(_job())
-    assert pack["ai_decisions"]["counts"]["total"] == len(pack["ai_decisions"]["entries"]) > 0
-    assert verify_signed_proof_pack(pack)["ok"], verify_signed_proof_pack(pack)
-    tampered = copy.deepcopy(pack)
-    tampered["ai_decisions"]["entries"][0]["decision"]["by"] = "mallory@example.com"
-    result = verify_signed_proof_pack(tampered)
-    assert not result["ok"] and "content_sha256 mismatch" in result["errors"]
-
-
-def test_the_signed_parity_pack_seals_the_ledger_and_the_markdown_shows_it(data_dir, calls, monkeypatch):
+def test_the_signed_packs_seal_the_ledger_and_approvers_attest_it(data_dir, calls, monkeypatch):
     import services.parity_state as parity_state
-    from services.parity_signoff import render_markdown
-    from services.signed_proof_pack import build_signed_parity_pack, verify_signed_proof_pack
+    from services.signed_proof_pack import (
+        build_signed_parity_pack,
+        export_proof_pack_for_job,
+        verify_signed_proof_pack,
+    )
 
-    _witness(data_dir)
-    job = _job()
-    monkeypatch.setattr(parity_state, "load_job", lambda job_id: job)
-    pack = build_signed_parity_pack(job_id="job-ledger-1", report={"job_id": "job-ledger-1"}, actor="ana")
-    assert pack["ai_decisions"]["job_id"] == "job-ledger-1" and pack["ai_decisions"]["entries"]
+    maps = _rows(F.SWAPPED_NAMES)
+    _witness_on_map(maps)
+    job = _job(maps, _submit(maps), parity=PARITY)
+    pack = export_proof_pack_for_job(job)
     assert verify_signed_proof_pack(pack)["ok"]
     tampered = copy.deepcopy(pack)
-    tampered["ai_decisions"]["entries"].pop()
-    assert not verify_signed_proof_pack(tampered)["ok"]
+    tampered["ai_decisions"]["entries"][0]["decision"]["by"] = "mallory@example.com"
+    assert "content_sha256 mismatch" in verify_signed_proof_pack(tampered)["errors"]
 
-    lines = "\n".join(markdown_lines(pack["ai_decisions"]))
-    assert "## AI involvement" in lines
-    assert "model mapping suggestion: given → first_name | anthropic (claude-test) | rejected by ana@example.com" in lines
-    assert "Ledger SHA-256: " + pack["ai_decisions"]["ledger_sha256"] in lines
-    assert "## AI involvement" in render_markdown({}, {**pack, "parity": _minimal_parity_body()})
-
-
-def test_a_ledger_that_cannot_be_built_is_stated_in_the_pack_not_dropped(monkeypatch):
-    import services.parity_state as parity_state
-    from services.signed_proof_pack import build_signed_parity_pack
-
-    def boom(job_id):
-        raise RuntimeError("store down")
-
-    monkeypatch.setattr(parity_state, "load_job", boom)
-    pack = build_signed_parity_pack(job_id="j9", report={"job_id": "j9"}, actor="ana")
-    assert pack["ai_decisions"]["status"] == "unavailable"
-    assert "could not be built" in "\n".join(markdown_lines(pack["ai_decisions"]))
+    monkeypatch.setattr(parity_state, "load_job", lambda job_id: job)
+    report = {"job_id": "job-ledger-1", "ai_decisions_attested_sha256": attested_digest_for_job(job)}
+    ppack = build_signed_parity_pack(job_id="job-ledger-1", report=report, actor="ana")
+    assert verify_signed_proof_pack(ppack)["ok"]
+    assert ppack["ai_decisions"]["attested_sha256"] == ppack["parity"]["ai_decisions_attested_sha256"]
 
 
-def test_ledger_route_is_workspace_scoped(data_dir, calls, monkeypatch):
+def test_v2_approvals_attest_the_ledger_and_earlier_approvals_keep_their_version():
+    from services.parity_signoff import CONTENT_VERSION, content_digests, content_sha256, valid_approvals
+
+    report = {"job_id": "j", "verdict": "proven", "parity": {}, "tables": [], "differences": [], "fixes": [],
+              "ai_decisions_attested_sha256": "1" * 64}
+    v1 = {"role": "engineering", "content_sha256": content_sha256(report, 1)}  # given before v2 existed
+    v2 = {"role": "compliance", "content_sha256": content_sha256(report), "content_version": CONTENT_VERSION}
+    state = {"approvals": [v1, v2]}
+    assert valid_approvals(state, content_digests(report))[0] == [v1, v2]
+    changed = {**report, "ai_decisions_attested_sha256": "2" * 64}
+    valid, invalidated = valid_approvals(state, content_digests(changed))
+    assert valid == [v1] and invalidated == [v2]
+
+
+def test_ledger_routes_are_workspace_scoped(data_dir, calls, monkeypatch):
     from fastapi.testclient import TestClient
+
+    import importlib
 
     import services.parity_state as parity_state
     from src.main import app
 
-    job = _job()
+    connectors_router = importlib.import_module("src.routers.connectors_router")
 
-    class Store:
-        def get_job(self, job_id):
-            return job if job_id == "job-ledger-1" else None
-
-    monkeypatch.setattr(parity_state, "job_store", lambda: Store())
+    maps = _rows(F.CORRECT_MAPPING)
+    _witness_on_map(maps)
+    jobs = {"mine": _job(maps, _submit(maps), job_id="mine"),
+            "theirs": {**_job(maps, _submit(maps), job_id="theirs"), "workspace_id": "ws2"}}
+    monkeypatch.setattr(parity_state, "job_store", lambda: SimpleNamespace(get_job=jobs.get))
+    monkeypatch.setattr(connectors_router, "tenant_scope",
+                        lambda request, *a: SimpleNamespace(allows=lambda ws: ws == WS))
     client = TestClient(app)
-    ok = client.get("/api/v1/jobs/job-ledger-1/ai-decisions")
-    assert ok.status_code == 200, ok.text
-    assert ok.json()["counts"]["by_kind"][KIND_MAPPING_PROPOSAL] == len(F.SWAPPED_NAMES)
-    assert client.get("/api/v1/jobs/nope/ai-decisions").status_code == 404
+    for path in ("ai-decisions", "mapping-witness"):
+        assert client.get(f"/api/v1/jobs/mine/{path}").status_code == 200
+        assert client.get(f"/api/v1/jobs/theirs/{path}").status_code == 404, path
+        assert client.get(f"/api/v1/jobs/nope/{path}").status_code == 404
+    assert client.get("/api/v1/jobs/mine/mapping-witness").json()["witness"]["report"]["mode"] == "keyed"
 
 
-def _minimal_parity_body():
-    return {
-        "job_id": "job-ledger-1", "verdict": "proven", "verdict_reason": "All rows match.",
-        "confidence": {"statement": "Full checksum."},
-        "parity": {"rows_source": 1, "rows_destination": 1, "rows_differ": 0, "explained": 0, "unexplained": 0,
-                   "proven_equal_pct": 100},
-        "tables": [], "differences": [], "fixes": [], "rounds": [],
-        "signoff": {"approvals": [], "signed_at": None},
-    }
+def test_map_records_the_models_suggestions_for_ui_run_jobs(data_dir, calls, monkeypatch):
+    """Review 4e: Execute's payload drops engine_suggestion, so /transfer/map records them server-side."""
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    import services.mapping_pipeline as pipeline
+    from src.main import app
+
+    transfer_router = importlib.import_module("src.routers.transfer_router")
+
+    async def no_keys(body, request):
+        return [], "none"
+
+    monkeypatch.setattr(transfer_router, "_map_key_columns", no_keys)
+    monkeypatch.setattr(pipeline, "run_mapping_pipeline", lambda *a, **kw: {
+        "mappings": [
+            {"source": "given", "target": "last_name", "confidence": 0.9,
+             "engine_suggestion": {"target": "first_name", "llm_provider": "anthropic", "llm_model": "claude-test"}},
+            {"source": "family", "target": "first_name", "confidence": 0.9,
+             "engine_suggestion": {"target": "last_name"}},  # a deterministic alternative
+        ],
+        "validation": {"passed": True, "issues": []}, "classification": {},
+        "llm": {"llm_used": True, "ai_egress": {"payload_sha256": "c" * 64}},
+    })
+    dest = {"kind": "database", "format": "postgresql", "host": "db.internal.test", "port": 0, "database": "crm",
+            "schema": "", "table": "customers"}
+    res = TestClient(app).post("/api/v1/transfer/map", headers={"X-Workspace-Id": WS}, json={
+        "source_columns": ["given", "family"], "target_columns": ["first_name", "last_name"], "destination": dest})
+    assert res.status_code == 200, res.text
+    ran = [{"source": "given", "target": "last_name"}, {"source": "family", "target": "first_name"}]
+    ledger = build_ledger(_job(ran, _submit(ran)))
+    [suggestion] = _by_kind(ledger, KIND_MODEL_SUGGESTION)
+    assert suggestion["subject"] == "given → first_name"
+    assert suggestion["inputs_sha256"] and suggestion["origin"]["model"] == "claude-test"

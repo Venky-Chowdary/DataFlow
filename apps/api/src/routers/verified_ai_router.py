@@ -1,18 +1,22 @@
 """Verified AI routes: the Mapping Witness and the AI decisions ledger.
 
 ``POST /transfer/mapping-witness`` judges a mapping against a bounded sample of
-the data (``services.mapping_witness``) and keeps the report for that mapping
-and destination; it never changes the mapping. ``POST
-/transfer/mapping-witness/review`` records a person's answer to one flag.
-``GET /jobs/{id}/mapping-witness`` returns the report for the mapping the job
-ran with; ``GET /jobs/{id}/ai-decisions`` the AI decisions ledger
-(``services.ai_decision_ledger``), the same rows the signed packs carry. A job of another workspace is a 404, exactly as ``GET /jobs/{id}``.
+the data (``services.mapping_witness``) and appends the report for that mapping
+and the *resolved* destination; it never changes the mapping, and it runs off
+the event loop under the connector deadline. ``POST
+/transfer/mapping-witness/review`` records a person's answer to one flag, and
+``POST /transfer/mapping-witness/decisions`` who approved or changed each pair
+in Map (always the authenticated caller). ``GET /jobs/{id}/mapping-witness``
+returns the evidence snapshot the job was submitted with; ``GET
+/jobs/{id}/ai-decisions`` the AI decisions ledger built from it
+(``services.ai_decision_ledger``), the rows the signed packs carry. A job of
+another workspace is a 404, exactly as ``GET /jobs/{id}``.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -23,6 +27,9 @@ from .connectors_router import _can_access_job
 from .transfer_router import EndpointDTO, _assert_endpoint_connectors
 
 router = APIRouter(tags=["Verified AI"])
+
+#: The witness reads at most two bounded samples; past this it answers 504 and the event loop stays free.
+WITNESS_DEADLINE_SECONDS = 30.0
 
 
 class WitnessKey(BaseModel):
@@ -37,23 +44,40 @@ class WitnessRequest(BaseModel):
     source: Optional[EndpointDTO] = None
     destination: Optional[EndpointDTO] = None
     target_key_columns: list[str] = Field(default_factory=list, max_length=32)
+    #: Destination columns the witness may compare against (the catalog Map shows); bounded.
+    candidate_columns: list[str] = Field(default_factory=list, max_length=200)
     key: Optional[WitnessKey] = None
     destination_table_exists: Optional[bool] = None
     date_locale: str = Field(default="", max_length=8)
+    #: "explicit" = the operator chose Check mapping (the only way a warehouse is read).
+    trigger: Literal["auto", "explicit"] = "auto"
 
 
 class ReviewRequest(BaseModel):
     mapping_digest: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    destination: Optional[EndpointDTO] = None
     source: str = Field(..., min_length=1, max_length=256)
-    decision: str = Field(..., pattern=r"^(kept|changed)$")
-    new_target: str = Field(default="", max_length=256)
+    decision: Literal["kept", "changed"]
+    new_target: str = Field(default="", max_length=128)
 
 
-def _audit(action: str, digest: str, actor: str, details: dict[str, Any], workspace: str) -> None:
+class MapDecision(BaseModel):
+    source: str = Field(..., min_length=1, max_length=256)
+    target: str = Field(default="", max_length=256)
+    approved: bool = False
+    changed: bool = False
+
+
+class MapDecisionsRequest(BaseModel):
+    destination: Optional[EndpointDTO] = None
+    mappings: list[MapDecision] = Field(default_factory=list, max_length=400)
+
+
+def _audit(action: str, resource: str, actor: str, details: dict[str, Any], workspace: str) -> None:
     """Names and counts only: a witness report never carries a cell value."""
     from services.audit_log import append_audit_event
 
-    append_audit_event(action=action, resource=f"mapping:{digest[:16]}", actor=actor or "anonymous",
+    append_audit_event(action=action, resource=resource, actor=actor or "anonymous",
                        level="info", details=details, workspace_id=workspace or None)
 
 
@@ -65,15 +89,13 @@ def _endpoint(dto: EndpointDTO | None) -> Any:
     return EndpointConfig.from_dict(dto.kind, dto.model_dump(by_alias=True))
 
 
-def _public_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not record:
-        return None
-    return {
-        "mapping_digest": record.get("mapping_digest"),
-        "report": record.get("report"),
-        "decisions": record.get("decisions") or [],
-        "updated_at": record.get("updated_at"),
-    }
+async def _off_loop(fn: Any) -> Any:
+    from ..ai.copilot.tool_deadline import run_off_event_loop
+
+    def _timed_out(message: str) -> Any:
+        raise HTTPException(status_code=504, detail="The mapping check did not finish in time.")
+
+    return await run_off_event_loop("mapping_witness", fn, _timed_out, seconds=WITNESS_DEADLINE_SECONDS)
 
 
 @router.post("/transfer/mapping-witness")
@@ -82,7 +104,13 @@ async def mapping_witness(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    from services.mapping_witness_service import key_pair, mapping_digest, run_witness, save_report
+    from services.mapping_witness_service import (
+        destination_identity,
+        key_pair,
+        mapping_digest,
+        run_witness,
+        save_report,
+    )
     from services.workspace_access import resolve_write_workspace
 
     readable = tuple(e for e in (body.source, body.destination) if e is not None)
@@ -91,29 +119,33 @@ async def mapping_witness(
     workspace = resolve_write_workspace(request, workspace_id)
     mappings = [m for m in body.mappings if isinstance(m, dict)]
     key = key_pair(mappings, body.target_key_columns, body.key.model_dump() if body.key else None)
-    destination = body.destination.model_dump(by_alias=True) if body.destination else {}
+    actor = actor_from_request(request)
 
     def _run() -> dict[str, Any]:
+        destination = _endpoint(body.destination)
+        identity = destination_identity(destination, workspace)
         report = run_witness(
             mappings=mappings,
             source_rows=body.source_rows,
             source_endpoint=_endpoint(body.source),
-            destination_endpoint=_endpoint(body.destination),
+            destination_endpoint=destination,
             key=key,
+            candidate_columns=body.candidate_columns,
             destination_table_exists=body.destination_table_exists,
             date_locale=body.date_locale,
             workspace_id=workspace,
+            trigger=body.trigger,
         )
-        digest = mapping_digest(mappings, destination)
-        actor = actor_from_request(request)
-        record = save_report(report, workspace_id=workspace, digest=digest, actor=actor)
-        _audit("mapping_witness.recorded", digest, actor, {
-            "mode": report.get("mode"), "summary": report.get("summary"),
-            "inputs_sha256": report.get("inputs_sha256"),
+        digest = mapping_digest(mappings, identity)
+        saved = save_report(report, workspace_id=workspace, identity=identity, digest=digest, actor=actor)
+        _audit("mapping_witness.recorded", f"mapping:{digest[:16]}", actor, {
+            "mode": report.get("mode"), "summary": report.get("summary"), "trigger": report.get("trigger"),
+            "report_sha256": saved["report_sha256"],
         }, workspace)
-        return _public_record(record) or {}
+        return {"mapping_digest": digest, "report": report, "report_sha256": saved["report_sha256"],
+                "recorded_at": saved["recorded_at"]}
 
-    return await asyncio.to_thread(_run)
+    return await _off_loop(_run)
 
 
 @router.post("/transfer/mapping-witness/review")
@@ -122,21 +154,58 @@ async def review_witness_flag(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    from services.mapping_witness_service import record_review
+    from services.mapping_witness_service import destination_identity, record_review
     from services.workspace_access import resolve_write_workspace
 
+    if body.destination is not None:
+        _assert_endpoint_connectors(request, read=(body.destination,))
     workspace = resolve_write_workspace(request, workspace_id)
+    actor = actor_from_request(request)
+
+    def _run() -> dict[str, Any]:
+        identity = destination_identity(_endpoint(body.destination), workspace)
+        return record_review(workspace_id=workspace, identity=identity, digest=body.mapping_digest,
+                             source=body.source, decision=body.decision, actor=actor, new_target=body.new_target)
+
     try:
-        entry = await asyncio.to_thread(
-            record_review, workspace_id=workspace, digest=body.mapping_digest, source=body.source,
-            decision=body.decision, actor=actor_from_request(request), new_target=body.new_target,
-        )
+        entry = await _off_loop(_run)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    _audit("mapping_witness.reviewed", body.mapping_digest, entry["by"], {
-        k: entry.get(k) for k in ("source", "target", "flag_kind", "decision", "new_target", "report_sha256")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit("mapping_witness.reviewed", f"mapping:{body.mapping_digest[:16]}", entry["by"], {
+        k: entry.get(k) for k in ("source", "flagged_target", "flag_kind", "decision", "new_target", "report_sha256")
     }, workspace)
     return {"decision": entry}
+
+
+@router.post("/transfer/mapping-witness/decisions")
+async def record_map_decisions_route(
+    body: MapDecisionsRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Who approved or changed each pair in Map: the authenticated caller, never a name in the body."""
+    from services.mapping_witness_service import destination_identity, record_map_decisions
+    from services.workspace_access import resolve_write_workspace
+
+    if body.destination is not None:
+        _assert_endpoint_connectors(request, read=(body.destination,))
+    workspace = resolve_write_workspace(request, workspace_id)
+    actor = actor_from_request(request)
+
+    def _run() -> int:
+        identity = destination_identity(_endpoint(body.destination), workspace)
+        return record_map_decisions(workspace_id=workspace, identity=identity,
+                                    mappings=[m.model_dump() for m in body.mappings], actor=actor)
+
+    recorded = await _off_loop(_run)
+    _audit("mapping.decisions_recorded", "mapping:decisions", actor, {
+        "recorded": recorded,
+        "approved": sum(1 for m in body.mappings if m.approved),
+        "changed": sum(1 for m in body.mappings if m.changed),
+    }, workspace)
+    return {"recorded": recorded}
 
 
 def _visible_job(job_id: str, request: Request) -> dict[str, Any]:
@@ -150,11 +219,11 @@ def _visible_job(job_id: str, request: Request) -> dict[str, Any]:
 
 @router.get("/jobs/{job_id}/mapping-witness")
 async def job_mapping_witness(job_id: str, request: Request):
-    from services.mapping_witness_service import record_for_job
+    """The evidence snapshot frozen onto the job at submit (``null`` for a job submitted before it existed)."""
+    from services.mapping_witness_service import snapshot_of
 
-    job = _visible_job(job_id, request)
-    record = await asyncio.to_thread(record_for_job, job)
-    return {"job_id": job_id, "witness": _public_record(record)}
+    job = await asyncio.to_thread(_visible_job, job_id, request)
+    return {"job_id": job_id, "witness": snapshot_of(job)}
 
 
 @router.get("/jobs/{job_id}/ai-decisions")
@@ -162,5 +231,5 @@ async def job_ai_decisions(job_id: str, request: Request):
     """Every AI-originated proposal or explanation on the job and what became of it."""
     from services.ai_decision_ledger import build_ledger
 
-    job = _visible_job(job_id, request)
+    job = await asyncio.to_thread(_visible_job, job_id, request)
     return await asyncio.to_thread(build_ledger, job)

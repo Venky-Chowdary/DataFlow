@@ -831,7 +831,7 @@ def _evidence_block(job: dict[str, Any], tables_ev: list[TableEvidence]) -> dict
 
 
 def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
-    from services.parity_signoff import content_sha256, valid_approvals
+    from services.parity_signoff import content_digests, content_sha256, valid_approvals
 
     verdict, unexplained = report["verdict"], report["parity"]["unexplained"]
     roles = list(state.get("required_roles") or [])
@@ -842,10 +842,12 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         sealed = sealed_report.get("signoff") or {}
         approvals, invalidated = list(sealed.get("approvals") or []), []
         # The signed content is final; what the data shows now may have moved since.
-        attested = next((a.get("content_sha256") for a in approvals if a.get("content_sha256")), None)
+        attested_by = next((a for a in approvals if a.get("content_sha256")), None)
+        attested = (attested_by or {}).get("content_sha256")
+        attested_version = int((attested_by or {}).get("content_version") or 1)
         drift = {
             "signed_verdict": sealed_report.get("verdict"),
-            "drift_since_signing": (content_sha256(report) != attested) if attested else None,
+            "drift_since_signing": (content_sha256(report, attested_version) != attested) if attested else None,
         }
         # The pack names the rules it was signed under (absent = version 1).
         sealed_rules = stored_fingerprint_version(signed.get("pack"))
@@ -860,7 +862,7 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
                 "current": FINGERPRINT_VERSION,
             }
     else:
-        approvals, invalidated = valid_approvals(state, content_sha256(report))
+        approvals, invalidated = valid_approvals(state, content_digests(report))
     blocked_reason = None
     if signed:
         status = "signed"
@@ -973,6 +975,10 @@ def build_parity_report(
         "_cache": cache,
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
+    # What approvers attest includes the AI decisions ledger's decision rows (content v2).
+    from services.ai_decision_ledger import attested_digest_for_job
+
+    report["ai_decisions_attested_sha256"] = attested_digest_for_job(job)
     report["signoff"] = _signoff(state, report)
     return report
 
