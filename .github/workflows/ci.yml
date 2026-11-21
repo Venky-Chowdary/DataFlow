@@ -1058,9 +1058,10 @@ jobs:
           {
             echo "DATAFLOW_ORACLE_PASSWORD=${ora}"
             echo "DATAFLOW_TEST_ORACLE_PASSWORD=${ora}"
-            # SYS/SYSTEM share it (the image's ORACLE_PASSWORD); one test
-            # logs in as SYSTEM under this spelling.
+            # SYS/SYSTEM share it (the image's ORACLE_PASSWORD); two tests
+            # log in as SYSTEM under these spellings.
             echo "DF_TEST_ORACLE_PASSWORD=${ora}"
+            echo "ORA_PASSWORD=${ora}"
             echo "MSSQL_SA_PASSWORD=${mssql}"
             echo "DATAFLOW_TEST_MSSQL_PASSWORD=${mssql}"
             echo "DATAFLOW_SQLSERVER_PASSWORD=${mssql}"

@@ -312,18 +312,20 @@ def test_live_mongo_oracle_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mongo_to_oracle(
-            source_cfg=_mongo_cfg(mid),
-            source_table=mid,
-            dest_cfg=_ora_cfg(),
-            dest_schema="DATAFLOW",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            oracle_ddls=["NUMBER", "VARCHAR2(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        # An append into the occupied destination declines to the row path
+        # (#372: a Mongo source has no PK-range skip here, so a fast-path
+        # re-copy could only duplicate). Nothing is written by the decline.
+        with pytest.raises(FastPathUnavailable, match="occupied Oracle dest"):
+            copy_mongo_to_oracle(
+                source_cfg=_mongo_cfg(mid),
+                source_table=mid,
+                dest_cfg=_ora_cfg(),
+                dest_schema=_ora_cfg()["schema"],
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                oracle_ddls=["NUMBER", "VARCHAR2(32)"],
+                replace_destination=False,
+            )
         assert _ora_count(dest) == 800
     finally:
         cur = ora.cursor()

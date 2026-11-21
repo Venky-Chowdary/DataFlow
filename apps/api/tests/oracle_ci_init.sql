@@ -9,10 +9,11 @@
 -- OFF keeps sqlplus from echoing it into the job log.
 --
 -- Grants are the documented LogMiner set (V$ views, LOGMINING, DBMS_LOGMNR).
--- The PDB login deliberately does NOT get SELECT_CATALOG_ROLE, V_$TRANSACTION
--- or GV_$INSTANCE: tests/test_cdc_oracle_logminer_txn_live.py grants and
--- revokes those two views itself to prove the connector fails closed without
--- them, which a catalog role would mask.
+-- The PDB login gets direct grants only, never SELECT_CATALOG_ROLE: the
+-- buffer-off LogMiner path needs V_$TRANSACTION and GV_$INSTANCE (open
+-- transaction and RAC detection), and tests/test_cdc_oracle_logminer_txn_live.py
+-- revokes and restores exactly those two grants to prove the connector fails
+-- closed without them, which a catalog role would mask.
 SET VERIFY OFF
 SET ECHO OFF
 SET FEEDBACK OFF
@@ -45,6 +46,8 @@ GRANT SELECT ON SYS.V_$ARCHIVED_LOG TO DATAFLOW;
 GRANT SELECT ON SYS.V_$LOGMNR_CONTENTS TO DATAFLOW;
 GRANT SELECT ON SYS.V_$LOGMNR_LOGS TO DATAFLOW;
 GRANT EXECUTE ON SYS.DBMS_LOGMNR TO DATAFLOW;
+GRANT SELECT ON SYS.V_$TRANSACTION TO DATAFLOW;
+GRANT SELECT ON SYS.GV_$INSTANCE TO DATAFLOW;
 
 -- A read-only login for the destination-privilege probe's deny case
 -- (tests/test_saas_privilege_deny_live.py): SELECT on one table, nothing else.

@@ -277,14 +277,15 @@ def test_live_oracle_stream_insert_select_load_method(monkeypatch):
         ensure_memory_job_store_if_mongo_down()
         job_id = f"ora-copy-{tag}"
         get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+        live = _ora_live()
         endpoint = {
             "format": "oracle",
-            "host": "127.0.0.1",
-            "port": 1521,
-            "database": "XEPDB1",
-            "schema": "DATAFLOW",
-            "username": "dataflow",
-            "password": _oracle_password(),
+            "host": live["host"],
+            "port": live["port"],
+            "database": live["database"],
+            "schema": live["schema"],
+            "username": live["username"],
+            "password": live["password"],
         }
         source = EndpointConfig.from_dict("database", {**endpoint, "table": src})
         destination = EndpointConfig.from_dict("database", {**endpoint, "table": dest})
