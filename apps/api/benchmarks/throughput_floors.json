@@ -5,14 +5,31 @@
     "below min_rows_per_second. rows/s is over the whole engine call, Gate-8 included; at 200k the",
     "in-memory verification ladder runs too, so it is lower than a 1M run on the same route.",
     "A floor sits well under the rate the route reaches on a hosted runner so runner noise does not",
-    "flap the gate, and above the rate of the code before the per-column fast paths (about 210 rows/s",
-    "on the row path, 100k rows, 70cb4669c), so losing them trips it. Raise a floor only with the",
-    "CI artifacts that justify it."
+    "flap the gate, and above the rate of the code before the per-column fast paths (about 210-235",
+    "rows/s on the row path, 100k rows, 70cb4669c, local), so losing them trips it. First CI run",
+    "(44923502709, ubuntu-latest, 200k rows): pg-pg 3276, pg-pg-row 558, pg-mysql 953, mysql-pg 642",
+    "rows/s; floors are about 60% of those. Raise a floor only with the CI artifacts that justify it."
   ],
   "routes": {
-    "pg-pg": {"route": "pg-pg", "row_path": false, "min_rows_per_second": 1500},
-    "pg-pg-row": {"route": "pg-pg", "row_path": true, "min_rows_per_second": 250},
-    "pg-mysql": {"route": "pg-mysql", "row_path": false, "min_rows_per_second": 250},
-    "mysql-pg": {"route": "mysql-pg", "row_path": false, "min_rows_per_second": 250}
+    "pg-pg": {
+      "route": "pg-pg",
+      "row_path": false,
+      "min_rows_per_second": 2000
+    },
+    "pg-pg-row": {
+      "route": "pg-pg",
+      "row_path": true,
+      "min_rows_per_second": 350
+    },
+    "pg-mysql": {
+      "route": "pg-mysql",
+      "row_path": false,
+      "min_rows_per_second": 550
+    },
+    "mysql-pg": {
+      "route": "mysql-pg",
+      "row_path": false,
+      "min_rows_per_second": 400
+    }
   }
 }

@@ -50,6 +50,12 @@ reconciliation 196 s → 78 s. On the copy route the copy itself took 1.7 s for
 ladder described next. Other processes shared the machine during both sets
 of runs, so treat differences under about 10% as noise.
 
+CI (`throughput-smoke`, GitHub-hosted `ubuntu-latest`, MySQL 8.0, Python
+3.12, 200k rows, run 44923502709): PostgreSQL → PostgreSQL 3,276 rows/s on the
+default binary copy and 558 on the forced row path, PostgreSQL → MySQL 953,
+MySQL → PostgreSQL 642; every route passed the independent cell check; peak
+RSS 850–910 MB (at 200k the ladder below holds both populations in memory).
+
 At or below 250,000 rows Gate-8 also runs the in-memory verification ladder
 (column aggregates L2 and cell localisation L4/L5); above it the ladder is
 skipped and says so (`coverage_limit`), so per-row cost at 1M rows is lower
