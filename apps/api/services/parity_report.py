@@ -1064,9 +1064,19 @@ def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def summary_stamp(job: dict[str, Any]) -> dict[str, str]:
-    """The job state a stored summary was computed for: a different one makes it stale."""
+    """The job state a stored summary was computed for: a different one makes it stale.
+
+    Verification after the write writes without touching ``updated_at`` (it is
+    not job progress), so its state and finish time are part of the stamp: a
+    summary stored while it ran is stale once it ends (or stops).
+    """
+    from services.parity_scale.verification import effective_block
+
+    block = effective_block(job)
     return {"job_status": str(job.get("status") or "").strip().lower(),
-            "job_updated_at": str(job.get("updated_at") or "")}
+            "job_updated_at": str(job.get("updated_at") or ""),
+            "verification_state": str(block.get("state") or ""),
+            "verification_finished_at": str(block.get("finished_at") or "")}
 
 
 def compact_summary(report: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:

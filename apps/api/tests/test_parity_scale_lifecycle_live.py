@@ -254,3 +254,23 @@ def test_a_failed_reverify_never_leaves_the_earlier_match_standing(tables, monke
     assert report["verdict"] != "proven"
     assert report["signoff"]["status"] == "blocked"
     assert "did not finish" in report["signoff"]["blocked_reason"]
+
+
+@live
+def test_a_summary_stored_while_verification_ran_is_recomputed_when_it_ends(tables) -> None:
+    """Defect 8: verification writes do not touch updated_at, so the stamp must carry its state."""
+    from services.parity_report import build_parity_report, compact_summary
+    from services.parity_scale import verification
+    from services.parity_summary import _job_summary
+
+    job_id = _job(*tables)
+    _svc().update_job_fields(job_id, {"parity_scale": {"state": "running", "tables": [
+        {"name": tables[1], "status": "running", "scan_id": "x"}]}})
+    _live_lease(job_id)
+    job = _svc().get_job(job_id)
+    running = compact_summary(build_parity_report(job, reread=False, job_id=job_id), job)
+    assert running["verdict"] == "verifying"
+    _svc().update_job_fields(job_id, {"parity.summary": running, "parity_scale": {}, "parity_scale_lease": None},
+                             touch_updated_at=False)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    assert _job_summary(_svc().get_job(job_id), job_id)["verdict"] == "proven"
