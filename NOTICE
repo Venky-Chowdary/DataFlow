@@ -257,6 +257,7 @@ JavaScript (web bundle)
 @radix-ui/react-collection: MIT
 @radix-ui/react-compose-refs: MIT
 @radix-ui/react-context: MIT
+@radix-ui/react-dialog: MIT
 @radix-ui/react-direction: MIT
 @radix-ui/react-dismissable-layer: MIT
 @radix-ui/react-dropdown-menu: MIT
@@ -265,6 +266,7 @@ JavaScript (web bundle)
 @radix-ui/react-id: MIT
 @radix-ui/react-menu: MIT
 @radix-ui/react-navigation-menu: MIT
+@radix-ui/react-popover: MIT
 @radix-ui/react-popper: MIT
 @radix-ui/react-portal: MIT
 @radix-ui/react-presence: MIT
@@ -297,8 +299,10 @@ aria-hidden: MIT
 camelcase: MIT
 classcat: MIT
 cliui: ISC
+cmdk: MIT
 color-convert: MIT
 color-name: MIT
+cron-parser: MIT
 d3-color: ISC
 d3-dispatch: ISC
 d3-drag: ISC
@@ -318,6 +322,7 @@ get-nonce: MIT
 is-fullwidth-code-point: MIT
 locate-path: MIT
 lucide-react: ISC
+luxon: MIT
 p-limit: MIT
 p-locate: MIT
 p-try: MIT
