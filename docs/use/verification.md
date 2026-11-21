@@ -107,6 +107,37 @@ strongest form is a five-layer ladder:
 - It does not prove referential integrity between tables.
 - It does not prove the source was right.
 - It does not prove anything about rows written to the source after the read.
+- It does not prove the mapping means the right thing. `first_name → last_name`
+  copies perfectly and verifies perfectly. The Mapping Witness below checks that.
+
+## Mapping Witness (before the write)
+
+On the Map step, Datawrap checks each mapped pair against a bounded sample of
+the data (at most 500 rows) and flags pairs to review:
+
+- **Destination already holds the rows** (an existing table): values are
+  compared on matching keys. A pair whose values sit in another column is
+  flagged as a likely swap or wrong target. A pair that matches only after
+  ×100 is flagged as a unit mismatch (dollars into cents). Dates that match
+  only when read day-first, while the run reads month-first, are flagged as a
+  format mismatch.
+- **Before load** (new table, or no key to join on): the values are checked
+  against what the destination column promises. Examples: user names headed
+  for an `email` column, fractional amounts headed for a `*_cents` column,
+  surnames headed for `first_name` while given names go to `last_name`.
+
+A flag is evidence with a reason; the witness never changes a mapping. A pair
+it cannot judge says "No evidence", not "passed". Results carry column names
+and counts, never values. The Trust Report shows the evidence for the mapping
+the job ran with.
+
+Measured on a held-out benchmark (206 matchable columns, 23 tables, not used to
+set thresholds): no false flags on correct mappings in keyed or source-only
+mode; with the destination holding the same rows (built from the correct
+mapping, samples cycled to 20 rows per table), 32 of 36 wrong mapper proposals
+flagged and 399 of 399 injected swaps caught. Before load, most columns have no
+name-implied format, so few are judged (23 of 206 correct pairs). Command:
+`python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
 
 ## Coverage: which comparison ran
 

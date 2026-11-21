@@ -45,6 +45,7 @@ import type { EditableMapping } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
 import { MapIssueList, mapIssueSummary, mapStatusLine, type MapIssue } from "../../components/mapping/MapIssueList";
+import { useMappingWitness } from "../../components/mapping/useMappingWitness";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -137,6 +138,8 @@ interface TransferMapStepProps {
    * take the operator there to preview them. Absent, computed columns are off.
    */
   onAddComputedSteps?: (steps: ShapeStepWire[]) => void;
+  /** The run's day/month order ("DMY", "MDY" or "" for per-value): the Mapping Witness reads dates the same way. */
+  dateLocale?: string;
 }
 
 
@@ -203,6 +206,7 @@ export function TransferMapStep({
   sourceObjectName = "",
   transformSteps = [],
   onAddComputedSteps,
+  dateLocale = "",
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("attention");
@@ -235,6 +239,19 @@ export function TransferMapStep({
     enabled: remapEnabled && Boolean(destEndpoint),
   });
   const catalog = remapEnabled ? catalogState.catalog : null;
+  // Mapping Witness: evidence on each mapped pair from the sample Map already shows.
+  const witnessKeys = useMemo(
+    () => (catalogState.catalog?.columns ?? []).filter((c) => c.primaryKey).map((c) => c.name),
+    [catalogState.catalog],
+  );
+  const witness = useMappingWitness({
+    mappings: columnMappings,
+    sampleRows,
+    destEndpoint: remapEnabled ? destEndpoint : null,
+    targetKeyColumns: witnessKeys,
+    destTableExists,
+    dateLocale,
+  });
   // Once the operator edits, the rows they are working on must not jump out
   // of view because the issues-first filter re-evaluated behind them.
   const operatorEdited = useRef(false);
@@ -923,6 +940,8 @@ export function TransferMapStep({
                 onFilterChange={handleFilterChange}
                 focusSource={focusSource}
                 onFocusHandled={() => setFocusSource(null)}
+                witnessFlags={witness.flags}
+                onWitnessReview={setFocusSource}
               />
             </div>
           </div>

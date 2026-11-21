@@ -5,6 +5,8 @@ import { StructurePreview } from "./ui/StructurePreview";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DestColumnCombobox, DestTargetTag, destTargetTag } from "./mapping/DestColumnCombobox";
 import { TypeCompatBadge, compatSentence } from "./mapping/TypeCompatBadge";
+import { WitnessFlag } from "./mapping/WitnessFlag";
+import type { WitnessPair } from "../lib/mappingWitness";
 import type { DestColumnCatalog } from "../lib/destColumnCatalog";
 import type { TypeGrade } from "../lib/mappingStudioApi";
 import {
@@ -123,6 +125,10 @@ interface ColumnReviewPanelProps {
    * drag handles. Absent, the row keeps its plain destination-name field.
    */
   remap?: ColumnRemapControls;
+  /** Mapping Witness flags by lower-cased source column (evidence only; never edits a row). */
+  witnessFlags?: Map<string, WitnessPair>;
+  /** The flag's one action: take the operator to this row's destination picker. */
+  onWitnessReview?: (source: string) => void;
 }
 
 export interface ColumnRemapControls {
@@ -205,6 +211,8 @@ export function ColumnReviewPanel({
   migrationId = "",
   tableName = "",
   remap,
+  witnessFlags,
+  onWitnessReview,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("attention");
@@ -332,6 +340,19 @@ export function ColumnReviewPanel({
     onFocusHandled?.();
     return undefined;
   }, [focusSource, pageItems, filtered, onFocusHandled]);
+
+  /** The witness flag's one action: bring the row into view and put focus on its destination picker. */
+  const reviewWitness = (source: string) => {
+    onWitnessReview?.(source);
+    window.requestAnimationFrame(() => {
+      const row = rowRefs.current.get(source);
+      const wanted = `Destination column for ${source}`;
+      const picker = Array.from(row?.querySelectorAll<HTMLElement>("input, select") ?? []).find(
+        (el) => el.getAttribute("aria-label") === wanted,
+      );
+      picker?.focus();
+    });
+  };
 
   /** Per-row execution policy choice — no hidden CAST_AND_CONTINUE default. */
   const [policyBySource, setPolicyBySource] = useState<Record<string, ExecutionPolicy | "">>({});
@@ -998,10 +1019,14 @@ export function ColumnReviewPanel({
                       </select>
                 </>
               );
+              const witnessPair = witnessFlags?.get(m.source.toLowerCase());
               const compatBadge = (
                 <>
                       {remap ? (
                         <TypeCompatBadge grade={remap.gradeFor(m)} pending={remap.gradesPending && Boolean(m.destType)} />
+                      ) : null}
+                      {witnessPair && !omitted ? (
+                        <WitnessFlag pair={witnessPair} onReview={onWitnessReview ? reviewWitness : undefined} />
                       ) : null}
                 </>
               );

@@ -7628,6 +7628,7 @@ export function TransferPage({
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
+          dateLocale={dateLocale}
           hideFooter={studioFlags.canvas}
           analysis={analysis}
           destColumns={destColumns}

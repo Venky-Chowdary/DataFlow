@@ -12,7 +12,7 @@
  * cards on this job; this tab links to them instead of drawing them twice.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
@@ -20,6 +20,7 @@ import { LoadingBlock } from "../LoadingState";
 import { useToast } from "../Toast";
 import { DifferenceSplitBar, ParityRing, TableParityBars } from "../charts/ParityCharts";
 import { SignoffPanel, type ParityBusy } from "./SignoffPanel";
+import { VerifiedAiSection } from "../trust/VerifiedAiSection";
 import {
   approveParityFix,
   dismissParityFix,
@@ -288,6 +289,8 @@ export interface TrustReportViewProps {
   pollStopped?: boolean;
   /** The job's status: a failed run that never reached verification is said plainly. */
   jobStatus?: string;
+  /** Verified AI evidence (Mapping Witness, AI decisions), mounted above sign-off. */
+  aiEvidence?: ReactNode;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -331,6 +334,7 @@ export function TrustReportView({
   onOpenDetail,
   pollStopped = false,
   jobStatus,
+  aiEvidence,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -644,6 +648,8 @@ export function TrustReportView({
         </dl>
       </section>
 
+      {aiEvidence}
+
       <SignoffPanel
         report={report}
         busy={busy}
@@ -850,6 +856,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
   return (
     <TrustReportView
       report={report}
+      aiEvidence={<VerifiedAiSection jobId={jobId} />}
       busy={busy}
       canFix={fixGate.allowed}
       fixDeniedReason={fixGate.reason}
