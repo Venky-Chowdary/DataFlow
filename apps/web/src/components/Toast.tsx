@@ -1,14 +1,11 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { DtIcon } from "./DtIcon";
+import { Toaster, toast as sonner } from "sonner";
+import { DtIcon, type IconName } from "./DtIcon";
 import { Dialog } from "./ui/Dialog";
 import { ErrorReferenceChip } from "./ErrorReferenceChip";
 import { splitReference } from "../lib/errorCopy";
-import {
-  mergeToastStack,
-  toastFingerprint,
-  type ToastTone,
-} from "../lib/toastDedupe";
+import { toastFingerprint, type ToastTone } from "../lib/toastDedupe";
 
 export type { ToastTone };
 
@@ -29,180 +26,166 @@ interface ToastContextValue {
 
 const ToastContext = createContext<ToastContextValue | null>(null);
 
-const TONE_ICON: Record<ToastTone, string> = {
-  info: "activity",
-  success: "check",
-  warning: "gate",
-  error: "x",
+/** Standard status glyphs: the same four everywhere a tone is shown. */
+export const TOAST_TONE_ICON: Record<ToastTone, IconName> = {
+  info: "info",
+  success: "success",
+  warning: "warning",
+  error: "error",
 };
 
-export function ToastProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<ToastItem[]>([]);
-  const [review, setReview] = useState<ToastItem[]>([]);
-  const reviewRef = useRef<ToastItem[]>([]);
-  const timers = useRef(new Map<string, number>());
+const TONE_LABEL: Record<ToastTone, string> = {
+  info: "Information",
+  success: "Success",
+  warning: "Warning",
+  error: "Error",
+};
 
-  useEffect(() => () => {
-    for (const handle of timers.current.values()) window.clearTimeout(handle);
-    timers.current.clear();
-  }, []);
+/**
+ * How long a toast stays when nobody is looking at it. Hovering the stack,
+ * focusing a toast or pressing Alt+T pauses every timer (WCAG 2.2.1). Errors
+ * stay until the user dismisses them: the user has to act on them.
+ */
+export const TOAST_HOLD_MS: Record<ToastTone, number> = {
+  info: 6000,
+  success: 6000,
+  warning: 10000,
+  error: Infinity,
+};
+
+/** Longer than this, the toast clamps and offers "Details" with the full text. */
+const DETAILS_AFTER_CHARS = 180;
+
+/**
+ * Sonner pauses on hover and on Alt+T but not when keyboard focus lands on a
+ * toast. Its list listens for mouse enter/leave, so focus is translated into
+ * those events on the list itself: one pause model for pointer and keyboard.
+ */
+function pauseWhileFocused(event: React.FocusEvent<HTMLElement>, entering: boolean) {
+  const list = event.currentTarget.closest("[data-sonner-toaster]");
+  if (!list) return;
+  if (!entering && list.contains(event.relatedTarget as Node | null)) return;
+  const init = { bubbles: true, relatedTarget: entering ? null : document.body } as MouseEventInit;
+  list.dispatchEvent(new MouseEvent(entering ? "mousemove" : "mouseout", init));
+}
+
+function ToastCard({
+  item,
+  onDetails,
+  onDismiss,
+}: {
+  item: { title: string; message?: string; tone: ToastTone };
+  onDetails: () => void;
+  onDismiss: () => void;
+}) {
+  const { text, reference } = splitReference(item.message);
+  const long = text.length > DETAILS_AFTER_CHARS;
+  return (
+    <div
+      className={`dt-toast dt-toast--${item.tone}`}
+      onFocus={(event) => pauseWhileFocused(event, true)}
+      onBlur={(event) => pauseWhileFocused(event, false)}
+    >
+      <span className="dt-toast-icon">
+        <DtIcon name={TOAST_TONE_ICON[item.tone]} size={20} chrome="product" />
+        <span className="df2-sr-only">{TONE_LABEL[item.tone]}: </span>
+      </span>
+      <div className="dt-toast-body">
+        <strong className="dt-toast-title">{item.title}</strong>
+        {text && <p className={`dt-toast-message${long ? " is-clamped" : ""}`}>{text}</p>}
+        {(reference || long) && (
+          <div className="dt-toast-actions">
+            {reference && <ErrorReferenceChip reference={reference} />}
+            {long && (
+              <button type="button" className="dt-toast-action" onClick={onDetails} aria-haspopup="dialog">
+                Details
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <button type="button" className="dt-toast-close" onClick={onDismiss} aria-label="Dismiss notification">
+        <DtIcon name="x" size={16} chrome="product" />
+      </button>
+    </div>
+  );
+}
+
+const TOASTER_STYLE = {
+  zIndex: "var(--df-z-toast)",
+  "--width": "var(--df-toast-width)",
+} as CSSProperties;
+
+/**
+ * App notifications: one fixed region (bottom-right, bottom-centre on phones),
+ * never in the page flow. At most three show; more stack behind and expand on
+ * hover. Identical notifications collapse into one and restart its timer.
+ */
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [review, setReview] = useState<ToastItem[]>([]);
+  const live = useRef(new Map<string, ToastItem>());
+  const openReview = useRef<(item: ToastItem) => void>(() => {});
 
   const dismiss = useCallback((id: string) => {
-    const handle = timers.current.get(id);
-    if (handle != null) {
-      window.clearTimeout(handle);
-      timers.current.delete(id);
-    }
-    setItems((prev) => prev.filter((t) => t.id !== id));
+    live.current.delete(id);
+    sonner.dismiss(id);
   }, []);
 
-  const scheduleDismiss = useCallback(
-    (id: string, tone: ToastTone) => {
-      const prior = timers.current.get(id);
-      if (prior != null) window.clearTimeout(prior);
-      if (reviewRef.current.some((item) => item.id === id)) {
-        timers.current.delete(id);
-        return;
-      }
-      const holdMs = tone === "error" ? 16000 : tone === "warning" ? 10000 : 4500;
-      timers.current.set(id, window.setTimeout(() => {
-        if (!reviewRef.current.some((item) => item.id === id)) dismiss(id);
-      }, holdMs));
-    },
-    [dismiss],
-  );
+  /** Show or update one toast; `Infinity` holds it (while its details are open). */
+  const show = useCallback((item: ToastItem, duration: number) => {
+    live.current.set(item.id, item);
+    const forget = () => { live.current.delete(item.id); };
+    sonner.custom(
+      () => <ToastCard item={item} onDismiss={() => dismiss(item.id)} onDetails={() => openReview.current(item)} />,
+      { id: item.id, duration, onDismiss: forget, onAutoClose: forget },
+    );
+  }, [dismiss]);
 
-  const openReview = useCallback((next: ToastItem[]) => {
-    reviewRef.current = next;
-    for (const item of next) {
-      const handle = timers.current.get(item.id);
-      if (handle != null) window.clearTimeout(handle);
-      timers.current.delete(item.id);
-    }
-    setReview(next);
-  }, []);
+  openReview.current = (item: ToastItem) => {
+    show(item, Infinity);
+    setReview([item]);
+  };
 
   const closeReview = useCallback(() => {
-    const previous = reviewRef.current;
-    reviewRef.current = [];
+    // The toast resumes its timer once its details are closed.
+    for (const item of review) if (live.current.has(item.id)) show(item, TOAST_HOLD_MS[item.tone]);
     setReview([]);
-    for (const item of previous) scheduleDismiss(item.id, item.tone);
-  }, [scheduleDismiss]);
+  }, [review, show]);
 
   const dismissMatching = useCallback((title: string) => {
     const match = title.trim();
-    setItems((prev) => {
-      for (const item of prev) {
-        if (item.title !== match) continue;
-        const handle = timers.current.get(item.id);
-        if (handle != null) {
-          window.clearTimeout(handle);
-          timers.current.delete(item.id);
-        }
-      }
-      return prev.filter((item) => item.title !== match);
-    });
-  }, []);
+    for (const [id, item] of live.current) if (item.title === match) dismiss(id);
+  }, [dismiss]);
 
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
       const cleanTitle = title.trim();
       const cleanMessage = message?.trim() || undefined;
       const key = toastFingerprint({ title: cleanTitle, message: cleanMessage, tone });
-      const now = Date.now();
-      const incoming: ToastItem = {
-        id: reviewRef.current.find((item) => item.key === key)?.id ?? crypto.randomUUID(),
-        key,
-        title: cleanTitle,
-        message: cleanMessage,
-        tone,
-        createdAt: now,
-      };
-      let shownId = incoming.id;
-      setItems((prev) => {
-        const merged = mergeToastStack(prev, incoming, now, undefined, prev.length + 1);
-        shownId = merged.shownId;
-        return merged.items;
-      });
-      scheduleDismiss(shownId, tone);
+      show({ id: key, key, title: cleanTitle, message: cleanMessage, tone, createdAt: Date.now() }, TOAST_HOLD_MS[tone]);
     },
-    [scheduleDismiss],
+    [show],
   );
 
   const value = useMemo(() => ({ toast, dismiss, dismissMatching }), [toast, dismiss, dismissMatching]);
 
-  // D-BP-20: pages that declare a toast dock ([data-df2-toast-dock], e.g. the
-  // studio header chrome) take the host as an inline pill strip — no floating
-  // overlay, so toasts can never cover content and cannot reflow the page.
-  const [dock, setDock] = useState<HTMLElement | null>(null);
-  useEffect(() => {
-    const sync = () => {
-      const el = Array.from(document.querySelectorAll<HTMLElement>("[data-df2-toast-dock]"))
-        .find((candidate) => {
-          if (candidate.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
-          for (let ancestor: HTMLElement | null = candidate; ancestor; ancestor = ancestor.parentElement) {
-            const style = window.getComputedStyle(ancestor);
-            if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
-          }
-          return true;
-        }) ?? null;
-      setDock((prev) => (prev === el ? prev : el));
-    };
-    sync();
-    // The dock mounts/unmounts inside children without re-rendering this
-    // provider (children prop is referentially stable), so a bare
-    // querySelector-on-render misses it — a toast emitted before the dock
-    // existed would float forever. Observe instead (D-BP-20 residual).
-    const mo = new MutationObserver(sync);
-    mo.observe(document.body, {
-      childList: true, subtree: true, attributes: true,
-      attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"],
-    });
-    return () => mo.disconnect();
-  }, []);
-
-  // D-BP-27: a docked lane can never render a partially visible toast — cap
-  // visible to the newest 2 and collapse the rest into a "+N more" chip.
-  const visible = items.slice(-2);
-  const hiddenCount = Math.max(0, items.length - visible.length);
-
-  const host = (
-    <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false"
-      aria-hidden={review.length > 0 || undefined} inert={review.length > 0 || undefined}
-      style={review.length > 0 ? { display: "none" } : undefined}>
-        {visible.map((t) => (
-          <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role={t.tone === "error" ? "alert" : "status"}>
-            <span className="dt-toast-icon" aria-hidden>
-              <DtIcon name={TONE_ICON[t.tone]} size={18} />
-            </span>
-            <div className="dt-toast-body">
-              <strong className="dt-toast-title">{t.title}</strong>
-              {t.message && <span className="dt-toast-message">{splitReference(t.message).text}</span>}
-              {t.message && <ErrorReferenceChip reference={splitReference(t.message).reference} />}
-            </div>
-            <button type="button" className="dt-toast-close" onClick={() => openReview([t])}
-              aria-label="View notification details" aria-haspopup="dialog" title="View notification details">
-              <DtIcon name="book" size={16} />
-            </button>
-            <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss notification" title="Dismiss notification">
-              <DtIcon name="x" size={16} />
-            </button>
-            <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
-          </div>
-        ))}
-        {hiddenCount > 0 && (
-          <button type="button" className="dt-toast-more" onClick={() => openReview([...items].reverse())}
-            aria-label={`Review ${hiddenCount} more notifications`} aria-haspopup="dialog" title="Review notifications">
-            +{hiddenCount} more
-          </button>
-        )}
-    </div>
-  );
-
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {createPortal(host, dock ?? document.body)}
+      {/* On <body>: a transformed or clipped page ancestor can never move or cut the region. */}
+      {createPortal(
+        <Toaster
+          position="bottom-right"
+          visibleToasts={3}
+          gap={8}
+          offset={{ bottom: "var(--df-toast-offset-bottom, 20px)", right: 20 }}
+          mobileOffset={{ bottom: "var(--df-toast-offset-bottom-mobile, 16px)", left: 16, right: 16 }}
+          containerAriaLabel="Notifications"
+          style={TOASTER_STYLE}
+          toastOptions={{ unstyled: true, className: "dt-toast-item" }}
+        />,
+        document.body,
+      )}
       <Dialog open={review.length > 0} onClose={closeReview} title="Notification details" size="md" className="dt-toast-review">
         {review.map((item) => (
           <section key={item.id} className={`dt-toast-review-item dt-toast-review-item--${item.tone}`}>

@@ -92,7 +92,9 @@ export function MapIssueList({
       data-testid={testId}
     >
       <div className="df2-map-issues-bar">
-        <DtIcon name="alert" size={16} />
+        <span className="df2-map-issues-icon">
+          <DtIcon name={blocking ? "error" : "warning"} size={16} chrome="product" />
+        </span>
         <p className="df2-map-issues-summary" role="status" title={ordered.map((i) => i.title).join("\n")}>
           <span className="df2-map-issues-count">{summary}</span>
           {shownSubjects.length > 0 ? (

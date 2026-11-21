@@ -17,6 +17,7 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   MouseEvent: dom.window.MouseEvent,
   KeyboardEvent: dom.window.KeyboardEvent,
+  CustomEvent: dom.window.CustomEvent, // the row menu (Radix) dispatches DOM CustomEvents
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   IS_REACT_ACT_ENVIRONMENT: true,
 });
@@ -219,7 +220,9 @@ describe("JobsGrid", () => {
       host.querySelector(".df2-jobs-grid-scroll")!.dispatchEvent(new dom.window.Event("scroll"));
     });
     assert.ok(document.querySelector('[role="menu"]'), "scrolling the grid moves the menu with its row, not closes it");
-    await key(menu, "ArrowDown");
+    assert.equal(document.activeElement, items[0], "opening moves focus to the first item");
+    await key(document.activeElement!, "ArrowDown");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); }); // roving focus moves on the next tick
     assert.equal(document.activeElement, items[1]);
     await act(async () => (items[1] as HTMLButtonElement).click());
     assert.deepEqual(calls.menu, ["copy:job-bad"]);

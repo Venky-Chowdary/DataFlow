@@ -129,7 +129,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           <span className="df2-confirm-title">
             {tone === "danger" && (
               <span className="df2-confirm-icon" aria-hidden>
-                <DtIcon name="gate" size={18} />
+                <DtIcon name="warning" size={18} />
               </span>
             )}
             {pending?.title}

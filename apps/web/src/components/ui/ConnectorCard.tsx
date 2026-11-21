@@ -135,7 +135,7 @@ export function ConnectorCard({
             loading={testing}
             loadingLabel="Testing…"
             onClick={onTest}
-            leadingIcon={<DtIcon name="activity" size={14} />}
+            leadingIcon={<DtIcon name="test-connection" size={14} />}
             aria-label={`Test ${c.name} connection`}
             title={`Test ${c.name} connection`}
           >
@@ -208,7 +208,7 @@ export function ConnectorCard({
           loading={testing}
           loadingLabel="Testing…"
           onClick={onTest}
-          leadingIcon={<DtIcon name="activity" size={14} />}
+          leadingIcon={<DtIcon name="test-connection" size={14} />}
         >
           Test
         </Button>

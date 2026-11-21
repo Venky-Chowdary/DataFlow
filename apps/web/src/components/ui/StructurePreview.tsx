@@ -156,7 +156,7 @@ function PreviewBody({
             <span className="df2-structure-field-count">
               {previewCols.length} fields
             </span>
-            <span>Expand field chips — sample rows stay visible below</span>
+            <span>Show field list</span>
           </summary>
           <div className="df2-structure-field-strip" aria-label="Detected fields">
             {/* Columns are positional: a name can repeat or be blank (a header row
@@ -203,7 +203,8 @@ function PreviewBody({
           ))}
         </div>
       ) : previewRows.length > 0 ? (
-        <div className="df2-structure-table-wrap">
+        // Scrolls both ways: a named, focusable region so keyboard users can scroll it (P1-25).
+        <div className="df2-structure-table-wrap" tabIndex={0} role="region" aria-label="Sample rows">
           <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>
               <tr>
@@ -246,7 +247,7 @@ function PreviewBody({
           )}
           {onRetrySample && (
             <button type="button" className="df2-btn df2-btn-sm" onClick={onRetrySample}>
-              <DtIcon name="scan" size={14} /> Reload sample preview
+              <DtIcon name="refresh" size={14} /> Reload sample preview
             </button>
           )}
         </div>

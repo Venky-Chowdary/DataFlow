@@ -62,7 +62,7 @@ describe("reasons", () => {
   });
 
   it("says what the conditional columns were checked against, never the population", () => {
-    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes.");
+    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Run writes.");
     assert.match(dataCheckedText({ rows: 0, source: "none" }), /No observed rows/);
     // Review 3, M4: only the server's covers_population says the sample is the table, never a count alone.
     assert.doesNotMatch(dataCheckedText({ rows: 25, source: "plan_sample", population_rows: 10 }), /holds every row/);
@@ -74,7 +74,7 @@ describe("the gate line", () => {
   it("is not required when the switch is off, and blocks Execute when on and not reversible", () => {
     assert.equal(gatePresentation(planReversibilityFixture()).label, "Not required");
     const blocked = gatePresentation(blockedReversibilityFixture());
-    assert.equal(blocked.label, "Blocks Execute");
+    assert.equal(blocked.label, "Blocks Run");
     assert.equal(blocked.tone, "danger");
     assert.match(blocked.detail, /customers\.email/);
     assert.equal(gatePresentation({ require_reversibility: true, gate: { id: "g24_reversibility", status: "pass", message: "" } }).label, "Gate passes");
@@ -93,8 +93,8 @@ describe("the gate line", () => {
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: writing }), { label: "Enforced while writing", tone: "ok" });
     assert.match(checkText(writing), /enforced while writing: every row is checked and the run stops on the first value that would change/);
     const validate = { ...writing, enforcement: "at_execute" as const };
-    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: validate }), { label: "Enforced at Execute", tone: "ok" });
-    assert.equal(checkText(validate), "Checked on the sample (100 observed rows); enforced on every row at Execute.");
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: validate }), { label: "Enforced at Run", tone: "ok" });
+    assert.equal(checkText(validate), "Checked on the sample (100 observed rows); enforced on every row at Run.");
     const inherited = { ...writing, enforcement: "unavailable" as const };
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: inherited }), { label: "Cannot be enforced", tone: "warn" });
   });
@@ -103,7 +103,7 @@ describe("the gate line", () => {
     // The gate passes an enforced column whose sample held no value (status not_checked): every row is checked.
     const empty = { status: "not_checked" as const, rows_checked: 0, rows_not_fitting: 0, covers_population: false };
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "while_writing" as const } }), { label: "Enforced while writing", tone: "ok" });
-    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "at_execute" as const } }), { label: "Enforced at Execute", tone: "ok" });
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "at_execute" as const } }), { label: "Enforced at Run", tone: "ok" });
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "unavailable" as const } }), { label: "Cannot be enforced", tone: "warn" });
     // A value already seen to change stays a failure, enforced or not.
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, status: "does_not_fit" as const, rows_checked: 3, rows_not_fitting: 1, enforcement: "while_writing" as const } }), { label: "Does not fit", tone: "danger" });
@@ -185,7 +185,7 @@ describe("contract 11: a fit counts only over the whole table; new reason codes"
     const email = cols.find((c) => c.source === "email")!;
     assert.equal(email.check?.covers_population, false);
     // Review 3 (M3): a run that must be reversible enforces it on every row at Execute.
-    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Execute", tone: "ok" });
+    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Run", tone: "ok" });
     const sampleOnly = { ...email, check: { ...email.check!, enforcement: undefined } };
     assert.deepEqual(columnPillPresentation(sampleOnly), { label: "Fits sample only", tone: "warn" });
     assert.match(checkText(sampleOnly.check), /Fits the sample \(2 observed rows\); rows not sampled are not proven/);
@@ -217,8 +217,8 @@ describe("review 3: a real Validate report with a conditional column enforced at
     const { realReversibilityReview3 } = await import("../components/exit/realExitPayloads.js");
     const email = realReversibilityReview3.tables[0].columns.find((c) => c.source === "email")!;
     assert.equal(email.check?.enforcement, "at_execute");
-    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Execute", tone: "ok" });
-    assert.equal(checkText(email.check), "Checked on the sample (2 observed rows); enforced on every row at Execute.");
+    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Run", tone: "ok" });
+    assert.equal(checkText(email.check), "Checked on the sample (2 observed rows); enforced on every row at Run.");
     assert.equal(realReversibilityReview3.data_checked.covers_population, false);
     assert.deepEqual(gatePresentation(realReversibilityReview3).label, "Gate passes");
   });

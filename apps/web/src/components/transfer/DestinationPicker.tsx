@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SkeletonList } from "../LoadingState";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { FilterTabs } from "../ui/FilterTabs";
@@ -204,14 +205,24 @@ export function DestinationPicker({
                     {c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
                   </span>
                 </span>
-                {c.last_test_ok === true && (
-                  <span className="df2-dest-connector-card-status ok">Tested</span>
-                )}
+                <span className="df2-dest-connector-card-end">
+                  {c.last_test_ok === true && (
+                    <span className="df2-dest-connector-card-status ok">Tested</span>
+                  )}
+                  {connectorId === c.id && (
+                    <span className="df2-dest-connector-card-check" aria-hidden>
+                      <DtIcon name="check" size={16} chrome="product" />
+                    </span>
+                  )}
+                </span>
               </button>
             ))}
           </div>
 
-          {connectors.length === 0 && !connectorListKnown({ connectorsLoading, connectorsError }) && (
+          {connectors.length === 0 && connectorsLoading && (
+            <SkeletonList rows={3} label="Loading connections" className="df2-dest-connector-skeleton" />
+          )}
+          {connectors.length === 0 && !connectorsLoading && !connectorListKnown({ connectorsLoading, connectorsError }) && (
             <ConnectorListStatus compact connectorsLoading={connectorsLoading} connectorsError={connectorsError} onRetryConnectors={onRetryConnectors} />
           )}
           {connectors.length === 0 && connectorListKnown({ connectorsLoading, connectorsError }) && (

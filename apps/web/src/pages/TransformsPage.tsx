@@ -4,6 +4,7 @@ import { SectionLoader } from "../components/LoadingState";
 import { TransformDetailDrawer } from "../components/TransformDetailDrawer";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -70,6 +71,7 @@ export function TransformsPage({
   const { confirm } = useConfirm();
   const [projects, setProjects] = useState<TransformProject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [editing, setEditing] = useState<(Omit<TransformProject, "id"> & { id?: string }) | null>(
     null,
   );
@@ -95,14 +97,16 @@ export function TransformsPage({
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     try {
       setProjects(await fetchTransformProjects());
     } catch (err) {
-      toast({ title: err instanceof Error ? err.message : "Could not load transforms", tone: "error" });
+      // Shown in the list's place, not as a toast over an empty state.
+      setLoadError(err instanceof Error ? err.message : "The server did not answer.");
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -511,6 +515,12 @@ export function TransformsPage({
 
             {loading ? (
               <SectionLoader title="Loading transforms" hint="Fetching post-load SQL models…" />
+            ) : loadError && projects.length === 0 ? (
+              <ErrorState
+                title="Couldn't load transforms"
+                message={loadError}
+                onRetry={() => void load()}
+              />
             ) : filtered.length === 0 ? (
               <EmptyState
                 icon="layers"

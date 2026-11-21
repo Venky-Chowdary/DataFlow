@@ -1,4 +1,4 @@
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 export type SourceKind = "file" | "database" | "cloud";
 
@@ -13,7 +13,7 @@ const OPTIONS: {
   id: SourceKind;
   label: string;
   desc: string;
-  icon: string;
+  icon: IconName;
   mindset: string;
 }[] = [
   {

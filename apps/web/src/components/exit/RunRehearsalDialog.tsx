@@ -5,12 +5,15 @@
 
 import { useEffect, useId, useState } from "react";
 import { Button } from "../ui/Button";
+import { Callout } from "../ui/Callout";
 import { Dialog } from "../ui/Dialog";
+import { PERMISSIONS, usePermissions } from "../../lib/PermissionsContext";
+import { plural } from "../../lib/plural";
+import { startErrorCopy, staleProof } from "./rehearsalSummary";
 import {
   engineLabel,
   formatWindow,
   readinessPresentation,
-  STALE_TEXT,
   sortBoardRows,
   type ExitBoardRow,
 } from "../../lib/exitReadiness";
@@ -39,6 +42,8 @@ export function RunRehearsalDialog({ open, systems: given, systemId, starting, e
 
   const system = systems.find((s) => s.id === chosen) ?? null;
   const running = system?.state === "running";
+  const { can } = usePermissions();
+  const refusal = error ? startErrorCopy(error) : null;
 
   return (
     <Dialog
@@ -83,7 +88,7 @@ export function RunRehearsalDialog({ open, systems: given, systemId, starting, e
             </div>
             <div>
               <dt>Tables</dt>
-              <dd>{system.tables.toLocaleString("en-US")} declared</dd>
+              <dd>{plural(system.tables, "table")} declared</dd>
             </div>
             <div>
               <dt>Window</dt>
@@ -92,21 +97,27 @@ export function RunRehearsalDialog({ open, systems: given, systemId, starting, e
             <div>
               <dt>Status now</dt>
               <dd>
-                {readinessPresentation(system.state, system.overdue, system.stale).label}
-                {system.stale ? ` · ${STALE_TEXT}` : ""}
+                {readinessPresentation(system.state, system.overdue, staleProof(system)).label}
+                {system.stale ? " · definition changed since the last rehearsal" : ""}
               </dd>
             </div>
           </dl>
         )}
         <p className="df2-parity-muted">
-          The extract reads the source through its saved connection and writes to the private export store. The
-          duration is measured from the job clocks. The source is only read; nothing is changed or deleted.
+          Reads the source through its saved connection and writes the extract to the private export store. The source
+          is only read; nothing is changed or deleted.
         </p>
-        {running && <p className="df2-parity-notice" role="status">A rehearsal of this system is already running.</p>}
-        {error && (
-          <p className="df2-parity-notice is-danger" role="alert">
-            {error}
-          </p>
+        {running && <Callout tone="info" role="status" title="A rehearsal of this system is already running." />}
+        {refusal && (
+          <Callout
+            tone="danger"
+            role="alert"
+            title={refusal.title}
+            isAdmin={can(PERMISSIONS.workspaceManage)}
+            adminDetails={refusal.adminDetail || undefined}
+          >
+            {refusal.body ? <p>{refusal.body}</p> : null}
+          </Callout>
         )}
       </div>
     </Dialog>

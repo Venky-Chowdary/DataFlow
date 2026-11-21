@@ -315,11 +315,11 @@
   --df-scrollbar-thumb-hover: color-mix(in srgb, var(--df-navy-700) 46%, transparent);
   --df-scrollbar-track: transparent;
 
-  /* Toast durations — keep CSS timer + JS dismiss in lockstep (Toast.tsx) */
-  --df-toast-duration: 4500ms;
-  --df-toast-duration-warning: 10000ms;
-  --df-toast-duration-error: 16000ms;
+  /* Toast hold times live in Toast.tsx (TOAST_HOLD_MS); errors stay until dismissed. */
   --df-toast-width: min(400px, calc(100vw - 32px));
+  /* Toast region distance from the viewport bottom (raised above sticky action footers). */
+  --df-toast-offset-bottom: 20px;
+  --df-toast-offset-bottom-mobile: 16px;
 
   --df-space-1: 4px;
   --df-space-2: 8px;
@@ -446,6 +446,8 @@
   --df-z-popover: 90;
   --df-z-overlay: 200;
   --df-z-modal: 1000;
+  /* Dropdown menus open from inside dialogs and drawers too. */
+  --df-z-menu: 1050;
   --df-z-toast: 1100;
   --df-z-boot: 1200;
   --df-z-alert: 9999;
@@ -468,6 +470,37 @@
   --df-auth-dark-alert-title: rgb(253 232 200);
   --df-auth-dark-legal: rgb(139 167 163);
   --df-auth-dark-sub: rgb(169 196 192);
+
+  /* Status ink (P1-8). --df-success / --df-warning / --df-danger / --df-info
+     are fills and icons; coloured TEXT uses the -text token, which clears AA
+     on --df-surface and on its own -bg tint in both themes
+     (contrastTokens.test.ts). Pills: text -text, bg -bg, border -border. */
+  --df-danger-text: #b91c1c;
+  /* Focus ring around a filled control (primary / danger buttons): dark ink
+     on light, light ink on dark — >=3:1 against both the fill and the page. */
+  --df-focus-ring-on-fill: var(--df-text-primary);
+  /* Selection is a tint, never a border, so selected never reads as focused. */
+  --df-selected-bg: var(--df-brand-muted);
+  /* Loaders (feedback.css): skeleton block and its sheen follow the theme. */
+  --df-skeleton-bg: color-mix(in srgb, var(--df-text-primary) 8%, var(--df-surface));
+  --df-skeleton-sheen: color-mix(in srgb, var(--df-surface) 65%, transparent);
+  --df-spinner-duration: 0.8s;
+  /* Menus (feedback.css) */
+  --df-menu-min-width: 200px;
+}
+
+/* A filled button's ring takes the on-fill ink (the shared rule paints
+   var(--df-focus-ring)); scoped here so the token stays the only lever. */
+.df2-btn-primary:focus-visible,
+.df2-btn-danger:focus-visible {
+  --df-focus-ring: var(--df-focus-ring-on-fill);
+}
+
+/* A page with a sticky action footer (the studio's step footer) lifts the
+   toast region above it, so a notification never covers the primary action. */
+body:has(.df2-wizard-footer) {
+  --df-toast-offset-bottom: 88px;
+  --df-toast-offset-bottom-mobile: 120px;
 }
 
 html,
@@ -712,6 +745,7 @@ html.df2-theme-dark:has(.df2-app),
   --df-success-text: #6ee7b7;
   --df-warning-text: #fcd34d;
   --df-info-text: #7dd3fc;
+  --df-danger-text: #fca5a5;
   --df-brand-muted: rgba(13, 148, 136, 0.16);
   --df-brand-soft: rgba(20, 184, 166, 0.22);
   --df-brand-subtle: rgba(13, 148, 136, 0.12);

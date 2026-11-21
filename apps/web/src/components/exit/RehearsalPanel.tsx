@@ -6,8 +6,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "../ui/Button";
-import { EmptyState } from "../ui/EmptyState";
+import { DtIcon } from "../DtIcon";
+import { ErrorState } from "../ui/ErrorState";
 import { LoadingBlock } from "../LoadingState";
 import { useToast } from "../Toast";
 import { RehearsalView, type RehearsalBusy } from "./RehearsalView";
@@ -28,7 +28,7 @@ import {
   type ExitVerifyResult,
 } from "../../lib/exitReadiness";
 import { roleLabel } from "../../lib/parity";
-import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { PERMISSIONS, usePermissions, useWriteGate } from "../../lib/PermissionsContext";
 
 export interface RehearsalPanelProps {
   rehearsalId: string;
@@ -38,12 +38,20 @@ export interface RehearsalPanelProps {
   onOpenSystem?: (systemId: string) => void;
   /** A rehearsal that finished or was signed changes the board; the page reloads it. */
   onChanged?: () => void;
+  /** Start a new rehearsal of the rehearsed system (the page owns starting). */
+  onRerun?: (systemId: string) => void;
+  /** The page is starting a rehearsal of this system. */
+  rerunning?: boolean;
 }
 
-export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onOpenSystem, onChanged }: RehearsalPanelProps) {
+export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onOpenSystem, onChanged, onRerun, rerunning = false }: RehearsalPanelProps) {
   const { toast } = useToast();
   // Signing attests the rehearsal: job.manage, and the API binds each role to the signer's workspace role.
   const signGate = useWriteGate(PERMISSIONS.jobManage, "sign off an exit rehearsal");
+  const runGate = useWriteGate(PERMISSIONS.jobRun, "start an exit rehearsal");
+  // Deployment settings (env var names) are administrator detail; `can` is true while the role is unknown.
+  const { can } = usePermissions();
+  const isAdmin = can(PERMISSIONS.workspaceManage);
   const [rehearsal, setRehearsal] = useState<ExitRehearsal | null>(null);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -172,19 +180,20 @@ export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onOpenSystem, o
   }
   if (!rehearsal) {
     return (
-      <EmptyState
-        compact
-        icon="alert"
-        role="alert"
-        title="Could not load this rehearsal"
-        description={loadError || "The rehearsal is not available. Try again."}
-        action={
-          <div className="df2-parity-actions">
-            <Button size="sm" onClick={() => { setLoading(true); void load().finally(() => setLoading(false)); }}>Try again</Button>
-            <Button size="sm" variant="ghost" onClick={onBack}>Back to exit readiness</Button>
-          </div>
-        }
-      />
+      <div className="df2-exit-run">
+        <nav className="df2-exit-crumbs" aria-label="Breadcrumb">
+          <button type="button" className="df2-exit-crumb-link" onClick={onBack}>
+            <DtIcon name="arrow-left" size={14} /> Exit readiness
+          </button>
+        </nav>
+        <ErrorState
+          compact
+          title="Could not load this rehearsal"
+          message={loadError || "The rehearsal is not available. Try again."}
+          retrying={loading}
+          onRetry={() => { setLoading(true); void load().finally(() => setLoading(false)); }}
+        />
+      </div>
     );
   }
 
@@ -202,6 +211,11 @@ export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onOpenSystem, o
       onBack={onBack}
       onOpenJob={onOpenJob}
       onOpenSystem={onOpenSystem}
+      onRerun={onRerun ? () => onRerun(rehearsal.system_id) : undefined}
+      rerunning={rerunning}
+      canRerun={runGate.allowed}
+      rerunDeniedReason={runGate.reason}
+      isAdmin={isAdmin}
       onRefresh={() => {
         if (pollStopped) setPollEpoch((n) => n + 1);
         void run({ kind: "refresh" }, null, () => fetchExitRehearsal(rehearsalId));

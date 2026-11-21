@@ -3,7 +3,7 @@
  */
 
 import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { DtIcon } from "./components/DtIcon";
+import { DtIcon, type IconName } from "./components/DtIcon";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
@@ -101,21 +101,21 @@ function LazyScreen({ label, children }: { label: string; children: ReactNode })
   );
 }
 
-const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "ops" | "system" }[] = [
+const NAV: { id: Screen; label: string; icon: IconName; desc: string; group: "platform" | "ops" | "system" }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
   { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
-  { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
+  { id: "contracts", label: "Contracts", icon: "contract", desc: "Schema agreements and breakers", group: "platform" },
   { id: "exit", label: "Exit readiness", icon: "arrow-up-right", desc: "Rehearsed exits and evidence", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
-  { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
-  { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
-  { id: "transform-library", label: "Library", icon: "book", desc: "Reusable pre-load transforms", group: "ops" },
+  { id: "schedules", label: "Schedules", icon: "schedule", desc: "Recurring syncs", group: "ops" },
+  { id: "transforms", label: "Transforms", icon: "transform", desc: "Post-load SQL models", group: "ops" },
+  { id: "transform-library", label: "Library", icon: "library", desc: "Reusable pre-load transforms", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
-  { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
+  { id: "pilot", label: "Pilot", icon: "ai", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
   { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
-  { id: "docs", label: "Help", icon: "book", desc: "How Datawrap works", group: "system" },
+  { id: "docs", label: "Help", icon: "help", desc: "How Datawrap works", group: "system" },
   { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
@@ -757,7 +757,7 @@ function AppShell({
                 <span className="df2-sidebar-collapse-label">Settings</span>
               </button>
               <button type="button" onClick={onSignOut} title="Sign out">
-                <DtIcon name="gate" size={14} />
+                <DtIcon name="sign-out" size={14} />
                 <span className="df2-sidebar-collapse-label">Sign out</span>
               </button>
             </div>
@@ -929,11 +929,18 @@ function AppShell({
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
                     onFreshTransfer={openFreshTransfer}
-                    onTransferComplete={() => {
+                    onTransferComplete={(verification) => {
                       loadJobs();
                       void loadSchedules();
-                      // UX-34: say where the proof is, in the product's own words.
-                      toast({ title: "Transfer complete", message: "The Trust Report and post-write proof are on the job in Jobs.", tone: "success" });
+                      // Same words as the run header: the Trust Report verdict, and green
+                      // only when it is proven or explained.
+                      toast({
+                        title: "Transfer completed",
+                        message: verification?.verdict
+                          ? `Verification: ${verification.word}. The Trust Report is on the job in Jobs.`
+                          : "The Trust Report is on the job in Jobs.",
+                        tone: verification?.supportsSuccess ? "success" : "info",
+                      });
                     }}
                   />
                 </PageErrorBoundary>

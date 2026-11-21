@@ -1,3 +1,4 @@
+import type { IconName } from "../components/icons/iconMap";
 import { WORKSPACE_SHOT } from "./workspaceShots";
 
 export type HelpDocId =
@@ -66,7 +67,7 @@ export interface HelpDocArticle {
   title: string;
   description: string;
   readTime: string;
-  icon: string;
+  icon: IconName;
   sections: HelpDocSection[];
 }
 
@@ -210,7 +211,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Run Transfer Studio Source → Destination → Transform → Map → Validate → Run",
             pin: "Platform → Transfer  ·  or New transfer",
-            body: "Open **Platform → Transfer** (or **New transfer**). On **Source**, pick a **Database** connection and a table, and check the source schema. Then continue through **Destination**, **Transform** (click **Continue without transforming** when there is no recipe), **Map**, and **Validate**.\n\nFix every blocked gate before **Run**. On Validate the footer holds the one primary action: the fix for the blocking gate, or **Execute** when the decision is approve. The Transfer Studio guide walks through a full Postgres to Snowflake load.",
+            body: "Open **Platform → Transfer** (or **New transfer**). On **Source**, pick a **Database** connection and a table, and check the source schema. Then continue through **Destination**, **Transform** (click **Continue without transforming** when there is no recipe), **Map**, and **Validate**.\n\nFix every blocked gate before **Run**. On Validate the footer holds the one primary action: the fix for the blocking gate, or **Run transfer** when the decision is approve. The Transfer Studio guide walks through a full Postgres to Snowflake load.",
             figure: {
               src: WORKSPACE_SHOT.transferSource,
               alt: "Transfer Studio Source step with Orders Postgres (demo) and sales_orders",
@@ -428,24 +429,24 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Step 5 — Validate: clear every blocking gate",
             pin: "Validate footer → the one primary action",
-            body: "Validate runs every gate the route needs. On this route that is 23: the nine core gates plus policy gates for population fit, DDL, staging, sync contract, column coverage, and field reduction.\n\nThe first run blocked on one gate: **Create destination table**. The table does not exist, and strict validation will not create a table nobody approved. The card shows the exact `CREATE TABLE` statement, and the footer's primary button becomes **Approve destination DDL**.\n\nAfter approving and re-running, the summary reads **APPROVE · 17 passed · 0 blocked gates · 6 skipped** in 107.7 seconds. The six skipped gates do not apply to a new table with no code crosswalk. **Type coercions in sample** lists 25 JSON values that will be written as `VARIANT`, none quarantined.\n\n**Execute** unlocks only when no gate is blocked and the decision is approve. The headline still says **not migration proven**: that comes from the read-back after the write.",
+            body: "Validate runs every gate the route needs. On this route that is 23: the nine core gates plus policy gates for population fit, DDL, staging, sync contract, column coverage, and field reduction.\n\nThe first run blocked on one gate: **Create destination table**. The table does not exist, and strict validation will not create a table nobody approved. The card shows the exact `CREATE TABLE` statement, and the footer's primary button becomes **Approve destination DDL**.\n\nAfter approving and re-running, the summary reads **APPROVE · 17 passed · 0 blocked gates · 6 skipped** in 107.7 seconds. The six skipped gates do not apply to a new table with no code crosswalk. **Type coercions in sample** lists 25 JSON values that will be written as `VARIANT`, none quarantined.\n\n**Run transfer** unlocks only when no gate is blocked and the decision is approve. The headline still says **not migration proven**: that comes from the read-back after the write.",
             figure: {
               src: WORKSPACE_SHOT.transferValidate,
               alt: "Transfer Studio Validate: APPROVE, 17 passed, 0 blocked, 6 skipped across 23 gates",
-              caption: "Validate: 17 passed, 0 blocked, 6 skipped. Execute is unlocked; the read-back is still required.",
+              caption: "Validate: 17 passed, 0 blocked, 6 skipped. Run transfer is unlocked; the read-back is still required.",
               markers: [
                 { n: 1, label: "Decision", x: "25%", y: "21%" },
                 { n: 2, label: "Gate counts", x: "30%", y: "26%" },
                 { n: 3, label: "Type coercions", x: "26%", y: "43%" },
-                { n: 4, label: "Execute", x: "83%", y: "96%" },
+                { n: 4, label: "Run transfer", x: "83%", y: "96%" },
               ],
             },
             tip: "To see each gate on its own, scroll to **Validation rules**. The Preflight gates guide explains each gate ID.",
           },
           {
             title: "Step 6 — Run: execute and watch the load",
-            pin: "Validate → Execute  ·  then Job space",
-            body: "Click **Execute**. Run shows the phases (**Extract**, **Transform**, **Load**, **Reconcile**), rows read and written, and a live event log.\n\nWhen it finishes, the append check compares the destination before and after: **0 before, 5,100 after, 5,100 appended**, and the delta balances. Open the job in **Job space** for the Trust Report, which reads Snowflake back and compares it with Postgres.",
+            pin: "Validate → Run  ·  then Job space",
+            body: "Click **Run transfer**. The Run step shows the phases (**Extract**, **Transform**, **Load**, **Reconcile**), rows read and written, and a live event log.\n\nWhen it finishes, the append check compares the destination before and after: **0 before, 5,100 after, 5,100 appended**, and the delta balances. Open the job in **Job space** for the Trust Report, which reads Snowflake back and compares it with Postgres.",
             figure: {
               src: WORKSPACE_SHOT.transferRunComplete,
               alt: "Transfer Studio Run complete: 5,100 appended, destination 0 before and 5,100 after, delta balanced",
@@ -507,7 +508,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "when",
         title: "When Validate runs",
-        body: "Validate runs in Transfer Studio, and the same gates run again before every scheduled run. Execute stays locked until the decision is approve. A pass that still needs review does not unlock the write.",
+        body: "Validate runs in Transfer Studio, and the same gates run again before every scheduled run. Run stays locked until the decision is approve. A pass that still needs review does not unlock the write.",
         tip: "Schedules cannot skip Validate. A failing gate on a schedule blocks the write the same way it blocks a manual run, and the schedule parks with the reason.",
       },
       {
@@ -522,7 +523,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "G5 Sample dry-run — sample rows pass the same transforms writers use",
           "G6 Target DDL — required CREATE / ALTER statements are valid",
           "G7 Staging capacity — destination has headroom for the volume",
-          "G8 Sample reconciliation — pre-write sample identity and uniqueness hold (post-load checksum runs after Execute)",
+          "G8 Sample reconciliation — pre-write sample identity and uniqueness hold (post-load checksum runs after the run)",
           "G9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample",
         ],
         figure: {
@@ -551,7 +552,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "G13 Source column coverage — every source column is mapped or declared an intentional omission; an unaccounted column blocks instead of being dropped",
           "G16 Field reduction governance — every source column not carried over has a recorded reason, and a reason the sample disproves blocks",
           "G14, G15, G19, G20, G21, G22 — required columns, existing-table shape, schema replacement, code crosswalk, control totals, and referential integrity; they apply when the destination or contract calls for them",
-          "G24R Reversibility — added when the route must stay reversible; blocks Execute if any column cannot give the source value back",
+          "G24R Reversibility — added when the route must stay reversible; blocks Run if any column cannot give the source value back",
         ],
       },
       {
@@ -590,10 +591,10 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             },
           },
           {
-            title: "Re-run until Execute unlocks",
+            title: "Re-run until Run unlocks",
             pin: "Validate → Re-run Validate",
-            body: "Click **Re-run Validate**. Execute unlocks only when the server returns **approve** with no blocked gate. In the example the second run showed 17 passed, 0 blocked, 6 skipped.",
-            tip: "The unlock is decided by the server, not the browser. Editing the page cannot unlock Execute.",
+            body: "Click **Re-run Validate**. Run unlocks only when the server returns **approve** with no blocked gate. In the example the second run showed 17 passed, 0 blocked, 6 skipped.",
+            tip: "The unlock is decided by the server, not the browser. Editing the page cannot unlock Run.",
           },
         ],
       },

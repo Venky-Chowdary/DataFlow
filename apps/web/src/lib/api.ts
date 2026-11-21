@@ -220,7 +220,7 @@ export function gatewayTimeoutCopy(status: number, operation: string): string {
   if (/^(validate|preflight)/i.test(op)) {
     return (
       `Control plane timed out (HTTP ${status}) while Validate was running. `
-      + `Re-run Validate. Execute stays locked.`
+      + `Re-run Validate. Run stays locked.`
     );
   }
   return (
@@ -3234,7 +3234,7 @@ export function validateTransportMessage(
   if (!isTransportFailure(message)) return message;
   return (
     `Validate did not finish${rows}. The control plane timed out or hung — `
-    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+    + `Re-run Validate. Run stays locked until the API returns a verdict.`
   );
 }
 
@@ -3293,7 +3293,7 @@ async function pollPlanPreflight(
     return data;
   }
   throw new Error(
-    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+    `${lastError} Re-run Validate. Run stays locked until a verdict lands.`,
   );
 }
 

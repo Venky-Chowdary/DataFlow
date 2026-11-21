@@ -313,8 +313,8 @@
 .df2-map-proof-rail-kicker {
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-text-tertiary);
 }
 

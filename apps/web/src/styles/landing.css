@@ -9622,7 +9622,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 18px 0 0;
   padding: 16px 18px;
   border-radius: 12px;
-  border-left: 3px solid var(--df-teal-600);
+  border: 1px solid var(--df-brand-soft);
   background: #f0fdfa;
 }
 
@@ -13852,7 +13852,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 0 0 18px;
   padding: 12px 14px;
   border: 1px solid var(--df-border);
-  border-left: 3px solid var(--df-brand-arrow);
   border-radius: var(--df-radius-lg);
   background: var(--df-surface-subtle);
 }

@@ -571,8 +571,8 @@
 .df2-pilot-confirm-kicker {
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-brand);
 }
 

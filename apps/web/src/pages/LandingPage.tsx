@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { DtIcon } from "../components/DtIcon";
+import { DtIcon, type IconName } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import { TrustSection } from "../components/landing/TrustSection";
 import { MarketingFaq } from "../components/marketing/MarketingFaq";
@@ -186,7 +186,7 @@ type Feature = {
   route: PublicRoute;
   link: string;
   size: "wide" | "narrow" | "third";
-  icon: string;
+  icon: IconName;
 };
 
 const FEATURES: Feature[] = [

@@ -1,0 +1,493 @@
+/**
+ * Feedback primitives — the one place for toasts, menus, spinners, skeletons
+ * and busy buttons (components/Toast.tsx, components/jobs/JobsMenu.tsx,
+ * components/LoadingState.tsx). Tokens only; motion only for state changes,
+ * and none of it under prefers-reduced-motion.
+ */
+
+/* ── Motion: the only spin and shimmer keyframes in the app ───────────── */
+
+@keyframes df-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes df-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@keyframes df-pop-in {
+  from { opacity: 0; transform: translateY(-2px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── Spinner: a ring in currentColor, for buttons and inline text ─────── */
+
+.df-spinner {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  vertical-align: -0.125em;
+}
+
+.df-spinner svg {
+  display: block;
+  animation: df-spin var(--df-spinner-duration) linear infinite;
+}
+
+.df-spinner-track {
+  stroke: currentColor;
+  stroke-width: 2.5;
+  opacity: 0.22;
+}
+
+.df-spinner-arc {
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.df-btn-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-2);
+}
+
+/* A busy button keeps its label and its width; it only stops taking clicks. */
+.df2-btn[aria-busy="true"] {
+  cursor: progress;
+}
+
+/* ── Skeletons ─────────────────────────────────────────────────────────── */
+
+.dt-skeleton {
+  display: block;
+  min-height: 12px;
+  border-radius: var(--df-radius-sm);
+  background-color: var(--df-skeleton-bg);
+  background-image: linear-gradient(90deg, transparent 0%, var(--df-skeleton-sheen) 50%, transparent 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: df-shimmer 1.6s ease-in-out infinite;
+}
+
+.dt-skeleton--line { height: 12px; }
+.dt-skeleton--block { height: 100%; min-height: 16px; }
+.dt-skeleton--circle { border-radius: var(--df-radius-pill); }
+
+.dt-skeleton-stack {
+  display: grid;
+  gap: var(--df-space-2);
+}
+
+.dt-skeleton-table {
+  display: grid;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  overflow: hidden;
+}
+
+.dt-skeleton-table-row {
+  display: grid;
+  gap: var(--df-space-4);
+  align-items: center;
+  min-height: 40px;
+  padding: 0 var(--df-space-4);
+  border-top: 1px solid var(--df-border);
+}
+
+.dt-skeleton-table-row.is-head {
+  min-height: 36px;
+  border-top: 0;
+  background: var(--df-surface-muted);
+}
+
+.dt-skeleton-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--df-grid-gap);
+}
+
+.dt-skeleton-tile {
+  display: grid;
+  gap: var(--df-space-3);
+  min-height: var(--df-tile-min-h);
+  padding: var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-card);
+  background: var(--df-surface);
+}
+
+.dt-skeleton-list {
+  display: grid;
+  gap: var(--df-space-1);
+}
+
+.dt-skeleton-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-3);
+  padding: var(--df-space-3) var(--df-space-2);
+}
+
+.dt-skeleton-list-text {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--df-space-2);
+}
+
+/* The section loader that has no skeleton shape yet: a quiet ring, no card glow. */
+.dt-loading-block .df-spinner {
+  color: var(--df-brand);
+}
+
+/* ── Toasts (sonner, unstyled; one style for every tone) ───────────────── */
+
+.dt-toast-item {
+  width: var(--width, var(--df-toast-width));
+  font-family: var(--df-font-sans);
+}
+
+.dt-toast {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--df-space-3);
+  width: 100%;
+  padding: var(--df-space-3) var(--df-space-2) var(--df-space-3) var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  box-shadow: var(--df-shadow-lg);
+}
+
+.dt-toast--info { --df-toast-ink: var(--df-info-text); }
+.dt-toast--success { --df-toast-ink: var(--df-success-text); }
+.dt-toast--warning { --df-toast-ink: var(--df-warning-text); }
+.dt-toast--error { --df-toast-ink: var(--df-danger-text); }
+
+.dt-toast-icon {
+  display: inline-flex;
+  padding-top: 1px;
+  color: var(--df-toast-ink);
+}
+
+.dt-toast-body {
+  display: grid;
+  gap: var(--df-space-1);
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.dt-toast-title {
+  font-size: var(--df-fs-md);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dt-toast-message {
+  margin: 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dt-toast-message.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+}
+
+.dt-toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2);
+  margin-top: var(--df-space-1);
+}
+
+.dt-toast-action {
+  /* WCAG 2.2 target size: every toast control is at least 24px tall. */
+  min-height: 24px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-brand-text);
+  font: inherit;
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dt-toast-action:hover {
+  background: var(--df-brand-muted);
+}
+
+.dt-toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-tertiary);
+  cursor: pointer;
+}
+
+/* A collapsed stack shows only the edges of the toasts behind the front one.
+   Their content (and Dismiss) is hidden until the stack expands (hover, focus,
+   Alt+T), so no half-covered control is left to tab to or to miss (WCAG 2.5.8). */
+[data-sonner-toast][data-expanded="false"][data-front="false"] .dt-toast > * {
+  visibility: hidden;
+}
+
+.dt-toast-close:hover {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.dt-toast-action:focus-visible,
+.dt-toast-close:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 1px;
+}
+
+.dt-toast-review .dt-toast-review-item + .dt-toast-review-item {
+  margin-top: var(--df-space-4);
+  padding-top: var(--df-space-4);
+  border-top: 1px solid var(--df-border);
+}
+
+.dt-toast-review-item h3 {
+  margin: 0 0 var(--df-space-2);
+  font-size: var(--df-fs-lg);
+}
+
+.dt-toast-review-item p {
+  margin: 0 0 var(--df-space-2);
+  color: var(--df-text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Callout / banner (components/ui/Callout.tsx) ──────────────────────
+   Tone = 16px icon + hairline or subtle tint. Never a side stripe. */
+
+.df-callout {
+  --df-callout-ink: var(--df-info-text);
+  --df-callout-border: var(--df-info-border);
+  --df-callout-bg: var(--df-info-bg);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--df-space-2) var(--df-space-3);
+  padding: var(--df-space-3) var(--df-space-4);
+  border: 1px solid var(--df-callout-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df-callout--tint { background: var(--df-callout-bg); }
+.df-callout--success { --df-callout-ink: var(--df-success-text); --df-callout-border: var(--df-success-border); --df-callout-bg: var(--df-success-bg); }
+.df-callout--warning,
+.df-callout--held { --df-callout-ink: var(--df-warning-text); --df-callout-border: var(--df-warning-border); --df-callout-bg: var(--df-warning-bg); }
+.df-callout--danger { --df-callout-ink: var(--df-danger-text); --df-callout-border: var(--df-danger-border); --df-callout-bg: var(--df-danger-bg); }
+.df-callout--neutral { --df-callout-ink: var(--df-text-secondary); --df-callout-border: var(--df-border); --df-callout-bg: var(--df-surface-muted); }
+
+.df-callout-icon {
+  display: inline-flex;
+  padding-top: 2px;
+  color: var(--df-callout-ink);
+}
+
+.df-callout-content {
+  display: grid;
+  gap: var(--df-space-1);
+  min-width: 0;
+}
+
+.df-callout-title {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.df-callout-body {
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+  line-height: 1.5;
+}
+
+.df-callout-body > p { margin: 0; }
+
+.df-callout-action {
+  display: flex;
+  align-items: center;
+  align-self: center;
+}
+
+.df-callout-admin {
+  margin-top: var(--df-space-1);
+  font-size: var(--df-fs-sm);
+}
+
+.df-callout-admin > summary {
+  width: fit-content;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+}
+
+.df-callout-admin-body {
+  margin-top: var(--df-space-2);
+  padding: var(--df-space-2) var(--df-space-3);
+  border-radius: var(--df-radius-sm);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-body);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 599px) {
+  .df-callout { grid-template-columns: auto minmax(0, 1fr); }
+  .df-callout-action { grid-column: 2; justify-self: start; }
+}
+
+/* ── Menus (Radix DropdownMenu) ────────────────────────────────────────── */
+
+.df-menu {
+  z-index: var(--df-z-menu);
+  min-width: var(--df-menu-min-width);
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: var(--radix-dropdown-menu-content-available-height, 70vh);
+  overflow-y: auto;
+  padding: var(--df-space-1);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  box-shadow: var(--df-shadow-lg);
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-md);
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, top right);
+  animation: df-pop-in var(--df-dur-fast) var(--df-ease-out);
+}
+
+.df-menu:focus {
+  outline: 0;
+}
+
+.df-menu-label {
+  padding: var(--df-space-2) var(--df-space-2) var(--df-space-1);
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.df-menu-separator {
+  height: 1px;
+  margin: var(--df-space-1) calc(var(--df-space-1) * -1);
+  background: var(--df-border);
+}
+
+.df-menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--df-space-2);
+  min-height: 32px;
+  padding: 6px var(--df-space-2);
+  border-radius: var(--df-radius-sm);
+  color: var(--df-text-primary);
+  line-height: 1.35;
+  cursor: pointer;
+  outline: 0;
+  user-select: none;
+}
+
+.df-menu-item-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.df-menu-item-check {
+  display: inline-flex;
+  width: 14px;
+  padding-top: 2px;
+  color: var(--df-brand-text);
+}
+
+.df-menu-item-reason {
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-sm);
+  font-weight: 400;
+}
+
+/* Keyboard highlight: a tint plus a ring, so it never reads as "checked". */
+.df-menu-item[data-highlighted] {
+  background: var(--df-surface-muted);
+  box-shadow: inset 0 0 0 2px var(--df-focus-ring);
+}
+
+.df-menu-item[data-disabled] {
+  color: var(--df-text-tertiary);
+  cursor: not-allowed;
+}
+
+.df-menu-item.is-danger {
+  color: var(--df-danger-text);
+}
+
+.df-menu-item.is-danger[data-highlighted] {
+  background: var(--df-danger-bg);
+  box-shadow: inset 0 0 0 2px var(--df-danger);
+}
+
+.df-menu-item.is-danger[data-disabled] {
+  color: var(--df-text-tertiary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df-menu {
+    animation: none;
+  }
+
+  /* A frozen arc reads as "hung": show a still, dashed ring instead; the
+     label next to it says what is loading. */
+  .df-spinner svg {
+    animation: none;
+  }
+
+  .df-spinner-track {
+    opacity: 0.7;
+    stroke-dasharray: 2.5 3;
+  }
+
+  .df-spinner-arc {
+    display: none;
+  }
+
+  .dt-skeleton {
+    animation: none;
+    background-image: none;
+  }
+}

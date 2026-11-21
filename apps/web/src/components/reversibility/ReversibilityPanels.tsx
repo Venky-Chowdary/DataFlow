@@ -28,6 +28,11 @@ export interface PlanReversibilityCardProps {
   onRevalidate?: () => void;
 }
 
+/** A 404 here means no analysis exists yet for this plan or run, not that it was deleted. */
+function notAnalysedYet(err: unknown): boolean {
+  return (err as { status?: unknown })?.status === 404;
+}
+
 export function PlanReversibilityCard({ planId, preflightReport, requireReversibility, onRequireChange, onRevalidate }: PlanReversibilityCardProps) {
   const gate = useWriteGate(PERMISSIONS.jobPlan, "change whether this transfer must be reversible");
   const [report, setReport] = useState<ReversibilityReport | null>(preflightReport);
@@ -57,7 +62,9 @@ export function PlanReversibilityCard({ planId, preflightReport, requireReversib
       setReport(next);
       setError("");
     } catch (err) {
-      if (planRef.current === forPlan) setError(exitErrorMessage(err, "Could not analyse the reversibility of this plan."));
+      if (planRef.current !== forPlan) return;
+      // No analysis yet is the empty state below, not an error.
+      setError(notAnalysedYet(err) ? "" : exitErrorMessage(err, "Could not analyse the reversibility of this plan."));
     } finally {
       if (planRef.current === forPlan) setLoading(false);
     }
@@ -98,9 +105,9 @@ export function PlanReversibilityCard({ planId, preflightReport, requireReversib
         compact
         icon="alert"
         role={error ? "alert" : "status"}
-        title="Reversibility not analysed"
+        title={error ? "Could not analyse reversibility" : "Reversibility not analysed yet"}
         description={error || "Run Validate to analyse whether this transfer can be reversed."}
-        action={<Button size="sm" onClick={() => void load()}>Try again</Button>}
+        action={error ? <Button size="sm" onClick={() => void load()}>Try again</Button> : undefined}
       />
     );
   }
@@ -133,6 +140,7 @@ export function PlanReversibilityCard({ planId, preflightReport, requireReversib
 export function JobReversibilityTab({ jobId }: { jobId: string }) {
   const [report, setReport] = useState<ReversibilityReport | null>(null);
   const [error, setError] = useState("");
+  const [missing, setMissing] = useState(false);
   const [loading, setLoading] = useState(true);
   const jobRef = useRef(jobId);
   jobRef.current = jobId;
@@ -145,9 +153,12 @@ export function JobReversibilityTab({ jobId }: { jobId: string }) {
       if (jobRef.current !== forJob) return;
       setReport(next);
       setError("");
+      setMissing(false);
     } catch (err) {
       if (signal?.aborted || jobRef.current !== forJob) return;
-      setError(exitErrorMessage(err, "Could not analyse the reversibility of this run."));
+      // No analysis yet is the empty state below, not an error.
+      setMissing(notAnalysedYet(err));
+      setError(notAnalysedYet(err) ? "" : exitErrorMessage(err, "Could not analyse the reversibility of this run."));
     } finally {
       if (!signal?.aborted && jobRef.current === forJob) setLoading(false);
     }
@@ -163,6 +174,17 @@ export function JobReversibilityTab({ jobId }: { jobId: string }) {
 
   if (!report && loading) {
     return <LoadingBlock size="sm" title="Analysing reversibility" hint="Reading this run's mappings and transforms; no rows are read." />;
+  }
+  if (!report && missing) {
+    return (
+      <EmptyState
+        compact
+        icon="info"
+        role="status"
+        title="Reversibility not analysed yet"
+        description="This run has no reversibility analysis."
+      />
+    );
   }
   if (!report) {
     return (

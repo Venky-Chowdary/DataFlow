@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useToast } from "../Toast";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
 import { downloadBlob } from "../../lib/downloadBlob";
+import { plural } from "../../lib/plural";
 import {
   controlTotalEvidenceLabel,
   controlTotalEvidenceTitle,
@@ -59,6 +60,12 @@ interface Gate8ProofCardProps {
   onRerun?: () => void;
   /** Override default “Re-run transfer” label (Validate uses Re-run Validate). */
   onRerunLabel?: string;
+  /**
+   * The write has finished (Run step, Jobs). A payload that still reads as the
+   * pre-write simulation then means Gate-8 recorded no post-write comparison:
+   * say that, never "run the transfer" after it ran.
+   */
+  afterWrite?: boolean;
 }
 
 function shortChecksum(value?: string): string {
@@ -152,6 +159,7 @@ export function Gate8ProofCard({
   onOpenQuarantine,
   onRerun,
   onRerunLabel = "Re-run transfer",
+  afterWrite = false,
 }: Gate8ProofCardProps) {
   const { toast } = useToast();
   const verifySequence = useRef(0);
@@ -216,6 +224,8 @@ export function Gate8ProofCard({
     };
   }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
   const preWrite = isGate8PreWriteSimulation(report);
+  /** After the write, a simulation-only payload is a missing post-write proof, not a failed one. */
+  const noPostWrite = afterWrite && preWrite;
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
   const keyedBatch = !preWrite && !sampleVerified && isGate8KeyedBatch(report);
   const lastStream = !preWrite && !sampleVerified && !keyedBatch && isGate8LastStream(report);
@@ -251,7 +261,7 @@ export function Gate8ProofCard({
     ...(report.rule_checks ?? [])
       .filter((c) => c.status === "failed")
       .map((c) =>
-        `Business rule ${c.rule_id || "unknown"}: ${Number(c.duplicates ?? 0)} duplicate value(s) in ${c.column || "?"} after load`,
+        `Business rule ${c.rule_id || "unknown"}: ${plural(Number(c.duplicates ?? 0), "duplicate value")} in ${c.column || "?"} after load`,
       ),
     ...(report.unverified_rules ?? []).map((u) =>
       `Business rule ${u.rule_id || "unknown"} not verified: ${u.reason || "unverified"}`,
@@ -281,16 +291,18 @@ export function Gate8ProofCard({
 
   const fullChecksumPass = isGate8FullChecksumProof(report);
   const toneClass = preWrite
-    ? (simulationOk ? "is-pending" : "is-fail")
+    ? (simulationOk || noPostWrite ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
       : sampleVerified || identityUnproven || appendDelta || keyedBatch || lastStream || cellUnproven
         ? "is-pending"
         : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
-    ? (simulationOk
-      ? "Pre-write simulation passed — post-write proof pending"
-      : "Pre-write reconciliation did not verify")
+    ? (noPostWrite
+      ? "No post-write comparison recorded"
+      : simulationOk
+        ? "Pre-write simulation passed — post-write proof pending"
+        : "Pre-write reconciliation did not verify")
     : writerAck
       ? (writerAckOk
         ? "Writer acknowledged — independent read-back not available"
@@ -309,7 +321,7 @@ export function Gate8ProofCard({
                 ? "Rows counted — cell values not read back"
               : (fullChecksumPass ? "Source and destination match" : passed ? "Comparison reported — full proof unavailable" : "Reconciliation did not verify");
   const badge = preWrite
-    ? (simulationOk ? "Pending" : "Failed")
+    ? (noPostWrite ? "Not run" : simulationOk ? "Pending" : "Failed")
     : writerAck
       ? (writerAckOk ? "Writer ack" : "Failed")
       : identityUnproven && (passed || sampleVerified)
@@ -326,7 +338,7 @@ export function Gate8ProofCard({
                 ? "Count only"
               : (fullChecksumPass ? "Verified" : passed ? "Unproven" : "Failed");
   const badgeClass = preWrite
-    ? (simulationOk ? "is-pending" : "is-bad")
+    ? (simulationOk || noPostWrite ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
       : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream || cellUnproven) && passed)
@@ -349,11 +361,17 @@ export function Gate8ProofCard({
       </header>
 
       <p className="df2-gate8-proof-lede">
-        {preWrite ? (
+        {noPostWrite ? (
+          <>
+            The write finished, but Gate-8 recorded no post-write <strong>row-count</strong> or
+            {" "}<strong>checksum</strong> comparison for this run. The figures below come from the
+            pre-write simulation on sample rows, not from the destination.
+          </>
+        ) : preWrite ? (
           <>
             This is a <strong>pre-write simulation</strong> on sample rows.
             {" "}Post-write <strong>row-count</strong> and <strong>checksum</strong> proof
-            is produced only after Execute finishes — never claim “source and destination match”
+            is produced only after the run finishes — never claim “source and destination match”
             before the write.
           </>
         ) : lastStream && passed ? (
@@ -422,13 +440,13 @@ export function Gate8ProofCard({
             <dt>Pre-write simulation</dt>
             <dd className={simulationOk ? "is-ok" : "is-warn"}>
               {simulationOk
-                ? `Passed — ${sourceRows.toLocaleString()} sample row(s)`
+                ? `Passed — ${plural(sourceRows, "sample row")}`
                 : "Needs review"}
             </dd>
           </div>
           <div>
             <dt>Post-write proof</dt>
-            <dd className="is-warn">Pending Execute</dd>
+            <dd className="is-warn">{noPostWrite ? "Not recorded" : "After the run"}</dd>
           </div>
         </dl>
       )}
@@ -777,8 +795,10 @@ export function Gate8ProofCard({
         <div className="df2-gate8-proof-next-copy">
           <strong>{hasFindings || preWrite || (lastStream && passed) ? "Next step" : "Audit export"}</strong>
           <p>
-            {preWrite
-              ? "Run Execute to produce post-write row-count and checksum proof in Job Theater."
+            {noPostWrite
+              ? "Open the Trust Report for this run's verdict. To verify the destination, run the transfer again: Gate-8 compares row counts and checksums after the write."
+              : preWrite
+              ? "Run the transfer to produce post-write row-count and checksum proof."
               : !passed
                 ? "Fix mapping or transforms, inspect quarantine if rows were isolated, then re-run. Export the proof for audit."
                 : sampleVerified

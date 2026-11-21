@@ -162,17 +162,18 @@ describe("Page A: the exit readiness board", () => {
 describe("Page B: a rehearsal run", () => {
   it("proven: timeline, completeness with coverage per method and the Merkle root, measured duration, sign-off open", () => {
     const t = text(run(provenRehearsal()));
-    assert.match(t, /Exit readiness \/ Core ledger · rehearsal 6/);
-    assert.match(t, /Proven/);
-    assert.match(t, /Inventory Done · 3 s Extract Done · 52 h Verify Done · 8 h Seal Done · 6 s Sign-off Pending/);
-    assert.match(t, /412 of 412 declared tables extracted/);
-    assert.match(t, /290 Full checksum every row compared by checksum 30 Key diff/);
-    assert.match(t, /92 Population digest/);
+    assert.match(t, /Exit readiness Proven Core ledger · rehearsal 6 Started .* on schedule · took 61 h/);
+    // The stepper follows the run; seal and sign-off carry facts, not 0 s clocks.
+    assert.match(t, /Inventory Done 3 s Extract Done 52 h Verify Done 8 h Seal Done 412 parts Sign-off Waiting 1 of 3 signed/);
+    assert.match(t, /Go to sign-off/);
+    assert.match(t, /412 of 412 tables extracted 412 proven/);
+    assert.match(t, /Full checksum on 290 tables Key diff on 30 tables Population digest on 92 tables/);
     assert.doesNotMatch(t, /Not proof/);
-    assert.match(t, /Files sealed: Merkle root sha256:[0-9a-f]{4}…[0-9a-f]{4} over 412 parts/);
-    assert.match(t, /measured 61 h window 30 d margin 91%/);
-    assert.match(t, /Fits the window · 8\.5% of the window/);
+    assert.match(t, /Merkle root sha256:[0-9a-f]{64}/);
+    assert.match(t, /Parts 412 parts/);
+    assert.match(t, /61 h of the 30 d window: fits, 91% to spare\./);
     assert.match(t, /Measured from job clocks, not estimated/);
+    assert.doesNotMatch(t, /table\(s\)|Re-run rehearsal/);
     assert.match(t, /Projection, not measured: about 63 h/);
     assert.match(t, /Sign as Data owner/);
     assert.doesNotMatch(t, /Only a proven rehearsal can be signed/);
@@ -180,45 +181,43 @@ describe("Page B: a rehearsal run", () => {
   });
 
   it("not proven: the reason, sampled tables marked 'Not proof', sign-off blocked", () => {
-    const t = text(run(notProvenRehearsal()));
+    const t = text(run(notProvenRehearsal(), { onRerun: noop }));
     assert.match(t, /Not proven/);
-    assert.match(t, /26 of 40 table\(s\) proven; 14 could not be proven in full/);
-    assert.match(t, /14 Sampled a sample bounds nothing here; not proof Not proof/);
+    assert.match(t, /26 of 40 tables proven; 14 could not be proven in full\./);
+    assert.match(t, /Sampled on 14 tables Not proof/);
     assert.match(t, /Sampled \(not proof\)/);
-    assert.match(t, /Only a proven rehearsal can be signed/);
-    // The sign form stays visible (Parity's panel) but cannot submit.
-    assert.match(run(notProvenRehearsal()), /<button[^>]*type="submit"[^>]*disabled=""[^>]*>Sign as Engineering/);
-    assert.match(t, /Files sealed: Merkle root sha256:[0-9a-f]{4}…[0-9a-f]{4} over 40 parts/);
+    // A rehearsal that cannot be signed shows no sign form; the stepper says sign-off did not run.
+    assert.match(t, /Sign-off Not run/);
+    assert.doesNotMatch(run(notProvenRehearsal()), /Sign as Engineering/);
+    assert.match(t, /Re-run rehearsal/);
+    assert.match(t, /Parts 40 parts/);
   });
 
   it("incomplete: missing rows and differing control totals are named, at least where only digests differ", () => {
     const html = run(incompleteRehearsal());
     const t = text(html);
     assert.match(t, /Incomplete/);
-    assert.match(t, /1 of 6 table\(s\) differ from the source: fact_orders/);
+    assert.match(t, /1 of 6 tables differ from the source: fact_orders\./);
     assert.match(t, /≥ 1 missing rows The extract holds 1 row\(s\) fewer than the source/);
     assert.match(t, /control total Control totals of amount differ/);
     assert.match(t, /1,204,331 → 1,204,330/);
     assert.match(t, /1 of 2 differ/);
     // Not proven, so not compared with the window (contract 10.1.5): no margin, no ratio, no fit claim.
-    assert.match(t, /margin — /);
-    assert.match(t, /Not compared with the window Only measured for proven runs\./);
-    assert.doesNotMatch(t, /over by|Does not fit the window|of the window ·/);
+    assert.match(t, /Took 40 h\. Only a proven rehearsal is compared with the 36 h window\./);
+    assert.doesNotMatch(t, /over by|fits|to spare|—/);
     assert.match(html, /aria-expanded="true"/, "a table that differs opens its details");
   });
 
   it("running: nothing measured is shown as measured", () => {
-    const t = text(run(normalizeRehearsal(runningRehearsalRaw())));
+    const t = text(run(normalizeRehearsal(runningRehearsalRaw()), { onRerun: noop }));
     assert.match(t, /Running/);
-    assert.match(t, /Extract Running/);
-    assert.match(t, /0 of 3 declared tables extracted/);
-    assert.match(t, /Not measured yet: the rehearsal is still running/);
-    assert.match(t, /Not sealed yet/);
-    assert.match(t, /measured — window 30 d/);
-    assert.match(t, /The rehearsal is still running; sign-off opens when it is proven/);
-    assert.doesNotMatch(t, /Fits the window/);
-    assert.doesNotMatch(t, /Extract Not measured|0 B sealed/);
-    assert.match(t, /timed from the job clocks once they finish; nothing is estimated/);
+    assert.match(t, /· running Refresh Download report/);
+    // Steps not reached yet read "Not started", never "Pending · 0 s".
+    assert.match(t, /Inventory Done 2 s Extract Running Verify Not started Seal Not started Sign-off Not started/);
+    assert.match(t, /0 of 3 tables extracted/);
+    assert.match(t, /Measured when the rehearsal finishes, against the 30 d window\./);
+    assert.doesNotMatch(t, /Fits the window|fits|Sealed files|Sign as|Re-run rehearsal|Pending · 0 s/);
+    assert.doesNotMatch(t, /Extract Not measured|0 B sealed|—/);
   });
 
   it("anchor: anchored, not anchored and failed each read as what they are", () => {
@@ -261,7 +260,8 @@ describe("Page B: a rehearsal run", () => {
       assertHonest(t);
     }
     const failed = text(run(realFailed));
-    assert.match(failed, /1 of 2 table\(s\) could not be extracted: no_such_table/);
+    assert.match(failed, /Extract failed for 1 of 2 tables: no_such_table\./);
+    assert.doesNotMatch(failed, /table\(s\)/);
     const notProven = text(run(realNotProven));
     assert.match(notProven, /Count only/);
     assert.match(notProven, /Not proof/);
@@ -329,10 +329,8 @@ describe("contract 10: what the review fixes changed on screen", () => {
 
   it("rehearsal: a measured run that is not proven is not compared with the window", () => {
     const t = text(run(realNotProven));
-    assert.match(t, /margin — /);
-    assert.match(t, /Not compared with the window/);
-    assert.match(t, /Only measured for proven runs\./);
-    assert.doesNotMatch(t, /Fits the window|Does not fit the window/);
+    assert.match(t, /Only a proven rehearsal is compared with the 30 d window\./);
+    assert.doesNotMatch(t, /Fits the window|Does not fit the window|to spare|over by/);
     // The source could not be re-read: its totals were not measured, not "no numeric columns".
     assert.match(t, /orders Not proven \? → 60 Not measured Not measured Not measured Count only/);
   });
@@ -484,7 +482,7 @@ describe("Exit pages actions (jsdom)", () => {
       return new Response(JSON.stringify(signedRehearsal()), { status: 200 });
     };
     await mount(<RehearsalPanel rehearsalId="exr_core00000006" onBack={noop} />);
-    assert.match(host!.textContent || "", /412 of 412 declared tables extracted/);
+    assert.match(host!.textContent || "", /412 of 412 tables extracted/);
     await click(button(/^Sign as Data owner$/));
     const post = calls.find((c) => c.method === "POST");
     assert.ok(post);
@@ -551,20 +549,21 @@ describe("contract 11: what the second review fixes changed on screen", () => {
     const html = run(realPiiHeld, { onOpenSystem: noop });
     const t = text(html);
     assert.match(t, /Needs PII review/);
-    assert.match(t, /The PII gate held these extracts: nothing was bypassed\. Acknowledge PII for HR people/);
+    assert.match(t, /The PII gate held 1 table: people\. Nothing was bypassed\. Acknowledge PII for HR people, then re-run the rehearsal\./);
     assert.match(t, /Open PII review/);
+    assert.match(t, /Extract Held 0 of 1 table extracted Verify Not run Nothing was extracted/);
     assert.doesNotMatch(t, /123-45-60|p1@example\.com/);
     assert.doesNotMatch(t, /\bProven\b/);
   });
 
   it("rehearsal: an acknowledged run shows who acknowledged PII, when and why", () => {
     const t = text(run(realPiiAcked));
-    assert.match(t, /PII acknowledged by dpo@example\.com on .*DPA clause 9 allows the exit extract \(carried by this rehearsal's extracts and its evidence pack\)/);
+    assert.match(t, /PII acknowledged by dpo@example\.com on .*\. DPA clause 9 allows the exit extract/);
   });
 
   it("system: the PII review asks for a reason and the action, and is disabled without job.manage", () => {
     const t = text(pii(realSystemPii));
-    assert.match(t, /PII review The PII gate held the last rehearsal/);
+    assert.match(t, /PII review Held: The PII gate held the last rehearsal/);
     assert.match(t, /Why the extract may carry this PII/);
     assert.match(t, /Acknowledge PII/);
     const denied = pii(realSystemPii, { canManage: false, manageDeniedReason: "Needs job.manage" });
@@ -614,16 +613,20 @@ describe("contract 12: what the third review fixes changed on screen", () => {
 
   it("rehearsal: one that no longer proves the system's definition says so on its own page", () => {
     assert.equal(realStale.current, false);
-    const t = text(run(realStale));
-    assert.match(t, new RegExp(`${esc(STALE_TEXT)}\\. This rehearsal proved an earlier definition of Billing`));
-    assert.match(t, /changed since this rehearsal/);
-    assert.doesNotMatch(text(run(realPiiAcked)), new RegExp(esc(STALE_TEXT)));
+    const t = text(run(realStale, { onRerun: noop }));
+    // Said once, in one line, beside the re-run action.
+    assert.match(t, /Re-run rehearsal The system's definition changed after this rehearsal, so it no longer proves the current one\./);
+    assert.equal(t.match(/no longer proves/g)?.length, 1);
+    assert.doesNotMatch(t, /Go to sign-off/);
+    assert.doesNotMatch(text(run(realPiiAcked)), /definition changed/);
   });
 
   it("rehearsal: the completeness chips count tables the PII gate held", () => {
     const t = text(run(realPiiHeld));
-    assert.match(t, /1 held for PII review/);
-    assert.match(t, /0 proven/);
+    // Nothing was extracted: the count is said once (the callout), not again as "0 proven" / "1 held" chips.
+    assert.match(t, /Tables 0 of 1 table extracted Exit time Not measured: nothing was extracted\./);
+    assert.match(t, /The PII gate held 1 table/);
+    assert.doesNotMatch(t, /0 proven|Took 0 s/);
   });
 
   it("system: the PII form lists the held columns and categories it would cover, never a value", () => {

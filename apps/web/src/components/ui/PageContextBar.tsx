@@ -1,12 +1,12 @@
 import { ReactNode } from "react";
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 export type ContextStatTone = "default" | "ok" | "warn" | "danger" | "muted";
 
 export interface ContextStat {
   label: string;
   value: string | number;
-  icon?: string;
+  icon?: IconName;
   tone?: ContextStatTone;
   title?: string;
 }

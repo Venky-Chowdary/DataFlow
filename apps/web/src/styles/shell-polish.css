@@ -72,7 +72,7 @@
 
   .df2-app.df2-sidebar-nav-compact .df2-nav-item.active .dt-nav-icon,
   .df2-app.df2-sidebar-nav-compact .df2-nav-item.active .dt-nav-icon svg {
-    color: var(--df-action-bg) !important;
+    color: var(--df-brand-text) !important;
     stroke: currentColor !important;
   }
 
@@ -862,12 +862,12 @@ select.df2-select {
 }
 
 .df2-nav-item.active {
-  color: var(--df-action-bg) !important;
+  color: var(--df-brand-text) !important;
 }
 
 .df2-nav-item.active .dt-nav-icon,
 .df2-nav-item.active .dt-nav-icon svg {
-  color: var(--df-action-bg) !important;
+  color: var(--df-brand-text) !important;
 }
 
 .df2-system-pill {
@@ -1244,8 +1244,8 @@ textarea.df2-pilot-composer textarea {
 .df2-workspace-switcher-label {
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  text-transform: none;
+  letter-spacing: normal;
   color: var(--df-text-tertiary);
 }
 
@@ -1380,13 +1380,11 @@ textarea.df2-pilot-composer textarea {
   border: 2px solid rgba(15, 118, 110, 0.2);
   border-top-color: var(--df-brand);
   border-radius: 50%;
-  animation: df2-spin 0.7s linear infinite;
+  animation: df-spin 0.7s linear infinite;
   vertical-align: -2px;
 }
 
-@keyframes df2-spin {
-  to { transform: rotate(360deg); }
-}
+
 
 /* ─── Fixed shell: sidebar never scrolls, only main content scrolls ───
    Sidebar space is reserved with padding (not main margin-left) so flex
@@ -1464,7 +1462,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-app .df2-nav-item.active .dt-nav-icon,
 .df2-app .df2-nav-item.active .dt-nav-icon svg {
-  color: var(--df-action-bg) !important;
+  color: var(--df-brand-text) !important;
   stroke: currentColor !important;
 }
 
@@ -1571,7 +1569,15 @@ textarea.df2-pilot-composer textarea {
   color: var(--df-text-muted);
 }
 
-/* ─── Responsive topbar ─── */
+/* ─── Responsive topbar ───
+   The top bar has one fixed height: its left group never wraps. On narrow
+   desktops the search gives up its shortcut hint before its placeholder. */
+@media (max-width: 1099px) {
+  .df2-command-search kbd {
+    display: none;
+  }
+}
+
 @media (max-width: 900px) {
   .df2-topbar-pill-text,
   .df2-topbar-btn-text {
@@ -2027,8 +2033,8 @@ textarea.df2-pilot-composer textarea {
   background: var(--df-brand-muted);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-brand) !important;
 }
 
@@ -2174,8 +2180,9 @@ textarea.df2-pilot-composer textarea {
   color: var(--df-text-secondary) !important;
 }
 
+/* --df-brand misses AA on the light chrome; brand-strong clears it in both themes. */
 .df2-wizard-step.active .df2-wizard-label {
-  color: var(--df-brand) !important;
+  color: var(--df-brand-strong) !important;
   font-weight: 600;
 }
 
@@ -2697,11 +2704,12 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pilot-tool-log.ok {
-  border-left: 3px solid #22c55e;
+  border-color: var(--df-success-border);
 }
 
 .df2-pilot-tool-log.err {
-  border-left: 3px solid #ef4444;
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
 }
 
 .df2-pilot-thinking {
@@ -2710,10 +2718,8 @@ textarea.df2-pilot-composer textarea {
   gap: 10px;
 }
 
-/* ─── Landing + content boot ─── */
-.df2-content-inner.is-booting {
-  opacity: 0.92;
-}
+/* ─── Landing + content boot ───
+   No dimming while the workspace boots: a dimmed page drops text below AA. */
 
 /* Panel-in only on first paint — not every navigation (see responsive-shell-fixes.css) */
 

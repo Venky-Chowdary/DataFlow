@@ -45,7 +45,7 @@ export function CopyIdChip({
       <span className="df2-copy-id-label">{label}</span>
       <code className="df2-copy-id-value">{display}</code>
       <button type="button" className="df2-copy-id-btn" onClick={copy} aria-label={`Copy ${label} ${id}`}>
-        <DtIcon name={copied ? "check" : "layers"} size={12} />
+        <DtIcon name={copied ? "check" : "copy"} size={12} />
         {copied ? "Copied" : "Copy"}
       </button>
     </span>

@@ -379,11 +379,12 @@
 }
 
 .df2-pilot-v2 .df2-pilot-tool-log.ok {
-  border-left: 2px solid #22c55e;
+  border: 1px solid var(--df-success-border);
 }
 
 .df2-pilot-v2 .df2-pilot-tool-log.err {
-  border-left: 2px solid #ef4444;
+  border: 1px solid var(--df-danger-border);
+  background: var(--df-danger-bg);
 }
 
 .df2-pilot-v2 .df2-pilot-main {
@@ -1397,8 +1398,8 @@
   display: block;
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: #0f766e;
   margin-bottom: 2px;
 }
@@ -2144,15 +2145,17 @@
 }
 
 .df2-jobs-evidence-card.tone-ok {
-  border-left: 3px solid #059669;
+  border-color: var(--df-success-border);
 }
 
 .df2-jobs-evidence-card.tone-warn {
-  border-left: 3px solid #d97706;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-jobs-evidence-card.tone-danger {
-  border-left: 3px solid #dc2626;
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
 }
 
 .df2-jobs-evidence-icon {
@@ -3412,14 +3415,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 999px;
   background: linear-gradient(90deg, #0f766e, #14b8a6, #2dd4bf);
   background-size: 200% 100%;
-  animation: df-eu-shimmer 1.4s ease-in-out infinite;
+  animation: df-shimmer 1.4s ease-in-out infinite;
   transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@keyframes df-eu-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
+
 
 /* ═══════════════════════════════════════════════════════════
    LANDING + TOAST + SHARED
@@ -3470,40 +3470,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-brand);
 }
 
-.dt-toast {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--df-radius-card, 8px);
-  box-shadow: var(--df-shadow-md);
-  animation: dt-toast-in var(--df-dur) var(--df-ease-out);
-}
 
-.dt-toast-timer {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  transform-origin: left center;
-  animation: df-eu-toast-timer var(--df-toast-duration, 4500ms) linear forwards;
-  background: var(--df-brand);
-  opacity: 0.65;
-}
-
-.dt-toast-timer--error { animation-duration: var(--df-toast-duration-error, 16000ms); background: var(--df-danger); }
-.dt-toast-timer--warning { animation-duration: var(--df-toast-duration-warning, 10000ms); background: var(--df-warning); }
-.dt-toast-timer--success { background: var(--df-success); }
-.dt-toast-timer--info { background: var(--df-brand); }
-
-@keyframes df-eu-toast-in {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes df-eu-toast-timer {
-  from { transform: scaleX(1); }
-  to { transform: scaleX(0); }
-}
 
 .df2-page-header h1,
 .df2-page-title,
@@ -3528,10 +3495,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dt-toast,
-  .dt-toast-timer,
   .df2-loader-bars i,
-  .df2-mapping-progress-fill {
+.df2-mapping-progress-fill {
     animation: none !important;
   }
 }
@@ -3650,11 +3615,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 4px;
-}
-
-/* Transfer wizard: short labels off by default; media queries may enable them */
-.df2-wizard-label-short {
-  display: none;
 }
 
 .df2-wizard-studio .df2-wizard-item,
@@ -3791,7 +3751,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-connectors-list .df2-badge-error {
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-connectors-list .df2-badge-muted {
@@ -4383,16 +4343,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-bottom: 12px;
 }
 
-/* Danger buttons — beat later .df2-btn color overrides */
+/* Danger buttons: status ink tokens, AA in both themes (contrastTokens.test.ts). */
 .df2-btn.df2-btn-danger {
-  color: #dc2626 !important;
-  border-color: #fecaca;
+  color: var(--df-danger-text);
+  border-color: var(--df-danger-border);
 }
 
 .df2-btn.df2-btn-danger:hover:not(:disabled) {
-  background: #fef2f2 !important;
-  border-color: #fca5a5 !important;
-  color: #b91c1c !important;
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger-text);
+  color: var(--df-danger-text);
 }
 
 .df2-btn.df2-btn-primary:disabled,
@@ -5434,7 +5394,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-ring.is-indeterminate svg {
-  animation: df2-progress-ring-spin 1.1s linear infinite;
+  animation: df-spin 1.1s linear infinite;
 }
 
 .df2-progress-ring {
@@ -5473,7 +5433,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-progress-ring.tone-idle .fill { stroke: #94a3b8; }
 
 .df2-progress-ring.is-indeterminate svg {
-  animation: df2-progress-ring-spin 1.1s linear infinite;
+  animation: df-spin 1.1s linear infinite;
 }
 
 .df2-progress-ring-label {
@@ -5499,10 +5459,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 600;
 }
 
-@keyframes df2-progress-ring-spin {
-  to { transform: rotate(360deg); }
-  from { transform: rotate(0deg); }
-}
+
 
 .df2-theater-v3-ring-label {
   position: absolute;
@@ -6573,7 +6530,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 10px;
   padding: 14px var(--df-result-pad-x) 12px;
   border-bottom: 1px solid #e2e8f0;
-  border-left: 3px solid var(--df-result-accent);
   background: linear-gradient(
     90deg,
     var(--df-result-accent-soft, var(--df-success-bg)) 0%,
@@ -7035,19 +6991,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   z-index: var(--df-z-modal, 1000) !important;
 }
 
-.dt-toast-host {
-  /* Docked bottom-right (dataflow-ui.css): the top-right stack this rule
-     used to force landed on the page header and covered the Policy card on
-     the Connectors empty state — toasts must never cover content (D-BP-4).
-     No !important anywhere: the studio step rules raise bottom clearance and
-     cap the stack height through ``body:has()`` specificity, and !important
-     here made those caps dead code (the D-BP-17 stack cap never engaged). */
-  top: auto;
-  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
-  right: 16px;
-  max-height: calc(100dvh - var(--df-header-height, 56px) - 88px);
-  z-index: var(--df-z-toast, 1100);
-}
+
 
 .df-app-boot-overlay {
   z-index: var(--df-z-boot, 1200) !important;
@@ -8096,7 +8040,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-left: 3px solid currentColor;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
   background: var(--df-surface-muted);
   font-size: 13px;
 }
@@ -8182,10 +8127,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 .df2-confirm-icon {
   display: inline-flex;
-  color: #b45309;
+  color: var(--df-warning-text);
 }
 .df2-confirm-danger .df2-confirm-icon {
-  color: #b91c1c;
+  color: var(--df-danger-text);
 }
 .df2-confirm-message {
   margin: 0;
@@ -8415,10 +8360,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-nav-group-label {
   margin: 10px 8px 6px;
-  font-size: var(--df-fs-xs);
+  font-size: var(--df-fs-body);
   font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-text-tertiary);
 }
 
@@ -9387,22 +9332,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-textarea {
   min-width: 0;
   max-width: 100%;
-}
-
-/* Topbar — keep actions from crushing search */
-.df2-topbar-left {
-  flex-wrap: wrap;
-  row-gap: 8px;
-}
-
-.df2-workspace-search-wrap {
-  flex: 1 1 220px;
-  min-width: 0;
-}
-
-.df2-topbar-actions {
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 /* Chart panels — stable min height, no head overlap */
@@ -11008,8 +10937,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: block;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-text-tertiary);
   margin-bottom: 4px;
 }
@@ -11215,7 +11144,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge-danger,
 .df2-app .df2-badge-failed {
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: var(--df-danger-text);
   border: 1px solid var(--df-danger-border, rgba(220, 38, 38, 0.22));
 }
 
@@ -12050,20 +11979,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-success-bg, var(--df-surface-muted));
   color: var(--df-success);
 }
-.df2-quarantine-notifications .dt-toast-host {
-  position: static;
-  width: 100%;
-  max-width: 100%;
-  gap: 6px;
-  pointer-events: auto;
-}
-.df2-quarantine-notifications .dt-toast {
-  width: 100%;
-  max-width: 100%;
-  padding: 6px 10px;
-  border-radius: 4px;
-}
-.df2-quarantine-notifications:has(.dt-toast) { margin: 8px 0; }
+
+
 
 .df2-quarantine-edit-backdrop {
   position: fixed;
@@ -12247,7 +12164,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-warning-bg) !important;
 }
 
-/* Short stepper labels before route bar overlaps (tablet / 14" / split view) */
+/* Denser stepper before the route bar overlaps (tablet / 14" / split view) */
 @media (max-width: 1439px) {
   .df2-page-transfer-studio .df2-wizard-progress {
     display: none;
@@ -12262,20 +12179,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     width: var(--df-stepper-node, 22px);
     height: var(--df-stepper-node, 22px);
     font-size: 11px;
-  }
-
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
-    display: none !important;
-  }
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
-    display: inline !important;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    overflow: visible;
-    text-overflow: clip;
-    white-space: nowrap;
-    max-width: none;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item {
@@ -14101,7 +14004,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-structure-empty-rows,
 .df2-app .df2-col-badge-warn,
 .df2-app .df2-overview-health-pill.warn,
-.df2-app .df2-badge-run,
 .df2-app .df2-badge-beta,
 .df2-app .df2-badge-warning,
 .df2-app .dt-badge-warning,
@@ -15416,7 +15318,7 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-type-int .df2-type-badge,
 .df2-app th.df2-type-int .df2-type-badge {
   background: var(--df-info-bg);
-  color: var(--df-info);
+  color: var(--df-info-text);
 }
 
 .df2-app .df2-type-decimal .df2-type-badge,
@@ -15436,13 +15338,13 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-type-temporal .df2-type-badge,
 .df2-app th.df2-type-temporal .df2-type-badge {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text);
 }
 
 .df2-app .df2-type-spatial .df2-type-badge,
 .df2-app th.df2-type-spatial .df2-type-badge {
   background: var(--df-success-bg);
-  color: var(--df-success);
+  color: var(--df-success-text);
 }
 
 .df2-app .df2-type-uuid .df2-type-badge,
@@ -15454,13 +15356,13 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-type-float .df2-type-badge,
 .df2-app th.df2-type-float .df2-type-badge {
   background: var(--df-info-bg);
-  color: var(--df-info);
+  color: var(--df-info-text);
 }
 
 .df2-app .df2-type-bool .df2-type-badge,
 .df2-app th.df2-type-bool .df2-type-badge {
   background: var(--df-warning-bg);
-  color: var(--df-warning);
+  color: var(--df-warning-text);
 }
 
 .df2-app .df2-type-json .df2-type-badge,
@@ -15772,7 +15674,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
 .df2-app .df2-connectors-list .df2-badge-error {
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-app .df2-connectors-list .df2-badge-muted {
@@ -15865,7 +15767,8 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-track {
     display: grid !important;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* Each step as wide as its full name; the spare width is shared out. */
+    grid-template-columns: repeat(6, auto);
     gap: 1px;
     width: 100%;
     overflow: visible;
@@ -15900,18 +15803,6 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     height: var(--df-stepper-mobile-node);
     flex: 0 0 var(--df-stepper-mobile-node);
     font-size: var(--df-fs-xs);
-  }
-
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
-    display: none !important;
-  }
-
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
-    display: inline !important;
-    overflow: visible;
-    font-size: var(--df-fs-xs);
-    text-overflow: clip;
-    white-space: nowrap;
   }
 }
 
@@ -15973,8 +15864,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     flex-shrink: 0;
   }
 
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label,
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
     position: static;
     top: auto;
     left: auto;
@@ -16047,10 +15937,6 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     text-overflow: clip;
   }
 
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
-    display: none !important;
-  }
-
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step,
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item:last-child .df2-wizard-step {
     flex: 0 0 auto;
@@ -16071,14 +15957,12 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     color: var(--df-text-primary);
   }
 
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label,
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
     color: var(--df-text-primary) !important;
     font-weight: var(--df-fw-semibold);
   }
 
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active .df2-wizard-label,
-  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active .df2-wizard-label-short {
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active .df2-wizard-label {
     color: var(--df-brand-strong) !important;
     font-weight: var(--df-fw-bold);
   }
@@ -16150,18 +16034,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   outline-offset: 2px;
 }
 
-.df2-jobs-menu-group + .df2-jobs-menu-group {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--df-border);
-}
 
-.df2-jobs-menu-heading {
-  padding: 4px var(--df-space-2) 2px;
-  font-size: var(--df-fs-xs);
-  font-weight: 600;
-  color: var(--df-text-tertiary);
-}
 
 .df2-page-fit.df2-page-jobs .df2-jobs-date-filter {
   flex-shrink: 0;
@@ -16493,34 +16366,7 @@ table.df2-table.df2-jobs-grid-table {
   justify-content: center;
 }
 
-.df2-canvas-menu.df2-jobs-menu {
-  z-index: var(--df-z-dropdown);
-  min-width: 200px;
-}
 
-.df2-canvas-menu.df2-jobs-menu button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--df-fs-sm);
-}
-
-.df2-canvas-menu.df2-jobs-menu button:disabled {
-  color: var(--df-text-muted);
-  cursor: not-allowed;
-}
-
-.df2-canvas-menu.df2-jobs-menu button:focus-visible {
-  outline: 2px solid var(--df-focus-ring);
-  outline-offset: -2px;
-}
-
-.df2-jobs-menu-check {
-  display: inline-block;
-  width: 14px;
-  color: var(--df-brand-strong);
-  text-align: center;
-}
 
 .df2-jobs-grid .df2-jobs-grid-footer {
   position: static;

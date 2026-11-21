@@ -1,3 +1,4 @@
+import type { IconName } from "../icons/iconMap";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectorDisplayName } from "../../lib/connectorTypes";
 import { createPortal } from "react-dom";
@@ -33,7 +34,7 @@ interface WorkspaceSearchProps {
   query: string;
   onQueryChange: (q: string) => void;
   onNavigate: (target: SearchNavigateTarget) => void;
-  navItems: { id: Screen; label: string; desc: string; icon: string }[];
+  navItems: { id: Screen; label: string; desc: string; icon: IconName }[];
   connectors: Connector[];
   jobs: TransferJob[];
   schedules: PipelineSchedule[];

@@ -32,7 +32,7 @@
 .df2-exit-run-dialog .df2-badge-error {
   border: 1px solid var(--df-danger-border);
   background: var(--df-danger-bg);
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-exit-drawer .df2-badge-warn,
@@ -57,7 +57,7 @@
 }
 
 .df2-parity-notice.is-ok {
-  border-left-color: var(--df-success);
+  border-color: var(--df-success-border);
   background: var(--df-success-bg);
 }
 
@@ -66,7 +66,7 @@
 }
 
 .df2-parity-notice.is-muted {
-  border-left-color: var(--df-border-strong);
+  border-color: var(--df-border);
   background: var(--df-surface-muted);
 }
 
@@ -188,18 +188,7 @@
   background: var(--df-brand-muted);
 }
 
-/* Selected: tint plus a left accent bar, never tint alone. */
-.df2-exit-grid .df2-exit-grid-table tbody tr.df2-exit-grid-row td:first-child {
-  position: relative;
-}
-
-.df2-exit-grid .df2-exit-grid-table tbody tr.df2-exit-grid-row.is-selected td:first-child::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 4px;
-  background: var(--df-brand);
-}
+/* Selected: the tint, with the open drawer naming the system (no side bar). */
 
 .df2-exit-grid .df2-exit-grid-table tbody tr.df2-exit-grid-row:focus {
   outline: none;
@@ -393,10 +382,6 @@
     background: transparent;
   }
 
-  .df2-exit-grid .df2-exit-grid-table tbody tr.df2-exit-grid-row.is-selected td:first-child::before {
-    display: none;
-  }
-
   .df2-exit-grid-window {
     min-width: 0;
   }
@@ -498,95 +483,6 @@
   color: var(--df-text-primary);
 }
 
-/* Timeline: five stages in a row; each says its status in words. */
-.df2-exit-timeline {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: var(--df-space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  counter-reset: none;
-}
-
-.df2-exit-step {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--df-space-2);
-  min-width: 0;
-  padding: var(--df-space-2) var(--df-space-3);
-  border: 1px solid var(--df-border);
-  border-top-width: 3px;
-  border-radius: var(--df-radius-md);
-  background: var(--df-surface);
-}
-
-.df2-exit-step.is-done {
-  border-top-color: var(--df-brand);
-}
-
-.df2-exit-step.is-running {
-  border-top-color: var(--df-info);
-  border-top-style: dashed;
-}
-
-.df2-exit-step.is-failed {
-  border-top-color: var(--df-danger);
-}
-
-.df2-exit-step-mark {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--dt-radius-full);
-  background: var(--df-surface-muted);
-  color: var(--df-text-tertiary);
-}
-
-.df2-exit-step-mark .dt-nav-icon {
-  display: inline-flex;
-}
-
-.df2-exit-step.is-done .df2-exit-step-mark {
-  background: var(--df-brand-muted);
-  color: var(--df-brand-strong);
-}
-
-.df2-exit-step.is-running .df2-exit-step-mark {
-  background: var(--df-info-bg);
-  color: var(--df-info-text);
-}
-
-.df2-exit-step.is-failed .df2-exit-step-mark {
-  background: var(--df-danger-bg);
-  color: var(--df-danger);
-}
-
-.df2-exit-step-body {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-  font-size: var(--df-fs-md);
-  color: var(--df-text-primary);
-}
-
-.df2-exit-headline {
-  margin: 0;
-  font-size: var(--df-fs-md);
-  color: var(--df-text-secondary);
-}
-
-.df2-exit-headline strong {
-  font-family: var(--df-font-display);
-  font-size: var(--df-fs-xl);
-  font-weight: var(--df-fw-bold);
-  color: var(--df-text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
 .df2-exit-chips {
   display: flex;
   flex-wrap: wrap;
@@ -594,53 +490,6 @@
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.df2-exit-coverage {
-  display: grid;
-  gap: var(--df-space-2);
-}
-
-.df2-exit-coverage ul {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.df2-exit-coverage li {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: var(--df-space-2);
-  font-size: var(--df-fs-md);
-  color: var(--df-text-primary);
-}
-
-.df2-exit-coverage-count {
-  font-family: var(--df-font-display);
-  font-weight: var(--df-fw-bold);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.df2-exit-seal-line {
-  margin: 0;
-  padding-top: var(--df-space-2);
-  border-top: 1px solid var(--df-border);
-  font-size: var(--df-fs-md);
-  color: var(--df-text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.df2-exit-window-kpis {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.df2-exit-window-row {
-  display: grid;
-  gap: 6px;
 }
 
 .df2-exit-fit {
@@ -653,7 +502,7 @@
 }
 
 .df2-exit-fit.is-bad {
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-exit-fit.is-none {
@@ -762,7 +611,7 @@ table.df2-table.df2-exit-tables {
 }
 
 .df2-exit-match.is-bad {
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-exit-match.is-none {
@@ -770,7 +619,7 @@ table.df2-table.df2-exit-tables {
 }
 
 .df2-exit-totals-text.is-bad {
-  color: var(--df-danger);
+  color: var(--df-danger-text);
   font-weight: var(--df-fw-semibold);
 }
 
@@ -879,13 +728,14 @@ table.df2-table.df2-exit-tables {
   gap: var(--df-space-2);
   padding: var(--df-space-3);
   border: 1px solid var(--df-border);
-  border-left: 3px solid var(--df-success);
+  border-color: var(--df-success-border);
+  background: var(--df-success-bg);
   border-radius: var(--df-radius-md);
   background: var(--df-surface);
 }
 
 .df2-exit-verify.is-bad {
-  border-left-color: var(--df-danger);
+  border-color: var(--df-danger-border);
 }
 
 .df2-exit-verify-head {
@@ -921,7 +771,7 @@ table.df2-table.df2-exit-tables {
 .df2-exit-verify-errors {
   padding-left: 18px;
   list-style: disc;
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 /* ── System drawer and form ───────────────────────────────────── */
@@ -1122,7 +972,7 @@ table.df2-table.df2-exit-tables {
   gap: 4px;
   margin: 4px 0 0;
   font-size: var(--df-fs-sm);
-  color: var(--df-danger);
+  color: var(--df-danger-text);
 }
 
 .df2-exit-roles {
@@ -1338,7 +1188,7 @@ table.df2-table.df2-rev-columns {
 }
 
 .df2-rev-rollback-card {
-  border-left: 3px solid var(--df-border-brand);
+  border-color: var(--df-border-brand);
 }
 
 /* ── Contract 10 states ────────────────────────────────────────── */
@@ -1350,10 +1200,6 @@ table.df2-table.df2-rev-columns {
 }
 
 /* Why a measured run is not compared with the window. */
-.df2-exit-fit-note {
-  font-size: var(--df-fs-sm);
-}
-
 /* A narrow Reversibility tab (the Jobs detail drawer, a phone): each table and each
    column is a stacked row, so nothing scrolls sideways or clips. */
 @container df2-rev (max-width: 760px) {

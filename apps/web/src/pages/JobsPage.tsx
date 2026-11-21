@@ -20,6 +20,10 @@ import { useJobsKpis } from "../components/jobs/useJobsKpis";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
+import { SkeletonTable, SkeletonTiles } from "../components/LoadingState";
+import { countsUnknown, listLoadState } from "../lib/listLoadState";
+import { plural } from "../lib/plural";
 import { Button } from "../components/ui/Button";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -47,7 +51,7 @@ import {
   shortJobId,
   sortJobsForGrid,
 } from "../lib/jobGrid";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus } from "../lib/uiUtils";
+import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus } from "../lib/uiUtils";
 import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
 import { jobDetailNeedsRefetch } from "../lib/theaterMount";
 import { JobProgress, TransferJob } from "../lib/types";
@@ -59,6 +63,7 @@ import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { useRunVerification } from "../components/RunResultHeader";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { TrustReportTab } from "../components/parity/TrustReportTab";
 import { JobReversibilityTab } from "../components/reversibility/ReversibilityPanels";
@@ -776,6 +781,13 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   else if (lastSelectedRef.current?._id !== selectedId) lastSelectedRef.current = undefined;
   const selected = listedSelected ?? lastSelectedRef.current;
   const isLive = Boolean(selected && LIVE_JOB_STATUSES.has(selected.status));
+  // The drawer's trust score defers to the Trust Report verdict, the same read
+  // the Run step makes, so the two screens never disagree about a run.
+  const drawerVerification = useRunVerification(
+    selected?._id ?? "",
+    liveJob ?? selected ?? {},
+    Boolean(selected) && !isLive,
+  );
 
   useEffect(() => {
     if (!counts.running || !onRefresh) return;
@@ -906,7 +918,17 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   }, [selectedId, toast, confirm, liveJob, focusJob]);
 
   // ── Operations grid: display order, KPIs, command-bar actions ──
-  const noJobsYet = jobs.length === 0 && (history?.total ?? 0) === 0 && !pageLoading;
+  // One load state for the list (P0-3): a failed or unanswered first read is
+  // never "No transfer jobs yet", and its counts are never printed as 0.
+  const firstPageLoaded = !onLoadPage || pageHistory != null;
+  const listState = listLoadState({
+    loading: pageLoading,
+    error: firstPageLoaded ? "" : pageError,
+    loaded: firstPageLoaded,
+    count: jobs.length + (firstPageLoaded ? (history?.total ?? 0) : 0),
+  });
+  const noJobsYet = listState === "empty";
+  const listCountsUnknown = countsUnknown(listState);
   const gridName = useCallback(
     (job: TransferJob) => jobDisplayName(job, nameOverrides[job._id]),
     [nameOverrides],
@@ -1283,13 +1305,18 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
           />
         ) : (
           <>
-            <PageMetricsRow className="df2-jobs-kpis" metrics={kpis} columns={4} compact />
+            {/* Counts the list has not read are never printed: tiles load as skeletons, and a failed read shows the error below instead. */}
+            {listState === "loading" ? (
+              <SkeletonTiles count={4} label="Loading job counts" className="df2-jobs-kpis" />
+            ) : listState === "error" ? null : (
+              <PageMetricsRow className="df2-jobs-kpis" metrics={kpis} columns={4} compact />
+            )}
             <JobsToolbar
               search={jobSearch}
               onSearch={changeSearch}
               pivot={filter}
               onPivot={changeFilter}
-              counts={{
+              counts={listCountsUnknown ? {} : {
                 all: counts.all,
                 running: counts.running,
                 completed: counts.completed,
@@ -1353,6 +1380,16 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
               </section>
             )}
 
+            {listState === "loading" ? (
+              <SkeletonTable rows={6} columns={5} label="Loading job history" />
+            ) : listState === "error" ? (
+              <ErrorState
+                title="Couldn't load job history"
+                message={pageError}
+                onRetry={() => setPageRefresh((value) => value + 1)}
+                retrying={pageLoading}
+              />
+            ) : (
             <JobsGrid
               jobs={gridJobs}
               displayName={gridName}
@@ -1398,6 +1435,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                 </>
               }
             />
+            )}
             <JobDetailPanel
               open={panelOpen}
               onClose={() => setMobileListOpen(true)}
@@ -1576,6 +1614,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                             <IdentityAlignmentNote job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
+                              verified={drawerVerification.verification.supportsSuccess}
                               onOpenGate8={recon ? () => setEvidenceDrawer("gate8") : undefined}
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
@@ -1922,10 +1961,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               </JobOverviewNote>
                               <p className="df2-jobs-quarantine-meaning">
                                 <strong>What “quarantined” means:</strong>{" "}
-                                {formatRowsProcessed(liveJob)} row(s) were processed.
+                                {formatRowsProcessed(liveJob)} {liveJob.records_processed === 1 ? "row was" : "rows were"} processed.
                                 {" "}
                                 {rejectedCount > 0
-                                  ? `Only ${rejectedCount.toLocaleString()} finding(s) failed type/integrity checks and were isolated — they were not written as clean destination rows. Inspect details for source row #, column, value, and reason. The rest of the load succeeded.`
+                                  ? `Only ${plural(rejectedCount, "finding")} failed type/integrity checks and were isolated — they were not written as clean destination rows. Inspect details for source row #, column, value, and reason. The rest of the load succeeded.`
                                   : "No write-time quarantine count on this job yet — open details to inspect preflight / integrity findings."}
                                 {" "}
                                 Example: 37,000 transferred + 30 quarantined = 30 bad findings with reasons — not silent data loss.
@@ -2096,7 +2135,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                                 onClick={() => void handleResume()}
                                 disabled={resuming}
                               >
-                                {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                                {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="play" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
                               </button>
                             )}
                             <button
@@ -2223,6 +2262,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
             report={recon}
             explanation={explanationText}
             jobId={selectedId || liveJob._id}
+            afterWrite={isJobTerminal(liveJob.status)}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
               openValidateInStudio();
@@ -2708,7 +2748,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
           open
           onClose={() => setEvidenceDrawer(null)}
           title="Stream conservation"
-          subtitle={`${streamHealth.length} stream(s)`}
+          subtitle={plural(streamHealth.length, "stream")}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
         >
@@ -2723,7 +2763,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
           title="Quarantine details"
           subtitle={
             rejectedCount > 0
-              ? `${rejectedCount.toLocaleString()} finding(s) — bad cells isolated; other rows already transferred`
+              ? `${plural(rejectedCount, "finding")} — bad cells isolated; other rows already transferred`
               : "Inspect findings, propose repair, or promote / replay"
           }
           icon={<DtIcon name="alert" size={18} />}

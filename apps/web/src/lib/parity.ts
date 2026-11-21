@@ -776,7 +776,7 @@ export function parityErrorMessage(err: unknown, fallback: string): string {
       : reason;
   }
   if (status === 409) return `${reason} The report has been refreshed so you can see its current state.`;
-  if (status === 422) return `The request was refused: ${reason}`;
+  // 422: the API's own sentence says what to change; no framing around it.
   if (status >= 500) return `${fallback} The server reported an error (HTTP ${status}). Try again in a moment.`;
   if (/timed out|failed to fetch|network/i.test(reason)) {
     return `${fallback} The request did not reach the server. Check your connection and try again.`;

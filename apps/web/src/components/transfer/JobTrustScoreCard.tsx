@@ -14,7 +14,19 @@ interface JobTrustScoreCardProps {
   onOpenMap?: () => void;
   onResume?: () => void;
   onOpenPipeline?: () => void;
+  /**
+   * The Trust Report verdict, when the caller has it: true for proven /
+   * explained, false for any other verdict (or not known yet). The verdict is
+   * the authority: the card then never contradicts it. Green only when the
+   * verdict supports it and the score agrees; otherwise neutral. With a
+   * supporting verdict the Gate-8 factor and next step defer to it instead of
+   * calling the proof incomplete. Omitted keeps the score's own tone.
+   */
+  verified?: boolean;
 }
+
+/** Next steps about Gate-8 assurance; a supporting verdict already answers them. */
+const GATE8_ACTIONS = new Set(["reconcile", "identity_key", "last_stream_checksum"]);
 
 function toneClass(tone: string): string {
   if (tone === "ok") return "is-ok";
@@ -37,11 +49,21 @@ export function JobTrustScoreCard({
   onOpenMap,
   onResume,
   onOpenPipeline,
+  verified,
 }: JobTrustScoreCardProps) {
   const trust: JobTrustScore = computeJobTrustScore(job as Parameters<typeof computeJobTrustScore>[0]);
   if (!trust || Number.isNaN(trust.score)) return null;
 
-  const action = trust.next_action;
+  const tone = verified === undefined ? trust.tone : verified && trust.tone === "ok" ? "ok" : "muted";
+  const factors = verified
+    ? trust.factors.map((f) =>
+        f.id === "reconcile" && f.present ? { ...f, note: "Verified: the Trust Report covers this run." } : f,
+      )
+    : trust.factors;
+  const action =
+    verified && GATE8_ACTIONS.has(trust.next_action.code)
+      ? { code: "ok", label: "No action needed", detail: "The Trust Report verdict covers this run." }
+      : trust.next_action;
   const cta =
     action.code === "quarantine" && onOpenQuarantine
       ? { label: "Open quarantine", onClick: onOpenQuarantine }
@@ -65,7 +87,7 @@ export function JobTrustScoreCard({
 
   return (
     <section
-      className={`df2-trust-score ${toneClass(trust.tone)} ${compact ? "is-compact" : ""} ${className}`.trim()}
+      className={`df2-trust-score ${toneClass(tone)} ${compact ? "is-compact" : ""} ${className}`.trim()}
       aria-label={`Job trust score ${trust.score}`}
     >
       <div className="df2-trust-score-head">
@@ -83,7 +105,7 @@ export function JobTrustScoreCard({
       </div>
       {!compact && (
         <ul className="df2-trust-score-factors">
-          {trust.factors.map((f) => (
+          {factors.map((f) => (
             <li key={f.id}>
               <span>{f.label}</span>
               <strong>{f.score == null ? "—" : f.score}</strong>

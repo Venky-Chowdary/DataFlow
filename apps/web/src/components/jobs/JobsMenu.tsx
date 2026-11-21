@@ -1,12 +1,17 @@
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import * as Menu from "@radix-ui/react-dropdown-menu";
+import { pushOverlay } from "../../lib/overlayStack";
+import { DtIcon } from "../DtIcon";
 
 export interface JobsMenuItem {
   id: string;
   label: string;
   onSelect: () => void;
   disabled?: boolean;
-  /** Tooltip — also why a disabled item is disabled. */
+  /**
+   * Tooltip on an enabled item. On a disabled item it is the reason, shown
+   * as a second line so keyboard and touch users can read it too.
+   */
   title?: string;
   /** Renders a checkable item (columns, density); the menu stays open on toggle. */
   checked?: boolean;
@@ -14,14 +19,26 @@ export interface JobsMenuItem {
   kind?: "checkbox" | "radio";
   /** Consecutive items with the same section render as one labelled group. */
   section?: string;
+  /**
+   * `danger` for destructive actions (cancel a job, clear all mappings): red
+   * text, set apart by a separator, always last in its group. Confirm or
+   * offer undo at the call site.
+   */
+  tone?: "danger";
 }
 
-function groupItems(items: JobsMenuItem[]): { section?: string; items: JobsMenuItem[] }[] {
-  const groups: { section?: string; items: JobsMenuItem[] }[] = [];
+interface MenuGroup { section?: string; items: JobsMenuItem[] }
+
+function groupItems(items: JobsMenuItem[]): MenuGroup[] {
+  const groups: MenuGroup[] = [];
   for (const item of items) {
     const last = groups.at(-1);
     if (last && last.section === item.section) last.items.push(item);
     else groups.push({ section: item.section, items: [item] });
+  }
+  // Destructive items go last in their group, behind a separator.
+  for (const group of groups) {
+    group.items = [...group.items.filter((i) => i.tone !== "danger"), ...group.items.filter((i) => i.tone === "danger")];
   }
   return groups;
 }
@@ -42,171 +59,194 @@ interface JobsMenuProps {
   trailingIcon?: ReactNode;
 }
 
-const MENU_GAP = 4;
+/** The one overflow trigger glyph: a horizontal ellipsis. */
+export function OverflowIcon({ size = 16 }: { size?: number }) {
+  return <DtIcon name="more" size={size} chrome="product" />;
+}
+
+const FIRST_ITEM = '[role^="menuitem"]:not([data-disabled])';
 
 /**
- * Button + popup menu, after the Transfer Studio canvas "More actions" menu
- * (`df2-canvas-menu`). The popup mounts on <body>, fixed-positioned from the
- * trigger, so a scrolling grid never clips or covers it. Arrow keys move,
- * Escape returns focus.
+ * Button + dropdown menu on Radix DropdownMenu: focus moves into the menu on
+ * open, arrows/Home/End/typeahead move, Enter/Space choose, Escape closes and
+ * returns focus to the trigger, Tab closes and continues from the trigger.
+ * The popup is portaled to <body> and follows its trigger (a scrolling grid
+ * never clips it); it hides when the trigger scrolls out of view.
  */
 export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, triggerTabIndex, title, text, trailingIcon }: JobsMenuProps) {
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const leavingByTab = useRef(false);
 
-  const close = useCallback((refocus: boolean) => {
-    setOpen(false);
-    if (refocus) triggerRef.current?.focus();
-  }, []);
-
-  /** Place the popup under the trigger (above it near the bottom edge); false when the trigger left the viewport. */
-  const place = useCallback((): boolean => {
-    const trigger = triggerRef.current;
-    const menu = menuRef.current;
-    if (!trigger) return false;
-    const rect = trigger.getBoundingClientRect();
-    const viewportW = window.innerWidth || document.documentElement.clientWidth;
-    const viewportH = window.innerHeight || document.documentElement.clientHeight;
-    if (rect.bottom < 0 || rect.top > viewportH) return false;
-    const width = menu?.offsetWidth || 220;
-    const height = menu?.offsetHeight || 0;
-    const left = Math.max(8, Math.min(rect.right - width, viewportW - width - 8));
-    const below = rect.bottom + MENU_GAP;
-    const top = height && below + height > viewportH - 8 ? Math.max(8, rect.top - height - MENU_GAP) : below;
-    setPosition({ top, left });
-    return true;
-  }, []);
-
-  useLayoutEffect(() => {
-    if (open) place();
-  }, [open, place]);
-
+  // While open, the menu is the top overlay: an enclosing dialog or drawer
+  // leaves Escape and Tab to it.
   useEffect(() => {
-    if (!open) return;
-    const first = menuRef.current?.querySelector<HTMLButtonElement>('[role^="menuitem"]:not([disabled])');
-    first?.focus();
-    const onPointer = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
-      close(false);
-    };
-    // A scrolling grid moves the trigger: follow it, close once it is gone.
-    const onViewportChange = () => {
-      if (!place()) close(false);
-    };
-    document.addEventListener("mousedown", onPointer);
-    window.addEventListener("resize", onViewportChange);
-    window.addEventListener("scroll", onViewportChange, true);
-    return () => {
-      document.removeEventListener("mousedown", onPointer);
-      window.removeEventListener("resize", onViewportChange);
-      window.removeEventListener("scroll", onViewportChange, true);
-    };
-  }, [open, close, place]);
+    if (!open || !contentRef.current) return;
+    return pushOverlay(contentRef.current);
+  }, [open]);
 
-  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const entries = Array.from(
-      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not([disabled])') ?? [],
+  const focusFirstItem = useCallback((event: Event) => {
+    event.preventDefault();
+    contentRef.current?.querySelector<HTMLElement>(FIRST_ITEM)?.focus({ preventScroll: true });
+  }, []);
+
+  const groups = groupItems(items);
+
+  const renderItem = (item: JobsMenuItem) => {
+    const reason = item.disabled && item.title ? item.title : "";
+    const className = `df-menu-item${item.tone === "danger" ? " is-danger" : ""}${reason ? " has-reason" : ""}`;
+    const body = (
+      <>
+        {item.kind ? (
+          <span className="df-menu-item-check" aria-hidden="true">
+            {item.checked ? <DtIcon name="check" size={14} chrome="product" /> : null}
+          </span>
+        ) : null}
+        <span className="df-menu-item-text">
+          {item.label}
+          {reason ? <span className="df-menu-item-reason">{reason}</span> : null}
+        </span>
+      </>
     );
-    const index = entries.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "Escape") {
-      event.preventDefault();
-      // Keep an enclosing drawer or grid from also handling this Escape.
-      event.stopPropagation();
-      close(true);
-    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      if (!entries.length) return;
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      entries[(index + step + entries.length) % entries.length]?.focus();
-    } else if (event.key === "Home" || event.key === "End") {
-      event.preventDefault();
-      (event.key === "Home" ? entries[0] : entries.at(-1))?.focus();
-    } else if (event.key === "Tab") {
-      // The popup sits at the end of <body>: hand focus back to the trigger
-      // and let this Tab carry on from there (no preventDefault).
-      close(true);
+    const common = {
+      className,
+      disabled: item.disabled,
+      title: reason ? undefined : item.title,
+      "data-menu-item-id": item.id,
+    };
+    if (item.kind === "checkbox") {
+      return (
+        <Menu.CheckboxItem
+          key={item.id}
+          {...common}
+          checked={Boolean(item.checked)}
+          onSelect={(event) => {
+            event.preventDefault();
+            item.onSelect();
+          }}
+        >
+          {body}
+        </Menu.CheckboxItem>
+      );
     }
+    if (item.kind === "radio") {
+      return (
+        <Menu.RadioItem key={item.id} {...common} value={item.id} onSelect={() => item.onSelect()}>
+          {body}
+        </Menu.RadioItem>
+      );
+    }
+    return (
+      <Menu.Item key={item.id} {...common} onSelect={() => item.onSelect()}>
+        {body}
+      </Menu.Item>
+    );
+  };
+
+  const renderGroupItems = (group: MenuGroup) => {
+    const out: ReactNode[] = [];
+    let index = 0;
+    while (index < group.items.length) {
+      const item = group.items[index];
+      if (item.tone === "danger" && index > 0 && group.items[index - 1].tone !== "danger") {
+        out.push(<Menu.Separator key={`sep-${item.id}`} className="df-menu-separator" />);
+      }
+      if (item.kind === "radio") {
+        const run: JobsMenuItem[] = [];
+        while (index < group.items.length && group.items[index].kind === "radio") run.push(group.items[index++]);
+        out.push(
+          <Menu.RadioGroup key={`radio-${run[0].id}`} role="none" value={run.find((r) => r.checked)?.id ?? ""}>
+            {run.map(renderItem)}
+          </Menu.RadioGroup>,
+        );
+        continue;
+      }
+      out.push(renderItem(item));
+      index += 1;
+    }
+    return out;
   };
 
   return (
     <span className="df2-jobs-menu-anchor">
-      <button
-        ref={triggerRef}
-        type="button"
-        className={triggerClassName ?? "df2-btn df2-btn-ghost df2-btn-sm"}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        aria-label={iconOnly || text ? label : undefined}
-        title={title ?? (iconOnly ? label : undefined)}
-        tabIndex={triggerTabIndex}
-        onClick={(event) => {
-          event.stopPropagation();
-          setOpen((value) => !value);
-        }}
-        onKeyDown={(event) => {
-          // Enter/Space on the trigger must not also open the row it sits in.
-          if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") event.stopPropagation();
-          if (event.key === "ArrowDown" && !open) {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
-      >
-        {icon}
-        {iconOnly ? null : text ?? label}
-        {trailingIcon}
-      </button>
-      {open && createPortal(
-        <div
-          ref={menuRef}
-          id={menuId}
-          className="df2-canvas-menu df2-jobs-menu"
-          role="menu"
-          aria-label={label}
-          style={position ? { position: "fixed", top: position.top, left: position.left, right: "auto" } : { visibility: "hidden" }}
-          onKeyDown={onMenuKeyDown}
-          onClick={(event) => event.stopPropagation()}
+      <Menu.Root open={open} onOpenChange={setOpen} modal={false}>
+        <Menu.Trigger
+          ref={triggerRef}
+          className={triggerClassName ?? "df2-btn df2-btn-ghost df2-btn-sm"}
+          aria-label={iconOnly || text ? label : undefined}
+          title={title ?? (iconOnly ? label : undefined)}
+          tabIndex={triggerTabIndex}
+          // Open on click (pointer, keyboard-synthesised or assistive tech)
+          // rather than Radix's pointerdown, so every way in behaves alike.
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen((value) => !value);
+          }}
+          onKeyDown={(event) => {
+            // Enter/Space/ArrowDown on the trigger must not also open the row it sits in.
+            if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") event.stopPropagation();
+          }}
         >
-          {groupItems(items).map((group, index) => {
-            const buttons = group.items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role={item.kind === "radio" ? "menuitemradio" : item.kind === "checkbox" ? "menuitemcheckbox" : "menuitem"}
-                aria-checked={item.kind ? Boolean(item.checked) : undefined}
-                disabled={item.disabled}
-                title={item.title}
-                tabIndex={-1}
-                onClick={() => {
-                  item.onSelect();
-                  if (item.kind !== "checkbox") close(true);
-                }}
-              >
-                {item.kind ? (
-                  <span className="df2-jobs-menu-check" aria-hidden="true">{item.checked ? "✓" : ""}</span>
-                ) : null}
-                {item.label}
-              </button>
-            ));
-            return group.section ? (
-              <div key={group.section} role="group" aria-label={group.section} className="df2-jobs-menu-group">
-                <div className="df2-jobs-menu-heading" aria-hidden="true">{group.section}</div>
-                {buttons}
-              </div>
-            ) : (
-              <div key={`group-${index}`} role="none" className="df2-jobs-menu-group">{buttons}</div>
-            );
-          })}
-        </div>,
-        // On <body>: a pinned grid column is its own stacking context and
-        // would paint later rows' cells over a popup left inside it.
-        document.body,
-      )}
+          {icon}
+          {iconOnly ? null : text ?? label}
+          {trailingIcon}
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Content
+            ref={contentRef}
+            className="df-menu"
+            aria-label={label}
+            side="bottom"
+            align="end"
+            sideOffset={4}
+            collisionPadding={8}
+            hideWhenDetached
+            loop
+            // Radix's MenuContent honours onOpenAutoFocus; DropdownMenu only
+            // leaves it out of its prop types. The first item gets focus on
+            // every open (pointer too), per the menu-button pattern.
+            {...({ onOpenAutoFocus: focusFirstItem } as object)}
+            onCloseAutoFocus={(event) => {
+              if (leavingByTab.current) {
+                leavingByTab.current = false;
+                event.preventDefault();
+              }
+            }}
+            onPointerDownOutside={(event) => {
+              // A press on the trigger toggles it closed through its click.
+              if (triggerRef.current?.contains(event.target as Node)) event.preventDefault();
+            }}
+            onKeyDownCapture={(event) => {
+              if (event.key !== "Tab") return;
+              // Close and hand focus back to the trigger; the browser's Tab
+              // then carries on from there (no preventDefault).
+              event.stopPropagation();
+              leavingByTab.current = true;
+              triggerRef.current?.focus();
+              setOpen(false);
+            }}
+            // Portaled, but React events still bubble to the row it came from.
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {groups.map((group, index) => (
+              <Fragment key={group.section ?? `group-${index}`}>
+                {index > 0 ? <Menu.Separator className="df-menu-separator" /> : null}
+                {group.section ? (
+                  <Menu.Group aria-label={group.section} className="df-menu-group">
+                    <Menu.Label className="df-menu-label" aria-hidden="true">{group.section}</Menu.Label>
+                    {renderGroupItems(group)}
+                  </Menu.Group>
+                ) : (
+                  <div role="none" className="df-menu-group">{renderGroupItems(group)}</div>
+                )}
+              </Fragment>
+            ))}
+          </Menu.Content>
+        </Menu.Portal>
+      </Menu.Root>
     </span>
   );
 }

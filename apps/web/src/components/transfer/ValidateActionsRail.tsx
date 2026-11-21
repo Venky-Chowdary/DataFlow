@@ -2,12 +2,16 @@ import type { ReactNode } from "react";
 import { useMemo } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
+import { plural } from "../../lib/plural";
+import { StepBackButton, StepFooterReason, StepPrimaryButton } from "./StudioStepFooter";
 import type { PreflightResult } from "../../lib/types";
 import { buildDisplayBlockers, buildExecutiveSummary } from "../../lib/validateIssueGrouping";
 import { resolveValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 
 interface ValidateActionsRailProps {
   preflight: PreflightResult | null;
+  /** File export route: key uniqueness copy does not apply. */
+  fileExport?: boolean;
   preflighting: boolean;
   transferring: boolean;
   mappingReviewCount: number;
@@ -32,7 +36,7 @@ interface ValidateActionsRailProps {
   supersededRunLabel?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
-  /** Bind a signed data contract before Execute (plans + schedules persist this). */
+  /** Bind a signed data contract before Run (plans + schedules persist this). */
   contractSlot?: ReactNode;
   /** Primary remediation for the top blocker (e.g. open identity settings). */
   onPrimaryFix?: () => void;
@@ -56,6 +60,7 @@ interface ValidateActionsRailProps {
  */
 export function ValidateActionsRail({
   preflight,
+  fileExport = false,
   preflighting,
   transferring,
   mappingReviewCount,
@@ -102,7 +107,10 @@ export function ValidateActionsRail({
     hasHoldOut: Boolean(onHoldOutRows),
   });
   const isPrimary = (kind: typeof studioPrimary.kind) => studioPrimary.kind === kind;
-  const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
+  const executiveSummary = useMemo(
+    () => buildExecutiveSummary(preflight, undefined, { fileExport }),
+    [preflight, fileExport],
+  );
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight) : []),
     [preflight],
@@ -119,21 +127,184 @@ export function ValidateActionsRail({
         : !preflight
           ? "Not run"
           : reviewGrade
-            ? "Review-grade"
+            ? "Needs review"
             : passed
               ? "Ready"
               : "Blocked";
 
   const statusDetail = transferLaunch
-    ? `Job queued · ${transferLaunch.rows.toLocaleString()} rows`
+    ? `Job queued · ${plural(transferLaunch.rows, "row")}`
     : preflighting
-      ? "Gates running"
+      ? "Checking the route"
       : transportFailed
-        ? preflightError
+        ? "Validate did not finish"
         : preflight
           ? (executiveSummary?.railLine
-            ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
-          : "Run preflight to unlock Execute";
+            ?? `${preflight.passed_count} of ${plural(preflight.total_gates, "gate")} passed`)
+          : "Run Validate to unlock Run";
+
+  // Why Run transfer is disabled, said once beside it (never only in a tooltip).
+  const runReason = !preflight || preflighting || transferLaunch || !studioPrimary.executeIsPrimary
+    ? ""
+    : executeBlocked
+      ? (executeBlockedReason || "Run is blocked for this route")
+      : reviewGrade
+        ? "Validate returned review: resolve it, then re-run"
+        : !passed
+          ? (firstBlocker?.title || "Resolve the blocked gates, then re-run")
+          : "";
+
+  const runProps = {
+    onClick: onExecute,
+    disabled: executeDisabled,
+    title: rowCount != null && !executeDisabled ? `Run transfer · ${plural(rowCount, "row")}` : undefined,
+    leadingIcon: <DtIcon name="play" size={16} />,
+  };
+  const runLabel = studioPrimary.executeLabel ?? "Run transfer";
+  const runButton = !preflight ? null : studioPrimary.executeIsPrimary ? (
+    <StepPrimaryButton
+      key="run"
+      {...runProps}
+      arrow={false}
+      busy={transferring}
+      loadingLabel="Starting…"
+      data-studio-primary="true"
+      className="df2-validate-studio-primary"
+    >
+      {runLabel}
+    </StepPrimaryButton>
+  ) : (
+    <Button key="run" variant="ghost" {...runProps} data-studio-primary="false">
+      {runLabel}
+    </Button>
+  );
+
+  // Secondaries first, the one primary last (rightmost), as on every step.
+  const actions: Array<{ key: string; primary: boolean; node: ReactNode }> = [];
+  if (preflight && onSaveAsContract) {
+    actions.push({
+      key: "contract",
+      primary: false,
+      node: (
+        <Button
+          key="contract"
+          variant="ghost"
+          onClick={onSaveAsContract}
+          loading={savingContract}
+          loadingLabel="Saving…"
+          disabled={savingContract || preflighting}
+          leadingIcon={<DtIcon name="contract" size={16} />}
+          title="Save these mappings and gates as a draft data contract"
+        >
+          Save contract
+        </Button>
+      ),
+    });
+  }
+  // Available in every state: a green verdict ages the moment the source,
+  // destination or mappings move, so re-running the same governed gates must
+  // not require a trip back through Map.
+  actions.push({
+    key: "validate",
+    primary: isPrimary("run_preflight"),
+    node: (
+      <Button
+        key="validate"
+        variant={isPrimary("run_preflight") ? "primary" : "ghost"}
+        onClick={onRunPreflight}
+        loading={preflighting}
+        loadingLabel="Validating…"
+        leadingIcon={<DtIcon name="refresh" size={16} />}
+        data-studio-primary={isPrimary("run_preflight") ? "true" : "false"}
+        className={isPrimary("run_preflight") ? "df2-validate-studio-primary df2-step-primary" : undefined}
+        title={preflight ? "Discard this verdict and run the same checks again" : undefined}
+      >
+        {!preflight && !transportFailed ? "Run Validate" : "Re-run Validate"}
+      </Button>
+    ),
+  });
+  if (blocked && onPrimaryFix && primaryFixLabel) {
+    const fixIcon = /map/i.test(primaryFixLabel)
+      ? "map"
+      : /bad data|strip|quarantine/i.test(primaryFixLabel) ? "inspect" : "sliders";
+    actions.push({
+      key: "fix",
+      primary: isPrimary("primary_fix"),
+      node: (
+        <Button
+          key="fix"
+          variant={isPrimary("primary_fix") ? "primary" : "ghost"}
+          onClick={onPrimaryFix}
+          leadingIcon={<DtIcon name={fixIcon} size={16} />}
+          title={primaryFixLabel}
+          data-studio-primary={isPrimary("primary_fix") ? "true" : "false"}
+          className={isPrimary("primary_fix") ? "df2-validate-studio-primary df2-step-primary" : undefined}
+        >
+          <span className="df2-validate-studio-primary-label">{primaryFixLabel}</span>
+        </Button>
+      ),
+    });
+  }
+  if (blocked && riskAckPendingCount > 0 && !onPrimaryFix) {
+    if (onHoldOutRows) {
+      actions.push({
+        key: "hold",
+        primary: isPrimary("hold_out"),
+        node: (
+          <Button
+            key="hold"
+            variant={isPrimary("hold_out") ? "primary" : "ghost"}
+            onClick={onHoldOutRows}
+            loading={holdingOutRows}
+            loadingLabel="Signing…"
+            leadingIcon={<DtIcon name="contract" size={16} />}
+            data-studio-primary={isPrimary("hold_out") ? "true" : "false"}
+            className={isPrimary("hold_out") ? "df2-step-primary" : undefined}
+            title={`Hold out failing rows in ${plural(riskAckPendingCount, "column")} and re-validate. Held rows go to quarantine for replay.`}
+          >
+            Run with rows held out
+          </Button>
+        ),
+      });
+    }
+    actions.push({
+      key: "policy",
+      primary: isPrimary("choose_policy"),
+      node: (
+        <Button
+          key="policy"
+          variant={isPrimary("choose_policy") ? "primary" : "ghost"}
+          onClick={onOpenMapForRisk || onBack}
+          leadingIcon={<DtIcon name="map" size={16} />}
+          data-studio-primary={isPrimary("choose_policy") ? "true" : "false"}
+          className={isPrimary("choose_policy") ? "df2-step-primary" : undefined}
+          title="Choose a per-column policy on Map. Approvals are kept."
+        >
+          Choose policy on Map
+        </Button>
+      ),
+    });
+  }
+  if (blocked && mappingBlocked && mappingReviewCount > 0 && riskAckPendingCount === 0 && !onPrimaryFix) {
+    actions.push({
+      key: "approve",
+      primary: isPrimary("approve_mappings"),
+      node: (
+        <Button
+          key="approve"
+          variant={isPrimary("approve_mappings") ? "primary" : "ghost"}
+          onClick={onApproveMappings}
+          leadingIcon={<DtIcon name="check" size={16} />}
+          data-studio-primary={isPrimary("approve_mappings") ? "true" : "false"}
+          className={isPrimary("approve_mappings") ? "df2-step-primary" : undefined}
+        >
+          Approve mappings
+        </Button>
+      ),
+    });
+  }
+  if (runButton) actions.push({ key: "run", primary: studioPrimary.executeIsPrimary, node: runButton });
+  const ordered = [...actions.filter((a) => !a.primary), ...actions.filter((a) => a.primary)];
 
   return (
     <>
@@ -148,172 +319,35 @@ export function ValidateActionsRail({
         </div>
       ) : null}
 
-      <div className="df2-card-footer df2-wizard-footer df2-validate-footer" aria-label="Validation actions">
-        <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
-          Back
-        </Button>
+      <div className="df2-card-footer df2-wizard-footer df2-validate-footer df2-step-footer" aria-label="Validation actions">
+        <StepBackButton onClick={onBack} />
 
         <div className="df2-validate-footer-status" aria-live="polite">
           <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade || transportFailed ? "is-warn" : undefined}>
             <strong>Validate</strong> {statusLabel}
           </span>
           <span title={firstBlockerMessage || undefined}>{statusDetail}</span>
-          {blocked && firstBlocker && (
-            <span className="is-warn" title={firstBlockerMessage || undefined}>
-              <strong>{firstBlocker.title}</strong>
-            </span>
-          )}
-          {executeBlocked && executeBlockedReason && (
-            <span className="is-warn" role="alert">{executeBlockedReason}</span>
-          )}
           {supersededRunLabel && !transferLaunch && (
             <span className="is-warn">
-              Last run wrote {supersededRunLabel} — nothing written for this route yet
+              Last run wrote {supersededRunLabel}. Nothing written for this route yet.
             </span>
           )}
         </div>
 
         <div className="df2-validate-footer-actions" data-studio-primary-kind={studioPrimary.kind}>
           {transferLaunch ? (
-            <Button
-              variant="primary"
+            <StepPrimaryButton
               onClick={onOpenJobTheater}
-              leadingIcon={<DtIcon name="activity" size={14} />}
+              arrow={false}
+              leadingIcon={<DtIcon name="live" size={16} />}
               data-studio-primary="true"
             >
               Open live progress
-            </Button>
+            </StepPrimaryButton>
           ) : (
             <>
-              {/* Available in every state: a green verdict ages the moment the
-                  source, destination or mappings move, so re-running the same
-                  governed gates must not require a trip back through Map. */}
-              <Button
-                variant={isPrimary("run_preflight") ? "primary" : "ghost"}
-                onClick={onRunPreflight}
-                loading={preflighting}
-                leadingIcon={<DtIcon name="gate" size={16} />}
-                data-studio-primary={isPrimary("run_preflight") ? "true" : "false"}
-                className={isPrimary("run_preflight") ? "df2-validate-studio-primary" : undefined}
-                title={
-                  preflight
-                    ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
-                    : transportFailed
-                      ? "Last Validate did not finish — re-run the same API gates"
-                      : "Run API preflight gates"
-                }
-              >
-                {!preflight && !transportFailed ? "Run preflight" : "Re-run Validate"}
-              </Button>
-
-              {blocked && onPrimaryFix && primaryFixLabel && (
-                <Button
-                  variant={isPrimary("primary_fix") ? "primary" : "ghost"}
-                  onClick={onPrimaryFix}
-                  leadingIcon={
-                    <DtIcon
-                      name={
-                        /bad data|strip|quarantine|map/i.test(primaryFixLabel)
-                          ? (/map/i.test(primaryFixLabel) ? "layers" : "shield")
-                          : "settings"
-                      }
-                      size={16}
-                    />
-                  }
-                  title={primaryFixLabel}
-                  data-studio-primary={isPrimary("primary_fix") ? "true" : "false"}
-                  className={isPrimary("primary_fix") ? "df2-validate-studio-primary" : undefined}
-                >
-                  <span className="df2-validate-studio-primary-label">{primaryFixLabel}</span>
-                </Button>
-              )}
-
-              {blocked && riskAckPendingCount > 0 && !onPrimaryFix && (
-                <>
-                  {onHoldOutRows && (
-                    <Button
-                      variant={isPrimary("hold_out") ? "primary" : "ghost"}
-                      onClick={onHoldOutRows}
-                      loading={holdingOutRows}
-                      loadingLabel="Signing…"
-                      leadingIcon={<DtIcon name="shield" size={16} />}
-                      data-studio-primary={isPrimary("hold_out") ? "true" : "false"}
-                      title={`Sign a quarantine Risk Contract for ${riskAckPendingCount} column(s) and re-validate here. Failing rows go to quarantine for replay — nothing is written lossily.`}
-                    >
-                      Run with rows held out
-                    </Button>
-                  )}
-                  <Button
-                    variant={isPrimary("choose_policy") ? "primary" : "ghost"}
-                    onClick={onOpenMapForRisk || onBack}
-                    leadingIcon={<DtIcon name="layers" size={16} />}
-                    data-studio-primary={isPrimary("choose_policy") ? "true" : "false"}
-                    title="Choose a per-column execution policy on Map — approvals are preserved"
-                  >
-                    Choose policy on Map
-                  </Button>
-                </>
-              )}
-
-              {blocked
-                && mappingBlocked
-                && mappingReviewCount > 0
-                && riskAckPendingCount === 0
-                && !onPrimaryFix && (
-                <Button
-                  variant={isPrimary("approve_mappings") ? "primary" : "ghost"}
-                  onClick={onApproveMappings}
-                  leadingIcon={<DtIcon name="check" size={16} />}
-                  data-studio-primary={isPrimary("approve_mappings") ? "true" : "false"}
-                >
-                  Approve mappings
-                </Button>
-              )}
-
-              {preflight && (
-                <Button
-                  variant={studioPrimary.executeIsPrimary ? "primary" : "ghost"}
-                  onClick={onExecute}
-                  loading={transferring}
-                  loadingLabel="Starting…"
-                  disabled={executeDisabled}
-                  data-studio-primary={studioPrimary.executeIsPrimary ? "true" : "false"}
-                  className={studioPrimary.executeIsPrimary ? "df2-validate-studio-primary" : undefined}
-                  title={
-                    executeBlocked
-                      ? (executeBlockedReason || "Execution blocked")
-                      : reviewGrade
-                        ? "Review-grade / local preflight — confirm API Validate before Execute"
-                        : !passed
-                          ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}`
-                          : rowCount != null
-                            ? `Execute transfer · ${rowCount.toLocaleString()} rows`
-                            : "Execute transfer"
-                  }
-                  leadingIcon={<DtIcon name="arrow-right" size={16} />}
-                >
-                  {studioPrimary.executeLabel
-                    ?? (executeBlocked || !passed
-                      ? "Execute (blocked)"
-                      : reviewGrade
-                        ? "Execute (review)"
-                        : "Execute")}
-                </Button>
-              )}
-
-              {preflight && onSaveAsContract && (
-                <Button
-                  variant="ghost"
-                  onClick={onSaveAsContract}
-                  loading={savingContract}
-                  loadingLabel="Saving…"
-                  disabled={savingContract || preflighting}
-                  leadingIcon={<DtIcon name="shield" size={16} />}
-                  title="Save mappings + gates as a draft data contract under Contracts"
-                >
-                  Save contract
-                </Button>
-              )}
+              {runReason ? <StepFooterReason>{runReason}</StepFooterReason> : null}
+              {ordered.map((a) => a.node)}
             </>
           )}
         </div>

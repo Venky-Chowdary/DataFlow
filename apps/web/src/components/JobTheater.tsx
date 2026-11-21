@@ -31,7 +31,8 @@ import { gate8AppendIdentity, isGate8AppendDelta, isGate8CellFidelityUnproven, i
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
-import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
+import { readGate8Population, readJobLineage } from "../lib/gate8Population";
+import { RunCheckSummary, runCheckRows } from "./transfer/RunCheckSummary";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { isDuplicateKeyError, jobFailureCopy } from "../lib/errorCopy";
 import { ErrorReferenceChip } from "./ErrorReferenceChip";
@@ -64,6 +65,10 @@ import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
 import { EmbeddingUsageSummary } from "./transfer/EmbeddingUsageSummary";
+import { plural } from "../lib/plural";
+import { Callout } from "./ui/Callout";
+import { RunResultHeader, useRunVerification } from "./RunResultHeader";
+import { shortJobId } from "../lib/jobGrid";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -120,8 +125,23 @@ const PHASE_LABELS: Record<string, string> = {
   transform: "Transform",
   load: "Load",
   reconcile: "Reconcile",
+  proof: "Proof",
   completed: "Done",
 };
+
+/** Engine phase states in the timeline's words (the API also sends running / completed). */
+function timelineState(status: string): string {
+  const s = String(status || "").toLowerCase();
+  if (s === "running" || s === "in_progress" || s === "started") return "active";
+  if (s === "completed" || s === "succeeded" || s === "success") return "done";
+  return s;
+}
+
+function phaseName(name: string): string {
+  if (PHASE_LABELS[name]) return PHASE_LABELS[name];
+  const text = String(name || "").replace(/_/g, " ").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Running";
+}
 
 function phaseIndex(phase?: string, status?: string): number {
   if (isJobSuccess(status)) return 5;
@@ -199,6 +219,7 @@ export function JobTheater({
   onOpenJob,
 }: JobTheaterProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
@@ -445,6 +466,20 @@ export function JobTheater({
 
   const handleCancel = async () => {
     if (cancelling || doneRef.current) return;
+    // Same confirm as Jobs → Cancel job (components/jobs/useJobRunActions.ts).
+    const accepted = await confirm({
+      title: "Cancel this job?",
+      message: "The job stops at the next checkpoint. Rows already committed stay in the destination.",
+      confirmLabel: "Cancel job",
+      cancelLabel: "Keep running",
+      tone: "danger",
+      facts: [
+        { label: "Job", value: `${routeLabels.source} → ${routeLabels.dest}` },
+        { label: "Job ID", value: shortJobId(jobId) },
+        { label: "Rows written so far", value: (job?.records_processed ?? 0).toLocaleString() },
+      ],
+    });
+    if (!accepted || doneRef.current) return;
     setCancelling(true);
     try {
       await cancelJob(jobId);
@@ -783,11 +818,13 @@ export function JobTheaterView({
       ? throughput
       : averageRps;
   const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
+  const finished = isComplete || isFailed || isCancelled;
+  const runVerification = useRunVerification(jobId, job, finished);
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
       return job.phases.map((phase: JobPhase) => {
-        let state = phase.status;
+        let state = timelineState(phase.status);
         // If writes finished but phase list lags, force Reconcile active for honesty.
         if (reconciling && phase.name === "reconcile" && state !== "done" && state !== "failed") {
           state = "active";
@@ -797,7 +834,7 @@ export function JobTheaterView({
         }
         return {
           id: phase.name,
-          label: PHASE_LABELS[phase.name] ?? phase.name,
+          label: phaseName(phase.name),
           state,
           elapsedMs: typeof phase.elapsed_ms === "number" ? phase.elapsed_ms : null,
         };
@@ -817,7 +854,8 @@ export function JobTheaterView({
   const phaseLabel = reconciling
     ? "Reconcile"
     : activePhase?.label
-      || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
+      || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed"
+        : job.status === "queued" || job.status === "pending" ? "Queued" : "Running");
 
   const headline = isQuarantine
     ? "Completed with quarantine"
@@ -841,7 +879,7 @@ export function JobTheaterView({
       return "All rows written — verifying destination row counts and checksums. This can take a few minutes on large loads.";
     }
     if (job.message) return job.message;
-    if (indeterminate) return `${phaseLabel} — ${processed.toLocaleString()} change(s) applied…`;
+    if (indeterminate) return `${phaseLabel} — ${plural(processed, "change")} applied…`;
     return `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`;
   })();
 
@@ -901,39 +939,37 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-header-meta">
-          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isQuarantine ? "is-quarantine" : isComplete ? "is-done" : "is-failed"}`}>
-            <span className="df2-theater-v3-live-dot" aria-hidden />
-            {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : isCancelled ? "Cancelled" : "Attention"}
-          </span>
-          <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
+          {!finished && <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>}
           <CopyIdChip id={jobId} label="Job" compact />
           {preflight?.run_id ? <CopyIdChip id={preflight.run_id} label="Validate" compact /> : null}
-          {isRunning && onCancel && (
-            <span className="df2-theater-v3-header-hint">Cancel is in the action bar below</span>
-          )}
         </div>
       </header>
 
-      {isCancelled && (
-        <div className="df2-theater-v3-alert error">
-          <DtIcon name="x" size={18} />
-          <div>
-            <strong>Transfer cancelled</strong>
-            <p>{job.message || "The job was stopped before completing. Choose where to go next — mappings and validation are still available."}</p>
-          </div>
-        </div>
+      {finished && (
+        <RunResultHeader
+          jobId={jobId}
+          job={job}
+          verification={runVerification.verification}
+          load={runVerification.load}
+          onRetry={runVerification.retry}
+          trustReportPrimary={isComplete}
+          detail={isCancelled
+            ? (job.message || "The job was stopped before completing. Mappings and validation are still available.")
+            : undefined}
+        />
       )}
 
       {isFailed && (
-        <div className="df2-theater-v3-alert error">
-          <DtIcon name="alert" size={18} />
+        <Callout
+          tone="danger"
+          variant="tint"
+          className="df2-theater-v3-failure"
+          title={failureHint?.title
+            || (job.failed_at_phase && !["failed", "cancelled"].includes(String(job.failed_at_phase).toLowerCase())
+              ? `Stopped during ${job.failed_at_phase}`
+              : "Why the run stopped")}
+        >
           <div className="df2-theater-v3-alert-body">
-            <strong>
-              {failureHint?.title
-                || (job.failed_at_phase && !["failed", "cancelled"].includes(String(job.failed_at_phase).toLowerCase())
-                  ? `Transfer failed during ${job.failed_at_phase}`
-                  : "Transfer failed")}
-            </strong>
             <p>{shownFailureText}</p>
             <ErrorReferenceChip reference={failureCopy.reference} />
             {continuityControls && (
@@ -963,7 +999,7 @@ export function JobTheaterView({
             <div className="df2-theater-v3-alert-actions">
               {duplicateKeyFailure && onBackToMap && (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
-                  <DtIcon name="layers" size={16} /> Open Map · set PK
+                  <DtIcon name="map" size={16} /> Open Map · set PK
                 </button>
               )}
               {breakerFailure && breakerContractId && (
@@ -1013,26 +1049,17 @@ export function JobTheaterView({
               )}
               {onBackToValidate && !duplicateKeyFailure && (
                 <button type="button" className="df2-btn" onClick={onBackToValidate}>
-                  <DtIcon name="gate" size={16} /> Validate
+                  <DtIcon name="verify" size={16} /> Validate
                 </button>
               )}
               {onBackToMap && !duplicateKeyFailure && (
                 <button type="button" className="df2-btn" onClick={onBackToMap}>
-                  <DtIcon name="layers" size={16} /> Map
+                  <DtIcon name="map" size={16} /> Map
                 </button>
               )}
             </div>
           </div>
-        </div>
-      )}
-
-      {isCancelled && (onNewTransfer || onBackToValidate || onBackToMap || onResume) && (
-        <div className="df2-theater-v3-next" role="status" aria-label="Recovery guidance">
-          <div className="df2-theater-v3-next-copy">
-            <strong>What next?</strong>
-            <span>Resume, reopen Map / Validate, or start clean from the action bar.</span>
-          </div>
-        </div>
+        </Callout>
       )}
 
       {isFailed && job.cdc_lease_conflict && (
@@ -1072,40 +1099,49 @@ export function JobTheaterView({
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
         <>
-          {(population.destCount != null || population.validateRunId || population.coverage) && (
-              <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
-                <span>
-                  <strong>{lastStreamPopulation ? "Job dest COUNT" : "Dest COUNT"}</strong>
-                  {population.destCount != null ? population.destCount.toLocaleString() : "—"}
-                </span>
-                <span>
-                  <strong>{lastStreamPopulation ? "Last stream checksum" : "Checksum"}</strong>
-                  {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
-                </span>
-                <span>
-                  <strong>Proof scope</strong>
-                  {formatProofScope(population)}
-                </span>
-                {population.validateRunId ? (
-                  <span>
-                    <strong>Validate</strong>
-                    {population.validateRunId}
-                  </span>
-                ) : null}
-              </div>
+          {/* The header carries the verdict and read = landed + held + skipped.
+              One compact section says how it was checked; the full ledger and
+              the Gate-8 cards sit behind a disclosure (no second equation,
+              no stat boxes of dashes, no green wash). */}
+          <RunCheckSummary
+            rows={runCheckRows({
+              reconciliation: gate8View ?? job.reconciliation,
+              population,
+              writerRows: Number((job.row_accounting as { writer_ack?: unknown } | undefined)?.writer_ack) || null,
+            }).map((row) => (lastStreamPopulation && row.label === "Destination count"
+              ? { ...row, label: "Destination count (last stream)" }
+              : row))}
+            details={(
+              <>
+                <ConservationLedgerCard
+                  job={job}
+                  onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
+                />
+                {isComplete && job.reconciliation && (
+                  <Gate8ProofCard
+                    report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
+                    explanation={presentStoredExplanation(job.explanation, job)}
+                    jobId={jobId}
+                    className="df2-theater-gate8"
+                    afterWrite
+                    onOpenValidate={onBackToValidate}
+                    onOpenQuarantine={openQuarantine}
+                  />
+                )}
+              </>
             )}
-          <ConservationLedgerCard
-            job={job}
-            onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
           />
           <EmbeddingUsageSummary destinationSummary={destinationSummary} />
           <JobTrustScoreCard
             job={job}
+            verified={runVerification.verification.supportsSuccess}
             onOpenQuarantine={openQuarantine}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
             onOpenGate8={() => {
+              // Gate-8 lives in the "How this was checked" disclosure: open it first.
+              document.querySelector(".df2-run-checks-details")?.setAttribute("open", "");
               document.querySelector(".df2-theater-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
           />
@@ -1127,18 +1163,13 @@ export function JobTheaterView({
       )}
 
       {slowSnowflakeTip && (
-        <div className="df2-theater-v3-alert warn" role="note">
-          <DtIcon name="zap" size={18} />
-          <div>
-            <strong>Low Snowflake throughput on this job</strong>
-            <p>
-              ~{displayRps.toLocaleString()} rows/s using {loadMethodLabel(loadMethod || "insert")}.
-              Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
-            </p>
-          </div>
-        </div>
+        <Callout tone="warning" title="Low Snowflake throughput on this job">
+          ~{displayRps.toLocaleString()} rows/s using {loadMethodLabel(loadMethod || "insert")}.
+          Prefer COPY INTO or larger batches when your deployment supports them.
+        </Callout>
       )}
 
+      {isRunning && (
       <div className={`df2-theater-v3-progress-block${reconciling ? " is-reconciling" : ""}`}>
         <div className="df2-theater-v3-progress-top">
           <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}${(indeterminate && isRunning && !reconciling) || reconcileIndeterminate ? " is-indeterminate" : ""}`} aria-hidden>
@@ -1238,6 +1269,7 @@ export function JobTheaterView({
           )}
         </div>
       </div>
+      )}
 
       <PhaseProfileCard
         profile={
@@ -1420,7 +1452,7 @@ export function JobTheaterView({
             className="df2-theater-v3-metric"
             title="SQL Server CDC TVF row_filter_option used for this run"
           >
-            <DtIcon name="layers" size={16} />
+            <DtIcon name="filter" size={16} />
             <div>
               <strong className="df2-mono">{job.cdc_row_filter}</strong>
               <span>CDC row filter</span>
@@ -1942,17 +1974,6 @@ export function JobTheaterView({
       {!earlyFail && <SchemaFidelityNotes job={job} />}
       {!earlyFail && <IdentityAlignmentNote job={job} />}
 
-      {isComplete && job.reconciliation && (
-        <Gate8ProofCard
-          report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
-          explanation={presentStoredExplanation(job.explanation, job)}
-          jobId={jobId}
-          className="df2-theater-gate8"
-          onOpenValidate={onBackToValidate}
-          onOpenQuarantine={openQuarantine}
-        />
-      )}
-
       {canDiscardStaging && rollbackGate.allowed && (
         <StagingRollbackPanel
           stagingTable={String(rollbackPlan?.staging_table)}
@@ -2041,7 +2062,7 @@ export function JobTheaterView({
               className="df2-btn df2-btn-sm df2-btn-primary"
               onClick={() => setMappingProofOpen(true)}
             >
-              <DtIcon name="layers" size={14} /> Open mapping proof
+              <DtIcon name="map" size={14} /> Open mapping proof
             </button>
             <button
               type="button"
@@ -2056,7 +2077,7 @@ export function JobTheaterView({
                 });
               }}
             >
-              <DtIcon name="globe" size={14} /> Copy deep-link
+              <DtIcon name="copy" size={14} /> Copy link
             </button>
           </div>
         </details>
@@ -2072,38 +2093,14 @@ export function JobTheaterView({
         />
       )}
 
-      {isComplete && !isQuarantine && (
-        <div className="df2-theater-v3-alert success">
-          <DtIcon name="check" size={18} />
-          <div>
-            <strong>Success</strong>
-            <p>{conservationCompleteCopy(job)}</p>
-            {droppedRows === 0 && coercedNullRows === 0 && (
-              <p className="df2-theater-v3-alert-note">
-                No write-time quarantine — every sampled cell fit after Validate remediations
-                (e.g. Strip controls). Inspect Quarantine only lists rows rejected during Execute.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {isQuarantine && (
-        <div className="df2-theater-v3-alert warn">
-          <DtIcon name="alert" size={18} />
-          <div>
-            <strong>Completed with quarantine — not full fidelity</strong>
-            <p>{conservationCompleteCopy(job, { quarantine: true })} Review the details below.</p>
-          </div>
-        </div>
-      )}
-
       {(() => {
         const hist =
           job.load_history_report
           || (destinationSummary.load_history_report as LoadHistoryReport | undefined)
           || preflight?.load_history_report;
-        if (!hist) return null;
+        // Same rule as LoadHistoryPanel: no prior loads and no finding → no empty framed section.
+        const hasHistorySignal = Boolean(hist?.anomalies?.length || hist?.novel_quarantine_patterns?.length || hist?.warning);
+        if (!hist || ((hist.prior_load_count ?? 0) === 0 && !hasHistorySignal)) return null;
         return (
           <section className="df2-theater-v3-quarantine" aria-label="Compared to prior loads">
             <LoadHistoryPanel report={hist} title="Compared to prior loads" />
@@ -2113,19 +2110,14 @@ export function JobTheaterView({
 
       {showQuarantineSection && (
         <section id={THEATER_QUARANTINE_ID} className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
-          <div className="df2-theater-v3-alert warn">
-            <DtIcon name="alert" size={18} />
-            <div>
-              <strong>
-                {droppedRows > 0
-                  ? `${droppedRows.toLocaleString()} rows held out in quarantine`
-                  : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
-              </strong>
-              <p>
-                Review the quarantine details below and export them for remediation.
-              </p>
-            </div>
-          </div>
+          <Callout
+            tone="held"
+            title={droppedRows > 0
+              ? `${plural(droppedRows, "row")} held out in quarantine`
+              : `${plural(coercedNullRows, "value")} coerced to NULL`}
+          >
+            Review them below and export them for remediation.
+          </Callout>
           <QuarantinePanel
             jobId={jobId}
             rejectedRows={rejectedRows}
@@ -2151,24 +2143,23 @@ export function JobTheaterView({
         </section>
       )}
 
-      </div>
-
-      <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
+      <div className="df2-run-log">
         <LiveEventLog
           lines={presentedLog}
           live={isRunning}
           variant="theater"
-          title="Live event log"
+          title={isRunning ? "Live event log" : "Event log"}
           empty="Waiting for job events…"
           collapsible
-          defaultOpen={!earlyFail}
+          defaultOpen={isRunning}
           storageKey={`df2-run-log-open:${jobId}`}
         />
+      </div>
       </div>
       <div className="df2-card-footer df2-wizard-footer df2-theater-v3-footer" role="navigation" aria-label="Run actions">
         {onBackToValidate ? (
           <button type="button" className="df2-btn" onClick={onBackToValidate}>
-            ← Back
+            <DtIcon name="arrow-left" size={16} /> Back
           </button>
         ) : (
           <span />
@@ -2185,27 +2176,27 @@ export function JobTheaterView({
           {isRunning && onCancel && (
             <button
               type="button"
-              className="df2-btn df2-btn-ghost"
+              className="df2-btn df2-run-cancel"
               onClick={onCancel}
               disabled={cancelling}
             >
-              <DtIcon name="x" size={16} /> {cancelling ? "Cancelling…" : "Cancel"}
+              <DtIcon name="x" size={16} /> {cancelling ? "Cancelling…" : "Cancel job"}
             </button>
           )}
           {(isComplete || isQuarantine) && onBackToValidate && (
             <button type="button" className="df2-btn" onClick={onBackToValidate}>
-              <DtIcon name="gate" size={16} /> Validate
+              <DtIcon name="verify" size={16} /> Validate
             </button>
           )}
           {(isComplete || isQuarantine) && onSchedule && (
             <button type="button" className="df2-btn" onClick={onSchedule}>
-              <DtIcon name="activity" size={16} /> Schedule
+              <DtIcon name="schedule" size={16} /> Schedule
             </button>
           )}
           {(isComplete || isCancelled || isFailed || isQuarantine) && onNewTransfer && (
             <button
               type="button"
-              className={isFailed || isCancelled ? "df2-btn df2-btn-ghost" : "df2-btn df2-btn-primary"}
+              className={isFailed || isCancelled ? "df2-btn df2-btn-ghost" : "df2-btn"}
               onClick={onNewTransfer}
             >
               <DtIcon name="plus" size={16} /> New transfer

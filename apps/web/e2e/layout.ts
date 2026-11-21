@@ -57,6 +57,12 @@ export async function expectDisjoint(page: Page, left: string | Locator, right: 
 }
 
 export async function expectWithinViewport(page: Page, selector: string, slop = 1): Promise<void> {
+  // Measure where the element rests, not mid-entrance (a drawer slides in).
+  await page.locator(selector).first().evaluate((el) => Promise.all(
+    el.getAnimations()
+      .filter((a) => a.effect?.getTiming().iterations !== Infinity)
+      .map((a) => a.finished.catch(() => undefined)),
+  ));
   const box = await page.locator(selector).first().boundingBox();
   const viewport = page.viewportSize();
   expect(box && viewport, selector).toBeTruthy();

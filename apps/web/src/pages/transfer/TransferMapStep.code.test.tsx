@@ -10,6 +10,10 @@ Object.assign(globalThis, {
   HTMLElement: dom.window.HTMLElement,
   Node: dom.window.Node,
   KeyboardEvent: dom.window.KeyboardEvent,
+  // The More menu (Radix) dispatches DOM CustomEvents and measures its trigger.
+  CustomEvent: dom.window.CustomEvent,
+  Element: dom.window.Element,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   MutationObserver: dom.window.MutationObserver,
   localStorage: dom.window.localStorage,
   sessionStorage: dom.window.sessionStorage,

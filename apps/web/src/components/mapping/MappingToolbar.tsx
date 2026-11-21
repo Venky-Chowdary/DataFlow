@@ -62,7 +62,7 @@ export function MappingToolbar({
             title: openSources ? `${openSources} source column(s) have no destination` : "Every source column has a destination",
             section: "Mapping",
           },
-          { id: "clear-all", label: "Clear all mappings", onSelect: onClearAll, section: "Mapping" },
+          { id: "clear-all", label: "Clear all mappings", onSelect: onClearAll, section: "Mapping", tone: "danger" as const },
         ]
       : []),
     ...moreItems,
@@ -71,7 +71,7 @@ export function MappingToolbar({
     <div className="df2-ms-toolbar" role="toolbar" aria-label="Mapping actions">
       {remapEnabled && (
         <button type="button" className="df2-btn df2-btn-sm" onClick={onAutoMap} disabled={!canAutoMap}>
-          <DtIcon name="sparkle" size={14} />Auto-map…
+          <DtIcon name="map" size={14} />Auto-map…
         </button>
       )}
       {/* Present only when a row needs a decision: an idle, greyed Review read as broken (W7). */}
@@ -115,7 +115,8 @@ export function MappingToolbar({
             type="button"
             className={`df2-ms-icon-btn${panelOpen ? " is-on" : ""}`}
             aria-pressed={panelOpen}
-            aria-controls={panelId}
+            // Only point at the panel while it is in the DOM (an id that is not there is invalid ARIA).
+            aria-controls={panelOpen ? panelId : undefined}
             aria-label={panelOpen ? "Hide destination columns" : "Show destination columns"}
             title={panelOpen ? "Hide destination columns" : "Show destination columns"}
             onClick={onTogglePanel}

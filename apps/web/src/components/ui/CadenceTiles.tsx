@@ -1,14 +1,14 @@
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 interface CadenceTilesProps {
   value: "hourly" | "daily" | "weekly";
   onChange: (v: "hourly" | "daily" | "weekly") => void;
 }
 
-const OPTIONS = [
-  { id: "hourly" as const, label: "Hourly", desc: "Every 60 minutes", icon: "activity" },
-  { id: "daily" as const, label: "Daily", desc: "Once per day", icon: "clock" },
-  { id: "weekly" as const, label: "Weekly", desc: "Once per week", icon: "calendar" },
+const OPTIONS: { id: "hourly" | "daily" | "weekly"; label: string; desc: string; icon: IconName }[] = [
+  { id: "hourly", label: "Hourly", desc: "Every 60 minutes", icon: "activity" },
+  { id: "daily", label: "Daily", desc: "Once per day", icon: "clock" },
+  { id: "weekly", label: "Weekly", desc: "Once per week", icon: "calendar" },
 ];
 
 export function CadenceTiles({ value, onChange }: CadenceTilesProps) {

@@ -1613,39 +1613,6 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   }
 }
 
-.df2-canvas-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: var(--df-z-canvas-menu);
-  display: flex;
-  flex-direction: column;
-  min-width: 220px;
-  padding: var(--df-space-1);
-  background: var(--df-surface);
-  border: 1px solid var(--df-border-strong);
-  border-radius: var(--df-radius-md);
-  box-shadow: var(--df-shadow-xs);
-}
-
-.df2-canvas-menu button {
-  text-align: left;
-  font: inherit;
-  font-size: 13px;
-  color: var(--df-text-primary);
-  background: transparent;
-  border: 0;
-  border-radius: var(--df-radius-sm);
-  min-height: 32px;
-  padding: 0 var(--df-space-2);
-  cursor: pointer;
-}
-
-.df2-canvas-menu button:hover,
-.df2-canvas-menu button[aria-pressed="true"] {
-  background: var(--df-surface-muted);
-}
-
 .df2-canvas-edgebar {
   position: absolute;
   top: 8px;
@@ -1982,8 +1949,6 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 
 .df2-page-transfer-studio.is-studio-next .df2-flow-column-title {
   margin: 0 0 var(--df-space-2);
-  padding-left: var(--df-space-2);
-  border-left: 3px solid var(--df-brand-arrow);
   font-size: 13px;
   font-weight: 600;
   line-height: 16px;
