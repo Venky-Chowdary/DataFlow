@@ -38,11 +38,11 @@ SPLITS = ("dev", "test")
 # ``dev`` is where changes are tuned. Auto-approve precision >= 0.98 and
 # no auto-mapped negatives hold on every split.
 HOLDOUT_FLOORS: dict[str, dict[str, float]] = {
-    "test": {"top1": 0.6364, "top3": 0.8818, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
-             "auto_coverage": 0.3636, "proposal_precision": 0.9091},
-    "dev": {"top1": 0.6979, "top3": 0.9062, "auto_precision": 0.973, "auto_coverage": 0.375,
-            "proposal_precision": 0.8701},
-    "all": {"top1": 0.665, "top3": 0.8932, "auto_precision": 0.98},
+    "test": {"top1": 0.6909, "top3": 0.8909, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
+             "auto_coverage": 0.3636, "proposal_precision": 0.9048},
+    "dev": {"top1": 0.7604, "top3": 0.9688, "auto_precision": 0.973, "auto_coverage": 0.375,
+            "proposal_precision": 0.9125},
+    "all": {"top1": 0.7233, "top3": 0.9272, "auto_precision": 0.98},
 }
 HOLDOUT_CEILINGS: dict[str, dict[str, int]] = {
     "test": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 2},

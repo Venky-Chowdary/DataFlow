@@ -104,7 +104,7 @@ def _calibrated_confidence(
 
 
 from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
-from services.mapping_assignment_policy import pin_decisive_pairs  # noqa: E402
+from services.mapping_assignment_policy import pin_decisive_pairs, rescore_pairs  # noqa: E402
 
 
 
@@ -1530,6 +1530,10 @@ def map_columns(
                 create_new_target=create_new_pairs.get(target) == source,
             )
             pair_scores[(source, target)] = (score, reason)
+    rescore_pairs(
+        pair_scores, source_columns, target_columns, source_samples=src_samples,
+        expand=lambda t: _expand_abbrev(t).split("_"), blocked=_key_blocked,
+    )
 
     assigned_sources: set[str] = set()
     dest_collisions = _dest_fold_collisions(target_columns)
@@ -1630,19 +1634,7 @@ def map_columns(
         for target in target_columns:
             if target in used_targets or _key_blocked(source, target):
                 continue
-            score, reason = _score_pair(
-                source,
-                target,
-                idf,
-                avgdl,
-                src_roles.get(source),
-                tgt_roles.get(target),
-                src_types.get(source, "VARCHAR"),
-                tgt_types.get(target, "VARCHAR"),
-                src_samples.get(source),
-                dest_db=dest_db,
-                create_new_target=create_new_pairs.get(target) == source,
-            )
+            score, reason = pair_scores[(source, target)]
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
         alternatives = _alternatives(source, target_columns, pair_scores)
