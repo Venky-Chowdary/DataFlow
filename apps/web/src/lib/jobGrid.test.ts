@@ -11,14 +11,14 @@ import {
   jobDetailSubtitle,
   jobNeedsAttention,
   jobStatusShortLabel,
-  jobVerificationDisplay,
+  jobVerdict,
+  jobVerdictTitle,
   jobsCsv,
   JOBS_CSV_HEADER,
   jobVerification,
   nextJobsGridSort,
   readJobsGridPrefs,
   sortJobsForGrid,
-  verificationBadgeClass,
   writeJobsGridPrefs,
 } from "./jobGrid.js";
 import type { TransferJob } from "./types.js";
@@ -55,7 +55,6 @@ describe("jobVerification", () => {
     const proven = jobVerification(job("a", { verification_summary: independent }));
     assert.equal(proven.label, "Independent re-read");
     assert.equal(proven.tone, "ok");
-    assert.equal(verificationBadgeClass(proven.tone), "df2-badge df2-badge-live");
 
     const failed = jobVerification(job("b", { verification_summary: { passed: false, message: "4 rows differ" } }));
     assert.equal(failed.label, "Failed");
@@ -97,39 +96,38 @@ describe("jobVerification", () => {
   });
 });
 
-describe("jobVerificationDisplay (plain labels over the unchanged classifier)", () => {
-  const show = (patch: Partial<TransferJob>) => jobVerificationDisplay(jobVerification(job("v", patch)));
+describe("jobVerdict (the Trust Report's five words, never a grid-only vocabulary)", () => {
+  const listed = (verdict: string, unexplained = 0) => ({ verdict, unexplained, method: "full" }) as TransferJob["parity_verdict"];
 
-  it("says Verified / Verified (sample) / Failed / Pending / Not run", () => {
-    const verified = show({ verification_summary: independent });
-    assert.equal(verified.label, "Verified");
-    assert.equal(verified.tone, "ok");
-    assert.match(verified.title, /Independent re-read/, "the technical basis stays in the tooltip");
-    const sample = show({ verification_summary: { passed: true, coverage: "sample", sample_compare: { passed: true, compared: 5 } } });
-    assert.equal(sample.label, "Verified (sample)");
-    assert.equal(sample.tone, "warn");
-    assert.equal(show({ verification_summary: { passed: false } }).label, "Failed");
-    assert.equal(show({ status: "running" }).label, "Pending");
-    assert.equal(show({ status: "failed" }).label, "Not run");
-    assert.equal(show({}).label, "Not run", "no recorded verdict is not a verification");
-    assert.match(show({}).title, /no Gate-8 verdict/i);
+  it("shows the verdict the API stated for the run", () => {
+    assert.equal(jobVerdict(job("p", { verification_summary: independent, parity_verdict: listed("proven") })), "proven");
+    assert.equal(jobVerdict(job("s", { verification_summary: { passed: true, coverage: "sample" }, parity_verdict: listed("no_difference_found") })), "no_difference_found");
+    assert.equal(jobVerdict(job("u", { verification_summary: { passed: false }, parity_verdict: listed("unexplained", 4) })), "unexplained");
   });
 
-  it("never upgrades a partial or unproven verdict to Verified", () => {
-    const writerAck = show({ verification_summary: { passed: true, phase: "writer_ack", message: "Verified by writer" } });
-    assert.equal(writerAck.label, "Unverified");
-    assert.match(writerAck.title, /Writer ack/);
-    const batch = show({ verification_summary: { passed: true, checksum_scope: "written_batch_keys" } });
-    assert.equal(batch.label, "Verified (partial)");
-    assert.equal(batch.tone, "warn");
+  it("waits honestly: live runs are not checked yet, a loading verdict is Checking, a failed read says so", () => {
+    assert.equal(jobVerdict(job("r", { status: "running", parity_verdict: listed("proven") })), "not_checked");
+    assert.equal(jobVerdict(job("l", { verification_summary: independent })), "checking");
+    assert.equal(jobVerdict(job("e", { verification_summary: independent, parity_verdict: null })), "not_loaded");
   });
 
-  it("shows held-out rows as Quarantined N unless the verification failed", () => {
-    const held = show({ verification_summary: independent, rejected_rows: 37 });
-    assert.equal(held.label, "Quarantined 37");
-    assert.equal(held.tone, "warn");
-    assert.match(held.title, /Independent re-read.*37 rows held out/s);
-    assert.equal(show({ verification_summary: { passed: false }, rejected_rows: 3 }).label, "Failed");
+  it("a run Gate-8 never reconciled is Unverifiable (the API's rule), with no read needed", () => {
+    assert.equal(jobVerdict(job("n")), "unverifiable");
+    assert.equal(jobVerdict(job("f", { status: "failed" })), "unverifiable");
+  });
+
+  it("keeps the Gate-8 basis and held rows in the tooltip, not in the word", () => {
+    const title = jobVerdictTitle(job("q", { verification_summary: independent, rejected_rows: 37, parity_verdict: listed("proven") }));
+    assert.match(title, /^Every row was compared and the destination matches the source\. Checked by: Independent re-read\. 37 rows held in quarantine\.$/);
+  });
+
+  it("sorts what needs a person first", () => {
+    const rows = [
+      job("proven", { verification_summary: independent, parity_verdict: listed("proven") }),
+      job("bad", { verification_summary: { passed: false }, parity_verdict: listed("unexplained", 2) }),
+      job("none"),
+    ];
+    assert.deepEqual(sortJobsForGrid(rows, { column: "verification", dir: "asc" }, { name: (j) => j._id }).map((j) => j._id), ["bad", "none", "proven"]);
   });
 });
 
@@ -213,7 +211,8 @@ describe("jobsCsv", () => {
     assert.ok(lines[1].startsWith('6731abcd,"orders, ""east""",Failed,postgresql,src,snowflake,'));
     assert.match(csv, /Incremental append/);
     assert.match(csv, /,38s,2026-11-10T10:00:00\.000Z,2026-11-10T10:00:38\.000Z,"line one\nline two"/);
-    assert.match(lines.at(-2) || "", /,Quarantined 3,Independent re-read,3,/);
+    assert.match(lines.at(-2) || "", /,Checking,Independent re-read,3,/);
+    assert.match(lines[1], /,Unverifiable,Not run,,/, "a failed run Gate-8 never checked");
     assert.equal(lines.at(-1), "", "the file ends with a line break");
   });
 

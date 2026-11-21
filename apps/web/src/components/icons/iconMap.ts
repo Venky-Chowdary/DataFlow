@@ -17,6 +17,7 @@ import {
   ArrowLeftRight,
   ArrowRight,
   ArrowUpRight,
+  BadgeCheck,
   AppWindow,
   Ban,
   Bell,
@@ -31,7 +32,10 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  ClipboardCheck,
   CircleAlert,
+  CircleDashed,
+  CircleEqual,
   CircleCheck,
   CircleDot,
   CircleHelp,
@@ -123,6 +127,8 @@ import {
   Users,
   X,
   Zap,
+  OctagonAlert,
+  ShieldQuestionMark,
   createLucideIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -233,6 +239,14 @@ export const ICONS = {
   zap: Zap,
   docs: BookOpen,
   spinner: LoaderCircle,
+
+  /* ── Verdicts (lib/verdict.ts: one glyph per Trust Report verdict) ── */
+  "verdict-proven": BadgeCheck,
+  "verdict-explained": ClipboardCheck,
+  "verdict-no-difference": CircleEqual,
+  "verdict-unexplained": OctagonAlert,
+  "verdict-unverifiable": ShieldQuestionMark,
+  "verdict-not-checked": CircleDashed,
 
   /* ── Transform operators (recipe canvas) ──────────────── */
   cast: Type,

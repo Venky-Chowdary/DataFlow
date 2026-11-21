@@ -199,6 +199,12 @@ export interface TransferJob {
    * was recorded. The full report stays on the detail document.
    */
   verification_summary?: Gate8ReconciliationPayload;
+  /**
+   * Jobs grid only (client-merged from GET /parity/verdicts): the Trust
+   * Report verdict of a finished run. Undefined while it loads, null when it
+   * could not be read.
+   */
+  parity_verdict?: import("./verdict").ListVerdict | null;
   /** List rows only: destination_summary.multi_stream of a multi-table run. */
   multi_stream?: boolean;
   /** List rows only: len(destination_summary.streams), which the Gate-8 relabel counts. */

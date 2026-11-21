@@ -122,6 +122,36 @@ def _jobs_by_id(store: Any, ids: list[str]) -> dict[str, dict[str, Any]]:
     return {i: j for i in ids if (j := store.get_job(i))}
 
 
+def job_verdicts(ids: list[str], visible: Any) -> dict[str, dict[str, Any]]:
+    """``{job_id: {verdict, unexplained, method}}`` for the finished jobs ``visible`` allows.
+
+    One batch read, then the stored summary or a report from stored evidence
+    (``reread=False``): the same verdict the Trust Report and the Migration
+    health dashboard state for the run.
+    """
+    from services.parity_evidence import job_is_terminal
+
+    if not ids:
+        return {}
+    full = _jobs_by_id(job_store(), ids)
+    out: dict[str, dict[str, Any]] = {}
+    for job_id in ids:
+        job = full.get(job_id)
+        if not job or not visible(job) or not job_is_terminal(job):
+            continue
+        try:
+            summary = _job_summary(job, job_id)
+        except Exception as exc:  # noqa: BLE001 - one unreadable job must not blank the page
+            logger.info("parity verdict unavailable for %s (%s)", job_id, type(exc).__name__)
+            continue
+        out[job_id] = {
+            "verdict": summary.get("verdict") or "unverifiable",
+            "unexplained": int(summary.get("unexplained") or 0),
+            "method": summary.get("method") or "none",
+        }
+    return out
+
+
 def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     """KPIs, the per-run trend (newest last) and the table x run heatmap."""
     from services.job_status import job_timestamp_iso

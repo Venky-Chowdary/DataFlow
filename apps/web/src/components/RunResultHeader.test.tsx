@@ -50,7 +50,7 @@ describe("Run result: one verdict, no contradictions", () => {
   it("a completed run Gate-8 never checked reads Unverifiable, neutral, with a Trust Report link", () => {
     const html = view(job({}));
     assert.match(html, /Transfer completed/);
-    assert.match(html, /Verification: <strong>Unverifiable<\/strong>/);
+    assert.match(html, /<span class="df2-verdict-prefix">Verification:<\/span><span class="df2-verdict-word">Unverifiable<\/span>/);
     assert.match(html, /Gate-8 recorded no reconciliation for this job, so nothing was compared\./);
     assert.match(html, /href="#\/jobs\?jobId=job-run-1&amp;panel=trust-report"[^>]*>.*Open Trust Report/);
     assert.match(html, /class="df2-run-result is-neutral"/);
@@ -123,7 +123,8 @@ describe("Run result: one verdict, no contradictions", () => {
 
   it("green appears only for a proven or explained verdict", () => {
     const j = job({ reconciliation: { passed: true, source_rows: 1200, target_rows: 1200 } });
-    for (const [verdict, tone] of [["proven", "success"], ["explained", "success"], ["no_difference_found", "neutral"], ["unexplained", "danger"]] as const) {
+    // One colour per verdict (lib/verdict.ts): a clean sample is blue, never green.
+    for (const [verdict, tone] of [["proven", "success"], ["explained", "success"], ["no_difference_found", "info"], ["unexplained", "danger"], ["unverifiable", "neutral"]] as const) {
       const load = {
         kind: "ready" as const,
         report: {
@@ -137,7 +138,7 @@ describe("Run result: one verdict, no contradictions", () => {
       const html = renderToStaticMarkup(
         <RunResultHeader jobId="j" job={j} verification={presentRunVerification(load, j)} load={load} onRetry={() => {}} />,
       );
-      assert.match(html, new RegExp(`class="df2-run-chip is-${tone}"`), verdict);
+      assert.match(html, new RegExp(`class="df2-verdict" data-tone="${tone}" data-verdict="${verdict}"`), verdict);
     }
   });
 

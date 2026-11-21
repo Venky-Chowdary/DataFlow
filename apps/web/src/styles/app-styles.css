@@ -55,6 +55,7 @@
 @import "./feedback.css";
 /* Run result header + list error/loading states (.df2-run-result, .df2-error-state). */
 @import "./run-result.css";
+@import "./verdict.css";
 /* Public hero system — authority for the marketing hero band + hero drawings. */
 @import "./marketing-hero.css";
 

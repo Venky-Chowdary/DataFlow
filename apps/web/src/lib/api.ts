@@ -6342,6 +6342,22 @@ export async function downloadParitySignedPack(jobId: string): Promise<Blob> {
   return res.blob();
 }
 
+/**
+ * The Trust Report verdict of each listed finished job (Jobs grid rows).
+ * The API leaves out a job it cannot show or that has not finished.
+ */
+export async function fetchJobVerdicts(
+  ids: string[],
+  init: { signal?: AbortSignal } = {},
+): Promise<Record<string, import("./verdict").ListVerdict>> {
+  const wanted = [...new Set(ids.filter(Boolean))].slice(0, 100);
+  if (!wanted.length) return {};
+  const res = await apiFetch(`${API_BASE}/parity/verdicts?ids=${encodeURIComponent(wanted.join(","))}`, { signal: init.signal });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load verdicts.");
+  const body = (await res.json()) as { verdicts?: Record<string, import("./verdict").ListVerdict> };
+  return body.verdicts && typeof body.verdicts === "object" ? body.verdicts : {};
+}
+
 /** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */
 export async function fetchParitySummary(limit = 30, init: { signal?: AbortSignal } = {}): Promise<ParitySummary> {
   // The route accepts 1..100 (422 outside it).

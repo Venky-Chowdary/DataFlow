@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { DtIcon, type IconName } from "./DtIcon";
+import { VerdictChip } from "./ui/VerdictChip";
 import { Button } from "./ui/Button";
 import { fetchParityReport } from "../lib/api";
 import { hashForScreen } from "../lib/appNavigation";
@@ -99,8 +100,12 @@ export function RunResultHeader({ jobId, job, verification, load, onRetry, trust
       <div className="df2-run-result-body">
         <div className="df2-run-result-head">
           <h2 id={titleId} className="df2-run-result-title">{status.title}</h2>
-          <span className={`df2-run-chip is-${verification.tone}`} aria-live="polite">
-            Verification: <strong>{verification.word}</strong>
+          <span aria-live="polite">
+            <VerdictChip
+              state={verification.verdict ?? (load.kind === "loading" ? "checking" : "not_loaded")}
+              prefix="Verification:"
+              title={verification.reason || undefined}
+            />
           </span>
         </div>
         {verification.reason && <p className="df2-run-result-reason">{verification.reason}</p>}

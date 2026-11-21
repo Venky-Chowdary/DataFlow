@@ -17,6 +17,8 @@ import { JobsToolbar } from "../components/jobs/JobsToolbar";
 import { useJobRunActions } from "../components/jobs/useJobRunActions";
 import { applyJobsFacets, useJobsGridState } from "../components/jobs/useJobsGridState";
 import { useJobsKpis } from "../components/jobs/useJobsKpis";
+import { useJobVerdicts } from "../components/jobs/useJobVerdicts";
+import { VerdictChip } from "../components/ui/VerdictChip";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -46,6 +48,8 @@ import {
   jobDetailSubtitle,
   jobDisplayName,
   jobNeedsAttention,
+  jobVerdict,
+  jobVerdictTitle,
   jobRouteLabel,
   LIVE_JOB_STATUSES,
   shortJobId,
@@ -354,6 +358,11 @@ function JobLineageLinks({
       ) : null}
     </p>
   );
+}
+
+/** The drawer header's verdict: the same chip and word as the grid row. */
+function SelectedVerdict({ row }: { row: TransferJob }) {
+  return <VerdictChip state={jobVerdict(row)} unexplainedRows={row.parity_verdict?.unexplained} title={jobVerdictTitle(row)} />;
 }
 
 export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, onLoadPage, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
@@ -933,9 +942,11 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     (job: TransferJob) => jobDisplayName(job, nameOverrides[job._id]),
     [nameOverrides],
   );
+  // The Trust Report's verdict per finished row (one read per page).
+  const verdictRows = useJobVerdicts(filtered);
   const gridJobs = useMemo(
-    () => sortJobsForGrid(filtered, grid.sort, { name: gridName }),
-    [filtered, grid.sort, gridName],
+    () => sortJobsForGrid(verdictRows, grid.sort, { name: gridName }),
+    [verdictRows, grid.sort, gridName],
   );
   const panelOpen = Boolean(selectedId) && !mobileListOpen;
   const openJob = useCallback((jobId: string) => {
@@ -1442,9 +1453,12 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
               title={selected ? jobDisplayName({ ...selected, name: liveJob?.name || selected.name }, nameOverrides[selected._id]) : "Job"}
               subtitle={selected ? jobDetailSubtitle(selected) : undefined}
               headerExtra={selected ? (
-                <span className={jobStatusBadgeClass(presentedJobStatus(selected))}>
-                  {jobStatusLabel(presentedJobStatus(selected))}
-                </span>
+                <>
+                  <span className={jobStatusBadgeClass(presentedJobStatus(selected))}>
+                    {jobStatusLabel(presentedJobStatus(selected))}
+                  </span>
+                  <SelectedVerdict row={verdictRows.find((row) => row._id === selected._id) ?? selected} />
+                </>
               ) : undefined}
             >
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
