@@ -22,6 +22,7 @@ from connectors.column_widen_restore import (
     writer_restore_guard,
 )
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.batch_salvage import salvage_in_order
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
@@ -1798,7 +1799,10 @@ def write_mapped_rows(
                         if is_sql_data_error(chunk_exc) and salvage_policy(
                             policy, mappings
                         ) in SALVAGE_POLICIES:
-                            for row_i, row in enumerate(write_batch):
+
+                            def _salvage_one(row_i: int) -> None:
+                                nonlocal chunk_written
+                                row = write_batch[row_i]
                                 # D299: a cancel stops before the next per-row
                                 # commit, counting the rows already committed.
                                 cancel_checkpoint(written + chunk_written)
@@ -1843,6 +1847,33 @@ def write_mapped_rows(
                                         mappings=mappings,
                                     )
                                     transform_errors.append(str(row_exc)[:200])
+
+                            def _salvage_range(lo: int, hi: int) -> bool:
+                                """Rows ``lo..hi-1`` as one committed batch, or nothing."""
+                                nonlocal chunk_written
+                                cancel_checkpoint(written + chunk_written)
+                                try:
+                                    cur.executemany(insert_sql, write_batch[lo:hi])
+                                    conn.commit()
+                                except Exception as range_exc:
+                                    try:
+                                        conn.rollback()
+                                    except Exception as exc:
+                                        logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
+                                    if is_connection_lost(range_exc):
+                                        raise
+                                    return False
+                                chunk_written += hi - lo
+                                return True
+
+                            # Split the failed chunk until the bad rows stand alone
+                            # (connectors.batch_salvage): good halves commit as
+                            # batches, bad rows take the per-row path above.
+                            salvage_in_order(
+                                len(write_batch),
+                                attempt_range=_salvage_range,
+                                salvage_row=_salvage_one,
+                            )
                             if use_ledger and chunk_written:
                                 try:
                                     mark_raw_chunk_committed(
