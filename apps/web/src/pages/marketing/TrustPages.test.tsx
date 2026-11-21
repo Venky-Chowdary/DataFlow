@@ -19,13 +19,13 @@ describe("trust pages", () => {
     assert.doesNotMatch(html, /All systems operational/);
   });
 
-  it("subprocessor list is marked draft and names each provider's trigger", () => {
+  it("subprocessor list is available on request and the page is noindex", () => {
     const html = renderToStaticMarkup(createElement(SubprocessorsPage));
-    assert.match(html, /Draft pending legal review/);
-    for (const name of ["Cloud hosting provider", "MongoDB", "Resend", "OpenAI", "Amazon Web Services"]) {
-      assert.match(html, new RegExp(name));
-    }
-    assert.match(html, /Only if a workspace admin enables a cloud model/);
+    assert.match(html, /available on request/);
+    assert.match(html, /contact@datawrap\.io/);
+    assert.doesNotMatch(html, /Draft/i);
+    assert.equal(PUBLIC_PAGE_META.subprocessors.robots, "noindex");
+    assert.equal(PUBLIC_PAGE_META.dpa.robots, "noindex");
   });
 
   it("trust pages name no hosting provider and no old brand (bundle brand gate)", () => {

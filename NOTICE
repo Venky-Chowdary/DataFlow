@@ -264,6 +264,7 @@ JavaScript (web bundle)
 @radix-ui/react-focus-scope: MIT
 @radix-ui/react-id: MIT
 @radix-ui/react-menu: MIT
+@radix-ui/react-navigation-menu: MIT
 @radix-ui/react-popper: MIT
 @radix-ui/react-portal: MIT
 @radix-ui/react-presence: MIT
@@ -275,8 +276,10 @@ JavaScript (web bundle)
 @radix-ui/react-use-effect-event: MIT
 @radix-ui/react-use-is-hydrated: MIT
 @radix-ui/react-use-layout-effect: MIT
+@radix-ui/react-use-previous: MIT
 @radix-ui/react-use-rect: MIT
 @radix-ui/react-use-size: MIT
+@radix-ui/react-visually-hidden: MIT
 @radix-ui/rect: MIT
 @types/d3-color: MIT
 @types/d3-drag: MIT

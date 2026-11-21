@@ -1313,6 +1313,7 @@ function DataTransferAppInner() {
             marketingMeta.keywords
             || "Datawrap, data transfer, migration, ETL, Transfer Studio, semantic mapping, preflight",
           canonicalPath: marketingMeta.canonicalPath || "#/",
+          robots: marketingMeta.robots,
           ogType: "website" as const,
         }
       : stage === "login"

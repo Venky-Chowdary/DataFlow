@@ -1,54 +1,32 @@
 import type { ReactNode } from "react";
 
 interface MarketingHeroBandProps {
+  /** Where the page sits, e.g. "Product, Transfer Studio". Plain text, not a badge. */
   kicker: string;
   title: string;
   lead: string;
   actions?: ReactNode;
   visual?: ReactNode;
-  /** Ink = dark enterprise hero with mesh (docs/help). Light = default wash. */
-  tone?: "light" | "ink";
-  /** Optional trail above the kicker (e.g. Home › Knowledge hub). */
+  /** Optional trail above the title (e.g. Home › Knowledge hub). */
   breadcrumb?: ReactNode;
-  /**
-   * Page-specific motion language so Pricing / Contact / Customers
-   * do not all share the same float + aurora feel.
-   */
+  /** Kept so existing call sites type-check; every subpage hero is paper now. */
+  tone?: "light" | "ink";
   motion?: "default" | "pricing" | "contact" | "customers";
 }
 
-/** Full-width hero used on every marketing subpage. */
-export function MarketingHeroBand({
-  kicker,
-  title,
-  lead,
-  actions,
-  visual,
-  tone = "light",
-  breadcrumb,
-  motion = "default",
-}: MarketingHeroBandProps) {
+/** Subpage hero: title and lead on the page surface, one real visual beside it. */
+export function MarketingHeroBand({ kicker, title, lead, actions, visual, breadcrumb }: MarketingHeroBandProps) {
   return (
-    <section
-      className={[
-        "lp-mkt-hero-band",
-        tone === "ink" ? "lp-mkt-hero-band--ink" : "",
-        motion !== "default" ? `lp-mkt-hero-band--${motion}` : "",
-      ].filter(Boolean).join(" ")}
-    >
-      <div className="lp-mkt-hero-band-glow" aria-hidden />
-      <div className="lp-mkt-hero-band-mesh" aria-hidden />
-      {motion === "contact" ? <div className="lp-mkt-hero-band-beams" aria-hidden /> : null}
-      {motion === "pricing" ? <div className="lp-mkt-hero-band-ruler" aria-hidden /> : null}
-      <div className={`lp-mkt-wrap lp-mkt-hero-grid ${visual ? "" : "lp-mkt-hero-grid--solo"}`.trim()}>
-        <div className="lp-mkt-hero-copy">
-          {breadcrumb ? <p className="lp-mkt-breadcrumb">{breadcrumb}</p> : null}
-          <p className="lp-mkt-kicker">{kicker}</p>
+    <section className="mk-subhero" aria-label={kicker}>
+      <div className={`mk-wrap mk-subhero-grid${visual ? "" : " is-solo"}`}>
+        <div className="mk-subhero-copy">
+          {breadcrumb ? <p className="mk-subhero-crumb">{breadcrumb}</p> : null}
+          <p className="mk-subhero-kicker">{kicker}</p>
           <h1>{title}</h1>
-          <p className="lp-mkt-lead">{lead}</p>
+          <p className="mk-subhero-lead">{lead}</p>
           {actions}
         </div>
-        {visual ? <div className="lp-mkt-hero-visual">{visual}</div> : null}
+        {visual ? <div className="mk-subhero-visual">{visual}</div> : null}
       </div>
     </section>
   );

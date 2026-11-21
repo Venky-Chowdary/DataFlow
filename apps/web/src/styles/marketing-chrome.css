@@ -1,0 +1,234 @@
+/**
+ * Marketing chrome: the header, its menus (Radix Navigation Menu), the
+ * mobile sheet and the footer. Loaded last from marketing-base.css, so these
+ * rules refine marketing-system.css and marketing-statement.css without
+ * editing them. Tokens only: no hex, no raw radius, no important flags.
+ */
+
+/* ── Bar ────────────────────────────────────────────────────────── */
+
+.mk .mk-nav-list {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mk .mk-nav-list > li {
+  margin: 0;
+  list-style: none;
+}
+
+/* Phones and tablets: every control in the bar is a 44 px target. */
+.mk .mk-menu-toggle {
+  width: 44px;
+  height: 44px;
+}
+
+.mk .mk-header-brand,
+.mk .mk-footer-brand {
+  min-height: 44px;
+}
+
+/* ── Menus ──────────────────────────────────────────────────────── */
+
+/* A bridge over the gap under the trigger, so the pointer can cross it
+   without the hover-intent close timer firing. */
+.mk .mk-nav-menu::before {
+  content: "";
+  position: absolute;
+  inset: -12px 0 auto;
+  height: 12px;
+}
+
+.mk .mk-nav-menu--product {
+  width: 760px;
+}
+
+.mk .mk-nav-menu--solutions {
+  width: 400px;
+}
+
+.mk .mk-mega {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.mk .mk-nav-menu .mk-mega-group ul {
+  grid-template-columns: 1fr;
+}
+
+/* Titles carry the hierarchy; notes sit a step back. */
+.mk .mk-nav-menu .mk-mega-text strong {
+  color: var(--mk-ink);
+}
+
+html[data-theme="dark"] .mk .mk-nav-menu .mk-mega-text strong {
+  color: var(--df-text-primary);
+}
+
+html[data-theme="dark"] .mk .mk-nav-menu .mk-mega-text span {
+  color: var(--df-text-secondary);
+}
+
+/* The menu's last row: one plain line and one link, sized to its content. */
+.mk .mk-mega-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-top: 6px;
+  padding: 6px 12px 0;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.mk .mk-mega-foot-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  line-height: 1.5;
+}
+
+.mk .mk-nav-menu .mk-mega-foot-label {
+  color: var(--mk-ink-3);
+  font-size: var(--mk-fs-caption);
+}
+
+.mk .mk-nav-menu .mk-mega-run-sum {
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-caption);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-theme="dark"] .mk .mk-nav-menu .mk-mega-run-sum {
+  color: var(--df-text-primary);
+}
+
+.mk .mk-nav-menu a.mk-mega-foot-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0;
+  color: var(--mk-link);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.mk .mk-nav-menu a.mk-mega-foot-link:hover,
+.mk .mk-nav-menu a.mk-mega-foot-link[aria-current="page"] {
+  background: transparent;
+  text-decoration-color: currentColor;
+}
+
+/* ── Mobile sheet ───────────────────────────────────────────────── */
+
+.mk .mk-mobile {
+  padding-bottom: 0;
+}
+
+.mk .mk-mobile-groups {
+  gap: 0;
+}
+
+.mk .mk-mobile-group ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+
+.mk .mk-mobile-group a {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 6px 0;
+  line-height: 1.3;
+}
+
+/* The two actions stay in view at the foot of the sheet while it scrolls. */
+.mk .mk-mobile-actions {
+  position: sticky;
+  bottom: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px calc(-1 * var(--mk-gutter)) 0;
+  padding: 12px var(--mk-gutter) calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--mk-rule);
+  background: var(--mk-page);
+}
+
+.mk .mk-mobile-actions .mk-btn {
+  width: 100%;
+  min-height: 44px;
+}
+
+.mk .mk-mobile-actions .mk-mobile-login {
+  grid-column: 1 / -1;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────── */
+
+.mk .mk-footer-nav a {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+  padding: 4px 0;
+}
+
+.mk .mk-footer-contacts {
+  gap: 4px;
+}
+
+.mk .mk-footer-contacts dd a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.mk .mk-footer-base-links {
+  flex-wrap: wrap;
+  gap: 0 20px;
+}
+
+/* Text actions sit flush with the grid edge: no side padding. */
+.mk .mk-footer-base-links .mk-text-btn {
+  min-height: 44px;
+  padding-inline: 0;
+}
+
+@media (min-width: 1024px) {
+  .mk .mk-footer-nav a,
+  .mk .mk-footer-contacts dd a,
+  .mk .mk-footer-brand {
+    min-height: 0;
+  }
+
+  .mk .mk-footer-contacts {
+    gap: 12px;
+  }
+
+  .mk .mk-footer-base-links .mk-text-btn {
+    min-height: 28px;
+  }
+}
+
+/* Dark theme: the mark's tile (logo tile ink) sits on a near-identical
+   page and loses its edge, so the straps read as floating. A hairline on
+   the inside of the tile (the stroke's outer half is clipped by the
+   viewBox) restores the shape without changing the mark. */
+html[data-theme="dark"] .mk .dt-brand-mark > rect:first-of-type {
+  stroke: color-mix(in srgb, var(--df-on-tile) 14%, transparent);
+  stroke-width: 3;
+}

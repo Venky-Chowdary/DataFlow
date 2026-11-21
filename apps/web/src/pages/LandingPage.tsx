@@ -1,22 +1,32 @@
-import type { ReactNode } from "react";
-import { DtIcon, type IconName } from "../components/DtIcon";
-import { ConnectorIcon } from "../app/brand-icons";
-import { TrustSection } from "../components/landing/TrustSection";
-import { MarketingFaq } from "../components/marketing/MarketingFaq";
-import { ProductShot } from "../components/marketing/ProductShot";
-import { VideoPlayer, videoThumb } from "../components/marketing/VideoPlayer";
-import { FEATURED_VIDEO_ID, MARKETING_VIDEOS } from "../lib/videoCatalog";
-import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
+import { useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { StatementHero } from "../components/marketing/StatementHero";
+import { ConnectorStrip } from "../components/marketing/ConnectorStrip";
 import {
-  PENDING_DRIVERS,
+  McpScene,
+  PilotScene,
+  QueryScene,
+  SCENE_NOTES,
+  SchedulesScene,
+  TransferScene,
+} from "../components/marketing/StoryScenes";
+import {
+  EXAMPLE_JOBS,
+  JobsWithTrust,
+} from "../components/marketing/app-frame/AppFrame";
+import {
+  ALL_CONNECTORS,
+  EVIDENCE_AS_OF,
   PROVEN_CDC_SOURCES,
   PROVEN_DRIVERS,
-  catalogHonestyLead,
-  provenDriversPhrase,
 } from "../lib/provenEvidence";
-import { connectorDisplayName } from "../lib/connectorTypes";
-import type { PublicRoute } from "../lib/publicNavigation";
-import { DEMO_ROUTE, WORKSPACE_SHOT } from "../lib/workspaceShots";
+import { MarketingClosing } from "../components/marketing/MarketingClosing";
+import { PRIMARY_CTA_LABEL, SALES_CTA_LABEL } from "../components/marketing/MarketingChrome";
+import { RUN_HELD_KEYS } from "../components/marketing/StoryPanels";
+import { Bento, BentoTile } from "../components/marketing/kit/Bento";
+import { SplitHead } from "../components/marketing/kit/SplitHead";
+import { StatRow } from "../components/marketing/kit/StatRow";
+import { SYNC_MODES } from "../lib/transferConstants";
+import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
 
 export interface LandingHomeProps {
   onLogin: () => void;
@@ -24,670 +34,459 @@ export interface LandingHomeProps {
   onNavigate: (route: PublicRoute) => void;
 }
 
-const STACK_IDS = [
-  "postgresql",
-  "snowflake",
-  "bigquery",
-  "sqlserver",
-  "oracle",
-  "mongodb",
-  "mysql",
-  "kafka",
-  "s3",
-];
 
-/** Marquee rows — transfer-ready drivers only (transfer_live_driver_types()). */
-const CONNECTOR_MARQUEE_IDS = [
-  "postgresql",
-  "mysql",
-  "sqlserver",
-  "oracle",
-  "mongodb",
-  "snowflake",
-  "bigquery",
-  "iceberg",
-  "s3",
-  "adls",
-  "gcs",
-  "kafka",
-  "pgvector",
-  "qdrant",
-  "elasticsearch",
-  "dynamodb",
-  "redis",
-  "salesforce",
-  "hubspot",
-  "stripe",
-  "parquet",
-  "csv",
-  "json",
-  "sftp",
-];
 
-const CONNECTOR_MARQUEE_ROW_B = [
-  "snowflake",
-  "kafka",
-  "postgresql",
-  "bigquery",
-  "pinecone",
-  "sqlserver",
-  "redis",
-  "mongodb",
-  "gcs",
-  "oracle",
-  "weaviate",
-  "mysql",
-  "s3",
-  "neo4j",
-  "salesforce",
-  "iceberg",
-  "milvus",
-  "couchbase",
-  "elasticsearch",
-  "adls",
-  "stripe",
-  "dynamodb",
-  "sqlite",
-  "hubspot",
-];
-
-const CONNECTOR_WALL = [...new Set([...CONNECTOR_MARQUEE_IDS, ...CONNECTOR_MARQUEE_ROW_B])];
-
-type Chapter = {
-  step: string;
-  name: string;
-  title: string;
-  body: string;
-  facts: string[];
-  shot: string;
-  alt: string;
-  surface: string;
-};
-
-const CHAPTERS: Chapter[] = [
+const DIFFERENT: { title: string; without: string; with: string; where: string }[] = [
   {
-    step: "01",
-    name: "Connect",
-    title: "Point at a source and a destination",
-    body: "Pick a saved connection, then a table, a SQL query, or a stored procedure. Datawrap profiles a sample before anything moves, so you see real types and values first.",
-    facts: [
-      "Databases, warehouses, object storage, files, and streams",
-      "Table, SQL query, or stored procedure as the source",
-      "A profiled sample before the first write",
-    ],
-    shot: WORKSPACE_SHOT.transferSource,
-    alt: "Transfer Studio source step: Orders Postgres (demo), table sales_orders, with a profiled sample of 100 rows",
-    surface: "Transfer Studio · Source",
+    title: "A green job is taken as proof",
+    without: "The job reports success, and nobody counts the destination until a report looks wrong.",
+    with: "The run that writes the rows also counts the destination with its own engine and compares it with the source.",
+    where: "Job space, Trust Report",
   },
   {
-    step: "02",
-    name: "Map",
-    title: "Columns pair by meaning, not only by name",
-    body: "Every pairing is scored on the column's role, its qualifier, and type fit. Confident pairs map themselves; ambiguous ones wait for a person. Open any row to see why it was paired.",
-    facts: [
-      "11 of 11 columns mapped on this route",
-      "JSONB attributes land in Snowflake as VARIANT",
-      "A written reason on every pairing",
-    ],
-    shot: WORKSPACE_SHOT.transferMapWhyStage,
-    alt: "Transfer Studio map: the attributes column explained, JSONB to VARIANT through Parse JSON",
-    surface: "Transfer Studio · Map",
+    title: "Failures show up mid-write",
+    without: "A value the destination cannot hold fails a batch halfway through the night.",
+    with: "Validate pushes sample rows through the real write path first. The approved plan is hashed, and a run that drifts from it is refused.",
+    where: "Transfer Studio, Validate",
   },
   {
-    step: "03",
-    name: "Validate",
-    title: "Checks run before a single row is written",
-    body: "Nine core checks run on every route, from source access to dry-run coercion, plus the policy checks the route needs. On this route, 23 checks finished clear and the write opened.",
-    facts: [
-      "23 checks on this route, none blocking",
-      "New tables wait for DDL sign-off",
-      "Execute stays locked until the verdict is approve",
-    ],
-    shot: WORKSPACE_SHOT.transferValidateGates,
-    alt: "Validation rules grid for the Postgres to Snowflake route: 23 checks, 17 passed and 6 not applicable",
-    surface: "Transfer Studio · Validate",
+    title: "Rejected rows go quiet",
+    without: "Rows the destination refuses end up in a log file, or nowhere.",
+    with: "A row that cannot land is held with its column, value, and reason, and replayed once fixed. A row not landed, held, or skipped is reported as potential loss.",
+    where: "Job space, Quarantine",
   },
   {
-    step: "04",
-    name: "Run",
-    title: "Clean rows land, and every row is counted.",
-    body: "Rows are written in batches with bound parameters. On the Snowflake run, 5,100 rows were read and 5,100 were written.",
-    facts: [
-      "Insert, merge, or stored-procedure writes",
-      "5,100 written, destination count 5,100",
-      "A live log for every batch",
-    ],
-    shot: WORKSPACE_SHOT.transferRunComplete,
-    alt: "Transfer Studio run complete: 5,100 rows appended to Snowflake, append delta balanced",
-    surface: "Transfer Studio · Run",
-  },
-  {
-    step: "05",
-    name: "Prove",
-    title: "The destination is read back and compared",
-    body: "After the write, Datawrap reads the destination and compares it with the source: row counts, a checksum, and a value census by key. On this run both sides are 5,100, and the checksum matches.",
-    facts: [
-      "Source and destination counts side by side",
-      "Full checksum, match on every table",
-      "A report you can export and sign off",
-    ],
-    shot: WORKSPACE_SHOT.jobTrust,
-    alt: "Trust Report for the Snowflake run: 5,100 rows in source and destination, full checksum match",
-    surface: "Job space · Trust Report",
+    title: "Sign-off lives in a spreadsheet",
+    without: "Approval is a tick in a sheet that nobody can re-check later.",
+    with: "The report names the comparison that ran, proof packs are signed and verifiable, and every action lands in a tamper-evident audit log.",
+    where: "Job space, Sign-off",
   },
 ];
 
-type Feature = {
-  id: string;
-  title: string;
-  body: string;
-  shot: string;
-  alt: string;
+const VERDICTS: { name: string; tone: "proven" | "explained" | "bounded" | "open" | "none"; meaning: string }[] = [
+  { name: "Proven", tone: "proven", meaning: "Every row was compared and none differs." },
+  { name: "Explained", tone: "explained", meaning: "Every row was compared. Some differ, and each difference has a known cause, such as timestamp precision or a transform you applied." },
+  { name: "No difference found", tone: "bounded", meaning: "Values were compared on a random sample. The report gives an upper bound on the rate of unexplained differences." },
+  { name: "Unexplained", tone: "open", meaning: "At least one difference has no known cause. The report points to the column and the row." },
+  { name: "Unverifiable", tone: "none", meaning: "There is nothing to sign yet: the job is still running, or only row counts exist." },
+];
+
+
+function RouteLink({
+  route,
+  onNavigate,
+  children,
+  className = "mk-link",
+}: {
   route: PublicRoute;
-  link: string;
-  size: "wide" | "narrow" | "third";
-  icon: IconName;
-};
-
-const FEATURES: Feature[] = [
-  {
-    id: "schedules",
-    title: "The same checks, on your cadence",
-    body: "Incremental, upsert, append, mirror, or CDC. Every tick is a full job with the same gates and the same read-back as a run you start by hand.",
-    shot: WORKSPACE_SHOT.schedulesHistory,
-    alt: "Run history for the Orders feed schedule, each run linked to its job",
-    route: "product-pipelines",
-    link: "Explore Schedules",
-    size: "wide",
-    icon: "jobs",
-  },
-  {
-    id: "query",
-    title: "Look at the data on both sides",
-    body: "Read-only SQL against any saved connection, with a schema browser and a row limit. Statements that write are refused.",
-    shot: WORKSPACE_SHOT.queryCard,
-    alt: "Query on Warehouse Snowflake (demo): revenue by region, 5 rows in 3.1 seconds",
-    route: "product-query",
-    link: "Open Query",
-    size: "narrow",
-    icon: "search",
-  },
-  {
-    id: "reversibility",
-    title: "Know whether you can get the source back",
-    body: "Column by column: can the destination value reproduce the source value? Hashes, masks, and narrowing casts are named.",
-    shot: WORKSPACE_SHOT.jobReversibilityCard,
-    alt: "Reversibility tab: every mapping lossless, 11 columns invertible, rollback by restoring from the destination",
-    route: "product-jobs",
-    link: "See Job space",
-    size: "third",
-    icon: "eye",
-  },
-  {
-    id: "contracts",
-    title: "Pin the shape a route promises",
-    body: "Columns, types, and nullability, versioned and signed. Drift waits for review instead of changing the destination.",
-    shot: WORKSPACE_SHOT.contractsCard,
-    alt: "Contract for Orders Postgres to SALES_ORDERS_REPORTING: 11 columns with types and nullability",
-    route: "product-transfer",
-    link: "How contracts work",
-    size: "third",
-    icon: "lock",
-  },
-  {
-    id: "agents",
-    title: "Ask in plain English, or bring your agent",
-    body: "Pilot answers with exact server-side SQL. MCP gives Cursor, Claude, and other clients the same tools, scoped by role, with every change held for confirmation.",
-    shot: WORKSPACE_SHOT.pilotCard,
-    alt: "Pilot answering total order value by region on Orders Postgres, with the SQL it ran",
-    route: "product-pilot",
-    link: "Meet Pilot",
-    size: "third",
-    icon: "sparkle",
-  },
-];
-
-const QUESTIONS: { q: string; a: string; where: string }[] = [
-  {
-    q: "Did every row arrive?",
-    a: "Rows in the source and rows in the destination, from a read-back. On this run, 5,100 and 5,100, checksum match.",
-    where: "Trust Report",
-  },
-  {
-    q: "Why did this column change type?",
-    a: "The pairing, its confidence, and the type on both sides, recorded before the write.",
-    where: "Map",
-  },
-  {
-    q: "What did the checks say?",
-    a: "Each check is named, with its result. On this route, 23 checks finished clear and the write opened.",
-    where: "Validate",
-  },
-  {
-    q: "Where is every row accounted for?",
-    a: "The job lists rows read, rows written, and the destination count. Replay sends a held row into the same table.",
-    where: "Quarantine",
-  },
-  {
-    q: "Could we rebuild the source from the copy?",
-    a: "On the Snowflake run, 11 of 11 columns round-trip, so the destination can give the data back.",
-    where: "Reversibility",
-  },
-  {
-    q: "Who approved this, and when?",
-    a: "Sign-off on the job and a hash-chained audit log you can export.",
-    where: "Sign-off",
-  },
-];
-
-const USE_CASES: { id: PublicRoute; tag: string; title: string; body: string; points: string[] }[] = [
-  {
-    id: "solution-migrations",
-    tag: "Migration",
-    title: "Cut over to a new system with evidence",
-    body: "Move between schemas that were never one-to-one. Run a subset, compare it, then cut over with keys and constraints carried.",
-    points: ["Cross-schema mapping you can review", "Identity, keys, and constraints carried", "A signed report for the cutover meeting"],
-  },
-  {
-    id: "solution-sync",
-    tag: "Sync",
-    title: "Keep two systems in step",
-    body: "Native CDC or typed watermarks on a schedule. Every run is a checked job, and schema drift waits for approval.",
-    points: [
-      PROVEN_CDC_SOURCES.length
-        ? `CDC proven on ${PROVEN_CDC_SOURCES.join(", ")}`
-        : "Native CDC and typed watermarks",
-      "Drift held for review, never applied silently",
-      "Schedules that park instead of retrying blindly",
-    ],
-  },
-  {
-    id: "solution-warehouse",
-    tag: "Warehouse",
-    title: "Load the warehouse finance relies on",
-    body: "Snowflake, BigQuery, Iceberg, and cloud storage, with capacity probes before the write and a read-back after it.",
-    points: ["Exact decimals and timestamps", "Append, overwrite, or merge by key", "Every load verified against the source"],
-  },
-];
-
-function Reveal({ children, className = "" }: { children: ReactNode; className?: string }) {
-  const reveal = useRevealOnScroll();
+  onNavigate: (route: PublicRoute) => void;
+  children: string;
+  className?: string;
+}) {
   return (
-    <div ref={reveal.ref} className={`${reveal.className} ${className}`.trim()}>
+    <a
+      className={className}
+      href={hashForPublicRoute(route)}
+      onClick={(e: MouseEvent<HTMLAnchorElement>) => {
+        e.preventDefault();
+        onNavigate(route);
+      }}
+    >
       {children}
+    </a>
+  );
+}
+
+type SwitchTab = { id: string; label: string; notes: readonly string[]; render: () => ReactNode };
+
+const SWITCH_TABS: SwitchTab[] = [
+  {
+    id: "jobs",
+    label: "Jobs and Trust Report",
+    notes: [
+      "Every run with its route, rows, held rows, and the comparison that ran.",
+      "Choose a run: its Trust Report opens beside the grid.",
+      "Only a full comparison with no difference is called proven.",
+    ],
+    render: () => (
+      <JobsWithTrust initial="5d20b7c4" caption="An example workspace, rendered in code. Choose any row." />
+    ),
+  },
+  { id: "transfer", label: "Transfer Studio", notes: SCENE_NOTES.transfer, render: () => <TransferScene marks /> },
+  { id: "schedules", label: "Schedules", notes: SCENE_NOTES.schedules, render: () => <SchedulesScene marks /> },
+  { id: "query", label: "Query", notes: SCENE_NOTES.query, render: () => <QueryScene marks /> },
+  { id: "pilot", label: "Pilot", notes: SCENE_NOTES.pilot, render: () => <PilotScene marks /> },
+  { id: "mcp", label: "MCP server", notes: SCENE_NOTES.mcp, render: () => <McpScene marks /> },
+];
+
+/**
+ * The product, one part at a time: a tab per surface, each a full app
+ * window with numbered pins and the notes that read them. Never advances on
+ * its own; arrow keys move between tabs.
+ */
+function ProductSwitcher() {
+  const [active, setActive] = useState(0);
+  const tabs = useRef<Array<HTMLButtonElement | null>>([]);
+  const tab = SWITCH_TABS[active];
+
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const last = SWITCH_TABS.length - 1;
+    let next = active;
+    if (e.key === "ArrowRight") next = active === last ? 0 : active + 1;
+    else if (e.key === "ArrowLeft") next = active === 0 ? last : active - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else return;
+    e.preventDefault();
+    setActive(next);
+    tabs.current[next]?.focus();
+  };
+
+  return (
+    <div className="mk-switch">
+      <div className="mk-switch-tabs" role="tablist" aria-label="Parts of the product" onKeyDown={onKey}>
+        {SWITCH_TABS.map((t, i) => (
+          <button
+            key={t.id}
+            ref={(el) => {
+              tabs.current[i] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`mk-switch-tab-${t.id}`}
+            aria-selected={i === active}
+            aria-controls={`mk-switch-panel-${t.id}`}
+            tabIndex={i === active ? 0 : -1}
+            className={i === active ? "is-active" : undefined}
+            onClick={() => setActive(i)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div
+        className="mk-switch-panel"
+        role="tabpanel"
+        id={`mk-switch-panel-${tab.id}`}
+        aria-labelledby={`mk-switch-tab-${tab.id}`}
+        key={tab.id}
+      >
+        {tab.render()}
+        <ol className="mk-switch-notes">
+          {tab.notes.map((n) => (
+            <li key={n}>{n}</li>
+          ))}
+        </ol>
+      </div>
     </div>
   );
 }
 
-function SectionHead({ kicker, title, children }: { kicker: string; title: string; children?: ReactNode }) {
-  return (
-    <Reveal className="lp-home-section-head">
-      <p className="lp-section-kicker">{kicker}</p>
-      <h2>{title}</h2>
-      {children ? <p>{children}</p> : null}
-    </Reveal>
-  );
-}
+const HERO_JOB = EXAMPLE_JOBS.find((j) => j.id === "6af912d7") ?? EXAMPLE_JOBS[1];
 
-function StepBand({
-  step,
-  flip,
-}: {
-  step: (typeof CHAPTERS)[number];
-  flip: boolean;
-}) {
-  const { ref, className } = useRevealOnScroll<HTMLLIElement>(0.18);
-  return (
-    <li
-      ref={ref}
-      id={`step-${step.name.toLowerCase()}`}
-      className={`${className}${flip ? " is-flip" : ""}`}
-    >
-      <div>
-        <p className="lp-home-steps-name">
-          {step.step} · {step.name}
-        </p>
-        <h3>{step.title}</h3>
-        <p>{step.body}</p>
-        <ul className="lp-home-steps-facts">
-          {step.facts.map((fact) => (
-            <li key={fact}>{fact}</li>
-          ))}
-        </ul>
-      </div>
-      <ProductShot src={step.shot} alt={step.alt} surface={step.surface} />
-    </li>
-  );
-}
+const HELD_ROWS: { key: string; value: string }[] = RUN_HELD_KEYS.map((key) => ({ key, value: "NULL" }));
 
-function ProductSteps() {
-  return (
-    <ol className="lp-home-steps">
-      {CHAPTERS.map((c, i) => (
-        <StepBand key={c.step} step={c} flip={i % 2 === 1} />
-      ))}
-    </ol>
-  );
-}
+/** The rows the example's `region = 'TEST'` filter excluded. */
+const SKIPPED_ROWS: { key: string }[] = [{ key: "50017" }, { key: "57240" }];
 
-export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
-  const featured = MARKETING_VIDEOS.find((v) => v.id === FEATURED_VIDEO_ID);
+const fmtN = new Intl.NumberFormat("en-US");
+
+/** How many held rows the Held tile lists before "Showing n of 33". */
+const HELD_SHOWN = 3;
+
+/**
+ * Where every row went, built as the statement itself: landed + held +
+ * skipped, then the line that proves nothing is unaccounted. Each tile is a
+ * fragment of the product UI; every figure is the hero's run.
+ */
+function RowBento() {
+  const [replayed, setReplayed] = useState(false);
+  const t = HERO_JOB.trust;
+  const held = HERO_JOB.held ?? 0;
+  const skipped = t.source - HERO_JOB.rows - held;
+  const unaccounted = t.source - HERO_JOB.rows - held - skipped;
+  const shown = HELD_ROWS.slice(0, HELD_SHOWN);
   return (
-    <>
-      <section className="lp-home-hero" aria-labelledby="lp-home-hero-title">
-        <div className="lp-home-hero-bg" aria-hidden />
-        <div className="lp-home-hero-grid">
-        <div className="lp-home-hero-copy">
-          <p className="lp-home-hero-eyebrow">Data transfer platform</p>
-          <h1 id="lp-home-hero-title">
-            Move data anywhere.
-            <span> Prove every row arrived.</span>
-          </h1>
-          <p className="lp-home-hero-sub">
-            Map columns across systems that were never designed to match. Stop a bad write before
-            it starts, then read the destination back and show the checksum match.
-          </p>
-          <div className="lp-home-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Start free
-              <DtIcon name="arrow-right" size={16} />
-            </button>
-            <button
-              type="button"
-              className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
-              onClick={() => onNavigate("contact")}
-            >
-              Talk to an engineer
-            </button>
+    <Bento className="mk-kit-bento--eq mk-rowbento" label="Where every row of the example run went">
+      <BentoTile
+        span={5}
+        tone="landed"
+        title="Landed"
+        figure={fmtN.format(HERO_JOB.rows)}
+        body="Written, then counted by the destination's own engine and compared with what was read."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <div className="mk-tui-head">
+            <span className="mk-app-pill mk-app-pill--t-proven">Proven equal</span>
+            <span className="mk-tui-muted">Check: {t.check}</span>
           </div>
-          <ul className="lp-home-hero-facts">
-            <li>
-              <strong>11 of 11</strong>
-              <span>columns mapped</span>
-            </li>
-            <li>
-              <strong>5,100</strong>
-              <span>rows read back</span>
-            </li>
-            <li>
-              <strong>Match</strong>
-              <span>full checksum</span>
-            </li>
-          </ul>
-          <p className="lp-home-hero-meta">{provenDriversPhrase()}</p>
-        </div>
-        <div className="lp-home-hero-stage">
-          <ProductShot
-            src={WORKSPACE_SHOT.transferMapStage}
-            alt="Transfer Studio map step: 11 of 11 columns from public.sales_orders mapped to SALES_ORDERS_REPORTING"
-            surface="Transfer Studio · Map"
-            route={{ source: DEMO_ROUTE.source, dest: DEMO_ROUTE.dest }}
-          />
-        </div>
-        </div>
-      </section>
-
-      <section className="lp-home-stack" aria-label="Works with your stack">
-        <p className="lp-home-stack-label">Works with the systems you already run</p>
-        <div className="lp-conn-marquee lp-home-stack-marquee">
-          <div className="lp-conn-marquee-track lp-home-stack-track">
-            {[0, 1].map((copy) => (
-              <div key={copy} className="lp-home-stack-row" aria-hidden={copy === 1 || undefined}>
-                {STACK_IDS.map((id) => (
-                  <span key={`${copy}-${id}`} className="lp-home-stack-item" title={connectorDisplayName(id)}>
-                    <ConnectorIcon id={id} size={28} />
-                    <em>{connectorDisplayName(id)}</em>
-                  </span>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="lp-home-promises" aria-label="What a transfer guarantees">
-        <div className="lp-home-inner">
-          <Reveal className="lp-home-promises-grid">
-            {[
-              {
-                n: "01",
-                title: "Map by meaning",
-                body: "Columns pair on role and type, not on spelling. An ambiguous pair waits for a person.",
-              },
-              {
-                n: "02",
-                title: "Stop a bad write",
-                body: "Checks run before the first row. On this route, 23 checks finished clear and the write opened.",
-              },
-              {
-                n: "03",
-                title: "Read it back",
-                body: "The destination is counted and checksummed against the source. On this run both sides are 5,100.",
-              },
-            ].map((item, i) => (
-              <article key={item.n} className="lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
-                <span>{item.n}</span>
-                <h2>{item.title}</h2>
-                <p>{item.body}</p>
-              </article>
-            ))}
-          </Reveal>
-        </div>
-      </section>
-
-      <section className="lp-home-measured" aria-label="Measured on one run">
-        <div className="lp-home-inner">
-          <SectionHead kicker="One named run" title="Postgres to Snowflake, counted on both sides">
-            These figures are from the load on this page: 5,100 orders, public.sales_orders into
-            DW_DEMO.SALES_ORDERS_REPORTING. They are not a catalog-wide claim.
-          </SectionHead>
-          <Reveal className="lp-home-measured-grid">
-            {[
-              ["11 / 11", "Columns mapped, none flagged"],
-              ["5,100", "Rows in the source and in Snowflake"],
-              ["Match", "Full checksum on every table"],
-              ["23", "Gates checked before the write"],
-            ].map(([value, label], i) => (
-              <div key={label} style={{ ["--reveal-i" as string]: i }}>
-                <strong>{value}</strong>
-                <span>{label}</span>
-              </div>
-            ))}
-          </Reveal>
-        </div>
-      </section>
-
-      <section className="lp-home-flow" id="how-it-works" aria-label="How a transfer runs">
-        <div className="lp-home-inner">
-          <SectionHead kicker="How it works" title="Five steps from connection to proof">
-            The same path runs whether a person starts the transfer in Studio, a schedule fires,
-            or an agent calls it through MCP. No surface can skip a check or the read-back.
-          </SectionHead>
-          <ProductSteps />
-          <div className="lp-home-actions">
-            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
-              Open Transfer Studio
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
-              How mapping and checks work
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="lp-home-features" id="product" aria-label="After the first load">
-        <div className="lp-home-inner">
-          <SectionHead kicker="After the first load" title="Everything you need to run it every day">
-            Schedules, Query, Reversibility, Contracts, and agents sit on the same engine as Studio,
-            so a recurring sync is held to the same standard as the first transfer.
-          </SectionHead>
-          <Reveal className="lp-home-bento">
-            {FEATURES.map((f, i) => (
-              <article key={f.id} className={`lp-home-bento-cell lp-scene-card is-${f.size}`} style={{ ["--reveal-i" as string]: i }}>
-                <div className="lp-home-bento-copy">
-                  <span className="lp-home-bento-mark" aria-hidden>
-                    <DtIcon name={f.icon} size={18} chrome="product" />
-                  </span>
-                  <h3>{f.title}</h3>
-                  <p>{f.body}</p>
-                  <button type="button" className="lp-home-link" onClick={() => onNavigate(f.route)}>
-                    {f.link}
-                    <DtIcon name="arrow-right" size={14} />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </Reveal>
-        </div>
-      </section>
-
-      <section className="lp-home-questions" aria-label="Questions Datawrap answers">
-        <div className="lp-home-inner">
-          <SectionHead kicker="Built for the review meeting" title="Answers your team will be asked for">
-            Moving the data is half the job. The other half is showing it arrived intact. Each of
-            these has a screen in Datawrap, not a spreadsheet someone assembles afterwards.
-          </SectionHead>
-          <Reveal>
-            <MarketingFaq items={QUESTIONS} />
-          </Reveal>
-        </div>
-      </section>
-
-      <section className="lp-home-cases" id="usecases" aria-label="Use cases">
-        <div className="lp-home-inner">
-          <SectionHead kicker="Use cases" title="Three jobs teams bring to Datawrap" />
-          <Reveal className="lp-home-cases-grid">
-            {USE_CASES.map((u, i) => (
-              <article key={u.id} className="lp-home-case lp-scene-card" style={{ ["--reveal-i" as string]: i }}>
-                <span className="lp-home-case-tag">{u.tag}</span>
-                <h3>{u.title}</h3>
-                <p>{u.body}</p>
-                <ul>
-                  {u.points.map((p) => (
-                    <li key={p}>
-                      <DtIcon name="check" size={14} />
-                      {p}
-                    </li>
-                  ))}
-                </ul>
-                <button type="button" className="lp-home-link" onClick={() => onNavigate(u.id)}>
-                  {u.tag} guide
-                  <DtIcon name="arrow-right" size={14} />
-                </button>
-              </article>
-            ))}
-          </Reveal>
-        </div>
-      </section>
-
-      <section className="lp-home-connectors" id="tools" aria-label="Connectors">
-        <div className="lp-home-inner lp-home-connectors-head">
-          <SectionHead kicker="Connectors" title="Databases, warehouses, lakes, and streams">
-            Native drivers, each one held to the same mapping, checks, and read-back. A driver is
-            listed as proven when its CI jobs ran green with no skipped test.
-          </SectionHead>
-          <dl className="lp-home-connectors-stats">
+          <dl className="mk-tui-counts mk-tui-counts--rows">
             <div>
-              <dt>{PROVEN_DRIVERS}</dt>
-              <dd>drivers proven in CI</dd>
+              <dt>Read at the source</dt>
+              <dd>{fmtN.format(t.source)}</dd>
             </div>
-            {PENDING_DRIVERS > 0 ? (
-              <div>
-                <dt>{PENDING_DRIVERS}</dt>
-                <dd>more running their CI proof</dd>
-              </div>
-            ) : null}
             <div>
-              <dt>{PROVEN_CDC_SOURCES.length}</dt>
-              <dd>CDC sources proven</dd>
+              <dt>In the destination</dt>
+              <dd>{fmtN.format(t.destination)}</dd>
+            </div>
+            <div>
+              <dt>Differ</dt>
+              <dd>{fmtN.format(t.differ)}</dd>
             </div>
           </dl>
         </div>
-        <div className="lp-home-inner">
-          <Reveal className="lp-home-connector-grid">
-            {CONNECTOR_WALL.map((id, i) => (
-              <span key={id} className="lp-conn-marquee-tile" style={{ ["--reveal-i" as string]: i }}>
-                <ConnectorIcon id={id} size={30} />
-                <em>{connectorDisplayName(id)}</em>
-              </span>
+      </BentoTile>
+
+      <BentoTile
+        span={4}
+        op="+"
+        tone="held"
+        title="Held"
+        figure={fmtN.format(held)}
+        body="Refused by the destination and kept with its value and reason, instead of stopping the load."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <div className="mk-tui-head">
+            <code>status</code>
+            <span className="mk-tui-muted">is NOT NULL in the destination</span>
+          </div>
+          <ul className="mk-tui-rows">
+            {shown.map((r) => (
+              <li key={r.key} className={replayed ? "is-landed" : undefined}>
+                <code>order_id {r.key}</code>
+                <code>status = {replayed ? "'pending'" : r.value}</code>
+                <span>{replayed ? "Landed on replay" : "Held"}</span>
+              </li>
             ))}
-          </Reveal>
-        </div>
-        <div className="lp-home-inner">
-          <p className="lp-home-connectors-note">{catalogHonestyLead()}</p>
-          <div className="lp-home-actions">
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
-              Browse connectors
+          </ul>
+          <div className="mk-tui-actions">
+            <button
+              type="button"
+              className="mk-app-tbtn mk-app-tbtn--primary"
+              aria-pressed={replayed}
+              onClick={() => setReplayed((v) => !v)}
+            >
+              {replayed ? "Undo the example replay" : `Replay ${held} rows after the fix`}
             </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
-              Read the docs
-            </button>
+            <span className="mk-tui-muted" aria-live="polite">
+              {replayed ? `${held} rows landed into the same table` : `Showing ${shown.length} of ${held}`}
+            </span>
           </div>
         </div>
-      </section>
+      </BentoTile>
 
-      <section className="lp-home-videos" id="demos" aria-label="Video demos">
-        <div className="lp-home-videos-inner">
-          <SectionHead kicker="Watch it work" title="Real runs, recorded end to end">
-            Mapping, CDC, and the checksum match, recorded on the production engine. Each
-            video ends where every transfer should: with the read-back.
-          </SectionHead>
-          <div className="lp-home-videos-feature">
-            <VideoPlayer videoId={FEATURED_VIDEO_ID} title={featured?.title ?? "Datawrap demo"} />
-          </div>
-          <Reveal className="lp-home-videos-row">
-            {MARKETING_VIDEOS.filter((v) => v.id !== FEATURED_VIDEO_ID)
-              .slice(0, 3)
-              .map((video, i) => (
-                <button
-                  key={video.id}
-                  type="button"
-                  className="lp-home-videos-card"
-                  style={{ ["--reveal-i" as string]: i }}
-                  onClick={() => onNavigate("demos")}
-                >
-                  <img src={videoThumb(video.id, "hq")} alt="" loading="lazy" />
-                  <span className="lp-home-videos-card-title">{video.title}</span>
-                </button>
-              ))}
-          </Reveal>
-          <div className="lp-home-actions">
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("demos")}>
-              All demos
-            </button>
-          </div>
+      <BentoTile
+        span={3}
+        op="+"
+        tone="skipped"
+        title="Skipped"
+        figure={fmtN.format(skipped)}
+        body="Excluded by a rule you set, and named in the statement."
+        bleed
+      >
+        <div className="mk-app-surface mk-tui">
+          <p className="mk-tui-filter">
+            Filter <code>region = 'TEST'</code>
+          </p>
+          <ul className="mk-tui-rows mk-tui-rows--skipped">
+            {SKIPPED_ROWS.slice(0, skipped).map((r) => (
+              <li key={r.key}>
+                <code>order_id {r.key}</code>
+                <span>Skipped</span>
+              </li>
+            ))}
+          </ul>
         </div>
-      </section>
+      </BentoTile>
 
-      <TrustSection />
+      <BentoTile
+        span={12}
+        tone="balance"
+        className="mk-tile--sum"
+        title="Unaccounted"
+        body="A row that is none of the three is reported as potential loss, and the statement does not balance."
+      >
+        <dl
+          className="mk-sumline"
+          aria-label={`${fmtN.format(t.source)} read, minus ${fmtN.format(HERO_JOB.rows)} landed, ${held} held and ${skipped} skipped, leaves ${unaccounted} unaccounted`}
+        >
+          <div>
+            <dt>Read</dt>
+            <dd>{fmtN.format(t.source)}</dd>
+          </div>
+          <div data-op="−">
+            <dt>Landed</dt>
+            <dd>{fmtN.format(HERO_JOB.rows)}</dd>
+          </div>
+          <div className="is-held" data-op="−">
+            <dt>Held</dt>
+            <dd>{fmtN.format(held)}</dd>
+          </div>
+          <div data-op="−">
+            <dt>Skipped</dt>
+            <dd>{fmtN.format(skipped)}</dd>
+          </div>
+          <div className="is-result" data-op="=">
+            <dt>Unaccounted</dt>
+            <dd>{fmtN.format(unaccounted)}</dd>
+          </div>
+        </dl>
+      </BentoTile>
+    </Bento>
+  );
+}
 
-      <section className="lp-home-final" aria-labelledby="lp-home-final-title">
-        <div className="lp-home-final-inner">
-          <div className="lp-home-final-panel">
-            <div>
-              <h2 id="lp-home-final-title">Run your first verified transfer today</h2>
-              <p>
-                Start free with the full Transfer Studio path, checks and read-back included. When
-                you&apos;re ready for schedules, CDC, and SSO, we&apos;ll scope it with you.
-              </p>
-            </div>
-            <div className="lp-home-final-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-                Start free
-                <DtIcon name="arrow-right" size={16} />
+export function LandingHome({ onGetStarted, onNavigate }: LandingHomeProps) {
+  return (
+    <div className="mk-page mk-home">
+      <section className="mk-hero mk-hero--statement" aria-labelledby="mk-hero-title">
+        <div className="mk-wrap mk-hero-stage">
+          <div className="mk-hero-copy">
+            <h1 id="mk-hero-title">Every row, accounted for.</h1>
+            <p className="mk-lead">
+              Datawrap moves data between databases, warehouses, files, and streams, and gives you a
+              statement for every run: what was read, what landed, what was held and why, and what a
+              rule skipped.
+            </p>
+            <div className="mk-actions">
+              <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+                {PRIMARY_CTA_LABEL}
               </button>
-              <button
-                type="button"
-                className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
-                onClick={() => onNavigate("pricing")}
-              >
-                See pricing
-              </button>
+              <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+                {SALES_CTA_LABEL}
+              </RouteLink>
             </div>
+          </div>
+          <div className="mk-hero-statement">
+            <StatementHero />
           </div>
         </div>
       </section>
-    </>
+
+      <ConnectorStrip />
+
+      <section className="mk-showcase mk-showcase--light" aria-labelledby="mk-showcase-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-showcase-title"
+            title="One workspace, from the plan to the proof"
+            lead="Every screen below is the product, rendered in code with one example workspace. Choose a part of the product to open it."
+          />
+          <ProductSwitcher />
+        </div>
+      </section>
+
+      <section className="mk-section mk-kit-sec" aria-labelledby="mk-bins-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-bins-title"
+            title="Where every row went"
+            lead="Each run sorts every row it read into one of three places. The statement only balances when they add up."
+          />
+          <RowBento />
+        </div>
+      </section>
+
+      <section className="mk-section mk-kit-sec mk-proven" aria-labelledby="mk-proven-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-proven-title"
+            title="What CI has proven"
+            lead={EVIDENCE_AS_OF ? `Counted from the CI evidence behind the connectors page, ${EVIDENCE_AS_OF}.` : "Counted from the CI evidence behind the connectors page."}
+          />
+          <StatRow
+            label="What CI and the product prove"
+            onNavigate={onNavigate}
+            items={[
+              {
+                figure: (
+                  <>
+                    {PROVEN_DRIVERS} <span className="mk-statrow-rel">of</span> {ALL_CONNECTORS.length}
+                  </>
+                ),
+                text: "drivers proven in CI",
+                route: "integrations",
+              },
+              ...(PROVEN_CDC_SOURCES.length
+                ? [{ figure: PROVEN_CDC_SOURCES.length, text: "databases with change data capture proven", route: "product-pipelines" as const }]
+                : []),
+              { figure: SYNC_MODES.length, text: "sync modes, CDC included", route: "solution-sync" },
+            ]}
+          />
+        </div>
+      </section>
+
+      <section className="mk-section mk-kit-sec" aria-labelledby="mk-different-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-different-title"
+            title="What a migration usually leaves to chance"
+            lead="Four gaps that scripts and spreadsheets leave open, and what Datawrap does on every run instead."
+          />
+          <dl className="mk-contrast">
+            <div className="mk-contrast-head" aria-hidden>
+              <span />
+              <span>Usually</span>
+              <span>With Datawrap</span>
+            </div>
+            {DIFFERENT.map((d) => (
+              <div key={d.title} className="mk-contrast-row">
+                <dt>{d.title}</dt>
+                <dd className="mk-contrast-without">
+                  <span className="mk-contrast-label">Usually: </span>
+                  {d.without}
+                </dd>
+                <dd className="mk-contrast-with">
+                  <span className="mk-contrast-label">With Datawrap: </span>
+                  {d.with}
+                  <span className="mk-different-where">You see it in {d.where}</span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
+
+      <section className="mk-section mk-section--band mk-kit-sec" aria-labelledby="mk-verdict-title">
+        <div className="mk-wrap">
+          <SplitHead
+            id="mk-verdict-title"
+            title="Five verdicts, and only one is called proven"
+            lead="Each table carries the comparison that actually ran: full checksum, key diff, sample, or count. The Trust Report turns it into a verdict a reviewer can sign, or says there is nothing to sign yet."
+          />
+          <ol className="mk-scale" aria-label="Trust Report verdicts, strongest first">
+            {VERDICTS.map((v) => (
+              <li key={v.name} className={`mk-scale-step mk-scale-step--${v.tone}`}>
+                <span className="mk-scale-name">{v.name}</span>
+                <span className="mk-scale-meaning">{v.meaning}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </section>
+
+      <MarketingClosing
+        title="Run your first statement on your own data"
+        body="Start with a free workspace and a table you know well, or ask for a scoped pilot on your own sources with a solutions engineer."
+        note={
+          <>
+            Or write to <a href="mailto:sales@datawrap.io">sales@datawrap.io</a>.{" "}
+            <RouteLink route="demos" onNavigate={onNavigate}>
+              Watch recorded runs
+            </RouteLink>
+          </>
+        }
+      >
+        <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+          Start free
+        </button>
+        <RouteLink route="contact" onNavigate={onNavigate} className="mk-btn mk-btn--secondary mk-btn--lg">
+          Request a pilot
+        </RouteLink>
+      </MarketingClosing>
+    </div>
   );
 }
 

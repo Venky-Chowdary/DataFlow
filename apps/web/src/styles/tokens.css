@@ -74,6 +74,18 @@
   --df-teal-400: #2dd4bf;
   --df-teal-500: #0d9488;
   --df-teal-600: #0f766e;
+  /* Public site (pass 4): the brand's own palette, taken from the logo.
+     Ink is the logo tile's deep teal, landed is teal, held is the amber
+     of the logo strap (deepened for text contrast), on cool paper. Every
+     value reuses one already in the system; night variants are derived. */
+  --df-paper: #f4f7f4;
+  --df-intaglio: var(--df-logo-tile);
+  --df-serial: #b45309;
+  --df-landed: #0f766e;
+  --df-paper-night: color-mix(in srgb, var(--df-intaglio) 44%, black);
+  --df-intaglio-light: color-mix(in srgb, var(--df-intaglio) 14%, white);
+  --df-serial-light: color-mix(in srgb, var(--df-serial) 55%, white);
+  --df-landed-light: color-mix(in srgb, var(--df-landed) 48%, white);
   --df-success: #059669;
   --df-success-bg: #ecfdf5;
   --df-success-border: rgba(5, 150, 105, 0.22);
@@ -710,12 +722,15 @@ body:has(.df2-app) #root {
 
 /* Dark theme — remap primitives only. Component rules keep reading --df-*.
    Opt-in via `data-theme="dark"` on <html>. Scoped with :has(.df2-app) so
-   marketing/login do not inherit workspace ink. Do not add a parallel dark
-   stylesheet; that is how overlap broke the shell. */
+   login does not inherit workspace ink; the public site (`.lp`, the
+   MarketingChrome root) takes the same remap so it follows the visitor's
+   Appearance preference. Do not add a parallel dark stylesheet; that is how
+   overlap broke the shell. */
 html[data-theme="dark"]:has(.df2-app),
 html[data-theme="dark"] .df2-app,
 html.df2-theme-dark:has(.df2-app),
-.df2-app.df2-theme-dark {
+.df2-app.df2-theme-dark,
+html[data-theme="dark"] .lp {
   color-scheme: dark;
   --df-bg-canvas: #0c1219;
   --df-bg-subtle: #121a24;

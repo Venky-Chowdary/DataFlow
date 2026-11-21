@@ -19,15 +19,17 @@ test("help articles exist for every registered id", () => {
   }
 });
 
-test("Team roles in Help match the product: Viewer / Editor / Admin", () => {
+test("Team roles in Help match the product: Viewer, Operator, Editor, Admin", () => {
   const help = readFileSync(path.join(SRC, "lib", "helpDocs.ts"), "utf8");
   const portal = readFileSync(path.join(SRC, "pages", "marketing", "DocsPortal.tsx"), "utf8");
-  assert.match(help, /Viewer \/ Editor \/ Admin/);
+  assert.match(help, /Viewer, Operator, Editor, Admin/);
+  assert.doesNotMatch(help, /one of three roles/);
   assert.match(help, /There is no Owner role/);
   assert.doesNotMatch(help, /Viewer \/ Editor \/ Owner/);
   assert.doesNotMatch(help, /\*\*Owner\*\* — everything Editors/);
   assert.doesNotMatch(portal, /Viewer \/ Editor \/ Owner/);
-  assert.match(portal, /Viewer \/ Editor \/ Admin/);
+  assert.doesNotMatch(portal, /Viewer \/ Editor \/ Admin/);
+  assert.match(portal, /four workspace roles/);
 });
 
 test("Help does not sell CDC as platform exactly-once", () => {
