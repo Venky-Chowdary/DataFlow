@@ -92,6 +92,7 @@ from services.type_system import (
     unsigned_integer_would_overflow,
     unsigned_signed_polarity_invent,
     uuid_carrier_is_dialect_equivalent,
+    snowflake_unbounded_text_alias,
     uuid_exact_wire_carrier,
     uuid_would_collapse,
     vector_dim_mismatch,
@@ -668,6 +669,21 @@ def assess_create_new_type_risk(
                     if typeless
                     else " — exact 36-char wire; UUID domain is not enforced at destination."
                 )
+            ),
+        })
+    if (
+        normalize_logical_type(src) == LOGICAL_UUID
+        and snowflake_unbounded_text_alias(tgt, db)
+    ):
+        # STRING / TEXT / VARCHAR are Snowflake's VARCHAR(16777216): every
+        # value lands exactly, as in VARCHAR(36); only the domain is unstated.
+        risks.append({
+            "kind": "uuid_carrier_equivalent",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt} on {db} (VARCHAR(16777216)) — "
+                "values round-trip exactly but the UUID domain and the 36-char "
+                "width are not enforced."
             ),
         })
     if objectid_would_collapse(src, tgt):

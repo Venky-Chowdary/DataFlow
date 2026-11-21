@@ -8396,8 +8396,8 @@ def test_redshift_scd2_current_is_true_not_svv_table_info(monkeypatch: pytest.Mo
     assert pop[HISTORY_ROWS_KEY] == 3
     current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
     assert current_sql
-    assert any("IS_CURRENT\" = TRUE" in sql.upper() for sql in current_sql)
-    assert all("IS TRUE" not in sql.upper() for sql in current_sql)
+    # Redshift (PostgreSQL grammar) has IS TRUE; only Snowflake lacks it (D47).
+    assert any("IS TRUE" in sql.upper() for sql in current_sql)
     assert all("= 1" not in sql for sql in current_sql)
     assert all("SVV_TABLE_INFO" not in sql.upper() for sql in engine.sql)
     assert all("to_regclass" not in sql.lower() for sql in engine.sql)

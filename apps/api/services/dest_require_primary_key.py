@@ -140,9 +140,28 @@ def _read_requirement(cfg: Mapping[str, Any]) -> PrimaryKeyRequirement:
             for variable in _REQUIRE_PK_VARIABLES:
                 value = None
                 try:
-                    cur.execute(f"SELECT @@{variable}")
-                    row = cur.fetchone()
-                    value = row[0] if row else None
+                    # Session is what this connection's CREATE obeys. GLOBAL is
+                    # what the next connection still enforces when a session
+                    # read comes back off (Aiven). Either ON is a requirement.
+                    # A privilege error on GLOBAL falls back to the session value.
+                    try:
+                        cur.execute(f"SELECT @@{variable}, @@GLOBAL.{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    except pymysql.err.MySQLError as global_exc:
+                        if _mysql_errno(global_exc) == _ER_UNKNOWN_SYSTEM_VARIABLE:
+                            raise
+                        cur.execute(f"SELECT @@{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    value = next(
+                        (
+                            item
+                            for item in values
+                            if item is not None and str(item).strip().upper() in {"1", "ON", "TRUE"}
+                        ),
+                        values[0] if values else None,
+                    )
                 except pymysql.err.MySQLError as exc:
                     if _mysql_errno(exc) != _ER_UNKNOWN_SYSTEM_VARIABLE:
                         logger.warning("require-primary-key probe: %s unreadable: %s",
@@ -343,6 +362,27 @@ def server_forces_primary_key_on(cursor: Any) -> tuple[bool, str]:
     return False, version
 
 
+def mysql_create_primary_key_message(exc: BaseException, *, table: str = "") -> str | None:
+    """Turn MySQL 3750 / MariaDB 1173 into the plan-time finding, or None otherwise.
+
+    Validate reads the server variable first and either carries the source key,
+    adds the approved surrogate, or blocks (``g_dest_requires_primary_key`` /
+    G6). This is the backstop when that probe did not run, or the operator did
+    not approve the surrogate, and CREATE itself is refused.
+    """
+    errno = _mysql_errno(exc)
+    if errno not in (3750, 1173):  # MySQL sql_require_primary_key / MariaDB innodb_force_primary_key
+        return None
+    name = table or "the destination table"
+    return (
+        f"The destination server refused CREATE TABLE {name} without a PRIMARY KEY "
+        f"({'MySQL error 3750, sql_require_primary_key' if errno == 3750 else 'MariaDB error 1173, innodb_force_primary_key'}). "
+        "Re-run Validate: it reads that setting and either carries the source key or "
+        f"discloses Datawrap's row key {SURROGATE_KEY_COLUMN} for your approval. Or run "
+        "upsert with a key, or create the table yourself with a primary key."
+    )
+
+
 @dataclass(frozen=True)
 class KeylessCreateDecision:
     """What Validate says about a CREATE on a server that forces a PRIMARY KEY.
@@ -500,3 +540,17 @@ def require_primary_key_gate(
             f"Have the DBA set {decision.variable}=OFF for this account",
         ],
     }
+
+
+def preflight_require_primary_key_gate(*, connected: bool, **kwargs: Any) -> dict[str, Any] | None:
+    """Validate's call: the gate, or None when the destination was not read.
+
+    A probe failure is logged, not raised: G6 still judges the CREATE.
+    """
+    if not connected:
+        return None
+    try:
+        return require_primary_key_gate(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("require-primary-key gate skipped: %s", exc, exc_info=exc)
+        return None

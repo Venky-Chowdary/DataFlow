@@ -48,7 +48,13 @@ import {
 import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
-import { inboxNeedsStudio, scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import {
+  inboxNeedsStudio,
+  NO_MAPPINGS_RUN_MESSAGE,
+  scheduleCreateOpensStudio,
+  scheduleNeedsStudio,
+  studioIntentFromSchedule,
+} from "../lib/scheduleApprovalCta";
 import { clearStudioRecovery } from "../lib/studioRecovery";
 import { readSession } from "../lib/session";
 import { getActiveWorkspaceId } from "../lib/workspace";
@@ -387,6 +393,24 @@ export function SchedulesPage({
     setSaving(false);
   };
 
+  /**
+   * Run now on a schedule with no column mappings (QA batch 1, PR #435): no
+   * job starts. The fix is Plan mappings (server-side mapping + Validate);
+   * Transfer Studio for that schedule is the second way out.
+   */
+  const explainNoMappings = async (sched: PipelineSchedule) => {
+    const plan = await confirm({
+      title: "Run now did not start a job",
+      message: NO_MAPPINGS_RUN_MESSAGE,
+      confirmLabel: "Plan mappings",
+      cancelLabel: "Not now",
+      secondaryLabel: "Open Transfer Studio",
+      onSecondary: () => openStudioFromSchedule(sched.id),
+      facts: [{ label: "Schedule", value: sched.name || sched.id }],
+    });
+    if (plan) await handlePlanMappings(sched);
+  };
+
   /** QA batch 1: arm a mapping-less schedule with the server-side plan. */
   const handlePlanMappings = async (sched: PipelineSchedule) => {
     if (!allowOrExplain(scheduleManage)) return;
@@ -458,6 +482,10 @@ export function SchedulesPage({
   const handleScheduleSync = async (id: string, mode: "sync" | "full") => {
     if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((row) => row.id === id);
+    if (sched && scheduleNeedsStudio(sched)) {
+      await explainNoMappings(sched);
+      return;
+    }
     const source = connectors.find((row) => row.id === sched?.source_connector_id);
     const dest = connectors.find((row) => row.id === sched?.dest_connector_id);
     setRunningId(id);
@@ -569,6 +597,9 @@ export function SchedulesPage({
    */
   const runSchedule = (id: string) => {
     const sched = schedules.find((row) => row.id === id);
+    // No mapping contract: say why no job starts and offer the fix before
+    // asking the API (which refuses it with 409 and the same sentence).
+    if (sched && scheduleNeedsStudio(sched)) return explainNoMappings(sched);
     return sched?.contract_id ? handleScheduleSync(id, "sync") : handleRunNow(id);
   };
 

@@ -37,8 +37,17 @@ def test_d72_uuid_exact_wire_on_snowflake_is_stated_not_held():
     risks = assess_create_new_type_risk("uuid", "VARCHAR(36)", destination_db_type="snowflake")
     assert risks, "the unenforced UUID domain must still be stated on Map"
     assert not _locking("uuid", "VARCHAR(36)", "snowflake")
-    # A bare VARCHAR is still an opaque-text collapse there.
-    assert _locking("uuid", "VARCHAR", "snowflake")
+    # Ruling (QA batch 1 / PR #435): a bare VARCHAR, STRING or TEXT on
+    # Snowflake is VARCHAR(16777216) — one type, graded the same: a lossless
+    # carrier (not held), not the exact-36 contract. A narrower bound still
+    # truncates a canonical UUID and is held.
+    wide = {
+        t: [r.get("kind") for r in assess_create_new_type_risk("uuid", t, destination_db_type="snowflake")]
+        for t in ("VARCHAR", "STRING", "TEXT", "VARCHAR(16777216)")
+    }
+    assert len({tuple(v) for v in wide.values()}) == 1, wide
+    assert not _locking("uuid", "VARCHAR", "snowflake")
+    assert _locking("uuid", "VARCHAR(32)", "snowflake")
 
 
 @pytest.fixture()

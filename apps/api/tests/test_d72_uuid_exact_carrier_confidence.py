@@ -60,8 +60,9 @@ def test_uuid_into_its_exact_wire_scores_like_identity(db, target_type, create_n
 
 @pytest.mark.parametrize("target_type", ["VARCHAR(255)", "STRING", "TEXT", "CHAR(32)"])
 def test_a_wider_or_unbounded_text_carrier_is_not_exact(target_type):
-    # These drop the 36-character contract (or truncate): the lossy-domain
-    # rules still report them; they must not be lifted into the exact band.
+    # These drop the 36-character contract (CHAR(32) also truncates): they
+    # must not be lifted into the exact band. Snowflake STRING / TEXT are its
+    # VARCHAR(16777216), a lossless carrier graded as such (test below).
     assert not is_exact_value_carrier("uuid", target_type, "snowflake")
     assert _score("snowflake", target_type, create_new=False)["confidence"] < 0.99
 
@@ -105,3 +106,36 @@ def test_create_new_plan_into_snowflake_scores_uuid_at_identity():
     assert str(sf.get("target_type")).upper() == "VARCHAR(36)", sf
     assert sf["confidence"] >= pg["confidence"], (sf, pg)
     assert not sf.get("requires_review")
+
+
+_SNOWFLAKE_TEXT_SPELLINGS = ["STRING", "TEXT", "VARCHAR", "VARCHAR(16777216)"]
+
+
+@pytest.mark.parametrize("create_new", [False, True])
+def test_snowflake_string_and_varchar_16777216_grade_identically(create_new):
+    """Ruling (QA batch 1 / PR #435): Snowflake STRING is VARCHAR(16777216).
+
+    Every spelling of that one type grades the same: a lossless carrier for a
+    canonical UUID (no truncation, no lossy-domain hold), and not the exact
+    36-character contract (below the exact band).
+    """
+    from services.type_coercion import is_precision_collapse_coercion
+    from services.type_system import is_lossy_coercion
+
+    graded = {
+        t: (
+            _score("snowflake", t, create_new=create_new)["confidence"],
+            _score("snowflake", t, create_new=create_new)["confidence_class"],
+            bool(_score("snowflake", t, create_new=create_new).get("requires_review")),
+            is_lossy_coercion("uuid", t, dest_db="snowflake"),
+            is_precision_collapse_coercion("uuid", t, dest_db="snowflake"),
+        )
+        for t in _SNOWFLAKE_TEXT_SPELLINGS
+    }
+    assert len(set(graded.values())) == 1, graded
+    conf, _cls, review, lossy, collapse = graded["STRING"]
+    assert not review and not lossy and not collapse
+    exact = _score("snowflake", "VARCHAR(36)", create_new=create_new)["confidence"]
+    assert conf <= exact
+    for t in _SNOWFLAKE_TEXT_SPELLINGS:
+        assert not is_exact_value_carrier("uuid", t, "snowflake")

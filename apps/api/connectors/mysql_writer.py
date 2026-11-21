@@ -101,6 +101,19 @@ class WriteResult(_WriteResult):
     driver: str = "pymysql"
 
 
+def _execute_mysql_create(cursor: Any, sql: str, table_name: str) -> None:
+    """CREATE, translating error 3750 into the plan-time primary-key finding."""
+    try:
+        cursor.execute(sql)
+    except Exception as exc:
+        from services.dest_require_primary_key import mysql_create_primary_key_message
+
+        message = mysql_create_primary_key_message(exc, table=table_name)
+        if message:
+            raise ValueError(message) from exc
+        raise
+
+
 def mysql_type(inferred: str) -> str:
     raw = materialize_dest_ddl("mysql", inferred)
     # MySQL 1064: bare VARCHAR/CHAR/BINARY need a width. LOGICAL_STRING is TEXT.
@@ -656,7 +669,6 @@ def _mysql_materialize_mapped_batch(
     )
 
 
-@writer_restore_guard
 def _plan_declares_primary_key(plan: Any) -> bool:
     if plan is None:
         return False
@@ -719,6 +731,7 @@ def _settle_forced_primary_key(
     return plan, column_sql
 
 
+@writer_restore_guard
 def write_mapped_rows(
     *,
     host: str,
@@ -1168,7 +1181,11 @@ def write_mapped_rows(
                     # later keyed upsert/quarantine replay needs.
                     from services.brand import new_marker_comment
 
-                    cursor.execute(f"{create_sql} COMMENT='{new_marker_comment(table_name)}'")
+                    _execute_mysql_create(
+                        cursor,
+                        f"{create_sql} COMMENT='{new_marker_comment(table_name)}'",
+                        table_name,
+                    )
                 _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
                     fidelity_plan,
                     dest_dialect="mysql",
@@ -1216,9 +1233,11 @@ def write_mapped_rows(
                     # later upserts/replays.
                     from services.brand import new_marker_comment
 
-                    cursor.execute(
+                    _execute_mysql_create(
+                        cursor,
                         f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}) "
-                        f"COMMENT='{new_marker_comment(table_name)}'"
+                        f"COMMENT='{new_marker_comment(table_name)}'",
+                        table_name,
                     )
                 _kwargs.setdefault(
                     "_schema_fidelity_report",

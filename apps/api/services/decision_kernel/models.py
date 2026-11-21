@@ -211,6 +211,21 @@ class DecisionArtifact:
             out["document_model_hash"] = self.document_model_hash
         return out
 
+    def matches_hash(self, approved: str | None) -> bool:
+        """``approved`` names this decision under the current or the legacy hash.
+
+        Validate stamps made before confidence left the hash (PR #435) carry
+        the legacy digest; they still name the same decision, so an upgrade
+        does not turn every stored schedule into "drift". A legacy stamp still
+        moves with confidence, exactly as it always did.
+        """
+        want = str(approved or "").strip().lower()
+        if not want:
+            return False
+        if self.content_hash and want == self.content_hash.lower():
+            return True
+        return want == legacy_content_hash(self.to_dict())
+
     def to_json(self, *, indent: int | None = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True) + (
             "\n" if indent is not None else ""
@@ -226,13 +241,50 @@ def _drop_empty(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Clock and signature fields of the artifact itself, and planner estimates on
+# each mapping row. A later scoring pass must not make an unchanged Map look
+# like drift. Structural identity is the source fingerprint, column types,
+# DDL, sync mode, error policy, keys, and transforms. Only those two levels
+# are stripped: a nested name-keyed dict (``ddl.column_ddl``) keeps a column
+# literally named ``created_at`` or ``score`` in the hash.
+_ARTIFACT_CLOCK_KEYS = frozenset({
+    "content_hash",
+    "policy_signature",
+    "created_at",
+    "artifact_id",
+})
+_MAPPING_ESTIMATE_KEYS = frozenset({
+    "confidence",
+    "calibration_reason",
+    "score",
+    "score_gap",
+    "alternatives",
+})
+
+
+def _structural_hash_body(payload: Mapping[str, Any]) -> dict[str, Any]:
+    body = {k: v for k, v in payload.items() if str(k) not in _ARTIFACT_CLOCK_KEYS}
+    rows = body.get("mappings")
+    if isinstance(rows, (list, tuple)):
+        body["mappings"] = [
+            {k: v for k, v in row.items() if str(k) not in _MAPPING_ESTIMATE_KEYS}
+            if isinstance(row, Mapping)
+            else row
+            for row in rows
+        ]
+    return body
+
+
+def legacy_content_hash(payload: Mapping[str, Any]) -> str:
+    """The digest stamped before PR #435 (confidence and estimates included)."""
+    body = {k: v for k, v in payload.items() if str(k) not in _ARTIFACT_CLOCK_KEYS}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """Stable SHA-256 over canonical JSON (excludes content_hash / signatures)."""
-    body = {
-        k: v
-        for k, v in payload.items()
-        if k not in {"content_hash", "policy_signature", "created_at", "artifact_id"}
-    }
+    """Stable SHA-256 over the structural decision (not confidence or clocks)."""
+    body = _structural_hash_body(payload)
     raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -392,7 +444,11 @@ def decision_artifact_from_dict(data: Mapping[str, Any]) -> DecisionArtifact:
         document_model_hash=str(data.get("document_model_hash") or ""),
     )
     expected = compute_content_hash(art.to_dict())
-    if art.content_hash and art.content_hash != expected:
+    if (
+        art.content_hash
+        and art.content_hash != expected
+        and art.content_hash.lower() != legacy_content_hash(art.to_dict())
+    ):
         raise ValueError(
             "decision artifact content_hash mismatch — refuse tampered/stale artifact"
         )

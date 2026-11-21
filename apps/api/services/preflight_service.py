@@ -399,11 +399,7 @@ def run_file_preflight(
     staged = staged_preflight_for_bound()
     if staged is not None:
         return staged
-    from services.schema_drift import (
-        PROPAGATE_POLICIES,
-        destination_evolution_approved,
-        effective_schema_policy,
-    )
+    from services.schema_drift import PROPAGATE_POLICIES, effective_schema_policy
     from services.timezone_policy import declared_source_column_types
 
     # ``backfill_new_fields`` is a request for propagate. Resolved once so
@@ -815,13 +811,18 @@ def run_file_preflight(
     # since Validate" compares it with the live table at Execute, which has not
     # been ALTERed yet.
     live_destination_types = dict(destination_column_types or {})
+    from services.managed_table import evolution_allowed
+
     if (
         destination_table_exists is True
         and not dest_recreated
         and destination_column_types
         and dest_declares_column_ddl(destination_db_type)
-        and destination_evolution_approved(
-            schema_policy, acknowledged=schema_drift_acknowledged
+        and evolution_allowed(  # propagate / acknowledged, or DW-D334 on a Datawrap table
+            str(destination_db_type or ""), destination_config, schema_policy=schema_policy,
+            acknowledged=bool(schema_drift_acknowledged), table=str(destination_table or ""),
+            schema=str((destination_config or {}).get("schema") or ""),
+            table_exists=destination_table_exists, dest_recreated=bool(dest_recreated),
         )
     ):
         from services.schema_drift import (
@@ -2218,30 +2219,15 @@ def run_file_preflight(
         can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
         destination_table=str(destination_table or ""), mappings=write_maps,
     )
-    # D396 / D377: a server that forces a PRIMARY KEY and a source with none —
-    # Datawrap's surrogate row key, only on the operator's DDL approval.
-    require_pk_gate: dict[str, Any] | None = None
-    if destination_connected:
-        try:
-            from services.dest_require_primary_key import require_primary_key_gate
+    from services.dest_require_primary_key import preflight_require_primary_key_gate
 
-            require_pk_gate = require_primary_key_gate(
-                acknowledged=bool(ddl_changes_acknowledged),
-                destination_table=str(destination_table or ""),
-                dest_db_type=destination_db_type,
-                destination_config=destination_config,
-                table_exists=dest_table_exists,
-                sync_mode=sync_mode,
-                key_hint=contract_primary_key or ",".join(destination_pk_columns or []),
-                mappings=write_maps,
-                source={
-                    "config": source_config,
-                    "connector_id": source_connector_id,
-                    "table": source_table,
-                },
-            )
-        except Exception as _rpk_exc:  # noqa: BLE001 — G6 still judges the CREATE
-            logger.warning("require-primary-key gate skipped: %s", _rpk_exc, exc_info=_rpk_exc)
+    require_pk_gate = preflight_require_primary_key_gate(  # D396 / D377 surrogate approval
+        connected=bool(destination_connected), acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""), dest_db_type=destination_db_type,
+        destination_config=destination_config, table_exists=dest_table_exists, sync_mode=sync_mode,
+        key_hint=contract_primary_key or ",".join(destination_pk_columns or []), mappings=write_maps,
+        source={"config": source_config, "connector_id": source_connector_id, "table": source_table},
+    )
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )

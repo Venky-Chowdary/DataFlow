@@ -29,6 +29,7 @@ def test_pg_bitstring_carriers_preserved():
     assert normalize_logical_type("BIT(32)") == "binary"
     assert normalize_logical_type("BIT(1)") == "boolean"
     assert is_bitstring_carrier("BIT(32)") is True
+    # BIT(1) stays boolean polarity. MySQL CREATE spells BIT(1) separately.
     assert is_bitstring_carrier("BIT(1)") is False
     assert parse_bitstring_width("BIT VARYING(16)") == 16
 
@@ -37,6 +38,9 @@ def test_bitstring_ddl_not_bytea():
     assert ddl_type("postgresql", "BIT(32)") == "BIT(32)"
     assert ddl_type("postgresql", "BIT VARYING(16)") == "BIT VARYING(16)"
     assert ddl_type("mysql", "BIT(32)") == "BIT(32)"
+    assert ddl_type("mysql", "BIT(1)") == "BIT(1)"
+    # Varying bit strings land as 0/1 digit text on MySQL (D320), never BIT(n).
+    assert ddl_type("mysql", "BIT VARYING(16)") == "VARCHAR(16)"
     # Engines without bitstring → VARCHAR of 0/1 digits, never BYTEA invent.
     assert "BYTEA" not in ddl_type("snowflake", "BIT(32)").upper()
     assert "BINARY" not in ddl_type("snowflake", "BIT(32)").upper()
@@ -59,6 +63,14 @@ def test_bitstring_wire_and_quarantine():
         assert "0/1" in str(exc)
     assert normalize_sql_bind_value("1010", "BIT(4)", engine="postgresql") == "1010"
 
+    # Short BIT(n) is refused on the shared path (PostgreSQL pads on the right).
+    try:
+        coerce_bitstring_wire("10", width=4)
+        raise AssertionError("expected length refusal")
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+    # ASCII bytes are the integer, not bit text: b'1' is 49, not the bit 1.
+    assert coerce_bitstring_wire(b"1", width=None) == "00110001"
     details: list[dict] = []
     out = quarantine_unfit_bitstrings(
         [("1010",), ("YWJj",), ("10",)],

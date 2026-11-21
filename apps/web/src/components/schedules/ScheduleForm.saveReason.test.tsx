@@ -21,7 +21,7 @@ function schedule(over: Partial<PipelineSchedule> = {}): PipelineSchedule {
     id: "sch_1", name: "Nightly orders", source_connector_id: "src", source_table: "orders",
     dest_connector_id: "dst", dest_table: "orders_copy", interval: "daily", cron: "", timezone: "UTC",
     sync_mode: "incremental_append", validation_mode: "strict", schema_policy: "manual_review",
-    backfill_new_fields: false, cursor_column: "", primary_key: "", cursor_value: "", workspace_id: "ws1",
+    backfill_new_fields: false, cursor_column: "updated_at", primary_key: "", cursor_value: "", workspace_id: "ws1",
     max_retries: 0, retry_backoff_seconds: 60, notify_on_failure: true, notify_on_success: false,
     enabled: true, last_run_at: null, next_run_at: null, last_job_id: null, last_status: null,
     run_count: 0, running: false, created_at: "2026-11-01T00:00:00Z", duplicate_policy: "upsert",
@@ -47,6 +47,34 @@ describe("schedule form: why Save is disabled (D344)", () => {
     );
     assert.doesNotMatch(html, /sched-save-why/);
     assert.doesNotMatch(html, /aria-invalid="true"/);
+  });
+
+  it("an edit of a planned incremental schedule names the missing cursor column (Validate g9 needs it)", () => {
+    const html = renderToStaticMarkup(
+      <ScheduleForm connectors={connectors} intervals={null} initial={schedule({ primary_key: "id", cursor_column: "" })} onSubmit={() => {}} onCancel={() => {}} />,
+    );
+    assert.match(html, /id="sched-save-why"[^>]*>To save: enter the cursor column \(incremental_append advances on it\)\.</);
+    assert.match(html, /Cursor column \(required\)/);
+    assert.match(html, /id="sched-cursor"[^>]*aria-invalid="true"/);
+  });
+
+  it("a mapping-less incremental schedule is planned by the server, so the cursor does not block Save", () => {
+    const html = renderToStaticMarkup(
+      <ScheduleForm connectors={connectors} intervals={null}
+        initial={schedule({ primary_key: "id", cursor_column: "", mappings: [], mapping_count: 0 })}
+        onSubmit={() => {}} onCancel={() => {}} />,
+    );
+    assert.doesNotMatch(html, /sched-save-why/);
+    assert.doesNotMatch(html, /Cursor column \(required\)/);
+  });
+
+  it("CDC never requires a cursor column (the change log is the position)", () => {
+    const html = renderToStaticMarkup(
+      <ScheduleForm connectors={connectors} intervals={{ sync_modes: ["cdc"] } as never}
+        initial={schedule({ primary_key: "id", cursor_column: "", sync_mode: "cdc" })}
+        onSubmit={() => {}} onCancel={() => {}} />,
+    );
+    assert.doesNotMatch(html, /enter the cursor column/);
   });
 
   it("an append schedule does not require a key", () => {

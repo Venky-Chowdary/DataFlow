@@ -169,6 +169,9 @@ def test_sql_bool_predicates_numeric_vs_ansi():
     assert sql_bool_is_not_true("snowflake", "c") == "(c IS NULL OR c = FALSE)"
     assert sql_bool_true_literal("snowflake") == "TRUE"
     assert sql_bool_false_literal("snowflake") == "FALSE"
+    # Quoted SCD2 / mirror columns keep their quoting (#435).
+    assert sql_bool_is_true("snowflake", '"is_current"') == '"is_current" = TRUE'
+    assert sql_bool_is_not_true("snowflake", '"_deleted"') == '("_deleted" IS NULL OR "_deleted" = FALSE)'
 
 
 def test_quote_matrix_no_postgres_leak():

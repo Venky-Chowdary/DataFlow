@@ -12,6 +12,7 @@ import { ContractBindField } from "../contracts/ContractBindField";
 import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
 import {
   scheduleCreatePlanFields,
+  scheduleCursorRequired,
   schedulePrimaryKeyRequired,
   scheduleSaveBlockedReason,
   scheduleSaveBlockers,
@@ -315,8 +316,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     return `Up to ${maxRetries} retr${maxRetries === 1 ? "y" : "ies"} — linear backoff before attempts: ${delays.join(", ")}${suffix}.`;
   }, [maxRetries, retryBackoff]);
 
-  // One answer for "can this be saved?" and "what is missing?" (QA D344):
-  // the disabled Save button says why, and the field it needs is marked.
+  // One answer for "can this be saved?" and "what is missing?" (QA D344,
+  // PR #435): the disabled Save button says why, and the field it needs is
+  // marked. The rules mirror the API (lib/scheduleFormReadiness.ts).
+  const serverPlans = !isEdit || mappingCount <= 0;
   const saveBlockers = scheduleSaveBlockers({
     name,
     sourceId,
@@ -331,13 +334,21 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     duplicatePolicy,
     primaryKey,
     contractBlock,
+    cursorColumn: showCursor ? cursorColumn : "",
+    sourceType: String(sourceConnector?.type ?? ""),
+    serverPlans,
   });
   const canSubmit = saveBlockers.length === 0;
   const saveBlockedReason = connectors.length < 2
     ? "To save: add a source and a destination connection first."
     : scheduleSaveBlockedReason(saveBlockers);
   const missingField = new Set(saveBlockers.map((b) => b.field));
-  const primaryKeyRequired = schedulePrimaryKeyRequired(syncMode, duplicatePolicy);
+  const primaryKeyRequired = schedulePrimaryKeyRequired(duplicatePolicy);
+  const cursorRequired = showCursor && scheduleCursorRequired({
+    syncMode,
+    sourceType: String(sourceConnector?.type ?? ""),
+    serverPlans,
+  });
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -632,11 +643,25 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <div className="df2-form-row df2-sched-cursor-row">
             {showCursor && (
               <div className="df2-field">
-                <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
-                <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
+                <label className="df2-label" htmlFor="sched-cursor">
+                  Cursor column{cursorRequired ? " (required)" : ""}
+                </label>
+                <input
+                  id="sched-cursor"
+                  className="df2-input"
+                  value={cursorColumn}
+                  onChange={(e) => setCursorColumn(e.target.value)}
+                  placeholder="updated_at"
+                  required={cursorRequired}
+                  aria-required={cursorRequired}
+                  aria-invalid={missingField.has("sched-cursor") || undefined}
+                />
                 <span className="df2-field-hint">
-                  Watermark column tracked between runs for incremental / CDC sync. Optional here: when it
-                  is empty, planning picks the table's single change-time column or tells you to name one.
+                  {syncMode === "cdc"
+                    ? "Optional for CDC: the change log is the position, so Validate does not need a column."
+                    : cursorRequired
+                      ? "Watermark column tracked between runs. Required: this schedule replays its saved plan, and Validate refuses incremental without one."
+                      : "Watermark column tracked between runs for incremental sync. Optional here: when it is empty, planning picks the table's single change-time column or tells you to name one."}
                 </span>
               </div>
             )}
@@ -674,11 +699,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   aria-invalid={missingField.has("sched-pk") || undefined}
                 />
                 <span className="df2-field-hint">
-                  {syncMode === "scd2"
-                    ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
+                  {(syncMode === "scd2"
+                    ? "SCD2 versions by this business key."
                     : syncMode === "mirror"
-                      ? `Required for mirror sync. ${mirrorDeleteText(contractsDeleteMode(initial?.stream_contracts))}`
-                      : "Enables dedupe / upsert into the destination."}
+                      ? `Mirror matches rows by this key. ${mirrorDeleteText(contractsDeleteMode(initial?.stream_contracts))}`
+                      : "Enables dedupe / upsert into the destination.")
+                    + (primaryKeyRequired
+                      ? " Required unless Duplicate policy is Append."
+                      : syncMode === "scd2" || syncMode === "mirror"
+                        ? " Empty uses the source table's primary key; Validate refuses when there is none."
+                        : "")}
                 </span>
               </div>
             )}
@@ -1055,6 +1085,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           loading={saving}
           loadingLabel="Saving…"
           disabled={saving || !canSubmit || connectors.length < 2}
+          title={saveBlockedReason || undefined}
           aria-describedby={saveBlockedReason ? "sched-save-why" : undefined}
         >
           {isEdit ? "Save changes" : "Save schedule"}

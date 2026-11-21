@@ -166,6 +166,189 @@ def build_artifact_from_mappings(
     )
 
 
+_INT_DISPLAY_WIDTH = re.compile(
+    r"^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)\s*\(\s*\d+\s*\)$",
+    re.I,
+)
+
+
+def _ddl_compare_token(type_sql: str) -> str:
+    """Physical DDL token for planned-vs-live equality.
+
+    Case, charset, and MySQL integer display widths are spelling. Width and
+    scale of character and decimal types stay, so VARCHAR(40) is not VARCHAR(80).
+    """
+    text = re.sub(r"\s+", " ", str(type_sql or "").strip())
+    text = re.sub(
+        r"\s+(?:CHARACTER\s+SET|CHARSET|COLLATE)\s+\S+",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = text.upper().strip()
+    # MySQL reports BOOLEAN as tinyint(1) and sometimes BIT(1). JSON is json.
+    if re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}:
+        return "BOOLEAN"
+    if text in {"JSON", "JSONB"}:
+        return "JSON"
+    shown = _INT_DISPLAY_WIDTH.match(text)
+    if shown:
+        base = shown.group(1).upper()
+        return "INT" if base in {"INTEGER", "INT4"} else ("BIGINT" if base == "INT8" else base)
+    head, sep, rest = text.partition("(")
+    head = {
+        "NUMERIC": "DECIMAL",
+        "NUMBER": "DECIMAL",
+        "CHARACTER VARYING": "VARCHAR",
+        "CHAR VARYING": "VARCHAR",
+        "INTEGER": "INT",
+        "INT4": "INT",
+        "INT8": "BIGINT",
+        "BOOL": "BOOLEAN",
+        "CHARACTER": "CHAR",
+    }.get(head.strip(), head.strip())
+    if head in {"TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT"}:
+        return head
+    return f"{head}({rest}" if sep else head
+
+
+def planned_ddl_matches_live(
+    planned: Mapping[str, str] | None,
+    live: Mapping[str, str] | None,
+) -> bool:
+    """True when the live table is exactly the DDL this plan would create.
+
+    Same column set, same carrier. An added column or a widened VARCHAR is
+    drift. Empty on either side is not a match.
+    """
+    if not planned or not live:
+        return False
+    want = {
+        str(name).strip().lower(): _ddl_compare_token(typ)
+        for name, typ in planned.items()
+        if str(name).strip()
+    }
+    have = {
+        str(name).strip().lower(): _ddl_compare_token(typ)
+        for name, typ in live.items()
+        if str(name).strip()
+    }
+    if not want or set(want) != set(have):
+        return False
+    return all(want[name] == have[name] for name in want)
+
+
+def _planned_create_still_holds(
+    *,
+    planned: dict[str, str],
+    live_column_types: dict[str, str] | None,
+    destination_table_exists: bool | None,
+    mappings: list[dict[str, Any]] | None,
+    dest_column_names: list[str] | None,
+    source_column_names: list[str] | None,
+    column_nullability: dict[str, bool] | None,
+    column_defaults: dict[str, str] | None,
+    identity_columns: list[str] | None,
+    generated_columns: list[str] | None,
+    schema_policy: str,
+) -> tuple[bool, str]:
+    """(holds, shape_error). Shape error is a real contract break.
+
+    Holds only when the destination exists and its columns are exactly the
+    planned DDL. A type or column someone else changed does not hold.
+    """
+    if destination_table_exists is not True:
+        return False, ""
+    if not planned_ddl_matches_live(planned, live_column_types):
+        return False, ""
+    shape_err = dest_exists_shape_error(
+        mappings=mappings,
+        dest_column_names=dest_column_names or list((live_column_types or {}).keys()),
+        source_column_names=source_column_names,
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+        schema_policy=schema_policy,
+    )
+    if shape_err:
+        return False, shape_err
+    return True, ""
+
+
+def _policy_propagates(schema_policy: str | None) -> bool:
+    return str(schema_policy or "").strip().lower() in {"propagate_columns", "propagate_all"}
+
+
+def dest_exists_shape_error(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    dest_column_names: list[str] | None,
+    source_column_names: list[str] | None,
+    column_nullability: dict[str, bool] | None = None,
+    column_defaults: dict[str, str] | None = None,
+    identity_columns: list[str] | None = None,
+    generated_columns: list[str] | None = None,
+    schema_policy: str = "",
+) -> str:
+    """Shape refusals after dest exists. Empty string means the Map still holds.
+
+    ``propagate_columns`` adopts a new source column instead of parking the
+    run on "extra source column(s) unaccounted" (DW-D344). Propagation off
+    still parks. NOT NULL holes and false friends stay refusals either way.
+    """
+    maps = [m for m in (mappings or []) if isinstance(m, dict)]
+    dests = [str(c) for c in (dest_column_names or []) if str(c).strip()]
+    dest_l = {_norm_col(c) for c in dests}
+    for m in write_mappings(maps):
+        tgt = str(m.get("target") or "").strip()
+        if tgt and _norm_col(tgt) not in dest_l:
+            return (
+                "Decision Artifact dest schema drifted since Validate — "
+                "mapped column missing after dest exists. Re-run Validate before Execute."
+            )
+    sources = [str(c) for c in (source_column_names or []) if str(c).strip()] or [
+        str(m.get("source") or "").strip()
+        for m in maps
+        if str(m.get("source") or "").strip()
+    ]
+    verdict = classify_dest_exists_shape(
+        destination_table_exists=True,
+        source_columns=sources,
+        dest_columns=dests,
+        mappings=maps,
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+    )
+    shape = str(verdict.get("shape") or "")
+    if shape in {SHAPE_CREATE_NEW, SHAPE_UNKNOWN, SHAPE_PENDING}:
+        return (
+            "Destination existence unproven — not treating as create-new. "
+            "Reload destination schema before Execute."
+        )
+    unfilled = list(verdict.get("unfilled_required") or [])
+    if unfilled:
+        return (
+            "Decision Artifact dest schema drifted since Validate — dest-only "
+            f"NOT NULL without a mapping: {', '.join(unfilled[:6])}. Re-run Validate."
+        )
+    unaccounted = list(verdict.get("unaccounted_sources") or [])
+    if unaccounted and not _policy_propagates(schema_policy):
+        return (
+            "Decision Artifact dest schema drifted since Validate — extra source "
+            f"column(s) unaccounted: {', '.join(unaccounted[:6])}. Re-run Validate."
+        )
+    false_friends = list(verdict.get("false_friend_sources") or [])
+    if false_friends:
+        return (
+            "Decision Artifact dest schema drifted since Validate — false-friend "
+            f"column(s): {', '.join(false_friends[:6])}. Re-run Validate."
+        )
+    return ""
+
+
 def create_new_validate_holds_after_dest_exists(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -186,6 +369,7 @@ def create_new_validate_holds_after_dest_exists(
     generated_columns: list[str] | None = None,
     tenant_id: str = "",
     route_id: str = "",
+    schema_policy: str = "",
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -244,7 +428,7 @@ def create_new_validate_holds_after_dest_exists(
                     artifact_id="da_inline",
                     created_at="1970-01-01T00:00:00+00:00",
                 )
-                if create_new.content_hash.lower() == approved:
+                if create_new.matches_hash(approved):
                     matched = True
                     break
             if matched:
@@ -253,58 +437,18 @@ def create_new_validate_holds_after_dest_exists(
             break
     if not matched:
         return False, ""
-    dest_l = {_norm_col(c) for c in dests}
-    for m in write_mappings(maps):
-        tgt = str(m.get("target") or "").strip()
-        if tgt and _norm_col(tgt) not in dest_l:
-            return (
-                False,
-                "Decision Artifact dest schema drifted since Validate — "
-                "mapped column missing after dest exists. Re-run Validate before Execute.",
-            )
-    sources = [str(c) for c in (source_column_names or []) if str(c).strip()] or [
-        str(m.get("source") or "").strip()
-        for m in maps
-        if str(m.get("source") or "").strip()
-    ]
-    verdict = classify_dest_exists_shape(
-        destination_table_exists=True,
-        source_columns=sources,
-        dest_columns=dests,
+    shape_err = dest_exists_shape_error(
         mappings=maps,
+        dest_column_names=dests,
+        source_column_names=source_column_names,
         column_nullability=column_nullability,
         column_defaults=column_defaults,
         identity_columns=identity_columns,
         generated_columns=generated_columns,
+        schema_policy=schema_policy,
     )
-    shape = str(verdict.get("shape") or "")
-    if shape in {SHAPE_CREATE_NEW, SHAPE_UNKNOWN, SHAPE_PENDING}:
-        return (
-            False,
-            "Destination existence unproven — not treating as create-new. "
-            "Reload destination schema before Execute.",
-        )
-    unfilled = list(verdict.get("unfilled_required") or [])
-    if unfilled:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — dest-only "
-            f"NOT NULL without a mapping: {', '.join(unfilled[:6])}. Re-run Validate.",
-        )
-    unaccounted = list(verdict.get("unaccounted_sources") or [])
-    if unaccounted:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — extra source "
-            f"column(s) unaccounted: {', '.join(unaccounted[:6])}. Re-run Validate.",
-        )
-    false_friends = list(verdict.get("false_friend_sources") or [])
-    if false_friends:
-        return (
-            False,
-            "Decision Artifact dest schema drifted since Validate — false-friend "
-            f"column(s): {', '.join(false_friends[:6])}. Re-run Validate.",
-        )
+    if shape_err:
+        return False, shape_err
     return True, ""
 
 
@@ -330,6 +474,10 @@ def enforce_decision_artifact(
     column_defaults: dict[str, str] | None = None,
     identity_columns: list[str] | None = None,
     generated_columns: list[str] | None = None,
+    approved_ddl_identity_hash: str = "",
+    schema_policy: str = "",
+    live_column_types: dict[str, str] | None = None,
+    plan_created_destination: bool = False,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -363,6 +511,7 @@ def enforce_decision_artifact(
             generated_columns=generated_columns,
             tenant_id=tenant_id,
             route_id=route_id,
+            schema_policy=schema_policy,
         )
 
     if artifact_payload:
@@ -397,12 +546,92 @@ def enforce_decision_artifact(
                     None,
                 )
             if dest_fp and supplied.dest_fingerprint != dest_fp:
+                if live_column_types and not planned_ddl_matches_live(
+                    dict(supplied.ddl.column_ddl or {}), live_column_types
+                ):
+                    return (
+                        "Decision Artifact dest schema drifted since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
                 if not supplied.dest_fingerprint:
                     holds, hold_err = _dest_exists_hold(supplied.content_hash)
                     if holds:
                         return (None, supplied)
                     if hold_err:
                         return (hold_err, None)
+                # These checks run before any create-new exception. A changed
+                # source fingerprint, sync mode, error policy, or approved
+                # hash is drift even when the live columns still match.
+                if (
+                    src_fp
+                    and supplied.source_fingerprint
+                    and supplied.source_fingerprint != src_fp
+                ):
+                    return (
+                        "Decision Artifact source schema drifted since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if (
+                    sync_mode
+                    and supplied.sync_mode
+                    and sync_mode != supplied.sync_mode
+                ):
+                    return (
+                        "Decision Artifact sync_mode changed since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if (
+                    error_policy
+                    and supplied.error_policy
+                    and error_policy != supplied.error_policy
+                ):
+                    return (
+                        "Decision Artifact error_policy changed since Validate — "
+                        "re-run Validate before Execute.",
+                        None,
+                    )
+                if approved and not supplied.matches_hash(approved):
+                    return (
+                        "Decision Artifact content_hash does not match approved hash — "
+                        "refuse write.",
+                        None,
+                    )
+                source_same = (supplied.source_fingerprint or "") == (src_fp or "")
+                mode_same = (not sync_mode) or sync_mode == (supplied.sync_mode or sync_mode)
+                policy_same = (not error_policy) or error_policy == (
+                    supplied.error_policy or error_policy
+                )
+                hash_same = (not approved) or supplied.matches_hash(approved)
+                # DW-D407: only a create-new plan (empty dest fingerprint) whose
+                # table this job created, and only after the checks above.
+                if (
+                    not supplied.dest_fingerprint
+                    and plan_created_destination
+                    and source_same
+                    and mode_same
+                    and policy_same
+                    and hash_same
+                ):
+                    held, shape_err = _planned_create_still_holds(
+                        planned=dict(supplied.ddl.column_ddl or {}),
+                        live_column_types=live_column_types,
+                        destination_table_exists=destination_table_exists,
+                        mappings=mappings,
+                        dest_column_names=dest_column_names,
+                        source_column_names=source_column_names,
+                        column_nullability=column_nullability,
+                        column_defaults=column_defaults,
+                        identity_columns=identity_columns,
+                        generated_columns=generated_columns,
+                        schema_policy=schema_policy,
+                    )
+                    if shape_err:
+                        return (shape_err, None)
+                    if held:
+                        return (None, supplied)
                 return (
                     "Decision Artifact dest schema drifted since Validate — "
                     "re-run Validate before Execute.",
@@ -414,7 +643,7 @@ def enforce_decision_artifact(
                     "re-run Validate before Execute.",
                     None,
                 )
-            if approved and approved != supplied.content_hash.lower():
+            if approved and not supplied.matches_hash(approved):
                 return (
                     "Decision Artifact content_hash does not match approved hash — "
                     "refuse write.",
@@ -462,7 +691,7 @@ def enforce_decision_artifact(
     if approved:
         for rid in route_candidates:
             candidate = _rebuild(rid, dest_fp_now)
-            if approved == candidate.content_hash.lower():
+            if candidate.matches_hash(approved):
                 return (None, candidate)
         holds, hold_err = _dest_exists_hold(approved)
         if holds:
