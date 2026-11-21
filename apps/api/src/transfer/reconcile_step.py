@@ -4906,6 +4906,14 @@ def _stamp_uniform_draw(
         and sample_compare.get("alignment") == "keyed"
     ):
         return sample_compare
+    if (dest_summary or {}).get("resumed_checkpoint_rows") and draw.get("covers_whole_run") is not True:
+        # T3: a resumed run whose draw did not carry over covers only the
+        # rows written after the resume; no bound is stated for the table.
+        return {**sample_compare, "uniform_draw_incomplete": {
+            "drawn_rows": int(draw.get("drawn_rows") or 0),
+            "reason": "the run resumed from a checkpoint without its sample draw, so the "
+                      "draw covers only the rows written after the resume",
+        }}
     drawn = len(sample_records or [])
     covered = int(sample_compare.get("rows_compared") or 0) + int(
         sample_compare.get("rows_excluded_quarantined") or 0

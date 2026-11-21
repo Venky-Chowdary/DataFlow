@@ -574,6 +574,11 @@ def _project_operator_quarantine(job: dict) -> None:
             )
         if isinstance(checkpoint.get("reconcile_sample"), list):
             checkpoint["reconcile_sample"] = _shown_wire_sample(checkpoint["reconcile_sample"])
+        draw_state = checkpoint.get("reconcile_sample_draw_state")
+        if isinstance(draw_state, dict) and isinstance(draw_state.get("rows"), list):
+            checkpoint["reconcile_sample_draw_state"] = {
+                **draw_state, "rows": _shown_wire_sample(draw_state["rows"])
+            }
 
 
 def _confined_source_path(raw: object) -> str:

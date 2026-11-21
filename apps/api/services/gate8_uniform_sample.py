@@ -61,6 +61,9 @@ class UniformSampleMerger:
         self.k = max(int(k), 0)
         self.population = 0
         self.rows: list[Any] = []
+        #: True when this run resumed without the earlier pages' draw: the
+        #: sample then covers only the rows written after the resume (T3).
+        self.partial = False
 
     def add(self, idx: int, page_sample: list[Any], page_rows: int) -> None:
         """Merge page ``idx``'s uniform sample (of ``page_rows`` rows) into the running one."""
@@ -81,4 +84,43 @@ class UniformSampleMerger:
 
     def draw_record(self, draw: dict[str, Any]) -> dict[str, Any]:
         """What Gate-8 and the Trust Report need to know about this draw."""
-        return {**draw, "population_rows": self.population, "drawn_rows": len(self.rows)}
+        return {
+            **draw, "population_rows": self.population, "drawn_rows": len(self.rows),
+            "covers_whole_run": not self.partial,
+        }
+
+    def state(self, draw: dict[str, Any], chunk_index: int) -> dict[str, Any]:
+        """The checkpointed draw after page ``chunk_index``: enough to continue it."""
+        return {
+            **draw, "population_rows": self.population, "rows": list(self.rows),
+            "chunk_index": int(chunk_index), "partial": self.partial,
+        }
+
+
+def resume_draw(checkpoint: Any, k: int, *, resumed: bool) -> tuple[dict[str, Any], UniformSampleMerger]:
+    """``(draw, merger)`` for this pass: the checkpoint's draw when resuming (T3).
+
+    A resumed pass continues the seed, population and rows the checkpoint
+    carried, so the sample is still uniform over every row the run offered
+    the writer. A resumed pass without that state starts a draw over the new
+    pages only and is marked ``partial``: it is not reported as uniform over
+    the run, and no bound is stated for it.
+    """
+    state = getattr(checkpoint, "reconcile_sample_draw_state", None) if resumed else None
+    if (
+        isinstance(state, dict) and state.get("seed") and state.get("method") == METHOD
+        and not state.get("partial")
+        # Saved with the same page as the resume point: an older copy (the
+        # job document lagging the sidecar token) would miss pages.
+        and state.get("chunk_index") is not None
+        and int(state["chunk_index"]) == int(getattr(checkpoint, "chunk_index", 0) or 0)
+    ):
+        draw = {key: state[key] for key in ("method", "seed", "size", "algorithm") if key in state}
+        merger = UniformSampleMerger(str(state["seed"]), int(state.get("size") or k))
+        merger.population = max(int(state.get("population_rows") or 0), 0)
+        merger.rows = [row for row in state.get("rows") or [] if isinstance(row, dict)][: merger.k]
+        return draw, merger
+    draw = new_draw(k)
+    merger = UniformSampleMerger(draw["seed"], k)
+    merger.partial = bool(resumed)
+    return draw, merger
