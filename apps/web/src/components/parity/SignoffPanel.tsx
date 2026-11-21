@@ -8,6 +8,7 @@ import {
   formatDateTime,
   roleLabel,
   approvalAuthority,
+  INVALIDATED_APPROVAL_REASON,
   invalidatedApprovalsNote,
   shortSignature,
   signedDriftNote,
@@ -176,11 +177,19 @@ export function SignoffPanel({ report, subject: given, copy: copyOverride, busy,
                     <span className="df2-parity-muted"> ({approvalAuthority(row.approval)})</span>
                   ) : null}
                   {row.approval?.note ? <span className="df2-parity-sig-note">{row.approval.note}</span> : null}
+                  {!row.approval && row.invalidated ? (
+                    <span className="df2-parity-sig-note">
+                      {row.invalidated.user ? `${row.invalidated.user}'s ` : "The "}
+                      {INVALIDATED_APPROVAL_REASON}.
+                    </span>
+                  ) : null}
                 </span>
                 {row.approval ? (
                   <span className={badgeClass("ok")} title={formatDateTime(row.approval.at)}>
                     Signed {formatClock(row.approval.at)}
                   </span>
+                ) : row.invalidated ? (
+                  <span className={badgeClass("warn")}>Sign again</span>
                 ) : (
                   <span className={badgeClass("warn")}>Waiting</span>
                 )}

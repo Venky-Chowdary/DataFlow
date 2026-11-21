@@ -89,6 +89,19 @@ describe("real backend payloads (static)", () => {
     assert.match(t, /Sign as Engineering/);
   });
 
+  it("an approval given on an earlier version shows on its role with the reason", () => {
+    const [first] = reportSigned.signoff.approvals;
+    const report: ParityReport = {
+      ...reportResynced,
+      signoff: { ...reportResynced.signoff, status: "open", approvals: [], invalidated_approvals: [first] },
+    };
+    const t = text(renderToStaticMarkup(
+      <SignoffPanel report={report} busy={null} canSign onSign={noop} onExport={noop} onDownloadSigned={noop} />,
+    ));
+    assert.ok(t.includes(`${first.user}'s approval was given on an earlier version of this report — sign again.`), t);
+    assert.match(t, /Sign again/);
+  });
+
   it("signed: the three approvals, the signature and the signed pack download", () => {
     const html = renderToStaticMarkup(
       <SignoffPanel report={reportSigned} busy={null} canSign onSign={noop} onExport={noop} onDownloadSigned={noop} />,
