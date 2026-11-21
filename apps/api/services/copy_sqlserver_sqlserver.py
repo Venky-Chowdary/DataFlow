@@ -168,6 +168,12 @@ def _ss_connect(cfg: dict[str, Any]) -> Any:
     except Exception as exc:
         if not _is_connect_failure(exc):
             raise FastPathUnavailable(f"SQL Server connect failed: {exc}") from exc
+        from connectors.mssql_security import needs_odbc
+
+        if needs_odbc(merged):
+            # A failed verified-TLS / Entra ID handshake must never be retried
+            # over FreeTDS, which does not verify the certificate (NF-2).
+            raise FastPathUnavailable(f"SQL Server connect failed: {exc}") from exc
         logger.info(
             "SQL Server generic_sql handshake failed (%s); falling back to pymssql",
             exc,

@@ -316,7 +316,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 
   // username + password mode for most connectors
   const userPassFields: FormField[] = [];
-  if (isGeneric || ["postgresql", "mysql", "redshift", "mariadb", "cockroachdb", "timescaledb", "singlestore", "supabase", "neon"].includes(resolved)) {
+  // SQL Server is first-class (not generic), and used to fall through to the
+  // bare fallback form: its TLS trust, driver and Entra ID fields never showed.
+  if (isGeneric || isMssqlFamily(resolved) || ["postgresql", "mysql", "redshift", "mariadb", "cockroachdb", "timescaledb", "singlestore", "supabase", "neon"].includes(resolved)) {
     userPassFields.push(
       text("host", "Host", { placeholder: host || "localhost" }),
       number("port", "Port", { placeholder: String(port || 5432) }),
@@ -327,7 +329,17 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
     if (isMssqlFamily(resolved)) {
       userPassFields.push(
-        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or private-CA servers only — skips TLS chain verification." })
+        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or private-CA servers only — skips TLS chain verification." }),
+        text("sqlserver_driver", "SQL Server driver", {
+          optional: true,
+          placeholder: "auto",
+          hint: "auto: Microsoft ODBC Driver 18 when installed (verified TLS) · odbc: require it · freetds: FreeTDS — TLS certificate NOT verified, no Entra ID.",
+        }),
+        text("authentication", "Authentication", {
+          optional: true,
+          placeholder: "sql",
+          hint: "sql · entra_service_principal (username = client id, password = secret) · entra_managed_identity · entra_password · entra_access_token (token in password). Entra ID needs the Microsoft ODBC driver.",
+        })
       );
     }
   } else if (isMongo) {
@@ -1097,7 +1109,17 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         ) {
           return "Port is required.";
         }
+        // Entra ID managed identity signs in with no password (the username is
+        // optional: a user-assigned identity's client id); an access token
+        // goes in the password field with no username.
+        const entraAuth = isMssqlFamily(resolved) ? fmt(values, "authentication").toLowerCase() : "";
+        const entraNoPassword = entraAuth === "entra_managed_identity" || entraAuth === "activedirectorymsi";
+        const entraTokenOnly = entraAuth === "entra_access_token";
+        if (entraTokenOnly && !fmt(values, "password")) {
+          return "Put the Entra ID access token in the password field.";
+        }
         if (
+          !entraNoPassword && !entraTokenOnly &&
           !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "qdrant", "milvus"].includes(resolved) &&
           (!fmt(values, "username") || !fmt(values, "password"))
         ) {

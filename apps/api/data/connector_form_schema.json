@@ -4003,7 +4003,8 @@
             "label": "Database",
             "type": "text",
             "optional": false,
-            "sensitive": false
+            "sensitive": false,
+            "placeholder": "mydb"
           },
           {
             "key": "username",
@@ -4024,7 +4025,34 @@
             "label": "Use SSL / TLS",
             "type": "checkbox",
             "optional": false,
-            "sensitive": false
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          },
+          {
+            "key": "trustServerCertificate",
+            "label": "Trust server certificate",
+            "type": "checkbox",
+            "optional": true,
+            "sensitive": false,
+            "hint": "For self-signed or private-CA servers only — skips TLS chain verification."
+          },
+          {
+            "key": "sqlserver_driver",
+            "label": "SQL Server driver",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "auto: Microsoft ODBC Driver 18 when installed (verified TLS) · odbc: require it · freetds: FreeTDS — TLS certificate NOT verified, no Entra ID.",
+            "placeholder": "auto"
+          },
+          {
+            "key": "authentication",
+            "label": "Authentication",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "sql · entra_service_principal (username = client id, password = secret) · entra_managed_identity · entra_password · entra_access_token (token in password). Entra ID needs the Microsoft ODBC driver.",
+            "placeholder": "sql"
           }
         ]
       }
@@ -4145,6 +4173,24 @@
             "optional": true,
             "sensitive": false,
             "hint": "For self-signed or private-CA servers only — skips TLS chain verification."
+          },
+          {
+            "key": "sqlserver_driver",
+            "label": "SQL Server driver",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "auto: Microsoft ODBC Driver 18 when installed (verified TLS) · odbc: require it · freetds: FreeTDS — TLS certificate NOT verified, no Entra ID.",
+            "placeholder": "auto"
+          },
+          {
+            "key": "authentication",
+            "label": "Authentication",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "sql · entra_service_principal (username = client id, password = secret) · entra_managed_identity · entra_password · entra_access_token (token in password). Entra ID needs the Microsoft ODBC driver.",
+            "placeholder": "sql"
           }
         ]
       },

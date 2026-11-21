@@ -3443,6 +3443,7 @@ def _read_verify_rows(
             schema=str(cfg.get("schema") or "dbo"),
             table=table,
             columns=cols,
+            options=_connection_options(cfg),
         )
     if key in {"postgresql", "redshift"} or postgres_default:
         return _vl.read_postgres_rows(
@@ -10176,3 +10177,10 @@ def _run_reconciliation_with_rules(
             recon, mappings, endpoint=endpoint, validation_mode=validation_mode
         )
     return recon
+
+
+def _connection_options(cfg: Any) -> dict[str, Any]:
+    """TLS / driver / sign-in options of ``cfg`` (nested ``extra`` included)."""
+    from connectors.generic_sql import connection_options
+
+    return connection_options(dict(cfg or {}))
