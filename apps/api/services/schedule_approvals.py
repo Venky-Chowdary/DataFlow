@@ -707,21 +707,28 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
         source_dbs.append(source_connector_id)
     if "" not in source_dbs:
         source_dbs.append("")
-    for src_db in source_dbs:
-        art = build_artifact_from_mappings(
-            maps,
-            dest_db=engine,
-            source_db=src_db,
-            source_fingerprint=source_fp,
-            dest_fingerprint="",
-            sync_mode=mode,
-            route_id=f"validate:{engine or 'unknown'}",
-            tenant_id="anonymous",
-            artifact_id="da_inline",
-            created_at="1970-01-01T00:00:00+00:00",
-        )
-        if decision_stamps_match(approved, art):
-            return True
+    from contextlib import nullcontext
+
+    from services.decision_kernel.legacy_rules import legacy_plan_rules
+
+    # Review Q1: a stamp minted under the previous release's type rules.
+    for legacy in (False, True):
+        with legacy_plan_rules() if legacy else nullcontext():
+            for src_db in source_dbs:
+                art = build_artifact_from_mappings(
+                    maps,
+                    dest_db=engine,
+                    source_db=src_db,
+                    source_fingerprint=source_fp,
+                    dest_fingerprint="",
+                    sync_mode=mode,
+                    route_id=f"validate:{engine or 'unknown'}",
+                    tenant_id="anonymous",
+                    artifact_id="da_inline",
+                    created_at="1970-01-01T00:00:00+00:00",
+                )
+                if decision_stamps_match(approved, art):
+                    return True
     return False
 
 

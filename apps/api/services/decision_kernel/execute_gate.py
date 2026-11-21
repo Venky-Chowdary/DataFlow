@@ -12,6 +12,9 @@ import re
 from typing import Any, Mapping
 
 from services.decision_kernel.ddl import approved_mapping_ddl_fingerprint
+from contextlib import nullcontext
+
+from services.decision_kernel.legacy_rules import legacy_plan_rules
 from services.decision_kernel.models import (
     AssignmentStrategy,
     CanonicalType,
@@ -230,6 +233,33 @@ def _ddl_compare_token(type_sql: str) -> str:
     return f"{token} UNSIGNED" if unsigned else token
 
 
+def _legacy_plan_holds(
+    legacy: DecisionArtifact,
+    current: DecisionArtifact,
+    live_column_types: Mapping[str, str] | None,
+    destination_table_exists: bool | None,
+) -> bool:
+    """A previous-release stamp still runs unless the live table really drifted.
+
+    Where the two releases plan a different DDL for the same mapping, an
+    existing destination keeps the type it has (no ALTER, no refusal) when
+    that type is either release's plan. A column holding neither is drift.
+    Without a live table (create-new) the new release's DDL is created.
+    """
+    if destination_table_exists is not True or not live_column_types:
+        return True
+    live = {str(k).strip().lower(): _ddl_compare_token(v) for k, v in live_column_types.items()}
+    now = dict(current.ddl.column_ddl or {})
+    for name, old_type in dict(legacy.ddl.column_ddl or {}).items():
+        new_type = now.get(name, old_type)
+        if str(old_type).strip().upper() == str(new_type).strip().upper():
+            continue
+        have = live.get(str(name).strip().lower())
+        if have is not None and have not in {_ddl_compare_token(old_type), _ddl_compare_token(new_type)}:
+            return False
+    return True
+
+
 def planned_ddl_matches_live(
     planned: Mapping[str, str] | None,
     live: Mapping[str, str] | None,
@@ -431,29 +461,35 @@ def create_new_validate_holds_after_dest_exists(
         if fp not in source_fps:
             source_fps.append(fp)
     matched = False
-    for rid in routes:
-        for src in source_dbs:
-            for sfp in source_fps:
-                create_new = build_artifact_from_mappings(
-                    maps,
-                    dest_db=dest_engine,
-                    source_db=src,
-                    tenant_id=tenant_id or "anonymous",
-                    route_id=rid,
-                    source_fingerprint=sfp,
-                    dest_fingerprint="",
-                    sync_mode=sync_mode,
-                    error_policy=error_policy,
-                    artifact_id="da_inline",
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-                if decision_stamps_match(approved, create_new) or (
-                    reference is not None and same_structural_decision(reference, create_new)
-                ):
-                    matched = True
+    # Review Q1: a stamp the previous release minted for this unchanged Map is
+    # matched under that release's type rules too.
+    for legacy in (False, True):
+        with legacy_plan_rules() if legacy else nullcontext():
+            for rid in routes:
+                for src in source_dbs:
+                    for sfp in source_fps:
+                        create_new = build_artifact_from_mappings(
+                            maps,
+                            dest_db=dest_engine,
+                            source_db=src,
+                            tenant_id=tenant_id or "anonymous",
+                            route_id=rid,
+                            source_fingerprint=sfp,
+                            dest_fingerprint="",
+                            sync_mode=sync_mode,
+                            error_policy=error_policy,
+                            artifact_id="da_inline",
+                            created_at="1970-01-01T00:00:00+00:00",
+                        )
+                        if decision_stamps_match(approved, create_new) or (
+                            reference is not None and same_structural_decision(reference, create_new)
+                        ):
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if matched:
                     break
-            if matched:
-                break
         if matched:
             break
     if not matched:
@@ -718,6 +754,15 @@ def enforce_decision_artifact(
             candidate = _rebuild(rid, dest_fp_now)
             if decision_stamps_match(approved, candidate):
                 return (None, candidate)
+        for rid in route_candidates:
+            # Review Q1: the same Map stamped by the previous release, whose
+            # type rules graded or spelled a few pairs differently.
+            with legacy_plan_rules():
+                legacy = _rebuild(rid, dest_fp_now)
+            if decision_stamps_match(approved, legacy) and _legacy_plan_holds(
+                legacy, current, live_column_types, destination_table_exists
+            ):
+                return (None, current)
         holds, hold_err = _dest_exists_hold(approved)
         if holds:
             return (None, current)

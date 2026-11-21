@@ -598,6 +598,15 @@ def assert_ddl_identity(
         )
     actual = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
     if actual.lower() != expected:
+        # Review Q1: the previous release's type rules gave this unchanged Map
+        # a different DDL (bit(1) -> BOOLEAN, varbit -> BIT(64)). Its stamp
+        # still names it; the destination keeps whatever it already has.
+        from services.decision_kernel.legacy_rules import legacy_plan_rules
+
+        with legacy_plan_rules():
+            legacy = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
+        if legacy.lower() == expected:
+            return legacy
         diverged = ddl_identity_divergence(
             approved_columns, mappings, dest_db=dest_db
         )

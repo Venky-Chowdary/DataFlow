@@ -258,6 +258,10 @@ _MAPPING_SCORE_KEYS = frozenset({
     "alternatives",
 })
 _KEY_FLAG_ALIASES = ("is_primary_key", "primary_key", "identity", "is_identity")
+#: How the code grades a conversion, not what the operator planned: a new
+#: release that reclassifies an unchanged pair must not refuse the stamp
+#: (review Q1). ``risk_contract_id`` stays — the operator minted it.
+_CLASSIFICATION_KEYS = frozenset({"reason", "risk_level", "recommended_action"})
 
 
 def _digest(body: Any) -> str:
@@ -286,8 +290,7 @@ def _historical_body(payload: Mapping[str, Any]) -> dict[str, Any]:
     return body
 
 
-def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """The structural decision hash (envelope and per-mapping scores excluded)."""
+def _structural_body(payload: Mapping[str, Any], *, classification: bool) -> dict[str, Any]:
     body = {k: v for k, v in payload.items() if k not in _ENVELOPE_KEYS}
     rows = body.get("mappings")
     if isinstance(rows, (list, tuple)):
@@ -300,11 +303,33 @@ def compute_content_hash(payload: Mapping[str, Any]) -> str:
                 str(k): v for k, v in row.items()
                 if str(k) not in _MAPPING_SCORE_KEYS and str(k) not in _KEY_FLAG_ALIASES
             }
+            conversion = kept.get("conversion")
+            if not classification and isinstance(conversion, Mapping):
+                kept["conversion"] = {
+                    k: v for k, v in conversion.items() if k not in _CLASSIFICATION_KEYS
+                }
             if _row_is_key(row):
                 kept["is_primary_key"] = True
             stripped.append(kept)
         body["mappings"] = stripped
-    return _digest(body)
+    return body
+
+
+def compute_content_hash(payload: Mapping[str, Any]) -> str:
+    """The structural decision hash.
+
+    Excluded: the envelope, per-mapping scores, and how the code classifies a
+    conversion (reason, risk level, recommended action).
+    """
+    return _digest(_structural_body(payload, classification=False))
+
+
+def scored_structural_hash(payload: Mapping[str, Any]) -> str:
+    """The structural digest before review Q1: classification still inside.
+
+    Read-only compatibility for stamps minted by fix/qa-batch1 / PR #435.
+    """
+    return _digest(_structural_body(payload, classification=True))
 
 
 def structural_decision_hash(artifact: DecisionArtifact | Mapping[str, Any]) -> str:
@@ -350,6 +375,7 @@ def accepted_stamps(artifact: DecisionArtifact | Mapping[str, Any]) -> set[str]:
     payload = _payload(artifact)
     stamps = {
         compute_content_hash(payload),
+        scored_structural_hash(payload),
         base_content_hash(payload),
     }
     rows = payload.get("mappings") or []

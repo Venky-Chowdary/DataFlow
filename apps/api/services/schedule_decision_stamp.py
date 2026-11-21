@@ -63,28 +63,35 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
         source_dbs.append(connector_id)
     fingerprints = ["", stored_fp] if stored_fp else [""]
     found: set[str] = set()
-    for src in source_dbs:
-        for sfp in fingerprints:
-            for rid in (f"validate:{dest}", f"execute:{dest}"):
-                art = build_artifact_from_mappings(
-                    maps,
-                    dest_db=dest,
-                    source_db=src,
-                    source_fingerprint=sfp,
-                    dest_fingerprint="",
-                    sync_mode=mode,
-                    route_id=rid,
-                    tenant_id="anonymous",
-                    artifact_id="da_inline",
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-                if art.content_hash:
-                    found.add(art.content_hash.lower())
-                    # The same decision under every accepted digest (the
-                    # feature/Cleanup and PR #435 interim stamps).
-                    from services.decision_kernel.models import accepted_stamps
+    from contextlib import nullcontext
 
-                    found.update(accepted_stamps(art))
+    from services.decision_kernel.legacy_rules import legacy_plan_rules
+
+    # Review Q1: also the previous release's type rules (its stamps).
+    for legacy in (False, True):
+        with legacy_plan_rules() if legacy else nullcontext():
+            for src in source_dbs:
+                for sfp in fingerprints:
+                    for rid in (f"validate:{dest}", f"execute:{dest}"):
+                        art = build_artifact_from_mappings(
+                            maps,
+                            dest_db=dest,
+                            source_db=src,
+                            source_fingerprint=sfp,
+                            dest_fingerprint="",
+                            sync_mode=mode,
+                            route_id=rid,
+                            tenant_id="anonymous",
+                            artifact_id="da_inline",
+                            created_at="1970-01-01T00:00:00+00:00",
+                        )
+                        if art.content_hash:
+                            found.add(art.content_hash.lower())
+                            # The same decision under every accepted digest (the
+                            # feature/Cleanup and PR #435 interim stamps).
+                            from services.decision_kernel.models import accepted_stamps
+
+                            found.update(accepted_stamps(art))
     return found
 
 
