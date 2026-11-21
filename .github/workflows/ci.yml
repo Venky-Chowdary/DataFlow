@@ -1199,15 +1199,15 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
-  # Not in the Required PR gate yet: on 81f5ec525 (Redis peer started) all
-  # three legs ran past the 60-minute limit because route jobs (Pilot
-  # start_transfer -> confirm) stopped completing from test_r10_d151 on
-  # (r10_d151, r10_d203, r4_acc each waited out its job timeout); run
-  # 44914844545 (no Redis) was green, 418/418. Kafka is still proven only by
-  # a green run of this job.
+  # Not in the Required PR gate until two consecutive runs are green with the
+  # Redis peer back. The earlier timeouts (81f5ec525, 3 of 3 legs: every
+  # route job from test_r10_d151 on never completed) were a test leak, not
+  # Redis: test_d84_d87 patched the engine's job store from two worker
+  # threads, and when the first patcher finished first the store stayed a
+  # fake for the rest of the session. Fixed in that test.
   # Kafka proven on every backend change: a single-node KRaft broker
   # (apache/kafka, PLAINTEXT :9092 and SASL_PLAINTEXT/PLAIN :9094) with
-  # PostgreSQL / MySQL / MongoDB peers. Before this, Kafka was started only by
+  # PostgreSQL / MySQL / MongoDB / Redis peers. Before this, Kafka was started only by
   # the nightly whole-suite run, which has never completed (no CI result).
   kafka-live:
     needs: changes
@@ -1240,12 +1240,8 @@ jobs:
       - name: Export live-engine connection settings (every name the suite reads)
         run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
 
-      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB)
-        # No Redis peer: with one on :6379 every route job from
-        # test_r10_d151 onward never completed (3 of 3 legs on 81f5ec525),
-        # while the same tests without it ran green in CI and locally. Under
-        # investigation; the Redis cells stay skipped meanwhile.
-        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo
+      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB, Redis)
+        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo redis
 
       - name: Set up Python
         if: ${{ !cancelled() }}

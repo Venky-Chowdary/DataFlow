@@ -80,8 +80,8 @@ def test_every_sqlserver_junit_reaches_the_strict_checker() -> None:
     assert spec["mode"] == "strict" and spec["expected_skips"] == []
 
 
-#: In the Required PR gate (three green legs in a row). kafka-live is not
-#: yet: its three legs on 81f5ec525 ran out of time (see ci.yml).
+#: In the Required PR gate (three green legs in a row). kafka-live joins after
+#: two consecutive green runs with its Redis peer (see ci.yml).
 _REQUIRED_LIVE_JOBS = {"oracle-live"}
 
 
