@@ -96,6 +96,9 @@ def _patch_conn(monkeypatch, target, captured, rows):
         mod = types.ModuleType("pymssql")
         mod.connect = lambda **_kw: fake
         monkeypatch.setitem(sys.modules, "pymssql", mod)
+        # A host without the Microsoft ODBC driver: the read goes to pymssql
+        # (with the driver installed it would go to pyodbc, NF-2).
+        monkeypatch.setattr("connectors.mssql_security._odbc_installed", lambda: False)
         return
     import importlib
 
