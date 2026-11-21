@@ -115,28 +115,41 @@ strongest form is a five-layer ladder:
 On the Map step, Datawrap checks each mapped pair against a bounded sample of
 the data (at most 500 rows) and flags pairs to review:
 
-- **Destination already holds the rows** (an existing table): values are
-  compared on matching keys. A pair whose values sit in another column is
-  flagged as a likely swap or wrong target. A pair that matches only after
-  ×100 is flagged as a unit mismatch (dollars into cents). Dates that match
-  only when read day-first, while the run reads month-first, are flagged as a
-  format mismatch.
+- **Destination already holds the rows** (an existing table, read by key): a
+  pair whose values sit in another column is flagged as a likely swap or wrong
+  target. A pair that matches only after ×100 is flagged as a unit mismatch.
+  Dates that match only when read in the order the run does not use are
+  flagged as a format mismatch. The read names its columns and joins on the
+  destination's key; a warehouse (BigQuery, Snowflake, …) is read only when you
+  choose Check mapping.
 - **Before load** (new table, or no key to join on): the values are checked
   against what the destination column promises. Examples: user names headed
   for an `email` column, fractional amounts headed for a `*_cents` column,
   surnames headed for `first_name` while given names go to `last_name`.
 
-A flag is evidence with a reason; the witness never changes a mapping. A pair
-it cannot judge says "No evidence", not "passed". Results carry column names
-and counts, never values. The Trust Report shows the evidence for the mapping
-the job ran with.
+A flag is evidence with a reason; the witness never changes a mapping, and it
+prefers silence to a wrong flag. "Witnessed" needs agreement beyond chance and
+no other column that matches better. A column with one distinct value proves
+nothing ("Consistent"). A pair the mapping transforms (mask, hash, an
+expression) is "Not comparable". A pair it cannot judge says "No evidence", not
+"passed". Results carry column names and counts, never values.
 
-Measured on a held-out benchmark (206 matchable columns, 23 tables, not used to
-set thresholds): no false flags on correct mappings in keyed or source-only
-mode; with the destination holding the same rows (built from the correct
-mapping, samples cycled to 20 rows per table), 32 of 36 wrong mapper proposals
-flagged and 399 of 399 injected swaps caught. Before load, most columns have no
-name-implied format, so few are judged (23 of 206 correct pairs). Command:
+When a job is submitted, the evidence for exactly the mapping and destination
+it runs is frozen onto the job. The Trust Report and the AI decisions ledger
+read only that copy.
+
+Measured on the held-out benchmark (206 matchable columns, 23 tables; not used
+to set thresholds; each table's samples cycled into 20 rows, the destination
+built from the correct mapping):
+
+- false flags on correct mappings: 0 of 206, keyed and before load;
+- wrong mapper proposals flagged with the destination's rows: 7 of 36;
+- injected swaps caught on both sides: 19 of 399.
+
+The recall is low because 203 of the 231 held-out columns carry a single sample
+value, and one value cannot prove or disprove a pair. On the witness's own
+fixtures (60 distinct customers), every swap, unit, date-order and
+email/username case is caught with no false flags. Command:
 `python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
 
 ## Coverage: which comparison ran

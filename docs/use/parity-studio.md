@@ -127,9 +127,14 @@ their re-check, and every model call recorded by the AI-egress chain.
 
 Each row names the proposer (a deterministic engine, or the provider and
 model), a fingerprint of its inputs (names, types and settings, never
-values), the decision and the check that verified it. A row no check confirmed
-says "Not checked". The ledger is sealed into the signed pack and the proof
-pack, so editing a row breaks the signature.
+values), the decision, who made it (the person who approved or changed the
+pair in Map; the account or schedule that started the run is shown
+separately) and the check that verified it. A row no check confirmed says "Not
+checked". If part of the evidence could not be read, the ledger says
+"Partial" and why. The ledger is sealed into the signed pack and the proof
+pack, so editing a row breaks the signature. Approvals attest its decision
+rows: an approval given before this was added stays valid for what it
+attested.
 `GET /api/v1/jobs/{job_id}/ai-decisions` returns the same rows.
 
 ## Limits
