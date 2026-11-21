@@ -281,6 +281,13 @@ def mysql_bulk_load_session_settings(version: str) -> dict[str, int]:
     return {"unique_checks": 0, "foreign_key_checks": 0}
 
 
+def _set_session_check(name: str, value: int) -> str:
+    """``SET SESSION <check>=<0|1>`` for one of the two bulk-load checks (no free text)."""
+    if name not in ("unique_checks", "foreign_key_checks"):
+        raise ValueError(name)
+    return f"SET SESSION {name}={1 if int(value) else 0}"
+
+
 def apply_mysql_bulk_load_session(cursor: Any, conn: Any | None = None) -> dict[str, int]:
     """Set the session checks for one bulk LOAD DATA; returns what was set.
 
@@ -291,8 +298,8 @@ def apply_mysql_bulk_load_session(cursor: Any, conn: Any | None = None) -> dict[
     session is back to default checks.
     """
     settings = mysql_bulk_load_session_settings(mysql_server_version_text(cursor, conn))
-    cursor.execute(f"SET SESSION unique_checks={settings['unique_checks']}")
-    cursor.execute(f"SET SESSION foreign_key_checks={settings['foreign_key_checks']}")
+    for name in ("unique_checks", "foreign_key_checks"):
+        cursor.execute(_set_session_check(name, settings[name]))
     return settings
 
 
