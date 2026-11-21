@@ -491,30 +491,108 @@ def test_postgresql_to_bigquery_typed_preflight_on():
         drop_pg_table(src)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Open defect found by oracle-live (Oracle Database Free): the source's "
-        "note_empty TEXT NOT NULL holds '', the new Oracle table carries NOT NULL, "
-        "Oracle stores '' as NULL (D210 decision 4), so Execute fails ORA-01400 "
-        "after Validate passed (nothing is written). Needs an owner decision: "
-        "create such Oracle text columns NULLable with a disclosure, or block at "
-        "Validate. strict: this flips to a failure once it is fixed."
-    ),
-)
+def _oracle_rows(table: str) -> tuple[dict[str, str], list[tuple]]:
+    """(column -> NULLABLE flag, rows of id/note_empty) of the Oracle table."""
+    import oracledb
+
+    from tests.helpers.live_env import oracle_creds, oracle_dsn
+
+    c = oracle_creds()
+    conn = oracledb.connect(user=c["username"], password=c["password"], dsn=oracle_dsn(c))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM user_tables WHERE UPPER(table_name) = :t",
+                {"t": table.upper()},
+            )
+            (stored,) = cur.fetchone()
+            cur.execute(
+                "SELECT column_name, nullable FROM user_tab_columns WHERE table_name = :t",
+                {"t": stored},
+            )
+            nullable = {str(r[0]).lower(): str(r[1]) for r in cur.fetchall()}
+            cur.execute(
+                f'SELECT "{_ora_col(conn, stored, "id")}", "{_ora_col(conn, stored, "note_empty")}" '
+                f'FROM "{stored}" ORDER BY 1'  # nosec B608 - test-owned names
+            )
+            rows = [tuple(r) for r in cur.fetchall()]
+        return nullable, rows
+    finally:
+        conn.close()
+
+
+def _ora_col(conn, stored: str, name: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM user_tab_columns WHERE table_name = :t AND LOWER(column_name) = :c",
+            {"t": stored, "c": name.lower()},
+        )
+        return str(cur.fetchone()[0])
+
+
+def _drop_oracle_table(table: str) -> None:
+    import oracledb
+
+    from tests.helpers.live_env import oracle_creds, oracle_dsn
+
+    c = oracle_creds()
+    conn = oracledb.connect(user=c["username"], password=c["password"], dsn=oracle_dsn(c))
+    try:
+        with conn.cursor() as cur:
+            for name in {table, table.upper(), table.lower()}:
+                try:
+                    cur.execute(f'DROP TABLE "{name}" PURGE')  # nosec B608 - test-owned name
+                except oracledb.DatabaseError:
+                    pass
+    finally:
+        conn.close()
+
+
 def test_postgresql_to_oracle_typed_preflight_on():
+    """PostgreSQL ``note_empty TEXT NOT NULL`` holds '' in both rows; Oracle stores '' as NULL.
+
+    Found by oracle-live (Oracle Database Free): Validate passed and Execute
+    failed ORA-01400. Owner decision: Validate blocks, naming the column and
+    the count; the one approvable option creates the column NULL-able under a
+    signed Risk Contract, and Gate-8 reports the rows as explained by it.
+    """
+    from services import oracle_empty_not_null as oe
+
     require_oracle_env()
     pytest.importorskip("oracledb")
     src = uniq("tf_pg_ora_src")
     dst = uniq("TF_PG_ORA_DST")[:28]  # Oracle identifier length
     seed_postgresql_typed(src)
+    _drop_oracle_table(dst)
     try:
-        result = run_typed_transfer(pg_endpoint(src), oracle_endpoint(dst))
+        blocked = run_typed_transfer(pg_endpoint(src), oracle_endpoint(dst))
+        assert blocked.success is False
+        assert blocked.records_transferred == 0
+        plan = blocked.validation_plan or {}
+        (gate,) = [b for b in plan.get("blockers") or [] if oe.GATE_ID in (b.get("id"), b.get("gate"))]
+        assert "note_empty" in gate["message"] and "2 empty string(s)" in gate["message"], gate
+
+        signed = oe.sign_empty_as_null(
+            [{"source": c, "target": c} for c in
+             ("id", "amt_dec", "amt_float", "note_null", "note_empty", "ts_utc", "flag")],
+            {"option": oe.OPTION, "columns": ["note_empty"], "approved_by": "qa@example.com",
+             "reason": "an empty note is an absent note"},
+            table=dst,
+        )
+        result = run_typed_transfer(pg_endpoint(src), oracle_endpoint(dst), mappings=signed)
         assert result.success is True, result.error
         assert result.records_transferred == 2
         assert_preflight_ran(result)
-        # Oracle '' → NULL hazard: surface honestly if empty collapsed.
-        # Full native assert needs oracledb SELECT; prove transfer + validate here.
-        assert (result.reconciliation or {}).get("rejected_rows", 0) == 0
+        recon = result.reconciliation or {}
+        assert recon.get("rejected_rows", 0) == 0
+        (explained,) = [e for e in recon.get("explained_changes") or [] if e.get("kind") == oe.RISK_KIND]
+        assert explained["source_column"] == "note_empty" and explained["rows"] == 2, explained
+        assert "explained by signed Risk Contract" in str(recon.get("message")), recon.get("message")
+
+        nullable, rows = _oracle_rows(dst)
+        # Only the approved column is relaxed; the others keep the source's NOT NULL.
+        assert nullable["note_empty"] == "Y" and nullable["amt_dec"] == "N", nullable
+        assert [(int(r[0]), r[1]) for r in rows] == [(1, None), (2, None)], rows
     finally:
         drop_pg_table(src)
+        _drop_oracle_table(dst)

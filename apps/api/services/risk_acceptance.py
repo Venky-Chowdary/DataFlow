@@ -94,10 +94,12 @@ def sign_request_risk_acceptance(
     signed = _sign_required_risk_contracts(
         mappings, acceptance, table=table, force_columns=named or None
     )
+    from services.oracle_empty_not_null import CONTRACT_KEY
+
     gained = [
         str(new.get("source") or new.get("target") or "")
         for old, new in zip(mappings, signed)
-        if new.get("risk_contract") and not old.get("risk_contract")
+        if any(new.get(k) and not old.get(k) for k in ("risk_contract", CONTRACT_KEY))
     ]
     if not gained:
         raise ValueError(

@@ -51,6 +51,23 @@ truncation, nulls), what the writer must do, the quarantine and rollback
 posture, and who approved it, when and why. The default policy when a risk is
 not approved is to fail the job, never to continue silently.
 
+**Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
+cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is
+Oracle, Validate counts the empty strings in each source text column that will
+be `NOT NULL` there, over the source rows (bounded; the gate says when it saw
+only a preview). If there are none, nothing is shown. If there are some, the
+run is blocked and the gate names the column and the count:
+
+- **New table:** one option, "Create `<col>` as NULL-able; empty strings land
+  as NULL". Approving it signs a risk contract (over MCP:
+  `risk_acceptance: {"option": "oracle_empty_as_null", "columns": [...],
+  "approved_by": ..., "reason": ...}`). Only that column loses `NOT NULL`. After
+  the write, Gate-8 lists those rows under `explained_changes` with the
+  contract's id, and the proof pack lists the contract.
+- **Existing table:** Datawrap never alters the column. Add a `DEFAULT` to it
+  or map a transform that writes a non-empty value, then validate again.
+- **Key column:** cannot be made NULL-able; map a transform instead.
+
 When a route's mapping confidence is below the mode's floor, review the
 mapping in the Map step and run Validate again. Nothing is written until that
 gate passes.

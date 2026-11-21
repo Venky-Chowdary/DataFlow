@@ -615,13 +615,17 @@ def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str
         seen.add(key)
         out.append(dict(raw))
 
+    from services.oracle_empty_not_null import CONTRACT_KEY
+
     for m in job.get("mappings") or []:
         if isinstance(m, dict):
             _absorb(m.get("risk_contract") or m.get("riskContract"))
+            _absorb(m.get(CONTRACT_KEY))
     pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
     for m in pf.get("mappings") or []:
         if isinstance(m, dict):
             _absorb(m.get("risk_contract") or m.get("riskContract"))
+            _absorb(m.get(CONTRACT_KEY))
     pb = pf.get("proof_bundle") if isinstance(pf.get("proof_bundle"), dict) else {}
     for raw in pb.get("accepted_risks") or pb.get("risk_contracts") or []:
         _absorb(raw)

@@ -61,7 +61,7 @@ A NULL operand behaves the same way. `x = NULL` matches no row. `x IN (a, NULL)`
 
 MySQL `BOOLEAN` is `TINYINT(1)`, and `TRUE` / `FALSE` are the literals 1 and 0 ([numeric types](https://dev.mysql.com/doc/refman/8.4/en/numeric-type-syntax.html), [boolean literals](https://dev.mysql.com/doc/refman/8.4/en/boolean-literals.html)), so `flag = TRUE` matches 1 and not 2. A filter `eq true` / `eq false` (and `in [true]`) matches 1 / 0, a one-byte `BIT(1)`, and Oracle `NUMBER(1)` 1 / 0. NULL is neither true nor false. Ordering operators stay numeric.
 
-Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). That covers the character types (`VARCHAR2`, `NVARCHAR2`, `CHAR`); a LOB set with `EMPTY_CLOB()` is an empty LOB, not NULL. Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`. A `CLOB` or `NCLOB` is not a comparison key (`ORA-22848`); a probe compares `DBMS_LOB.SUBSTR` of the leading 4000 characters ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_LOB.html)).
+Oracle is the exception: a character value of length zero is NULL ([Oracle Nulls](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html)). That covers the character types (`VARCHAR2`, `NVARCHAR2`, `CHAR`); a LOB set with `EMPTY_CLOB()` is an empty LOB, not NULL. Plans that touch Oracle say so. An empty string written to Oracle becomes NULL, and a read of that column comes back as NULL. The pipeline must not pretend it round-tripped `''`. Into a `NOT NULL` column the write would fail (`ORA-01400`), so Validate scans the source population for empty strings in each text column that will be `NOT NULL` in Oracle (bounded like the fit scan; a preview when the source cannot be walked). None found: no gate. Found: a blocking gate (`g3o_oracle_empty_not_null`) names the column and the count. On a new table the one approvable option is "Create <col> as NULL-able; empty strings land as NULL", a signed migration risk contract (`risk_acceptance` with `option: oracle_empty_as_null`, `columns`, `approved_by`, `reason`); the column is then created without `NOT NULL`, Gate-8 reports those rows as explained by the contract, and the proof pack lists it. An existing `NOT NULL` column is never altered: the gate blocks and suggests a `DEFAULT` on the column or a transform that writes a non-empty value. A key column cannot be approved NULL-able. A `CLOB` or `NCLOB` is not a comparison key (`ORA-22848`); a probe compares `DBMS_LOB.SUBSTR` of the leading 4000 characters ([DBMS_LOB.SUBSTR](https://docs.oracle.com/en/database/oracle/oracle-database/26/arpls/DBMS_LOB.html)).
 
 A blank-as-missing probe used for type inference is the wrong predicate for a SQL filter. Float NaN is not NULL. PostgreSQL treats NaN as equal to NaN and greater than every non-NaN number; a filter uses that order, not a text compare of the word nan.
 
@@ -169,9 +169,11 @@ Checked on 2026-11-20 against PostgreSQL 16, MySQL 8.0, MongoDB 7.0 and SQLite 3
 - `apps/api/services/row_filter.py` (rule 3: three-valued filter, NULL operand refusal, boolean bits, plan warning)
 - `apps/api/services/cdc_snapshot_filter.py` (rule 3: SQL and MongoDB pushdown)
 - `apps/api/services/oracle_empty_string.py` (rule 3: Oracle `''` notice)
+- `apps/api/services/oracle_empty_not_null.py` (rule 3: Oracle `''` into `NOT NULL`, gate and contract; run on Oracle Database Free in the oracle-live CI job)
 - `apps/api/services/reversibility_schedule.py` (rule 8: schedule save gate)
 - `apps/api/services/gitops_manifest.py` (rule 8: GitOps apply)
 - `apps/api/services/compliance_guard.py` and `apps/api/services/pii_guard.py` (rule 11: PAN detection)
 - `apps/api/tests/test_d364_d365_null_filter.py`
+- `apps/api/tests/test_oracle_empty_not_null_gate.py`
 - `apps/api/tests/test_d372_d373_plan_execute.py`
 - `apps/api/tests/test_d295_d399_d297_d318_d374.py`

@@ -25,6 +25,7 @@ _OPERATOR_LOCK_FLAGS = (
     "operator_approved",
     "risk_contract",
     "riskContract",
+    "empty_as_null_contract",
 )
 
 

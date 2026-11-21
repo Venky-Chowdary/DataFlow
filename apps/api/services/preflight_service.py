@@ -2210,6 +2210,19 @@ def run_file_preflight(
         source_table=source_table,
     )
     enriched_blockers.extend(_cursor_blockers)
+    from services.oracle_empty_not_null import preflight_gate as _oracle_empty_gate
+
+    oracle_empty_gate, _oe_blockers = _oracle_empty_gate(  # Oracle '' into NOT NULL text
+        destination_db_type=destination_db_type, mappings=write_maps, column_types=column_types,
+        column_nullability=column_nullability, destination_table_exists=dest_table_exists,
+        destination_column_nullability=destination_column_nullability, sample_rows=sample_rows,
+        key_columns=[*str(contract_primary_key or "").split(","), *(destination_pk_columns or [])],
+        population_rows=population_rows if rows_are_population else None, walk=lambda cols: _ps._iter_table_population_for_preflight(
+            source_columns=cols, source_kind=source_kind, source_format=source_format,
+            source_connector_id=source_connector_id or "", source_config=source_config,
+            source_table=source_table or "", mappings=list(mappings or []), column_types=dict(column_types or {}),
+            dest_types=dict(destination_column_types or {}), dest_db=destination_db_type, sync_mode=sync_mode))
+    enriched_blockers.extend(_oe_blockers)
 
     # Only an operator-declared manual_review gates create-new (the default is the golden path).
     create_ddl_gate = build_create_ddl_gate(
@@ -2237,6 +2250,7 @@ def run_file_preflight(
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
+        + ([oracle_empty_gate] if oracle_empty_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2249,7 +2263,7 @@ def run_file_preflight(
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
         and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
-        and not shape_route_blocked,
+        and not shape_route_blocked and not _oe_blockers,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

@@ -15,6 +15,12 @@ starts, and checks the destination cell by cell.
   a NEW Oracle table (a CLOB carrier): the NULL-marker probe on the CLOB does
   not fail the run (``ORA-00932`` in QA), NULL stays NULL, and the long value
   lands exactly.
+* Oracle ``''`` into NOT NULL (owner decision): PostgreSQL ``note TEXT NOT
+  NULL`` holding empty strings into a NEW Oracle table is blocked at Validate,
+  naming the column and the count; the signed ``oracle_empty_as_null`` option
+  creates that column NULL-able, the run completes, and Gate-8 reports the rows
+  as explained by the contract. Into an EXISTING NOT NULL column it stays
+  blocked whatever is approved, and the table is not altered.
 
 Skipped when Oracle (or the peer) is not configured; the oracle-live CI job
 configures all of them.
@@ -236,3 +242,98 @@ def test_d362_pg_text_into_a_new_oracle_clob_keeps_nulls_and_long_values(client)
         h.drop_table("postgresql", src_t)
         _drop_ora(dst_t)
 
+
+
+# ------------------------------------------- Oracle '' into NOT NULL (owner decision)
+
+def _seed_empty_notes(src_t: str) -> None:
+    h.execute("postgresql", f'CREATE TABLE "{src_t}" (id INT PRIMARY KEY, note TEXT NOT NULL)')
+    h.execute("postgresql", f"""INSERT INTO "{src_t}" (id, note) VALUES (1, ''), (2, 'x'), (3, '')""")
+
+
+def _start(**kwargs):
+    from src.ai.copilot.transfer_tools import start_transfer
+
+    return start_transfer(validation_mode="strict", **kwargs)
+
+
+def _blocker(staged) -> dict:
+    from services import oracle_empty_not_null as oe
+
+    pf = (staged.output or {}).get("preflight") or {}
+    found = [b for b in pf.get("blockers") or [] if oe.GATE_ID in (b.get("id"), b.get("gate"))]
+    assert staged.success is False and len(found) == 1, {"error": staged.error, "blockers": pf.get("blockers")}
+    return found[0]
+
+
+def test_oracle_empty_strings_into_a_new_not_null_column_block_then_approve(client):
+    from services import oracle_empty_not_null as oe
+
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t = f"oe_s_{token}", f"oe_d_{token}"
+    ora = _oracle_cfg()
+    _drop_ora(dst_t)
+    try:
+        _seed_empty_notes(src_t)
+        src = _connector("source", token, h.dest_config("postgresql"))
+        dst = _connector("destination", token, ora)
+        args = dict(source_connector_id=src.id, source_table=src_t, dest_connector_id=dst.id,
+                    dest_table=dst_t, sync_mode="full_refresh_overwrite")
+        blocker = _blocker(_start(**args))
+        assert "note" in blocker["message"] and "2 empty string(s)" in blocker["message"], blocker
+        assert "source population" in blocker["message"], blocker
+        option = next(a for a in blocker["suggested_actions"] if a["id"] == oe.OPTION)
+        assert "Create note as NULL-able" in option["label"]
+        assert not _ora("SELECT 1 FROM user_tables WHERE UPPER(table_name) = :t", {"t": dst_t.upper()})
+
+        staged = _start(**args, risk_acceptance={
+            "option": oe.OPTION, "columns": ["note"], "approved_by": "qa@example.com",
+            "reason": "an empty note is an absent note",
+        })
+        assert staged.success, {"error": staged.error}
+        job = h.confirm(client, staged.output["ack_id"], reason="oe")
+        stored = _ora_name(dst_t)
+        cols = _ora_columns(stored)
+        nullable = dict(_ora(
+            "SELECT LOWER(column_name), nullable FROM user_tab_columns WHERE table_name = :t", {"t": stored}
+        ))
+        assert nullable["note"] == "Y" and nullable["id"] == "N", nullable
+        got = dict(_ora(f'SELECT "{cols["id"][0]}", "{cols["note"][0]}" FROM "{stored}"'))  # nosec B608
+        assert {int(k): v for k, v in got.items()} == {1: None, 2: "x", 3: None}, got
+        recon = job.get("reconciliation") or {}
+        (explained,) = [e for e in recon.get("explained_changes") or [] if e.get("kind") == oe.RISK_KIND]
+        assert explained["rows"] == 2 and explained["approved_by"] == "qa@example.com", explained
+        assert "explained by signed Risk Contract" in str(recon.get("message")), recon.get("message")
+    finally:
+        h.drop_table("postgresql", src_t)
+        _drop_ora(dst_t)
+
+
+def test_oracle_empty_strings_into_an_existing_not_null_column_stay_blocked(client):
+    from services import oracle_empty_not_null as oe
+
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t = f"oe_s_{token}", f"OE_X_{token}".upper()
+    ora = _oracle_cfg()
+    _drop_ora(dst_t)
+    try:
+        _seed_empty_notes(src_t)
+        _ora(f'CREATE TABLE "{dst_t}" (ID NUMBER(10) PRIMARY KEY, NOTE VARCHAR2(20) NOT NULL)')
+        src = _connector("source", token, h.dest_config("postgresql"))
+        dst = _connector("destination", token, ora)
+        args = dict(source_connector_id=src.id, source_table=src_t, dest_connector_id=dst.id,
+                    dest_table=dst_t, sync_mode="append")
+        blocker = _blocker(_start(**args))
+        assert "existing NOT NULL column" in blocker["message"] and "2 empty string(s)" in blocker["message"]
+        assert oe.OPTION not in [a["id"] for a in blocker["suggested_actions"]]
+        # Approving the option does not unlock an existing column.
+        _blocker(_start(**args, risk_acceptance={
+            "option": oe.OPTION, "columns": ["note"], "approved_by": "qa", "reason": "r",
+        }))
+        assert _ora(
+            "SELECT nullable FROM user_tab_columns WHERE table_name = :t AND column_name = 'NOTE'", {"t": dst_t}
+        ) == [("N",)]
+        assert _ora(f'SELECT COUNT(*) FROM "{dst_t}"') == [(0,)]  # nosec B608
+    finally:
+        h.drop_table("postgresql", src_t)
+        _drop_ora(dst_t)

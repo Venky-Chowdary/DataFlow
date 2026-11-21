@@ -697,11 +697,13 @@ def run_typed_transfer(
     validation_mode: str = "strict",
     sync_mode: str = "full_refresh_overwrite",
     stream_name: str = "fidelity",
+    mappings: list[dict] | None = None,
 ) -> TransferResult:
     """Execute with preflight ON (default). Never set skip_preflight=True here."""
     request = TransferRequest(
         source=source,
         destination=destination,
+        mappings=list(mappings or []),
         sync_mode=sync_mode,
         validation_mode=validation_mode,
         stream_contracts=fidelity_stream_contract(stream_name),
