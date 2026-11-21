@@ -83,8 +83,8 @@ def _witness_check(snapshot: dict[str, Any] | None, source: str) -> tuple[dict[s
     pair = next((p for p in report.get("pairs") or [] if str(p.get("source") or "").casefold()
                  == source.casefold()), None)
     if not pair:
-        return {"check": "none", "status": "not_checked",
-                "detail": "No Mapping Witness report for the mapping this job ran."}, None
+        why = (snapshot or {}).get("not_checked_reason") or "No Mapping Witness report for the mapping this job ran."
+        return {"check": "none", "status": "not_checked", "detail": why}, None
     flag = pair.get("flag") or {}
     return {
         "check": "mapping_witness",
@@ -92,7 +92,8 @@ def _witness_check(snapshot: dict[str, Any] | None, source: str) -> tuple[dict[s
         "mode": report.get("mode"),
         "detail": flag.get("reason") or pair.get("reason") or "",
         "report_sha256": (snapshot or {}).get("report_sha256"),
-        "checked_at": report.get("generated_at"),
+        "checked_at": (snapshot or {}).get("report_recorded_at") or report.get("generated_at"),
+        "checked_by": (snapshot or {}).get("requested_by"),
     }, pair
 
 
@@ -197,20 +198,21 @@ def _witness_entries(job: dict[str, Any], snapshot: dict[str, Any] | None) -> li
         return []
     report = snapshot.get("report") or {}
     reviews = [r for r in snapshot.get("flag_reviews") or [] if isinstance(r, dict)]
-    approvals = snapshot.get("map_decisions") or {}
-    recorded_at = str(snapshot.get("report_recorded_at") or "")
     out: list[dict[str, Any]] = []
     for pair in flagged_pairs(report):
         flag = pair.get("flag") or {}
-        kept = next((r for r in reviews if r.get("decision") == "kept"
-                     and str(r.get("source") or "").casefold() == pair["source"].casefold()), None)
-        approval = approvals.get(pair["source"]) if isinstance(approvals.get(pair["source"]), dict) else None
+
+        def on_this_flag(r: dict[str, Any], decision: str) -> bool:
+            return r.get("decision") == decision and r.get("flag_id") == flag.get("id")
+
+        kept = next((r for r in reviews if on_this_flag(r, "kept")), None)
+        continued = next((r for r in reviews if on_this_flag(r, "continued")), None)
         if kept:
             decision = {"status": "kept", "by": kept.get("by"), "at": kept.get("at"),
-                        "how": "The reviewer looked at the flag and kept the mapping."}
-        elif approval and approval.get("approved") and str(approval.get("at") or "") >= recorded_at:
-            decision = {"status": "kept", "by": approval.get("by"), "at": approval.get("at"),
-                        "how": "Approved in Map after the flag was shown."}
+                        "how": "The reviewer chose Keep this mapping on this flag."}
+        elif continued:
+            decision = {"status": "not_reviewed_continued", "by": continued.get("by"), "at": continued.get("at"),
+                        "how": "Not reviewed: this person continued past the flag."}
         else:
             decision = {"status": "unreviewed", "by": None, "at": None,
                         "how": "No one reviewed this flag; the job ran the flagged mapping."}
@@ -399,8 +401,10 @@ def build_ledger(job: dict[str, Any]) -> dict[str, Any]:
         "counts": {"total": len(entries), "by_kind": counts, "by_origin": by_origin,
                    "model_calls": len(calls)},
         "witness": ({"snapshot_sha256": snapshot.get("sha256"), "report_sha256": snapshot.get("report_sha256"),
-                     "mode": report.get("mode"), "generated_at": report.get("generated_at"),
-                     "summary": report.get("summary")} if snapshot else None),
+                     "session": snapshot.get("session"), "checked_by": snapshot.get("requested_by"),
+                     "checked_at": snapshot.get("report_recorded_at"), "mode": report.get("mode"),
+                     "summary": report.get("summary"), "not_checked_reason": snapshot.get("not_checked_reason")}
+                    if snapshot else None),
         "ledger_sha256": _sha(entries),
         "attested_sha256": attested_sha256(entries),
         "honesty": _HONESTY,

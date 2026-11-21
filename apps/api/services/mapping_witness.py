@@ -76,6 +76,9 @@ STATUS_FLAGGED = "flagged"
 STATUS_DIFFERS = "differs"
 STATUS_NOT_COMPARABLE = "not_comparable"
 STATUS_NO_EVIDENCE = "no_evidence"
+#: The destination column was not read (not in the catalog yet, a name the sampler cannot address, or past
+#: the read bound): no evidence either way, never "differs".
+STATUS_NOT_READ = "not_read"
 
 KIND_SWAP = "swap"
 KIND_WRONG_TARGET = "wrong_target"
@@ -176,11 +179,14 @@ def norm(value: Any) -> str | None:
             return str(value)[:MAX_CELL_CHARS]
         return _canon_number(Decimal(value))
     if isinstance(value, Decimal):
-        return _canon_number(value) if value.is_finite() else None
+        if not value.is_finite():
+            return None
+        return _canon_number(value) or str(value).casefold()[:MAX_CELL_CHARS]
     if isinstance(value, float):
         if not math.isfinite(value):
             return None
-        return _canon_number(Decimal(repr(value)))
+        # Beyond the exponent bound a float is compared as written, never dropped as missing.
+        return _canon_number(Decimal(repr(value))) or repr(value).casefold()
     if isinstance(value, datetime):
         text = value.isoformat()
     elif isinstance(value, date):
@@ -502,7 +508,7 @@ def _comparable(loaded: list[str | None], dest: list[str | None]) -> list[str | 
 
 
 def _keyed(pairs: list[dict[str, Any]], source_rows: list[dict], dest_rows: list[dict], key: tuple[str, str],
-           date_locale: str) -> tuple[list[dict[str, Any]], int]:
+           date_locale: str, unread: dict[str, str]) -> tuple[list[dict[str, Any]], int]:
     skey, tkey = key
     index: dict[str, dict] = {}
     for row in dest_rows:
@@ -528,6 +534,10 @@ def _keyed(pairs: list[dict[str, Any]], source_rows: list[dict], dest_rows: list
             results[s] = _pair_result(pair, STATUS_NOT_COMPARABLE,
                                       evidence={"mode": MODE_KEYED, "transform": pair["transform"]},
                                       reason=f"Not comparable: the mapping transforms the value ({pair['transform']}).")
+            continue
+        if tf in unread:
+            results[s] = _pair_result(pair, STATUS_NOT_READ, evidence={"mode": MODE_KEYED},
+                                      reason=f"Not read: {unread[tf]}")
             continue
         if pair["create_new"] and tf not in dest_vals:
             continue  # a column this run will create holds nothing yet
@@ -803,8 +813,14 @@ def witness_mappings(
     key: tuple[str, str] | None = None,
     date_locale: str = "",
     generated_at: str | None = None,
+    unread: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Judge every mapped pair against the data. Pure: same inputs, same report."""
+    """Judge every mapped pair against the data. Pure: same inputs, same report.
+
+    ``unread`` names destination columns (any case) the sample did not read, with
+    why; a pair onto one is "not read", never judged as an empty column.
+    """
+    unread = {str(k).casefold(): str(v) for k, v in (unread or {}).items()}
     date_locale = str(date_locale or "").strip().upper()
     date_locale = date_locale if date_locale in ("DMY", "MDY") else ""
     pairs = mapped_pairs(mappings)
@@ -814,7 +830,7 @@ def witness_mappings(
     joined = 0
     mode = MODE_SOURCE_ONLY
     if dest_rows and key and key[0] and key[1]:
-        keyed, joined = _keyed(pairs, source_rows, dest_rows, (key[0], key[1]), date_locale)
+        keyed, joined = _keyed(pairs, source_rows, dest_rows, (key[0], key[1]), date_locale, unread)
         for res in keyed:
             results[res["source"]] = res
         if joined >= MIN_KEYED:
@@ -834,7 +850,7 @@ def witness_mappings(
         profile = _profile_candidates(pairs, source_rows, dest_cols, spelled)
     for pair in pairs:
         prior = results.get(pair["source"])
-        if prior and prior["status"] != STATUS_DIFFERS:
+        if prior and prior["status"] not in (STATUS_DIFFERS, STATUS_NOT_READ):
             continue
         if not comparable_transform(pair["transform"]):
             results[pair["source"]] = _pair_result(
@@ -878,6 +894,13 @@ def witness_mappings(
     _mark_swaps(results, pairs)
     ordered = [results[p["source"]] for p in pairs if p["source"] in results]
     summary = Counter(r["status"] for r in ordered)
+    inputs_sha256 = _fingerprint(pairs, mode=mode, key=key, date_locale=date_locale,
+                                 source_rows=source_rows, dest_rows=dest_rows)
+    for res in ordered:
+        if res.get("flag"):
+            # A flag's id: what a person reviews ("Keep this mapping") names exactly this flag.
+            res["flag"]["id"] = hashlib.sha256(
+                f"{inputs_sha256}|{res['source']}|{res['target']}|{res['flag']['kind']}".encode()).hexdigest()[:20]
     return {
         "version": WITNESS_VERSION,
         "mode": mode,
@@ -894,10 +917,10 @@ def witness_mappings(
             "flagged": summary.get(STATUS_FLAGGED, 0),
             "differs": summary.get(STATUS_DIFFERS, 0),
             "not_comparable": summary.get(STATUS_NOT_COMPARABLE, 0),
+            "not_read": summary.get(STATUS_NOT_READ, 0),
             "no_evidence": summary.get(STATUS_NO_EVIDENCE, 0),
         },
-        "inputs_sha256": _fingerprint(pairs, mode=mode, key=key, date_locale=date_locale,
-                                      source_rows=source_rows, dest_rows=dest_rows),
+        "inputs_sha256": inputs_sha256,
         "honesty": _HONESTY,
     }
 

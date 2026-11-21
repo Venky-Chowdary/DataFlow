@@ -88,12 +88,46 @@ def valid_approvals(
     attested (absent = version 1).
     """
     approvals = [a for a in state.get("approvals") or [] if isinstance(a, dict)]
-    if isinstance(digest, dict):
-        valid = [a for a in approvals
-                 if a.get("content_sha256") == digest.get(int(a.get("content_version") or 1))]
-    else:
-        valid = [a for a in approvals if a.get("content_sha256") == digest]
+
+    def attests(a: dict[str, Any]) -> bool:
+        claimed = a.get("content_sha256")
+        if not claimed:
+            return False
+        if isinstance(digest, dict):
+            try:
+                version = int(a.get("content_version") or 1)
+            except (TypeError, ValueError):
+                return False
+            expected = digest.get(version)  # an unknown version attests nothing
+            return bool(expected) and claimed == expected
+        return claimed == digest
+
+    valid = [a for a in approvals if attests(a)]
     return valid, [a for a in approvals if a not in valid]
+
+
+def one_content_version(valid: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(approvals that count, approvals superseded): a report seals under one content version.
+
+    Only legacy data can mix versions; then the newest version counts and the
+    earlier signers sign again (their approval did not attest the AI ledger).
+    """
+    versions = {int(a.get("content_version") or 1) for a in valid}
+    if len(versions) <= 1:
+        return valid, []
+    newest = max(versions)
+    keep = [a for a in valid if int(a.get("content_version") or 1) == newest]
+    return keep, [a for a in valid if a not in keep]
+
+
+def signing_version(valid: list[dict[str, Any]]) -> int:
+    """The content version a new approval attests: the one the valid approvals share, else the current.
+
+    A report approved before v2 existed keeps collecting v1 approvals, so its
+    set is never mixed; a mixed set (legacy data) does not seal.
+    """
+    versions = {int(a.get("content_version") or 1) for a in valid}
+    return versions.pop() if len(versions) == 1 else CONTENT_VERSION
 
 
 def sign_off(
@@ -132,7 +166,6 @@ def sign_off(
         raise ParityConflict("This report is already signed.")
     if signoff["status"] == "blocked":
         raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
-    digest = content_sha256(report)
     digests = content_digests(report)
     authority = authority_note(role, signer_role)
 
@@ -144,6 +177,9 @@ def sign_off(
         if state.get("signed"):
             raise ParityConflict("This report is already signed.")
         approvals, invalidated = valid_approvals(state, digests)
+        approvals, superseded = one_content_version(approvals)
+        invalidated = invalidated + superseded
+        version = signing_version(approvals)
         if any(a.get("role") == role for a in approvals):
             raise ParityConflict(f"The {role} role has already signed.")
         if actor and any(a.get("user") == actor for a in approvals):
@@ -151,13 +187,15 @@ def sign_off(
         approvals.append({
             "role": role, "user": actor or "anonymous", "at": now_iso(), "note": note,
             "signer_role": signer_role, "authority": authority,
-            "version": int(report["version"]), "content_sha256": digest,
-            "content_version": CONTENT_VERSION,
+            "version": int(report["version"]), "content_sha256": digests[version],
+            "content_version": version,
         })
         # Approvals of earlier content stay on the record; they no longer count.
         state["approvals"] = invalidated + approvals
         if not {a["role"] for a in approvals} >= set(roles):
             return None
+        if len({int(a.get("content_version") or 1) for a in approvals}) != 1:
+            return None  # approvals of different content versions never seal one report
         signed_at = now_iso()
         final = public_report(report)
         # The seal holds what the approvals attest (content_sha256): the explanation is
@@ -180,7 +218,7 @@ def sign_off(
     _updated, state, (after, pack) = update_state(job_id, approve, expected_version=int(report["version"]))
     audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
           details={"role": role, "note": note, "verdict": report["verdict"], "signer_role": signer_role,
-                   "version": int(report["version"]), "content_sha256": digest})
+                   "version": int(report["version"]), "content_digests": {str(k): v for k, v in digests.items()}})
     if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
               details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})

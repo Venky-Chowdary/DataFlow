@@ -31,6 +31,8 @@ from services.mapping_witness import witness_mappings
 from tests.helpers import witness_fixtures as F
 
 WS = "ws1"
+SESSION = "plan-0001-session"
+SOURCE = "file|customers.csv"
 
 
 def _dest(**over):
@@ -56,12 +58,13 @@ def _rows(maps, **marks):
     return out
 
 
-def _submit(mappings, *, triggered_by="ana@example.com", dest=None):
-    """What create_pending_job stamps: the snapshot for this mapping and destination."""
+def _submit(mappings, *, triggered_by="ana@example.com", dest=None, session=SESSION, filename="customers.csv"):
+    """What create_pending_job stamps: the snapshot for this mapping, destination, source and session."""
     from services.mapping_witness_service import snapshot_for_request
 
     request = SimpleNamespace(workspace_id=WS, destination=dest or _dest(), mappings=mappings,
-                              triggered_by=triggered_by)
+                              triggered_by=triggered_by, witness_session_id=session,
+                              source=SimpleNamespace(kind="file", table="", collection=""), source_filename=filename)
     return snapshot_for_request(request)
 
 
@@ -107,16 +110,20 @@ def calls(monkeypatch):
     return CALLS
 
 
-def _witness_on_map(maps, *, actor="map-user@example.com"):
+def _witness_on_map(maps, *, actor="map-user@example.com", session=SESSION, source=SOURCE):
     """What the Map step does: run the witness for this mapping (destination already holds the rows)."""
     from services.mapping_witness_service import destination_identity, mapping_digest, save_report
 
     src, dst = F.customers()
     identity = destination_identity(_dest(), WS)
     digest = mapping_digest(maps, identity)
-    save_report(witness_mappings(maps, src, dst, key=F.KEY), workspace_id=WS, identity=identity, digest=digest,
-                actor=actor)
-    return src, identity, digest
+    saved = save_report(witness_mappings(maps, src, dst, key=F.KEY), workspace_id=WS, session=session,
+                        identity=identity, digest=digest, source=source, actor=actor)
+    return src, identity, digest, saved["report"]
+
+
+def _flag_id(report, source):
+    return next(p["flag"]["id"] for p in report["pairs"] if p["source"] == source)
 
 
 def _by_kind(ledger, kind):
@@ -127,8 +134,8 @@ def test_who_is_the_person_who_approved_in_map_not_who_started_the_run(data_dir,
     from services.mapping_witness_service import record_map_decisions
 
     maps = _rows(F.SWAPPED_NAMES)
-    _src, identity, _ = _witness_on_map(maps)
-    record_map_decisions(workspace_id=WS, identity=identity, actor="dee@example.com", mappings=[
+    _src, identity, _, _ = _witness_on_map(maps)
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com", mappings=[
         {"source": "mail", "target": "email", "approved": True},
         {"source": "login", "target": "username", "approved": True, "changed": True},
     ])
@@ -149,8 +156,8 @@ def test_a_scheduled_run_shows_the_map_approver_and_the_schedule_separately(data
     from services.mapping_witness_service import record_map_decisions
 
     maps = _rows(F.CORRECT_MAPPING)
-    _src, identity, _ = _witness_on_map(maps)
-    record_map_decisions(workspace_id=WS, identity=identity, actor="dee@example.com",
+    _src, identity, _, _ = _witness_on_map(maps)
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com",
                          mappings=[{"source": "mail", "target": "email", "approved": True}])
     job = _job(maps, _submit(maps, triggered_by="schedule:nightly"), triggered_by="schedule:nightly")
     ledger = build_ledger(job)
@@ -166,7 +173,7 @@ def test_only_a_named_provider_makes_a_model_suggestion(data_dir, calls):
     maps = _rows(F.SWAPPED_NAMES, family={"engine_suggestion": {"target": "last_name", "suppressed": True}})
     _witness_on_map(maps)
     # What /transfer/map received from the model, recorded server-side (the run payload drops it).
-    record_model_suggestions(workspace_id=WS, identity=destination_identity(_dest(), WS), llm={
+    record_model_suggestions(workspace_id=WS, session=SESSION, identity=destination_identity(_dest(), WS), llm={
         "ai_egress": {"payload_sha256": "a" * 64, "event_hash": "e1"}}, mappings=[
         {"source": "given", "target": "last_name", "engine_suggestion": {
             "target": "first_name", "llm_provider": "anthropic", "llm_model": "claude-test"}}])
@@ -183,9 +190,9 @@ def test_a_change_that_was_reverted_is_not_reported_as_changed(data_dir, calls):
     from services.mapping_witness_service import record_review
 
     maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
-    _src, identity, digest = _witness_on_map(maps)
+    _src, identity, digest, report = _witness_on_map(maps)
     # Map auto-records "changed" when the flagged column is remapped…
-    record_review(workspace_id=WS, identity=identity, digest=digest, source="login", decision="changed",
+    record_review(workspace_id=WS, session=SESSION, identity=identity, digest=digest, source="login", decision="changed",
                   actor="dee@example.com", new_target="username")
     # …then the operator reverts and runs the flagged mapping.
     [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
@@ -198,8 +205,8 @@ def test_the_corrected_job_shows_the_flag_it_resolved(data_dir, calls):
     from services.mapping_witness_service import record_review
 
     flagged = _rows(F.LOGIN_INTO_EMAIL_ONLY)
-    _src, identity, digest = _witness_on_map(flagged)
-    record_review(workspace_id=WS, identity=identity, digest=digest, source="login", decision="changed",
+    _src, identity, digest, report = _witness_on_map(flagged)
+    record_review(workspace_id=WS, session=SESSION, identity=identity, digest=digest, source="login", decision="changed",
                   actor="dee@example.com", new_target="username")
     fixed = _rows([m if m["source"] != "login" else {"source": "login", "target": "username"}
                    for m in F.LOGIN_INTO_EMAIL_ONLY])
@@ -221,8 +228,8 @@ def test_a_later_map_session_cannot_rewrite_what_a_finished_job_says(data_dir, c
     fake = [{"cust_id": i, "login": f"u{i}@example.com", "given": "A", "family": "B", "joined": "01/01/2020",
              "balance": "1.00"} for i in range(6)]
     identity = destination_identity(_dest(), WS)
-    save_report(witness_mappings(maps, fake), workspace_id=WS, identity=identity,
-                digest=mapping_digest(maps, identity))
+    save_report(witness_mappings(maps, fake), workspace_id=WS, session=SESSION, identity=identity,
+                digest=mapping_digest(maps, identity), source=SOURCE)
     after = build_ledger(job)
     assert after["ledger_sha256"] == before["ledger_sha256"]
     assert after["entries"] == before["entries"]
@@ -276,7 +283,7 @@ def test_every_model_call_and_parity_decision_is_a_row(data_dir, calls):
 
 def test_the_ledger_carries_no_cell_values(data_dir, calls):
     maps = _rows(F.SWAPPED_NAMES)
-    src, _identity, _ = _witness_on_map(maps)
+    src, _identity, _, _ = _witness_on_map(maps)
     text = json.dumps(build_ledger(_job(maps, _submit(maps), parity=PARITY)))
     for row in src:
         for col in ("given", "family", "mail", "login", "joined", "balance"):
@@ -374,10 +381,119 @@ def test_map_records_the_models_suggestions_for_ui_run_jobs(data_dir, calls, mon
     dest = {"kind": "database", "format": "postgresql", "host": "db.internal.test", "port": 0, "database": "crm",
             "schema": "", "table": "customers"}
     res = TestClient(app).post("/api/v1/transfer/map", headers={"X-Workspace-Id": WS}, json={
-        "source_columns": ["given", "family"], "target_columns": ["first_name", "last_name"], "destination": dest})
+        "source_columns": ["given", "family"], "target_columns": ["first_name", "last_name"], "destination": dest,
+        "witness_session_id": SESSION})
     assert res.status_code == 200, res.text
     ran = [{"source": "given", "target": "last_name"}, {"source": "family", "target": "first_name"}]
     ledger = build_ledger(_job(ran, _submit(ran)))
     [suggestion] = _by_kind(ledger, KIND_MODEL_SUGGESTION)
     assert suggestion["subject"] == "given → first_name"
     assert suggestion["inputs_sha256"] and suggestion["origin"]["model"] == "claude-test"
+
+
+# ── Round 2: evidence belongs to the Map session it was made in (N3, N4) ─────
+
+
+def test_evidence_from_another_session_or_no_session_is_not_checked(data_dir, calls):
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _witness_on_map(maps, session="someone-elses-session")
+    for snap in (_submit(maps), _submit(maps, session="")):
+        ledger = build_ledger(_job(maps, snap))
+        rows = _by_kind(ledger, KIND_MAPPING_PROPOSAL)
+        assert {r["verification"]["status"] for r in rows} == {"not_checked"}
+        assert not _by_kind(ledger, KIND_WITNESS_FLAG)
+    assert "not submitted from a Map session" in _submit(maps, session="")["not_checked_reason"]
+
+
+def test_evidence_from_another_file_or_too_old_is_not_checked(data_dir, calls):
+    from services.mapping_witness_service import build_snapshot, destination_identity
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _witness_on_map(maps)
+    other_file = _submit(maps, filename="customers_v2.csv")
+    assert other_file["report"] is None and other_file["not_checked_reason"]
+    later = build_snapshot(workspace_id=WS, session=SESSION, identity=destination_identity(_dest(), WS),
+                           source=SOURCE, mappings=maps, taken_at="2099-01-01T00:00:00+00:00")
+    assert later["report"] is None
+
+
+def test_fabricated_rows_in_another_session_do_not_clear_this_sessions_flag(data_dir, calls):
+    from services.mapping_witness_service import destination_identity, mapping_digest, save_report
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _witness_on_map(maps)
+    fake = [{"cust_id": i, "login": f"u{i}@example.com"} for i in range(6)]
+    identity = destination_identity(_dest(), WS)
+    save_report(witness_mappings(maps, fake), workspace_id=WS, session="another-session-id", identity=identity,
+                digest=mapping_digest(maps, identity), source=SOURCE)
+    assert len(_by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)) == 1
+
+
+def test_an_approval_posted_in_another_session_never_attaches(data_dir, calls):
+    from services.mapping_witness_service import record_map_decisions
+
+    maps = _rows(F.CORRECT_MAPPING)
+    _src, identity, _, _ = _witness_on_map(maps)
+    record_map_decisions(workspace_id=WS, session="a-different-session", identity=identity,
+                         actor="mallory@example.com", mappings=[{"source": "mail", "target": "email", "approved": True}])
+    row = next(e for e in _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_MAPPING_PROPOSAL)
+               if e["subject"] == "mail → email")
+    assert row["decision"]["by"] is None and row["decision"]["status"] == "unreviewed"
+
+
+def test_kept_needs_the_explicit_keep_on_that_flag_and_continuing_is_recorded(data_dir, calls):
+    from services.mapping_witness_service import record_map_decisions, record_review
+
+    maps = _rows(F.LOGIN_INTO_EMAIL_ONLY)
+    _src, identity, digest, report = _witness_on_map(maps)
+    # Approving the row (Continue) after the flag was shown is not a review of the flag.
+    record_map_decisions(workspace_id=WS, session=SESSION, identity=identity, actor="dee@example.com",
+                         mappings=[{"source": "login", "target": "email", "approved": True}])
+    [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
+    assert flag["decision"]["status"] == "unreviewed"
+    with pytest.raises(LookupError):
+        record_review(workspace_id=WS, session=SESSION, identity=identity, digest=digest, source="login",
+                      decision="kept", actor="dee@example.com", flag_id="not-this-flag")
+    record_review(workspace_id=WS, session=SESSION, identity=identity, digest=digest, source="login",
+                  decision="continued", actor="dee@example.com", flag_id=_flag_id(report, "login"))
+    [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
+    assert flag["decision"]["status"] == "not_reviewed_continued" and flag["decision"]["by"] == "dee@example.com"
+    record_review(workspace_id=WS, session=SESSION, identity=identity, digest=digest, source="login",
+                  decision="kept", actor="eve@example.com", flag_id=_flag_id(report, "login"))
+    [flag] = _by_kind(build_ledger(_job(maps, _submit(maps))), KIND_WITNESS_FLAG)
+    assert flag["decision"]["status"] == "kept" and flag["decision"]["by"] == "eve@example.com"
+
+
+def test_the_ledger_says_who_ran_the_check_and_when(data_dir, calls):
+    maps = _rows(F.CORRECT_MAPPING)
+    _witness_on_map(maps, actor="map-user@example.com")
+    ledger = build_ledger(_job(maps, _submit(maps)))
+    assert ledger["witness"]["checked_by"] == "map-user@example.com" and ledger["witness"]["checked_at"]
+    row = _by_kind(ledger, KIND_MAPPING_PROPOSAL)[0]
+    assert row["verification"]["checked_by"] == "map-user@example.com"
+
+
+# ── Round 2: content versions (N8) ───────────────────────────────────────────
+
+
+def test_an_approval_with_an_unknown_version_or_no_digest_attests_nothing():
+    from services.parity_signoff import content_digests, valid_approvals
+
+    report = {"job_id": "j", "verdict": "proven", "parity": {}, "tables": [], "differences": [], "fixes": []}
+    digests = content_digests(report)
+    state = {"approvals": [{"role": "a", "content_version": 9, "content_sha256": None},
+                           {"role": "b", "content_version": 7, "content_sha256": digests[2]},
+                           {"role": "c", "content_version": "x", "content_sha256": digests[1]}]}
+    assert valid_approvals(state, digests)[0] == []
+
+
+def test_a_mixed_version_set_never_seals_and_newer_versions_win():
+    from services.parity_signoff import one_content_version, signing_version
+
+    v1 = {"role": "engineering", "content_sha256": "a", "content_version": 1}
+    v2 = {"role": "compliance", "content_sha256": "b", "content_version": 2}
+    keep, superseded = one_content_version([v1, v2])
+    assert keep == [v2] and superseded == [v1]
+    # A report approved before v2 existed keeps collecting v1, so its set seals as v1.
+    assert signing_version([{"role": "engineering", "content_sha256": "a"}]) == 1
+    assert signing_version([]) == 2

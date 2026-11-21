@@ -51,13 +51,20 @@ class WitnessRequest(BaseModel):
     date_locale: str = Field(default="", max_length=8)
     #: "explicit" = the operator chose Check mapping (the only way a warehouse is read).
     trigger: Literal["auto", "explicit"] = "auto"
+    #: The Map session (the plan id, or the id Map minted); evidence without one never reaches a job.
+    session_id: str = Field(default="", max_length=128)
+    #: What the sample came from: {"kind": "file" | "database", "name": file name or table}.
+    source_ref: dict[str, str] = Field(default_factory=dict)
 
 
 class ReviewRequest(BaseModel):
     mapping_digest: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    session_id: str = Field(..., min_length=8, max_length=128)
     destination: Optional[EndpointDTO] = None
     source: str = Field(..., min_length=1, max_length=256)
-    decision: Literal["kept", "changed"]
+    #: kept = "Keep this mapping"; changed = remapped; continued = went on past it unreviewed.
+    decision: Literal["kept", "changed", "continued"]
+    flag_id: str = Field(default="", max_length=64)
     new_target: str = Field(default="", max_length=128)
 
 
@@ -69,6 +76,7 @@ class MapDecision(BaseModel):
 
 
 class MapDecisionsRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=128)
     destination: Optional[EndpointDTO] = None
     mappings: list[MapDecision] = Field(default_factory=list, max_length=400)
 
@@ -110,6 +118,7 @@ async def mapping_witness(
         mapping_digest,
         run_witness,
         save_report,
+        source_identity,
     )
     from services.workspace_access import resolve_write_workspace
 
@@ -137,13 +146,15 @@ async def mapping_witness(
             trigger=body.trigger,
         )
         digest = mapping_digest(mappings, identity)
-        saved = save_report(report, workspace_id=workspace, identity=identity, digest=digest, actor=actor)
+        saved = save_report(report, workspace_id=workspace, session=body.session_id, identity=identity,
+                            digest=digest, source=source_identity(body.source_ref), actor=actor)
         _audit("mapping_witness.recorded", f"mapping:{digest[:16]}", actor, {
             "mode": report.get("mode"), "summary": report.get("summary"), "trigger": report.get("trigger"),
             "report_sha256": saved["report_sha256"],
         }, workspace)
-        return {"mapping_digest": digest, "report": report, "report_sha256": saved["report_sha256"],
-                "recorded_at": saved["recorded_at"]}
+        return {"mapping_digest": digest, "session": saved["session"] or None, "report": report,
+                "report_sha256": saved["report_sha256"], "recorded_at": saved["recorded_at"],
+                "requested_by": saved["requested_by"]}
 
     return await _off_loop(_run)
 
@@ -164,8 +175,9 @@ async def review_witness_flag(
 
     def _run() -> dict[str, Any]:
         identity = destination_identity(_endpoint(body.destination), workspace)
-        return record_review(workspace_id=workspace, identity=identity, digest=body.mapping_digest,
-                             source=body.source, decision=body.decision, actor=actor, new_target=body.new_target)
+        return record_review(workspace_id=workspace, session=body.session_id, identity=identity,
+                             digest=body.mapping_digest, source=body.source, decision=body.decision, actor=actor,
+                             flag_id=body.flag_id, new_target=body.new_target)
 
     try:
         entry = await _off_loop(_run)
@@ -174,7 +186,8 @@ async def review_witness_flag(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _audit("mapping_witness.reviewed", f"mapping:{body.mapping_digest[:16]}", entry["by"], {
-        k: entry.get(k) for k in ("source", "flagged_target", "flag_kind", "decision", "new_target", "report_sha256")
+        k: entry.get(k) for k in ("source", "flagged_target", "flag_kind", "flag_id", "decision", "new_target",
+                                  "report_sha256")
     }, workspace)
     return {"decision": entry}
 
@@ -196,7 +209,7 @@ async def record_map_decisions_route(
 
     def _run() -> int:
         identity = destination_identity(_endpoint(body.destination), workspace)
-        return record_map_decisions(workspace_id=workspace, identity=identity,
+        return record_map_decisions(workspace_id=workspace, session=body.session_id, identity=identity,
                                     mappings=[m.model_dump() for m in body.mappings], actor=actor)
 
     recorded = await _off_loop(_run)

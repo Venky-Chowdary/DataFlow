@@ -831,7 +831,7 @@ def _evidence_block(job: dict[str, Any], tables_ev: list[TableEvidence]) -> dict
 
 
 def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
-    from services.parity_signoff import content_digests, content_sha256, valid_approvals
+    from services.parity_signoff import content_digests, content_sha256, one_content_version, valid_approvals
 
     verdict, unexplained = report["verdict"], report["parity"]["unexplained"]
     roles = list(state.get("required_roles") or [])
@@ -863,6 +863,8 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
             }
     else:
         approvals, invalidated = valid_approvals(state, content_digests(report))
+        approvals, superseded = one_content_version(approvals)
+        invalidated = invalidated + superseded
     blocked_reason = None
     if signed:
         status = "signed"

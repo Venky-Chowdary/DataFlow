@@ -211,7 +211,8 @@ def client(monkeypatch, tmp_path):
 def test_witness_route_returns_evidence_and_review_records_the_person(client, data):
     src, _ = data
     body = {"mappings": F.LOGIN_INTO_EMAIL_ONLY, "source_rows": src, "date_locale": "DMY",
-            "destination_table_exists": False}
+            "destination_table_exists": False, "session_id": "map-session-0001",
+            "source_ref": {"kind": "file", "name": "customers.csv"}}
     resp = client.post("/api/v1/transfer/mapping-witness", json=body)
     assert resp.status_code == 200, resp.text
     out = resp.json()
@@ -220,11 +221,12 @@ def test_witness_route_returns_evidence_and_review_records_the_person(client, da
     assert out["report"]["notes"] == ["The destination table does not exist yet, so only source values were checked."]
     review = client.post("/api/v1/transfer/mapping-witness/review",
                          json={"mapping_digest": out["mapping_digest"], "source": "login", "decision": "changed",
-                               "new_target": "username"})
+                               "new_target": "username", "session_id": "map-session-0001"})
     assert review.status_code == 200, review.text
     assert review.json()["decision"]["decision"] == "changed"
     missing = client.post("/api/v1/transfer/mapping-witness/review",
-                          json={"mapping_digest": out["mapping_digest"], "source": "given", "decision": "kept"})
+                          json={"mapping_digest": out["mapping_digest"], "source": "given", "decision": "kept",
+                                "session_id": "map-session-0001"})
     assert missing.status_code == 404
 
 
@@ -244,6 +246,7 @@ def test_map_and_job_name_the_same_destination_however_it_was_spelled(monkeypatc
                 "database": "crm", "schema": "", "table": "customers"}
     out = TestClient(app).post("/api/v1/transfer/mapping-witness", json={
         "mappings": maps, "source_rows": src, "destination": map_side, "destination_table_exists": False,
+        "session_id": "map-session-0001", "source_ref": {"kind": "file", "name": "customers.csv"},
     })
     assert out.status_code == 200, out.text
     # Job: the resolved endpoint (schema public, port 5432); the omitted row sent as Execute sends it.
@@ -251,7 +254,9 @@ def test_map_and_job_name_the_same_destination_however_it_was_spelled(monkeypatc
                               database="crm", schema="public", table="customers")
     job_maps = F.LOGIN_INTO_EMAIL_ONLY + [{"source": "legacy_flag", "target": "", "transform": "omit",
                                            "intentional_omit": True}]
-    snap = snapshot_for_request(SimpleNamespace(workspace_id="", destination=job_dest, mappings=job_maps))
+    snap = snapshot_for_request(SimpleNamespace(
+        workspace_id="", destination=job_dest, mappings=job_maps, witness_session_id="map-session-0001",
+        source=SimpleNamespace(kind="file", table="", collection=""), source_filename="customers.csv"))
     assert snap["status"] == "ok" and snap["mapping_digest"] == out.json()["mapping_digest"]
     assert snap["report"]["summary"]["flagged"] == 1
     # The same table spelled other ways is one identity; another table is not.
@@ -367,7 +372,9 @@ def test_a_warehouse_is_read_only_when_asked(data, monkeypatch):
                            destination_table_exists=True)
     assert reads == [] and "only when you choose Check mapping" in auto["notes"][0]
     svc.run_witness(mappings=F.CORRECT_MAPPING, source_rows=src, destination_endpoint=wh, key=F.KEY,
-                    destination_table_exists=True, trigger="explicit", candidate_columns=["region", "x; DROP"])
+                    destination_table_exists=True, trigger="explicit",
+                    candidate_columns=["customer_id", "first_name", "last_name", "email", "username", "joined_on",
+                                       "balance", "region", "x; DROP"])
     # Named columns only (never SELECT *): the key, the mapped targets, the catalog's candidates.
     assert reads == [["customer_id", "first_name", "last_name", "email", "username", "joined_on", "balance",
                       "region"]]
@@ -391,11 +398,12 @@ def test_submit_freezes_the_evidence_onto_the_job(monkeypatch, tmp_path, data):
     src, dst = data
     identity = destination_identity(dest, "ws1")
     digest = mapping_digest(F.SWAPPED_NAMES, identity)
-    save_report(witness_mappings(F.SWAPPED_NAMES, src, dst, key=F.KEY), workspace_id="ws1", identity=identity,
-                digest=digest)
+    save_report(witness_mappings(F.SWAPPED_NAMES, src, dst, key=F.KEY), workspace_id="ws1", session="plan-0001-x",
+                identity=identity, digest=digest, source="database|legacy")
     request = TransferRequest(source=EndpointConfig(kind="database", format="postgresql", table="legacy"),
                               destination=dest, mappings=list(F.SWAPPED_NAMES), workspace_id="ws1",
                               skip_preflight=True)
+    request.witness_session_id = "plan-0001-x"
     monkeypatch.setattr("services.data_residency.enforce_request_residency", lambda r: None)
     monkeypatch.setattr("services.callable_intake.apply_callable_intake", lambda r: None)
     assert create_pending_job(engine, request) == "job-1"
@@ -431,3 +439,130 @@ def test_hostile_cells_through_the_route_are_a_200(monkeypatch, tmp_path):
     res = TestClient(app).post("/api/v1/transfer/mapping-witness", json={
         "mappings": [{"source": "amount_cents", "target": "amount_cents"}], "source_rows": rows})
     assert res.status_code == 200, res.text
+
+
+# ── Round 2 (N2, N6, N7, N8) ─────────────────────────────────────────────────
+
+
+def _wide(n_cols=80, rows=50):
+    cols = [f"c{i:02d}" for i in range(n_cols)] + ["amount (usd)"]
+    src = [{"id": r, **{c: f"{c}-{r}" for c in cols}} for r in range(rows)]
+    return cols, src
+
+
+def test_a_wide_table_is_read_in_batches_and_unread_columns_never_read_as_differs(monkeypatch, tmp_path):
+    import services.mapping_witness_service as svc
+    from services.mapping_witness import STATUS_NOT_READ
+    from src.transfer.models import EndpointConfig
+
+    cols, src = _wide()
+    dest_table = {r["id"]: dict(r) for r in src}
+    calls: list[list[str]] = []
+
+    def fake_read(endpoint, *, workspace_id, key_column, keys, columns):
+        calls.append(list(columns))
+        if any(not svc._addressable(c) for c in columns):
+            raise ValueError("unaddressable column reached the reader")
+        return [{c: dest_table[k].get(c) for c in columns} for k in keys]
+
+    monkeypatch.setattr(svc, "read_rows", fake_read)
+    maps = [{"source": "id", "target": "id"}] + [{"source": c, "target": c} for c in cols]
+    maps.append({"source": "later", "target": "added_later"})  # not in the catalog yet (createNew lagging)
+    src = [{**r, "later": "x"} for r in src]
+    endpoint = EndpointConfig(kind="database", format="postgresql", host="db.internal.test", table="wide")
+    report = svc.run_witness(mappings=maps, source_rows=src, destination_endpoint=endpoint, key=("id", "id"),
+                             destination_table_exists=True, candidate_columns=["id", *cols])
+    assert len(calls) == 2 and all(len(c) <= svc.READ_BATCH_COLUMNS + 1 for c in calls)
+    statuses = {p["source"]: p["status"] for p in report["pairs"]}
+    assert statuses["amount (usd)"] == STATUS_NOT_READ
+    assert statuses["later"] == STATUS_NOT_READ
+    assert "differs" not in statuses.values()
+    assert sum(1 for v in statuses.values() if v == "witnessed") == 81
+
+
+def test_a_failed_read_batch_leaves_its_columns_not_read(monkeypatch):
+    import services.mapping_witness_service as svc
+    from src.transfer.models import EndpointConfig
+
+    cols, src = _wide(n_cols=70)
+    state = {"n": 0}
+
+    def flaky(endpoint, *, workspace_id, key_column, keys, columns):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise OSError("batch two failed")
+        return [{c: f"{c}-{k}" if c != "id" else k for c in columns} for k in keys]
+
+    monkeypatch.setattr(svc, "read_rows", flaky)
+    maps = [{"source": "id", "target": "id"}] + [{"source": c, "target": c} for c in cols[:70]]
+    endpoint = EndpointConfig(kind="database", format="postgresql", host="db.internal.test", table="wide")
+    report = svc.run_witness(mappings=maps, source_rows=src, destination_endpoint=endpoint, key=("id", "id"),
+                             destination_table_exists=True, candidate_columns=["id", *cols])
+    by = {p["source"]: p for p in report["pairs"]}
+    assert by["c69"]["status"] == "not_read" and "could not be read" in by["c69"]["reason"]
+    assert by["c00"]["status"] == "witnessed"
+
+
+def test_stores_are_capped_and_pruned(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.mapping_witness_service as svc
+
+    monkeypatch.setattr(svc, "MAX_RECORDS_PER_WORKSPACE", 5)
+    for i in range(9):
+        svc.save_report({"pairs": [], "n": i}, workspace_id="ws1", session=f"session-{i:04d}", identity="x",
+                        digest=f"{i:064d}")
+    data = svc._DOC.load(part="ws1")
+    kept = [k for k, r in data.items() if isinstance(r, dict) and r.get("workspace_id") == "ws1"]
+    assert len(kept) == 5 and not any(k.endswith(f"{0:064d}") for k in kept)
+    many = [{"source": f"s{i}", "target": f"t{i}", "approved": True} for i in range(1200)]
+    for _ in range(3):
+        svc.record_map_decisions(workspace_id="ws2", session="session-big1", identity="x", mappings=many,
+                                 actor="a@example.com")
+    _d, _k, record, _n = svc._activity("ws2", "session-big1", "x")
+    assert len(record["map_decisions"]) <= svc.MAX_SOURCES
+
+
+def test_identity_tells_files_projects_and_quoted_case_apart(monkeypatch):
+    from services.mapping_witness_service import destination_identity
+
+    a = {"kind": "file_export", "format": "csv", "output_path": "exports/a.csv"}
+    b = {"kind": "file_export", "format": "csv", "output_path": "exports/b.csv"}
+    assert destination_identity(a) != destination_identity(b)
+    bq = dict(kind="database", format="bigquery", database="sales", table="orders")
+    assert destination_identity({**bq, "extra": {"project": "p-one"}}) != \
+        destination_identity({**bq, "extra": {"project": "p-two"}})
+    pg = dict(kind="database", format="postgresql", host="db.internal.test", database="crm", schema="public")
+    assert destination_identity({**pg, "table": "Orders"}) != destination_identity({**pg, "table": "orders"})
+    sf = dict(kind="database", format="snowflake", host="acme.snowflakecomputing.com", database="DW", schema="PUBLIC")
+    assert destination_identity({**sf, "table": "ORDERS"}) == destination_identity({**sf, "table": "orders"})
+
+
+def test_identity_is_the_same_with_or_without_a_connector_id(monkeypatch):
+    import src.transfer.adapters as adapters
+    from services.mapping_witness_service import destination_identity
+
+    cfg = {"type": "postgresql", "host": "db.internal.test", "port": 5432, "database": "crm", "schema": "public",
+           "table": "customers"}
+    monkeypatch.setattr(adapters, "resolve_connector_config", lambda ep, ws=None: dict(cfg))
+    via_id = {"kind": "database", "format": "postgresql", "connector_id": "conn-1", "table": "customers"}
+    inline = {"kind": "database", "format": "postgresql", "host": "db.internal.test", "table": "customers"}
+    assert destination_identity(via_id) == destination_identity(inline)
+
+
+def test_the_warehouse_guard_reads_the_resolved_engine(monkeypatch):
+    import services.mapping_witness_service as svc
+    import src.transfer.adapters as adapters
+    from src.transfer.models import EndpointConfig
+
+    monkeypatch.setattr(adapters, "resolve_connector_config", lambda ep, ws=None: {
+        "type": "snowflake", "host": "acme.snowflakecomputing.com", "database": "DW", "table": "T"})
+    monkeypatch.setattr(svc, "read_rows", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("read a warehouse")))
+    saved = EndpointConfig(kind="database", format="", connector_id="conn-sf", table="T")
+    report = svc.run_witness(mappings=F.CORRECT_MAPPING, source_rows=F.customers()[0], destination_endpoint=saved,
+                             key=F.KEY, destination_table_exists=True)
+    assert "only when you choose Check mapping" in report["notes"][0]
+
+
+def test_floats_beyond_the_bound_are_compared_as_written_not_missing():
+    assert norm(1.5e61) == "1.5e+61"
+    assert norm(1.5e61) is not None and norm(1.5e61) != norm(2.5e61)
