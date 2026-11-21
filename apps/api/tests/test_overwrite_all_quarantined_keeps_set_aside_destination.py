@@ -361,9 +361,14 @@ class _FakeIndices:
     def refresh(self, index: str = "", **_: Any) -> dict:
         return {}
 
-    def get_alias(self, index: str, **_: Any) -> dict:
-        # A clone copies no alias: aliases live on the index entry only.
-        return {index: {"aliases": dict(self.store[index].get("aliases") or {})}}
+    def get_alias(self, index: str, **_: Any) -> Any:
+        # A clone copies no alias: aliases live on the index entry only. The
+        # real elasticsearch-py 8 client answers with an ObjectApiResponse,
+        # not a dict (review of NF-1: a dict-only reader saw no alias).
+        from elastic_transport import ObjectApiResponse
+
+        body = {index: {"aliases": dict(self.store[index].get("aliases") or {})}}
+        return ObjectApiResponse(body=body, meta=None)
 
     def update_aliases(self, actions: list[dict[str, Any]], **_: Any) -> dict:
         for action in actions:

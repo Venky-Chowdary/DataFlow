@@ -602,6 +602,29 @@ def test_elasticsearch_failed_run_restores_documents_and_aliases(es):
     assert store["orders"]["settings"]["index.lifecycle.name"] == "keep-90d"
 
 
+def test_elasticsearch_restore_fails_loudly_when_aliases_do_not_come_back(es, monkeypatch):
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+    monkeypatch.setattr(client.indices, "update_aliases", lambda **_: {"acknowledged": True})
+
+    with pytest.raises(TableDropError, match="orders_eu"):
+        restore_set_aside("elasticsearch", {}, "orders", backup)
+
+    assert store["orders"]["docs"] == [1, 2, 3]  # the rows are back; the aliases are reported
+
+
+def test_elasticsearch_aliases_read_from_an_object_api_response():
+    from elastic_transport import ObjectApiResponse
+
+    from connectors.overwrite_governance import elasticsearch_aliases
+
+    body = {"orders": {"aliases": {"orders_eu": {"filter": {"term": {"region": "EU"}}}}}}
+    client = SimpleNamespace(indices=SimpleNamespace(get_alias=lambda index: ObjectApiResponse(body=body, meta=None)))
+    assert elasticsearch_aliases(client, "orders") == [
+        {"add": {"index": "orders", "alias": "orders_eu", "filter": {"term": {"region": "EU"}}}}
+    ]
+
+
 def test_elasticsearch_failed_empty_puts_the_documents_back(es, monkeypatch):
     client, store = es
 

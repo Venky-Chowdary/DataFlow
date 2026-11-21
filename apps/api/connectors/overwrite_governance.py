@@ -32,6 +32,7 @@ shows for each engine.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -379,26 +380,60 @@ def bigquery_create_like(client: Any, table_id: str, gov: BigQueryGovernance, ca
 # ------------------------------------------------------------ Elasticsearch
 
 
+def _es_body(raw: Any) -> dict[str, Any]:
+    """The JSON body of an elasticsearch-py response.
+
+    elasticsearch-py 8 returns ``ObjectApiResponse`` (not a ``dict``); its
+    payload is ``.body``. Reading only dicts made every index look alias-less.
+    """
+    body = getattr(raw, "body", raw)
+    if isinstance(body, Mapping):
+        return dict(body)
+    try:
+        return dict(body or {})
+    except (TypeError, ValueError):
+        return {}
+
+
 def elasticsearch_aliases(client: Any, index: str) -> list[dict[str, Any]]:
     """The aliases of ``index`` as ``update_aliases`` add actions."""
-    raw = client.indices.get_alias(index=index) or {}
-    body = dict(raw.get(index) or {}) if isinstance(raw, dict) else {}
+    raw = _es_body(client.indices.get_alias(index=index))
+    entry = raw.get(index)
+    if entry is None and len(raw) == 1:
+        # An alias-resolved name answers under the concrete index name.
+        entry = next(iter(raw.values()))
+    body = _es_body(entry or {})
     actions: list[dict[str, Any]] = []
-    for alias, spec in (body.get("aliases") or {}).items():
+    for alias, spec in _es_body(body.get("aliases") or {}).items():
         add = {"index": index, "alias": alias}
+        spec = _es_body(spec)
         for key in ("filter", "routing", "index_routing", "search_routing", "is_write_index", "is_hidden"):
-            if isinstance(spec, dict) and key in spec:
+            if key in spec:
                 add[key] = spec[key]
         actions.append({"add": add})
     return actions
 
 
 def elasticsearch_restore_aliases(client: Any, index: str, actions: list[dict[str, Any]]) -> None:
+    """Re-add the aliases, then read them back: a missing alias fails the restore.
+
+    A filtered alias is often the access boundary readers go through; a
+    restore that silently dropped it would report success on an index nobody
+    can read the way they did before.
+    """
     if not actions:
         return
     for action in actions:
         action["add"]["index"] = index
     client.indices.update_aliases(actions=actions)
+    wanted = {a["add"]["alias"]: a["add"] for a in actions}
+    present = {a["add"]["alias"]: a["add"] for a in elasticsearch_aliases(client, index)}
+    missing = sorted(
+        name for name, spec in wanted.items()
+        if name not in present or present[name].get("filter") != spec.get("filter")
+    )
+    if missing:
+        raise GovernanceNotPreserved(index, [f"alias(es) {missing} were not re-added"])
 
 
 # ----------------------------------------------------------------- Validate
