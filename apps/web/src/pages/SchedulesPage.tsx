@@ -27,6 +27,7 @@ import { recoveryConfirmOptions } from "../lib/scheduleRecovery";
 import {
   applyGitopsManifest,
   createSchedule,
+  planScheduleMappings,
   deleteSchedule,
   exportDatawrapManifest,
   exportScheduleYaml,
@@ -356,12 +357,15 @@ export function SchedulesPage({
         toast({ title: "Schedule updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
       } else {
         created = await createSchedule(input as ScheduleInput);
+        const mapped = created?.mapping_count ?? created?.mappings?.length ?? 0;
         toast({
           title: input.enabled === false ? "Schedule saved paused" : "Schedule created",
           message:
             input.enabled === false
               ? `"${input.name}" has no Validate mappings — opening Transfer Studio so the beat does not invent an auto-map.`
-              : `"${input.name}" is scheduled.`,
+              : input.plan_mappings && mapped
+                ? `"${input.name}" is scheduled: ${mapped} column${mapped === 1 ? "" : "s"} mapped and Validate passed.`
+                : `"${input.name}" is scheduled.`,
           tone: "success",
         });
       }
@@ -379,6 +383,31 @@ export function SchedulesPage({
         tone: "error",
       });
       console.error(err);
+    }
+    setSaving(false);
+  };
+
+  /** QA batch 1: arm a mapping-less schedule with the server-side plan. */
+  const handlePlanMappings = async (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
+    setSaving(true);
+    try {
+      const planned = await planScheduleMappings(sched.id);
+      const mapped = planned.mapping_count ?? planned.mappings?.length ?? 0;
+      toast({
+        title: "Mappings planned",
+        message: `"${sched.name}": ${mapped} column${mapped === 1 ? "" : "s"} mapped and Validate passed. Run now can start it.`,
+        tone: "success",
+      });
+      closeForm();
+      await load();
+      void onSchedulesChange?.();
+    } catch (err) {
+      toast({
+        title: "Could not plan mappings",
+        message: err instanceof Error ? err.message : undefined,
+        tone: "error",
+      });
     }
     setSaving(false);
   };
@@ -693,7 +722,7 @@ export function SchedulesPage({
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring syncs between your connections: each run replays a Validate-approved route on a cadence. A draft without mappings stays paused until Transfer Studio saves its mapping."
+      description="Recurring syncs between your connections: each run replays a Validate-approved route on a cadence. New schedule plans the mapping and runs Validate before it saves; a draft without mappings stays paused until it is planned."
     >
       <PageFrame className="df2-pipeline-page">
       <PermissionNotice
@@ -839,6 +868,7 @@ export function SchedulesPage({
                   ? () => openStudioFromSchedule(editing.id)
                   : () => onStartTransfer?.()
               }
+              onPlanMappings={editing ? () => void handlePlanMappings(editing) : undefined}
             />
           </PageSection>
         </div>
@@ -881,7 +911,7 @@ export function SchedulesPage({
             page
             icon="activity"
             title="No schedules yet"
-            description="Unattended runs replay a Validate-approved mapping contract. Open Transfer Studio, Map → Validate, then Schedule from the footer. New schedule here saves cadence only — it stays paused until mappings exist."
+            description="Unattended runs replay a Validate-approved mapping contract. New schedule here plans the mapping and runs Validate for the route, and saves only a schedule that would run; to review the mapping yourself, open Transfer Studio, Map → Validate, then Schedule from the footer."
             action={
               !showForm ? (
                 <>

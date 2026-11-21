@@ -786,7 +786,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             { n: 4, label: "New schedule", x: "91%", y: "11%" },
           ],
         },
-        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page saves cadence only and stays paused until the route has an approved mapping.",
+        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page is planned the same way: Datawrap maps the columns and runs Validate for the route, and saves the schedule only if that plan would run (otherwise it shows the blockers). A schedule saved earlier without mappings shows **Plan mappings**; Run now on it explains what to do instead of starting a job.",
       },
       {
         id: "create-pipeline",
