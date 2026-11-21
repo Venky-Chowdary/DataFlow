@@ -1,1 +1,435 @@
-{"schema_version": 1, "ce_version": "CE1", "generated_by": "parity-ce-matrix", "matrix_run": "", "date": "", "about": "Not yet generated: the parity-ce-matrix CI job writes this file.", "engines": {}, "pairs": {}}
+{
+ "schema_version": 1,
+ "ce_version": "CE1",
+ "generated_by": "parity-ce-matrix",
+ "matrix_run": "44925120810",
+ "date": "2026-11-21",
+ "about": "Engine x kind renderings and engine pairs a live CE-matrix run certified. Read by services.parity_scale.certification; a kind or pair not listed is uncertified.",
+ "engines": {
+  "mariadb11.4": {
+   "family": "mariadb",
+   "kinds": {
+    "integer": {
+     "ce_kind": "integer",
+     "ddl": "BIGINT",
+     "values": 629
+    },
+    "boolean": {
+     "ce_kind": "boolean",
+     "ddl": "TINYINT(1)",
+     "values": 710
+    },
+    "decimal": {
+     "ce_kind": "decimal",
+     "ddl": "DECIMAL(18,4)",
+     "values": 846
+    },
+    "text": {
+     "ce_kind": "text",
+     "ddl": "VARCHAR(40)",
+     "values": 596
+    },
+    "text_digest": {
+     "ce_kind": "text",
+     "ddl": "TEXT",
+     "values": 596
+    },
+    "char": {
+     "ce_kind": "char",
+     "ddl": "CHAR(8)",
+     "values": 648
+    },
+    "date": {
+     "ce_kind": "date",
+     "ddl": "DATE",
+     "values": 747
+    },
+    "timestamp": {
+     "ce_kind": "timestamp",
+     "ddl": "DATETIME(6)",
+     "values": 520
+    },
+    "binary": {
+     "ce_kind": "binary",
+     "ddl": "VARBINARY(64)",
+     "values": 978
+    }
+   },
+   "projections": [
+    "decimal_fit",
+    "instant0",
+    "instant3"
+   ]
+  },
+  "mysql8.0": {
+   "family": "mysql",
+   "kinds": {
+    "integer": {
+     "ce_kind": "integer",
+     "ddl": "BIGINT",
+     "values": 629
+    },
+    "boolean": {
+     "ce_kind": "boolean",
+     "ddl": "TINYINT(1)",
+     "values": 710
+    },
+    "decimal": {
+     "ce_kind": "decimal",
+     "ddl": "DECIMAL(18,4)",
+     "values": 846
+    },
+    "text": {
+     "ce_kind": "text",
+     "ddl": "VARCHAR(40)",
+     "values": 596
+    },
+    "text_digest": {
+     "ce_kind": "text",
+     "ddl": "TEXT",
+     "values": 596
+    },
+    "char": {
+     "ce_kind": "char",
+     "ddl": "CHAR(8)",
+     "values": 648
+    },
+    "date": {
+     "ce_kind": "date",
+     "ddl": "DATE",
+     "values": 747
+    },
+    "timestamp": {
+     "ce_kind": "timestamp",
+     "ddl": "DATETIME(6)",
+     "values": 520
+    },
+    "binary": {
+     "ce_kind": "binary",
+     "ddl": "VARBINARY(64)",
+     "values": 978
+    }
+   },
+   "projections": [
+    "decimal_fit",
+    "instant0",
+    "instant3"
+   ]
+  },
+  "postgresql16": {
+   "family": "postgresql",
+   "kinds": {
+    "integer": {
+     "ce_kind": "integer",
+     "ddl": "bigint",
+     "values": 629
+    },
+    "boolean": {
+     "ce_kind": "boolean",
+     "ddl": "boolean",
+     "values": 710
+    },
+    "decimal": {
+     "ce_kind": "decimal",
+     "ddl": "numeric(18,4)",
+     "values": 846
+    },
+    "text": {
+     "ce_kind": "text",
+     "ddl": "varchar(40)",
+     "values": 596
+    },
+    "text_digest": {
+     "ce_kind": "text",
+     "ddl": "text",
+     "values": 596
+    },
+    "char": {
+     "ce_kind": "char",
+     "ddl": "char(8)",
+     "values": 648
+    },
+    "date": {
+     "ce_kind": "date",
+     "ddl": "date",
+     "values": 747
+    },
+    "timestamp": {
+     "ce_kind": "timestamp",
+     "ddl": "timestamp(6)",
+     "values": 520
+    },
+    "timestamptz": {
+     "ce_kind": "timestamptz",
+     "ddl": "timestamptz",
+     "values": 684
+    },
+    "uuid": {
+     "ce_kind": "uuid",
+     "ddl": "uuid",
+     "values": 543
+    },
+    "binary": {
+     "ce_kind": "binary",
+     "ddl": "bytea",
+     "values": 978
+    }
+   },
+   "projections": [
+    "decimal_fit",
+    "instant0",
+    "instant3"
+   ]
+  },
+  "sqlserver16": {
+   "family": "sqlserver",
+   "kinds": {
+    "integer": {
+     "ce_kind": "integer",
+     "ddl": "bigint",
+     "values": 629
+    },
+    "boolean": {
+     "ce_kind": "boolean",
+     "ddl": "bit",
+     "values": 710
+    },
+    "decimal": {
+     "ce_kind": "decimal",
+     "ddl": "DECIMAL(18,4)",
+     "values": 846
+    },
+    "text": {
+     "ce_kind": "text",
+     "ddl": "NVARCHAR(40)",
+     "values": 596
+    },
+    "text_digest": {
+     "ce_kind": "text",
+     "ddl": "NVARCHAR(MAX)",
+     "values": 596
+    },
+    "char": {
+     "ce_kind": "char",
+     "ddl": "NCHAR(8)",
+     "values": 648
+    },
+    "date": {
+     "ce_kind": "date",
+     "ddl": "date",
+     "values": 747
+    },
+    "timestamp": {
+     "ce_kind": "timestamp",
+     "ddl": "DATETIME2(6)",
+     "values": 520
+    },
+    "timestamp7": {
+     "ce_kind": "timestamp",
+     "ddl": "DATETIME2(7)",
+     "values": 725
+    },
+    "timestamptz": {
+     "ce_kind": "timestamptz",
+     "ddl": "DATETIMEOFFSET(6)",
+     "values": 684
+    },
+    "uuid": {
+     "ce_kind": "uuid",
+     "ddl": "uniqueidentifier",
+     "values": 543
+    },
+    "binary": {
+     "ce_kind": "binary",
+     "ddl": "VARBINARY(64)",
+     "values": 978
+    }
+   },
+   "projections": [
+    "decimal_fit",
+    "instant0",
+    "instant3"
+   ]
+  }
+ },
+ "pairs": {
+  "mariadb11.4->mariadb11.4": {
+   "source": "mariadb11.4",
+   "destination": "mariadb11.4",
+   "source_family": "mariadb",
+   "destination_family": "mariadb",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "mariadb11.4->postgresql16": {
+   "source": "mariadb11.4",
+   "destination": "postgresql16",
+   "source_family": "mariadb",
+   "destination_family": "postgresql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "mysql8.0->mysql8.0": {
+   "source": "mysql8.0",
+   "destination": "mysql8.0",
+   "source_family": "mysql",
+   "destination_family": "mysql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "mysql8.0->postgresql16": {
+   "source": "mysql8.0",
+   "destination": "postgresql16",
+   "source_family": "mysql",
+   "destination_family": "postgresql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "postgresql16->mariadb11.4": {
+   "source": "postgresql16",
+   "destination": "mariadb11.4",
+   "source_family": "postgresql",
+   "destination_family": "mariadb",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "postgresql16->mysql8.0": {
+   "source": "postgresql16",
+   "destination": "mysql8.0",
+   "source_family": "postgresql",
+   "destination_family": "mysql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp"
+   ],
+   "rows": 400
+  },
+  "postgresql16->postgresql16": {
+   "source": "postgresql16",
+   "destination": "postgresql16",
+   "source_family": "postgresql",
+   "destination_family": "postgresql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp",
+    "timestamptz",
+    "uuid"
+   ],
+   "rows": 400
+  },
+  "postgresql16->sqlserver16": {
+   "source": "postgresql16",
+   "destination": "sqlserver16",
+   "source_family": "postgresql",
+   "destination_family": "sqlserver",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp",
+    "timestamptz",
+    "uuid"
+   ],
+   "rows": 400
+  },
+  "sqlserver16->postgresql16": {
+   "source": "sqlserver16",
+   "destination": "postgresql16",
+   "source_family": "sqlserver",
+   "destination_family": "postgresql",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp",
+    "timestamptz",
+    "uuid"
+   ],
+   "rows": 400
+  },
+  "sqlserver16->sqlserver16": {
+   "source": "sqlserver16",
+   "destination": "sqlserver16",
+   "source_family": "sqlserver",
+   "destination_family": "sqlserver",
+   "kinds": [
+    "binary",
+    "boolean",
+    "char",
+    "date",
+    "decimal",
+    "integer",
+    "text",
+    "timestamp",
+    "timestamptz",
+    "uuid"
+   ],
+   "rows": 400
+  }
+ }
+}

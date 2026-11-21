@@ -235,7 +235,20 @@ partition the key space, so their quality changes speed, never the result.
 
 <!-- BEGIN GENERATED: parity-ce-certification (apps/api/scripts/gen_parity_ce_certification.py) -->
 
-No engine pair is certified yet.
+Certified by CE-matrix run `44925120810` on 2026-11-21 (CE version CE1). A kind not listed for a pair is compared by streamed fingerprint.
+
+| Source | Destination | Kinds compared in-engine |
+|---|---|---|
+| mariadb11.4 | mariadb11.4 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| mariadb11.4 | postgresql16 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| mysql8.0 | mysql8.0 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| mysql8.0 | postgresql16 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| postgresql16 | mariadb11.4 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| postgresql16 | mysql8.0 | binary, boolean, char, date, decimal, integer, text, timestamp |
+| postgresql16 | postgresql16 | binary, boolean, char, date, decimal, integer, text, timestamp, timestamptz, uuid |
+| postgresql16 | sqlserver16 | binary, boolean, char, date, decimal, integer, text, timestamp, timestamptz, uuid |
+| sqlserver16 | postgresql16 | binary, boolean, char, date, decimal, integer, text, timestamp, timestamptz, uuid |
+| sqlserver16 | sqlserver16 | binary, boolean, char, date, decimal, integer, text, timestamp, timestamptz, uuid |
 
 <!-- END GENERATED: parity-ce-certification -->
 
