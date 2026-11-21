@@ -112,7 +112,50 @@ def _spawn(spec: dict, tmp: Path, name: str) -> tuple[subprocess.Popen, Path]:
 
 
 ROUTES = [("pg", "pg"), ("mysql", "mysql"), ("pg", "mysql"), ("mysql", "pg")]
-MODES = ["full_refresh_overwrite", "incremental_deduped"]
+#: Append modes are the ones a plain rerun would duplicate: they prove the second
+#: process resumed after the committed batches instead of starting over.
+MODES = ["full_refresh_overwrite", "incremental_deduped", "full_refresh_append",
+         "incremental_append"]
+_APPEND_MODES = {"full_refresh_append", "incremental_append"}
+
+
+def _count_writes(bench_env, engine: str, table: str, tag: str) -> str:
+    """Count every row the destination receives from now on (a trigger)."""
+    counter = f"kr_cnt_{tag}"
+    if engine == "pg":
+        bench_env._exec("pg", [
+            (f"CREATE TABLE {counter} (n int)", None),
+            (f"CREATE FUNCTION {counter}_f() RETURNS trigger LANGUAGE plpgsql AS "
+             f"$$ BEGIN INSERT INTO {counter} VALUES (1); RETURN NULL; END $$", None),
+            (f"CREATE TRIGGER {counter}_t AFTER INSERT OR UPDATE ON {table} "
+             f"FOR EACH ROW EXECUTE FUNCTION {counter}_f()", None),
+        ])
+    else:
+        bench_env._exec("mysql", [
+            (f"CREATE TABLE {counter} (n int)", None),
+            (f"CREATE TRIGGER {counter}_i AFTER INSERT ON {table} FOR EACH ROW "
+             f"INSERT INTO {counter} VALUES (1)", None),
+            (f"CREATE TRIGGER {counter}_u AFTER UPDATE ON {table} FOR EACH ROW "
+             f"INSERT INTO {counter} VALUES (1)", None),
+        ])
+    return counter
+
+
+def _scalar(bench_env, engine: str, sql: str) -> int:
+    conn = bench_env._connect(engine)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _drop_counter(bench_env, engine: str, counter: str) -> None:
+    stmts = [(f"DROP TABLE IF EXISTS {counter}", None)]
+    if engine == "pg":
+        stmts.append((f"DROP FUNCTION IF EXISTS {counter}_f() CASCADE", None))
+    bench_env._exec(engine, stmts)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -168,6 +211,13 @@ def test_sigkill_mid_write_then_resume_loses_and_duplicates_nothing(
         )
         assert killed_at < ROWS, killed_at
         assert not Path(first["result_path"]).exists()
+        counter = ""
+        landed_before = 0
+        resume_point = _committed_rows(store_path, job_id)  # the checkpoint the resume reads
+        if mode in _APPEND_MODES:
+            landed_before = _scalar(bench_env, dst_engine, f"SELECT COUNT(*) FROM {dst_table}")
+            assert landed_before >= 4 * CHUNK, landed_before  # committed batches survived the kill
+            counter = _count_writes(bench_env, dst_engine, dst_table, tag)
 
         second = dict(base, resume=True, result_path=str(tmp_path / "second.result"),
                       started_path=str(tmp_path / "second.started"))
@@ -186,7 +236,21 @@ def test_sigkill_mid_write_then_resume_loses_and_duplicates_nothing(
         check = bench_env.independent_check(src_engine, src_table, dst_engine, dst_table, ROWS)
         assert check["passed"], check
         assert check["rows_compared"] == ROWS
+        if counter:
+            # The resumed process started at the durable checkpoint: it wrote no
+            # more than the rows after it (rows that landed after the last
+            # checkpoint save are re-applied through the write ledger, not
+            # duplicated), never the whole table a rerun would have written.
+            written = _scalar(bench_env, dst_engine, f"SELECT COUNT(*) FROM {counter}")
+            assert 0 < resume_point <= landed_before, (resume_point, landed_before)
+            assert ROWS - landed_before <= written <= ROWS - resume_point, (
+                written, landed_before, resume_point)
     finally:
+        if mode in _APPEND_MODES:
+            try:
+                _drop_counter(bench_env, dst_engine, f"kr_cnt_{tag}")
+            except Exception:  # noqa: BLE001, S110 - cleanup only
+                pass
         for engine, table in ((src_engine, src_table), (dst_engine, dst_table)):
             try:
                 bench_env.drop_table(engine, table)
