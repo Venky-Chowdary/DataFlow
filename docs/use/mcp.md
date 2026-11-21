@@ -108,6 +108,10 @@ policy (`PUT /api/v1/mcp/policy`, field `confirm`:
   from their own signed-in session.
 - The `confirm` part of the policy can only be changed from an interactive
   session; an API key or MCP token (the agent it governs) gets 403.
+- A change merges into the stored policy. `default` and other workspaces'
+  entries need a platform admin; a workspace admin may set (or clear, with
+  `null`) only their own workspace's entry. The audit event
+  `mcp.policy.updated` records the old and new policy.
 - With platform authentication off (`DATAFLOW_REQUIRE_AUTH=0`) there is no
   identity to bind: only the MCP channel is refused.
 - Not covered: a person who copies their own sign-in token into an agent has

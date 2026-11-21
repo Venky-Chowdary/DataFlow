@@ -209,10 +209,13 @@ Connectors form shows them as text fields). Code:
 | `trust_server_certificate`, `server_certificate`, `hostname_in_certificate` | Unchanged: skip verification (declared), pin a certificate, or match an alias host name. |
 
 Gate-8 read-back, the verification ladder and target samples follow the same
-choice: they no longer dial FreeTDS for a connector that requires encryption,
-a pinned certificate, Entra ID or the Microsoft driver, and the SQL
-Server-to-SQL Server fast path no longer retries a failed verified handshake
-over FreeTDS. Proven by unit tests (`tests/test_nf2_sqlserver_tls_and_entra.py`);
+choice: they use the Microsoft driver whenever it is installed (unless the
+connector chose `freetds`) and whenever the connector requires encryption, a
+pinned certificate or Entra ID, and the SQL Server-to-SQL Server fast path
+never retries a failed verified handshake over FreeTDS. A `mssql+pymssql://`
+connection string is refused under `MSSQL_REQUIRE_VERIFIED_TLS`,
+`sqlserver_driver=odbc` or Entra ID, like a host/port connector. Read-backs
+send no default `sa` user (a system-assigned managed identity has none). Proven by unit tests (`tests/test_nf2_sqlserver_tls_and_entra.py`);
 Entra ID sign-in has not been run against a tenant.
 
 ## Known inconsistencies
