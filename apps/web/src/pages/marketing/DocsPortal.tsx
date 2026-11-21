@@ -1,24 +1,21 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { DtIcon } from "../../components/DtIcon";
-import { DocsShotReel } from "../../components/docs/DocsShotReel";
 import {
   HELP_DOC_CATEGORIES,
   getHelpDoc,
+  hashForHelpDoc,
   helpDocNeighbors,
   searchHelpDocs,
   type HelpDocFigure,
   type HelpDocId,
   type HelpDocWorkflowStep,
 } from "../../lib/helpDocs";
-import {
-  EVIDENCE_AS_OF,
-  EVIDENCE_RUN_ID,
-  MARKETING_STACK,
-  PROVEN_EVIDENCE,
-  catalogHonestyLead,
-} from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
-import { WORKSPACE_SHOT } from "../../lib/workspaceShots";
+import { shotSize } from "../../lib/workspaceShots";
+import { MarketingClosing } from "../../components/marketing/MarketingClosing";
+import { Bento, BentoTile } from "../../components/marketing/kit/Bento";
+import { SplitHead } from "../../components/marketing/kit/SplitHead";
+import { SALES_ACTION_LABEL, START_ACTION_LABEL } from "./ContactSalesPage";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
 function formatDocRichText(text: string): ReactNode {
@@ -53,6 +50,8 @@ function DocParagraphs({ text }: { text: string }) {
 interface DocsPortalProps {
   onNavigate: (route: PublicRoute) => void;
   onGetStarted: () => void;
+  /** The public site (not the signed-in Help): adds the closing card. */
+  marketing?: boolean;
 }
 
 /** Bust browser cache when docs screenshots are recaptured at full desktop size. */
@@ -62,58 +61,6 @@ function docsShotUrl(src: string): string {
   return `${src}${sep}v=${DOCS_SHOT_V}`;
 }
 
-const SPACE_FRAMES = [
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.jobTrust),
-    alt: "Job space Trust Report: 5,100 rows in source and destination, full checksum match",
-    caption: "1 · Job space: Trust Report for the sales_orders load into Snowflake",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.connectors),
-    alt: "Connectors page with the saved demo connections",
-    caption: "2 · Connectors: saved connections that Studio, Query, and Schedules share",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferSource),
-    alt: "Transfer Studio Source step with Orders Postgres (demo) selected",
-    caption: "3 · Transfer Studio: pick the source table",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferDest),
-    alt: "Transfer Studio Destination step with Warehouse Snowflake (demo)",
-    caption: "4 · Destination: a saved warehouse and the target table",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferMap),
-    alt: "Transfer Studio Map: 11 of 11 columns mapped",
-    caption: "5 · Map: every column, its destination type, and a status",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.transferValidate),
-    alt: "Transfer Studio Validate: 17 gates passed, Execute unlocked",
-    caption: "6 · Validate: the gates are clear and Run is unlocked",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.schedulesHistory),
-    alt: "Run history for the Orders feed, each run linked to its job",
-    caption: "7 · Schedules: cadence, mode, and a job for every tick",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.query),
-    alt: "Query: revenue by region on Warehouse Snowflake (demo)",
-    caption: "8 · Query: read-only SQL on a saved connection",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.mcp),
-    alt: "MCP Server page",
-    caption: "9 · MCP: connect Cursor, Claude, VS Code, or any MCP client",
-  },
-  {
-    src: docsShotUrl(WORKSPACE_SHOT.pilot),
-    alt: "Pilot answering a row count with the SQL it ran",
-    caption: "10 · Pilot: questions answered with the SQL shown",
-  },
-];
 
 function DocsSpaceSidebar({
   activeId,
@@ -196,172 +143,254 @@ function DocsSpaceShell({
   );
 }
 
-const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl(WORKSPACE_SHOT.overview),
-  transfer: docsShotUrl(WORKSPACE_SHOT.transferMap),
-  connect: docsShotUrl(WORKSPACE_SHOT.connectors),
-  ai: docsShotUrl(WORKSPACE_SHOT.mcp),
-  ops: docsShotUrl(WORKSPACE_SHOT.jobs),
-  enterprise: docsShotUrl(WORKSPACE_SHOT.settingsSso),
-};
 
-/** Confluence-style space home — left nav + product-first start page. */
-export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
-  const [query, setQuery] = useState("");
-  const searchHits = useMemo(() => searchHelpDocs(query).slice(0, 8), [query]);
+type GuideEntry = { id: HelpDocId; label?: string; note?: string };
+/** `app` names the screens of the app the step happens on. */
+type DocsStep = { name: string; line: string; app: string; guides: GuideEntry[] };
 
+/** Guides you read once, before the first load. */
+const BEFORE_FIRST_LOAD: GuideEntry[] = [
+  { id: "help-installation", label: "Access your workspace", note: "Tenant URL, SSO sign-in, and the four workspace roles." },
+  { id: "help-getting-started", note: "The sidebar map and the governed transfer path." },
+  { id: "help-enterprise", note: "SSO, roles, your own key, and the data region, set by a workspace admin." },
+];
+
+/**
+ * Every guide, grouped by the step of a load it belongs to: the same four
+ * steps as the Transfer Studio page (Plan, Validate, Execute, Verify). Each
+ * step names the app screens it covers, so the docs map onto the app's
+ * stepper (Source, Destination, Transform, Map, Validate, Run).
+ */
+const DOCS_STEPS: DocsStep[] = [
+  {
+    name: "Plan",
+    line: "Connect both systems and pair the columns.",
+    app: "Source, Destination, Transform, and Map",
+    guides: [{ id: "help-connectors" }, { id: "help-transfer-studio" }, { id: "help-semantic-mapping" }],
+  },
+  {
+    name: "Validate",
+    line: "Check the plan before the first write.",
+    app: "Validate",
+    guides: [{ id: "help-preflight-gates" }, { id: "help-contracts" }],
+  },
+  {
+    name: "Execute",
+    line: "Run it once or on a schedule.",
+    app: "Run, and Schedules",
+    guides: [{ id: "help-pipelines" }, { id: "help-transforms" }],
+  },
+  {
+    name: "Verify",
+    line: "Read the destination back, compare, and sign the report.",
+    app: "Job space and its Trust Report",
+    guides: [{ id: "help-job-theater", label: "Job space, the Trust Report, and sign-off" }, { id: "help-query" }],
+  },
+];
+
+/** Other ways into the same engine, and reference. */
+const AROUND_THE_LOAD: GuideEntry[] = [
+  { id: "help-data-pilot" },
+  { id: "help-mcp" },
+  { id: "help-api" },
+  { id: "help-faq" },
+];
+
+const GUIDE_COUNT = new Set(
+  [...BEFORE_FIRST_LOAD, ...DOCS_STEPS.flatMap((s) => s.guides), ...AROUND_THE_LOAD].map((g) => g.id),
+).size;
+
+function GuideLink({
+  entry,
+  onNavigate,
+  showNote = false,
+}: {
+  entry: GuideEntry;
+  onNavigate: (route: PublicRoute) => void;
+  showNote?: boolean;
+}) {
+  const doc = getHelpDoc(entry.id);
   return (
-    <DocsSpaceShell activeId="help" onNavigate={onNavigate}>
-      <header className="docs-space-page-head">
-        <p className="docs-article-kicker">Enterprise product resources</p>
-        <h1>Operate Datawrap in your tenant</h1>
-        <p className="docs-article-lead">
-          Operator guides with the current workspace. After SSO: connect systems, map schemas, pass Validate, then open Job space for the Trust Report and reversibility of the run. Query is the read-only check before the next load. Nothing to install on operator laptops.
-        </p>
-        <form className="docs-search docs-search--inline" role="search" onSubmit={(e) => e.preventDefault()}>
-          <DtIcon name="search" size={18} />
-          <input
-            type="search"
-            placeholder="Search guides — e.g. Validate, Schedules, SSO, MCP…"
-            aria-label="Search documentation"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </form>
-        {query.trim() && searchHits.length > 0 ? (
-          <div className="docs-search-results docs-search-results--inline" role="listbox">
-            {searchHits.map((doc) => (
-              <button
-                key={doc.id}
-                type="button"
-                className="docs-search-hit"
-                onClick={() => {
-                  setQuery("");
-                  onNavigate(doc.id);
+    <a
+      className="mk-docs-guide"
+      href={hashForHelpDoc(entry.id)}
+      onClick={(e) => {
+        e.preventDefault();
+        onNavigate(entry.id);
+      }}
+    >
+      <span className="mk-docs-guide-title">{entry.label ?? doc.title}</span>
+      {showNote ? <span className="mk-docs-guide-note">{entry.note ?? doc.description}</span> : null}
+      <span className="mk-docs-guide-time">{doc.readTime}</span>
+    </a>
+  );
+}
+
+/** Guides that sit side by side: a tile each, the title as the link. */
+function GuideTiles({
+  entries,
+  label,
+  span,
+  onNavigate,
+}: {
+  entries: GuideEntry[];
+  label: string;
+  span: 3 | 4 | 6;
+  onNavigate: (route: PublicRoute) => void;
+}) {
+  return (
+    <Bento label={label} className="mk-docs-tiles">
+      {entries.map((entry) => {
+        const doc = getHelpDoc(entry.id);
+        return (
+          <BentoTile
+            key={entry.id}
+            span={span}
+            className="mk-docs-tile"
+            title={
+              <a
+                className="mk-docs-tile-link"
+                href={hashForHelpDoc(entry.id)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate(entry.id);
                 }}
               >
-                <strong>{doc.title}</strong>
-                <span>{doc.description}</span>
+                {entry.label ?? doc.title}
+              </a>
+            }
+            body={entry.note ?? doc.description}
+          >
+            <p className="mk-docs-tile-time">{doc.readTime} read</p>
+          </BentoTile>
+        );
+      })}
+    </Bento>
+  );
+}
+
+/** Documentation home: one search over every guide, and the guides laid out
+ * along the four steps of a load. */
+export function DocsPortal({ onNavigate, onGetStarted, marketing = false }: DocsPortalProps) {
+  const [query, setQuery] = useState("");
+  const q = query.trim();
+  const hits = useMemo(() => new Set(searchHelpDocs(q).map((d) => d.id)), [q]);
+  const keep = (entry: GuideEntry) => !q || hits.has(entry.id);
+  const matched = q ? hits.size : GUIDE_COUNT;
+
+  const before = BEFORE_FIRST_LOAD.filter(keep);
+  const around = AROUND_THE_LOAD.filter(keep);
+
+  return (
+    <div className="mk mk-docs">
+      <header className="mk-docs-hero">
+        <div className="mk-wrap">
+          <h1>Datawrap documentation</h1>
+          <p className="mk-docs-lead">
+            Operator guides for the hosted workspace, in the order a load runs. Nothing to install on operator laptops.
+          </p>
+          <form
+            className="mk-docs-search"
+            role="search"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const first = [...BEFORE_FIRST_LOAD, ...DOCS_STEPS.flatMap((s) => s.guides), ...AROUND_THE_LOAD].find(keep);
+              if (q && first) onNavigate(first.id);
+            }}
+          >
+            <span className="mk-docs-search-icon" aria-hidden="true">
+              <DtIcon name="search" size={20} />
+            </span>
+            <label className="mk-sr-only" htmlFor="mk-docs-q">
+              Search documentation
+            </label>
+            <input
+              id="mk-docs-q"
+              type="search"
+              placeholder="Search the guides: Validate, schedules, SSO, MCP"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+            />
+            {q ? (
+              <button type="button" className="mk-docs-search-clear" onClick={() => setQuery("")}>
+                Clear
               </button>
-            ))}
-          </div>
-        ) : null}
+            ) : null}
+          </form>
+          <p className="mk-docs-search-count" aria-live="polite">
+            {q
+              ? matched === 0
+                ? "No guide matches that search."
+                : `${matched} of ${GUIDE_COUNT} guides match. Press Enter to open the first.`
+              : `${GUIDE_COUNT} guides, grouped by the four steps of a load.`}
+          </p>
+        </div>
       </header>
 
-      <DocsShotReel frames={SPACE_FRAMES} className="docs-shot-reel--hero" surface="Operator workspace" />
+      <section className="mk-docs-map" aria-label="Guides">
+        <div className="mk-wrap">
+          {before.length ? (
+            <section className="mk-docs-group" aria-labelledby="mk-docs-before">
+              <SplitHead id="mk-docs-before" title="Before the first load" lead="Read once: how you sign in, how the app is laid out, and what an admin sets." />
+              <GuideTiles entries={before} label="Before the first load" span={4} onNavigate={onNavigate} />
+            </section>
+          ) : null}
 
-      <section className="docs-space-start">
-        <h2>Start here (recommended order)</h2>
-        <p>
-          Work through these four guides first. Each one pins real UI controls — sidebar labels,
-          buttons, and dialogs — so operators can follow along inside the signed-in product.
-        </p>
-        <div className="docs-featured-grid" aria-label="Start here guides">
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 0 }} onClick={() => onNavigate("help-installation")}>
-            <span>01</span>
-            <strong>Access your workspace</strong>
-            <em>Tenant URL, SSO sign-in, Viewer / Editor / Admin roles, admin checklist.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 1 }} onClick={() => onNavigate("help-getting-started")}>
-            <span>02</span>
-            <strong>How Datawrap works</strong>
-            <em>Sidebar map (Platform / Operations / System) and the governed transfer path.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 2 }} onClick={() => onNavigate("help-connectors")}>
-            <span>03</span>
-            <strong>Add & manage connectors</strong>
-            <em>New connection → Choose a connector dialog → Test passed → use in Studio.</em>
-          </button>
-          <button type="button" className="docs-featured-card" style={{ ["--i" as string]: 3 }} onClick={() => onNavigate("help-transfer-studio")}>
-            <span>04</span>
-            <strong>Transfer Studio guide</strong>
-            <em>A worked Postgres to Snowflake load: Source → Destination → Transform → Map → Validate → Run.</em>
-          </button>
+          <section className="mk-docs-group mk-docs-group--steps" aria-labelledby="mk-docs-map-title">
+            <SplitHead
+              id="mk-docs-map-title"
+              title="Guides by step"
+              lead="The four steps of a load, as Transfer Studio names them, with the app screens each one covers."
+            />
+            <ol className="mk-docs-steps" aria-labelledby="mk-docs-map-title">
+              {DOCS_STEPS.map((step, i) => {
+                const guides = step.guides.filter(keep);
+                return (
+                  <li key={step.name} className={`mk-docs-step${q && !guides.length ? " is-empty" : ""}`}>
+                    <span className="mk-docs-step-num" aria-hidden="true">
+                      {i + 1}
+                    </span>
+                    <h3>{step.name}</h3>
+                    <p className="mk-docs-step-line">{step.line}</p>
+                    <p className="mk-docs-step-app">In the app: {step.app}</p>
+                    {guides.length ? (
+                      <ul>
+                        {guides.map((g) => (
+                          <li key={`${g.id}-${g.label ?? ""}`}>
+                            <GuideLink entry={g} onNavigate={onNavigate} />
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mk-docs-step-none">No match in this step.</p>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+
+          {around.length ? (
+            <section className="mk-docs-group" aria-labelledby="mk-docs-around">
+              <SplitHead id="mk-docs-around" title="Other ways in, and reference" lead="Pilot, MCP, and the API reach the same engine and the same checks." />
+              <GuideTiles entries={around} label="Other ways in, and reference" span={6} onNavigate={onNavigate} />
+            </section>
+          ) : null}
         </div>
       </section>
 
-      <section className="docs-space-start" aria-label="Browse by category">
-        <h2>Browse by category</h2>
-        <p>
-          Each card opens the first guide in that section. Use the left sidebar for every article —
-          Schedules, Contracts, Transforms, MCP, Settings / SSO, and more.
-        </p>
-        <div className="docs-category-grid">
-          {HELP_DOC_CATEGORIES.map((cat) => {
-            const first = getHelpDoc(cat.docs[0]);
-            const shot = CATEGORY_SHOTS[cat.id] ?? SPACE_FRAMES[0].src;
-            return (
-              <button
-                key={cat.id}
-                type="button"
-                className="docs-category-card"
-                onClick={() => onNavigate(cat.docs[0])}
-              >
-                <img src={shot} alt="" loading="lazy" />
-                <span className="docs-category-card-body">
-                  <strong>{cat.title}</strong>
-                  <span>{first.title} · {cat.docs.length} guides</span>
-                  <em className="docs-category-card-desc">{cat.description}</em>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="docs-space-algorithm" aria-label="Governed path overview">
-        <h2>The governed path (every transfer and schedule run)</h2>
-        <ol className="docs-space-algorithm-steps">
-          <li>
-            <strong>1 · Map</strong>
-            <span>Align source → destination columns. Accept risk for intentional casts before Validate.</span>
-          </li>
-          <li>
-            <strong>2 · Validate</strong>
-            <span>Run preflight gates. Execute stays locked until the API decision is approve.</span>
-          </li>
-          <li>
-            <strong>3 · Write + quarantine</strong>
-            <span>Clean rows land; held-back cells isolate with column, value, and reason, ready to replay.</span>
-          </li>
-          <li>
-            <strong>4 · Reconcile in Jobs</strong>
-            <span>The read-back compares the destination with the source: row counts, checksums, and a value and key census. Scheduled runs land in Job space the same way.</span>
-          </li>
-        </ol>
-      </section>
-
-      <section className="docs-space-algorithm" aria-label="CI evidence">
-        <h2>Proven in CI{EVIDENCE_AS_OF ? ` (${EVIDENCE_AS_OF})` : ""}</h2>
-        <p className="docs-space-evidence-lead">
-          Each line is an engine whose proving CI jobs ran green with no skipped test.{" "}
-          {EVIDENCE_RUN_ID ? `Recorded from CI run ${EVIDENCE_RUN_ID}.` : null}
-        </p>
-        <ul className="docs-space-evidence-list">
-          {PROVEN_EVIDENCE.map((row) => (
-            <li key={row.engines}>
-              <strong>{row.engines}</strong>
-              <span>
-                {row.claim} · {row.cases} tests · {row.artifact}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="docs-space-algorithm" aria-label="Catalog families">
-        <h2>Catalog families</h2>
-        <p className="docs-space-evidence-lead">{catalogHonestyLead()}</p>
-        <ul className="docs-space-evidence-list">
-          {MARKETING_STACK.map((row) => (
-            <li key={row.family}>
-              <strong>{row.family} · {row.badge}</strong>
-              <span>{row.items} — {row.note}{row.proven && row.badge !== "Proven in CI" ? ` Proven in CI: ${row.proven}.` : ""}</span>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </DocsSpaceShell>
+      {marketing ? (
+        <MarketingClosing title="Follow a guide on your own data" body="Start a free workspace and run the four steps on a load of your own.">
+          <button type="button" className="mk-btn mk-btn--primary mk-btn--lg" onClick={onGetStarted}>
+            {START_ACTION_LABEL}
+          </button>
+          <button type="button" className="mk-btn mk-btn--secondary mk-btn--lg" onClick={() => onNavigate("contact")}>
+            {SALES_ACTION_LABEL}
+          </button>
+        </MarketingClosing>
+      ) : null}
+    </div>
   );
 }
 
@@ -377,7 +406,16 @@ function DocsAnnotatedFigure({ figure }: { figure: HelpDocFigure }) {
   return (
     <figure className="docs-figure docs-figure--live docs-figure--annotated">
       <div className="docs-figure-live">
-        <img src={docsShotUrl(figure.src)} alt={figure.alt} loading="lazy" />
+        <img
+          src={docsShotUrl(figure.src)}
+          alt={figure.alt}
+          loading="lazy"
+          decoding="async"
+          {...shotSize(figure.src)}
+          onError={(e) => {
+            e.currentTarget.closest("figure")?.setAttribute("hidden", "");
+          }}
+        />
         {figure.markers?.map((m) => (
           <span
             key={`${m.n}-${m.label}`}
@@ -444,7 +482,6 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingC
       </nav>
 
       <header className="docs-article-head">
-        <p className="docs-article-kicker">{doc.category}</p>
         <h1>{doc.title}</h1>
         <p className="docs-article-lead">{doc.description}</p>
         <div className="docs-article-meta-row">
@@ -499,17 +536,17 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingC
           )}
           {next ? (
             <button type="button" className="docs-pager-next" onClick={() => onNavigate(next)}>
-              {getHelpDoc(next).title} →
+              {getHelpDoc(next).title}
             </button>
           ) : null}
         </div>
         <div className="docs-article-cta">
-          <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+          <button type="button" className="mk-btn mk-btn--primary" onClick={onGetStarted}>
             Try in Transfer Studio
           </button>
           {hideMarketingCta ? null : (
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-              Contact sales
+            <button type="button" className="mk-btn mk-btn--secondary" onClick={() => onNavigate("contact")}>
+              {SALES_ACTION_LABEL}
             </button>
           )}
         </div>
