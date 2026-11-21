@@ -68,6 +68,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "changed_rows_by_engine_digest": engine_changed,
                 "duplicate_keys": int(diff["duplicate"]),
                 "changed_cells_by_column": dict(judge["cells_by_column"]),
+                "by_column": judge.get("by_column") or {},
                 "causes": dict(judge["causes"]),
                 "explained_rows": int(judge["explained_rows"]),
                 "unexplained_rows": int(judge["unexplained_rows"]),

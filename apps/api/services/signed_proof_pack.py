@@ -351,6 +351,36 @@ def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str
 def classify_post_write_assurance(
     reconciliation: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Gate-8's classification, upgraded by a Parity at Scale scan that compared every row.
+
+    A scan recorded on ``reconciliation.parity_at_scale`` (phase 3, behind
+    ``DATAWRAP_PARITY_SCALE``) is an independent re-read of both populations:
+    when it compared every unit, found no difference and every in-engine
+    column kind is certified for the server pair, the claim is a full
+    population proof (provenance ``engine_segment_digest``). A scan that found
+    differences makes the claim ``failed``. Anything else leaves Gate-8's own
+    classification as it is.
+    """
+    base = _classify_gate8_assurance(reconciliation)
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict) or base.get("claim_level") == "pre_write_only":
+        return base
+    if scan.get("outcome") == "differences_found":
+        return {**base, "claim_level": "failed", "migration_proven": False, "population_proof": False,
+                "checksum_match": False,
+                "note": "Parity at Scale compared every row and found differences — migration not proven."}
+    if scan.get("outcome") == "match" and scan.get("complete") is True and scan.get("certified") is True:
+        return {**base, "claim_level": "full_checksum", "post_write_verified": True, "migration_proven": True,
+                "population_proof": True, "checksum_match": True,
+                "source_checksum_provenance": "engine_segment_digest",
+                "note": "Every row compared inside both databases (Parity at Scale) and none differs."}
+    return base
+
+
+def _classify_gate8_assurance(
+    reconciliation: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Classify Gate-8 evidence — never invent migration_proven from samples/preview.
 
     claim_level:
@@ -743,7 +773,12 @@ def proof_pack_evidence_completeness_errors(
         recon = reconciliation if isinstance(reconciliation, dict) else {}
         src = str(recon.get("source_checksum") or "").strip()
         tgt = str(recon.get("target_checksum") or "").strip()
-        if not src or not tgt or src != tgt:
+        scan = recon.get("parity_at_scale")
+        # A complete, certified Parity at Scale match is an independent re-read
+        # of both populations, compared unit by unit (digests per segment).
+        scan_match = isinstance(scan, dict) and scan.get("outcome") == "match" and bool(
+            scan.get("complete")) and bool(scan.get("certified"))
+        if (not src or not tgt or src != tgt) and not scan_match:
             errors.append(
                 "migration_proven refused: independent matching checksums required"
             )

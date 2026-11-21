@@ -18,6 +18,16 @@ _logger = logging.getLogger(__name__)
 def apply_job_terminal_effects(job_id: str, status: str) -> None:
     if not job_id or not is_terminal(status):
         return
+    if status in COMPLETED_STATUSES:
+        try:
+            # Verification as its own tracked phase (Parity at Scale, behind
+            # DATAWRAP_PARITY_SCALE): tables Gate-8 could not compare in full are
+            # scanned after the write; the write status is never rewritten.
+            from services.parity_scale.verification import start_for_job
+
+            start_for_job(job_id)
+        except Exception:  # noqa: BLE001 - verification must not fail the transfer
+            _logger.exception("Parity at Scale verification was not started for job %s", job_id)
     try:
         from services.schedule_runner import record_schedule_for_finished_job
 

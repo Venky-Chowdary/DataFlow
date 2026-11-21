@@ -77,6 +77,8 @@ class TableEvidence:
     gate8_unaccounted: bool = False
     #: A recorded fix re-check resolved keys the evidence named.
     resolved_by_fix: bool = False
+    #: Parity at Scale: how the table was verified in full (services.parity_scale.report).
+    scale: dict[str, Any] = field(default_factory=dict)
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -398,7 +400,7 @@ def _value_observations(recon: dict[str, Any], table: str) -> list[Observation]:
 LOCALIZING_ORIGINS = frozenset({
     "sample_compare", "ladder_l5", "key_census", "write_witness", "write_witness_loss",
     "ladder_aggregate", "unattributed", "row_count", "quarantine", "rule_checks",
-    "dedupe_checks", "batch_undo", "protection_proof", "reread",
+    "dedupe_checks", "batch_undo", "protection_proof", "reread", "parity_scale",
 })
 
 
@@ -788,6 +790,9 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
         _batch_undone(ev, recon, dest)
     if gate8_failed(recon) and not any(localizes(o) for o in ev.observations):
         mark_unaccounted(ev, recon)
+    from services.parity_scale.report import apply_scale_evidence
+
+    apply_scale_evidence(ev, job)
     tables = [ev]
     streams = dest.get("streams") if is_multi_stream(dest) else None
     for row in streams if isinstance(streams, list) else []:

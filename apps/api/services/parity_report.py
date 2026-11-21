@@ -51,7 +51,9 @@ from services.parity_stats import CONFIDENCE_LEVEL, clopper_pearson_upper, forma
 
 logger = logging.getLogger(__name__)
 
-_FULL_CHECKS = frozenset({"full_checksum", "key_diff"})
+#: Checks that compared every row. ``segment_diff`` / ``multiset_digest`` are
+#: Parity at Scale's in-engine compares (keyed / "Content match (no key)").
+_FULL_CHECKS = frozenset({"full_checksum", "key_diff", "segment_diff", "multiset_digest"})
 #: How a protected value (a key included) is shown.
 PROTECTED = "protected"
 
@@ -547,7 +549,9 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         upper = None  # Gate-8 did not count these rows: nothing bounds how many differ
     if ev.capped or ev.gate8_unaccounted or at_least:
         pct = None  # the census stopped naming keys, Gate-8 failed on rows it did not name or count
-    if bad:
+    if ev.check == "verifying":
+        status = "verifying"
+    elif bad:
         status = "unexplained"
     elif ev.check in {"none", "count_only"} or ev.capped or ev.gate8_unaccounted:
         status = "unverifiable"
@@ -570,6 +574,12 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         "_unaccounted": ev.gate8_unaccounted,
         "_capped": ev.capped,
         "_note": ev.note,
+        **({
+            "check_label": ev.scale.get("check_label"),
+            "key_attribution": ev.scale.get("key_attribution"),
+            "certified": ev.scale.get("certified"),
+            "certification_pair": ev.scale.get("certification_pair"),
+        } if ev.scale else {}),
     }
 
 
@@ -696,6 +706,14 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
         return "unverifiable", "The job has not finished; parity is decided once it completes."
     if not isinstance(job.get("reconciliation"), dict) or not job.get("reconciliation"):
         return "unverifiable", "Gate-8 recorded no reconciliation for this job, so nothing was compared."
+    verifying = [t["name"] for t in tables if t["status"] == "verifying"]
+    if verifying:
+        # Its own state, not a verdict (owner decision 2): the write finished,
+        # the comparison of every row is still running.
+        return "verifying", (
+            f"Verification is running for {', '.join(verifying[:5])}: every row is being compared. "
+            "Sign-off and cutover wait until it finishes."
+        )
     bad = sum(t["unexplained"] for t in tables)
     if bad:
         names = ", ".join(t["name"] for t in tables if t["unexplained"])
@@ -754,6 +772,20 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             "Compared cells match, and the certificate will not say proven: "
             + "; ".join(str(item) for item in blockers[:3])
             + "."
+        )
+    uncertified = [t["name"] for t in tables if t.get("certified") is False]
+    if uncertified:
+        # Design §4.4: nothing says proven on a rendering no live engine certified.
+        return "no_difference_found", (
+            f"Every row of {', '.join(uncertified[:5])} was compared and none differs, but this engine pair "
+            "is not certified for every column type, so the report does not say proven."
+        )
+    content = [t["name"] for t in tables if t.get("check") == "multiset_digest"]
+    if content:
+        return "proven", (
+            "No differences: the destination matches the source. "
+            f"{', '.join(content[:5])}: content match (no key) — every row has an identical counterpart; "
+            "the table has no key, so a difference could not be attributed to a key."
         )
     return "proven", "No differences: the destination matches the source."
 
@@ -864,6 +896,9 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     blocked_reason = None
     if signed:
         status = "signed"
+    elif verdict == "verifying":
+        status = "blocked"
+        blocked_reason = "Verification is still running; sign once every row has been compared."
     elif unexplained > 0:
         status = "blocked"
         blocked_reason = f"{unexplained:,} row(s) still hold an unexplained difference."
@@ -928,7 +963,7 @@ def build_parity_report(
     for ev in tables_ev:
         resolved = set((state.get("resolved") or {}).get(ev.name) or [])
         checking = set((recheck or {}).get(ev.name) or [])
-        if reread and terminal and ev is tables_ev[0]:
+        if reread and terminal and ev is tables_ev[0] and ev.check != "verifying":
             _apply_reread(job, ev, engine, resolved | checking,
                           version=int(state.get("version") or 0), cache=cache)
             if ev.reread.get("status") != "ok":
@@ -953,6 +988,10 @@ def build_parity_report(
     if carried:
         confidence["statement"] = f"{confidence['statement']} Representation: {'; '.join(carried)}."
     verdict, reason = _verdict(job, tables, confidence)
+    if verdict == "verifying":
+        # Nothing is decided while every row is being compared: no earlier figure is restated.
+        confidence = {**confidence, "statement": "Every row is being compared now. How sure this is follows when "
+                      "verification finishes."}
     parity = _parity_block(tables)
     report: dict[str, Any] = {
         "job_id": job_id or job_id_of(job),
@@ -974,7 +1013,40 @@ def build_parity_report(
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
     report["signoff"] = _signoff(state, report)
+    verification = _verification_block(job)
+    if verification:
+        # Only on a job verified after the write: other reports (and their digests) are unchanged.
+        report["verification"] = verification
     return report
+
+
+def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The Parity at Scale verification phase as the Trust Report shows it (no evidence bodies)."""
+    from services.parity_scale.verification import block_of, table_state
+
+    block = block_of(job)
+    if not block:
+        return None
+    return {
+        "state": block.get("state"),
+        "started_at": block.get("started_at"),
+        "finished_at": block.get("finished_at"),
+        "reason": block.get("reason") or "",
+        "tables": [
+            {
+                "name": t.get("name"),
+                # running, passed, failed, incomplete or error (the block's own words).
+                "status": table_state(t),
+                "progress": t.get("progress") or {},
+                "error": t.get("error"),
+                "outcome": (t.get("evidence") or {}).get("outcome"),
+                "mode": (t.get("evidence") or {}).get("mode"),
+                "check_kind": (t.get("evidence") or {}).get("check_kind"),
+            }
+            for t in block.get("tables") or []
+            if isinstance(t, dict)
+        ],
+    }
 
 
 def summary_stamp(job: dict[str, Any]) -> dict[str, str]:

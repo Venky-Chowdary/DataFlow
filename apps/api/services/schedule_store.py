@@ -245,6 +245,9 @@ class PipelineSchedule:
     source_query: str = ""
     procedure_params: dict[str, Any] = field(default_factory=dict)
     cursor_value: str = ""  # last observed watermark (advances each run)
+    #: Parity at Scale (owner decision 2): the next tick waits while the previous
+    #: tick's verification is still running. Set False to let ticks overlap it.
+    wait_for_verification: bool = True
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
@@ -440,6 +443,7 @@ class PipelineSchedule:
             if isinstance(data.get("procedure_params"), dict)
             else {},
             cursor_value=str(data.get("cursor_value") or ""),
+            wait_for_verification=data.get("wait_for_verification") is not False,
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
             require_signed_contract=bool(

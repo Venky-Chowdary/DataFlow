@@ -842,11 +842,21 @@ class ParityScan:
                 judge["explained_rows"] += 1
             else:
                 judge["unexplained_rows"] += 1
+            by_column = judge.setdefault("by_column", {})
             for cell in verdict.cells:
                 col = cell["column"]
-                code = cell["cause"].get("code") or "unexplained"
+                cause = cell["cause"]
+                code = cause.get("code") or "unexplained"
                 judge["cells_by_column"][col] = judge["cells_by_column"].get(col, 0) + 1
                 judge["causes"][code] = judge["causes"].get(code, 0) + 1
+                # Per column and cause: what the Trust Report groups a difference by.
+                slot = by_column.setdefault(col, {}).setdefault(code, {
+                    "rows": 0, "explained": bool(cause.get("explained")), "label": cause.get("label") or code,
+                    "detail": cause.get("detail") or "", "keys": [],
+                })
+                slot["rows"] += 1
+                if len(slot["keys"]) < 20:
+                    slot["keys"].append(text)
             if len(judge["examples"]) < self.config.examples_cap:
                 judge["examples"].append({"key": text, "cells": verdict.cells})
 
