@@ -103,38 +103,40 @@ export type PublicPageMeta = {
   description: string;
   keywords?: string;
   canonicalPath?: string;
+  /** "noindex" keeps a page out of search results (footer-only pages). */
+  robots?: string;
 };
 
 export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
-    title: "Universal Data Transfer Platform",
+    title: "Data migration and sync, every row accounted for",
     description:
-      "Move data between databases, warehouses, files, streams, and APIs. Semantic mapping, 9 preflight gates, native CDC, and every load verified value by value.",
+      "Datawrap moves data between databases, warehouses, files, and streams, and accounts for every row: landed and read back, held with a reason, or skipped by rule.",
     keywords:
       "Datawrap, data transfer platform, database migration, ETL, CDC, semantic mapping, preflight gates, data verification, PostgreSQL Snowflake SQL Server",
     canonicalPath: "#/",
   },
   pricing: {
     title: "Pricing",
-    description: "Starter, Team, and Enterprise plans — verification, preflight, and quarantine in every plan; CDC, Pilot, SSO, and SCIM as you scale.",
+    description: "Starter is free while Datawrap is in early access. Team and Enterprise are priced with you. Every plan includes the plan review, the checks before the write, quarantine, and the read-back.",
     keywords: "Datawrap pricing, ETL pricing, data migration plans, enterprise data transfer cost",
     canonicalPath: "#/pricing",
   },
   enterprise: {
     title: "Enterprise",
-    description: "SSO (OIDC / SAML), SCIM, RBAC with capped API keys, workspace isolation, BYOK, and a tamper-evident audit chain for governed data movement.",
+    description: "SSO (OIDC or SAML), SCIM, four workspace roles, your own key on connector secrets, a data-region fence, a tamper-evident audit log, and self-managed deployment.",
     keywords: "Datawrap enterprise, SSO SAML OIDC, SCIM provisioning, RBAC data platform, workspace isolation, BYOK, audit trail",
     canonicalPath: "#/enterprise",
   },
   customers: {
-    title: "Customers",
-    description: "Measured on live engines: schema drift, identity and key carry, retry safety, and destination read-back — the proof you get on your own data.",
-    keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
+    title: "Proof",
+    description: "Proof you can check yourself: connectors proven in CI, and signed proof packs you can verify through the API.",
+    keywords: "Datawrap proof, CI evidence, proof pack verification",
     canonicalPath: "#/customers",
   },
   contact: {
     title: "Contact sales",
-    description: "Talk to a Datawrap solutions engineer about migrations, CDC, warehouse loading, and a scoped pilot on your own stack.",
+    description: "Talk to Datawrap about a migration, a recurring sync, or a pilot on your own data. We usually reply within one business day.",
     keywords: "contact Datawrap, data migration sales, enterprise ETL demo",
     canonicalPath: "#/contact",
   },
@@ -152,7 +154,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   security: {
     title: "Security",
-    description: "Workspace isolation, encrypted credentials with BYOK, SSO and SCIM, signed webhooks, and a hash-chained audit log in Datawrap.",
+    description: "Workspace isolation, encrypted connector secrets with your own key, checked outbound connections, four roles, and a tamper-evident audit log.",
     keywords: "Datawrap security, BYOK, workspace isolation, SSO SAML OIDC, SCIM, signed webhooks, audit log",
     canonicalPath: "#/security",
   },
@@ -164,15 +166,17 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   dpa: {
     title: "Data processing addendum",
-    description: "How Datawrap processes personal data as your processor: instructions, security measures, subprocessors, breach notice, transfers, and deletion.",
-    keywords: "Datawrap DPA, data processing agreement, GDPR processor terms",
+    description: "Datawrap's data processing addendum is available on request from contact@datawrap.io.",
+    keywords: "Datawrap DPA, data processing agreement",
     canonicalPath: "#/dpa",
+    robots: "noindex",
   },
   subprocessors: {
     title: "Subprocessors",
-    description: "Third parties that process personal data on Datawrap's behalf to run the hosted service.",
-    keywords: "Datawrap subprocessors, GDPR subprocessor list",
+    description: "Datawrap's current subprocessor list is available on request from contact@datawrap.io.",
+    keywords: "Datawrap subprocessors",
     canonicalPath: "#/subprocessors",
+    robots: "noindex",
   },
   help: {
     title: "Docs & help",
@@ -187,7 +191,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/product/transfer",
   },
   "product-pilot": {
-    title: "Datawrap Pilot",
+    title: "Pilot",
     description: "A copilot on Datawrap's own local engine — no cloud AI key needed. Triage transfers, jobs, and schemas; Confirm before anything moves.",
     keywords: "Datawrap Pilot, AI data agent, natural language ETL, schema inspection chat",
     canonicalPath: "#/product/pilot",
@@ -200,7 +204,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   "product-jobs": {
     title: "Job space",
-    description: "Every run's Trust Report, reversibility verdict, quarantine, and sign-off — source and destination counts checked row by row.",
+    description: "Every run's Trust Report: the destination counted by its own engine, a value and key census, quarantine, and sign-off.",
     keywords: "Job space, Trust Report, data reconciliation, reversibility, quarantine report",
     canonicalPath: "#/product/jobs",
   },
@@ -211,7 +215,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/product/pipelines",
   },
   "product-query": {
-    title: "Query Playground",
+    title: "Query",
     description: "Read-only SQL against saved connections — check source and destination side by side before and after a load.",
     keywords: "Query Playground, SQL against connectors, MongoDB query, data export",
     canonicalPath: "#/product/query",

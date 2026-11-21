@@ -283,7 +283,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Receive your tenant URL and role",
             pin: "IT / Datawrap admin → invite email",
-            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — read Jobs, quarantine, and Trust Reports; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Schedules**, and open **Job space**. Only an Admin adds, removes or re-roles members.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
+            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of four roles:\n\n**Viewer** — read Jobs, quarantine, and Trust Reports; cannot create connectors or run transfers.\n\n**Operator** — run and repair pipelines (run, retry, resume, sign off) but not design them: no planning, connector edits, or schedule changes.\n\n**Editor** — create connectors, run **Transfer Studio** and **Schedules**, and open **Job space**. Only an Admin adds, removes or re-roles members.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
           },
           {
             title: "Sign in with SSO",
@@ -1337,7 +1337,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "team",
         title: "Team roles",
-        body: "Open **Settings → Team** to invite members by email and assign one of three roles (Viewer / Editor / Admin). The workspace picker on this tab is the same live workspace as the top bar — member lists refresh while the tab is open.",
+        body: "Open **Settings → Team** to invite members by email and assign one of four roles (Viewer, Operator, Editor, Admin). The workspace picker on this tab is the same live workspace as the top bar — member lists refresh while the tab is open.",
         steps: [
           "Viewer — inspect Jobs, proof, and connectors (no execute)",
           "Editor — create connectors, run Transfer Studio and Schedules (an Admin manages members)",
@@ -1414,7 +1414,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "q2",
         title: "Who can run transfers?",
-        body: "Editors and Admins can create connectors and run Transfer Studio and Schedules. Viewers can open Jobs and read Trust Reports and quarantine. Roles are assigned under Settings → Team (Viewer, Editor, Admin — there is no Owner role) and can come from IdP group claims when SSO is configured.",
+        body: "Editors and Admins can create connectors, plan transfers, and manage Schedules. Operators run and repair pipelines but do not design them. Viewers can open Jobs and read Trust Reports and quarantine. Roles are assigned under Settings → Team (Viewer, Operator, Editor, Admin — there is no Owner role) and can come from IdP group claims when SSO is configured.",
       },
       {
         id: "q3",
