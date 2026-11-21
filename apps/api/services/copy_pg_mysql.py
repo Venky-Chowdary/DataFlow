@@ -432,8 +432,20 @@ def _fifo_copy_into_mysql(
 
         poll_cancel()
 
+    src_conn = getattr(src_cur, "connection", None)
+
+    def _stop_source_copy() -> None:
+        # PQcancel is thread-safe: a COPY waiting inside libpq for the next
+        # source rows returns (and leaves libpq) instead of holding the pump.
+        cancel = getattr(src_conn, "cancel", None)
+        if cancel is not None:
+            cancel()
+
     stream_between_cursors(
-        prefix="df_pg_mysql_", producer=_produce, consumer=_consume
+        prefix="df_pg_mysql_",
+        producer=_produce,
+        consumer=_consume,
+        abort_producer=_stop_source_copy,
     )
 
 
@@ -462,7 +474,12 @@ def _run_shard(
 ) -> None:
     from connectors.mysql_load_data import mysql_load_data_session_ready
 
-    from services.source_read_cancel import as_cancel, settle_watch, start_watch
+    from services.source_read_cancel import (
+        as_cancel,
+        close_connection,
+        settle_watch,
+        start_watch,
+    )
 
     src = _pg_connect(source_cfg)
     dst = _mysql_connect(dest_cfg)
@@ -504,10 +521,9 @@ def _run_shard(
     finally:
         if watch is not None:
             watch.stop()
-        try:
-            src.close()
-        except Exception:
-            logger.debug("shard pg close skipped", exc_info=True)
+        # Through the libpq gate: after a destination failure the pump may
+        # still be inside PQgetCopyData on this session.
+        close_connection(src)
         try:
             dst.close()
         except Exception:
@@ -580,6 +596,34 @@ def _launch_copy_shards(
             raise errors[0]
 
 
+def _drop_run_table(dest_conn: Any, table_q: str, *, staged: bool) -> bool:
+    """Drop a table this run created (a stage or a new destination) after a failure.
+
+    A DROP that fails leaves a table nothing else will remove (a stage's name
+    is random per run): say so at warning and record its name on the job, so
+    it can be cleaned up. Returns whether it was dropped.
+    """
+    from services.cancel_check import note_on_job
+
+    try:
+        with dest_conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
+        dest_conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - the run's own failure is the outcome
+        name = table_q.strip("`").replace("``", "`")
+        kind = "staging table" if staged else "destination table created by this run"
+        logger.warning("could not drop the %s %s after the copy failed: %s", kind, name, exc)
+        note_on_job(
+            {"orphaned_tables_note": (
+                f"The {kind} {name} could not be dropped after this run stopped; "
+                "it is left in the destination database and can be dropped by hand."
+            )},
+            append={"orphaned_tables": name},
+        )
+        return False
+
+
 def _end_source_read(conn: Any) -> None:
     """Commit the read-only source snapshot after the rows landed; never raises."""
     if conn is None or getattr(conn, "closed", 0):
@@ -626,8 +670,10 @@ def copy_postgres_to_mysql(
     source_ref = _table_ref(source_schema, source_table)
     table_q = _mysql_ident(dest_table)
 
+    from services.cancel_check import poll_cancel
     from services.source_read_cancel import (
         as_cancel,
+        close_connection,
         settle_watch,
         start_watch,
         stop_watch,
@@ -876,6 +922,16 @@ def copy_postgres_to_mysql(
             cancel_watch = None
             _end_source_read(source_conn)
 
+            def _stage_cancel_point() -> None:
+                # Overwrite: the rows are still only in the run's private
+                # stage; the live table is untouched until the publish below.
+                # A cancel here drops the stage (except branch) and nothing
+                # lands. Without a stage the rows are live already: a cancel
+                # from here on is the engine's "landed before the cancel".
+                if swap_at_end:
+                    poll_cancel()
+
+            _stage_cancel_point()
             dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
             if dest_count != source_count:
@@ -887,6 +943,7 @@ def copy_postgres_to_mysql(
                 dest_ident = _mysql_ident(pk_map[1])
                 dest_conn.commit()
                 for part in partitions:
+                    _stage_cancel_point()
                     dest_part = _mysql_range_count(
                         dst_cur, table_q, dest_ident, part
                     )
@@ -900,6 +957,10 @@ def copy_postgres_to_mysql(
             if swap_at_end:
                 from services.dest_overwrite_swap import mysql_swap_staged_dest
 
+                # Last point a cancel keeps the live table as it was. The
+                # publish is one transaction (DELETE + INSERT ... SELECT, then
+                # COMMIT): once it starts it lands whole or rolls back whole.
+                _stage_cancel_point()
                 mysql_swap_staged_dest(
                     dst_cur,
                     dest_q=swap_dest_q,
@@ -960,12 +1021,7 @@ def copy_postgres_to_mysql(
                 raise err from exc
             raise
         if created_here:
-            try:
-                with dest_conn.cursor() as cur:
-                    cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
-                dest_conn.commit()
-            except Exception:
-                logger.debug("dest drop after copy failure skipped", exc_info=True)
+            _drop_run_table(dest_conn, table_q, staged=staged)
         elif existed_before and reset_empty_dest_on_failure:
             try:
                 with dest_conn.cursor() as cur:
@@ -979,10 +1035,7 @@ def copy_postgres_to_mysql(
     finally:
         if watch is not None:
             watch.stop()
-        try:
-            source_conn.close()
-        except Exception:
-            logger.debug("pg source close skipped", exc_info=True)
+        close_connection(source_conn)
         try:
             dest_conn.close()
         except Exception:

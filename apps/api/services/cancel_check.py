@@ -457,6 +457,32 @@ def active_job_store() -> tuple[Any, str] | None:
     return meter._mongo, meter._job_id
 
 
+def note_on_job(fields: dict[str, Any], *, append: dict[str, Any] | None = None) -> bool:
+    """Best effort: record operator-facing facts on this run's job record.
+
+    ``append`` adds values to list fields (kept unique). Returns whether the
+    record was written; never raises (a note must not fail the run).
+    """
+    bound = active_job_store()
+    if bound is None:
+        return False
+    mongo, job_id = bound
+    try:
+        update = dict(fields)
+        if append:
+            job = _read_job(mongo, job_id) or {}
+            for key, value in append.items():
+                current = list(job.get(key) or [])
+                if value not in current:
+                    current.append(value)
+                update[key] = current
+        mongo.update_job_fields(job_id, update)
+        return True
+    except Exception as exc:  # noqa: BLE001 - a note must never fail the run
+        logger.warning("could not record %s on job %s: %s", sorted(fields) or sorted(append or {}), job_id, exc)
+        return False
+
+
 def set_progress_meter(meter: "ProgressMeter | None") -> None:
     _meter.set(meter)
     _last_written.set(0)

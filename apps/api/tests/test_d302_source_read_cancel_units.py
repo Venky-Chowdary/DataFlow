@@ -121,13 +121,17 @@ def test_abort_waits_for_the_copy_thread_to_leave_libpq():
     gate = libpq_gate(conn)
     gate.acquire()  # a COPY thread inside PQgetCopyData
     done = threading.Event()
-    t = threading.Thread(target=lambda: (abort_connection(conn), done.set()))
+    t = threading.Thread(
+        target=lambda: (abort_connection(conn), done.set()), daemon=True
+    )
     t.start()
-    assert _wait_for(lambda: conn.cancels >= 1)
-    time.sleep(0.6)
-    assert not conn.closed, "closed while the COPY thread was inside libpq"
-    assert conn.cancels >= 2, "the server-side cancel is resent while waiting"
-    gate.release()  # the COPY returns (the cancel aborted it)
+    try:
+        assert _wait_for(lambda: conn.cancels >= 1)
+        time.sleep(1.4)
+        assert not conn.closed, "closed while the COPY thread was inside libpq"
+        assert conn.cancels >= 2, "the server-side cancel is resent while waiting"
+    finally:
+        gate.release()  # the COPY returns (the cancel aborted it)
     assert done.wait(5)
     assert conn.closed
     assert not gate.locked()
@@ -259,3 +263,237 @@ def test_a_consumer_that_fails_before_opening_the_fifo_frees_the_producer():
     assert time.monotonic() - started < 10, "the producer held the handoff"
     assert producer_done.is_set(), "the producer is still parked on the pipe"
     assert producer_error and isinstance(producer_error[0], OSError)
+
+
+class _Store:
+    """A job store double for the notes the cancel path records."""
+
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict] = {"job1": {"status": "running"}}
+
+    def get_job(self, job_id):
+        return dict(self.jobs.get(job_id) or {})
+
+    def update_job_fields(self, job_id, fields):
+        self.jobs.setdefault(job_id, {}).update(fields)
+
+
+def _in_run(store: _Store, fn):
+    """Run ``fn`` in a context bound to job1 (as the engine binds a run)."""
+    from services import cancel_check
+
+    def run():
+        cancel_check.set_progress_meter(cancel_check.ProgressMeter(store, "job1"))
+        return fn()
+
+    return contextvars.copy_context().run(run)
+
+
+def test_abort_closes_at_once_while_the_copy_is_parked_in_its_callback():
+    """A COPY whose destination stalled sits in the file callback (a pipe
+    write), outside libpq: the gate is free and the session is closed now,
+    not when the destination answers."""
+    from services.cancel_check import copy_expert_keeping_cancel
+    from services.source_read_cancel import abort_connection
+
+    conn = _Conn()
+    parked, unblock = threading.Event(), threading.Event()
+
+    class _Cur:
+        connection = conn
+
+        def copy_expert(self, sql, file):
+            file.write(b"1\n")
+
+    class _StalledSink:
+        def write(self, data):
+            parked.set()
+            unblock.wait(30)  # the FIFO is full: the LOAD is stalled
+
+    t = threading.Thread(
+        target=lambda: copy_expert_keeping_cancel(_Cur(), "COPY", _StalledSink()),
+        daemon=True,
+    )
+    t.start()
+    try:
+        assert parked.wait(5)
+        started = time.monotonic()
+        assert abort_connection(conn) is True
+        assert conn.closed and time.monotonic() - started < 1.0
+    finally:
+        unblock.set()
+        t.join(5)
+
+
+def test_a_slow_release_keeps_waiting_and_is_recorded_on_the_job(monkeypatch):
+    """N2: past the 5 s promise the job says the source session is still
+    open; the watch keeps waiting (resending the cancel) and closes it as
+    soon as the read leaves libpq, then records how long it took."""
+    from services import source_read_cancel as src
+    from services.cancel_check import libpq_gate
+
+    monkeypatch.setattr(src, "RELEASE_BUDGET_SECONDS", 0.3)
+    conn, store = _Conn(), _Store()
+    gate = libpq_gate(conn)
+    gate.acquire()  # the read is inside libpq; the cancel is not answered
+    watch = _in_run(store, lambda: src.SourceReadCancelWatch(conn, _cancelled, interval=0.01))
+    watch.start()
+    try:
+        assert _wait_for(lambda: "source_session_warning" in store.jobs["job1"], 5)
+        warning = store.jobs["job1"]["source_session_warning"]
+        assert "still open" in warning and "read lock" in warning, warning
+        time.sleep(0.5)  # well past the old fixed give-up point, scaled
+        assert not conn.closed and conn.cancels >= 1
+    finally:
+        gate.release()
+    watch.join(5)
+    assert conn.closed and watch.released is True
+    assert "source_session_released_after_s" in store.jobs["job1"]
+
+
+def test_the_watch_stops_waiting_when_the_owner_takes_over():
+    from services import source_read_cancel as src
+    from services.cancel_check import libpq_gate
+
+    conn = _Conn()
+    gate = libpq_gate(conn)
+    gate.acquire()
+    watch = src.SourceReadCancelWatch(conn, _cancelled, interval=0.01).start()
+    try:
+        assert _wait_for(lambda: conn.cancels >= 1)
+        watch.stop()  # the run is ending; its owner closes through the gate
+        watch.join(2)
+        assert not watch._thread.is_alive()
+        assert watch.released is False and not conn.closed
+    finally:
+        gate.release()
+
+
+def test_a_failing_cancel_is_logged_at_warning(caplog):
+    from services.source_read_cancel import abort_connection
+
+    class _NoCancel(_Conn):
+        def cancel(self):
+            raise RuntimeError("cancel request dropped by the pooler")
+
+    with caplog.at_level("WARNING", logger="services.source_read_cancel"):
+        abort_connection(_NoCancel())
+    assert any("cancel" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_a_cancelled_session_is_not_handed_back_to_an_endpoint_pool():
+    """A scoped (pooled) connection's close() rolls back and lends it out
+    again; a cancelled source session must really end."""
+    from services.source_read_cancel import abort_connection
+
+    released: list[bool] = []
+
+    class _Pooled(_Conn):
+        def __init__(self):
+            super().__init__()
+            self._df_release = lambda: released.append(True)
+
+        def close(self):
+            release, self._df_release = self._df_release, None
+            if release is not None:
+                release()  # back to the pool, session still open
+                return
+            self.closed = 1
+
+    conn = _Pooled()
+    assert abort_connection(conn) is True
+    assert conn.closed and released == []
+
+
+def test_owner_close_waits_for_the_copy_to_leave_libpq_and_is_bounded():
+    from services.cancel_check import libpq_gate
+    from services.source_read_cancel import close_connection
+
+    idle = _Conn()
+    assert close_connection(idle) is True and idle.closed and idle.cancels == 0
+
+    busy = _Conn()
+    gate = libpq_gate(busy)
+    gate.acquire()  # the pump is still inside PQgetCopyData
+    try:
+        started = time.monotonic()
+        assert close_connection(busy, budget=0.5) is False
+        assert time.monotonic() - started < 2.0
+        assert not busy.closed and busy.cancels >= 1
+    finally:
+        gate.release()
+
+
+@pytest.mark.timeout(60)
+def test_a_load_error_stops_a_producer_waiting_on_a_silent_source():
+    """N3: the LOAD failed (1062/1205) after reading part of the pipe while
+    the producer was waiting inside the driver for more source rows. The
+    handoff cancels the source COPY and its whole wait is bounded."""
+    from services.copy_fast_path import fifo_streaming_supported, stream_between_cursors
+
+    if not fifo_streaming_supported():
+        pytest.skip("no named pipes on this host")
+    source_answers = threading.Event()  # set by the source-side cancel
+    producer_done = threading.Event()
+    aborted: list[bool] = []
+
+    def producer(path: str) -> None:
+        try:
+            with open(path, "wb") as fh:
+                fh.write(b"1\ta\t1\n")
+                fh.flush()
+                source_answers.wait(120)  # inside PQgetCopyData, silent source
+                for _ in range(100):
+                    fh.write(b"x" * 65536)
+        finally:
+            producer_done.set()
+
+    def consumer(path: str) -> None:
+        with open(path, "rb") as fh:
+            fh.read(6)
+        raise RuntimeError("(1062, \"Duplicate entry '1' for key 'PRIMARY'\")")
+
+    def abort_producer() -> None:
+        aborted.append(True)
+        source_answers.set()
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="1062"):
+        stream_between_cursors(
+            prefix="df_test_", producer=producer, consumer=consumer,
+            abort_producer=abort_producer,
+        )
+    assert aborted == [True]
+    assert time.monotonic() - started < 20
+    assert producer_done.wait(5)
+
+
+def test_a_stage_that_cannot_be_dropped_is_named_on_the_job(caplog):
+    """N4: a failed DROP of the run's stage was swallowed at debug; nothing
+    else ever removes a randomly named stage."""
+    from services.copy_pg_mysql import _drop_run_table
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql):
+            raise RuntimeError("Lock wait timeout exceeded")
+
+    class _Dest:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+    store = _Store()
+    with caplog.at_level("WARNING", logger="services.copy_pg_mysql"):
+        dropped = _in_run(store, lambda: _drop_run_table(_Dest(), "`df_ow_orders_ab12cd34`", staged=True))
+    assert dropped is False
+    assert store.jobs["job1"]["orphaned_tables"] == ["df_ow_orders_ab12cd34"]
+    assert "df_ow_orders_ab12cd34" in store.jobs["job1"]["orphaned_tables_note"]
+    assert any(r.levelname == "WARNING" and "df_ow_orders_ab12cd34" in r.getMessage() for r in caplog.records)

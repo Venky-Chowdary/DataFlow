@@ -168,3 +168,39 @@ def test_cancel_watch_never_closes_the_connection_under_a_running_copy():
     # 200 silences cannot finish inside the cancel window).
     assert "finished" not in ends, ends
     assert "None" not in ends, ends
+
+
+def test_a_cancelled_pooled_source_session_really_ends():
+    """Inside an all-engine endpoint scope (the copilot's tool calls open one)
+    a PostgreSQL session's close() rolls back and lends it to the next
+    consumer. The cancel watch must end the session instead: a cancelled
+    read's session must not be lent out, and its backend must be gone."""
+    from connectors.postgresql_conn import get_connection
+    from services.endpoint_session import endpoint_session_scope, scope_stats
+    from services.source_read_cancel import abort_connection
+    from tests.helpers.live_env import pg_creds
+
+    connect, _recording = _pg()
+    side = connect()
+    side.autocommit = True
+    p = pg_creds()
+    kw = dict(
+        host=p["host"], port=int(p["port"]), database=p["database"],
+        username=p["username"], password=p["password"],
+        connection_string="", ssl=False,
+    )
+    try:
+        with endpoint_session_scope():
+            conn = get_connection(**kw)
+            assert getattr(conn, "_df_release", None) is not None, "not a pooled session"
+            pid = conn.get_backend_pid()
+            assert abort_connection(conn) is True
+            again = get_connection(**kw)
+            assert again.get_backend_pid() != pid, "the cancelled session was lent out again"
+            assert scope_stats().get("postgresql", {}).get("reused", 0) == 0
+            again.close()
+        with side.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_stat_activity WHERE pid = %s", (pid,))
+            assert cur.fetchone() is None, f"backend {pid} still open"
+    finally:
+        side.close()

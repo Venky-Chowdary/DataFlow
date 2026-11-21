@@ -494,3 +494,129 @@ def test_a_cancelled_overwrite_leaves_no_stage_table(monkeypatch):
         assert kept == [-2, -1], kept
     finally:
         _teardown(pg, my, src_t, dst_t)
+
+
+def _cancel_once_the_stage_holds_the_rows(monkeypatch, on_landed):
+    """Run ``on_landed`` right after the COPY's rows reached the stage (the
+    source read is over), i.e. inside the proof-counts-and-publish window."""
+    import services.copy_pg_mysql as cpm
+
+    real = cpm._end_source_read
+
+    def end_then_cancel(conn):
+        real(conn)
+        on_landed()
+
+    monkeypatch.setattr(cpm, "_end_source_read", end_then_cancel)
+
+
+def test_a_cancel_before_the_publish_keeps_the_live_table(monkeypatch):
+    """Overwrite: the load first lands in a private stage; the live table
+    changes only at the publish. A cancel between the two (the proof counts
+    and the start of the publish take minutes on a large table) used to be
+    ignored once the source read was over: the run published over the live
+    table and the job said the load had finished before the cancel. Now the
+    stage is dropped and the live table keeps exactly what it had."""
+    from services import cancel_check
+    from services.copy_pg_mysql import copy_postgres_to_mysql
+
+    p, c, pg, my, src_t, dst_t = _setup(3000)
+    with my.cursor() as cur:
+        cur.execute(f"CREATE TABLE `{dst_t}` (id INT PRIMARY KEY, a VARCHAR(40), n INT)")
+        cur.execute(f"INSERT INTO `{dst_t}` VALUES (-1, 'keep', 0), (-2, 'keep', 0)")
+    flag = threading.Event()
+
+    def probe(_rows=None):
+        if flag.is_set():
+            raise TransferCancelled("Transfer cancelled by user")
+
+    _cancel_once_the_stage_holds_the_rows(monkeypatch, flag.set)
+
+    def cfg(creds: dict) -> dict:
+        return {
+            "host": creds["host"], "port": int(creds["port"]),
+            "database": creds["database"], "username": creds["username"],
+            "password": creds["password"],
+        }
+
+    def run():
+        cancel_check.set_cancel_probe(probe)
+        copy_postgres_to_mysql(
+            source_cfg=cfg(p), source_schema="public", source_table=src_t,
+            dest_cfg=cfg(c), dest_table=dst_t,
+            pairs=[("id", "id"), ("a", "a"), ("n", "n")],
+            mysql_ddls=["INT", "VARCHAR(40)", "INT"],
+            replace_destination=True,
+        )
+
+    try:
+        with pytest.raises(TransferCancelled):
+            contextvars.copy_context().run(run)
+        assert flag.is_set(), "the load never reached its stage"
+        with my.cursor() as cur:
+            cur.execute(f"SELECT id FROM `{dst_t}` ORDER BY id")  # nosec B608
+            kept = [r[0] for r in cur.fetchall()]
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name LIKE %s",
+                (f"df_ow_{dst_t}%",),
+            )
+            stages = [r[0] for r in cur.fetchall()]
+        assert kept == [-2, -1], kept
+        assert stages == [], stages
+    finally:
+        _teardown(pg, my, src_t, dst_t)
+
+
+def test_a_cancel_before_the_publish_is_reported_as_nothing_landed(monkeypatch):
+    """The same window end to end: the engine ends the run cancelled with
+    nothing of this run landed, and its record matches the table. (The
+    engine's MySQL overwrite empties the live table into ``__df_bak`` before
+    the route runs and, by design, does not restore it on a cancel: the
+    table is left empty, as the record says. The COPY route's own stage
+    swap is what must not publish the cancelled load.)"""
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    store = _engine(monkeypatch)
+    p, c, pg, my, src_t, dst_t = _setup(3000)
+    with my.cursor() as cur:
+        cur.execute(f"CREATE TABLE `{dst_t}` (id INT PRIMARY KEY, a VARCHAR(40), n INT)")
+        cur.execute(f"INSERT INTO `{dst_t}` VALUES (-1, 'keep', 0), (-2, 'keep', 0)")
+    job_id = uuid.uuid4().hex[:24]
+
+    def cancel_now():
+        store.request_job_cancel(job_id)
+        store.update_job_status(job_id, "cancelled", operator_command=True)
+
+    _cancel_once_the_stage_holds_the_rows(monkeypatch, cancel_now)
+    request = TransferRequest(
+        source=_endpoint("postgresql", p, src_t),
+        destination=_endpoint("mysql", c, dst_t),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="balanced",
+        skip_preflight=True,
+    )
+    store.update_job_status(job_id, "pending", transfer_request={})
+    try:
+        r = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert r.success is False, r
+        job = store.get_job(job_id) or {}
+        assert job.get("phase") == "cancelled", (job.get("phase"), job.get("message"))
+        outcome = job.get("cancel_outcome") or {}
+        # Nothing of this run landed, and the record says what the table holds.
+        assert outcome.get("rows_committed") == 0, outcome
+        assert outcome.get("destination_rows_before") == 2, outcome
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst_t}` WHERE id > 0")  # nosec B608
+            assert cur.fetchone()[0] == 0, "rows of the cancelled run were published"
+            cur.execute(f"SELECT COUNT(*) FROM `{dst_t}`")  # nosec B608
+            assert outcome.get("destination_rows_now") == cur.fetchone()[0], outcome
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name LIKE %s",
+                (f"df_ow_{dst_t}%",),
+            )
+            assert cur.fetchall() == ()
+    finally:
+        _teardown(pg, my, src_t, dst_t)
