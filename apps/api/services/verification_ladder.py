@@ -1018,15 +1018,14 @@ def read_sqlserver_rows(
     table: str,
     columns: list[str] | None = None,
     max_rows: int = MAX_LADDER_ROWS,
+    options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Population read of a SQL Server table, bounded by the ladder row budget.
 
     Mirrors the MySQL reader: pymssql streams through the same row-budget
     accounting so a tampered norecipe run can no longer stay count-only (X-22).
     """
-    import pymssql
-    from connectors.mssql_login import PYMSSQL_TDS_VERSION
-
+    from connectors.mssql_security import connect_sqlserver_dbapi
     from connectors.sql_identifiers import quote_table_ref, require_safe_identifier
 
     col_sql = (
@@ -1039,16 +1038,11 @@ def read_sqlserver_rows(
     )
     sch = (schema or "dbo").strip() or "dbo"
     table_ref = quote_table_ref(table, schema=sch, dialect="sqlserver")
-    conn = pymssql.connect(
-        server=host or "127.0.0.1",
-        port=int(port or 1433),
-        user=username or "sa",
-        password=password or "",
-        database=database or "master",
-        login_timeout=10,
-        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
-        timeout=30,
-    )
+    conn = connect_sqlserver_dbapi({
+        **dict(options or {}),
+        "host": host, "port": port, "database": database or "master",
+        "username": username or "sa", "password": password,
+    })
     try:
         cur = conn.cursor()
         from connectors.sqlserver_tick import full_precision_select_list

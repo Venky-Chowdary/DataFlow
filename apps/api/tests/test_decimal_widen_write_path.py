@@ -245,10 +245,33 @@ def test_remap_on_existing_dest_still_scans_live_ddl():
 
 
 def test_overwrite_judges_mapping_type_not_dropped_live_ddl():
-    """Overwrite recreates the object — mapping NUMBER(10,7) is the write bind."""
+    """Overwrite recreates the object — mapping NUMERIC(10,7) is the write bind.
+
+    BigQuery: since NF-1 Snowflake keeps the live table on overwrite, so its
+    live DDL binds (see the next test)."""
     rows = [{"DEP_TIME": "7.9166665"}]
     report = scan_population_fit(
         rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMERIC(10,7)"}],
+        dest_types={"DEP_TIME": "NUMERIC(9,6)"},
+        dest_db="bigquery",
+        dialect_label="bigquery",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_overwrite",
+        dest_table_exists=True,
+    )
+    assert report.findings == ()
+    assert report.targets[0].target_type == "NUMERIC(10,7)"
+    assert report.targets[0].binds_live_ddl is False
+
+
+def test_snowflake_overwrite_binds_the_kept_table_ddl():
+    """NF-1: the Snowflake overwrite loads the kept table, like a relational one."""
+    report = scan_population_fit(
+        [{"DEP_TIME": "7.9166665"}],
         [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
         dest_types={"DEP_TIME": "NUMBER(9,6)"},
         dest_db="snowflake",
@@ -260,9 +283,7 @@ def test_overwrite_judges_mapping_type_not_dropped_live_ddl():
         sync_mode="full_refresh_overwrite",
         dest_table_exists=True,
     )
-    assert report.findings == ()
-    assert report.targets[0].target_type == "NUMBER(10,7)"
-    assert report.targets[0].binds_live_ddl is False
+    assert report.targets[0].binds_live_ddl is True
 
 
 def test_create_new_uses_mapping_even_when_projected_types_are_narrow():

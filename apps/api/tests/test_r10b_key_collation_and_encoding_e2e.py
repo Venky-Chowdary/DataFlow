@@ -272,3 +272,8 @@ def test_legacy_encoded_csv_upload_loads_exactly_run1_run2(transfer_client, enc,
         _assert_exact(kind, table, run2)
     finally:
         h.drop_table(kind, table)
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

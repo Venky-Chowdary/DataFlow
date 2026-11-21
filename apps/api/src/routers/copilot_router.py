@@ -733,6 +733,31 @@ async def copilot_confirm(
             status_code=403,
             detail=confirm_denial_message(role, str(peek.get("kind") or "")),
         )
+    # The human-in-the-loop gate: an approval is spent on the channel the
+    # workspace requires (services.mcp_confirm_policy; default: an
+    # interactive session of the person who staged it, or an admin). Checked
+    # before the claim, so a refused confirm leaves the approval pending.
+    from services.mcp_confirm_policy import ConfirmRefused, check_confirm_channel
+
+    try:
+        check_confirm_channel(
+            http_request,
+            staged_by=str(peek.get("staged_by") or ""),
+            staged_in=staged_in,
+            role=role,
+            actor=session_actor,
+            auth_enforced=auth_service.auth_required(),
+        )
+    except ConfirmRefused as exc:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="pilot.confirm.refused_channel",
+            resource=f"ack/{ack_id}",
+            actor=session_actor or "unknown",
+            details={"kind": str(peek.get("kind") or ""), "workspace_id": staged_in, "reason": str(exc)},
+        )
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     kind = str(peek.get("kind") or "")
     studio_payload: dict | None = None
     if kind == "studio_remediation":

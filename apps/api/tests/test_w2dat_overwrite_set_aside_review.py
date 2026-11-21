@@ -88,6 +88,17 @@ class _FakeBigQuery:
         t = self.tables[ref]
         return SimpleNamespace(streaming_buffer={"estimated_rows": t["buffered"]} if t["buffered"] else None)
 
+    def get_iam_policy(self, ref, **kw):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(bindings=[])
+
+    @property
+    def _connection(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(api_request=lambda **_: {})
+
     def delete_table(self, ref, not_found_ok=True, **kw):
         self.deleted.append(ref)
         self.tables.pop(ref, None)

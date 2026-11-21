@@ -14,7 +14,8 @@
   "apt_packages": {
     "unixodbc": {"licence": "LGPL-2.1", "why": "unixODBC driver manager (odbcinst / isql and the driver registry) for pyodbc, used unmodified.", "source": "companion bundle <tag>-sources"},
     "libodbc2": {"licence": "LGPL-2.1", "why": "unixODBC's libodbc.so.2, which pyodbc's wheel links; used unmodified as a shared library.", "source": "companion bundle <tag>-sources"},
-    "curl": {"licence": "curl (MIT-style); its libraries' licences are read from their copyright files at build time", "why": "HEALTHCHECK probe.", "source": "companion bundle <tag>-sources when its copyright file names a copyleft licence (build-time scan)"}
+    "curl": {"licence": "curl (MIT-style); its libraries' licences are read from their copyright files at build time", "why": "HEALTHCHECK probe.", "source": "companion bundle <tag>-sources when its copyright file names a copyleft licence (build-time scan)"},
+    "msodbcsql18": {"licence": "Microsoft Software License Terms (proprietary): MICROSOFT ODBC DRIVER 18 FOR SQL SERVER", "why": "SQL Server verified TLS, Encrypt=strict and Microsoft Entra ID sign-in (NF-2). Installed ONLY with --build-arg INSTALL_MSODBCSQL=1; the default image does not contain it. The terms (section 2) allow distributing code on the REDIST list 'in applications you develop' if the application adds significant primary functionality, distributors and end users agree to terms protecting Microsoft at least as much, and the distributor indemnifies Microsoft; section 4(e) forbids distributing the software otherwise or providing it as a stand-alone hosted solution. The package ships no REDIST list, so whether the image may carry it to customers needs the owner's (legal) sign-off.", "source": "not applicable: proprietary binary from packages.microsoft.com (debian/12/prod), not installed by default", "owner_decision": true}
   },
   "exceptions": {
     "pypi:certifi": {

@@ -605,3 +605,8 @@ def test_d2_quantities_counts_and_labels_are_not_pii_but_real_pii_still_is(world
         assert "qty (" not in text, text
     finally:
         drop_pg(benign, real)
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

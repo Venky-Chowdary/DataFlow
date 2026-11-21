@@ -526,12 +526,51 @@ API responses carry their own policy: `default-src 'none'; frame-ancestors
 'none'; base-uri 'none'` (a looser one on `/docs` and `/redoc`), and HSTS on
 HTTPS requests or when `DATAWRAP_HSTS=1`.
 
-## Static analysis in CI
+## Static analysis and scanning in CI
 
-Pull requests run `pip-audit` and `bandit` (configuration in `bandit.yaml`;
-the gate fails on high-severity findings). The earlier written catalogue of
-reviewed false positives was removed with the old documentation and has not
-been rebuilt.
+The `security` job in `.github/workflows/ci.yml` runs on every pull request:
+
+| Check | Gates? |
+|---|---|
+| `pip-audit --local` over the installed API environment (no ignored advisories) | yes |
+| `npm audit --omit=dev --audit-level=high` over the production npm dependencies | yes (high and critical) |
+| `bandit` on `apps/api/connectors`, `services`, `src` (configuration in `bandit.yaml`) | yes, High findings |
+| `bandit` Medium findings, uploaded as `bandit-medium-report` | no, report only |
+| Licence gate, LGPL / Debian / companion source drift checks | yes |
+
+The `dast-baseline` job runs the OWASP ZAP baseline scan (spider and passive
+rules, no attacks) against the API, started with authentication on, and the
+built web app. It is report-only: it does not fail the pipeline and is not a
+required check. Its HTML and JSON reports are uploaded as `zap-baseline`.
+Making it gating needs its findings triaged into a ZAP rule file first.
+
+The earlier written catalogue of reviewed false positives was removed with
+the old documentation and has not been rebuilt.
+
+## Pilot and MCP approvals
+
+A staged Pilot or MCP action runs only when it is confirmed. Who may confirm
+is the workspace's confirm policy: by default (`interactive`) a person signed
+in interactively, either the one who staged it or a workspace admin, never an
+MCP client, workspace API key or MCP OAuth token. `four_eyes` requires a
+second admin; `agent` restores confirmation by any permitted caller. See
+[../use/mcp.md](../use/mcp.md#who-may-confirm-confirm-policy).
+
+## SQL Server transport security
+
+SQL Server is dialled through pyodbc and the Microsoft ODBC Driver 18 when
+the host has it, which encrypts and verifies the server certificate by
+default; Datawrap also sends `Encrypt=yes` to Driver 17. Without the driver
+it falls back to pymssql (FreeTDS), which does **not** verify the server
+certificate. The default production image does not contain the Microsoft
+driver (its licence is an owner decision, see
+[../legal/third-party-licences.md](../legal/third-party-licences.md)); an image
+built with `--build-arg INSTALL_MSODBCSQL=1` has it and sets
+`DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS=1`, so FreeTDS is then used only where a
+connector says `sqlserver_driver=freetds`. Microsoft Entra ID sign-in
+(`authentication`: service principal, managed identity, Entra password or
+access token) needs the Microsoft driver. See
+[../reference/connectors.md](../reference/connectors.md#sql-server-tls-and-entra-id).
 
 ## Not covered
 
@@ -587,4 +626,5 @@ been rebuilt.
   `apps/api/services/audit_anchor.py`, `apps/api/services/audit_anchor_s3.py`
 - `apps/api/services/auth_rate_limit.py`, `apps/api/src/middleware/body_size_limit.py`
 - `apps/api/tests/fixtures/rbac_route_permissions.json`
-- `.github/workflows/ci.yml`, `bandit.yaml`
+- `.github/workflows/ci.yml`, `bandit.yaml`, `apps/api/tests/test_ci_security_scanning.py`
+- `apps/api/services/mcp_confirm_policy.py`, `apps/api/connectors/mssql_security.py`

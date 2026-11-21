@@ -111,7 +111,7 @@ def _empty_store() -> dict[str, Any]:
         "sso": _default_sso(),
         "ai_providers": _default_ai(),
         "pilot": _default_pilot(),
-        "mcp_policy": {"enabled": True, "allowed_tools": None},
+        "mcp_policy": {"enabled": True, "allowed_tools": None, "confirm": None},
         "api_keys": [],
     }
 
@@ -165,11 +165,17 @@ def _load_raw() -> dict[str, Any]:
     allowed = policy.get("allowed_tools")
     if allowed is not None and not isinstance(allowed, list):
         allowed = None
+    from services.mcp_confirm_policy import normalize_confirm_policy
+
     return {
         "sso": sso,
         "ai_providers": ai,
         "pilot": pilot,
-        "mcp_policy": {"enabled": bool(policy.get("enabled", True)), "allowed_tools": allowed},
+        "mcp_policy": {
+            "enabled": bool(policy.get("enabled", True)),
+            "allowed_tools": allowed,
+            "confirm": normalize_confirm_policy(policy.get("confirm")),
+        },
         "api_keys": api_keys,
     }
 
@@ -235,7 +241,13 @@ def apply_integrations_to_env() -> None:
 
 
 def get_mcp_policy() -> dict[str, Any]:
-    """Return the organization-level MCP execution policy."""
+    """Return the organization-level MCP execution policy.
+
+    ``confirm`` is who may spend a staged approval, per workspace
+    (:mod:`services.mcp_confirm_policy`; default ``interactive``).
+    """
+    from services.mcp_confirm_policy import normalize_confirm_policy
+
     policy = _load_raw()["mcp_policy"]
     allowed = policy.get("allowed_tools")
     return {
@@ -245,13 +257,26 @@ def get_mcp_policy() -> dict[str, Any]:
             if isinstance(allowed, list)
             else None
         ),
+        "confirm": normalize_confirm_policy(policy.get("confirm")),
     }
 
 
 def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
-    """Persist MCP policy, rejecting unknown registered tools."""
+    """Persist MCP policy, rejecting unknown registered tools.
+
+    ``confirm`` omitted (``None``) keeps the stored confirm policy.
+    """
+    from services.mcp_confirm_policy import normalize_confirm_policy, normalize_mode
     from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 
+    confirm = policy.get("confirm")
+    if confirm is not None:
+        if not isinstance(confirm, dict):
+            raise ValueError("confirm must be an object: {default, workspaces}")
+        normalize_mode(confirm.get("default") or "interactive")
+        for mode in dict(confirm.get("workspaces") or {}).values():
+            normalize_mode(mode)
+        confirm = normalize_confirm_policy(confirm)
     enabled = bool(policy.get("enabled", True))
     allowed = policy.get("allowed_tools")
     if allowed is not None:
@@ -262,7 +287,9 @@ def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Unknown MCP tools: {', '.join(unknown)}")
         allowed = sorted(set(allowed))
     data = _load_raw()
-    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed}
+    if confirm is None:
+        confirm = data["mcp_policy"].get("confirm")
+    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed, "confirm": confirm}
     data["updated_at"] = _now()
     _save(data)
     return get_mcp_policy()

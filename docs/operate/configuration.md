@@ -370,6 +370,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MONGO_SQLITE_COPY_BATCH` | `5000` | Read by `mongo_sqlite_copy_batch()`: MongoDB snapshot find → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlite.py` |
 | `MONGO_SQLSERVER_COPY` | `1` | Read by `mongo_sqlserver_copy_enabled()`: MongoDB snapshot find → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlserver.py` |
 | `MSSQL_CDC_CAPTURE_WAIT_SEC` | `""` | Read by `_capture_wait_budget_sec()`: SQL Server *native* CDC (cdc schema) — Debezium-class path | `apps/api/connectors/sqlserver_cdc_native.py` |
+| `MSSQL_REQUIRE_VERIFIED_TLS` | `""` | Read by `require_verified_tls()`: Host policy: no silent FreeTDS fallback (set in the image that ships Driver 18) | `apps/api/connectors/mssql_security.py` |
 | `MS_FIT_AGGREGATE_SECONDS` | `""` | Read by `aggregate_timeout_seconds()`: Millisecond narrowing onto a document-store instant, decided on values (D148) | `apps/api/services/millisecond_fit.py` |
 | `MULTI_REPLICA` | `""` | `1` declares that more than one process shares this deployment. Turns on the topology checks that refuse an unsafe process split, and makes the Mongo job queue mandatory. | `apps/api/services/cdc_lease_store.py`, `apps/api/services/process_role.py` +1 more |
 | `MYSQL_ICEBERG_COPY` | `1` | Read by `mysql_iceberg_copy_enabled()`: MySQL SELECT → Iceberg catalog snapshot (cross-engine bulk) | `apps/api/services/copy_mysql_iceberg.py` |

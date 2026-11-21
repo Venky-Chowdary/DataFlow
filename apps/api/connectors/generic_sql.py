@@ -460,6 +460,27 @@ def _mssql_odbc_driver() -> str | None:
     return None
 
 
+def _mssql_drivername_for(cfg: Mapping[str, Any]) -> str:
+    """The SQL Server DBAPI for this connector (``sqlserver_driver``, host policy).
+
+    Refuses (``SqlServerSecurityError``) rather than fall back to FreeTDS when
+    the connector or the host requires the Microsoft driver.
+    """
+    from connectors.mssql_security import select_driver
+
+    try:
+        import pymssql  # noqa: F401
+
+        has_pymssql = True
+    except Exception:  # noqa: BLE001 - absent or broken wheel
+        has_pymssql = False
+    return select_driver(
+        with_connection_options(cfg),
+        odbc_installed=bool(_mssql_odbc_driver()),
+        pymssql_installed=has_pymssql,
+    )
+
+
 def _mssql_drivername() -> str:
     """Pick an installed SQL Server DBAPI: pyodbc+driver preferred, pymssql fallback."""
     if _mssql_odbc_driver():
@@ -531,11 +552,12 @@ def _mssql_connect_query(cfg: dict[str, Any], drivername: str) -> dict[str, str]
             query["HostNameInCertificate"] = host_in_cert
         if cfg.get("trust_server_certificate") in _TRUTHY:
             query["TrustServerCertificate"] = "Yes"
-        encrypt = str(cfg.get("encrypt") or "").strip()
-        if encrypt:
-            # ``no`` only when the operator declares this server plaintext; the
-            # default is left to the driver (Driver 18: encrypt + verify).
-            query["Encrypt"] = encrypt
+        from connectors.mssql_security import odbc_security_query
+
+        # Encrypt defaults to ``yes`` (Driver 17's own default is ``no``): ``no``
+        # / ``optional`` only when the operator declares this server plaintext.
+        # Entra ID sign-in adds ``Authentication=`` (connectors.mssql_security).
+        query.update(odbc_security_query(cfg))
         return query
 
     unsupported = sorted(
@@ -550,6 +572,10 @@ def _mssql_connect_query(cfg: dict[str, Any], drivername: str) -> dict[str, str]
         # FreeTDS negotiates login encryption but cannot be told to require it
         # for the whole session per connection, and it never verifies the chain.
         unsupported.append("Encrypt")
+    from connectors.mssql_security import is_entra
+
+    if is_entra(cfg):
+        unsupported.append("Authentication (Microsoft Entra ID)")
     if unsupported:
         from services.brand import PRODUCT_NAME
         raise ValueError(
@@ -738,6 +764,9 @@ CONNECTION_OPTION_KEYS: tuple[str, ...] = (
     "application_intent",
     "driver",
     "odbc_driver",
+    # SQL Server: DBAPI choice (auto/odbc/freetds) and Entra ID sign-in
+    "sqlserver_driver",
+    "authentication",
     # Kafka listener: a connector may declare these under ``extra`` (D83)
     "security_protocol",
     "sasl_mechanism",
@@ -879,9 +908,15 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
         port = _default_port(db_type)
 
     query: dict[str, str] | None = None
+    username = cfg.get("username") or None
+    password = cfg.get("password") or None
     if drivername.startswith("mssql"):
-        drivername = _mssql_drivername()
+        from connectors.mssql_security import url_credentials
+
+        drivername = _mssql_drivername_for(cfg)
         query = _mssql_connect_query(cfg, drivername)
+        # Entra ID managed identity / access token: no UID or PWD in the URL.
+        username, password = url_credentials(cfg)
         if drivername == "mssql+pymssql":
             from connectors.mssql_login import pymssql_tds_version
 
@@ -908,8 +943,8 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
 
     return sa.URL.create(
         drivername,
-        username=cfg.get("username") or None,
-        password=cfg.get("password") or None,
+        username=username,
+        password=password,
         host=cfg.get("host") or "localhost",
         port=port if port else None,
         database=database,
@@ -1200,6 +1235,17 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             install_sqlserver_datetime2_bind()
 
         connect_args = _connect_args_for(url, cfg)
+        if "pyodbc" in driver and "mssql" in driver:
+            from connectors.mssql_security import odbc_attrs_before
+
+            token = odbc_attrs_before(cfg)
+            if token:
+                # Entra ID access token (SQL_COPT_SS_ACCESS_TOKEN), next to the
+                # login timeout pyodbc already takes as a pre-connect attribute.
+                connect_args = {
+                    **connect_args,
+                    "attrs_before": {**dict(connect_args.get("attrs_before") or {}), **token},
+                }
         url_head = (url if isinstance(url, str) else str(driver)).lower()
         mysql_tls = None
         if "pymysql" in driver or url_head.startswith(("mysql", "mariadb")):

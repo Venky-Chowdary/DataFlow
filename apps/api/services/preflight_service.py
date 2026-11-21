@@ -2219,9 +2219,9 @@ def run_file_preflight(
         can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
         destination_table=str(destination_table or ""), mappings=write_maps,
     )
-    from services.dest_require_primary_key import preflight_require_primary_key_gate
+    from services.preflight_dest_gates import build_dest_object_gates  # D396 key gate + NF-1 governance
 
-    require_pk_gate = preflight_require_primary_key_gate(  # D396 / D377 surrogate approval
+    require_pk_gate, overwrite_governance_gate = build_dest_object_gates(
         connected=bool(destination_connected), acknowledged=bool(ddl_changes_acknowledged),
         destination_table=str(destination_table or ""), dest_db_type=destination_db_type,
         destination_config=destination_config, table_exists=dest_table_exists, sync_mode=sync_mode,
@@ -2231,6 +2231,9 @@ def run_file_preflight(
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
+    overwrite_governance_blocked = bool(
+        overwrite_governance_gate and overwrite_governance_gate.get("status") == "block"
+    )
     upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
     upsert_ddl_blocked = upsert_ddl_blocked or dup_dest_gate is not None
     upsert_ddl_blocked = upsert_ddl_blocked or bool(
@@ -2239,7 +2242,7 @@ def run_file_preflight(
     enriched_blockers.extend(
         blockers_from_gates(
             (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None),
-            (require_pk_gate, None),
+            (require_pk_gate, None), (overwrite_governance_gate, None),
         )
     )
     extra_gates: list[dict[str, Any]] = (
@@ -2250,6 +2253,7 @@ def run_file_preflight(
         + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([require_pk_gate] if require_pk_gate else [])
+        + ([overwrite_governance_gate] if overwrite_governance_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )
@@ -2264,7 +2268,7 @@ def run_file_preflight(
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
         and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
-        and not shape_route_blocked,
+        and not shape_route_blocked and not overwrite_governance_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

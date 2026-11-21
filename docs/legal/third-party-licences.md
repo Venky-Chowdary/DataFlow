@@ -111,8 +111,36 @@ allows bundling as long as the copyright and licence travel with the fonts;
    the production image, and no longer in `licence-policy.json` (Datawrap
    does not distribute them). See the next section.
 
-No owner decision is pending (`owner_decision: true` appears nowhere in
-`licence-policy.json`).
+4. **Microsoft ODBC Driver 18 for SQL Server** (`msodbcsql18`, NF-2).
+   **Pending owner decision.** The secure SQL Server path (verified TLS,
+   `Encrypt=strict`, Microsoft Entra ID sign-in) needs it; without it the
+   image dials SQL Server through FreeTDS, which does not verify the server
+   certificate. Its licence is the MICROSOFT SOFTWARE LICENSE TERMS shipped
+   in the package (`/usr/share/doc/msodbcsql18/LICENSE.txt`, read from
+   `msodbcsql18_18.4.1.1-1_amd64.deb`, packages.microsoft.com debian/12):
+   - section 1(a) allows installing and using it "to develop and test your
+     applications";
+   - section 2 lets you distribute *distributable code* — code on the
+     REDIST list "in the software, if any, or listed at REDIST" — "in
+     applications you develop", if the application adds significant primary
+     functionality, distributors and external end users agree to terms that
+     protect it and Microsoft at least as much, and you indemnify Microsoft;
+   - section 4(e) forbids sharing or distributing the software otherwise, or
+     providing it "as a stand-alone hosted solution for others to use".
+   The package carries no REDIST list, so whether the driver counts as
+   distributable code, and whether shipping a container image to customers
+   meets section 2(b), is not clear from the text. It is therefore **not**
+   installed by default: `Dockerfile.api` installs it only with
+   `--build-arg INSTALL_MSODBCSQL=1` (Microsoft's signed apt repository, key
+   `BC528686B50D79E339D3721CEB3E94ADBE1229CF`, key file pinned by SHA-256),
+   and `licence-policy.json` lists it under `apt_packages` with
+   `owner_decision: true`. Options: (a) approve distribution in the image
+   (legal sign-off on section 2), then make the build arg default to 1;
+   (b) keep it operator-installed, like the vendor drivers below, where the
+   operator who builds the image accepts the terms.
+
+Pending owner decisions: item 4 (`owner_decision: true` on
+`apt_packages.msodbcsql18` in `licence-policy.json`).
 
 ## Native libraries bundled inside the wheels
 

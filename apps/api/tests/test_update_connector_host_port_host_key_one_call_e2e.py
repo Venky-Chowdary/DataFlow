@@ -84,3 +84,8 @@ def test_host_port_and_host_key_in_one_update_all_land(
     assert after.host == "127.0.0.2"
     assert int(after.port) == 2200
     assert (after.extra or {}).get("host_key") == new_pin, after.extra
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

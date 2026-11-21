@@ -195,3 +195,8 @@ def test_studio_plan_mapping_binds_the_source_engine(tmp_path, monkeypatch, src_
     assert str(name.get("target_type") or "").upper().startswith("NVARCHAR"), name
     assert not name.get("requires_risk_contract"), (name.get("fidelity_reason"),
                                                     name.get("create_new_risks"))
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

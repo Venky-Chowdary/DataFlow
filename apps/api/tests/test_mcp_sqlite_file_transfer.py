@@ -556,3 +556,8 @@ def test_mcp_file_load_into_existing_sqlite_writes_by_column_name(mcp_client):
     assert str(row[0]) in {"1001", "1001.0"}
     assert "Wire" in str(row[1])
     assert str(row[2]) in {"1500", "1500.0", "1500.00"}
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

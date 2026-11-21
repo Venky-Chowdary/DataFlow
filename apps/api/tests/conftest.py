@@ -302,6 +302,19 @@ LOCAL_OBJECT_STORE_BUCKET = "dataflow-matrix"
 
 
 @pytest.fixture()
+def mcp_confirm_agent_mode(monkeypatch):
+    """Let an MCP client spend its own approvals (the opt-in ``agent`` confirm policy).
+
+    The default confirm policy requires a person in an interactive session
+    (services.mcp_confirm_policy). Tests whose subject is what an unattended
+    MCP flow does end to end opt in, as a workspace would.
+    """
+    import services.mcp_confirm_policy as policy
+
+    monkeypatch.setattr(policy, "confirm_mode_for", lambda workspace_id: "agent")
+
+
+@pytest.fixture()
 def local_object_store(_local_object_store_server: str) -> str:
     """Session endpoint with the matrix bucket guaranteed to exist *now*.
 

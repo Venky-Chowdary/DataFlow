@@ -348,6 +348,8 @@ class _FakeIndices:
             raise RuntimeError(f"index {target} already exists")
         src = self.store[index]
         self.store[target] = {"docs": list(src["docs"]), "settings": dict(src["settings"])}
+        if "mappings" in src:
+            self.store[target]["mappings"] = dict(src["mappings"])
         return {"acknowledged": True}
 
     def delete(self, index: str, ignore_unavailable: bool = False) -> dict:
@@ -358,6 +360,17 @@ class _FakeIndices:
 
     def refresh(self, index: str = "", **_: Any) -> dict:
         return {}
+
+    def get_alias(self, index: str, **_: Any) -> dict:
+        # A clone copies no alias: aliases live on the index entry only.
+        return {index: {"aliases": dict(self.store[index].get("aliases") or {})}}
+
+    def update_aliases(self, actions: list[dict[str, Any]], **_: Any) -> dict:
+        for action in actions:
+            add = dict(action["add"])
+            idx, alias = add.pop("index"), add.pop("alias")
+            self.store[idx].setdefault("aliases", {})[alias] = add
+        return {"acknowledged": True}
 
 
 class _FakeElasticsearch:
@@ -371,6 +384,14 @@ class _FakeElasticsearch:
 
     def count(self, index: str, **_: Any) -> dict:
         return {"count": len(self.store[index]["docs"])}
+
+    def delete_by_query(self, index: str, query: dict, **_: Any) -> dict:
+        assert query == {"match_all": {}}
+        if self.store[index]["settings"].get("index.blocks.write") is True:
+            raise RuntimeError(f"index [{index}] blocked by: [FORBIDDEN/8/index write (api)]")
+        deleted = len(self.store[index]["docs"])
+        self.store[index]["docs"] = []
+        return {"deleted": deleted, "failures": []}
 
     def close(self) -> None:
         pass
@@ -553,9 +574,26 @@ class _FakeBigQuery:
         self.copy_jobs = copy_jobs
 
     def get_table(self, table_id: str, **_: Any) -> Any:
+        from types import SimpleNamespace
+
         if table_id not in self.tables:
             raise _NotFound(f"Not found: Table {table_id}")
-        return table_id
+        # An ungoverned table: no policy tags, labels, partitioning.
+        return SimpleNamespace(table_id=table_id, schema=[], labels={}, description=None,
+                               time_partitioning=None, range_partitioning=None,
+                               clustering_fields=None, streaming_buffer=None)
+
+    def get_iam_policy(self, table_id: str, **_: Any) -> Any:
+        from types import SimpleNamespace
+
+        self.get_table(table_id)
+        return SimpleNamespace(bindings=[])
+
+    @property
+    def _connection(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(api_request=lambda **_: {})
 
     def delete_table(self, table_id: str, not_found_ok: bool = False, **_: Any) -> None:
         if table_id not in self.tables and not not_found_ok:

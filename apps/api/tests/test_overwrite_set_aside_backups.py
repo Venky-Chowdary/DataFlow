@@ -134,18 +134,24 @@ def test_snowflake_committed_overwrite_drops_the_backup(snowflake):
 
     backup = retire_set_aside("snowflake", cfg, table, "PUBLIC")
     assert backup == f"{table}__DF_BAK"
-    assert table not in _sf_tables()
+    # NF-1: the live table is kept (emptied in place); the backup is a clone.
+    assert {table, backup} <= _sf_tables()
+    assert _sf_exec(f'SELECT count(*) FROM "{table}"') == [(0,)]
+    assert sorted(_sf_exec(f'SELECT "ID", "NAME", "QTY" FROM "{backup}"')) == sorted(PRIOR)
     discard_set_aside("snowflake", cfg, table, backup, "PUBLIC")
 
     assert backup not in _sf_tables()
+    assert table in _sf_tables()
 
 
 def test_snowflake_backup_without_live_table_becomes_this_runs_backup(snowflake):
+    """A backup the earlier rename-aside design left is the original object: renamed back first."""
     cfg, table = snowflake
     _sf_seed(table)
     _sf_exec(f'ALTER TABLE "{table}" RENAME TO "{table}__DF_BAK"')
 
     backup = retire_set_aside("snowflake", cfg, table, "PUBLIC")
+    assert table in _sf_tables()
     restore_set_aside("snowflake", cfg, table, backup, "PUBLIC")
 
     assert sorted(_sf_exec(f'SELECT "ID", "NAME", "QTY" FROM "{table}"')) == sorted(PRIOR)
