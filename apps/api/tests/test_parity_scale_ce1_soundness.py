@@ -149,6 +149,20 @@ def test_decimal_is_sound(pair, ddl) -> None:
 
 
 @PROPERTY
+@given(d=st.decimals(allow_nan=False, allow_infinity=False, places=2, min_value=-(10**8), max_value=10**8),
+       bump=st.sampled_from([0.0, 1e-9, -1e-9, 0.005]))
+def test_sqlite_real_against_an_exact_decimal_is_sound(d, bump) -> None:
+    """SQLite NUMERIC stores REAL: the projection compares it to an exact source by value."""
+    spec = FieldSpec(kind="decimal", dest_type="NUMERIC(10,2)", dest_engine="sqlite")
+    stored = float(d) + bump
+    assert_sound(d, stored, spec)
+    assert_sound(float(d), stored, spec)
+    if bump == 0.0 and Decimal(repr(float(d))) == d:
+        # The faithful case is not a false difference.
+        assert ce1.encode_value(d, spec) == ce1.encode_value(stored, spec)
+
+
+@PROPERTY
 @given(pair=_pair(TEXT, _text_variants),
        ddl=st.sampled_from([("varchar(20)", PG), ("text", PG), ("TEXT", "sqlite"),
                             ("VARCHAR(20) COLLATE utf8mb4_0900_ai_ci", "mysql"), ("citext", PG),
@@ -279,7 +293,9 @@ def test_stricter_cases_are_the_judges() -> None:
     aware, naive = datetime(2024, 1, 1, 0, tzinfo=timezone.utc), datetime(2024, 1, 1)
     assert ce1.encode_value(aware, tz) != ce1.encode_value(naive, tz)
     real = FieldSpec(kind="decimal", dest_type="NUMERIC(10,2)", dest_engine="sqlite")
-    assert ce1.encode_value(12.34, real) != ce1.encode_value(Decimal("12.34"), real)
+    # A REAL that is not the exact decimal stays apart (0.1 + 0.2 is not 0.3).
+    assert ce1.encode_value(0.1 + 0.2, real) != ce1.encode_value(Decimal("0.3"), real)
+    assert ce1.encode_value(12.34, real) == ce1.encode_value(Decimal("12.34"), real)
 
 
 # ── approved lossy casts: the projection replays the real writer ─────────────

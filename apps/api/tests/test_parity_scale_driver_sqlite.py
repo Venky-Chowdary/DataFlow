@@ -419,12 +419,11 @@ def test_resume_refuses_a_changed_plan(tmp_path) -> None:
     assert resumed.result()["outcome"] == "match"
 
 
-def test_dialect_registry_names_the_first_certification_wave() -> None:
+def test_dialect_registry_serves_the_first_wave_and_refuses_later_engines() -> None:
     from services.parity_scale.dialects import IMPLEMENTED, PLANNED, open_side
     from services.parity_scale.plan import PairNotCertified
 
-    assert set(IMPLEMENTED) == {"sqlite", "postgresql"}
-    assert {"mysql", "mariadb", "sqlserver"} <= set(PLANNED)
+    assert {"sqlite", "postgresql", "mysql", "mariadb", "sqlserver"} <= set(IMPLEMENTED)
     for engine in PLANNED:
         with pytest.raises(PairNotCertified):
             open_side(engine, role="source", plan=plan_for(), table="t")

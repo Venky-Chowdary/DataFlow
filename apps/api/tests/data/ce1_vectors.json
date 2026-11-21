@@ -214,7 +214,7 @@
    "expected": "V1:7"
   },
   {
-   "name": "decimal as REAL (sqlite)",
+   "name": "decimal as REAL (sqlite) is the REAL's shortest decimal",
    "kind": "decimal",
    "value": {
     "$f": "12.5"
@@ -223,6 +223,32 @@
    "spec": {
     "dest_type": "NUMERIC(10,2)",
     "dest_engine": "sqlite"
+   },
+   "expected": "V4:12.5"
+  },
+  {
+   "name": "decimal as inexact REAL (sqlite)",
+   "kind": "decimal",
+   "value": {
+    "$f": "0.30000000000000004"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "NUMERIC(10,2)",
+    "dest_engine": "sqlite"
+   },
+   "expected": "V19:0.30000000000000004"
+  },
+  {
+   "name": "REAL in a PostgreSQL decimal kind stays foreign",
+   "kind": "decimal",
+   "value": {
+    "$f": "12.5"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "numeric",
+    "dest_engine": "postgresql"
    },
    "expected": "Xreal:4:12.5"
   },
@@ -510,6 +536,20 @@
     "dest_engine": "postgresql"
    },
    "expected": "V12:946684800001"
+  },
+  {
+   "name": "timestamp 100ns units (datetime2(7))",
+   "kind": "timestamp",
+   "value": {
+    "$dt": "2024-01-01T00:00:00.123456"
+   },
+   "side": "destination",
+   "spec": {
+    "dest_type": "datetime2(7)",
+    "digits": 7,
+    "dest_engine": "sqlserver"
+   },
+   "expected": "V17:17040672001234560"
   },
   {
    "name": "timestamptz to utc",

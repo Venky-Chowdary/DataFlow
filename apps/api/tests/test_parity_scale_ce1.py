@@ -177,11 +177,17 @@ def test_plan_text_key_needs_binary_collation_for_mode_r() -> None:
     assert binary.order_portable
 
 
-def test_plan_refuses_uncertified_pairs_but_names_the_first_wave() -> None:
-    from services.parity_scale.plan import PairNotCertified, build_plan, require_pair
+def test_plan_supports_the_first_wave_and_refuses_engines_without_a_dialect() -> None:
+    from services.parity_scale.plan import WAVE1_PAIRS, PairNotCertified, build_plan, require_pair
 
     types = {"id": "int"}
+    for src, dst in sorted(WAVE1_PAIRS):
+        require_pair(build_plan([{"source": "id", "target": "id"}], source_types=types, dest_types=types,
+                                source_engine=src, dest_engine=dst, key_columns=["id"]))
+    mariadb = build_plan([{"source": "id", "target": "id"}], source_types=types, dest_types=types,
+                         source_engine="mariadb", dest_engine="postgresql", key_columns=["id"])
+    assert mariadb.source_engine == "mysql"  # one dialect; the leg is the server it reports
     plan = build_plan([{"source": "id", "target": "id"}], source_types=types, dest_types=types,
-                      source_engine="mysql", dest_engine="postgresql", key_columns=["id"])
-    with pytest.raises(PairNotCertified, match="first certification wave"):
+                      source_engine="oracle", dest_engine="postgresql", key_columns=["id"])
+    with pytest.raises(PairNotCertified):
         require_pair(plan)

@@ -177,10 +177,14 @@ def test_sql_instant_projection_replays_carrier_instant(admin, target, digits) -
     run_sql(admin, f'CREATE TABLE "{table}" (id int PRIMARY KEY, x {source})')
     col = ColumnPlan(source="x", target="x", cls="engine", kind="timestamptz" if aware else "timestamp",
                      digits=digits, source_type=source, dest_type=target, projection=f"instant({digits})")
-    # Post-1970 instants: PostgreSQL rounds half away from zero before 1970,
-    # carrier_instant (and so Gate-8 and CE1) half up — see the module notes.
-    pool = st.datetimes(min_value=datetime(1970, 1, 2), max_value=datetime(9999, 12, 30),
-                        timezones=OFFSETS if aware else st.none())
+    # The whole range, halves included: PostgreSQL rounds half away from zero
+    # around 2000-01-01, and carrier_instant (so Gate-8 and CE1) models it.
+    halves = st.builds(lambda d, m: d.replace(microsecond=(m * 1000 + 500) % 1_000_000),
+                       st.datetimes(min_value=datetime(1, 1, 3), max_value=datetime(9999, 12, 29)),
+                       st.integers(0, 999))
+    pool = st.one_of(st.datetimes(min_value=datetime(1, 1, 3), max_value=datetime(9999, 12, 29)), halves)
+    if aware:
+        pool = pool.map(lambda d: d.replace(tzinfo=timezone.utc))
 
     @settings(max_examples=40, derandomize=True, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(batch=st.lists(pool, min_size=1, max_size=25))
@@ -475,3 +479,21 @@ def test_engine_checksum_ce1_population_digest(admin, monkeypatch) -> None:
     assert legacy is not None and not legacy.checksum.startswith("psd1:")
     monkeypatch.delenv("DATAWRAP_PARITY_SCALE")
     assert postgresql_ce1_population_digest(connect(), plan, role="source", table=src) is None
+
+
+@pytest.mark.parametrize("strategy", ["linear", "sample", "quantile"])
+def test_large_table_boundaries_still_find_every_fault(admin, strategy) -> None:
+    """Linear integer split and TABLESAMPLE boundaries (forced on a small table)."""
+    src, dst = pair(admin, f"bd_{strategy}")
+    run_sql(admin, f'ANALYZE "{src}"',
+            f'UPDATE "{dst}" SET i = i + 1 WHERE id IN (3, 9999, 19998)',
+            f'DELETE FROM "{dst}" WHERE id = 12000',
+            f'INSERT INTO "{dst}" SELECT 50000, i, amt, name, ts, ok, d, u, note FROM "{dst}" WHERE id = 1')
+    cfg = ScanConfig(segment_rows=2_000, leaf_threshold=200, bisection_factor=8, boundary_strategy=strategy)
+    ev = scan_pg(src, dst, plan_of(), mode="R", config=cfg)
+    diff = ev["differences"]
+    assert ev["boundary_strategy"] == strategy
+    assert ev["coverage"]["complete"]
+    assert keys(diff, "changed_keys") == [3, 9999, 19998]
+    assert keys(diff, "missing_keys") == [12000]
+    assert keys(diff, "extra_keys") == [50000]

@@ -210,6 +210,35 @@ this page that could make two values encode equal that encoded apart before
 is a new version. A fold added to fingerprint v2 must either bump CE or be
 shown to be a fold CE1 leaves to the judge.
 
+## Engines (phase 2)
+
+The same SQL shape runs on every engine (`apps/api/services/parity_scale/dialects/sqlbase.py`);
+each dialect supplies its spellings, and each is checked against the Python
+reference value by value on a live engine by the CE matrix.
+
+| Engine | Hash and sum | Notes |
+|---|---|---|
+| PostgreSQL 14+ | `sha256()`, `sum(bigint)` as `numeric` | Session pinned (UTC, `extra_float_digits`, ISO dates). Same-engine `native` rendering for floats, `jsonb`, intervals and arrays. |
+| MySQL 8 | `SHA2(…, 256)`, `SUM` as `DECIMAL` | Text as `CONVERT(… USING utf8mb4)`. `TIME` (an interval up to 838 h), `BIT` and cross-engine floats and JSON are streamed. Statement timeout `max_execution_time`. |
+| MariaDB 10.4+ | as MySQL | Its own certified leg, told apart by `VERSION()`. Statement timeout `max_statement_time`. |
+| SQL Server 2019+ | `HASHBYTES('SHA2_256')` over the row converted to UTF-8 through `Latin1_General_100_BIN2_UTF8`, `SUM(CAST(… AS DECIMAL(38,0)))` | No row values: key ranges use the OR/AND expansion. `datetime2(7)` compares in 100 ns units (CE1 `d = 7`); legacy `datetime`, `smalldatetime` and `time` are streamed. Tested in CI only. |
+| SQLite | Python UDFs (the reference itself) | `NUMERIC(p,s)` stores `REAL`: a `REAL` in a decimal column encodes as the decimal its shortest round-trip text spells, which is the number Gate-8 reads (a soundness property checks it). |
+
+**Level-0 boundaries on large tables.** Below `large_table_rows` (the
+engine's own row estimate; default 2,000,000) mode R reads exact quantiles.
+Above it, a single integer key is split linearly between `MIN` and `MAX`,
+and any other key takes boundaries from a block sample (`TABLESAMPLE SYSTEM`
+on PostgreSQL and SQL Server; MySQL falls back to quantiles). Boundaries only
+partition the key space, so their quality changes speed, never the result.
+
+## Certification
+
+<!-- BEGIN GENERATED: parity-ce-certification (apps/api/scripts/gen_parity_ce_certification.py) -->
+
+No engine pair is certified yet.
+
+<!-- END GENERATED: parity-ce-certification -->
+
 ## Verified against
 
 - `apps/api/services/parity_scale/ce1.py` (the Python reference) and
@@ -219,3 +248,7 @@ shown to be a fold CE1 leaves to the judge.
 - `apps/api/tests/test_parity_scale_ce1.py` (golden vectors, plan)
 - `apps/api/tests/test_parity_scale_ce1_soundness.py` (Hypothesis: soundness
   against `fingerprint_for_reconcile`, projection against the real writer)
+- `apps/api/services/parity_scale/dialects/` (one module per engine)
+- `apps/api/tests/test_parity_ce_matrix.py` (live rendering per engine and
+  kind, pairs copied by the real writer), `apps/api/scripts/gen_parity_ce_certification.py`,
+  `apps/api/data/parity_ce_certification.json`

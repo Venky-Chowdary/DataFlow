@@ -111,6 +111,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "check_label": CHECK_LABELS[state["check_kind"]],
         "mode": state["mode"],
         "mode_reason": state["mode_reason"],
+        "boundary_strategy": state.get("boundary_strategy"),
         "plan_hash": state["plan_hash"],
         "plan": {
             "columns": [
@@ -122,6 +123,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
         },
         "source": {"engine": plan["source_engine"]},
         "destination": {"engine": plan["dest_engine"]},
+        "certification": state.get("certification"),
         "population": {
             "rows_source": rows_src,
             "rows_destination": int(state["rows"]["destination"]),

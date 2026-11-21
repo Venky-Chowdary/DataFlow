@@ -65,6 +65,7 @@ class SqliteSide(Side):
             # (one at a time); the connection is never shared between sides.
             connection = sqlite3.connect(path, check_same_thread=False)
         self.conn = connection
+        self.server = "sqlite"
         self._deadline: float | None = None
         self.engine_cols = list(plan.engine_columns)
         self.compared_cols = list(plan.compared_columns)

@@ -33,12 +33,10 @@ _PG_FAMILY: Final[frozenset[str]] = frozenset(
     {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase"}
 )
 
-#: Engine pairs whose in-engine CE1 rules this build runs (phase 1). The dialect
-#: interface also names the pairs of the first certification wave (owner
-#: decision 3); those raise :class:`PairNotCertified` until their dialects land.
-PHASE1_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
-    {("sqlite", "sqlite"), ("postgresql", "postgresql")}
-)
+#: Engines with an in-engine CE1 dialect in this build.
+DIALECT_ENGINES: Final[frozenset[str]] = frozenset({"sqlite", "postgresql", "mysql", "sqlserver"})
+#: The first certification wave (owner decision 3). MariaDB runs as the
+#: ``mysql`` dialect and is certified as its own leg by the server it reports.
 WAVE1_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("postgresql", "postgresql"),
@@ -48,9 +46,16 @@ WAVE1_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("postgresql", "mysql"),
         ("sqlserver", "sqlserver"),
         ("mysql", "mysql"),
-        ("mariadb", "mariadb"),
     }
 )
+#: Pairs the driver will run: SQLite with itself (the reference engine), and
+#: any pair of the SQL dialects. Whether a pair's kinds are *certified* is the
+#: certification file's answer (:mod:`services.parity_scale.certification`).
+SUPPORTED_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {("sqlite", "sqlite")}
+    | {(a, b) for a in ("postgresql", "mysql", "sqlserver") for b in ("postgresql", "mysql", "sqlserver")}
+)
+PHASE1_PAIRS = SUPPORTED_PAIRS  # kept for callers of the phase-1 name
 
 #: Same set as ``engine_checksum._NO_OP_TYPE_TRANSFORMS``: coercions into a type
 #: that cannot move a value already of that type.
@@ -77,6 +82,10 @@ def normalize_engine(engine: str | None) -> str:
         return "postgresql"
     if eng in {"sqlite", "sqlite3"}:
         return "sqlite"
+    if eng in {"mysql", "mariadb", "tidb"}:
+        # The product names a MariaDB destination ``mysql``; the dialect reads
+        # VERSION() and certification records the server it talked to.
+        return "mysql"
     if eng in {"mssql", "sqlserver", "azuresql", "azure_sql"}:
         return "sqlserver"
     return eng
@@ -210,6 +219,27 @@ def kind_of(ddl: str, engine: str) -> str | None:
     """CE1 kind of a declared column type on ``engine``, or ``None`` (not in-engine)."""
     eng = normalize_engine(engine)
     logical = _logical(ddl)
+    if eng == "mysql":
+        if logical == "boolean" and re.match(r"^\s*bit\b", ddl or "", re.I):
+            return None  # BIT reads back as bytes: no portable rendering
+        if logical == "time":
+            return None  # TIME is an interval up to 838 h and reads back as one
+        if logical == "datetime":
+            return "timestamp"  # DATETIME / TIMESTAMP read back naive (session UTC)
+        if logical == "float":
+            return "native"
+        if logical == "json":
+            return "native"
+    if eng == "sqlserver":
+        base = (ddl or "").strip().lower()
+        if logical == "datetime" and (base.startswith("datetime2") or base.startswith("datetimeoffset")):
+            return "timestamptz" if base.startswith("datetimeoffset") else "timestamp"
+        if logical in {"datetime", "time"}:
+            return None  # datetime (1/300 s), smalldatetime and time: streamed
+        if logical == "float":
+            return "native"
+        if logical in {"string", "text"}:
+            return "char" if re.match(r"^\s*n?char\b(?!\s*varying)", base) else "text"
     if eng == "sqlite":
         # SQLite has no enforced types: values keep their storage class, so only
         # the classes CE1 renders natively are typed; everything else is the
@@ -256,9 +286,10 @@ def _carrier_digits(ddl: str, engine: str) -> int:
     from services.carrier_instant import carrier_instant_digits
 
     digits = carrier_instant_digits(ddl, engine=engine)
+    cap = 7 if normalize_engine(engine) == "sqlserver" else 6
     if digits is None:
-        return 6
-    return max(0, min(6, int(digits)))
+        return cap
+    return max(0, min(cap, int(digits)))
 
 
 def _canonical_type(engine: str, ddl: str) -> str:
@@ -541,7 +572,7 @@ def build_plan(
     notes: list[str] = []
     if not key_encodable and key_cols:
         notes.append("key not encodable in-engine: the table is compared by streamed fingerprint")
-    if (src_eng, dst_eng) not in PHASE1_PAIRS:
+    if (src_eng, dst_eng) not in SUPPORTED_PAIRS:
         notes.append(f"pair {src_eng}->{dst_eng} has no in-engine dialect in this build")
     plan = TablePlan(
         source_engine=src_eng,
@@ -558,8 +589,7 @@ def build_plan(
 
 def require_pair(plan: TablePlan) -> None:
     pair = (plan.source_engine, plan.dest_engine)
-    if pair not in PHASE1_PAIRS:
-        wave = " (first certification wave, phase 2)" if pair in WAVE1_PAIRS else ""
+    if pair not in SUPPORTED_PAIRS:
         raise PairNotCertified(
-            f"{plan.source_engine}->{plan.dest_engine} has no in-engine CE1 dialect in this build{wave}"
+            f"{plan.source_engine}->{plan.dest_engine} has no in-engine CE1 dialect in this build"
         )

@@ -17,8 +17,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from typing import Any
 
-from services.parity_scale.dialects.base import Digest, KeyBound, LeafRow, Side, UnitTimeout, range_predicate
-from services.parity_scale.plan import ColumnPlan, TablePlan
+from services.parity_scale.dialects.sqlbase import SqlSide, fit_field, fit_held_predicate, timeout_error
+from services.parity_scale.plan import ColumnPlan
 
 #: Session settings every rendering depends on (``native`` ``::text`` above all).
 SESSION_SETTINGS: tuple[str, ...] = (
@@ -81,13 +81,29 @@ def _foreign(cls: str, text_sql: str) -> str:
     return f"('X{cls}:' || octet_length({text_sql})::text || ':' || {text_sql})"
 
 
-def _units(u_sql: str, digits: int, *, project: bool, clock: bool = False) -> str:
+#: 2000-01-01 00:00 UTC in microseconds since 1970: PostgreSQL's timestamp epoch.
+_PG_EPOCH_US = 946_684_800_000_000
+
+
+def _units(u_sql: str, digits: int, *, project: bool, clock: bool = False, pg_axis: bool = False) -> str:
     """Epoch (or since-midnight) units at ``digits``; ``u_sql`` is exact microseconds."""
+    if digits >= 7:
+        # A 100 ns carrier (SQL Server datetime2(7)): microseconds hold no tick.
+        return _inline(f"(({u_sql}) * 10)::text")
     if digits >= 6:
         return _inline(f"({u_sql})::text")
     step = 10 ** (6 - digits)
     if project:
         rounded = f"floor(({u_sql} + {step // 2}) / {step})"
+        if pg_axis:
+            # The destination is PostgreSQL: it rounds half away from zero on
+            # its own axis (microseconds since 2000-01-01), so an instant before
+            # 2000 rounds half down on the timeline (carrier_instant models it).
+            v = f"({u_sql} - {_PG_EPOCH_US})"
+            rounded = (
+                f"(CASE WHEN {v} >= 0 THEN floor(({v} + {step // 2}) / {step}) "
+                f"ELSE -floor((-{v} + {step // 2}) / {step}) END + {_PG_EPOCH_US // step})"
+            )
         if clock:
             # 23:59:59.9… cannot carry into the next day inside a TIME column:
             # carrier_instant keeps the second it can store.
@@ -103,11 +119,15 @@ def _units(u_sql: str, digits: int, *, project: bool, clock: bool = False) -> st
     )
 
 
-def field_sql(col: ColumnPlan, *, column: str, role: str, column_type: str) -> str:
+def field_sql(
+    col: ColumnPlan, *, column: str, role: str, column_type: str, dest_engine: str = "postgresql"
+) -> str:
     """The CE1 field of one column as a SQL ``text`` expression."""
     x = quote_ident(column)
     kind = col.kind
     source = role == "source"
+    dest_is_pg = str(dest_engine or "postgresql").lower() in {
+        "postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "pgvector"}
     if kind == "integer":
         body = _inline(f"{x}::text")
     elif kind == "boolean":
@@ -128,7 +148,7 @@ def field_sql(col: ColumnPlan, *, column: str, role: str, column_type: str) -> s
         u = f"trunc(extract(epoch FROM {x}) * 1000000)"
         body = (
             f"(CASE WHEN NOT isfinite({x}) THEN (CASE WHEN {x} > 'epoch' THEN 'V4:+inf' ELSE 'V4:-inf' END) "
-            f"ELSE {_units(u, col.digits, project=source)} END)"
+            f"ELSE {_units(u, col.digits, project=source, pg_axis=dest_is_pg)} END)"
         )
     elif kind == "time":
         u = f"trunc(extract(epoch FROM {x}) * 1000000)"
@@ -141,15 +161,8 @@ def field_sql(col: ColumnPlan, *, column: str, role: str, column_type: str) -> s
         body = _inline(f"{x}::text")
     else:  # pragma: no cover - the plan only emits known kinds
         raise ValueError(f"no PostgreSQL rendering for CE1 kind {kind!r}")
-    fit = col.decimal_fit if source else None
-    if fit:
-        classes = decimal_fit_classes(x, fit)
-        # NULL (not 'N') marks a held-out cell; the row filter removes those rows.
-        acts = {"keep": body, "null": "'N'", "hold": "NULL"}
-        whens = " ".join(
-            f"WHEN {cond} THEN {acts[fit['actions'].get(name, 'hold')]}" for name, cond in classes
-        )
-        return f"(CASE WHEN {x} IS NULL THEN 'N' {whens} ELSE {body} END)"
+    if source and col.decimal_fit:
+        return fit_field(x, body, col.decimal_fit, decimal_fit_classes)
     return f"(CASE WHEN {x} IS NULL THEN 'N' ELSE {body} END)"
 
 
@@ -175,41 +188,16 @@ def decimal_fit_classes(x: str, fit: dict[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
-class PostgresSide(Side):
+class PostgresSide(SqlSide):
     """One PostgreSQL table. Read-only: every statement runs in a read-only transaction."""
 
-    def __init__(
-        self,
-        *,
-        role: str,
-        plan: TablePlan,
-        table: str,
-        schema: str = "public",
-        connection: Any = None,
-        connect: Any = None,
-    ) -> None:
-        super().__init__(role=role, plan=plan, table=table, schema=schema or "public")
-        if connection is None:
-            if connect is None:
-                raise ValueError("PostgresSide needs a connection or a connect() factory")
-            connection = connect()
-        self.conn = connection
-        self.engine_cols = list(plan.engine_columns)
-        self.compared_cols = list(plan.compared_columns)
-        self.key_cols = list(plan.key_plans()) if plan.key else []
-        self._prepare_session()
-        self._row_fields = [
-            field_sql(c, column=self.column_name(c), role=role, column_type=self.column_type(c))
-            for c in self.engine_cols
-        ]
-        self._key_fields = [
-            field_sql(c, column=self.column_name(c), role=role, column_type=self.column_type(c))
-            for c in self.key_cols
-        ]
-        self._held = self._held_predicate()
+    #: Keeps PostgreSQL from inlining the derived table (one sha256 per row).
+    materialize = " OFFSET 0"
 
-    # session -----------------------------------------------------------------
-    def _prepare_session(self) -> None:
+    def __init__(self, *, schema: str = "public", **kwargs: Any) -> None:
+        super().__init__(schema=schema or "public", **kwargs)
+
+    def prepare_session(self) -> None:
         self.conn.autocommit = False
         with self.conn.cursor() as cur:
             cur.execute("SHOW server_encoding")
@@ -221,81 +209,57 @@ class PostgresSide(Side):
             raise ValueError(f"Parity at Scale needs a UTF8 database (this one is {encoding})")
         if version < 140000:
             raise ValueError("Parity at Scale needs PostgreSQL 14 or later (exact extract(epoch))")
+        self.server = "postgresql"
         self.conn.autocommit = True
         with self.conn.cursor() as cur:
             for stmt in SESSION_SETTINGS:
                 cur.execute(stmt)
         self.conn.autocommit = False
 
-    # SQL pieces ----------------------------------------------------------------
+    def quote(self, name: str) -> str:
+        return quote_ident(name)
+
     @property
-    def _table_ref(self) -> str:
+    def table_ref(self) -> str:
         from connectors.sql_identifiers import quote_table_ref
 
         return quote_table_ref(self.table, self.schema, dialect="postgresql")
 
-    def _quoted_keys(self) -> list[str]:
-        return [quote_ident(self.column_name(c)) for c in self.key_cols]
+    def field(self, col: ColumnPlan, column: str) -> str:
+        return field_sql(col, column=column, role=self.role, column_type="", dest_engine=self.plan.dest_engine)
 
-    def _held_predicate(self) -> str:
-        if not self.is_source:
-            return ""
-        parts = []
-        for col in self.engine_cols:
-            fit = col.decimal_fit
-            if not fit:
-                continue
-            x = quote_ident(self.column_name(col))
-            whens = " ".join(
-                f"WHEN {cond} THEN {'TRUE' if fit['actions'].get(name, 'hold') == 'hold' else 'FALSE'}"
-                for name, cond in decimal_fit_classes(x, fit)
-            )
-            parts.append(f"({x} IS NOT NULL AND (CASE {whens} ELSE FALSE END))")
-        return " OR ".join(parts) if parts else ""
+    def concat(self, parts: Sequence[str]) -> str:
+        return "(" + " || ".join(parts) + ")"
 
-    def _where(self, lo: KeyBound, hi: KeyBound) -> tuple[str, list[Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if self.key_cols:
-            sql, p = range_predicate(self._quoted_keys(), lo, hi, "%s")
-            if sql != "TRUE":
-                clauses.append(sql)
-                params.extend(p)
-        if self._held:
-            clauses.append(f"NOT ({self._held})")
-        return (" AND ".join(clauses) or "TRUE"), params
+    def sha256_hex(self, text: str) -> str:
+        return f"encode(sha256(convert_to({text}, 'UTF8')), 'hex')"
 
-    def _hashed(self, lo: KeyBound, hi: KeyBound, *, extra: str = "") -> tuple[str, list[Any]]:
-        """Subquery yielding ``k…, kb (key bytes), h (row hash hex)`` per row."""
-        where, params = self._where(lo, hi)
-        row = " || ".join(self._row_fields)
-        keys = ""
-        if self.key_cols:
-            kexpr = " || ".join(self._key_fields)
-            qk = ", ".join(f"{q} AS k{i}" for i, q in enumerate(self._quoted_keys()))
-            keys = f"{qk}, convert_to({kexpr}, 'UTF8') AS kb, "
-        sql = (
-            f"SELECT {keys}encode(sha256(convert_to({row}, 'UTF8')), 'hex') AS h "
-            f"FROM {self._table_ref} WHERE {where}{extra} OFFSET 0"  # nosec B608 — identifiers quoted
-        )
-        return sql, params
+    def utf8_hex(self, text: str) -> str:
+        return f"encode(convert_to({text}, 'UTF8'), 'hex')"
 
-    @staticmethod
-    def _a(h: str = "h") -> str:
-        return f"('x' || substr({h}, 2, 15))::bit(60)::bigint"
+    def word(self, h: str, which: str) -> str:
+        start = 2 if which == "a" else 18
+        return f"('x' || substr({h}, {start}, 15))::bit(60)::bigint"
 
-    @staticmethod
-    def _b(h: str = "h") -> str:
-        return f"('x' || substr({h}, 18, 15))::bit(60)::bigint"
+    def hex4_int(self, hex4: str) -> str:
+        return f"('x' || {hex4})::bit(16)::int"
 
-    def _bucket(self, level: int) -> str:
-        if self.key_cols:
-            top = "('x' || substr(encode(sha256(kb), 'hex'), 1, 16))::bit(64)::bigint"
-        else:
-            top = "('x' || substr(h, 33, 16))::bit(64)::bigint"
-        return f"(({top} >> {54 - 10 * level}) & 1023)"
+    def substr(self, text: str, start: int, length: int) -> str:
+        return f"substr({text}, {start}, {length})"
 
-    def _run(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def exact_sum(self, expr: str) -> str:
+        return f"sum({expr})"
+
+    def idiv(self, a: str, b: int) -> str:
+        return f"(({a}) / {int(b)})"
+
+    def mod(self, a: str, b: str) -> str:
+        return f"mod({a}, {b})"
+
+    def held_predicate(self) -> str:
+        return fit_held_predicate(self, decimal_fit_classes)
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import psycopg2
 
         try:
@@ -309,158 +273,38 @@ class PostgresSide(Side):
             return rows
         except psycopg2.errors.QueryCanceled as exc:
             self.conn.rollback()
-            raise UnitTimeout(str(exc).strip()) from exc
+            raise timeout_error(exc) from exc
         except Exception:
             self.conn.rollback()
             raise
 
-    @staticmethod
-    def _digest_row(row: Sequence[Any]) -> Digest:
-        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+    # Kept for callers (tests) of the phase-1 name.
+    _run = execute
 
-    def _path_filter(self, parents: Sequence[tuple[int, ...]], params: list[Any]) -> str:
-        if not parents or not parents[0]:
-            return ""
-        depth = len(parents[0])
-        lhs = f"({', '.join(self._bucket(lvl) for lvl in range(depth))})" if depth > 1 else self._bucket(0)
-        rows = []
-        for path in parents:
-            params.extend(path)
-            marks = ", ".join("%s" for _ in path)
-            rows.append(f"({marks})" if depth > 1 else marks)
-        return f" WHERE {lhs} IN ({', '.join(rows)})"
+    def estimate_rows(self) -> int | None:
+        rows = self.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass", [self.table_ref])
+        value = int(rows[0][0]) if rows and rows[0][0] is not None else -1
+        return value if value >= 0 else None
 
-    # operations ----------------------------------------------------------------
-    def split_points(self, lo: KeyBound, hi: KeyBound, step: int) -> list[tuple[Any, ...]]:
-        keys = ", ".join(self._quoted_keys())
-        where, params = self._where(lo, hi)
-        sql = (
-            f"SELECT {keys} FROM (SELECT {keys}, row_number() OVER (ORDER BY {keys}) AS rn "
-            f"FROM {self._table_ref} WHERE {where}) s WHERE rn > 1 AND mod(rn - 1, %s) = 0 ORDER BY {keys}"
-        )
-        return [tuple(r) for r in self._run(sql, [*params, max(1, int(step))])]
+    def sample_keys(self, fraction: float, limit: int) -> list[tuple[Any, ...]] | None:
+        keys = ", ".join(self.quoted_keys())
+        pct = max(0.0001, min(100.0, fraction * 100.0))
+        sql = (f"SELECT {keys} FROM {self.table_ref} TABLESAMPLE SYSTEM ({pct:.6f}) REPEATABLE (42) "
+               f"ORDER BY {keys} LIMIT %s")
+        return [tuple(r) for r in self.execute(sql, [int(limit)])]
 
-    def range_digest(self, lo: KeyBound, hi: KeyBound) -> Digest:
-        inner, params = self._hashed(lo, hi)
-        sql = f"SELECT count(*), sum({self._a()}), sum({self._b()}) FROM ({inner}) r"
-        return self._digest_row(self._run(sql, params)[0])
-
-    def _leaf_select(self, inner: str) -> str:
-        if self.key_cols:
-            ks = ", ".join(f"k{i}" for i in range(len(self.key_cols)))
-            return f"SELECT {ks}, encode(kb, 'hex'), h, {self._a()}, {self._b()} FROM ({inner}) r"
-        return f"SELECT h, {self._a()}, {self._b()} FROM ({inner}) r"
-
-    def _leaf_rows(self, rows: list[tuple[Any, ...]], path_filtered: bool = False) -> list[LeafRow]:
-        width = len(self.key_cols)
-        out = []
-        for row in rows:
-            if width:
-                out.append(LeafRow(tuple(row[:width]), row[width], int(row[width + 2]), int(row[width + 3])))
-            else:
-                out.append(LeafRow(None, row[0], int(row[1]), int(row[2])))
-        return out
-
-    def range_leaf(self, lo: KeyBound, hi: KeyBound) -> list[LeafRow]:
-        inner, params = self._hashed(lo, hi)
-        return self._leaf_rows(self._run(self._leaf_select(inner), params))
-
-    def bucket_digests(
-        self, level: int, parents: Sequence[tuple[int, ...]], lo: KeyBound = None, hi: KeyBound = None
-    ) -> dict[tuple[int, ...], Digest]:
-        inner, params = self._hashed(lo, hi)
-        path_params: list[Any] = []
-        path = self._path_filter(parents, path_params)
-        groups = [self._bucket(lvl) for lvl in range(level + 1)]
-        sql = (
-            f"SELECT {', '.join(groups)}, count(*), sum({self._a()}), sum({self._b()}) "
-            f"FROM ({inner}) r{path} GROUP BY {', '.join(str(i + 1) for i in range(level + 1))}"
-        )
-        out: dict[tuple[int, ...], Digest] = {}
-        for row in self._run(sql, [*params, *path_params]):
-            out[tuple(int(v) for v in row[: level + 1])] = self._digest_row(row[level + 1 :])
-        return out
-
-    def bucket_leaf(
-        self, parents: Sequence[tuple[int, ...]], lo: KeyBound = None, hi: KeyBound = None
-    ) -> list[LeafRow]:
-        inner, params = self._hashed(lo, hi)
-        path_params: list[Any] = []
-        path = self._path_filter(parents, path_params)
-        sql = f"SELECT * FROM ({self._leaf_select(inner)}) l" if not path else (
-            self._leaf_select(f"SELECT * FROM ({inner}) q{path}")
-        )
-        return self._leaf_rows(self._run(sql, [*params, *path_params]))
-
-    def fetch_rows(self, keys: Sequence[tuple[Any, ...]]) -> dict[str, list[tuple[Any, ...]]]:
-        out: dict[str, list[tuple[Any, ...]]] = {}
-        if not keys:
-            return out
-        quoted = self._quoted_keys()
-        width = len(quoted)
-        lhs = f"({', '.join(quoted)})" if width > 1 else quoted[0]
-        cols = ", ".join(quote_ident(self.column_name(c)) for c in self.compared_cols)
-        for start in range(0, len(keys), 1000):
-            page = keys[start : start + 1000]
-            params: list[Any] = []
-            rows = []
-            for key in page:
-                params.extend(key)
-                marks = ", ".join("%s" for _ in key)
-                rows.append(f"({marks})" if width > 1 else marks)
-            sql = (
-                f"SELECT {', '.join(quoted)}, {cols} FROM {self._table_ref} "
-                f"WHERE {lhs} IN ({', '.join(rows)})"  # nosec B608 — identifiers quoted
-            )
-            for row in self._run(sql, params):
-                out.setdefault(self.key_hex(row[:width]), []).append(tuple(row[width:]))
-        return out
-
-    def keyless_examples(self, row_hashes: Sequence[str], limit: int) -> list[tuple[str, tuple[Any, ...]]]:
-        if not row_hashes:
-            return []
-        where, params = self._where(None, None)
-        row = " || ".join(self._row_fields)
-        cols = ", ".join(quote_ident(self.column_name(c)) for c in self.compared_cols)
-        sql = (
-            f"SELECT h, {cols} FROM (SELECT encode(sha256(convert_to({row}, 'UTF8')), 'hex') AS h, {cols} "
-            f"FROM {self._table_ref} WHERE {where} OFFSET 0) s WHERE h = ANY(%s) LIMIT %s"
-        )
-        return [(r[0], tuple(r[1:])) for r in self._run(sql, [*params, list(row_hashes), int(limit)])]
-
-    def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
-    ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
+    def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import uuid as _uuid
 
-        width = len(self.key_cols)
-        names = [*self._quoted_keys(), *(quote_ident(self.column_name(c)) for c in columns)]
-        where, params = self._where(None, None)
-        sql = f"SELECT {', '.join(names)} FROM {self._table_ref} WHERE {where}"
         cur = self.conn.cursor(name=f"psd1_stream_{_uuid.uuid4().hex[:12]}")
         cur.itersize = batch
         try:
-            cur.execute(sql, params)
+            cur.execute(sql, list(params))
             while True:
                 rows = cur.fetchmany(batch)
                 if not rows:
                     break
-                for row in rows:
-                    yield (tuple(row[:width]) if width else None), tuple(row[width:])
+                yield from rows
         finally:
             cur.close()
             self.conn.rollback()
-
-    def held_count(self) -> int:
-        if not self._held:
-            return 0
-        sql = f"SELECT count(*) FROM {self._table_ref} WHERE {self._held}"
-        return int(self._run(sql)[0][0])
-
-    def close(self) -> None:
-        import psycopg2
-
-        try:
-            self.conn.close()
-        except psycopg2.Error:  # pragma: no cover - closing a broken connection
-            return None

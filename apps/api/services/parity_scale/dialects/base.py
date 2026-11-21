@@ -121,6 +121,16 @@ class Side(ABC):
     def split_points(self, lo: KeyBound, hi: KeyBound, step: int) -> list[tuple[Any, ...]]:
         """Keys at every ``step``-th row of ``[lo, hi)`` in key order (excluding the first row)."""
 
+    def boundaries(self, segment_rows: int, *, strategy: str = "auto",
+                   large_table_rows: int = 2_000_000) -> tuple[list[tuple[Any, ...]], str]:
+        """Level-0 segment boundaries and the strategy that chose them.
+
+        The default reads exact quantiles (one ordered index scan); SQL sides
+        switch to a linear integer split or a sampled set of keys on large
+        tables (:class:`services.parity_scale.dialects.sqlbase.SqlSide`).
+        """
+        return self.split_points(None, None, segment_rows), "quantile"
+
     @abstractmethod
     def range_digest(self, lo: KeyBound, hi: KeyBound) -> Digest:
         """Digest of the rows with ``lo <= key < hi``."""

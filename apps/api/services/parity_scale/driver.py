@@ -56,6 +56,11 @@ class ScanConfig:
     max_levels: int = 5
     #: Mode H scans each side in chunks of its own native key order.
     chunk_rows: int = 250_000
+    #: Level-0 boundaries (mode R): ``auto`` reads exact quantiles below
+    #: ``large_table_rows`` (engine estimate) and, above it, splits a single
+    #: integer key linearly or samples the keys (TABLESAMPLE).
+    boundary_strategy: str = "auto"
+    large_table_rows: int = 2_000_000
     statement_timeout_s: float | None = 120.0
     max_retries: int = 2
     max_wall_seconds: float | None = None
@@ -348,7 +353,14 @@ class ParityScan:
 
     # start ---------------------------------------------------------------------------
     def _start(self, _item: dict[str, Any]) -> None:
+        from services.parity_scale.certification import assess
+
         mode = self.state["mode"]
+        self.state["certification"] = assess(
+            self.plan,
+            getattr(self.side("source"), "server", self.plan.source_engine),
+            getattr(self.side("destination"), "server", self.plan.dest_engine),
+        )
         tail: list[dict[str, Any]] = []
         if any(c.decimal_fit for c in self.plan.engine_columns):
             tail.append({"t": "held"})
@@ -364,7 +376,12 @@ class ParityScan:
             try:
                 if self._fault is not None:
                     self._fault("split", {"t": "R0"})
-                points = src.split_points(None, None, self.config.segment_rows)
+                points, strategy = src.boundaries(
+                    self.config.segment_rows,
+                    strategy=self.config.boundary_strategy,
+                    large_table_rows=self.config.large_table_rows,
+                )
+                self.state["boundary_strategy"] = strategy
                 self.state["statements"] += 1
             except UnitTimeout as exc:
                 self._not_compared({"t": "R", "lo": None, "hi": None, "lvl": 0},

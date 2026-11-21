@@ -41,6 +41,7 @@ stricter-than-fingerprint choice, sound by construction.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import uuid as _uuid
 from dataclasses import dataclass, field
@@ -218,6 +219,10 @@ def foreign(value: Any) -> bytes:
     return foreign_field("other:" + type(value).__name__, repr(value))
 
 
+def _sqlite_engine(engine: str) -> bool:
+    return str(engine or "").strip().lower() in {"sqlite", "sqlite3"}
+
+
 # ── canonical texts per kind ────────────────────────────────────────────────
 
 
@@ -260,28 +265,23 @@ def _epoch_microseconds(value: datetime) -> int:
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
-def _units_field(microseconds: int, digits: int) -> bytes:
+def _units_field(microseconds: int, digits: int, tick: int = 0) -> bytes:
     """Integer epoch units at ``digits`` fractional digits, never a fold.
 
     A value carrying finer digits than the comparison precision cannot be
     rendered at that precision without losing them, so it is encoded at
     microseconds under an ``X`` tag instead: stricter, never looser.
     """
+    if digits >= 7:
+        # 100 ns units (SQL Server datetime2(7)); ``tick`` is the seventh digit.
+        return inline_field(str(microseconds * 10 + tick))
+    if tick:
+        # A 100 ns tick is finer than the comparison precision.
+        return foreign_field("tick", f"{microseconds * 10 + tick}")
     step = 10 ** (6 - digits)
     if microseconds % step:
         return foreign_field("us", str(microseconds))
     return inline_field(str(microseconds // step))
-
-
-def _round_half_up_units(microseconds: int, digits: int) -> int:
-    """``carrier_instant`` rounding in integer arithmetic (half up on the timeline).
-
-    ``quantize_instant_for_carrier`` rounds the non-negative microsecond field
-    half up, which on the epoch axis is ``floor((u + step/2) / step)`` for
-    pre-1970 instants too — not "half away from zero".
-    """
-    step = 10 ** (6 - digits)
-    return ((microseconds + step // 2) // step) * step
 
 
 def project_instant(value: Any, spec: FieldSpec) -> Any:
@@ -383,6 +383,13 @@ def encode_value(value: Any, spec: FieldSpec) -> bytes:
             return inline_field(decimal_text(value))
         if isinstance(value, int) and not isinstance(value, bool):
             return inline_field(str(value))
+        if isinstance(value, float) and _sqlite_engine(spec.dest_engine) and math.isfinite(value):
+            # SQLite has no exact decimal: NUMERIC(p,s) stores REAL. The
+            # double's shortest round-trip text is the number Gate-8 reads
+            # (the bind parses str(float)), and distinct doubles have distinct
+            # texts, so a REAL encodes as that decimal: equal to an exact
+            # source value exactly when the fingerprint calls them equal.
+            return inline_field(decimal_text(Decimal(repr(value))))
         return foreign(value)
     if kind in {"text", "char"}:
         if not isinstance(value, str):
@@ -404,12 +411,10 @@ def encode_value(value: Any, spec: FieldSpec) -> bytes:
             # A naive carrier holds naive instants and an aware one aware
             # instants; the other kind is not this column's own (Gate-8 binds
             # an aware value into a naive column by its wall clock, not UTC).
-            from connectors.sqlserver_tick import tick_of
+            from connectors.sqlserver_tick import drop_tick, tick_of
 
-            if tick_of(value):
-                # A 100 ns tick is finer than any phase-1 comparison precision.
-                return foreign_field("tick", value.isoformat() + f"+{tick_of(value)}")
-            return _units_field(_epoch_microseconds(value), spec.digits)
+            tick = tick_of(value)
+            return _units_field(_epoch_microseconds(drop_tick(value)), spec.digits, tick)
         if isinstance(value, str) and value.strip().lower() in _INFINITY_TOKENS:
             return inline_field(_INFINITY_TOKENS[value.strip().lower()])
         return foreign(value)

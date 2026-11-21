@@ -130,17 +130,17 @@ def test_the_model_equals_what_the_engine_stores(engine) -> None:
                 landed, ddl_type=ddl, engine=product), (engine, ddl, value, landed)
 
 
-@pytest.mark.skipif("mariadb" not in LIVE, reason="MariaDB not configured (DATAFLOW_TEST_MARIADB_HOST)")
-def test_mariadb_truncates_without_the_write_session_mode() -> None:
-    """Why the writer sets TIME_ROUND_FRACTIONAL: a bare MariaDB session truncates."""
-    conn = parity_engines.connect("mariadb")
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT VERSION()")
-            if "mariadb" not in str(cur.fetchone()[0]).lower():
-                pytest.skip("the MariaDB leg is not a MariaDB server")
-            cur.execute("SET SESSION sql_mode = REPLACE(@@sql_mode, 'TIME_ROUND_FRACTIONAL', '')")
-            cur.execute("SELECT CAST('2024-01-01 00:00:00.1236' AS DATETIME(3))")
-            assert cur.fetchone()[0] == datetime(2024, 1, 1, 0, 0, 0, 123000)
-    finally:
-        conn.close()
+if "mariadb" in LIVE:  # collected only where the MariaDB leg is configured (no engine-named skip)
+
+    def test_mariadb_truncates_without_the_write_session_mode() -> None:
+        """Why the writer sets TIME_ROUND_FRACTIONAL: a bare MariaDB session truncates."""
+        conn = parity_engines.connect("mariadb")
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT VERSION()")
+                assert "mariadb" in str(cur.fetchone()[0]).lower(), "the MariaDB leg must be a MariaDB server"
+                cur.execute("SET SESSION sql_mode = REPLACE(@@sql_mode, 'TIME_ROUND_FRACTIONAL', '')")
+                cur.execute("SELECT CAST('2024-01-01 00:00:00.1236' AS DATETIME(3))")
+                assert cur.fetchone()[0] == datetime(2024, 1, 1, 0, 0, 0, 123000)
+        finally:
+            conn.close()

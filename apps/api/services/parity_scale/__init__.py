@@ -1,10 +1,11 @@
 """Parity at Scale: every row of a table of any size compared inside the engines.
 
 Status: **experimental, behind ``DATAWRAP_PARITY_SCALE=1``** (``DATAFLOW_`` also
-read). Phases 0 and 1 of ``PARITY_AT_SCALE_DESIGN.md``: the CE1 canonical
-encoding with its Python reference, and the scan driver on SQLite and
-PostgreSQL→PostgreSQL. Nothing here feeds a verdict, Gate-8, a proof pack or
-the Trust Report yet (phase 3).
+read). Phases 0–2 of ``PARITY_AT_SCALE_DESIGN.md``: the CE1 canonical encoding
+with its Python reference, the scan driver, and the dialects of the first
+certification wave (SQLite, PostgreSQL, MySQL / MariaDB, SQL Server) with the
+CE matrix that certifies them (:mod:`.certification`). Nothing here feeds a
+verdict, Gate-8, a proof pack or the Trust Report yet (phase 3).
 
 Shape: each engine encodes every row with CE1 (:mod:`.ce1`) from a column plan
 both sides share (:mod:`.plan`), hashes it with SHA-256 and sums two 60-bit
