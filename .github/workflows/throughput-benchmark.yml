@@ -1,0 +1,113 @@
+name: Throughput benchmark
+
+# Large-scale runs of apps/api/benchmarks/db_throughput.py (NF-6): N
+# deterministic mixed-type rows through the real engine and Gate-8 on
+# PostgreSQL / MySQL service containers, plus an independent cell-by-cell
+# re-read. Manual only — never on a pull request. The per-PR gate is the
+# `throughput-smoke` job in ci.yml (200k rows per route).
+#
+# Sizing: a hosted runner has ~14 GB of free disk and a 6 h job limit. The
+# mixed table is ~200 bytes/row per copy, so 10M rows needs ~4-5 GB (source +
+# destination + WAL) and fits; 100M does not fit a hosted runner and needs a
+# self-hosted one (`runner` input). On the streaming row path the run time is
+# rows / (rows/s of the smoke) — check that it fits the 6 h limit first; the
+# identity server-side COPY routes (`row_path: false`) are the ones sized for
+# 10M+.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Rows per route (e.g. 10000000)"
+        required: true
+        default: "10000000"
+      routes:
+        description: "Comma-separated routes: pg-pg,pg-mysql,mysql-pg,mysql-mysql"
+        required: true
+        default: "pg-pg,pg-mysql,mysql-pg"
+      mode:
+        description: "Sync mode"
+        required: true
+        default: "full_refresh_overwrite"
+      row_path:
+        description: "Force the streaming row path (pass-through filter)"
+        type: boolean
+        default: false
+      runner:
+        description: "Runner label (self-hosted for 100M)"
+        required: true
+        default: "ubuntu-latest"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 355
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free runner disk
+        if: ${{ inputs.runner == 'ubuntu-latest' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Start Postgres and MySQL (local_infile)
+        run: |
+          bash .github/scripts/start_ci_databases.sh postgres mysql
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt
+
+      - name: Run benchmark
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          ROWS: ${{ inputs.rows }}
+          ROUTES: ${{ inputs.routes }}
+          MODE: ${{ inputs.mode }}
+          ROW_PATH: ${{ inputs.row_path }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/throughput"
+          extra=""
+          if [ "$ROW_PATH" = "true" ]; then extra="--row-path"; fi
+          rc=0
+          IFS=',' read -ra list <<< "$ROUTES"
+          for route in "${list[@]}"; do
+            python -m benchmarks.db_throughput --route "$route" --rows "$ROWS" \
+              --mode "$MODE" $extra --label "dispatch-${GITHUB_SHA::9}" \
+              --out "$RUNNER_TEMP/throughput/${route}-${ROWS}.json" || rc=1
+            df -h /
+          done
+          exit "$rc"
+
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-benchmark-${{ inputs.rows }}
+          path: ${{ runner.temp }}/throughput/
+          if-no-files-found: warn
