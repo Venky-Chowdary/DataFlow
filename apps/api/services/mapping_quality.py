@@ -372,6 +372,31 @@ def _logical_type(type_str: str) -> str:
         return "string"
 
 
+def is_exact_value_carrier(source_type: str, target_type: str, dest_db: str = "") -> bool:
+    """True when every source value lands as exactly one target value and back.
+
+    A different type *name* is not a weaker pairing when the destination has
+    no native type for the source and the target is its exact canonical wire:
+    ``uuid`` → Snowflake ``VARCHAR(36)`` (Snowflake has no UUID type), MySQL
+    ``CHAR(36)``, SQL Server ``UNIQUEIDENTIFIER``. Those scored as a "type
+    promotion" (0.97) on an existing table and in the widening band (≤ 0.90)
+    on create-new, below a same-name ``uuid`` → ``uuid`` identity (D72). A
+    wider text carrier (``VARCHAR(255)``) or a bare ``STRING`` is not exact:
+    it drops the 36-character contract, which the lossy-domain rules report.
+    """
+    if not source_type or not target_type:
+        return False
+    from services.type_system import (
+        LOGICAL_UUID,
+        normalize_logical_type,
+        uuid_exact_wire_carrier,
+    )
+
+    if normalize_logical_type(source_type) != LOGICAL_UUID:
+        return False
+    return uuid_exact_wire_carrier(target_type)
+
+
 def _is_dialect_sanctioned_carrier(
     source_type: str, target_type: str, dest_db: str
 ) -> bool:
@@ -523,7 +548,16 @@ def classify_mapping_confidence(
     )
     # VARCHAR onto an unbounded TEXT column is the same text carrier, not a
     # promotion: exact name + compatible type is the exact band (D159).
-    type_same = src_logical == tgt_logical or (src_logical, tgt_logical) == ("string", "text")
+    exact_carrier = is_exact_value_carrier(
+        str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+        str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+        destination_db_type,
+    ) and transform in {"", "none", "identity", "passthrough"}
+    type_same = (
+        src_logical == tgt_logical
+        or (src_logical, tgt_logical) == ("string", "text")
+        or exact_carrier
+    )
     safe_promo = (
         (src_logical, tgt_logical) in _SAFE_PROMOTIONS
         or sanctioned_carrier
@@ -591,6 +625,7 @@ def classify_mapping_confidence(
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
         "type_path_class": str(mapping.get("conversion_class") or ""),
+        "exact_carrier": exact_carrier,
         "type_same_declared": bool(
             str(mapping.get("source_type") or mapping.get("inferred_type") or "").strip()
             and str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
@@ -625,6 +660,10 @@ def apply_confidence_class(
         expression = "(" in str(classification.get("source_expr") or "")
         same_declared = bool(classification.get("type_same_declared"))
         hard_loss = conv in {"narrowing", "lossy", "incompatible"}
+        if classification.get("exact_carrier") and not hard_loss:
+            # The destination's exact wire for the source type: the same
+            # band as a same-type identity create, not a widening (D72).
+            return round(min(IDENTITY_PASSTHROUGH_CONF_CAP, max(conf, 0.91)), 3)
         # Widening is a real capacity change. same_declared must not lift it
         # into the identity band or every create-new score collapses to 0.93.
         if conv in {"widening", "lossless"} and not hard_loss:
