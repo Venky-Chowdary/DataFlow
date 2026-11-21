@@ -24,6 +24,12 @@ def apply_job_terminal_effects(job_id: str, status: str) -> None:
         record_schedule_for_finished_job(job_id)
     except Exception:  # noqa: BLE001 - bookkeeping must not fail the transfer
         _logger.exception("Schedule run was not recorded for job %s", job_id)
+    try:
+        from services.validate_execute_ledger import record_run_outcome
+
+        record_run_outcome(job_id, status)
+    except Exception:  # noqa: BLE001 - the accuracy ledger must not fail the transfer
+        _logger.exception("Validate/Execute outcome was not recorded for job %s", job_id)
     if status not in COMPLETED_STATUSES:
         return
     try:

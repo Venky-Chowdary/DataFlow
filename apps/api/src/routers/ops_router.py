@@ -52,6 +52,20 @@ async def get_metrics_json(request: Request):
     return snapshot(workspace_filter=tenant_scope(request).single_workspace_filter())
 
 
+@router.get("/validate-execute")
+def get_validate_execute(request: Request):
+    """Validate verdict vs Execute outcome for this workspace's runs (Accuracy A7).
+
+    Counts and rates only (no job ids, table names or messages). Platform
+    admins without a workspace header see every workspace. A plain ``def``:
+    the ledger read runs on the thread pool, not the event loop.
+    """
+    from services.validate_execute_ledger import aggregate
+    from services.workspace_access import tenant_scope
+
+    return aggregate(tenant_scope(request).single_workspace_filter())
+
+
 @router.get("/dlq")
 async def get_dlq(
     request: Request,
