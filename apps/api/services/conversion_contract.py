@@ -330,7 +330,7 @@ def classify_conversion(
         }
 
     safe = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
-    return {
+    out = {
         "conversion_class": safe.value,
         "reason": f"{src} → {tgt} round-trips without invent or declared loss ({safe.value}).",
         "invents_capacity": False,
@@ -338,6 +338,19 @@ def classify_conversion(
         "requires_risk_contract": False,
         "contract_version": CONVERSION_CONTRACT_VERSION,
     }
+    # A declared tick past the destination's ceiling (SQL Server datetime2(7)
+    # into a microsecond carrier) is not a blocker while no measured value uses
+    # the extra digit (D372), but it does not "round-trip": say what may be lost
+    # instead of grading it a plain safe path (Accuracy A6).
+    from services.decision_kernel.type_invent import temporal_tick_disclosure
+
+    unmeasured = temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population)
+    if unmeasured:
+        out["reason"] = (
+            f"{src} → {tgt} keeps every value up to the destination's precision; {unmeasured}"
+        )
+        out["unmeasured_loss"] = unmeasured
+    return out
 
 
 _CREATE_NEW_CLASS_LABELS: dict[ConversionClass, str] = {
@@ -370,6 +383,8 @@ def create_new_mapping_reason(
         cls = ConversionClass.LOSSLESS
     if cls == ConversionClass.NEEDS_USER_APPROVAL:
         label = "projected CREATE — capacity not dest-proven"
+    elif classified.get("unmeasured_loss"):
+        label = "keeps values up to the destination precision; a finer digit would be truncated"
     else:
         label = _CREATE_NEW_CLASS_LABELS.get(cls, raw.replace("_", " ") or "projected CREATE")
     return (
