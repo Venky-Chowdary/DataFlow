@@ -2412,6 +2412,14 @@ def _stream_database_transfer_impl(
     # Bounded source sample for Gate-8 after streaming (records=[] at reconcile).
     reconcile_sample: list[dict[str, Any]] = []
     run.cfg._RECONCILE_SAMPLE_CAP = 50
+    # P0-5: the sample is a uniform random draw over every row offered the
+    # writer (seeded, seed recorded), not the first rows read, so Gate-8's
+    # sample bounds the rows it did not check.
+    from services.gate8_uniform_sample import UniformSampleMerger, new_draw
+
+    sample_draw = new_draw(run.cfg._RECONCILE_SAMPLE_CAP)
+    run.cfg._RECONCILE_SAMPLE_DRAW = sample_draw
+    sample_merger = UniformSampleMerger(sample_draw["seed"], run.cfg._RECONCILE_SAMPLE_CAP)
 
     # The destination DDL rides on the first page that reaches the writer, which
     # is not necessarily the first page read: a source filter or a recipe can
@@ -2451,7 +2459,14 @@ def _stream_database_transfer_impl(
         if fps:
             write_pass_fp.add_many(fps)
         warning_samples.extend(result["warnings"])  # bounded + deduped
-        if len(reconcile_sample) < run.cfg._RECONCILE_SAMPLE_CAP:
+        if "reconcile_sample_population" in result:
+            sample_merger.add(
+                idx,
+                [row for row in result.get("reconcile_sample_rows") or [] if isinstance(row, dict)],
+                int(result.get("reconcile_sample_population") or 0),
+            )
+            reconcile_sample = sample_merger.rows
+        elif len(reconcile_sample) < run.cfg._RECONCILE_SAMPLE_CAP:
             for row in result.get("reconcile_sample_rows") or []:
                 if not isinstance(row, dict):
                     continue
@@ -3621,6 +3636,8 @@ def _stream_database_transfer_impl(
             ) + diverted
     if reconcile_sample:
         run.tally.dest_summary["reconcile_sample"] = reconcile_sample[:run.cfg._RECONCILE_SAMPLE_CAP]
+    if sample_merger.population and sample_merger.rows and sample_merger.rows is reconcile_sample:
+        run.tally.dest_summary["reconcile_sample_draw"] = sample_merger.draw_record(sample_draw)
     if load_methods_seen:
         if "copy_into" in load_methods_seen:
             run.tally.dest_summary["load_method"] = "copy_into"

@@ -4880,6 +4880,58 @@ def _is_append_first_load(
     )
 
 
+def _stamp_uniform_draw(
+    sample_compare: dict[str, Any] | None,
+    dest_summary: dict[str, Any] | None,
+    sample_records: list[dict[str, Any]],
+    *,
+    streamed: bool,
+) -> dict[str, Any] | None:
+    """Name a uniform random draw on the sample it produced (P0-5).
+
+    The streaming writer draws the sample uniformly over every row it was
+    offered (:mod:`services.gate8_uniform_sample`). The draw is named on the
+    compare only when the compare covered every drawn row: each was compared
+    by key, or left out because the writer quarantined it. A drawn row the
+    destination did not return (skipped as a scope miss) would bias the
+    sample, so then the compare keeps its non-random label and bounds nothing.
+    """
+    draw = (dest_summary or {}).get("reconcile_sample_draw")
+    if not (
+        streamed
+        and isinstance(sample_compare, dict)
+        and isinstance(draw, dict)
+        and draw.get("method") == "uniform_random"
+        and sample_compare.get("alignment") == "keyed"
+    ):
+        return sample_compare
+    drawn = len(sample_records or [])
+    covered = int(sample_compare.get("rows_compared") or 0) + int(
+        sample_compare.get("rows_excluded_quarantined") or 0
+    )
+    if not drawn or covered != drawn or drawn != int(draw.get("drawn_rows") or 0):
+        out = dict(sample_compare)
+        out["uniform_draw_incomplete"] = {
+            "drawn_rows": int(draw.get("drawn_rows") or 0),
+            "rows_covered": covered,
+            "reason": "not every drawn row was compared, so the draw is not reported as random",
+        }
+        return out
+    seed = dict(sample_compare.get("sample_seed") or {})
+    seed.update(
+        method="uniform_random",
+        seed=str(draw.get("seed") or ""),
+        population_rows=int(draw.get("population_rows") or 0),
+        algorithm=str(draw.get("algorithm") or ""),
+        note=(
+            "Uniform random sample without replacement over every row this run offered "
+            "the writer (seed recorded): it bounds the share of rows that differ; it does "
+            "not prove every row."
+        ),
+    )
+    return {**sample_compare, "sample_seed": seed}
+
+
 _FULL_KEYED_COMPARE_MAX_ROWS = 1_000_000
 
 
@@ -8837,6 +8889,9 @@ def _run_reconciliation_impl(
                 source_locale=str(dest_summary.get("number_locale") or ""),
                 source_endpoint=source_endpoint,
                 held_out_keys=_held_out_keys(dest_summary, sort_key),
+            )
+            sample_compare = _stamp_uniform_draw(
+                sample_compare, dest_summary, sample_records, streamed=not records
             )
 
     # CDC delete proof: stashed PKs must be absent on destination read-back.

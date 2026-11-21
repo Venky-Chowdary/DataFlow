@@ -13,7 +13,12 @@
  * sample found nothing, which bounds the difference rate but proves nothing.
  */
 export type ParityVerdict = "proven" | "no_difference_found" | "explained" | "unexplained" | "unverifiable";
-export type ParityCheck = "full_checksum" | "key_diff" | "sampled" | "count_only" | "none";
+/**
+ * readback: a mirror / SCD2 run whose Gate-8 digest of every live destination row, re-read after
+ * the write, matched the digest of the rows the run read from the source. Values were compared,
+ * but the source side is the run's own read and a digest names no row: never proof.
+ */
+export type ParityCheck = "full_checksum" | "key_diff" | "sampled" | "readback" | "count_only" | "none";
 export type ParityTableStatus = "match" | "explained" | "unexplained" | "unverifiable";
 export type ParityDifferenceKind = "missing_in_destination" | "extra_in_destination" | "value" | "duplicate_key";
 export type ParityFixAction = "widen_column" | "resync_keys" | "accept" | "rerun";
@@ -41,7 +46,7 @@ export interface ParityCounts {
 }
 
 export interface ParityConfidence {
-  method: "full" | "sampled" | "mixed" | "none";
+  method: "full" | "sampled" | "readback" | "mixed" | "none";
   sampled_rows: number;
   differences_in_sample: number;
   level: number;
@@ -281,12 +286,16 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /** Verdict pill: what the report concluded, in one short phrase. */
 export function verdictPresentation(
-  report: Pick<ParityReport, "verdict" | "parity"> & { confidence?: Pick<ParityReport["confidence"], "bound_valid"> },
+  report: Pick<ParityReport, "verdict" | "parity"> & { confidence?: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">> },
 ): { label: string; tone: ParityTone } {
   switch (report.verdict) {
     case "proven":
       return { label: "Proven equal", tone: "ok" };
     case "no_difference_found":
+      if (report.confidence?.method === "readback") {
+        // A read-back digest of every live row matched the run's own source read: not proof.
+        return { label: "No difference in read-back (not proven)", tone: "muted" };
+      }
       if (report.confidence?.bound_valid === false) {
         // Not a random sample: it says nothing about the rows it did not check, and sign-off waits.
         return {
@@ -325,6 +334,9 @@ export function noDifferencesText(
     return report.evidence.reconciliation_passed === false
       ? "Gate-8 failed this run, but its evidence names no row that differs, so parity cannot be shown. Re-run the job to localize the difference."
       : "No differences were found, but the check could not cover enough rows to prove a match.";
+  }
+  if (report.verdict === "no_difference_found" && report.confidence.method === "readback") {
+    return "No difference: the digest of every live destination row, re-read after the write, matches the rows this run read. A digest names no row and the source was not re-read independently, so this is not proof.";
   }
   if (report.verdict === "no_difference_found") {
     return report.confidence.bound_valid === false
@@ -452,6 +464,7 @@ const CHECK_LABELS: Record<ParityCheck, string> = {
   full_checksum: "Full checksum",
   key_diff: "Key diff + values",
   sampled: "Count + sampled values",
+  readback: "Read-back digest (not proof)",
   count_only: "Count only",
   none: "Not checked",
 };
@@ -465,6 +478,7 @@ export function tableStatusPresentation(
 ): { label: string; tone: ParityTone } {
   switch (table.status) {
     case "match":
+      if (table.check === "readback") return { label: "No difference in read-back", tone: "muted" };
       return table.check === "sampled" ? { label: "No difference in sample", tone: "ok" } : { label: "Match", tone: "ok" };
     case "explained":
       return { label: "Explained", tone: "ok" };
@@ -746,7 +760,7 @@ export function differencesByTable(report: Pick<ParityReport, "tables" | "differ
 /** Heatmap cell words, for the legend and each cell's tooltip. */
 export const HEAT_CELL_LABELS: Record<ParityHeatCell, string> = {
   proven: "Proven",
-  sampled: "No difference in sample",
+  sampled: "No difference found, not proven (sample or read-back)",
   explained: "All explained",
   unexplained_small: "Unexplained, small",
   unexplained_large: "Unexplained, large",

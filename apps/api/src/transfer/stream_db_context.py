@@ -103,6 +103,8 @@ class RunConfig:
     _schema_absorb_lock: Any = None
     ddl_log: Any = None
     _RECONCILE_SAMPLE_CAP: Any = None
+    # The run's uniform random Gate-8 draw (services.gate8_uniform_sample.new_draw).
+    _RECONCILE_SAMPLE_DRAW: Any = None
     resume_write_complete: bool = False
 
 

@@ -369,9 +369,19 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
     # Absorb sparse schemaless attributes discovered on this page.
     _absorb_schemaless_discovered_attrs(run, batch)
     local_warnings: list[str] = []
-    sample_rows: list[dict[str, Any]] = [
-        dict(zip(batch.headers, row)) for row in batch.rows[:cfg._RECONCILE_SAMPLE_CAP]
-    ]
+    draw = cfg._RECONCILE_SAMPLE_DRAW if isinstance(cfg._RECONCILE_SAMPLE_DRAW, dict) else None
+    if draw:
+        # A uniform random sample of this page (P0-5), merged across pages by the coordinator.
+        from services.gate8_uniform_sample import page_sample_indices
+
+        sample_rows: list[dict[str, Any]] = [
+            dict(zip(batch.headers, batch.rows[i]))
+            for i in page_sample_indices(draw["seed"], idx, len(batch.rows), int(draw["size"]))
+        ]
+    else:
+        sample_rows = [
+            dict(zip(batch.headers, row)) for row in batch.rows[:cfg._RECONCILE_SAMPLE_CAP]
+        ]
     # Per-batch data-quality / anomaly gate for database streams.
     # Routed batches are audited PER ROUTE inside the split loop — each
     # route table is a separate destination; auditing the mixed batch
@@ -1024,6 +1034,8 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
             getattr(batch, "raw_page_held", 0) or 0
         ),
         "reconcile_sample_rows": sample_rows,
+        # The population the page's sample was drawn from (its rows offered to the writer).
+        "reconcile_sample_population": len(batch.rows),
         "fingerprints": inline_fps,
         "overwrite_keys": (
             matrix_to_key_tuples(

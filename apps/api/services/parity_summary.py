@@ -71,8 +71,10 @@ def _cell(table: dict[str, Any]) -> str:
     status = table.get("status")
     if table.get("failed_verification"):
         return "failed"  # Gate-8 failed on rows it did not name: not "not checked"
-    if status in {"match", "explained"} and table.get("check") == "sampled":
-        # A sample bounds the rate of unexplained differences; only a full compare is proof.
+    if status in {"match", "explained"} and table.get("check") in {"sampled", "readback"}:
+        # A sample bounds the rate of unexplained differences, and a mirror / SCD2
+        # read-back digest is not compared with an independent source re-read:
+        # neither is proof, so neither is drawn as "proven" (cell: no difference found).
         return "sampled"
     if status == "match":
         return "proven"

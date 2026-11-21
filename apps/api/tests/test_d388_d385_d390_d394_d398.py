@@ -160,7 +160,10 @@ def test_a_mirror_read_back_that_matched_is_not_an_uncompared_count():
     report = build_parity_report(job, reread=False)
     assert report["verdict"] == "no_difference_found"
     assert "Values were not compared" not in report["verdict_reason"]
-    assert "tombstones" in report["verdict_reason"]
+    assert "tombstoned rows are outside the live population" in report["verdict_reason"]
+    # P0-3: the confidence block agrees with the verdict (a value comparison ran).
+    assert report["confidence"]["method"] == "readback"
+    assert "No value comparison ran" not in report["confidence"]["statement"]
 
 
 def test_assume_timezone_and_a_bson_date_match_at_milliseconds():

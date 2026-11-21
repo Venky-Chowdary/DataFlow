@@ -34,8 +34,11 @@ def _job(rows: int, *, method: str = "keyed_sorted", mismatches: list | None = N
     return job
 
 
-def test_no_gate8_sample_method_is_a_random_draw():
-    assert parity_evidence.UNIFORM_RANDOM_SAMPLE_METHODS == frozenset()
+def test_only_the_uniform_draw_is_a_random_sample():
+    # P0-5: the streaming writer's seeded uniform draw is the one random method;
+    # the first-rows / lowest-keys / stratified picks still bound nothing.
+    assert parity_evidence.UNIFORM_RANDOM_SAMPLE_METHODS == frozenset({"uniform_random"})
+    assert parity_evidence.sample_bound_valid("uniform_random") is True
     for method in ("keyed_sorted", "positional_sorted", "stratified", ""):
         assert parity_evidence.sample_bound_valid(method) is False
 
