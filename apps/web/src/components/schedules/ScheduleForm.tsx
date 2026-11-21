@@ -317,7 +317,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   }, [maxRetries, retryBackoff]);
 
   // One answer for "can this be saved?" and "what is missing?" (QA D344,
-  // PR #435): the disabled Save button says why, and the field it needs is
+  // PR 435): the disabled Save button says why, and the field it needs is
   // marked. The rules mirror the API (lib/scheduleFormReadiness.ts).
   const serverPlans = !isEdit || mappingCount <= 0;
   const saveBlockers = scheduleSaveBlockers({

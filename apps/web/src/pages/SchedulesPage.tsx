@@ -394,7 +394,7 @@ export function SchedulesPage({
   };
 
   /**
-   * Run now on a schedule with no column mappings (QA batch 1, PR #435): no
+   * Run now on a schedule with no column mappings (QA batch 1, PR 435): no
    * job starts. The fix is Plan mappings (server-side mapping + Validate);
    * Transfer Studio for that schedule is the second way out.
    */

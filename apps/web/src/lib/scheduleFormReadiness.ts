@@ -1,5 +1,5 @@
 /**
- * Why the schedule form's Save button is disabled (QA D344, PR #435).
+ * Why the schedule form's Save button is disabled (QA D344, PR 435).
  *
  * The form disabled Save until every requirement was met and never said
  * which one was missing. One function answers "can this be saved?" and

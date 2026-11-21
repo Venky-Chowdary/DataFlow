@@ -1,5 +1,5 @@
 /**
- * QA D344 / PR #435: the schedule Save button was disabled with no reason.
+ * QA D344 / PR 435: the schedule Save button was disabled with no reason.
  * Each rule here is the API's: the store's key rule for duplicate_policy, and
  * Validate's (g9) cursor rule per sync mode, which the server plan satisfies
  * itself on a new schedule.

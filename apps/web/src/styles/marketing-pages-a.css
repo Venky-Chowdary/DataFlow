@@ -1,0 +1,2655 @@
+/*
+ * Designer a: Pricing, Enterprise, Proof, Security, Connectors.
+ * Pass 5: one page structure for all five (MarketingSubpage.tsx):
+ *   hero (left-aligned copy, then one light frame at full width),
+ *   3 to 5 body sections (a feature row, a 3-column grid of facts, or a
+ *   table), then the closing section on the page background.
+ * One card style, pill chips, ink links, no dark bands, no seals.
+ * Every selector sits under .lp.mk with .mk-a (shared) or a page prefix
+ * (.mk-pr-, .mk-ent-, .mk-proof-, .mk-sec-, .mk-int-), plus the .mk-sc-
+ * product scenes. Palette tokens only.
+ */
+
+/* ── Shared: page tokens ────────────────────────────────────────── */
+
+.lp.mk .mk-a {
+  --mk-a-card-bg: var(--df-surface);
+  --mk-a-hero-top: 48px;
+}
+
+html[data-theme="dark"] .lp.mk .mk-a {
+  --mk-a-card-bg: var(--mk-panel);
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-a {
+    --mk-a-hero-top: 64px;
+  }
+}
+
+/* ── Shared: hero ───────────────────────────────────────────────── */
+
+.lp.mk .mk-a-hero {
+  padding-block: var(--mk-a-hero-top) var(--mk-section-y);
+  background: var(--mk-page);
+}
+
+.lp.mk .mk-a-hero-copy {
+  max-width: 46rem;
+}
+
+.lp.mk .mk-a-hero h1 {
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lp.mk .mk-a-lead {
+  max-width: 36em;
+  margin: 20px 0 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-lead);
+  line-height: 1.5;
+}
+
+.lp.mk .mk-a-hero-copy .mk-actions {
+  margin-top: 32px;
+}
+
+.lp.mk .mk-a-hero-visual {
+  min-width: 0;
+  margin-top: 48px;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-a-hero-visual {
+    margin-top: 56px;
+  }
+
+  /* Split head, as on the product pages: headline left, lead (and any
+     actions) right, top-aligned. */
+  .lp.mk .mk-a-hero-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    column-gap: 64px;
+    align-items: start;
+    max-width: none;
+  }
+
+  .lp.mk .mk-a-hero-copy h1 {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .lp.mk .mk-a-hero-copy .mk-a-lead {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: none;
+    margin: 10px 0 0;
+  }
+
+  .lp.mk .mk-a-hero-copy .mk-actions {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 24px;
+  }
+}
+
+/* ── Shared: body sections ──────────────────────────────────────── */
+
+.lp.mk .mk-a-section {
+  padding-block: var(--mk-section-y);
+}
+
+.lp.mk .mk-a-head {
+  max-width: 46rem;
+  margin-bottom: 40px;
+}
+
+.lp.mk .mk-a-head h2,
+.lp.mk .mk-a-row-copy h2 {
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lp.mk .mk-a-head > p,
+.lp.mk .mk-a-row-lead {
+  max-width: 38em;
+  margin: 16px 0 0;
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-lead);
+  line-height: 1.5;
+}
+
+/* (a) Feature row: copy on one side, a 560–720px frame on the other. */
+.lp.mk .mk-a-row {
+  display: grid;
+  gap: 40px;
+}
+
+.lp.mk .mk-a-row-copy,
+.lp.mk .mk-a-row-visual {
+  min-width: 0;
+}
+
+.lp.mk .mk-a-row-copy > :is(dl, ol, ul, .mk-a-row-note) {
+  margin-top: 28px;
+}
+
+.lp.mk .mk-a-row-visual .mk-app-figure {
+  max-width: 660px;
+}
+
+.lp.mk .mk-a-row:not(.is-flip) .mk-a-row-visual .mk-app-figure {
+  margin-left: auto;
+}
+
+.lp.mk .mk-a-row-note {
+  margin-bottom: 0;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-a-row {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    column-gap: 64px;
+    align-items: center;
+  }
+
+  .lp.mk .mk-a-row.is-flip {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  }
+
+  .lp.mk .mk-a-row.is-flip .mk-a-row-copy {
+    order: 2;
+  }
+}
+
+/* (b) Three short facts: a line icon, a 16px title, two lines of text. */
+.lp.mk .mk-a-facts {
+  display: grid;
+  gap: 32px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-facts > li {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-top: 24px;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-a-fact-icon {
+  margin-bottom: 4px;
+  color: var(--mk-ink);
+}
+
+.lp.mk .mk-a-facts h3 {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.lp.mk .mk-a-facts p {
+  max-width: 34em;
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+@media (min-width: 768px) {
+  .lp.mk .mk-a-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 40px;
+  }
+}
+
+/* (c) Tables: unboxed, hairline rows. */
+.lp.mk .mk-a-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+.lp.mk .mk-a-table thead th {
+  padding: 0 16px 12px 0;
+  border-bottom: 1px solid var(--mk-ink);
+  color: var(--mk-ink-2);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  vertical-align: bottom;
+}
+
+.lp.mk .mk-a-table tbody th,
+.lp.mk .mk-a-table tbody td {
+  padding: 14px 16px 14px 0;
+  border-bottom: 1px solid var(--mk-rule);
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+.lp.mk .mk-a-table :is(th, td):last-child {
+  padding-right: 0;
+}
+
+/* Row labels at medium weight; only group headers are bold, so a long
+   table does not read as a wall of bold text. */
+.lp.mk .mk-a-table tbody th {
+  color: var(--mk-ink);
+  font-weight: 500;
+}
+
+.lp.mk .mk-a-table tbody td {
+  color: var(--mk-ink-2);
+}
+
+.lp.mk .mk-a-table .mk-a-table-group th {
+  padding-top: 32px;
+  border-bottom-color: var(--mk-rule-strong);
+  color: var(--mk-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* ── Shared: the one card, lists, chips, tags, links ────────────── */
+
+.lp.mk .mk-a-card {
+  padding: 24px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-12);
+  background: var(--mk-a-card-bg);
+  box-shadow: none;
+}
+
+.lp.mk .mk-a-checks,
+.lp.mk .mk-a-bullets {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-checks li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.lp.mk .mk-a-checks .mk-glyph {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  color: var(--mk-landed);
+}
+
+.lp.mk .mk-a-bullets li {
+  position: relative;
+  padding-left: 20px;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.lp.mk .mk-a-bullets li::before {
+  content: "";
+  position: absolute;
+  top: 0.7em;
+  left: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-ink-3);
+}
+
+.lp.mk .mk-a-dl {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-a-dl > div {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-a-dl dt {
+  color: var(--mk-ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-a-dl dd {
+  margin: 4px 0 0;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.lp.mk .mk-a-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lp.mk .mk-a-chip,
+.lp.mk .mk-a .mk-app-picker button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  background: transparent;
+  color: var(--mk-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.lp.mk .mk-a-chip:hover,
+.lp.mk .mk-a .mk-app-picker button:hover {
+  border-color: var(--mk-ink);
+}
+
+.lp.mk .mk-a-chip:is([aria-pressed="true"], [aria-selected="true"]),
+.lp.mk .mk-a .mk-app-picker button.is-active {
+  border-color: var(--mk-ink);
+  background: var(--mk-ink);
+  color: var(--mk-page);
+}
+
+.lp.mk .mk-a-chip:focus-visible,
+.lp.mk .mk-a .mk-app-picker button:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 2px;
+}
+
+.lp.mk .mk-a-chip-n {
+  min-width: 24px;
+  padding: 1px 6px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-wash);
+  color: var(--mk-ink);
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp.mk .mk-a-chip[aria-pressed="true"] .mk-a-chip-n {
+  background: color-mix(in srgb, var(--mk-page) 22%, transparent);
+  color: var(--mk-page);
+}
+
+.lp.mk .mk-a .mk-app-picker {
+  margin-bottom: 16px;
+}
+
+@media (max-width: 767px) {
+  .lp.mk .mk-a-chip,
+  .lp.mk .mk-a .mk-app-picker button {
+    min-height: 44px;
+  }
+}
+
+.lp.mk .mk-a-tag {
+  display: inline-block;
+  padding: 2px 10px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  color: var(--mk-ink);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Links read as ink with an underline, never the browser's blue. */
+.lp.mk .mk-a :is(p, dd, li, td) a:not(.mk-btn),
+.lp.mk .mk-a .mk-link {
+  color: var(--mk-ink);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--mk-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.lp.mk .mk-a :is(p, dd, li, td) a:not(.mk-btn):hover,
+.lp.mk .mk-a .mk-link:hover {
+  text-decoration-color: currentColor;
+}
+
+/* Frames on these pages: light UI, a 1px border, radius 12, no shadow. */
+.lp.mk .mk-a .mk-app-fit {
+  border-radius: var(--df-radius-12);
+  box-shadow: 0 0 0 1px var(--mk-rule-strong);
+}
+
+.lp.mk .mk-a .mk-app-caption {
+  color: var(--mk-ink-2);
+}
+
+/* ══ Pricing ═══════════════════════════════════════════════════════ */
+
+.lp.mk .mk-pr-plans {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Plan cards at tile radius. Team, the recommended plan, is the one raised
+   card: an ink border and the primary button. */
+.lp.mk .mk-pr-plan {
+  display: flex;
+  flex-direction: column;
+  padding: var(--mk-kit-pad);
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--mk-kit-radius-tile);
+  background: var(--mk-tile-bg);
+}
+
+.lp.mk .mk-pr-plan.is-recommended {
+  border-color: var(--mk-ink);
+  box-shadow: inset 0 0 0 1px var(--mk-ink);
+}
+
+.lp.mk .mk-pr-plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.lp.mk .mk-pr-plan h3 {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-h3);
+}
+
+.lp.mk .mk-pr-badge {
+  margin: 0;
+  padding: 2px 10px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-ink);
+  color: var(--mk-page);
+  font-size: var(--mk-fs-caption);
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.lp.mk .mk-pr-who {
+  margin: 8px 0 0;
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* The figure, then what it depends on on its own line, in every card. */
+.lp.mk .mk-pr-price {
+  display: grid;
+  gap: 4px;
+  margin: 24px 0 0;
+}
+
+.lp.mk .mk-pr-figure {
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-stat);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.lp.mk .mk-pr-qual {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+}
+
+/* The action closes the card, so every card ends on its button. */
+.lp.mk .mk-pr-cta {
+  justify-content: center;
+  width: 100%;
+  margin-top: auto;
+}
+
+.lp.mk .mk-pr-plan .mk-a-checks {
+  margin-bottom: 28px;
+}
+
+.lp.mk .mk-pr-adds {
+  margin: 24px 0 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--mk-rule);
+  color: var(--mk-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-pr-plans {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 24px;
+  }
+
+  .lp.mk .mk-pr-who {
+    min-height: 3em;
+  }
+}
+
+.lp.mk .mk-pr-col-feature {
+  width: 46%;
+}
+
+.lp.mk .mk-pr-table thead th.mk-pr-th {
+  width: 18%;
+}
+
+.lp.mk .mk-pr-table thead th.mk-pr-th,
+.lp.mk .mk-pr-table td.mk-pr-cell {
+  padding-right: 8px;
+  padding-left: 8px;
+  text-align: center;
+}
+
+.lp.mk .mk-pr-th-name {
+  display: block;
+  color: var(--mk-ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-pr-th-price {
+  display: block;
+  margin-top: 2px;
+  color: var(--mk-ink-2);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.lp.mk .mk-pr-yes .mk-glyph {
+  width: 16px;
+  height: 16px;
+  color: var(--mk-landed);
+  vertical-align: middle;
+}
+
+.lp.mk .mk-pr-no {
+  color: var(--mk-ink-3);
+}
+
+.lp.mk .mk-pr-faq .mk-a-head {
+  margin-bottom: 24px;
+}
+
+/* Phones: the three plan columns stay in view; the feature column wraps. */
+@media (max-width: 639px) {
+  .lp.mk .mk-pr-table {
+    font-size: 14px;
+  }
+
+  .lp.mk .mk-pr-col-feature {
+    width: auto;
+  }
+
+  .lp.mk .mk-pr-table thead th.mk-pr-th,
+  .lp.mk .mk-pr-table td.mk-pr-cell {
+    width: 68px;
+    padding-right: 2px;
+    padding-left: 2px;
+  }
+
+  .lp.mk .mk-pr-th-name {
+    font-size: 13px;
+  }
+
+  .lp.mk .mk-pr-th-price {
+    display: none;
+  }
+}
+
+/* ══ Enterprise ════════════════════════════════════════════════════ */
+
+/* Hosted and self-managed: a tile each (the kit bento lays them out). */
+@media (min-width: 768px) {
+  .lp.mk .mk-ent-estate-dl > div {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .lp.mk .mk-ent-estate-dl dd {
+    margin: 0;
+  }
+}
+
+.lp.mk .mk-ent-roles tbody th {
+  width: 200px;
+}
+
+.lp.mk .mk-ent-spec .mk-ent-spec-group {
+  width: 160px;
+}
+
+.lp.mk .mk-ent-spec tbody th[scope="row"] {
+  width: 220px;
+}
+
+@media (max-width: 767px) {
+  .lp.mk .mk-ent-spec thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .lp.mk .mk-ent-spec,
+  .lp.mk .mk-ent-spec tbody,
+  .lp.mk .mk-ent-spec tr {
+    display: block;
+  }
+
+  .lp.mk .mk-ent-spec tbody {
+    border-top: 1px solid var(--mk-ink);
+  }
+
+  .lp.mk .mk-ent-spec tbody + tbody {
+    border-top: 0;
+  }
+
+  .lp.mk .mk-ent-spec tbody th,
+  .lp.mk .mk-ent-spec tbody td {
+    display: block;
+    width: auto;
+    padding: 0;
+    border: 0;
+  }
+
+  .lp.mk .mk-ent-spec tr {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--mk-rule);
+  }
+
+  .lp.mk .mk-ent-spec .mk-ent-spec-group {
+    width: auto;
+    margin: 12px 0 8px;
+    color: var(--mk-ink-2);
+    font-size: 14px;
+  }
+
+  .lp.mk .mk-ent-spec tbody th[scope="row"] {
+    width: auto;
+  }
+
+  .lp.mk .mk-ent-roles tbody th {
+    width: 104px;
+  }
+}
+
+/* ══ Proof ═════════════════════════════════════════════════════════ */
+
+/* The CI job groups as a vertical tab list beside the evidence card. */
+.lp.mk .mk-proof-desk {
+  display: grid;
+  gap: 20px;
+  align-items: start;
+}
+
+.lp.mk .mk-proof-tabs {
+  display: grid;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-proof-tab {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 12px 12px 12px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--mk-rule);
+  background: none;
+  color: var(--mk-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--df-dur-fast) var(--df-ease);
+}
+
+.lp.mk .mk-proof-tab:hover {
+  background: var(--mk-wash);
+}
+
+.lp.mk .mk-proof-tab[aria-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--mk-ink);
+  background: var(--mk-wash);
+}
+
+.lp.mk .mk-proof-tab:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: -2px;
+}
+
+.lp.mk .mk-proof-tab-name {
+  font-size: var(--mk-fs-body);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.lp.mk .mk-proof-tab-meta {
+  color: var(--mk-ink-2);
+  font-size: var(--mk-fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-proof-desk {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    column-gap: var(--mk-col-gap);
+  }
+}
+
+.lp.mk .mk-proof-cert-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-proof-cert-title {
+  margin: 0;
+  color: var(--mk-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-proof-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--mk-landed) 40%, transparent);
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-verified-bg);
+  color: var(--mk-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-proof-state .mk-glyph {
+  color: var(--mk-landed);
+}
+
+.lp.mk .mk-proof-cert-figure {
+  display: grid;
+  gap: 4px;
+  margin: 20px 0 0;
+}
+
+.lp.mk .mk-proof-cert-num {
+  color: var(--mk-ink);
+  font-size: var(--mk-fs-stat);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp.mk .mk-proof-cert-unit,
+.lp.mk .mk-proof-cert-claim {
+  color: var(--mk-ink-2);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.lp.mk .mk-proof-cert-claim {
+  margin: 12px 0 0;
+}
+
+.lp.mk .mk-proof-cert-label {
+  margin: 20px 0 10px;
+  color: var(--mk-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-proof-cert-drivers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-proof-cert-drivers li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 3px;
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--df-radius-pill);
+  color: var(--mk-ink);
+  font-size: 13px;
+}
+
+.lp.mk .mk-proof-icon,
+.lp.mk .mk-int-row-icon,
+.lp.mk .mk-int-tile-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  border-radius: var(--df-radius-pill);
+  background: var(--df-on-tile);
+  box-shadow: 0 0 0 1px var(--mk-rule);
+}
+
+.lp.mk .mk-proof-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.lp.mk .mk-proof-cert-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+  margin: 20px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-proof-cert-foot dt {
+  color: var(--mk-ink-2);
+  font-size: 13px;
+}
+
+.lp.mk .mk-proof-cert-foot dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 0;
+  color: var(--mk-ink);
+  font-size: 14px;
+}
+
+.lp.mk .mk-proof-cert-foot code,
+.lp.mk .mk-proof-calls code {
+  font-family: var(--mk-mono);
+  font-size: 13px;
+}
+
+.lp.mk .mk-proof-cert-foot code {
+  padding: 1px 6px;
+  border-radius: var(--df-radius-sm);
+  background: var(--mk-sunken);
+}
+
+/* The verify steps: the one stepper style, 32px outlined circles. */
+.lp.mk .mk-proof-calls {
+  display: grid;
+  gap: 16px;
+  padding: 0;
+  list-style: none;
+  counter-reset: mk-call;
+}
+
+.lp.mk .mk-proof-calls li {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  min-height: 32px;
+  padding-left: 48px;
+  color: var(--mk-ink);
+  font-size: 15px;
+  font-weight: 500;
+  counter-increment: mk-call;
+}
+
+.lp.mk .mk-proof-calls li::before {
+  content: counter(mk-call);
+  position: absolute;
+  top: -4px;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--mk-ink);
+  border-radius: var(--df-radius-pill);
+  color: var(--mk-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-proof-calls code {
+  color: var(--mk-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.lp.mk .mk-a-row-copy > .mk-proof-rule {
+  margin-top: 28px;
+}
+
+/* ══ Security ══════════════════════════════════════════════════════ */
+
+.lp.mk .mk-sec-arch {
+  margin: 0;
+  padding: 16px 8px;
+}
+
+.lp.mk .mk-sec-svg {
+  display: block;
+  width: 100%;
+  max-width: 880px;
+  height: auto;
+  margin-inline: auto;
+  overflow: visible;
+}
+
+.lp.mk .mk-sec-svg--wide {
+  display: none;
+}
+
+.lp.mk .mk-sec-arch-cap {
+  margin-top: 16px;
+  color: var(--mk-ink-2);
+  font-size: 14px;
+  text-align: center;
+}
+
+@media (min-width: 768px) {
+  .lp.mk .mk-sec-arch {
+    padding: 40px 32px 28px;
+  }
+
+  .lp.mk .mk-sec-svg--wide {
+    display: block;
+  }
+
+  .lp.mk .mk-sec-svg--tall {
+    display: none;
+  }
+}
+
+/* The drawing: ink lines on the card, 13px text at the smallest. */
+.lp.mk .mk-sec-t {
+  fill: var(--mk-ink);
+  font-family: var(--mk-font);
+  font-size: 14px;
+}
+
+.lp.mk .mk-sec-t--b {
+  font-weight: 600;
+}
+
+.lp.mk .mk-sec-t--s {
+  fill: var(--mk-ink-2);
+  font-size: 13px;
+}
+
+.lp.mk .mk-sec-t--muted {
+  fill: var(--mk-ink-2);
+}
+
+.lp.mk .mk-sec-t--label {
+  fill: var(--mk-ink-2);
+  font-size: 13px;
+}
+
+.lp.mk .mk-sec-t--label .mk-sec-t--b {
+  fill: var(--mk-ink);
+}
+
+.lp.mk .mk-sec-box rect {
+  fill: var(--mk-a-card-bg);
+  stroke: var(--mk-rule-strong);
+  stroke-width: 1;
+}
+
+.lp.mk .mk-sec-box.is-engine rect {
+  stroke: var(--mk-ink);
+  stroke-width: 1.5;
+}
+
+.lp.mk .mk-sec-box.is-held rect {
+  stroke: var(--mk-serial);
+}
+
+.lp.mk .mk-sec-box.is-held .mk-sec-t--b {
+  fill: var(--mk-held);
+}
+
+.lp.mk .mk-sec-box.is-anchor rect {
+  fill: var(--mk-sunken);
+}
+
+.lp.mk .mk-sec-frame-rule {
+  fill: none;
+  stroke: var(--mk-rule-strong);
+  stroke-width: 1;
+}
+
+.lp.mk .mk-sec-frame--identity .mk-sec-frame-rule {
+  stroke: var(--mk-ink);
+}
+
+.lp.mk .mk-sec-frame--workspace .mk-sec-frame-rule {
+  stroke: var(--mk-ink-3);
+}
+
+.lp.mk .mk-sec-frame--encryption .mk-sec-frame-rule,
+.lp.mk .mk-sec-frame--audit .mk-sec-frame-rule {
+  fill: var(--mk-sunken);
+}
+
+.lp.mk .mk-sec-knock {
+  fill: var(--mk-a-card-bg);
+}
+
+.lp.mk .mk-sec-line {
+  fill: none;
+  stroke: var(--mk-ink);
+  stroke-linecap: round;
+}
+
+.lp.mk .mk-sec-line--data {
+  stroke-width: 2;
+}
+
+.lp.mk .mk-sec-line--thin {
+  stroke: var(--mk-ink-3);
+  stroke-width: 1;
+}
+
+.lp.mk .mk-sec-line--dash {
+  stroke-dasharray: 3 4;
+}
+
+.lp.mk .mk-sec-line--key {
+  stroke: var(--mk-ink-3);
+  stroke-width: 1.2;
+  stroke-dasharray: 5 4;
+}
+
+.lp.mk .mk-sec-line--held {
+  stroke: var(--mk-serial);
+  stroke-width: 1.4;
+}
+
+.lp.mk .mk-sec-head {
+  fill: var(--mk-ink);
+}
+
+.lp.mk .mk-sec-head--held {
+  fill: var(--mk-serial);
+}
+
+.lp.mk .mk-sec-caller rect {
+  fill: var(--mk-a-card-bg);
+  stroke: var(--mk-rule-strong);
+}
+
+.lp.mk .mk-sec-gate {
+  fill: var(--mk-landed);
+  stroke: var(--mk-a-card-bg);
+  stroke-width: 2;
+}
+
+.lp.mk .mk-sec-gate-mark {
+  fill: none;
+  stroke: var(--mk-a-card-bg);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lp.mk .mk-sec-chain rect {
+  fill: var(--mk-a-card-bg);
+  stroke: var(--mk-landed);
+  stroke-width: 1.2;
+}
+
+.lp.mk .mk-sec-chain path {
+  fill: none;
+  stroke: var(--mk-landed);
+  stroke-width: 1.2;
+}
+
+/* The controls ledger. */
+.lp.mk .mk-sec-ledger tbody th {
+  min-width: 11em;
+}
+
+.lp.mk .mk-sec-td-does {
+  max-width: 40em;
+}
+
+.lp.mk .mk-sec-td-when {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.lp.mk .mk-sec-td-when.is-always {
+  color: var(--mk-ink);
+  font-weight: 500;
+}
+
+.lp.mk .mk-sec-td-when .mk-glyph {
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  color: var(--mk-landed);
+  vertical-align: -2px;
+}
+
+@media (max-width: 767px) {
+  .lp.mk .mk-sec-ledger thead,
+  .lp.mk .mk-sec-deploy thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .lp.mk .mk-sec-ledger,
+  .lp.mk .mk-sec-ledger tbody,
+  .lp.mk .mk-sec-deploy,
+  .lp.mk .mk-sec-deploy tbody {
+    display: block;
+  }
+
+  .lp.mk .mk-sec-ledger tbody,
+  .lp.mk .mk-sec-deploy tbody {
+    border-top: 1px solid var(--mk-ink);
+  }
+
+  .lp.mk .mk-sec-ledger tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--mk-rule);
+  }
+
+  .lp.mk .mk-sec-ledger tbody th,
+  .lp.mk .mk-sec-ledger tbody td,
+  .lp.mk .mk-sec-deploy tbody th,
+  .lp.mk .mk-sec-deploy tbody td {
+    padding: 0;
+    border: 0;
+  }
+
+  .lp.mk .mk-sec-ledger tbody th {
+    min-width: 0;
+  }
+
+  .lp.mk .mk-sec-td-does,
+  .lp.mk .mk-sec-td-when {
+    grid-column: 1 / -1;
+  }
+
+  .lp.mk .mk-sec-deploy tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 6px 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--mk-rule);
+  }
+
+  .lp.mk .mk-sec-deploy tbody th {
+    grid-column: 1 / -1;
+  }
+
+  .lp.mk .mk-sec-deploy tbody td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--mk-ink-2);
+    font-size: 13px;
+    font-weight: 600;
+  }
+}
+
+.lp.mk .mk-sec-deploy thead th {
+  color: var(--mk-ink);
+  font-size: 16px;
+}
+
+.lp.mk .mk-sec-deploy thead th small {
+  display: block;
+  margin-top: 2px;
+  color: var(--mk-ink-2);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.lp.mk .mk-sec-deploy tbody th {
+  width: 34%;
+}
+
+/* Report a vulnerability: what we will not pursue, beside how to reach us. */
+.lp.mk .mk-sec-disclose-grid {
+  display: grid;
+  gap: 40px;
+}
+
+.lp.mk .mk-sec-disclose-copy > p {
+  margin: 0 0 16px;
+  color: var(--mk-ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+@media (min-width: 1024px) {
+  .lp.mk .mk-sec-disclose-grid {
+    grid-template-columns: minmax(0, 6fr) minmax(0, 6fr);
+    column-gap: 64px;
+  }
+
+  .lp.mk .mk-sec-disclose-facts > div {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .lp.mk .mk-sec-disclose-facts dd {
+    margin: 0;
+  }
+}
+
+/* ══ Connectors ════════════════════════════════════════════════════ */
+
+.lp.mk .mk-int-matrix {
+  margin: 0;
+  padding: 16px;
+}
+
+.lp.mk .mk-int-matrix-cap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--mk-rule);
+  color: var(--mk-ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-int-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  color: var(--mk-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.lp.mk .mk-int-key > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Legend: a small tile in each state, drawn as the tiles are drawn: the
+   border, the tint, and the check badge in the corner. */
+.lp.mk .mk-int-swatch {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 22px;
+  height: 18px;
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--df-radius-sm);
+  background: var(--mk-a-card-bg);
+}
+
+.lp.mk .mk-int-swatch.is-proven {
+  border-color: var(--mk-landed);
+}
+
+.lp.mk .mk-int-swatch.is-emulated {
+  border-color: color-mix(in srgb, var(--mk-landed) 55%, var(--mk-rule));
+  background: var(--mk-verified-bg);
+}
+
+.lp.mk .mk-int-swatch-mark {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-landed);
+}
+
+.lp.mk .mk-int-swatch-mark .mk-glyph {
+  width: 8px;
+  height: 8px;
+  color: var(--mk-a-card-bg);
+}
+
+.lp.mk .mk-int-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-int-row {
+  display: grid;
+  gap: 12px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--mk-rule);
+}
+
+.lp.mk .mk-int-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.lp.mk .mk-int-fam {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lp.mk .mk-int-fam-name {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mk-ink);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lp.mk .mk-int-fam-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.lp.mk .mk-int-fam-name:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 3px;
+  border-radius: var(--df-radius-sm);
+}
+
+.lp.mk .mk-int-fam-count {
+  margin: 0;
+  color: var(--mk-ink-2);
+  font-size: 14px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp.mk .mk-int-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-int-tile {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 8px;
+  min-height: 80px;
+  padding: 12px 4px 10px;
+  border: 1px solid var(--mk-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--mk-a-card-bg);
+}
+
+.lp.mk .mk-int-tile.is-proven {
+  border-color: var(--mk-landed);
+}
+
+.lp.mk .mk-int-tile.is-emulated {
+  border-color: color-mix(in srgb, var(--mk-landed) 55%, var(--mk-rule));
+  background: var(--mk-verified-bg);
+}
+
+.lp.mk .mk-int-tile-icon {
+  width: 30px;
+  height: 30px;
+}
+
+/* Implemented drivers keep their colour: the state is the border and the
+   badge, never a greyed-out logo. */
+
+.lp.mk .mk-int-tile-name {
+  max-width: 100%;
+  color: var(--mk-ink);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+/* The proven mark sits inside the tile's corner, not across its border. */
+.lp.mk .mk-int-tile-mark {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-landed);
+}
+
+.lp.mk .mk-int-tile-mark .mk-glyph {
+  width: 10px;
+  height: 10px;
+  color: var(--mk-a-card-bg);
+}
+
+@media (max-width: 639px) {
+  .lp.mk .mk-int-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .lp.mk .mk-int-tile {
+    min-height: 72px;
+    padding: 10px 2px 8px;
+  }
+
+  .lp.mk .mk-int-tile-icon {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+@media (min-width: 768px) {
+  .lp.mk .mk-int-matrix {
+    padding: 24px 32px;
+  }
+
+  .lp.mk .mk-int-row {
+    grid-template-columns: 200px minmax(0, 1fr);
+    column-gap: 28px;
+    align-items: start;
+    padding: 20px 0;
+  }
+
+  .lp.mk .mk-int-fam {
+    display: grid;
+    gap: 2px;
+  }
+
+  .lp.mk .mk-int-tiles {
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 10px;
+  }
+}
+
+/* The filter row and the driver table. */
+.lp.mk .mk-int-console {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.lp.mk .mk-int-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+}
+
+.lp.mk .mk-int-search {
+  position: relative;
+  flex: 1 1 260px;
+  max-width: 420px;
+}
+
+.lp.mk .mk-int-search svg {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: var(--mk-ink-3);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.lp.mk .mk-int-search input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px 0 42px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-a-card-bg);
+  color: var(--mk-ink);
+  font: inherit;
+  font-size: 15px;
+}
+
+.lp.mk .mk-int-search input::placeholder {
+  color: var(--mk-ink-3);
+}
+
+.lp.mk .mk-int-search input:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 1px;
+  border-color: var(--mk-ink);
+}
+
+.lp.mk .mk-int-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--mk-ink);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.lp.mk .mk-int-switch input {
+  position: absolute;
+  left: 0;
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.lp.mk .mk-int-switch-track {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  flex: none;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-wash);
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.lp.mk .mk-int-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--df-radius-pill);
+  background: var(--mk-ink-2);
+  transition:
+    transform 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.lp.mk .mk-int-switch input:checked + .mk-int-switch-track {
+  border-color: var(--mk-landed);
+  background: var(--mk-landed);
+}
+
+.lp.mk .mk-int-switch input:checked + .mk-int-switch-track::after {
+  background: var(--mk-a-card-bg);
+  transform: translateX(16px);
+}
+
+.lp.mk .mk-int-switch input:focus-visible + .mk-int-switch-track {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 2px;
+}
+
+.lp.mk .mk-int-count {
+  margin: 0 0 0 auto;
+  color: var(--mk-ink-2);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp.mk .mk-int-table-wrap {
+  scroll-margin-top: 88px;
+}
+
+.lp.mk .mk-int-table-wrap:focus-visible {
+  outline: 2px solid var(--mk-focus);
+  outline-offset: 4px;
+}
+
+.lp.mk .mk-int-table thead th {
+  padding-top: 18px;
+  white-space: nowrap;
+}
+
+.lp.mk .mk-int-table tbody th,
+.lp.mk .mk-int-table tbody td {
+  padding-block: 8px;
+  vertical-align: middle;
+}
+
+.lp.mk .mk-int-table tbody th {
+  white-space: nowrap;
+}
+
+.lp.mk .mk-int-row-icon {
+  width: 28px;
+  height: 28px;
+  margin-right: 12px;
+  vertical-align: middle;
+}
+
+.lp.mk .mk-int-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--mk-rule-strong);
+  border-radius: var(--df-radius-pill);
+  color: var(--mk-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.lp.mk .mk-int-badge.is-proven {
+  border-color: color-mix(in srgb, var(--mk-landed) 45%, transparent);
+  background: var(--mk-verified-bg);
+  color: var(--mk-ink);
+}
+
+.lp.mk .mk-int-badge.is-proven .mk-glyph,
+.lp.mk .mk-int-cdc.is-proven .mk-glyph {
+  color: var(--mk-landed);
+}
+
+.lp.mk .mk-int-cdc {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mk-ink-2);
+  font-size: 14px;
+}
+
+.lp.mk .mk-int-cdc.is-proven {
+  color: var(--mk-ink);
+  font-weight: 500;
+}
+
+.lp.mk .mk-int-cdc.is-none {
+  color: var(--mk-ink-3);
+}
+
+.lp.mk .mk-int-empty {
+  padding-block: 28px;
+}
+
+@media (max-width: 767px) {
+  .lp.mk .mk-int-count {
+    flex-basis: 100%;
+    margin: 0;
+  }
+
+  .lp.mk .mk-int-table,
+  .lp.mk .mk-int-table tbody {
+    display: block;
+  }
+
+  .lp.mk .mk-int-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  /* One compact row per driver: name and family on the left, status right. */
+  .lp.mk .mk-int-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 12px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--mk-rule);
+  }
+
+  .lp.mk .mk-int-table tbody th,
+  .lp.mk .mk-int-table tbody td {
+    padding: 0;
+    border: 0;
+  }
+
+  .lp.mk .mk-int-table tbody th {
+    grid-column: 1;
+    white-space: normal;
+  }
+
+  .lp.mk .mk-int-table tbody :is(.mk-int-td-family, .mk-int-td-cdc) {
+    grid-column: 1;
+    padding-left: 40px;
+    font-size: 13px;
+  }
+
+  .lp.mk .mk-int-td-status {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+  }
+
+  .lp.mk .mk-int-cdc {
+    font-size: 13px;
+  }
+
+  .lp.mk .mk-int-cdc.is-none {
+    display: none;
+  }
+
+  .lp.mk .mk-int-td-cdc:has(.is-none) {
+    display: none;
+  }
+
+  .lp.mk .mk-int-table tbody td.mk-int-empty {
+    grid-column: 1 / -1;
+    padding: 16px 0;
+  }
+}
+
+.lp.mk .mk-int-path-panel {
+  min-width: 0;
+}
+
+/* Held text on the held tint needs the deeper amber to reach 4.5:1. */
+.lp.mk .mk-a .mk-int-path-panel {
+  --mk-held: var(--df-warning-text);
+}
+
+/* ══ Product scenes (AppFrame kit) ═════════════════════════════════ */
+
+/* Settings scene. */
+.lp.mk .mk-sc-settings {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.lp.mk .mk-sc-nav {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-lg);
+  background: var(--app-surface);
+}
+
+.lp.mk .mk-sc-nav-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: var(--df-radius-md);
+  background: transparent;
+  color: var(--app-ink);
+  font: inherit;
+  text-align: left;
+}
+
+.lp.mk button.mk-sc-nav-item {
+  cursor: pointer;
+}
+
+.lp.mk button.mk-sc-nav-item:hover {
+  background: var(--app-muted);
+}
+
+.lp.mk .mk-sc-nav-item svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--app-ink-2);
+}
+
+.lp.mk .mk-sc-nav-item > span {
+  display: grid;
+  gap: 1px;
+}
+
+.lp.mk .mk-sc-nav-item strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-nav-item small {
+  color: var(--app-ink-2);
+  font-size: 12px;
+}
+
+.lp.mk .mk-sc-nav-item.is-active {
+  background: var(--app-brand-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-brand) 24%, transparent);
+}
+
+.lp.mk .mk-sc-nav-item.is-active strong,
+.lp.mk .mk-sc-nav-item.is-active svg {
+  color: var(--df-brand-hover);
+}
+
+.lp.mk .mk-sc-pane {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lp.mk .mk-sc-pane.is-panel {
+  padding: 14px;
+}
+
+.lp.mk .mk-sc-card {
+  overflow: hidden;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-lg);
+  background: var(--app-surface);
+}
+
+.lp.mk .mk-sc-card-head {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-sc-card-head strong {
+  font-size: 15px;
+}
+
+.lp.mk .mk-sc-card-head p {
+  margin: 3px 0 0;
+  color: var(--app-ink-2);
+  font-size: 12.5px;
+}
+
+.lp.mk .mk-sc-card-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.lp.mk .mk-sc-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--df-warning-text) 22%, transparent);
+  background: var(--df-warning-bg);
+  color: var(--df-warning-text);
+  font-size: 12.5px;
+}
+
+.lp.mk .mk-sc-banner svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.lp.mk .mk-sc-providers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.lp.mk .mk-sc-provider {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-lg);
+}
+
+.lp.mk .mk-sc-provider.is-on {
+  border-color: color-mix(in srgb, var(--df-success) 40%, transparent);
+  box-shadow: inset 0 3px 0 var(--df-success);
+}
+
+.lp.mk .mk-sc-provider strong {
+  font-size: 14px;
+}
+
+.lp.mk .mk-sc-provider > span:nth-child(2) {
+  color: var(--app-ink-2);
+  font-size: 12.5px;
+}
+
+.lp.mk .mk-sc-fine {
+  margin: 0;
+  color: var(--app-ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.lp.mk .mk-sc-fine code {
+  overflow-wrap: anywhere;
+}
+
+.lp.mk .mk-sc-scim {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.lp.mk .mk-sc-field {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.lp.mk .mk-sc-field small {
+  color: var(--app-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-field > span {
+  padding: 7px 10px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--app-bg);
+  font-size: 13px;
+}
+
+.lp.mk .mk-sc-subhead {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-rows {
+  display: grid;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+}
+
+.lp.mk .mk-sc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--app-rule);
+  font-size: 13px;
+}
+
+.lp.mk .mk-sc-row:last-child {
+  border-bottom: 0;
+}
+
+.lp.mk .mk-sc-row > :last-child {
+  margin-left: auto;
+}
+
+.lp.mk .mk-sc-row code {
+  color: var(--app-ink);
+}
+
+.lp.mk .mk-sc-arrow,
+.lp.mk .mk-sc-muted {
+  color: var(--app-ink-2);
+  font-size: 12px;
+}
+
+.lp.mk .mk-sc-table {
+  display: grid;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  overflow: hidden;
+}
+
+.lp.mk .mk-sc-tr {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--app-rule);
+  font-size: 13px;
+}
+
+.lp.mk .mk-sc-tr:last-child {
+  border-bottom: 0;
+}
+
+.lp.mk .mk-sc-th {
+  min-height: 32px;
+  background: var(--app-muted);
+  color: var(--app-ink-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-who {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-who i {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: var(--df-radius-pill);
+  background: var(--app-brand-soft);
+  color: var(--df-brand-hover);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.lp.mk .mk-sc-roles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.lp.mk .mk-sc-roles > div {
+  padding: 10px 12px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+}
+
+.lp.mk .mk-sc-roles dt {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.lp.mk .mk-sc-roles dd {
+  margin: 3px 0 0;
+  color: var(--app-ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.lp.mk .mk-sc-keyline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--app-bg);
+}
+
+.lp.mk .mk-sc-keyicon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--df-radius-md);
+  background: var(--app-brand-soft);
+  color: var(--df-brand-hover);
+}
+
+.lp.mk .mk-sc-keytext {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lp.mk .mk-sc-keytext code {
+  color: var(--app-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.lp.mk .mk-sc-keyline .mk-app-pill {
+  margin-left: auto;
+}
+
+.lp.mk .mk-sc-region {
+  display: grid;
+  gap: 12px;
+}
+
+.lp.mk .mk-sc-audit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.lp.mk .mk-sc-audit-state {
+  margin-left: auto;
+}
+
+.lp.mk .mk-sc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--app-surface);
+  color: var(--app-ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lp.mk .mk-sc-btn--primary {
+  border-color: transparent;
+  background: var(--df-action-bg);
+  color: var(--df-on-tile);
+}
+
+.lp.mk .mk-sc-btn--primary:hover {
+  background: var(--df-brand-hover);
+}
+
+.lp.mk .mk-sc-btn:focus-visible,
+.lp.mk .mk-sc-nav-item:focus-visible,
+.lp.mk .mk-sc-seg button:focus-visible,
+.lp.mk .mk-sc-cats button:focus-visible,
+.lp.mk .mk-sc-reset:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.lp.mk .mk-sc-chain {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+}
+
+.lp.mk .mk-sc-chain li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 70px 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-sc-chain li:last-child {
+  border-bottom: 0;
+}
+
+/* The link from each entry to the one before it. */
+.lp.mk .mk-sc-chain li + li::before {
+  content: "";
+  position: absolute;
+  top: -12px;
+  left: calc(14px + 70px + 10px + 10px);
+  height: 24px;
+  border-left: 2px solid var(--app-rule);
+}
+
+.lp.mk .mk-sc-chain.is-verified li + li::before {
+  border-left-color: var(--df-success);
+}
+
+.lp.mk .mk-sc-chain-time {
+  color: var(--app-ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp.mk .mk-sc-chain-node {
+  position: relative;
+  z-index: var(--df-z-raised);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--app-rule);
+  border-radius: var(--df-radius-pill);
+  background: var(--app-surface);
+  color: var(--df-on-tile);
+}
+
+.lp.mk .mk-sc-chain.is-verified .mk-sc-chain-node {
+  border-color: var(--df-success);
+  background: var(--df-success);
+  transition: background-color 0.24s ease, border-color 0.24s ease;
+}
+
+.lp.mk .mk-sc-chain-what {
+  display: grid;
+  min-width: 0;
+}
+
+.lp.mk .mk-sc-chain-what strong {
+  font-size: 13px;
+}
+
+.lp.mk .mk-sc-chain-what small,
+.lp.mk .mk-sc-chain-hash small {
+  color: var(--app-ink-2);
+  font-size: 11.5px;
+}
+
+.lp.mk .mk-sc-chain-hash {
+  display: grid;
+  justify-items: end;
+  gap: 1px;
+}
+
+/* Panels on phones: a narrower window, so cards stack. */
+.lp.mk .mk-sc-pane.is-panel .mk-sc-providers,
+.lp.mk .mk-sc-pane.is-panel .mk-sc-roles {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-tr {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-tr > :nth-child(3) {
+  display: none;
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-chain li {
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-chain-time {
+  display: none;
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-chain li + li::before {
+  left: calc(14px + 10px);
+}
+
+.lp.mk .mk-sc-pane.is-panel .mk-sc-audit-state {
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+
+.lp.mk .mk-sc-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-self: start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--app-muted);
+}
+
+.lp.mk .mk-sc-seg button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--app-ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lp.mk .mk-sc-seg button.is-active {
+  background: var(--app-surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--df-intaglio) 18%, transparent);
+}
+
+.lp.mk .mk-sc-seg button:disabled {
+  color: var(--app-ink-2);
+  cursor: default;
+}
+
+
+/* Sign-off drawer. */
+.lp.mk .mk-sc-signoff {
+  width: 540px;
+}
+
+.lp.mk .mk-sc-signoff.is-panel {
+  position: static;
+  width: auto;
+  border-left: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+.lp.mk .mk-sc-signers {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+}
+
+.lp.mk .mk-sc-signers li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-sc-signers li:last-child {
+  border-bottom: 0;
+}
+
+.lp.mk .mk-sc-signers strong {
+  font-size: 14px;
+}
+
+.lp.mk .mk-sc-signform {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.lp.mk .mk-sc-packstate {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--df-success) 30%, transparent);
+  border-radius: var(--df-radius-md);
+  background: var(--df-success-bg);
+  color: var(--df-success-text);
+  font-size: 12.5px;
+}
+
+.lp.mk .mk-sc-packstate svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.lp.mk .mk-sc-contains {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+}
+
+.lp.mk .mk-sc-contains ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--app-ink);
+  font-size: 12.5px;
+}
+
+.lp.mk .mk-sc-reset {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--df-brand-hover);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Proofs ledger. */
+.lp.mk .mk-sc-proofs {
+  display: grid;
+  gap: 14px;
+}
+
+.lp.mk .mk-sc-proofs.is-panel {
+  padding: 14px;
+}
+
+.lp.mk .mk-sc-proofs.is-panel .mk-app-kpis {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.lp.mk .mk-sc-proofs-tabs {
+  display: inline-flex;
+  justify-self: start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-md);
+  background: var(--app-muted);
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-proofs-tabs span {
+  padding: 5px 12px;
+  border-radius: var(--df-radius-sm);
+  color: var(--app-ink-2);
+}
+
+.lp.mk .mk-sc-proofs-tabs .is-active {
+  background: var(--app-surface);
+  color: var(--df-brand-hover);
+}
+
+.lp.mk .mk-sc-ltr {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) 120px 170px;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-sc-ltr:last-child {
+  border-bottom: 0;
+}
+
+.lp.mk .mk-sc-ltr .is-num {
+  justify-self: end;
+}
+
+.lp.mk .mk-sc-proofs.is-panel .mk-sc-ltr {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px 12px;
+}
+
+.lp.mk .mk-sc-proofs.is-panel .mk-sc-ltr > :nth-child(2),
+.lp.mk .mk-sc-proofs.is-panel .mk-sc-ltr > :nth-child(4) {
+  display: none;
+}
+
+.lp.mk .mk-sc-ldrivers {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.lp.mk .mk-sc-icons {
+  display: flex;
+  flex: none;
+}
+
+.lp.mk .mk-sc-icons i {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: -6px;
+  border: 1px solid var(--app-rule);
+  border-radius: var(--df-radius-pill);
+  background: var(--df-on-tile);
+}
+
+.lp.mk .mk-sc-icons i:first-child {
+  margin-left: 0;
+}
+
+.lp.mk .mk-sc-ljobs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.lp.mk .mk-sc-ljobs code {
+  padding: 1px 6px;
+  border-radius: var(--df-radius-sm);
+  background: var(--app-muted);
+  color: var(--app-ink);
+}
+
+
+/* One-panel crops (feature rows, and every frame on phones) render about
+   1:1, so their smallest UI text is set at 12px. */
+.lp.mk .mk-a .mk-app-figure--panel :is(.mk-app-pill, code, small, em, .mk-app-th > span, .mk-app-kpi small) {
+  font-size: 12px;
+}
+
+/* A picker that scrolls sideways fades at its right edge. */
+.lp.mk .mk-a .mk-app-picker {
+  padding-right: 24px;
+  mask-image: linear-gradient(90deg, black calc(100% - 32px), transparent);
+}
+
+/* ══ Pass 7: kit tiles on these pages ══════════════════════════════ */
+
+/* Tiles hold the page's facts; their figures sit beside the title. */
+.lp.mk .mk-a .mk-tile {
+  background: var(--mk-tile-bg);
+}
+
+/* A chip row, as the app draws a route's systems. */
+.lp.mk .mk-a-tui-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-tui-more {
+  color: var(--app-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Rows of a chip and its state. */
+.lp.mk .mk-a-tui-rows {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lp.mk .mk-a-tui-rows li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-a-tui-rows li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* A short key and value list, as the app's detail panes set them. */
+.lp.mk .mk-a-tui-dl {
+  display: grid;
+  margin: 0;
+}
+
+.lp.mk .mk-a-tui-dl div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--app-rule);
+}
+
+.lp.mk .mk-a-tui-dl div:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.lp.mk .mk-a-tui-dl dt {
+  color: var(--app-ink-2);
+}
+
+.lp.mk .mk-a-tui-dl dd {
+  margin: 0;
+  color: var(--app-ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Enterprise: hosted and self-managed, a tile each. */
+.lp.mk .mk-ent-estate-dl {
+  margin: 0;
+}
+
+.lp.mk .mk-ent-estates .mk-tile-ui {
+  margin-top: 0;
+  overflow: visible;
+}
+
+/* FAQ questions start on the same edge as their answers. */
+.lp.mk .mk-a .lp-faq button {
+  padding-inline: 0;
+}
