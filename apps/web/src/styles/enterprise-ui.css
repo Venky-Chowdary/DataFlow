@@ -9029,7 +9029,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  color: #0f766e;
+  color: var(--df-brand-text);
 }
 
 .df2-conn-setup .df2-conn-probe {

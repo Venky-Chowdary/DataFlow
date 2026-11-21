@@ -10,6 +10,9 @@ import { ToastProvider, useToast } from "./components/Toast";
 import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
+import { CommandMenu } from "./components/ui/CommandMenu";
+import { ShortcutsSheet } from "./components/ui/ShortcutsSheet";
+import { isTypingTarget } from "./lib/commandRegistry";
 import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
 import { FirstRunWorkspace } from "./components/ui/FirstRunWorkspace";
 import { StatusPopover } from "./components/StatusPopover";
@@ -173,6 +176,8 @@ function AppShell({
   const [modalType, setModalType] = useState("");
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [mobileShell, setMobileShell] = useState(() => window.matchMedia("(max-width: 1023px)").matches);
   const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
@@ -286,8 +291,14 @@ function AppShell({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        // The command menu (UI pass 2): actions for the selection, pages, records.
         e.preventDefault();
-        searchRef.current?.focus();
+        setShortcutsOpen(false);
+        setCommandOpen((open) => !open);
+      } else if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey && !isTypingTarget(e.target)
+        && !document.querySelector('[role="dialog"]')) {
+        e.preventDefault();
+        setShortcutsOpen(true);
       } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
         searchRef.current?.blur();
       }
@@ -786,6 +797,17 @@ function AppShell({
               <span>Workspace</span>
               <strong> {currentNav?.label ?? "Datawrap"}</strong>
             </div>
+            <CommandMenu
+              open={commandOpen}
+              onOpenChange={setCommandOpen}
+              navItems={NAV}
+              jobs={jobs}
+              connectors={connectors}
+              schedules={schedules}
+              onNavigate={navigateFromSearch}
+              onShowShortcuts={() => setShortcutsOpen(true)}
+            />
+            <ShortcutsSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
             <WorkspaceSearch
               query={searchQuery}
               onQueryChange={setSearchQuery}

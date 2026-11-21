@@ -4,7 +4,8 @@ import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { BookOpen, ClipboardList, Code2, FileText, Gauge, GitCompareArrows, History, Network, PanelRightOpen, ScrollText, Shield, type LucideIcon } from "lucide-react";
 import { ConnectorIcon } from "../app/brand-icons";
-import { DtIcon } from "../components/DtIcon";
+import { DtIcon, type IconName } from "../components/DtIcon";
+import { hashForScreen } from "../lib/appNavigation";
 import { JobTheater } from "../components/JobTheater";
 import { JobNameEditor } from "../components/jobs/JobNameEditor";
 import { JournalsDrawer } from "../components/jobs/JournalsDrawer";
@@ -18,6 +19,7 @@ import { useJobRunActions } from "../components/jobs/useJobRunActions";
 import { applyJobsFacets, useJobsGridState } from "../components/jobs/useJobsGridState";
 import { useJobsKpis } from "../components/jobs/useJobsKpis";
 import { useJobVerdicts } from "../components/jobs/useJobVerdicts";
+import { setSelectionActions } from "../lib/commandRegistry";
 import { VerdictChip } from "../components/ui/VerdictChip";
 import { ExplainPopover } from "../components/ui/ExplainPopover";
 import { explainVerdict } from "../lib/explainCatalog";
@@ -985,6 +987,34 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     open: openJob,
     onRefresh: refreshJobsAndDetail,
   });
+  // The command menu lists what can be done to the selected job first (UI pass 2).
+  const runActionsRef = useRef(runActions);
+  runActionsRef.current = runActions;
+  const commandJob = selected && selectedId === selected._id ? selected : null;
+  useEffect(() => {
+    if (!commandJob) return undefined;
+    const items = runActionsRef.current.rowMenuItems(commandJob).filter((item) => !item.disabled && item.id !== "open");
+    return setSelectionActions({
+      title: `Selected job · ${gridName(commandJob)}`,
+      actions: [
+        {
+          id: "trust-report",
+          label: "Open Trust Report",
+          icon: "verify",
+          run: () => { window.location.hash = hashForScreen("jobs", { jobId: commandJob._id, panel: "trust-report" }); },
+        },
+        ...items.map((item) => ({
+          id: item.id,
+          label: item.label,
+          icon: (item.id === "copy" ? "copy" : item.id === "retry" ? "refresh" : item.id === "cancel" ? "x" : undefined) as IconName | undefined,
+          tone: item.tone === "danger" ? "danger" as const : undefined,
+          run: item.onSelect,
+        })),
+      ],
+    });
+    // gridName is stable for a job's name; status changes which actions apply.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commandJob?._id, commandJob?.status, commandJob?.name]);
   const engineOptions = useMemo(() => {
     const seen = [...recentJobs, ...(pageHistory?.jobs ?? [])];
     return {
