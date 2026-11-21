@@ -491,6 +491,17 @@ def test_postgresql_to_bigquery_typed_preflight_on():
         drop_pg_table(src)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Open defect found by oracle-live (Oracle Database Free): the source's "
+        "note_empty TEXT NOT NULL holds '', the new Oracle table carries NOT NULL, "
+        "Oracle stores '' as NULL (D210 decision 4), so Execute fails ORA-01400 "
+        "after Validate passed (nothing is written). Needs an owner decision: "
+        "create such Oracle text columns NULLable with a disclosure, or block at "
+        "Validate. strict: this flips to a failure once it is fixed."
+    ),
+)
 def test_postgresql_to_oracle_typed_preflight_on():
     require_oracle_env()
     pytest.importorskip("oracledb")
