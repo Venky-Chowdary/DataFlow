@@ -104,7 +104,7 @@ def _calibrated_confidence(
 
 
 from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
-from services.mapping_assignment_policy import pin_decisive_pairs, rescore_pairs  # noqa: E402
+from services.mapping_assignment_policy import pin_decisive_pairs, rescore_pairs, suggestion_policy  # noqa: E402
 
 
 
@@ -1945,6 +1945,9 @@ def map_columns(
             if row.get("assignment_strategy") == "optimal_bipartite_hungarian":
                 row["assignment_strategy"] = "hungarian_with_greedy_patch"
 
+    mappings = suggestion_policy(mappings, target_columns, {
+        "dest_db": dest_db, "src_db": src_db, "source_samples": src_samples, "target_types": tgt_types,
+        "names_only_existing": destination_table_exists is True and not target_schemas})
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
     return _stamp_review_kinds(
         _apply_create_new_risk_stamps(

@@ -1,4 +1,4 @@
-"""Accuracy Track A items 2-3: assignment and suggestion policy around map_columns.
+"""Accuracy Track A items 2-4: assignment and suggestion policy around map_columns.
 
 Names here are invented for the tests (none come from the held-out test split,
 which tests/test_mapping_holdout_leak.py polices).
@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 
 from services.mapping_assignment_policy import (
+    SUGGESTION_FLOOR,
+    _backfill_freed_alternatives,
     inferred_abbreviation,
     name_kind,
     pin_decisive_pairs,
@@ -54,6 +56,23 @@ def test_clear_abbreviation_is_not_traded_for_two_weak_pairs() -> None:
     ))
     assert out["div_cd"]["target"] == "division_code"
     assert out["misc_txt"]["target"] not in {"division_code", "first_name"}
+
+
+def test_freed_column_backfills_a_no_match_row_for_review() -> None:
+    rows = [
+        {"source": "a", "target": "a", "create_new": True, "source_type": "VARCHAR", "confidence": 0.7,
+         "assignment_strategy": "create_compatible_new", "requires_review": True,
+         "alternatives": [{"target": "x", "confidence": 0.82, "reasoning": "r"}, {"target": "y", "confidence": 0.3}]},
+        {"source": "b", "target": "y", "source_type": "VARCHAR", "confidence": 0.9, "requires_review": False},
+    ]
+    out = _backfill_freed_alternatives(rows, {"x", "y"}, {"dest_db": "postgresql", "target_types": {"x": "VARCHAR"}})
+    assert out[0]["target"] == "x" and out[0]["requires_review"] is True
+    assert "create_new" not in out[0]
+    assert out[0]["confidence"] < 0.85
+    # Below the floor or already used: stays a new column.
+    rows[0]["alternatives"][0]["confidence"] = SUGGESTION_FLOOR - 0.01
+    rows[0]["target"], rows[0]["create_new"] = "a", True
+    assert _backfill_freed_alternatives([dict(rows[0])], {"x"}, {})[0]["create_new"] is True
 
 
 # ---------------- item 3: candidates the dictionary lacks ----------------
@@ -110,3 +129,39 @@ def test_email_samples_find_the_only_email_column() -> None:
     assert scores[("notify_addr", "contact_email")][0] >= 0.80
     assert "review required" in scores[("notify_addr", "contact_email")][1]
     assert scores[("notify_addr", "vendor_id")][0] == 0.3
+
+
+# ---------------- item 4: suggestion floor ----------------
+
+
+def test_low_confidence_leftover_is_not_proposed_onto_an_existing_column() -> None:
+    src = _typed([("given_nm", "VARCHAR", ["Ann"]), ("legacy_ref", "VARCHAR", ["Q-9"])])
+    tgt = [{"name": "given_name", "inferred_type": "VARCHAR"}, {"name": "account_id", "inferred_type": "VARCHAR"}]
+    out = _by_source(map_columns(
+        [c["name"] for c in src], [t["name"] for t in tgt], source_schemas=src, target_schemas=tgt,
+        destination_db_type="postgresql", destination_table_exists=True, source_db_type="postgresql",
+    ))
+    leftover = out["legacy_ref"]
+    assert leftover["target"] != "account_id"
+    assert leftover.get("create_new") is True and leftover["requires_review"] is True
+    # The candidate is still offered.
+    assert (leftover.get("alternatives") or [{}])[0].get("target") == "account_id"
+
+
+def test_every_proposal_onto_an_existing_column_meets_the_floor() -> None:
+    from services.mapping_holdout_eval import run_holdout
+
+    rows = run_holdout("dev")
+    low = [(r["source"], r["pred"], r["conf"]) for r in rows if r["pred"] and r["conf"] < SUGGESTION_FLOOR]
+    assert low == []
+
+
+def test_auto_approve_floor_is_at_or_above_the_dev_calibrated_safe_threshold() -> None:
+    from preflight.gates import g4_confidence_floor
+    from services.mapping_holdout_eval import AUTO_APPROVE_FLOOR, calibrate_auto_threshold, run_holdout
+
+    cal = calibrate_auto_threshold(run_holdout("dev"))
+    assert g4_confidence_floor(None) == AUTO_APPROVE_FLOOR == 0.85
+    # The dev data never supports lowering the floor (n is too small for a
+    # 0.95 Wilson bound), so the gate stays where it is.
+    assert cal["recommended"] is None or cal["recommended"] >= AUTO_APPROVE_FLOOR, cal

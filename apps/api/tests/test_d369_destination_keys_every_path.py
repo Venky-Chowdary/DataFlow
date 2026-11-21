@@ -72,8 +72,15 @@ def test_an_unrelated_source_is_never_proposed_onto_a_destination_key(
         destination_table_exists=True,
         source_db_type="postgresql",
     )
-    # Without the key flag the scorer does pair them: this is the defect.
-    assert (source, key) in _pairs(unguarded)
+    # Without the key flag the scorer does pair them: this is the defect. A
+    # low-confidence pair is kept as the first alternative rather than proposed
+    # (suggestion floor), which is still the scorer pairing them.
+    assert (source, key) in _pairs(unguarded) or any(
+        a.get("target") == key
+        for m in unguarded
+        if m["source"] == source
+        for a in (m.get("alternatives") or [])[:1]
+    )
 
     guarded = map_columns(
         [source, "name"],

@@ -38,14 +38,14 @@ SPLITS = ("dev", "test")
 # ``dev`` is where changes are tuned. Auto-approve precision >= 0.98 and
 # no auto-mapped negatives hold on every split.
 HOLDOUT_FLOORS: dict[str, dict[str, float]] = {
-    "test": {"top1": 0.6909, "top3": 0.8909, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
-             "auto_coverage": 0.3636, "proposal_precision": 0.9048},
-    "dev": {"top1": 0.7604, "top3": 0.9688, "auto_precision": 0.973, "auto_coverage": 0.375,
-            "proposal_precision": 0.9125},
-    "all": {"top1": 0.7233, "top3": 0.9272, "auto_precision": 0.98},
+    "test": {"top1": 0.6636, "top3": 0.8909, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
+             "auto_coverage": 0.3636, "proposal_precision": 0.9241},
+    "dev": {"top1": 0.75, "top3": 0.9688, "auto_precision": 0.973, "auto_coverage": 0.375,
+            "proposal_precision": 0.9351},
+    "all": {"top1": 0.7039, "top3": 0.9272, "auto_precision": 0.98},
 }
 HOLDOUT_CEILINGS: dict[str, dict[str, int]] = {
-    "test": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 2},
+    "test": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
     "dev": {"neg_auto": 0, "wrong_auto": 1, "neg_proposed": 1},
     "all": {"neg_auto": 0, "wrong_auto": 1},
 }
@@ -197,3 +197,38 @@ def gate_failures(split: str, overall: dict[str, Any]) -> list[str]:
         if got is None or got > ceiling:
             out.append(f"{split}.{key}={got} > ceiling {ceiling}")
     return out
+
+
+def auto_threshold_curve(rows: Iterable[dict], thresholds: Iterable[float] | None = None) -> list[dict]:
+    """Precision of non-review existing-column proposals at each confidence threshold."""
+    cand = [r for r in rows if r["pred"] and not r["review"]]
+    out = []
+    for t in thresholds or (0.70, 0.75, 0.80, 0.85, 0.90, 0.95):
+        sel = [r for r in cand if r["conf"] >= t]
+        ok = sum(1 for r in sel if r["pred"] == r["gold"])
+        out.append({
+            "threshold": t, "auto_count": len(sel), "correct": ok,
+            "precision": round(ok / len(sel), 4) if sel else None,
+            "wilson_lb": wilson_lower_bound(ok, len(sel)),
+        })
+    return out
+
+
+def calibrate_auto_threshold(rows: Iterable[dict], *, target: float = 0.98, min_lower_bound: float = 0.95) -> dict:
+    """Lowest threshold whose precision meets ``target`` with a Wilson lower bound
+    of at least ``min_lower_bound``; ``None`` when the sample cannot support one.
+
+    Used on the dev split only. The product's auto-approve floor (G4, 0.85) is
+    never lowered from this: a recommendation below it is reported, not applied.
+    """
+    curve = auto_threshold_curve(list(rows), [round(0.70 + 0.01 * i, 2) for i in range(30)])
+    safe = [c for c in curve if c["precision"] is not None and c["precision"] >= target]
+    supported = [c for c in safe if (c["wilson_lb"] or 0) >= min_lower_bound]
+    unsafe = [c["threshold"] for c in curve if c["precision"] is not None and c["precision"] < target]
+    return {
+        "target_precision": target,
+        "recommended": supported[0]["threshold"] if supported else None,
+        "lowest_meeting_target": safe[0]["threshold"] if safe else None,
+        "highest_unsafe": max(unsafe) if unsafe else None,
+        "curve": curve,
+    }

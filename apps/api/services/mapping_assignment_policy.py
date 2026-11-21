@@ -13,17 +13,24 @@ the dev split of the held-out set (tests/fixtures/mapping_holdout_v1.json).
   Abbreviations it has no dictionary entry for (``dsch_dt`` -> ``discharge_date``,
   ``los`` -> ``length_of_stay``) and value patterns in the source samples
   (an email-shaped column onto the only email column). Inferred pairs always require review.
+* :func:`suggestion_policy`: one confidence line (0.70) between "suggest this
+  existing column" and "no match, plan a new column", whichever path produced
+  the row.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Any, Callable
 
 # A pair is decisive when it is the best for its source and for its
 # destination by at least this margin, and scores at least this much.
 DECISIVE_MIN_SCORE = 0.75
 DECISIVE_MARGIN = 0.05
+# Review suggestions below this confidence are not shown as the mapping: the
+# row becomes "no match" with the candidate kept first in its alternatives.
+# Dev split: proposals under 0.70 were right 1 time in 6; 0.70-0.72, 6 in 9.
+SUGGESTION_FLOOR = 0.70
 INFERRED_ABBREVIATION_SCORE = 0.80
 VALUE_PATTERN_MATCH_SCORE = 0.80
 REVIEW_TAG = "review required"
@@ -260,3 +267,153 @@ def rescore_pairs(
                     INFERRED_ABBREVIATION_SCORE,
                     f"Inferred abbreviation of {tgt} — {REVIEW_TAG}",
                 )
+
+
+# --------------------------------------------------------------------------
+# Suggestion policy
+# --------------------------------------------------------------------------
+
+_KEEP_STRATEGIES = frozenset({
+    "same_name_existing", "identity_passthrough", "pending_dest_schema", "create_compatible_new",
+})
+
+
+def _no_match_row(row: dict[str, Any], ctx: dict[str, Any], taken: set[str]) -> dict[str, Any]:
+    """The row the mapper emits when a source has no destination column."""
+    from services.decision_kernel import create_new_mapping_target_type, ddl_type
+    from services.semantic_mapper import _semantic_form, create_new_target_name
+
+    source = row["source"]
+    src_type = row.get("source_type") or "VARCHAR"
+    dest_db = ctx.get("dest_db") or ""
+    candidate = source.strip() or _semantic_form(source)
+    if candidate.lower() in taken:
+        sem = _semantic_form(source)
+        candidate = sem if sem.lower() not in taken else candidate
+    if candidate.lower() in taken:
+        base = re.sub(r"[^A-Za-z0-9_]+", "_", candidate).strip("_") or "field"
+        candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
+    why = (
+        f"Best existing column {row['target']} scored {row['confidence']:.2f}, below the "
+        f"{SUGGESTION_FLOOR:.2f} suggestion floor — kept as the first alternative, not proposed"
+    )
+    base_row = {
+        "source": source,
+        "semantic_name": _semantic_form(source),
+        "confidence": SUGGESTION_FLOOR,
+        "user_override": False,
+        "source_type": src_type,
+        "alternatives": row.get("alternatives") or [],
+        "score_gap": 0.0,
+        "requires_review": True,
+        "create_new": False,
+    }
+    if ctx.get("names_only_existing"):
+        return {
+            **base_row,
+            "target": create_new_target_name(source),
+            "confidence": 0.55,
+            "reasoning": f"{why}. Destination column types were not loaded — retry introspect.",
+            "target_type": "",
+            "assignment_strategy": "pending_dest_schema",
+        }
+    native = ddl_type(dest_db, src_type) if dest_db else src_type
+    return {
+        **base_row,
+        "target": candidate,
+        "reasoning": (
+            f"{why}. No confident destination column — map to a new field "
+            f"(create/ADD as {native}); do not coerce into incompatible DDL"
+        ),
+        "target_type": create_new_mapping_target_type(
+            src_type, dest_db, samples=(ctx.get("source_samples") or {}).get(source),
+            source_db=ctx.get("src_db") or "",
+        ),
+        "assignment_strategy": "create_compatible_new",
+        "create_new": True,
+    }
+
+
+def suggestion_policy(
+    mappings: list[dict[str, Any]],
+    target_columns: list[str],
+    ctx: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Apply the suggestion floor, then let freed columns back-fill "no match" rows."""
+    tset = set(target_columns)
+    return _backfill_freed_alternatives(hide_low_suggestions(mappings, target_columns, ctx), tset, ctx)
+
+
+def hide_low_suggestions(
+    mappings: list[dict[str, Any]],
+    target_columns: list[str],
+    ctx: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Hide review suggestions under :data:`SUGGESTION_FLOOR`.
+
+    A proposal onto an existing column that the mapper itself rates below the
+    floor is noise in the review queue (Hungarian leftovers such as
+    ``etl_batch_id`` -> ``first_name``). It becomes the same "no match" row the
+    mapper emits when nothing fits, with the candidate first in its
+    alternatives, so an operator can still pick it.
+    """
+    tset = set(target_columns)
+    taken = {t.lower() for t in target_columns} | {str(m.get("target") or "").lower() for m in mappings}
+    out = []
+    for row in mappings:
+        tgt = row.get("target")
+        if (
+            tgt in tset
+            and not row.get("create_new")
+            and not row.get("user_override")
+            and row.get("assignment_strategy") not in _KEEP_STRATEGIES
+            and float(row.get("confidence") or 0.0) < SUGGESTION_FLOOR
+            and not str(row.get("reasoning") or "").startswith("Exact")
+        ):
+            new = _no_match_row(row, ctx, taken)
+            taken.add(str(new["target"]).lower())
+            out.append(new)
+        else:
+            out.append(row)
+    return out
+
+
+def _backfill_freed_alternatives(
+    rows: list[dict[str, Any]], tset: set[str], ctx: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """A "no match" row whose first alternative is a free existing column at or
+    above the floor proposes that column for review instead of a new one."""
+    from services.semantic_mapper import _calibrated_confidence, _scored_dest_type
+
+    used = {r.get("target") for r in rows if r.get("target") in tset}
+    order = sorted(
+        (i for i, r in enumerate(rows) if r.get("create_new") and r.get("alternatives")),
+        key=lambda i: -float(rows[i]["alternatives"][0].get("confidence") or 0.0),
+    )
+    for i in order:
+        row = rows[i]
+        alts = row["alternatives"]
+        best = alts[0]
+        score = float(best.get("confidence") or 0.0)
+        tgt = best.get("target")
+        if tgt not in tset or tgt in used or score < SUGGESTION_FLOOR:
+            continue
+        if row.get("assignment_strategy") == "identity_passthrough":
+            continue
+        gap = round(max(score - (float(alts[1].get("confidence") or 0.0) if len(alts) > 1 else 0.0), 0.0), 3)
+        used.add(tgt)
+        rows[i] = {
+            **{k: v for k, v in row.items() if k not in ("create_new", "semantic_name", "create_new_risks")},
+            "target": tgt,
+            "confidence": _calibrated_confidence(score, score_gap=gap, requires_review=True),
+            "reasoning": f"{best.get('reasoning')} · freed existing column preferred over a new one — {REVIEW_TAG}",
+            "assignment_strategy": "freed_alternative_review",
+            "target_type": _scored_dest_type(
+                row.get("source_type") or "VARCHAR",
+                (ctx.get("target_types") or {}).get(tgt, "VARCHAR"),
+                ctx.get("dest_db") or "",
+            ),
+            "score_gap": gap,
+            "requires_review": True,
+        }
+    return rows

@@ -192,7 +192,7 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
         ),
         # Floors mirror services.mapping_holdout_eval.HOLDOUT_FLOORS["test"].
         "floors": {
-            "top1": 0.6909,
+            "top1": 0.6636,
             "top3": 0.8909,
             "auto_precision": 0.98,
             "neg_auto_zero": 1,
