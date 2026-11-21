@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from collections.abc import Callable
 from typing import Any
 
@@ -149,6 +150,7 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         _endpoints,
         key_columns_of,
         mappings_of,
+        protected_targets,
         request_of,
         table_name_of,
         target_to_source,
@@ -178,6 +180,10 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         "mappings": mappings,
         "key_columns": [t2s.get(k, k) for k in key_targets],
         "error_policy": str(request_of(job).get("error_policy") or "quarantine"),
+        # Values of these never reach the job document (examples, causes, keys of a protected key).
+        "protected": sorted(str(c).lower() for c in protected_targets(job)),
+        "key_protected": any(str(k).lower() in {str(c).lower() for c in protected_targets(job)}
+                             for k in key_targets),
     }, ""
 
 
@@ -475,6 +481,11 @@ def _run(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: b
     plan = plan_for(spec)
     opener = side_opener(spec)
     cfg = config or ScanConfig(keys_stored_cap=2000, max_wall_seconds=WALL_SECONDS)
+    cfg = replace(cfg, protected=tuple(spec.get("protected") or ()))
+    if spec.get("key_protected"):
+        # The key itself is protected: no key value is stored; rows are counted, not named.
+        # Hash buckets (mode H) keep no key value in the queue either, unlike key-range bounds.
+        cfg = replace(cfg, keys_stored_cap=0, examples_cap=0, mode="H")
     if resume:
         scan = ParityScan.resume(scan_id, store=store, open_side=opener, plan=plan)
     else:

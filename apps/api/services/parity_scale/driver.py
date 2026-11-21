@@ -75,11 +75,17 @@ class ScanConfig:
     spill_dir: str | None = None
     #: Run each statement on both sides at once (one connection per side).
     parallel_sides: bool = True
+    #: Target columns whose values must never be stored (masked, hashed, redacted
+    #: or omitted by the run): examples and causes keep the column, never a value.
+    protected: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ScanConfig":
         fields = cls.__dataclass_fields__
-        return cls(**{k: v for k, v in (data or {}).items() if k in fields})
+        values = {k: v for k, v in (data or {}).items() if k in fields}
+        if "protected" in values:
+            values["protected"] = tuple(str(c).lower() for c in values["protected"] or ())
+        return cls(**values)
 
 
 SideFactory = Callable[[str, TablePlan], Side]
@@ -780,8 +786,8 @@ class ParityScan:
         if shape == "multiset":
             diff["missing"] += result.missing
             diff["extra"] += result.extra
-            self.state["examples"]["missing_content"] = result.missing_examples
-            self.state["examples"]["extra_content"] = result.extra_examples
+            self.state["examples"]["missing_content"] = [self._masked(r) for r in result.missing_examples]
+            self.state["examples"]["extra_content"] = [self._masked(r) for r in result.extra_examples]
             self.state["rows"].update(source=result.rows_source, destination=result.rows_destination,
                                       level0_complete=True)
             return
@@ -801,6 +807,23 @@ class ParityScan:
         if extra_unnamed > 0:
             diff["changed"] += extra_unnamed
             diff["keys_capped"] = True
+
+    # protected values ---------------------------------------------------------------------------
+    def _is_protected(self, column: str) -> bool:
+        return str(column).lower() in self.config.protected
+
+    def _masked(self, values: Sequence[Any]) -> list[Any]:
+        """A row of compared-column values with every protected value replaced (never stored raw)."""
+        cols = self.plan.compared_columns
+        return [
+            "protected" if i < len(cols) and self._is_protected(cols[i].target) else v
+            for i, v in enumerate(values)
+        ]
+
+    def _safe_cause(self, column: str, cause: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_protected(column):
+            return cause
+        return {**cause, "detail": "A protected column: its values are never shown or stored."}
 
     # judge ------------------------------------------------------------------------------------
     def _queue_judge(self) -> None:
@@ -844,7 +867,8 @@ class ParityScan:
             else:
                 judge["unexplained_rows"] += 1
             by_column = judge.setdefault("by_column", {})
-            for cell in verdict.cells:
+            cells = [{**c, "cause": self._safe_cause(c["column"], c["cause"])} for c in verdict.cells]
+            for cell in cells:
                 col = cell["column"]
                 cause = cell["cause"]
                 code = cause.get("code") or "unexplained"
@@ -859,7 +883,7 @@ class ParityScan:
                 if len(slot["keys"]) < 20:
                     slot["keys"].append(text)
             if len(judge["examples"]) < self.config.examples_cap:
-                judge["examples"].append({"key": text, "cells": verdict.cells})
+                judge["examples"].append({"key": text, "cells": cells})
 
     def _examples(self, _item: dict[str, Any]) -> None:
         from services.parity_scale.judge import wire_text
@@ -875,7 +899,7 @@ class ParityScan:
             except UnitTimeout:
                 continue
             self.state["examples"][f"{name}_content"] = [
-                [wire_text(v) for v in values] for _h, values in rows
+                self._masked([wire_text(v) for v in values]) for _h, values in rows
             ]
 
     # the queue's tail: judge after every unit is merged ---------------------------------------------

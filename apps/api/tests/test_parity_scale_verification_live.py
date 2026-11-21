@@ -210,25 +210,8 @@ def test_faults_are_named_explored_and_repaired_by_the_reviewer(tables) -> None:
     assert _report(job_id)["verdict"] == "proven"
 
 
-def test_protected_columns_never_show_a_value(tables) -> None:
-    from services.mongodb_service import get_mongodb_service
-    from services.parity_scale import explorer
-
-    src, dst = tables
-    _sql(f"UPDATE \"{dst}\" SET name = 'leak?' WHERE id = 7")
-    job_id = _job(src, dst)
-    job = get_mongodb_service().get_job(job_id)
-    job["transfer_request"]["mappings"][1]["transform"] = "mask_pii"
-    get_mongodb_service().update_job_fields(job_id, {"transfer_request": job["transfer_request"]})
-    _verify(job_id, force=True)
-    job = get_mongodb_service().get_job(job_id)
-    for row in explorer.values(job, dst)["rows"]:
-        for cell in row["cells"]:
-            if cell["column"] == "name":
-                assert cell["source"] == cell["destination"] == "protected"
-    repair = explorer.repair_sql(job, dst)["sql"]
-    assert "-- Protected columns are left out: name." in repair
-    assert '"name" =' not in repair and "leak?" not in repair
+# Protected columns: tests/test_parity_scale_protected_live.py (rows that really differ,
+# the stored job document and the job API payload are inspected).
 
 
 def test_keyless_table_is_a_content_match(tables) -> None:
