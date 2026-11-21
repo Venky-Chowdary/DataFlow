@@ -3,9 +3,9 @@ name: AI benchmarks (nightly, live provider)
 # The same suites as the PR job ai-benchmarks, against a real provider: the
 # reference cases of every AI feature, with the invariants still gated
 # (the LLM never changes a mapping decision, fix ids stay within the fix list).
-# It runs only when a provider key secret exists. Without one the key check
-# fails (red) with NOT RUN in the summary: a missing key is never a pass. A key
-# that gets no model answer is NOT RUN too (the script exits 78).
+# It runs only when a provider key secret exists. Without one the live job is
+# skipped at the job level (grey, never green) and the summary and a warning say
+# NOT RUN. A key that gets no model answer fails the live job (the script exits 78).
 # A live Anthropic run also records its answers as cassettes (artifact) so the
 # offline replay can be refreshed from real responses.
 
@@ -44,7 +44,6 @@ jobs:
               echo
               echo "**NOT RUN** — no provider key secret (ANTHROPIC_API_KEY or OPENAI_API_KEY). This is not a pass."
             } >> "$GITHUB_STEP_SUMMARY"
-            exit 78
           fi
 
   live:

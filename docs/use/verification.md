@@ -131,25 +131,31 @@ A flag is evidence with a reason; the witness never changes a mapping, and it
 prefers silence to a wrong flag. "Witnessed" needs agreement beyond chance and
 no other column that matches better. A column with one distinct value proves
 nothing ("Consistent"). A pair the mapping transforms (mask, hash, an
-expression) is "Not comparable". A pair it cannot judge says "No evidence", not
-"passed". Results carry column names and counts, never values.
+expression) is "Not comparable". A destination column that was not read (not
+in the table yet, a name the sampler cannot address as written, or past the
+columns one check reads) is "Not read". A pair it cannot judge says "No
+evidence", not "passed". Results carry column names and counts, never values.
 
 When a job is submitted, the evidence for exactly the mapping and destination
 it runs is frozen onto the job. The Trust Report and the AI decisions ledger
 read only that copy.
 
-Measured on the held-out benchmark (206 matchable columns, 23 tables; not used
-to set thresholds; each table's samples cycled into 20 rows, the destination
-built from the correct mapping):
+A job takes evidence only from the Map session it was submitted from, for its
+own source and destination, at most a day old; the Trust Report says who ran
+the check and when. A flag counts as kept only when someone chose Keep this
+mapping on it; continuing past it is recorded as not reviewed.
 
-- false flags on correct mappings: 0 of 206, keyed and before load;
-- wrong mapper proposals flagged with the destination's rows: 7 of 36;
-- injected swaps caught on both sides: 19 of 399.
+Measured on a synthetic benchmark written for the witness (120 rows per table,
+at least 30 distinct values per column, the destination holding the same rows
+with trailing spaces, other letter case, other number spellings, other time
+zones and a few stale rows): no false flags on the correct mappings, and 20 of
+20 injected swaps flagged on both sides. These are the CI floors.
 
-The recall is low because 203 of the 231 held-out columns carry a single sample
-value, and one value cannot prove or disprove a pair. On the witness's own
-fixtures (60 distinct customers), every swap, unit, date-order and
-email/username case is caught with no false flags. Command:
+The held-out mapping benchmark (206 matchable columns, 23 tables) gives no
+usable witness figures: 203 of its 231 columns carry a single sample value,
+and the destination there is an exact copy, so a pair can only come out
+"consistent". Its false-flag count (0) and swap recall (19 of 399) are
+reported, not claimed. Command:
 `python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
 
 ## Coverage: which comparison ran

@@ -73,23 +73,14 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "true")
 
 
-def _tiny_holdout(path):
-    """Two tables in the committed fixture's format (not the held-out data itself)."""
-    col = lambda n, t, s: {"name": n, "type": t, "samples": s}  # noqa: E731
-    path.write_text(json.dumps({"tables": [
-        {"id": "t1", "source": [col("fn", "VARCHAR", ["Ann", "Bob"]), col("ln", "VARCHAR", ["Kim", "Lo"]),
-                                col("em", "VARCHAR", ["a@x.io", "b@y.io"])],
-         "target": [{"name": "first_name", "type": "VARCHAR"}, {"name": "last_name", "type": "VARCHAR"},
-                    {"name": "email", "type": "VARCHAR"}],
-         "gold": {"fn": "first_name", "ln": "last_name", "em": "email"}},
-    ]}), encoding="utf-8")
-    return path
+SYNTHETIC_HOLDOUT = API_ROOT / "tests" / "fixtures" / "witness" / "holdout_minimal_synthetic.json"
 
 
 @pytest.mark.parametrize("suite", sorted(bench.SUITES))
-def test_replay_meets_its_floors_without_drift(offline, suite, monkeypatch, tmp_path):
-    if suite == "mapping_witness" and not bench.HOLDOUT_PATH.exists():
-        monkeypatch.setattr(bench, "HOLDOUT_PATH", _tiny_holdout(tmp_path / "holdout.json"))
+def test_replay_meets_its_floors_without_drift(offline, suite, monkeypatch):
+    if suite == "mapping_witness":
+        # The held-out gate's mechanics, on a fixture labelled synthetic (no published number comes from it).
+        monkeypatch.setattr(bench, "HOLDOUT_PATH", SYNTHETIC_HOLDOUT)
     result = bench.SUITES[suite](bench.Runner("replay")).as_dict()
     assert result["passed"], json.dumps(result, indent=1)
     assert result["floors"], "a suite with no floor proves nothing"
@@ -130,6 +121,31 @@ def test_a_cassette_never_answers_more_than_it_recorded(offline):
     with anthropic_cassette(tape):
         resp = DataTransferAnthropicProvider().generate("hello")
     assert resp.success is False  # the provider reports the failure; nothing is invented
+
+
+def test_the_script_fails_without_the_holdout_and_passes_with_one(offline, monkeypatch, tmp_path, capsys):
+    """N1: the script itself gates on the held-out fixture (Track A lands it before this branch)."""
+    assert json.loads(SYNTHETIC_HOLDOUT.read_text(encoding="utf-8"))["synthetic"] is True
+    monkeypatch.setattr(bench, "HOLDOUT_PATH", bench.HOLDOUT_PATH)  # main() sets it; restored after the test
+    base = ["run_ai_benchmarks.py", "--suite", "mapping_witness", "--summary", str(tmp_path / "s.md")]
+    monkeypatch.setattr(sys, "argv", [*base, "--holdout", str(tmp_path / "absent.json")])
+    assert bench.main() == 1
+    assert "holdout_present 0" in (tmp_path / "s.md").read_text(encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [*base, "--holdout", str(SYNTHETIC_HOLDOUT)])
+    assert bench.main() == 0
+
+
+def test_witness_floors_come_from_the_noisy_multi_value_fixture(offline, monkeypatch):
+    from helpers import witness_noisy
+
+    for table in witness_noisy.build():
+        for column in table["gold"]:
+            assert len({str(r[column]) for r in table["rows"]}) >= 30, (table["id"], column)
+    monkeypatch.setattr(bench, "HOLDOUT_PATH", SYNTHETIC_HOLDOUT)
+    result = bench.suite_mapping_witness(bench.Runner("replay")).as_dict()
+    assert result["floors"]["noisy_swap_recall"] == 1.0 and result["metrics"]["noisy_swap_recall"] == 1.0
+    assert result["metrics"]["noisy_no_false_flags"] == 1.0
+    assert "holdout_injected_swap_recall" not in result["floors"]
 
 
 def test_a_missing_holdout_fails_the_witness_suite(offline, monkeypatch, tmp_path):
