@@ -14,6 +14,11 @@ Validate (G6) reads the server variable and refuses before anything is written,
 naming the variable and the fixes; upsert, overwrite and append with a declared
 key create PRIMARY KEY (id) and run.
 
+Owner decision D396 / D377 (QA batch 1): on such a server the *source's* key is
+carried on append too, and a keyless source is an approvable surrogate-key gate
+(``g_dest_requires_primary_key``, tests/test_d396_require_primary_key_surrogate_e2e.py);
+``_judge`` below is G6 plus that gate, one Validate verdict.
+
 The live half sets ``SET GLOBAL sql_require_primary_key=ON`` (restored in a
 finally block) on a PRIVATE MySQL only — never the shared server other suites
 use: ``DATAFLOW_TEST_MYSQL_GLOBALS_HOST/_PORT/_USER/_PASSWORD/_ROOT_PASSWORD``
@@ -247,7 +252,8 @@ _MODES = [
     (True, "full_refresh_overwrite", {"primary_key": None}, False),  # source PK carried
     (False, "upsert", {}, False),                    # operator key is the PK
     (False, "incremental_upsert", {"cursor_semantics": "monotonic_sequence"}, False),
-    (True, "full_refresh_append", {"primary_key": None}, True),  # append withholds source key
+    # A forcing server: the source key is carried on append too (D396 decision b).
+    (True, "full_refresh_append", {"primary_key": None}, False),
     (True, "full_refresh_append", {}, False),        # operator key is the PK (8f9963845)
     (True, "scd2", {"cursor_semantics": "modification_timestamp"}, True),  # history table
 ]
@@ -327,6 +333,25 @@ def test_planned_key_is_the_writers_planner_answer():
         assert got == want, (mode, cat, key, policy, got)
 
 
+
+def _judge(**kw):
+    """G6 plus the approvable surrogate-key gate (D396): one Validate verdict."""
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.dest_require_primary_key import require_primary_key_gate
+
+    compatible, issues = evaluate_ddl_compatibility(**kw)
+    gate = require_primary_key_gate(
+        acknowledged=False, destination_table=str(kw.get("destination_table") or ""),
+        dest_db_type=kw["dest_db_type"], destination_config=kw.get("destination_config"),
+        table_exists=kw.get("table_exists"), sync_mode=kw.get("sync_mode"),
+        key_hint=kw.get("contract_primary_key") or "", mappings=kw.get("mappings"),
+        source=kw.get("create_source"),
+    )
+    if gate and gate["status"] == "block":
+        return False, [*issues, gate["message"]]
+    return compatible, issues
+
+
 def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement, options=None):
     from services import dest_require_primary_key as rpk
     from services.ddl_compatibility import evaluate_ddl_compatibility
@@ -353,15 +378,17 @@ def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement, opti
         operator_key_columns=[key_hint] if key_hint else [],
         source_schema_catalog=None, destination_config=destination_config,
     )
-    compatible, issues = evaluate_ddl_compatibility(
+    g6_args = dict(
         mappings=mappings, table_exists=False, dest_connected=True,
         dest_db_type="mysql", allow_create=True, sync_mode=mode,
         destination_table="orders", contract_primary_key=key_hint,
         destination_config=destination_config, create_source=source,
     )
+    evaluate_ddl_compatibility(**g6_args)
     assert probes == [destination_config]
     assert catalogs == ([(source, mappings)] if requirement.variable or requirement.unreadable
                         else [])
+    compatible, issues = _judge(**g6_args)
     return planned, compatible, issues
 
 
@@ -486,7 +513,7 @@ def test_pure_explicit_policy_writer_and_g6_same_inputs(
     monkeypatch.setattr(rpk, "server_requires_primary_key",
                         lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
     monkeypatch.setattr(rpk, "source_catalog_for_create", lambda src, maps: None)
-    compatible, issues = evaluate_ddl_compatibility(
+    compatible, issues = _judge(
         mappings=mappings, table_exists=False, dest_connected=True,
         dest_db_type="mysql", allow_create=True, sync_mode=mode,
         destination_table="orders", contract_primary_key="order_id",
@@ -532,7 +559,7 @@ def test_pure_explicit_policy_missing_key_fails_closed(monkeypatch, mode, policy
         operator_key_columns=[key_hint] if key_hint else [],
         source_schema_catalog=catalog, destination_config=cfg,
     ) == []
-    compatible, issues = evaluate_ddl_compatibility(
+    compatible, issues = _judge(
         mappings=mappings, table_exists=False, dest_connected=True,
         dest_db_type="mysql", allow_create=True, sync_mode=mode,
         destination_table="orders", contract_primary_key=key_hint,
@@ -564,7 +591,7 @@ def test_pure_explicit_append_overrides_upsert_for_create(monkeypatch, mode, opt
         sync_mode=mode, mappings=mappings, operator_key_columns=["order_id"],
         destination_config=cfg,
     ) == []
-    compatible, issues = evaluate_ddl_compatibility(
+    compatible, issues = _judge(
         mappings=mappings, table_exists=False, dest_connected=True,
         dest_db_type="mysql", allow_create=True, sync_mode=mode,
         destination_table="orders", contract_primary_key="order_id", destination_config=cfg,

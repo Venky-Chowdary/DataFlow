@@ -26,6 +26,9 @@ export interface ConfirmOptions {
   tone?: ConfirmTone;
   /** What the confirm will run. Rendered as a definition list, not folded into the message. */
   facts?: ConfirmFact[];
+  /** A second way out beside Cancel (e.g. "Open Transfer Studio"): closes the dialog (resolves false), then runs. */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
 }
 
 export interface AskField {
@@ -140,6 +143,19 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             <Button variant="ghost" size="sm" onClick={() => close(false)}>
               {pending?.cancelLabel || "Cancel"}
             </Button>
+            {pending?.kind === "confirm" && pending.secondaryLabel && pending.onSecondary && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  const run = pending.onSecondary;
+                  close(false);
+                  run?.();
+                }}
+              >
+                {pending.secondaryLabel}
+              </Button>
+            )}
             <Button
               variant={confirmVariant}
               size="sm"

@@ -80,7 +80,24 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
                 )
                 if art.content_hash:
                     found.add(art.content_hash.lower())
+                    # The same decision under every accepted digest (the
+                    # feature/Cleanup and PR #435 interim stamps).
+                    from services.decision_kernel.models import accepted_stamps
+
+                    found.update(accepted_stamps(art))
     return found
+
+
+def decision_hash_for_sync(merged: dict[str, Any]) -> str:
+    """The hash Sync Now must send: the one Validate stored.
+
+    Rebuilding it with empty fingerprints approved a source-type change, a
+    sync_mode change, and an error_policy change. Dest-exists is relaxed in
+    the execute gate, which still requires this hash, the source fingerprint,
+    the sync mode, and the error policy to match. This function does not
+    mint a new hash.
+    """
+    return str(merged.get("approved_decision_artifact_hash") or "").strip().lower()
 
 
 def align_schedule_decision_hash(merged: dict[str, Any]) -> None:

@@ -9,6 +9,7 @@ the write rather than passing it through unproven.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,22 @@ def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
     return {"source_kind": kind, "source_format": fmt}
 
 
+def destination_created_by_plan(request: Any, table_exists: bool | None) -> bool:
+    """True when this plan's CREATE left the live table (ownership comment).
+
+    A pre-existing table does not carry the Datawrap comment, so a retry
+    into someone else's table is not this exception (DW-D407).
+    """
+    if table_exists is not True:
+        return False
+    try:
+        from src.transfer.engine_schema_propagation import _destination_is_managed
+
+        return bool(_destination_is_managed(request))
+    except Exception:
+        return False
+
+
 def _enforce_decision_artifact_once(
     pf: dict | None,
     mappings: list,
@@ -184,6 +201,10 @@ def _enforce_decision_artifact_once(
     source_kind: str = "",
     source_format: str = "",
     source_connector_id: str = "",
+    approved_ddl_identity_hash: str = "",
+    schema_policy: str = "",
+    plan_created_destination: bool = False,
+    request: Any = None,
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -193,8 +214,26 @@ def _enforce_decision_artifact_once(
     """
     from services.decision_kernel import enforce_decision_artifact
 
+    if request is not None:
+        if not approved_ddl_identity_hash:
+            approved_ddl_identity_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+        if not schema_policy:
+            schema_policy = str(getattr(request, "schema_policy", "") or "")
     approved = (approved_decision_artifact_hash or "").strip()
     payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
+    if (
+        request is not None
+        and not plan_created_destination
+        and payload is not None
+        and not str(payload.get("dest_fingerprint") or "")
+    ):
+        # DW-D407 is about a create-new plan only: probe ownership (a
+        # destination round trip) just for that, not on every Execute.
+        plan_created_destination = destination_created_by_plan(
+            request, destination_table_exists
+        )
     if pf and not payload and not approved:
         proof_bundle = pf.get("proof_bundle") or {}
         stamped = proof_bundle.get("decision_artifact")
@@ -294,6 +333,10 @@ def _enforce_decision_artifact_once(
         destination_table_exists=destination_table_exists,
         dest_column_names=dest_names,
         source_column_names=source_names,
+        approved_ddl_identity_hash=approved_ddl_identity_hash,
+        schema_policy=schema_policy,
+        live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
+        plan_created_destination=bool(plan_created_destination),
     )
     return err, (art.to_dict() if art is not None else None)
 

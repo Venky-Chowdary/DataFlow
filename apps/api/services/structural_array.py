@@ -609,3 +609,49 @@ def parent_key_hint_from_schemas(
         if cand in names:
             return [cand]
     return None
+
+
+#: InnoDB index key limit (bytes) and utf8mb4's widest character.
+_INNODB_KEY_BYTES = 3072
+_UTF8MB4_BYTES = 4
+
+
+def child_table_key_ddl(
+    columns: list[str],
+    ddl_types: list[str],
+    parent_key_count: int,
+    *,
+    quote: str = "`",
+    forced_primary_key: bool = False,
+) -> tuple[str, int]:
+    """``(column defs + key clause, max parent-key characters)`` for a child table.
+
+    The key is the parent key columns plus the ordinal: one row per array
+    element, so an at-least-once replay cannot duplicate it. Normally a
+    ``UNIQUE`` key. On a MySQL-family server that forces a PRIMARY KEY
+    (``sql_require_primary_key`` / ``innodb_force_primary_key``) a keyless
+    CREATE is refused (3750 / 1173), so the same columns are the PRIMARY KEY,
+    declared NOT NULL (a parent row with a NULL key is already refused). A
+    PRIMARY KEY cannot be a TEXT column, so each parent key column is a
+    VARCHAR sized to fit InnoDB's 3072-byte key; the second value is that
+    width (0 when unchanged), and a longer key is refused before any write.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    key_n = max(1, int(parent_key_count or 1)) + 1
+    types = list(ddl_types)
+    width = 0
+    if forced_primary_key:
+        width = (_INNODB_KEY_BYTES - 8) // (_UTF8MB4_BYTES * max(1, key_n - 1))
+        for i in range(min(key_n - 1, len(types))):
+            if str(types[i]).strip().upper() in {"TEXT", "LONGTEXT", "MEDIUMTEXT", "VARCHAR"}:
+                types[i] = f"VARCHAR({width})"
+        types = [
+            f"{t} NOT NULL" if i < key_n else t for i, t in enumerate(types)
+        ]
+    defs = ", ".join(
+        f"{quote_sql_identifier(c, quote)} {t}" for c, t in zip(columns, types)
+    )
+    key_sql = ", ".join(quote_sql_identifier(c, quote) for c in columns[:key_n])
+    clause = "PRIMARY KEY" if forced_primary_key else "UNIQUE"
+    return f"{defs}, {clause} ({key_sql})", width

@@ -1908,6 +1908,9 @@ def coerce_bitstring_wire(
         return bound
     bits: str
     if isinstance(value, (bytes, bytearray, memoryview)):
+        # Raw bytes are MSB-first bits. ASCII ``b'01'`` is the integer 12337
+        # (or 49 for one byte), not the bit text ``"01"``. PostgreSQL bit/varbit
+        # arrives as a str of 0/1 digits; only that form is bit text.
         bits = "".join(f"{b:08b}" for b in bytes(value))
     else:
         text = str(value).strip()
@@ -1928,6 +1931,9 @@ def coerce_bitstring_wire(
                     f"bitstring length {len(bits)} exceeds BIT VARYING({width})"
                 )
         elif len(bits) != width:
+            # Never left-pad a short value into a fixed BIT(n) (MySQL included):
+            # '1010' and '001010' are different bit strings. A varying source
+            # lands in MySQL as 0/1 digit text instead (D320, type_ddl_specialty).
             raise ValueError(
                 f"bitstring length {len(bits)} does not match BIT({width})"
             )

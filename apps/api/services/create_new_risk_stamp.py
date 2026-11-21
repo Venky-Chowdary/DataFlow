@@ -33,6 +33,46 @@ _INFORMATIONAL_WARN_KINDS = frozenset({
 })
 
 
+def _lift_lossless_uuid_wire(
+    row: dict,
+    source_type: str,
+    target_type: str,
+    dest_db: str,
+    locking_risks: list,
+) -> None:
+    """PG UUID → VARCHAR(36) on an engine with no UUID type is exact (DW-D72).
+
+    The carrier round-trips every canonical UUID. Capping it near 0.70 and
+    forcing review made G4 refuse a column the operator cannot remap. It is
+    stamped like any equivalent create-new (the identity band), and the
+    scorer grades it as the same-type identity it is
+    (``mapping_quality.is_exact_value_carrier``) — not above it.
+    """
+    if locking_risks:
+        return
+    from services.dest_dialect_facts import dest_has_no_uuid_type
+    from services.type_system import normalize_logical_type, uuid_exact_wire_carrier
+
+    if normalize_logical_type(source_type) != "uuid":
+        return
+    if not uuid_exact_wire_carrier(target_type):
+        return
+    if not dest_has_no_uuid_type(dest_db):
+        return
+    fid = str(row.get("fidelity") or "").strip().lower()
+    if fid in {"lossy_cast", "lossy", "mutate", "truncate", "precision_collapse"}:
+        return
+    row["requires_review"] = False
+    row["mapping_class"] = "equivalent_create_new"
+    try:
+        base = float(row.get("confidence") or 0.95)
+    except (TypeError, ValueError):
+        base = 0.95
+    row["confidence"] = round(min(0.97, max(base, 0.95)), 3)
+    if fid in {"", "cast"}:
+        row["fidelity"] = "preserve"
+
+
 def create_new_risk_locks_review(risk: dict) -> bool:
     """True when a create-new chip must hold Map/Validate until the operator acts.
 
@@ -307,5 +347,6 @@ def apply_create_new_risk_stamps(
                     hard_cap=0.84,
                     fidelity=fid,
                 )
+        _lift_lossless_uuid_wire(row, src, str(row.get("target_type") or tgt), db, locking_risks)
         out.append(row)
     return out

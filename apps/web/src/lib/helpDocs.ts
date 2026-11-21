@@ -788,7 +788,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             { n: 4, label: "New schedule", x: "91%", y: "11%" },
           ],
         },
-        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page saves cadence only and stays paused until the route has an approved mapping.",
+        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page is planned the same way: Datawrap maps the columns and runs Validate for the route, and saves the schedule only if that plan would run (otherwise it shows the blockers). A schedule saved earlier without mappings shows **Plan mappings**; Run now on it explains what to do instead of starting a job.",
       },
       {
         id: "create-pipeline",
@@ -816,7 +816,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Set the cadence and sync mode",
             pin: "Cadence → Preset | Cron  ·  Sync mode",
-            body: "In **Cadence** choose **Preset** or **Cron**. The presets are **Hourly**, **Daily**, and **Weekly**. They count from the last run, so Daily means about 24 hours after the previous run, not a fixed time of day. For a fixed time use **Cron** with a timezone, for example `10 10 * * *` for 10:10 every day.\n\nIn **Sync mode** pick how rows move: **Full append**, **Full overwrite**, **Incremental append**, **Incremental deduped**, **CDC**, **SCD Type 2**, or **Mirror**. Which ones are offered depends on the two connectors. Upsert, SCD Type 2, and Mirror need a **Primary key**; incremental modes need a **Cursor column**.",
+            body: "In **Cadence** choose **Preset** or **Cron**. The presets are **Hourly**, **Daily**, and **Weekly**. They count from the last run, so Daily means about 24 hours after the previous run, not a fixed time of day. For a fixed time use **Cron** with a timezone, for example `10 10 * * *` for 10:10 every day.\n\nIn **Sync mode** pick how rows move: **Full append**, **Full overwrite**, **Incremental append**, **Incremental deduped**, **CDC**, **SCD Type 2**, or **Mirror**. Which ones are offered depends on the two connectors. The **Primary key** is required unless **Duplicate policy** is **Append**; for SCD Type 2 and Mirror an empty key uses the source table's primary key, and Validate refuses when there is none. Incremental append and deduped advance on a **Cursor column**: a new schedule's plan picks the table's single change-time column or tells you to name one, and an existing schedule needs it filled in. CDC needs no cursor column (the change log is its position). The disabled **Save** button says what is still missing.",
             figure: {
               src: WORKSPACE_SHOT.schedulesCadenceMode,
               alt: "Cadence presets Hourly, Daily, Weekly and the sync mode tiles",

@@ -2558,6 +2558,13 @@ export async function deleteSchedule(id: string): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete schedule");
 }
 
+/** Plan a mapping-less schedule server-side (mapping + Validate) and arm it. */
+export async function planScheduleMappings(id: string): Promise<PipelineSchedule> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}/plan-mappings`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not plan this schedule's mappings"));
+  return res.json();
+}
+
 export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/run`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to run schedule"));

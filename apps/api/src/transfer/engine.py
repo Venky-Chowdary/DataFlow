@@ -2092,6 +2092,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -3529,6 +3530,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -4682,6 +4684,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(

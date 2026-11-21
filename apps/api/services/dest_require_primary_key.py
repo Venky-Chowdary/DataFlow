@@ -51,11 +51,26 @@ class PrimaryKeyRequirement:
 
     variable: str = ""
     unreadable: str = ""
+    #: ``SELECT VERSION()`` of the server (``8.0.36``, ``10.11.14-MariaDB-...``).
+    server_version: str = ""
 
 
 def _mysql_errno(exc: BaseException) -> int | None:
     args = getattr(exc, "args", None) or ()
     return args[0] if args and isinstance(args[0], int) else None
+
+
+#: Seconds a read answer is reused: Validate asks from G6 and from the
+#: surrogate-key gate of the same run; a variable change is seen next Validate.
+_PROBE_TTL_SECONDS = 60.0
+_probe_cache: dict[tuple, tuple[float, PrimaryKeyRequirement]] = {}
+
+
+def _probe_key(cfg: Mapping[str, Any]) -> tuple:
+    return tuple(
+        str(cfg.get(k) or "")
+        for k in ("host", "port", "database", "username", "connection_string")
+    )
 
 
 def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequirement:
@@ -64,9 +79,21 @@ def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequ
     Reads ``@@<variable>`` (the session value where the variable has one, which is
     what this account's CREATE obeys). A variable this server does not have
     (1193) is not a requirement; any other failure is reported as unreadable.
+    A read answer is reused for ``_PROBE_TTL_SECONDS``; an unreadable one never.
     """
     if not cfg:
         return PrimaryKeyRequirement(unreadable="no destination connection settings")
+    key = _probe_key(cfg)
+    hit = _probe_cache.get(key)
+    if hit and time.monotonic() - hit[0] < _PROBE_TTL_SECONDS:
+        return hit[1]
+    answer = _read_requirement(cfg)
+    if not answer.unreadable:
+        _probe_cache[key] = (time.monotonic(), answer)
+    return answer
+
+
+def _read_requirement(cfg: Mapping[str, Any]) -> PrimaryKeyRequirement:
     import pymysql
 
     from connectors.mysql_conn import get_connection
@@ -103,12 +130,38 @@ def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequ
         return PrimaryKeyRequirement(unreadable="could not connect")
     try:
         with conn.cursor() as cur:
+            version = ""
+            try:
+                cur.execute("SELECT VERSION()")
+                row = cur.fetchone()
+                version = str(row[0]) if row else ""
+            except pymysql.err.MySQLError as exc:
+                logger.debug("require-primary-key probe: VERSION() unreadable: %s", exc)
             for variable in _REQUIRE_PK_VARIABLES:
                 value = None
                 try:
-                    cur.execute(f"SELECT @@{variable}")
-                    row = cur.fetchone()
-                    value = row[0] if row else None
+                    # Session is what this connection's CREATE obeys. GLOBAL is
+                    # what the next connection still enforces when a session
+                    # read comes back off (Aiven). Either ON is a requirement.
+                    # A privilege error on GLOBAL falls back to the session value.
+                    try:
+                        cur.execute(f"SELECT @@{variable}, @@GLOBAL.{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    except pymysql.err.MySQLError as global_exc:
+                        if _mysql_errno(global_exc) == _ER_UNKNOWN_SYSTEM_VARIABLE:
+                            raise
+                        cur.execute(f"SELECT @@{variable}")
+                        row = cur.fetchone()
+                        values = list(row or ())
+                    value = next(
+                        (
+                            item
+                            for item in values
+                            if item is not None and str(item).strip().upper() in {"1", "ON", "TRUE"}
+                        ),
+                        values[0] if values else None,
+                    )
                 except pymysql.err.MySQLError as exc:
                     if _mysql_errno(exc) != _ER_UNKNOWN_SYSTEM_VARIABLE:
                         logger.warning("require-primary-key probe: %s unreadable: %s",
@@ -117,8 +170,8 @@ def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequ
                             unreadable=f"{variable} unreadable ({_mysql_errno(exc) or type(exc).__name__})"
                         )
                 if value is not None and str(value).strip().upper() in {"1", "ON", "TRUE"}:
-                    return PrimaryKeyRequirement(variable=variable)
-        return PrimaryKeyRequirement()
+                    return PrimaryKeyRequirement(variable=variable, server_version=version)
+        return PrimaryKeyRequirement(server_version=version)
     finally:
         conn.close()
 
@@ -130,8 +183,13 @@ def planned_create_primary_key(
     operator_key_columns: list[str] | None,
     source_schema_catalog: Any = None,
     destination_config: Mapping[str, Any] | None = None,
+    carry_source_keys: bool = False,
 ) -> list[str]:
     """The PRIMARY KEY the writer's CREATE TABLE would declare on MySQL, or ``[]``.
+
+    ``carry_source_keys`` asks what the writer declares on a server that forces
+    a PRIMARY KEY: there it carries the source's own key on every write mode
+    (:func:`writer_forces_source_key`), so a keyed source is never refused.
 
     Asked of the writer's own planner (``schema_fidelity.resolve_create_fidelity_plan``)
     with the inputs the write path gives it (``stream.py`` / ``stream_write.py``):
@@ -184,7 +242,7 @@ def planned_create_primary_key(
     key_inputs = create_key_inputs(
         write_mode=write_mode,
         conflict_columns=keys if mode != "scd2" else None,
-        carry_source_keys=is_overwrite_sync(mode),
+        carry_source_keys=is_overwrite_sync(mode) or (carry_source_keys and not rows_allowed),
         duplicates_allowed=rows_allowed,
     )
     carry = mode != "scd2" and key_inputs["carry_keys"]
@@ -241,7 +299,106 @@ def source_catalog_for_create(source: Mapping[str, Any] | None, mappings: list[d
         return None
 
 
-def keyless_create_refusal(
+#: The column Datawrap adds, with approval, to a keyless table on a server that
+#: forces a PRIMARY KEY. It is not a source column: parity never compares it.
+SURROGATE_KEY_COLUMN = "_dw_row_id"
+#: MySQL 8.0.23 added INVISIBLE columns (``SELECT *`` does not return them).
+_MYSQL_INVISIBLE_SINCE = (8, 0, 23)
+
+
+def _is_mariadb(version: str) -> bool:
+    return "mariadb" in (version or "").lower()
+
+
+def _mysql_version(version: str) -> tuple[int, ...]:
+    import re
+
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", (version or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else ()
+
+
+def surrogate_key_column_sql(server_version: str = "") -> str:
+    """The column definition of Datawrap's surrogate key on this server.
+
+    ``INVISIBLE`` on MySQL 8.0.23+ so ``SELECT *`` and the operator's own
+    queries do not see it; a plain column on MariaDB and older MySQL.
+    """
+    invisible = (
+        not _is_mariadb(server_version)
+        and bool(_mysql_version(server_version))
+        and _mysql_version(server_version) >= _MYSQL_INVISIBLE_SINCE
+    )
+    return (
+        f"`{SURROGATE_KEY_COLUMN}` BIGINT NOT NULL"
+        + (" INVISIBLE" if invisible else "")
+        + " AUTO_INCREMENT PRIMARY KEY"
+    )
+
+
+def server_forces_primary_key_on(cursor: Any) -> tuple[bool, str]:
+    """``(forced, server_version)`` read on the writer's own connection.
+
+    The writer asks at CREATE time with the cursor it creates on, so it obeys
+    exactly the session the CREATE runs in. A variable this server does not
+    have is not a requirement; any other failure reads as not forced (the
+    CREATE then reports the server's own answer).
+    """
+    version = ""
+    try:
+        cursor.execute("SELECT VERSION()")
+        row = cursor.fetchone()
+        version = str((row[0] if not isinstance(row, dict) else next(iter(row.values()))) or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("VERSION() unreadable: %s", exc)
+    for variable in _REQUIRE_PK_VARIABLES:
+        try:
+            cursor.execute(f"SELECT @@{variable}")
+            row = cursor.fetchone()
+        except Exception:  # noqa: BLE001 — 1193: this server has no such variable
+            continue
+        value = (row[0] if not isinstance(row, dict) else next(iter(row.values()))) if row else None
+        if value is not None and str(value).strip().upper() in {"1", "ON", "TRUE"}:
+            return True, version
+    return False, version
+
+
+def mysql_create_primary_key_message(exc: BaseException, *, table: str = "") -> str | None:
+    """Turn MySQL 3750 / MariaDB 1173 into the plan-time finding, or None otherwise.
+
+    Validate reads the server variable first and either carries the source key,
+    adds the approved surrogate, or blocks (``g_dest_requires_primary_key`` /
+    G6). This is the backstop when that probe did not run, or the operator did
+    not approve the surrogate, and CREATE itself is refused.
+    """
+    errno = _mysql_errno(exc)
+    if errno not in (3750, 1173):  # MySQL sql_require_primary_key / MariaDB innodb_force_primary_key
+        return None
+    name = table or "the destination table"
+    return (
+        f"The destination server refused CREATE TABLE {name} without a PRIMARY KEY "
+        f"({'MySQL error 3750, sql_require_primary_key' if errno == 3750 else 'MariaDB error 1173, innodb_force_primary_key'}). "
+        "Re-run Validate: it reads that setting and either carries the source key or "
+        f"discloses Datawrap's row key {SURROGATE_KEY_COLUMN} for your approval. Or run "
+        "upsert with a key, or create the table yourself with a primary key."
+    )
+
+
+@dataclass(frozen=True)
+class KeylessCreateDecision:
+    """What Validate says about a CREATE on a server that forces a PRIMARY KEY.
+
+    ``kind``: ``""`` nothing to say; ``refuse`` a G6 refusal (``message``);
+    ``surrogate`` a keyless source that Datawrap can key only by adding
+    ``SURROGATE_KEY_COLUMN`` — an approvable DDL change (``column_sql``).
+    """
+
+    kind: str = ""
+    message: str = ""
+    variable: str = ""
+    column_sql: str = ""
+
+
+def keyless_create_decision(
     *,
     dest_db_type: str,
     destination_config: Mapping[str, Any] | None,
@@ -251,71 +408,149 @@ def keyless_create_refusal(
     key_hint: str | None = None,
     mappings: list[dict[str, Any]] | None = None,
     source: Mapping[str, Any] | None = None,
-) -> str | None:
-    """G6 issue text when this run would CREATE a keyless table the server refuses.
+) -> KeylessCreateDecision:
+    """Judge a CREATE this run would issue on a server that may force a key.
 
-    Any write mode that creates the destination is asked the same question —
-    will the writer's CREATE declare a PRIMARY KEY? — append (keys withheld on
-    purpose), overwrite or upsert of a source without a key, a query source (no
-    catalog key), SCD2 history. An existing table is not re-created.
+    Owner decision (QA D396 / D377): a source key is carried on every write
+    mode there (the writer does the same, :func:`server_forces_primary_key_on`);
+    a keyless source gets Datawrap's surrogate ``_dw_row_id`` only after the
+    operator approves the disclosed DDL — never silently. SCD2 history and an
+    unreadable variable stay refusals.
     """
     from services.sync_cursor import normalize_sync_mode
     from src.transfer.engine_family import family_or_kind
 
     if table_exists is not False or not destination_config:
-        return None
+        return KeylessCreateDecision()
     if family_or_kind(dest_db_type or "") != "mysql":
-        return None
+        return KeylessCreateDecision()
     mode = normalize_sync_mode(str(sync_mode or ""), default="")
     keys = [k.strip() for k in str(key_hint or "").split(",") if k.strip()]
     requirement = server_requires_primary_key(destination_config)
     if not requirement.variable and not requirement.unreadable:
-        return None
+        return KeylessCreateDecision()
     catalog = source_catalog_for_create(source, mappings) if mode != "scd2" else None
-    if planned_create_primary_key(
+    plan_args = dict(
         sync_mode=mode, mappings=mappings, operator_key_columns=keys,
-        source_schema_catalog=catalog,
-        destination_config=destination_config,
-    ):
-        return None
+        source_schema_catalog=catalog, destination_config=destination_config,
+    )
+    if planned_create_primary_key(**plan_args):
+        return KeylessCreateDecision()
     table = str(destination_table or "the destination table")
     if requirement.unreadable:
         # Not a pass: this CREATE declares no key, and whether the server
         # refuses that (3750) could not be read.
-        return (
+        return KeylessCreateDecision(kind="refuse", message=(
             f"Could not read whether the destination forces a PRIMARY KEY "
             f"(sql_require_primary_key / innodb_force_primary_key: "
             f"{requirement.unreadable}), and this {mode} CREATE of {table} declares "
             "none — if the server forces one, the first write fails with MySQL 3750. "
             "Fix: re-run Validate once the destination can be read, or run upsert "
             "with a key so Datawrap creates PRIMARY KEY on it."
-        )
+        ))
     variable = requirement.variable
-    key = ",".join(keys)
-    keyed = f" with the key `{key}`" if key else " with a key the source guarantees unique"
-    from services.destination_key_collision_probe import (
-        sync_mode_appends_without_key_resolution,
+    if mode != "scd2" and planned_create_primary_key(**plan_args, carry_source_keys=True):
+        # The source's own key: the writer carries it here (D396 decision b).
+        return KeylessCreateDecision()
+    if mode == "scd2":
+        return KeylessCreateDecision(kind="refuse", variable=variable, message=(
+            f"The destination server has {variable}=ON: it refuses CREATE TABLE without "
+            f"a PRIMARY KEY (MySQL error 3750). Fix: create {table} yourself with a "
+            "surrogate PRIMARY KEY (an AUTO_INCREMENT column) and run scd2 into it; or "
+            f"have the DBA set {variable}=OFF for this account. An scd2 history table "
+            "holds several versions of each key, so its CREATE declares no PRIMARY KEY. "
+            "It would fail at the first write."
+        ))
+    column_sql = surrogate_key_column_sql(requirement.server_version)
+    return KeylessCreateDecision(
+        kind="surrogate", variable=variable, column_sql=column_sql, message=(
+            f"The destination server has {variable}=ON: it refuses CREATE TABLE without "
+            f"a PRIMARY KEY (MySQL error 3750), and this {mode or 'create'} CREATE of "
+            f"{table} declares no PRIMARY KEY: there is no key to carry (the source has "
+            "none, a query result has no catalog key, or the append policy lets keys "
+            f"repeat). Datawrap can add its own row key: {column_sql}. It is not "
+            "a source column — the Trust Report lists it as Datawrap-added and parity "
+            "never compares it. Approve this destination DDL to add it; or declare a "
+            f"source key (run upsert with it); or create {table} yourself with a "
+            f"primary key; or have the DBA set {variable}=OFF for this account."
+        ),
     )
 
-    if mode == "scd2":
-        why = ("An scd2 history table holds several versions of each key, so its "
-               "CREATE declares no PRIMARY KEY.")
-        fix = (f"create {table} yourself with a surrogate PRIMARY KEY (an AUTO_INCREMENT "
-               f"column) and run scd2 into it; or have the DBA set {variable}=OFF for "
-               "this account")
-    else:
-        if sync_mode_appends_without_key_resolution(mode):
-            why = (f"A {mode} create-new declares no key on purpose — a second copy of "
-                   "the same row is legal on append.")
-        else:
-            why = (f"The {mode} create declares no PRIMARY KEY: the source carries none "
-                   "Datawrap can copy (a source table without a primary key, or a query "
-                   "result, which has no catalog key).")
-        fix = (f"run upsert{keyed} (Datawrap creates PRIMARY KEY on it); or create "
-               f"{table} yourself with a primary key and load into it; or have the DBA "
-               f"set {variable}=OFF for this account")
-    return (
-        f"The destination server has {variable}=ON: it refuses CREATE TABLE without "
-        f"a PRIMARY KEY (MySQL error 3750). Fix: {fix}. {why} It would fail at the "
-        "first write."
+
+def keyless_create_refusal(**kwargs: Any) -> str | None:
+    """G6 issue text when this run would CREATE a keyless table the server refuses.
+
+    Only the refusals that no approval can clear (an unreadable variable, SCD2
+    history). A keyless source Datawrap can key with its surrogate column is
+    the approvable ``g_dest_requires_primary_key`` gate instead
+    (:func:`require_primary_key_gate`).
+    """
+    decision = keyless_create_decision(**kwargs)
+    return decision.message if decision.kind == "refuse" else None
+
+
+GATE_ID = "g_dest_requires_primary_key"
+
+
+def require_primary_key_gate(
+    *, acknowledged: bool, destination_table: str, **kwargs: Any,
+) -> dict[str, Any] | None:
+    """Validate's approvable surrogate-key gate, or None when it does not apply."""
+    decision = keyless_create_decision(destination_table=destination_table, **kwargs)
+    if decision.kind != "surrogate":
+        return None
+    planned = (
+        f"CREATE TABLE {destination_table} (... mapped columns ..., {decision.column_sql})"
     )
+    details = {
+        "rule_id": GATE_ID,
+        "remediation_kind": "approve_ddl_or_dedupe",
+        "planned_ddl": planned,
+        "server_variable": decision.variable,
+        "datawrap_added_columns": [{
+            "name": SURROGATE_KEY_COLUMN,
+            "ddl": decision.column_sql,
+            "reason": f"{decision.variable}=ON requires a PRIMARY KEY; the source has none",
+            "excluded_from_parity": True,
+        }],
+        "ddl_acknowledged": bool(acknowledged),
+        "requires_approval": not acknowledged,
+    }
+    if acknowledged:
+        return {
+            "id": GATE_ID,
+            "status": "pass",
+            "message": (
+                f"Approved destination DDL: Datawrap adds {decision.column_sql} to "
+                f"{destination_table} ({decision.variable}=ON; the source has no key). "
+                "Parity does not compare it."
+            ),
+            "duration_ms": 0,
+            "details": {**details, "acknowledged": True},
+        }
+    return {
+        "id": GATE_ID,
+        "status": "block",
+        "message": decision.message,
+        "duration_ms": 0,
+        "details": details,
+        "suggested_actions": [
+            f"Approve the disclosed DDL (adds {SURROGATE_KEY_COLUMN}) and re-validate",
+            "Declare a source key and run upsert with it",
+            f"Have the DBA set {decision.variable}=OFF for this account",
+        ],
+    }
+
+
+def preflight_require_primary_key_gate(*, connected: bool, **kwargs: Any) -> dict[str, Any] | None:
+    """Validate's call: the gate, or None when the destination was not read.
+
+    A probe failure is logged, not raised: G6 still judges the CREATE.
+    """
+    if not connected:
+        return None
+    try:
+        return require_primary_key_gate(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("require-primary-key gate skipped: %s", exc, exc_info=exc)
+        return None

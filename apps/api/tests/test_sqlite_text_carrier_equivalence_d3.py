@@ -8,7 +8,10 @@ carried byte-exact and no alternative DDL enforces more. The missing domain is
 still stated to the operator as a warn-level carrier note; what does not apply
 is the fail-closed collapse and the Migration Risk Contract it demanded.
 
-Every non-SQLite dialect keeps its previous grading.
+Every non-SQLite dialect keeps its previous grading, except one ruling
+(QA batch 1 / PR #435): Snowflake's ``STRING`` / ``TEXT`` / bare ``VARCHAR``
+are its ``VARCHAR(16777216)``, a lossless carrier for a UUID, graded the same
+as that spelling (a warn-level domain note, no collapse).
 """
 
 from __future__ import annotations
@@ -48,6 +51,9 @@ _SQLITE_TEXT_ROUTES = (
 )
 
 _OTHER_DIALECTS = ("postgresql", "mysql", "snowflake", "bigquery", "sqlserver")
+#: Dialects whose bare text carrier is a bounded/collapsing type for a UUID.
+#: Snowflake's bare TEXT / VARCHAR is VARCHAR(16777216) (see the module note).
+_COLLAPSE_DIALECTS = ("postgresql", "mysql", "bigquery", "sqlserver")
 
 
 @pytest.mark.parametrize("source_type,target_type", _SQLITE_TEXT_ROUTES)
@@ -61,7 +67,7 @@ def test_sqlite_text_carrier_is_not_lossy_or_collapse(source_type, target_type):
 
 
 @pytest.mark.parametrize("source_type,target_type", _SQLITE_TEXT_ROUTES)
-@pytest.mark.parametrize("dest_db", _OTHER_DIALECTS)
+@pytest.mark.parametrize("dest_db", _COLLAPSE_DIALECTS)
 def test_other_dialects_keep_the_collapse(source_type, target_type, dest_db):
     """Only the dynamically typed engine is excused — nothing else moves."""
     assert (
@@ -131,10 +137,22 @@ def test_sqlite_fixed_width_create_new_risk_states_the_missing_padding():
 
 
 def test_non_sqlite_uuid_create_new_still_blocks_with_domain_note():
-    risks = assess_create_new_type_risk("UUID", "TEXT", destination_db_type="snowflake")
+    risks = assess_create_new_type_risk("UUID", "TEXT", destination_db_type="postgresql")
     kinds = {r["kind"] for r in risks}
     assert "uuid_domain" in kinds
     assert any(r["severity"] == "block" for r in risks)
+
+
+@pytest.mark.parametrize("target_type", ["TEXT", "VARCHAR", "STRING", "VARCHAR(16777216)"])
+def test_snowflake_wide_text_is_its_varchar_16777216(target_type):
+    """Ruling: one Snowflake type, one grade — lossless, domain stated, not held."""
+    assert uuid_would_collapse("UUID", target_type, dest_db="snowflake") is False
+    assert is_lossy_coercion("UUID", target_type, dest_db="snowflake") is False
+    risks = assess_create_new_type_risk("UUID", target_type, destination_db_type="snowflake")
+    assert [r["kind"] for r in risks] == ["uuid_carrier_equivalent"]
+    assert not any(create_new_risk_locks_review(r) for r in risks)
+    # A Snowflake UNIQUEIDENTIFIER-sourced value is the same UUID.
+    assert uuid_would_collapse("UNIQUEIDENTIFIER", target_type, dest_db="snowflake") is False
 
 
 def _create_new_mapping(source: str, target: str, target_type: str) -> dict:

@@ -1547,6 +1547,9 @@ export type ScheduleSyncMode =
 
 /** Editable config shared by create (POST) and partial update (PATCH). */
 export interface ScheduleInput {
+  /** Create only: plan the route server-side (mapping + Validate) when no
+   * mapping contract is sent; the schedule is saved only if it would run. */
+  plan_mappings?: boolean;
   name: string;
   source_connector_id: string;
   source_table: string;
