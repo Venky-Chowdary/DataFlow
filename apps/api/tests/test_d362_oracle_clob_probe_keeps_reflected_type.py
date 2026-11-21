@@ -99,3 +99,43 @@ def test_the_run_keys_scope_still_filters_on_the_key_column(probe) -> None:
     sql = _flat(sent[0])
     assert "DBMS_LOB.SUBSTR(NOTE,1000,1)IN(" in sql, sent[0]
     assert "IDIN('1','2')" in sql, sent[0]
+
+
+def test_an_upper_case_oracle_key_is_found_in_its_reflected_lower_case_spelling(monkeypatch) -> None:
+    """The run's key is ``ID``; SQLAlchemy reflects Oracle's ``ID`` as ``id``.
+
+    oracle-live (Oracle Database Free), test_family_b_run2_own_table_e2e
+    [oracle-incremental_upsert]: "NULL-marker check ... could not be measured
+    (the key column 'ID' is not in ...)" and the strict upsert failed.
+    """
+    from services import null_marker_probe as nmp
+
+    sent: list[str] = []
+    columns = [{"name": "id", "type": sa.Numeric(10, 0)}, {"name": "note", "type": sa.String(40)}]
+    monkeypatch.setattr(nmp, "probe_engine", lambda cfg: _Engine(sent))
+    monkeypatch.setattr(sa, "inspect", lambda conn: _Inspector(columns))
+    monkeypatch.setattr(nmp, "statement_timeout", lambda *a, **k: contextlib.nullcontext(True))
+    monkeypatch.setattr("services.engine_pool.release_engine", lambda engine: None)
+    scope = nmp.ProbeScope("run_keys", key_column="ID", keys=("7",))
+    result = nmp.count_marker_rows({"schema": "DATAFLOW"}, "T", ["NOTE"], scope)
+    assert result.rows == 0, result
+    assert "IDIN('7')" in _flat(sent[0]), sent[0]
+
+
+def test_two_columns_differing_only_by_case_never_guess_the_key(monkeypatch) -> None:
+    from services import null_marker_probe as nmp
+
+    sent: list[str] = []
+    columns = [
+        {"name": "Id", "type": sa.Numeric(10, 0)},
+        {"name": "iD", "type": sa.Numeric(10, 0)},
+        {"name": "note", "type": sa.String(40)},
+    ]
+    monkeypatch.setattr(nmp, "probe_engine", lambda cfg: _Engine(sent))
+    monkeypatch.setattr(sa, "inspect", lambda conn: _Inspector(columns))
+    monkeypatch.setattr(nmp, "statement_timeout", lambda *a, **k: contextlib.nullcontext(True))
+    monkeypatch.setattr("services.engine_pool.release_engine", lambda engine: None)
+    scope = nmp.ProbeScope("run_keys", key_column="ID", keys=("7",))
+    result = nmp.count_marker_rows({"schema": "DATAFLOW"}, "T", ["NOTE"], scope)
+    assert result.rows is None and "is not in" in str(result.reason), result
+    assert sent == []

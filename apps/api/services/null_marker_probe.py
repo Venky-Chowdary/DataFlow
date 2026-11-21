@@ -28,7 +28,7 @@ import logging
 import math
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -289,20 +289,31 @@ def bounded_marker_count(conn: Any, tbl: Any, text_cols: list[str], hit: Any, sc
 
 
 def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
-             key: str = "") -> tuple[list[str], set[int], Any, dict[str, Any]]:
+             key: str = "") -> tuple[list[str], set[int], Any, dict[str, Any], str]:
     """(text columns to probe, positions of fixed-width CHAR ones, the key column's type,
-    each text column's reflected type)."""
+    each text column's reflected type, the key column's reflected name).
+
+    The key is matched exactly first, then case-insensitively when exactly one
+    column matches that way. SQLAlchemy reflects an Oracle (and Snowflake)
+    upper-case identifier as lower case, so the run's key ``ID`` comes back as
+    ``id``; an exact-only match called the key missing and every Oracle upsert
+    ended "NULL-marker check not measured" (seen in the oracle-live CI job).
+    """
     import sqlalchemy as sa
 
     folded = {c.lower() for c in wanted}
     out: list[str] = []
     fixed: set[int] = set()
     key_type: Any = None
+    key_name = ""
+    loose: list[tuple[str, Any]] = []
     types: dict[str, Any] = {}
     for col in sa.inspect(conn).get_columns(table, schema=schema or None):
         name = str(col.get("name") or "")
         if key and name == key:
-            key_type = col.get("type")
+            key_type, key_name = col.get("type"), name
+        elif key and name.lower() == key.lower():
+            loose.append((name, col.get("type")))
         if folded and name.lower() not in folded:
             continue
         kind = col.get("type")
@@ -311,7 +322,9 @@ def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
                 fixed.add(len(out))
             out.append(name)
             types[name] = kind
-    return out, fixed, key_type, types
+    if key and not key_name and len(loose) == 1:
+        key_name, key_type = loose[0]
+    return out, fixed, key_type, types, key_name
 
 
 def probe_table(bare: str, schema: str | None, text_cols: list[str], types: dict[str, Any],
@@ -491,13 +504,15 @@ def count_marker_rows(
             if dialect == "mysql" and getattr(engine.dialect, "is_mariadb", False):
                 dialect = "mariadb"
             try:
-                text_cols, fixed, key_type, types = _columns(
+                text_cols, fixed, key_type, types, key_name = _columns(
                     conn, bare, schema, columns, scope.key_column
                 )
                 if not text_cols:
                     return MarkerCount(0)
-                if scope.kind == "run_keys" and key_type is None:
+                if scope.kind == "run_keys" and not key_name:
                     return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
+                if scope.kind == "run_keys" and key_name != scope.key_column:
+                    scope = replace(scope, key_column=key_name)
                 tbl = probe_table(
                     bare, schema, text_cols, types,
                     scope.key_column if scope.kind == "run_keys" else "", key_type,
