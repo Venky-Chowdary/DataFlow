@@ -47,26 +47,67 @@ def _stamp_vector_identity_honesty(
 _JSON_CAST_TRANSFORMS = frozenset({"json", "jsonb"})
 
 
-def _jsonb_carry_mappings(mappings: list[dict], declared: dict[str, str]) -> list[dict]:
+def _jsonb_carry_mappings(
+    mappings: list[dict],
+    declared: dict[str, str],
+    dest_types: dict[str, str] | None = None,
+) -> list[dict]:
     """PostgreSQL→PostgreSQL: a ``json`` cast on a ``jsonb`` column is a plain carry.
 
     The mapper stamps ``json`` on every JSON column, which made
     ``comparable_column_pairs`` send any table with a ``jsonb`` column down the
     row path. Between two PostgreSQL ``jsonb`` columns a binary COPY moves the
     datum itself — key order, duplicate keys and number scale are what the
-    source stored, and the digest compares ``jsonb::text`` on both sides. Only
-    ``jsonb``: a ``json`` column keeps its text verbatim, which the row path's
-    cast does not, so it stays on the row path.
+    source stored, and the digest compares ``jsonb::text`` on both sides.
+
+    Only when the destination column is ``jsonb`` too or does not exist yet
+    (``dest_types``: the live destination's lower-cased column → type, or
+    ``None`` when the table is absent). Into an existing ``text`` / ``json``
+    column the cast is what decides the stored text (the row path writes the
+    compact document; ``jsonb::text`` is spaced), so the cast stays and the
+    route stays on the row path. A ``json`` (text) source column always does.
     """
     lowered = {str(k).lower(): str(v or "").strip().lower() for k, v in (declared or {}).items()}
+    live = None if dest_types is None else {
+        str(k).lower(): str(v or "").strip().lower() for k, v in dest_types.items()
+    }
     out: list[dict] = []
     for mapping in mappings or []:
         transform = str(mapping.get("transform") or "").strip().lower()
         source = str(mapping.get("source") or "").strip().lower()
-        if transform in _JSON_CAST_TRANSFORMS and lowered.get(source) == "jsonb":
+        target = str(mapping.get("target") or mapping.get("source") or "").strip().lower()
+        if (
+            transform in _JSON_CAST_TRANSFORMS
+            and lowered.get(source) == "jsonb"
+            and (live is None or live.get(target) == "jsonb")
+        ):
             mapping = dict(mapping, transform="")
         out.append(mapping)
     return out
+
+
+def _pg_live_column_types(cfg: dict[str, Any], schema: str, table: str) -> dict[str, str] | None:
+    """``column → format_type`` of an existing PostgreSQL table, ``None`` when absent."""
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    conn = _pg_connect_for_probe(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (pg_regclass_literal(schema or "public", table),))
+            reg = cur.fetchone()[0]
+            if reg is None:
+                return None
+            cur.execute(
+                "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
+                "WHERE attrelid = to_regclass(%s) AND attnum > 0 AND NOT attisdropped",
+                (pg_regclass_literal(schema or "public", table),),
+            )
+            return {str(name): str(typ) for name, typ in cur.fetchall()}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - probe connection only
+            logger.debug("live column probe close skipped", exc_info=True)
 
 
 def _try_copy_fast_path(
@@ -2317,9 +2358,19 @@ def _try_copy_fast_path(
         except Exception:  # nosec B110 — probe connection only
             pass
 
-    pairs = comparable_column_pairs(
-        _jsonb_carry_mappings(mappings, declared), declared, declared, engine=src_type
-    )
+    carried = mappings
+    if any(
+        str(m.get("transform") or "").strip().lower() in _JSON_CAST_TRANSFORMS for m in mappings
+    ):
+        try:
+            live_types = _pg_live_column_types(
+                dest_cfg, destination.schema or "public", dest_table
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown destination keeps the row path
+            note_copy_decline(f"COPY fast path declined (destination catalog): {exc}")
+            return None
+        carried = _jsonb_carry_mappings(mappings, declared, live_types)
+    pairs = comparable_column_pairs(carried, declared, declared, engine=src_type)
     if not pairs:
         return None
     # ``comparable_column_pairs`` compared the source against itself above, which
