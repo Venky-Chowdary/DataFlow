@@ -114,6 +114,9 @@ class MappingDecision:
     omitted: bool = False
     alternatives: tuple[str, ...] = ()
     calibration_reason: str = ""
+    #: Key / identity flag. Omitted from ``to_dict`` so ``content_hash`` stays
+    #: the historical digest. The structural replay hash includes it.
+    is_primary_key: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -226,14 +229,19 @@ def _drop_empty(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# Planner estimates and clock fields. A later scoring pass must not make an
-# unchanged Map look like drift. Structural identity is the source fingerprint,
-# column types, DDL, sync mode, error policy, keys, and transforms.
-_NON_STRUCTURAL_HASH_KEYS = frozenset({
+# Volatile envelope fields. Everything else, including mapping confidence, is
+# part of the historical content hash. Stored Validate stamps and schedule
+# approvals were computed with this exact body.
+_CONTENT_HASH_EXCLUDED = frozenset({
     "content_hash",
     "policy_signature",
     "created_at",
     "artifact_id",
+})
+
+# Scoring fields on a mapping row only. A column whose name is one of these
+# (the per-column DDL map) stays in the structural hash.
+_MAPPING_SCORE_KEYS = frozenset({
     "confidence",
     "calibration_reason",
     "score",
@@ -242,25 +250,100 @@ _NON_STRUCTURAL_HASH_KEYS = frozenset({
 })
 
 
-def _structural_hash_body(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _structural_hash_body(item)
-            for key, item in value.items()
-            if str(key) not in _NON_STRUCTURAL_HASH_KEYS
-        }
-    if isinstance(value, list):
-        return [_structural_hash_body(item) for item in value]
-    if isinstance(value, tuple):
-        return [_structural_hash_body(item) for item in value]
-    return value
-
-
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """Stable SHA-256 over the structural decision (not confidence or clocks)."""
-    body = _structural_hash_body(dict(payload))
+    """Stable SHA-256 over canonical JSON (excludes content_hash / signatures)."""
+    body = {
+        k: v
+        for k, v in payload.items()
+        if k not in _CONTENT_HASH_EXCLUDED
+    }
     raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _row_is_key(row: Mapping[str, Any]) -> bool:
+    return bool(
+        row.get("is_primary_key")
+        or row.get("primary_key")
+        or row.get("identity")
+        or row.get("is_identity")
+    )
+
+
+def _structural_mapping_row(
+    row: Mapping[str, Any],
+    *,
+    is_primary_key: bool | None = None,
+) -> dict[str, Any]:
+    """One mapping row with scores removed and the key flag kept."""
+    kept = {
+        str(key): value
+        for key, value in row.items()
+        if str(key) not in _MAPPING_SCORE_KEYS and str(key) not in {
+            "is_primary_key", "primary_key", "identity", "is_identity",
+        }
+    }
+    if is_primary_key is None:
+        is_primary_key = _row_is_key(row)
+    kept["is_primary_key"] = bool(is_primary_key)
+    return kept
+
+
+def structural_decision_hash(
+    artifact: DecisionArtifact | Mapping[str, Any],
+) -> str:
+    """SHA-256 of the replay identity. Not the stored content hash.
+
+    Scoring fields are dropped only from mapping rows. Source fingerprint,
+    column types, DDL (including a column named ``confidence``), sync mode,
+    error policy, and key flags stay. ``content_hash`` is a different digest
+    and still covers confidence, so a stamp taken before this hash exists
+    keeps verifying.
+    """
+    if isinstance(artifact, DecisionArtifact):
+        payload = artifact.to_dict()
+        decisions = artifact.mappings
+    else:
+        payload = artifact
+        decisions = None
+    body = {
+        key: value
+        for key, value in payload.items()
+        if key not in _CONTENT_HASH_EXCLUDED
+    }
+    rows: list[Any] = []
+    for index, row in enumerate(list(body.get("mappings") or [])):
+        if not isinstance(row, Mapping):
+            rows.append(row)
+            continue
+        flag: bool | None = None
+        if decisions is not None and index < len(decisions):
+            flag = bool(getattr(decisions[index], "is_primary_key", False))
+        rows.append(_structural_mapping_row(row, is_primary_key=flag))
+    body["mappings"] = rows
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def same_structural_decision(left: DecisionArtifact, right: DecisionArtifact) -> bool:
+    """True when two artifacts are the same decision at different scores."""
+    return structural_decision_hash(left) == structural_decision_hash(right)
+
+
+def decision_stamps_match(approved: str, art: DecisionArtifact) -> bool:
+    """True when a stored stamp names this artifact.
+
+    The historical content hash matches a stamp taken on unchanged rows.
+    The structural hash matches a stamp of the same decision with a different
+    mapping score. Neither match accepts a different type, key, fingerprint,
+    sync mode, or error policy.
+    """
+    stamp = (approved or "").strip().lower()
+    if not stamp:
+        return False
+    if stamp == (art.content_hash or "").strip().lower():
+        return True
+    return stamp == structural_decision_hash(art).lower()
 
 
 def build_decision_artifact(
@@ -380,6 +463,12 @@ def decision_artifact_from_dict(data: Mapping[str, Any]) -> DecisionArtifact:
             omitted=bool(raw.get("omitted")),
             alternatives=tuple(raw.get("alternatives") or ()),
             calibration_reason=str(raw.get("calibration_reason") or ""),
+            is_primary_key=bool(
+                raw.get("is_primary_key")
+                or raw.get("primary_key")
+                or raw.get("identity")
+                or raw.get("is_identity")
+            ),
         )
 
     ddl_raw = data.get("ddl") or {}

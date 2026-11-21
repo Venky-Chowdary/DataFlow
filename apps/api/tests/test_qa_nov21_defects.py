@@ -101,32 +101,49 @@ def test_mysql_boolean_and_json_are_the_planned_ddl():
     assert not planned_ddl_matches_live(
         {"name": "VARCHAR(40)"}, {"name": "varchar(80)"}
     )
+    assert not planned_ddl_matches_live(
+        {"qty": "BIGINT"}, {"qty": "bigint(20) unsigned"}
+    )
+    assert planned_ddl_matches_live({"qty": "BIGINT"}, {"qty": "bigint(20)"})
 
 
-def test_confidence_only_change_keeps_the_decision_hash():
-    """A scoring pass is not Map drift. A target-type change still is.
+def test_base_stamped_hash_replays_and_scores_are_not_drift():
+    """A content hash stamped with confidence still inside it must replay.
 
-    On the previous hash, confidence was inside the digest, so this refused.
+    Changing that digest broke every stored approval. Scoring is a separate
+    structural hash: a confidence-only change of the stored artifact still
+    runs, and a target-type change still refuses. On the previous gate the
+    confidence-only replay refused.
     """
     from services.decision_kernel.execute_gate import (
         build_artifact_from_mappings,
         enforce_decision_artifact,
     )
+    from services.decision_kernel.models import (
+        decision_artifact_from_dict,
+        structural_decision_hash,
+    )
     from services.schema_fingerprint import fingerprint_schema
 
-    def _maps(confidence: float, target_type: str = "BIGINT") -> list[dict]:
+    def _maps(
+        confidence: float,
+        target_type: str = "BIGINT",
+        *,
+        key: bool = False,
+        target: str = "id",
+    ) -> list[dict]:
         return [{
             "source": "id",
-            "target": "id",
+            "target": target,
             "source_type": "BIGINT",
             "target_type": target_type,
             "confidence": confidence,
             "create_new": True,
+            "is_primary_key": key,
         }]
 
     src_fp = fingerprint_schema(["id"], {"id": "BIGINT"})
-    high = build_artifact_from_mappings(
-        _maps(0.99),
+    common = dict(
         dest_db="mysql",
         source_db="mysql",
         source_fingerprint=src_fp,
@@ -137,35 +154,22 @@ def test_confidence_only_change_keeps_the_decision_hash():
         artifact_id="da_inline",
         created_at="1970-01-01T00:00:00+00:00",
     )
-    low = build_artifact_from_mappings(
-        _maps(0.72),
-        dest_db="mysql",
-        source_db="mysql",
-        source_fingerprint=src_fp,
-        dest_fingerprint="",
-        sync_mode="incremental_append",
-        error_policy="quarantine",
-        route_id="validate:mysql",
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
-    assert high.content_hash == low.content_hash
-    edited = build_artifact_from_mappings(
-        _maps(0.99, "VARCHAR(8)"),
-        dest_db="mysql",
-        source_db="mysql",
-        source_fingerprint=src_fp,
-        dest_fingerprint="",
-        sync_mode="incremental_append",
-        error_policy="quarantine",
-        route_id="validate:mysql",
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
-    assert edited.content_hash != high.content_hash
+    high = build_artifact_from_mappings(_maps(0.99), **common)
+    low = build_artifact_from_mappings(_maps(0.72), **common)
+    # The stored digest still covers confidence. The replay digest does not.
+    assert high.content_hash != low.content_hash
+    assert structural_decision_hash(high) == structural_decision_hash(low)
+    revived = decision_artifact_from_dict(high.to_dict())
+    assert revived.content_hash == high.content_hash
+    keyed = build_artifact_from_mappings(_maps(0.99, key=True), **common)
+    assert keyed.content_hash == high.content_hash
+    assert structural_decision_hash(keyed) != structural_decision_hash(high)
+    named = high.to_dict()
+    named["ddl"]["column_ddl"]["confidence"] = "VARCHAR(8)"
+    assert structural_decision_hash(named) != structural_decision_hash(high.to_dict())
     live = fingerprint_schema(["id"], {"id": "bigint"})
     err, art = enforce_decision_artifact(
-        mappings=_maps(0.72),
+        mappings=_maps(0.99),
         dest_db="mysql",
         source_db="mysql",
         approved_content_hash=high.content_hash,
@@ -177,14 +181,34 @@ def test_confidence_only_change_keeps_the_decision_hash():
         live_column_types={"id": "bigint"},
         sync_mode="incremental_append",
         error_policy="quarantine",
+        route_id="validate:mysql",
     )
     assert err is None, err
     assert art is not None
+    err_score, art_score = enforce_decision_artifact(
+        mappings=_maps(0.72),
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=high.content_hash,
+        artifact_payload=high.to_dict(),
+        source_fingerprint=src_fp,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        source_column_names=["id"],
+        live_column_types={"id": "bigint"},
+        sync_mode="incremental_append",
+        error_policy="quarantine",
+        route_id="validate:mysql",
+    )
+    assert err_score is None, err_score
+    assert art_score is not None
     err_type, art_type = enforce_decision_artifact(
         mappings=_maps(0.99, "VARCHAR(8)"),
         dest_db="mysql",
         source_db="mysql",
         approved_content_hash=high.content_hash,
+        artifact_payload=high.to_dict(),
         source_fingerprint=src_fp,
         dest_fingerprint=live,
         destination_table_exists=True,
@@ -193,6 +217,7 @@ def test_confidence_only_change_keeps_the_decision_hash():
         live_column_types={"id": "bigint"},
         sync_mode="incremental_append",
         error_policy="quarantine",
+        route_id="validate:mysql",
     )
     assert err_type and art_type is None
 
