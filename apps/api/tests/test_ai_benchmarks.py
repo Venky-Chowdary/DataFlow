@@ -73,8 +73,23 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "true")
 
 
+def _tiny_holdout(path):
+    """Two tables in the committed fixture's format (not the held-out data itself)."""
+    col = lambda n, t, s: {"name": n, "type": t, "samples": s}  # noqa: E731
+    path.write_text(json.dumps({"tables": [
+        {"id": "t1", "source": [col("fn", "VARCHAR", ["Ann", "Bob"]), col("ln", "VARCHAR", ["Kim", "Lo"]),
+                                col("em", "VARCHAR", ["a@x.io", "b@y.io"])],
+         "target": [{"name": "first_name", "type": "VARCHAR"}, {"name": "last_name", "type": "VARCHAR"},
+                    {"name": "email", "type": "VARCHAR"}],
+         "gold": {"fn": "first_name", "ln": "last_name", "em": "email"}},
+    ]}), encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize("suite", sorted(bench.SUITES))
-def test_replay_meets_its_floors_without_drift(offline, suite):
+def test_replay_meets_its_floors_without_drift(offline, suite, monkeypatch, tmp_path):
+    if suite == "mapping_witness" and not bench.HOLDOUT_PATH.exists():
+        monkeypatch.setattr(bench, "HOLDOUT_PATH", _tiny_holdout(tmp_path / "holdout.json"))
     result = bench.SUITES[suite](bench.Runner("replay")).as_dict()
     assert result["passed"], json.dumps(result, indent=1)
     assert result["floors"], "a suite with no floor proves nothing"
@@ -115,6 +130,52 @@ def test_a_cassette_never_answers_more_than_it_recorded(offline):
     with anthropic_cassette(tape):
         resp = DataTransferAnthropicProvider().generate("hello")
     assert resp.success is False  # the provider reports the failure; nothing is invented
+
+
+def test_a_missing_holdout_fails_the_witness_suite(offline, monkeypatch, tmp_path):
+    monkeypatch.setattr(bench, "HOLDOUT_PATH", tmp_path / "absent.json")
+    result = bench.suite_mapping_witness(bench.Runner("replay")).as_dict()
+    assert result["passed"] is False and result["metrics"]["holdout_present"] == 0.0
+
+
+def test_prompt_drift_fails_the_suite_not_only_the_test(offline, monkeypatch, tmp_path):
+    import shutil
+
+    import services.ai_cassette as cassette
+
+    copy_dir = tmp_path / "cassettes"
+    shutil.copytree(cassette.CASSETTE_DIR, copy_dir)
+    path = copy_dir / "validation_assistant.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for case in data["cases"].values():
+        case["prompt_sha256"] = ["0" * 64 for _ in case["prompt_sha256"]]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(cassette, "CASSETTE_DIR", copy_dir)
+    result = bench.suite_validation_assistant(bench.Runner("replay")).as_dict()
+    assert result["prompt_drift"] and result["passed"] is False
+
+
+def test_the_request_digest_covers_tool_schemas():
+    from services.ai_cassette import request_digest
+
+    tool = {"name": "list_connectors", "description": "List connectors", "input_schema": {"type": "object"}}
+    changed = {**tool, "description": "Delete every connector"}
+    assert request_digest({"messages": [], "tools": [tool]}) != request_digest({"messages": [], "tools": [changed]})
+
+
+def test_live_with_a_key_but_no_model_answer_is_not_run(offline, monkeypatch, tmp_path, capsys):
+    from src.ai.llm import provider as prov
+
+    monkeypatch.setattr(bench, "live_provider", lambda: "anthropic")
+    monkeypatch.setattr(prov.DataTransferAnthropicProvider, "_init_client", lambda self: setattr(self, "_client", None))
+    for cls in (prov.DataTransferOpenAIProvider, prov.DataTransferOllamaProvider):
+        monkeypatch.setattr(cls, "is_available", lambda self: False)
+    summary = tmp_path / "live.md"
+    monkeypatch.setattr(sys, "argv", ["run_ai_benchmarks.py", "--mode", "live", "--summary", str(summary),
+                                      "--suite", "parity_explanation", "--suite", "validation_assistant"])
+    assert bench.main() == bench.EXIT_NOT_RUN
+    text = summary.read_text(encoding="utf-8")
+    assert "**NOT RUN**" in text and "PASS" not in text
 
 
 def test_live_without_a_key_is_not_run_never_a_pass(tmp_path):

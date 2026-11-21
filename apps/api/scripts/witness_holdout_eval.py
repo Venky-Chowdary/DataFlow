@@ -53,7 +53,11 @@ def load_tables(path: str) -> list[dict[str, Any]]:
     return list(raw["tables"] if isinstance(raw, dict) else raw)
 
 
-def parse(spec: str) -> tuple[str, str, list[str]]:
+def parse(spec: Any) -> tuple[str, str, list[str]]:
+    """A column as ``"name:TYPE|s1;s2"`` (research file) or ``{name, type, samples}`` (committed fixture)."""
+    if isinstance(spec, dict):
+        samples = [str(s) for s in spec.get("samples") or [] if s not in (None, "")]
+        return str(spec.get("name") or ""), str(spec.get("type") or ""), samples
     name, _, rest = spec.partition(":")
     typ, _, samp = rest.partition("|")
     return name, typ, [s for s in samp.split(";") if s] if samp else []

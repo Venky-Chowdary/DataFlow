@@ -42,11 +42,12 @@ class CassetteExhausted(RuntimeError):
 
 
 def request_digest(kwargs: dict[str, Any]) -> str:
-    """Digest of what crossed the boundary: system, messages and tool names (not the model id)."""
+    """Digest of what crossed the boundary: system, messages and the full tool schemas (not the model id)."""
+    tools = [t for t in kwargs.get("tools") or [] if isinstance(t, dict)]
     body = {
         "system": kwargs.get("system") or "",
         "messages": kwargs.get("messages") or [],
-        "tools": sorted(str(t.get("name") or "") for t in kwargs.get("tools") or [] if isinstance(t, dict)),
+        "tools": sorted(tools, key=lambda t: str(t.get("name") or "")),
     }
     return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
