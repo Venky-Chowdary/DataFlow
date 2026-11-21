@@ -210,10 +210,16 @@ def connect(engine: str, cfg: dict[str, Any]) -> Any:
                               connection_string=str(cfg.get("connection_string") or ""),
                               ssl=bool(cfg.get("ssl", False)), purpose="introspect")
     if engine == "sqlserver":
-        import pymssql
+        # The connector's own driver selection, TLS options and egress check
+        # (the SQL Server reader's connection builder), never a bare pymssql dial.
+        from connectors.generic_sql import connection_options, get_connection
 
-        return pymssql.connect(server=host, port=port or 1433, database=database, user=user, password=password,
-                               autocommit=False, login_timeout=30)
+        from services.egress_guard import current_egress_workspace
+
+        return get_connection(host=host, port=port or 1433, database=database, username=user, password=password,
+                              connection_string=str(cfg.get("connection_string") or ""),
+                              ssl=bool(cfg.get("ssl", False)), db_type="sqlserver",
+                              workspace_id=current_egress_workspace(), **connection_options(cfg))
     raise ValueError(f"no verification connection for {engine}")
 
 

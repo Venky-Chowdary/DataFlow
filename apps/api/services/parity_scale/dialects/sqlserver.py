@@ -239,8 +239,20 @@ class SqlServerSide(SqlSide):
                f"TABLESAMPLE SYSTEM ({pct:.6f} PERCENT) REPEATABLE (42) ORDER BY {keys}")
         return [tuple(r) for r in self.execute(sql, [])]
 
+    def _driver_conn(self) -> Any:
+        """The pymssql ``_mssql`` connection under any wrapper (pool proxy, qmark adapter)."""
+        conn: Any = self.conn
+        for _ in range(5):
+            if hasattr(conn, "query_timeout"):
+                return conn
+            conn = (getattr(conn, "_conn", None) or getattr(conn, "dbapi_connection", None)
+                    or getattr(conn, "driver_connection", None))
+            if conn is None:
+                return None
+        return None
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
-        inner = getattr(self.conn, "_conn", None)
+        inner = self._driver_conn()
         if self.timeout_seconds and inner is not None and hasattr(inner, "query_timeout"):
             try:
                 inner.query_timeout = max(1, int(round(self.timeout_seconds)))

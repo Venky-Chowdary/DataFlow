@@ -129,14 +129,23 @@ def _key_targets(job: dict[str, Any]) -> list[str]:
 
 
 def _sides(job: dict[str, Any]):
+    """Plan and both sides, dialled under the job's workspace allowlist (as the run's dials were)."""
+    from services.egress_guard import egress_workspace
     from services.parity_scale.verification import plan_for, side_opener, table_spec
 
     spec, why = table_spec(job)
     if spec is None:
         raise ExplorerUnavailable(why)
-    plan = plan_for(spec)
-    opener = side_opener(spec)
-    return plan, opener("source", plan), opener("destination", plan)
+    with egress_workspace(str(job.get("workspace_id") or "")):
+        plan = plan_for(spec)
+        opener = side_opener(spec)
+        src = opener("source", plan)
+        try:
+            dst = opener("destination", plan)
+        except BaseException:
+            src.close()
+            raise
+    return plan, src, dst
 
 
 def _cell_text(value: Any) -> str | None:
