@@ -68,6 +68,10 @@ describe("AI involvement section", () => {
     assert.deepEqual(ledger.entries.map(checkTone), ["ok", "ok", "warn", "muted"]);
     assert.equal(originLabel({ type: "model", provider: "openai", model: "unrecorded" }), "openai");
     assert.equal(decisionLabel(entry({ decision: { status: "held", by: null, at: null, how: "" } })), "Held for review");
+    assert.equal(
+      decisionLabel(entry({ decision: { status: "not_reviewed_continued", by: "ann@example.com", at: null, how: "" } })),
+      "Not reviewed (continued) · ann@example.com",
+    );
   });
 
   it("names the Map approver, the schedule that ran it, and a partial ledger", () => {

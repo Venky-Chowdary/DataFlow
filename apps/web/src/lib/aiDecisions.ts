@@ -65,6 +65,7 @@ const DECISION_LABEL: Record<string, string> = {
   held: "Held for review",
   kept: "Kept",
   unreviewed: "Not reviewed in Map",
+  not_reviewed_continued: "Not reviewed (continued)",
   informational: "No decision needed",
 };
 

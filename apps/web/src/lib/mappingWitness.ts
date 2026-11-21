@@ -9,7 +9,14 @@
 import { apiFetch, parseApiError } from "./api";
 import { API_BASE } from "./types";
 
-export type WitnessStatus = "witnessed" | "consistent" | "flagged" | "differs" | "not_comparable" | "no_evidence";
+export type WitnessStatus =
+  | "witnessed"
+  | "consistent"
+  | "flagged"
+  | "differs"
+  | "not_comparable"
+  | "not_read"
+  | "no_evidence";
 export type WitnessFlagKind = "swap" | "wrong_target" | "unit_mismatch" | "format_mismatch";
 
 export interface WitnessFlag {
@@ -19,6 +26,8 @@ export interface WitnessFlag {
   basis: "keyed" | "profile" | "source_only";
   action: "review";
   swapped_with?: string;
+  /** Names exactly this flag on this check: "Keep this mapping" answers it. */
+  id?: string;
 }
 
 export interface WitnessPair {
@@ -44,6 +53,7 @@ export interface WitnessReport {
     flagged: number;
     differs: number;
     not_comparable?: number;
+    not_read?: number;
     no_evidence: number;
   };
   inputs_sha256: string;
@@ -54,6 +64,8 @@ export interface WitnessReport {
 /** What POST /transfer/mapping-witness answers: the report, appended for this mapping and destination. */
 export interface WitnessResult {
   mapping_digest: string;
+  session?: string | null;
+  requested_by?: string;
   report: WitnessReport;
   report_sha256: string;
   recorded_at: string;
@@ -63,7 +75,8 @@ export interface WitnessReview {
   source: string;
   flagged_target: string;
   flag_kind: WitnessFlagKind | null;
-  decision: "kept" | "changed";
+  flag_id?: string | null;
+  decision: "kept" | "changed" | "continued";
   new_target: string | null;
   by: string;
   at: string;
@@ -77,6 +90,9 @@ export interface WitnessSnapshot {
   report: WitnessReport | null;
   report_sha256?: string | null;
   report_recorded_at?: string | null;
+  requested_by?: string | null;
+  session?: string | null;
+  not_checked_reason?: string;
   flag_reviews?: WitnessReview[];
   map_decisions?: Record<string, { target: string; approved: boolean; changed: boolean; by: string; at: string }>;
 }
@@ -100,6 +116,7 @@ export const STATUS_LABEL: Record<WitnessStatus, string> = {
   flagged: "Review",
   differs: "Differs",
   not_comparable: "Not comparable",
+  not_read: "Not read",
   no_evidence: "No evidence",
 };
 
@@ -127,6 +144,8 @@ export interface WitnessRequest {
   destination_table_exists?: boolean | null;
   date_locale?: string;
   trigger?: "auto" | "explicit";
+  session_id?: string;
+  source_ref?: { kind: string; name: string };
 }
 
 /** The rows sent: what Map already shows, capped (the server caps again). */
@@ -148,6 +167,8 @@ export function buildWitnessRequest(input: {
   destTableExists?: boolean | null;
   dateLocale?: string;
   trigger: "auto" | "explicit";
+  sessionId?: string;
+  source?: { kind: string; name: string };
 }): WitnessRequest {
   return {
     mappings: writtenPairs(input.rows).map((m) => ({
@@ -164,7 +185,14 @@ export function buildWitnessRequest(input: {
     destination_table_exists: input.destTableExists ?? null,
     date_locale: input.dateLocale || "",
     trigger: input.trigger,
+    session_id: input.sessionId || "",
+    source_ref: input.source ?? { kind: "", name: "" },
   };
+}
+
+/** Everything a check depends on: a different value means an earlier result no longer stands. */
+export function witnessInputsKey(request: WitnessRequest): string {
+  return JSON.stringify({ ...request, source_rows: request.source_rows.length, trigger: undefined });
 }
 
 /**
@@ -190,9 +218,11 @@ export async function runMappingWitness(body: WitnessRequest, signal?: AbortSign
 
 export async function reviewWitnessFlag(body: {
   mapping_digest: string;
+  session_id: string;
   destination: Record<string, unknown> | null;
   source: string;
-  decision: "kept" | "changed";
+  decision: "kept" | "changed" | "continued";
+  flag_id?: string;
   new_target?: string;
 }): Promise<WitnessReview> {
   const res = await apiFetch(`${API_BASE}/transfer/mapping-witness/review`, {
@@ -206,13 +236,14 @@ export async function reviewWitnessFlag(body: {
 
 /** Who approved or changed each pair in Map; the server records the signed-in person, never a name we send. */
 export async function recordMapDecisions(
+  sessionId: string,
   destination: Record<string, unknown> | null,
   mappings: Array<{ source: string; target: string; approved: boolean; changed: boolean }>,
 ): Promise<number> {
   const res = await apiFetch(`${API_BASE}/transfer/mapping-witness/decisions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ destination, mappings }),
+    body: JSON.stringify({ session_id: sessionId, destination, mappings }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Map decisions could not be recorded"));
   return (await res.json()).recorded;

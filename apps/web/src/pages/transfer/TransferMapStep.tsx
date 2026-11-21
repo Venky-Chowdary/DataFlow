@@ -141,6 +141,10 @@ interface TransferMapStepProps {
   onAddComputedSteps?: (steps: ShapeStepWire[]) => void;
   /** The run's day/month order ("DMY", "MDY" or "" for per-value): the Mapping Witness reads dates the same way. */
   dateLocale?: string;
+  /** The Map session the witness evidence belongs to; the run submits the same id. */
+  witnessSessionId?: string;
+  /** What the sample came from (file name or table), so a job only takes evidence for its own source. */
+  witnessSource?: { kind: string; name: string };
 }
 
 
@@ -208,6 +212,8 @@ export function TransferMapStep({
   transformSteps = [],
   onAddComputedSteps,
   dateLocale = "",
+  witnessSessionId = "",
+  witnessSource,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("attention");
@@ -271,6 +277,8 @@ export function TransferMapStep({
     catalogReady: !(remapEnabled && destEndpoint) || (!catalogState.loading
       && (catalogState.catalog !== null || Boolean(catalogState.error))),
     warehouse: isWarehouse(destType),
+    sessionId: witnessSessionId,
+    source: witnessSource ?? { kind: "", name: "" },
   });
   // Once the operator edits, the rows they are working on must not jump out
   // of view because the issues-first filter re-evaluated behind them.
@@ -497,8 +505,10 @@ export function TransferMapStep({
     const decided = columnMappings
       .filter((m) => !isIntentionalOmit(m) && m.target && (m.approved || m.operatorTarget))
       .map((m) => ({ source: m.source, target: m.target, approved: Boolean(m.approved), changed: Boolean(m.operatorTarget) }));
-    if (decided.length) {
-      void recordMapDecisions(destEndpoint ?? null, decided).catch(() => {
+    // Flags nobody answered are recorded as "not reviewed (continued)" by this person.
+    void witness.continuePastFlags().catch(() => undefined);
+    if (decided.length && witnessSessionId) {
+      void recordMapDecisions(witnessSessionId, destEndpoint ?? null, decided).catch(() => {
         /* Evidence only: Validate never depends on it; the ledger then says "not reviewed". */
       });
     }
@@ -971,8 +981,23 @@ export function TransferMapStep({
                 onFocusHandled={() => setFocusSource(null)}
                 witnessFlags={witness.flags}
                 onWitnessReview={setFocusSource}
+                onWitnessKeep={witness.keep}
+                witnessKept={witness.kept}
               />
-              {witness.needsCheck && (
+              {witness.error && (
+                <div className="df2-witness-bar is-error" role="alert">
+                  <span>The mapping check did not finish: {witness.error}</span>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-ghost df2-btn-xs"
+                    onClick={witness.retry}
+                    disabled={witness.loading}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              {witness.needsCheck && !witness.error && (
                 <div className="df2-witness-bar" role="note">
                   <span>Values in this warehouse are checked only when you ask: it runs a query.</span>
                   <button

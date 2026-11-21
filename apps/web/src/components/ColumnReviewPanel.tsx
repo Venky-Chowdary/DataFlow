@@ -127,8 +127,11 @@ interface ColumnReviewPanelProps {
   remap?: ColumnRemapControls;
   /** Mapping Witness flags by lower-cased source column (evidence only; never edits a row). */
   witnessFlags?: Map<string, WitnessPair>;
-  /** The flag's one action: take the operator to this row's destination picker. */
+  /** The flag's Review action: take the operator to this row's destination picker. */
   onWitnessReview?: (source: string) => void;
+  /** The flag's Keep this mapping action, and the flag ids already kept. */
+  onWitnessKeep?: (pair: WitnessPair) => Promise<void> | void;
+  witnessKept?: Set<string>;
 }
 
 export interface ColumnRemapControls {
@@ -213,6 +216,8 @@ export function ColumnReviewPanel({
   remap,
   witnessFlags,
   onWitnessReview,
+  onWitnessKeep,
+  witnessKept,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("attention");
@@ -1026,7 +1031,12 @@ export function ColumnReviewPanel({
                         <TypeCompatBadge grade={remap.gradeFor(m)} pending={remap.gradesPending && Boolean(m.destType)} />
                       ) : null}
                       {witnessPair && !omitted ? (
-                        <WitnessFlag pair={witnessPair} onReview={onWitnessReview ? reviewWitness : undefined} />
+                        <WitnessFlag
+                          pair={witnessPair}
+                          onReview={onWitnessReview ? reviewWitness : undefined}
+                          onKeep={onWitnessKeep}
+                          kept={Boolean(witnessPair.flag?.id && witnessKept?.has(witnessPair.flag.id))}
+                        />
                       ) : null}
                 </>
               );

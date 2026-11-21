@@ -18,6 +18,7 @@ const TONE: Record<WitnessStatus, ParityTone> = {
   flagged: "warn",
   differs: "muted",
   not_comparable: "muted",
+  not_read: "muted",
   no_evidence: "muted",
 };
 
@@ -36,16 +37,19 @@ export function witnessHeadline(report: WitnessReport): string {
 }
 
 function decisionText(snapshot: WitnessSnapshot, pair: WitnessPair): string {
-  const kept = (snapshot.flag_reviews ?? []).find(
-    (r) => r.decision === "kept" && r.source.toLowerCase() === pair.source.toLowerCase(),
-  );
-  if (kept) return `Kept by ${kept.by}`;
-  const approval = snapshot.map_decisions?.[pair.source];
-  // An approval given after the flag was shown is a decision on the flag (the ledger reads it the same way).
-  if (approval?.approved && approval.at >= (snapshot.report_recorded_at ?? "")) {
-    return `Approved in Map after the flag by ${approval.by}`;
-  }
+  const id = pair.flag?.id;
+  const reviews = snapshot.flag_reviews ?? [];
+  const kept = reviews.find((r) => r.decision === "kept" && id && r.flag_id === id);
+  if (kept) return `Kept by ${kept.by} (Keep this mapping)`;
+  const continued = reviews.find((r) => r.decision === "continued" && id && r.flag_id === id);
+  if (continued) return `Not reviewed: ${continued.by} continued past it`;
   return "Not reviewed";
+}
+
+function when(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
 /**
@@ -67,7 +71,7 @@ export function MappingEvidenceView({ record }: { record: WitnessSnapshot | null
   if (!record.report) {
     return (
       <p className="df2-parity-muted">
-        No mapping check ran for the mapping this job used. Map runs it when the sample is loaded.
+        Not checked: {record.not_checked_reason ?? "no mapping check ran for the mapping this job used."}
       </p>
     );
   }
@@ -79,6 +83,8 @@ export function MappingEvidenceView({ record }: { record: WitnessSnapshot | null
       <p className="df2-parity-muted">
         {witnessHeadline(report)}. {MODE_LABEL[report.mode]}
         {report.sample.matching_keys ? ` (${plural(report.sample.matching_keys, "matching key")}).` : "."}
+        {record.requested_by ? ` Checked by ${record.requested_by}` : " Checked"}
+        {record.report_recorded_at ? ` at ${when(record.report_recorded_at)}.` : "."}
       </p>
       {flagged.length > 0 && (
         <ul className="df2-trust-ai-list" aria-label="Flagged mappings">

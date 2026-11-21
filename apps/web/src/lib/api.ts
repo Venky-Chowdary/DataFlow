@@ -3468,6 +3468,8 @@ export async function runUniversalTransfer(options: {
   sourceExtra?: Record<string, unknown>;
   streamContracts?: Record<string, unknown>[];
   planId?: string;
+  /** The Map session the mapping was checked in (the plan id, or the id Map minted). */
+  witnessSessionId?: string;
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
   limit?: number;
@@ -3590,6 +3592,7 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.witnessSessionId) formData.append("witness_session_id", options.witnessSessionId);
   if (options.contractId) formData.append("contract_id", options.contractId);
   if (options.requireReversibility) formData.append("require_reversibility", "true");
   formData.append(
@@ -3725,6 +3728,8 @@ export async function executeTransferJson(payload: {
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
+  /** The Map session the mapping was checked in (the plan id, or the id Map minted). */
+  witnessSessionId?: string;
   idempotencyKey?: string;
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
@@ -3759,6 +3764,7 @@ export async function executeTransferJson(payload: {
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
+      witness_session_id: payload.witnessSessionId || undefined,
       compliance_acknowledged: payload.complianceAcknowledged === true,
       schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
       fk_risk_acknowledged: payload.fkRiskAcknowledged === true,

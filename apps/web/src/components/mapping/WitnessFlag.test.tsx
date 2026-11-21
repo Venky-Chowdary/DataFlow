@@ -30,6 +30,7 @@ const swapPair: WitnessPair = {
     suggested_target: "first_name",
     basis: "keyed",
     action: "review",
+    id: "flag-given-1",
   },
   evidence: { mode: "keyed", compared: 60, agreed: 0 },
 };
@@ -110,6 +111,22 @@ describe("Witness flag on a Map row", () => {
     await act(async () => root.unmount());
   });
 
+  it("Keep this mapping answers the flag through onKeep and then reads as kept", async () => {
+    const { createRoot } = await import("react-dom/client");
+    const { act } = await import("react");
+    const host = document.getElementById("root")!;
+    const kept: string[] = [];
+    const root = createRoot(host);
+    await act(async () => root.render(<WitnessFlag pair={swapPair} onReview={() => {}} onKeep={(p) => { kept.push(p.flag!.id!); }} />));
+    await act(async () => host.querySelector("button")!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    const keep = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Keep this mapping")!;
+    await act(async () => keep.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    assert.deepEqual(kept, ["flag-given-1"]);
+    await act(async () => root.render(<WitnessFlag pair={swapPair} onKeep={() => {}} kept />));
+    assert.match(host.textContent ?? "", /Kept after review/);
+    await act(async () => root.unmount());
+  });
+
   it("renders nothing for a pair without a flag", () => {
     assert.equal(renderToStaticMarkup(<WitnessFlag pair={witnessed} />), "");
   });
@@ -151,17 +168,26 @@ describe("When Map runs the witness (review finding 3)", () => {
 });
 
 describe("Mapping evidence in the Trust Report", () => {
-  it("states what was compared, the flag, and who approved it after it was shown", () => {
+  it("states what was compared, who checked it and when, and how each flag was answered", () => {
     const snap = snapshot([swapPair, witnessed], {
+      requested_by: "map-user@example.com",
+      // An approval in Map is not a review of the flag (round 2, N4).
       map_decisions: { given: { target: "last_name", approved: true, changed: false, by: "dee@example.com", at: "2026-11-21T10:05:00Z" } },
       flag_reviews: [{ source: "login", flagged_target: "email", flag_kind: "wrong_target", decision: "changed",
         new_target: "username", by: "ana@example.com", at: "2026-11-21T10:06:00Z" }],
     });
     const t = text(renderToStaticMarkup(<MappingEvidenceView record={snap} />));
     assert.match(t, /2 mapped columns · 1 confirmed by values · 1 to review/);
-    assert.match(t, /Compared on matching keys \(60 matching keys\)/);
-    assert.match(t, /Approved in Map after the flag by dee@example\.com/);
+    assert.match(t, /Compared on matching keys \(60 matching keys\)\. Checked by map-user@example\.com at 2026-11-21 10:00 UTC\./);
+    assert.match(t, /given → last_name Looks swapped .* Not reviewed/);
+    assert.doesNotMatch(t, /dee@example\.com/);
     assert.match(t, /login → email Resolved Flagged earlier; changed to username by ana@example\.com/);
+    const kept = snapshot([swapPair], { flag_reviews: [{ source: "given", flagged_target: "last_name", flag_kind: "swap",
+      flag_id: "flag-given-1", decision: "kept", new_target: null, by: "eve@example.com", at: "2026-11-21T10:07:00Z" }] });
+    assert.match(text(renderToStaticMarkup(<MappingEvidenceView record={kept} />)), /Kept by eve@example\.com \(Keep this mapping\)/);
+    const went = snapshot([swapPair], { flag_reviews: [{ source: "given", flagged_target: "last_name", flag_kind: "swap",
+      flag_id: "flag-given-1", decision: "continued", new_target: null, by: "dee@example.com", at: "2026-11-21T10:07:00Z" }] });
+    assert.match(text(renderToStaticMarkup(<MappingEvidenceView record={went} />)), /Not reviewed: dee@example\.com continued past it/);
     assert.equal(witnessHeadline(snap.report!), "2 mapped columns · 1 confirmed by values · 1 to review");
   });
 
@@ -172,8 +198,9 @@ describe("Mapping evidence in the Trust Report", () => {
   });
 
   it("says plainly when no check ran, instead of implying a pass", () => {
-    const t = text(renderToStaticMarkup(<MappingEvidenceView record={snapshot([], { report: null })} />));
-    assert.match(t, /No mapping check ran for the mapping this job used/);
+    const t = text(renderToStaticMarkup(<MappingEvidenceView record={snapshot([], { report: null,
+      not_checked_reason: "The run was not submitted from a Map session." })} />));
+    assert.match(t, /Not checked: The run was not submitted from a Map session\./);
     const old = text(renderToStaticMarkup(<MappingEvidenceView record={null} />));
     assert.match(old, /submitted before mapping evidence was recorded/);
   });

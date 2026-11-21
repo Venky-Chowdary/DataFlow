@@ -1817,3 +1817,18 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   color: var(--df-text-secondary);
   font-size: var(--df-fs-xs);
 }
+
+.df2-witness-bar.is-error {
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-witness-chip.is-kept {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-witness-error {
+  flex-basis: 100%;
+  color: var(--df2-ms-danger-ink);
+}
