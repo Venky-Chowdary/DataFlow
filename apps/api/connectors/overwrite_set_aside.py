@@ -200,6 +200,38 @@ def _snowflake_connection(cfg: dict[str, Any], schema: str | None) -> Any:
     return conn
 
 
+# Snowflake statements of the set-aside. Every argument is an identifier
+# already quoted by snowflake_qualified_table / quote_sql_identifier.
+
+
+def _sf_rename(src: str, dst: str) -> str:
+    return f"ALTER TABLE {src} RENAME TO {dst}"
+
+
+def _sf_clone(bak: str, live: str, *, copy_grants: bool) -> str:
+    return f"CREATE TABLE {bak} CLONE {live}" + (" COPY GRANTS" if copy_grants else "")
+
+
+def _sf_truncate(ref: str) -> str:
+    return f"TRUNCATE TABLE {ref}"
+
+
+def _sf_swap(live: str, bak: str) -> str:
+    return f"ALTER TABLE {live} SWAP WITH {bak}"
+
+
+def _sf_drop(ref: str) -> str:
+    return f"DROP TABLE IF EXISTS {ref}"
+
+
+def _sf_drop_column(ref: str, column: str) -> str:
+    return f"ALTER TABLE {ref} DROP COLUMN {column}"
+
+
+def _sf_insert_overwrite(live: str, bak: str, cols: str) -> str:
+    return f"INSERT OVERWRITE INTO {live} ({cols}) SELECT {cols} FROM {bak}"  # nosec B608 - quoted ids
+
+
 class _Snowflake:
     """Keep the live table; the backup is a zero-copy clone.
 
@@ -269,23 +301,23 @@ class _Snowflake:
                     # object (its grants and policies are on it): put it back
                     # under the live name first, then keep it in place.
                     live = _live_name_from_backup(stale, table_name)
-                    cur.execute(f"ALTER TABLE {self._ref(sch, stale)} RENAME TO {self._ref(sch, live)}")
+                    cur.execute(_sf_rename(self._ref(sch, stale), self._ref(sch, live)))
                     backup = stale
                 if not live:
                     return None
                 live_ref, bak_ref = self._ref(sch, live), self._ref(sch, backup)
                 try:
-                    cur.execute(f"CREATE TABLE {bak_ref} CLONE {live_ref} COPY GRANTS")
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=True))
                 except Exception as exc:  # noqa: BLE001 - a role may not copy grants
                     logger.info("CLONE ... COPY GRANTS refused for %s (%s); cloning without", live, exc)
-                    cur.execute(f"CREATE TABLE {bak_ref} CLONE {live_ref}")
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=False))
                 try:
-                    cur.execute(f"TRUNCATE TABLE {live_ref}")
+                    cur.execute(_sf_truncate(live_ref))
                 except Exception:
                     # Nothing was emptied: drop the clone so the next run is
                     # not refused for a backup next to a live table.
                     try:
-                        cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
+                        cur.execute(_sf_drop(bak_ref))
                     except Exception:  # noqa: BLE001 - report the truncate failure
                         logger.warning("Could not drop backup clone %s", backup, exc_info=True)
                     raise
@@ -306,7 +338,7 @@ class _Snowflake:
                 live = self._resolve(cur, sch, original)
                 bak_ref = self._ref(sch, backup)
                 if not live:
-                    cur.execute(f"ALTER TABLE {bak_ref} RENAME TO {self._ref(sch, original)}")
+                    cur.execute(_sf_rename(bak_ref, self._ref(sch, original)))
                     return
                 live_ref = self._ref(sch, live)
                 from connectors.snowflake_writer import _is_fakesnow_connection
@@ -326,8 +358,8 @@ class _Snowflake:
                     target=self._governance(cur, bak_ref, cfg, emulator=emulator),
                     target_ref=bak_ref,
                 )
-                cur.execute(f"ALTER TABLE {live_ref} SWAP WITH {bak_ref}")
-                cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
+                cur.execute(_sf_swap(live_ref, bak_ref))
+                cur.execute(_sf_drop(bak_ref))
         finally:
             _close_quietly(conn)
 
@@ -342,12 +374,10 @@ class _Snowflake:
         for col in self._columns(cur, sch, live):
             if col.upper() not in known:
                 # The run added it; the previous table did not have it.
-                cur.execute(f"ALTER TABLE {live_ref} DROP COLUMN {quote_sql_identifier(col)}")
+                cur.execute(_sf_drop_column(live_ref, quote_sql_identifier(col)))
         cols = ", ".join(quote_sql_identifier(c) for c in kept)
-        cur.execute(
-            f"INSERT OVERWRITE INTO {live_ref} ({cols}) SELECT {cols} FROM {bak_ref}"  # nosec B608 - quoted ids
-        )
-        cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
+        cur.execute(_sf_insert_overwrite(live_ref, bak_ref, cols))
+        cur.execute(_sf_drop(bak_ref))
 
     def discard(
         self, cfg: dict[str, Any], table_name: str, backup: str, schema: str | None
@@ -356,7 +386,7 @@ class _Snowflake:
         conn = _snowflake_connection(cfg, schema)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"DROP TABLE IF EXISTS {self._ref(sch, backup)}")
+                cur.execute(_sf_drop(self._ref(sch, backup)))
         finally:
             _close_quietly(conn)
 

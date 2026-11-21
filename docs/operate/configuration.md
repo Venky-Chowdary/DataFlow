@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-591 flags: 510 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
+592 flags: 511 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -262,8 +262,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ENGINE_CACHE` | `1` | Read by `cache_enabled()`: Whether engines are reused. Off restores per-call construction | `apps/api/services/engine_pool.py` |
 | `ENGINE_CACHE_SIZE` | `32` | Read by `max_engines()`: Process-wide SQLAlchemy Engine cache | `apps/api/services/engine_pool.py` |
 | `ENGINE_DIGEST` | `0` | Read by `_engine_digest_enabled()`: Operator gate — default **off** until two gaps are closed | `apps/api/src/transfer/reconcile_step.py` |
-| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
-| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
+| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
+| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
 | `ES_HOST` | `127.0.0.1` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `ES_PORT` | `9200` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `EXIT_VERIFY_MAX_SECONDS` | `""` | Read by `max_verify_seconds()`: The most a rehearsal's verification may take, all attempts together | `apps/api/services/exit_verify_guard.py` |
@@ -370,6 +370,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MONGO_SQLITE_COPY_BATCH` | `5000` | Read by `mongo_sqlite_copy_batch()`: MongoDB snapshot find → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlite.py` |
 | `MONGO_SQLSERVER_COPY` | `1` | Read by `mongo_sqlserver_copy_enabled()`: MongoDB snapshot find → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlserver.py` |
 | `MSSQL_CDC_CAPTURE_WAIT_SEC` | `""` | Read by `_capture_wait_budget_sec()`: SQL Server *native* CDC (cdc schema) — Debezium-class path | `apps/api/connectors/sqlserver_cdc_native.py` |
+| `MSSQL_REQUIRE_VERIFIED_TLS` | `""` | Read by `require_verified_tls()`: Host policy: no silent FreeTDS fallback (set in the image that ships Driver 18) | `apps/api/connectors/mssql_security.py` |
 | `MS_FIT_AGGREGATE_SECONDS` | `""` | Read by `aggregate_timeout_seconds()`: Millisecond narrowing onto a document-store instant, decided on values (D148) | `apps/api/services/millisecond_fit.py` |
 | `MULTI_REPLICA` | `""` | `1` declares that more than one process shares this deployment. Turns on the topology checks that refuse an unsafe process split, and makes the Mongo job queue mandatory. | `apps/api/services/cdc_lease_store.py`, `apps/api/services/process_role.py` +1 more |
 | `MYSQL_ICEBERG_COPY` | `1` | Read by `mysql_iceberg_copy_enabled()`: MySQL SELECT → Iceberg catalog snapshot (cross-engine bulk) | `apps/api/services/copy_mysql_iceberg.py` |
@@ -711,6 +712,7 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 These functions read a variable whose name is built at run time, so the name does not appear in the tables above.
 
+- `apps/api/services/call_lanes.py` — `lane_size()`
 - `apps/api/services/export_object_store.py` — `s3_client_for()`
 - `apps/api/services/integrations_store.py` — `apply_integrations_to_env()`
 - `apps/api/services/integrations_store.py` — `provider_key_state()`

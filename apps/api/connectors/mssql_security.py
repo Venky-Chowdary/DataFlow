@@ -38,7 +38,6 @@ Connector options (top level or under ``extra``):
 
 from __future__ import annotations
 
-import os
 import struct
 from typing import Any, Mapping
 
@@ -80,7 +79,10 @@ def _opt(cfg: Mapping[str, Any], key: str) -> str:
 
 def require_verified_tls() -> bool:
     """Host policy: no silent FreeTDS fallback (set in the image that ships Driver 18)."""
-    return os.environ.get("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "").strip().lower() in _TRUTHY
+    from services.brand_env import getenv_brand_str
+
+    # DATAWRAP_ / DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS
+    return getenv_brand_str("MSSQL_REQUIRE_VERIFIED_TLS", "").strip().lower() in _TRUTHY
 
 
 def driver_choice(cfg: Mapping[str, Any]) -> str:
@@ -270,15 +272,14 @@ def connect_sqlserver_dbapi(
 
     from connectors.mssql_login import PYMSSQL_TDS_VERSION
 
-    kwargs: dict[str, Any] = {
-        "server": str(cfg.get("host") or "127.0.0.1"),
-        "port": int(cfg.get("port") or 1433),
-        "user": str(cfg.get("username") or cfg.get("user") or "sa"),
-        "password": str(cfg.get("password") or ""),
-        "database": str(cfg.get("database") or "master"),
-        "login_timeout": login_timeout,
-        "tds_version": PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
-    }
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    return pymssql.connect(**kwargs)
+    extra: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
+    return pymssql.connect(
+        server=str(cfg.get("host") or "127.0.0.1"),
+        port=int(cfg.get("port") or 1433),
+        user=str(cfg.get("username") or cfg.get("user") or "sa"),
+        password=str(cfg.get("password") or ""),
+        database=str(cfg.get("database") or "master"),
+        login_timeout=login_timeout,
+        tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
+        **extra,
+    )

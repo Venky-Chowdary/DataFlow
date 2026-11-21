@@ -329,7 +329,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
     if (isMssqlFamily(resolved)) {
       userPassFields.push(
-        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or private-CA servers only — skips TLS chain verification." }),
+        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or internal-CA servers only — skips TLS chain verification." }),
         text("sqlserver_driver", "SQL Server driver", {
           optional: true,
           placeholder: "auto",

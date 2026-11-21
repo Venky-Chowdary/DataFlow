@@ -132,3 +132,8 @@ def test_cp1251_upload_is_refused_until_its_encoding_is_declared(transfer_client
             _assert_exact(kind, table, rows)
     finally:
         h.drop_table(kind, table)
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

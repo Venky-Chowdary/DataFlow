@@ -4034,7 +4034,7 @@
             "type": "checkbox",
             "optional": true,
             "sensitive": false,
-            "hint": "For self-signed or private-CA servers only — skips TLS chain verification."
+            "hint": "For self-signed or internal-CA servers only — skips TLS chain verification."
           },
           {
             "key": "sqlserver_driver",
@@ -4172,7 +4172,7 @@
             "type": "checkbox",
             "optional": true,
             "sensitive": false,
-            "hint": "For self-signed or private-CA servers only — skips TLS chain verification."
+            "hint": "For self-signed or internal-CA servers only — skips TLS chain verification."
           },
           {
             "key": "sqlserver_driver",
