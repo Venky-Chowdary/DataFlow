@@ -298,6 +298,7 @@ def _enforce_decision_artifact_once(
         source_column_names=source_names,
         approved_ddl_identity_hash=approved_ddl_identity_hash,
         schema_policy=schema_policy,
+        live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
     )
     return err, (art.to_dict() if art is not None else None)
 

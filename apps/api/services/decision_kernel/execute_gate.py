@@ -166,6 +166,99 @@ def build_artifact_from_mappings(
     )
 
 
+_INT_DISPLAY_WIDTH = re.compile(
+    r"^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)\s*\(\s*\d+\s*\)$",
+    re.I,
+)
+
+
+def _ddl_compare_token(type_sql: str) -> str:
+    """Physical DDL token for planned-vs-live equality.
+
+    Case, charset, and MySQL integer display widths are spelling. Width and
+    scale of character and decimal types stay, so VARCHAR(40) is not VARCHAR(80).
+    """
+    text = re.sub(r"\s+", " ", str(type_sql or "").strip())
+    text = re.sub(
+        r"\s+(?:CHARACTER\s+SET|CHARSET|COLLATE)\s+\S+",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = text.upper().strip()
+    shown = _INT_DISPLAY_WIDTH.match(text)
+    if shown:
+        base = shown.group(1).upper()
+        return "INT" if base == "INTEGER" else base
+    if text == "INTEGER":
+        return "INT"
+    return text
+
+
+def planned_ddl_matches_live(
+    planned: Mapping[str, str] | None,
+    live: Mapping[str, str] | None,
+) -> bool:
+    """True when the live table is exactly the DDL this plan would create.
+
+    Same column set, same carrier. An added column or a widened VARCHAR is
+    drift. Empty on either side is not a match.
+    """
+    if not planned or not live:
+        return False
+    want = {
+        str(name).strip().lower(): _ddl_compare_token(typ)
+        for name, typ in planned.items()
+        if str(name).strip()
+    }
+    have = {
+        str(name).strip().lower(): _ddl_compare_token(typ)
+        for name, typ in live.items()
+        if str(name).strip()
+    }
+    if not want or set(want) != set(have):
+        return False
+    return all(want[name] == have[name] for name in want)
+
+
+def _planned_create_still_holds(
+    *,
+    planned: dict[str, str],
+    live_column_types: dict[str, str] | None,
+    destination_table_exists: bool | None,
+    mappings: list[dict[str, Any]] | None,
+    dest_column_names: list[str] | None,
+    source_column_names: list[str] | None,
+    column_nullability: dict[str, bool] | None,
+    column_defaults: dict[str, str] | None,
+    identity_columns: list[str] | None,
+    generated_columns: list[str] | None,
+    schema_policy: str,
+) -> tuple[bool, str]:
+    """(holds, shape_error). Shape error is a real contract break.
+
+    Holds only when the destination exists and its columns are exactly the
+    planned DDL. A type or column someone else changed does not hold.
+    """
+    if destination_table_exists is not True:
+        return False, ""
+    if not planned_ddl_matches_live(planned, live_column_types):
+        return False, ""
+    shape_err = dest_exists_shape_error(
+        mappings=mappings,
+        dest_column_names=dest_column_names or list((live_column_types or {}).keys()),
+        source_column_names=source_column_names,
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+        schema_policy=schema_policy,
+    )
+    if shape_err:
+        return False, shape_err
+    return True, ""
+
+
 def _policy_propagates(schema_policy: str | None) -> bool:
     return str(schema_policy or "").strip().lower() in {"propagate_columns", "propagate_all"}
 
@@ -392,6 +485,7 @@ def enforce_decision_artifact(
     generated_columns: list[str] | None = None,
     approved_ddl_identity_hash: str = "",
     schema_policy: str = "",
+    live_column_types: dict[str, str] | None = None,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -466,6 +560,26 @@ def enforce_decision_artifact(
                         return (None, supplied)
                     if hold_err:
                         return (hold_err, None)
+                # DW-D407: retry of a cancelled create-new whose table is still
+                # the planned DDL. The fingerprint moved because the table now
+                # exists, not because someone else altered it.
+                held, shape_err = _planned_create_still_holds(
+                    planned=dict(supplied.ddl.column_ddl or {}),
+                    live_column_types=live_column_types,
+                    destination_table_exists=destination_table_exists,
+                    mappings=mappings,
+                    dest_column_names=dest_column_names,
+                    source_column_names=source_column_names,
+                    column_nullability=column_nullability,
+                    column_defaults=column_defaults,
+                    identity_columns=identity_columns,
+                    generated_columns=generated_columns,
+                    schema_policy=schema_policy,
+                )
+                if shape_err:
+                    return (shape_err, None)
+                if held:
+                    return (None, supplied)
                 return (
                     "Decision Artifact dest schema drifted since Validate — "
                     "re-run Validate before Execute.",
@@ -552,6 +666,27 @@ def enforce_decision_artifact(
             if shape_err:
                 return (shape_err, None)
             return (None, current)
+        # No stored DDL hash to prove the Map. The live table matching the
+        # plan is still the create this run left behind (DW-D407), not a
+        # license to accept a Map whose DDL hash disagrees.
+        if not str(approved_ddl_identity_hash or "").strip():
+            held, shape_err = _planned_create_still_holds(
+                planned=dict(current.ddl.column_ddl or {}),
+                live_column_types=live_column_types,
+                destination_table_exists=destination_table_exists,
+                mappings=mappings,
+                dest_column_names=dest_column_names,
+                source_column_names=source_column_names,
+                column_nullability=column_nullability,
+                column_defaults=column_defaults,
+                identity_columns=identity_columns,
+                generated_columns=generated_columns,
+                schema_policy=schema_policy,
+            )
+            if shape_err:
+                return (shape_err, None)
+            if held:
+                return (None, current)
         return (
             "Decision Artifact content_hash mismatch — Map/DDL drifted "
             "since Validate. Re-run Validate before Execute.",

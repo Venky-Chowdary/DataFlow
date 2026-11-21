@@ -7,15 +7,24 @@ from __future__ import annotations
 
 
 def test_d47_snowflake_scd2_and_mirror_predicates_do_not_use_is():
+    """DW-D47 covers both writers. SCD2 close-version uses
+    ``scd2_is_current_predicate`` (``WHERE is_current = TRUE``). Mirror
+    delete/update uses ``sql_bool_is_true`` / ``sql_bool_is_not_true`` on
+    ``_deleted`` (reactivate and soft-delete). Neither emits ``IS TRUE``.
+    """
     from services.dialect_profiles import sql_bool_is_not_true, sql_bool_is_true
     from services.scd2_engine import scd2_is_current_predicate
 
-    current = scd2_is_current_predicate("snowflake", '"is_current"')
-    deleted = sql_bool_is_not_true("snowflake", '"_deleted"')
-    assert current == '"is_current" = TRUE'
-    assert "IS TRUE" not in current.upper()
-    assert "DISTINCT" not in deleted.upper()
-    assert sql_bool_is_true("snowflake", '"is_current"') == current
+    close_version = scd2_is_current_predicate("snowflake", '"is_current"')
+    mirror_deleted = sql_bool_is_true("snowflake", '"_deleted"')
+    mirror_active = sql_bool_is_not_true("snowflake", '"_deleted"')
+    for sql in (close_version, mirror_deleted, mirror_active):
+        assert "IS TRUE" not in sql.upper()
+        assert "IS NOT TRUE" not in sql.upper()
+        assert "DISTINCT" not in sql.upper()
+    assert close_version == '"is_current" = TRUE'
+    assert mirror_deleted == '"_deleted" = TRUE'
+    assert mirror_active == '("_deleted" IS NULL OR "_deleted" = FALSE)'
 
 
 def test_d47_scd2_error_keeps_the_snowflake_syntax_line():
@@ -265,6 +274,80 @@ def test_d335_add_column_does_not_keep_the_boundary_row_on_append():
         dest_bind_dialect="postgresql",
     )
     assert dropped == {0}
+
+
+def test_d407_retry_of_own_create_is_not_dest_schema_drift():
+    """Cancelled incremental upsert created the table. Retry from start sees it.
+
+    The live carriers are the planned DDL (MySQL display width included).
+    That is not drift. A widened column or an extra column still is.
+    """
+    from services.decision_kernel.execute_gate import (
+        build_artifact_from_mappings,
+        enforce_decision_artifact,
+    )
+    from services.schema_fingerprint import fingerprint_schema
+
+    maps = [
+        {"source": "id", "target": "id", "source_type": "BIGINT", "target_type": "BIGINT", "create_new": True},
+        {"source": "name", "target": "name", "source_type": "VARCHAR(40)", "target_type": "VARCHAR(40)", "create_new": True},
+        {"source": "qty", "target": "qty", "source_type": "BIGINT", "target_type": "BIGINT", "create_new": True},
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="mysql",
+        source_db="postgresql",
+        source_fingerprint="aabbccddeeff0011",
+        dest_fingerprint="",
+        sync_mode="incremental_deduped",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    planned = dict(stamped.ddl.column_ddl)
+    assert planned
+    live = {name: typ.lower() for name, typ in planned.items()}
+    # Catalog spelling of the same DDL: integer display width, lower case.
+    live = {
+        "id": "bigint(20)",
+        "name": live.get("name", "varchar(40)"),
+        "qty": "bigint",
+    }
+    # Keep the planned name width if the kernel emitted one.
+    name_ddl = planned.get("name") or planned.get("NAME") or "VARCHAR(40)"
+    live["name"] = name_ddl.lower()
+    live_fp = fingerprint_schema(list(live), live)
+
+    def _gate(types: dict[str, str]):
+        return enforce_decision_artifact(
+            mappings=maps,
+            dest_db="mysql",
+            source_db="postgresql",
+            approved_content_hash=stamped.content_hash,
+            artifact_payload=stamped.to_dict(),
+            source_fingerprint="1122334455667788",
+            dest_fingerprint=fingerprint_schema(list(types), types),
+            destination_table_exists=True,
+            dest_column_names=list(types),
+            source_column_names=["id", "name", "qty"],
+            live_column_types=types,
+            sync_mode="incremental_deduped",
+        )
+
+    err, art = _gate(live)
+    assert err is None, err
+    assert art is not None
+
+    widened = {**live, "name": "varchar(80)"}
+    err_w, art_w = _gate(widened)
+    assert err_w and "drifted" in err_w.lower()
+    assert art_w is None
+
+    extra = {**live, "note": "int"}
+    err_x, art_x = _gate(extra)
+    assert err_x and "drifted" in err_x.lower()
+    assert art_x is None
+    assert live_fp
 
 
 def test_mysql_3750_is_a_plan_time_finding_not_a_raw_driver_error():
