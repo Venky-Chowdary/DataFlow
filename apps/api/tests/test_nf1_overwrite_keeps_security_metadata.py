@@ -628,6 +628,49 @@ def test_bigquery_governed_table_is_never_copied_by_query(monkeypatch):
     assert fake.queries == [] and sorted(fake.tables) == ["p.d.orders"]
 
 
+def test_bigquery_restore_with_unreadable_access_control_keeps_the_backup(monkeypatch):
+    """Review of NF-1: unreadable governance was treated as ungoverned: the backup
+    that carried the policies was deleted and the restore reported success."""
+    import connectors.bigquery_conn as bq_conn
+
+    fake = _GovernedBigQuery()
+    fake.add("p.d.orders", PRIOR)
+    monkeypatch.setattr(bq_conn, "get_client", lambda **_: fake)
+    backup = retire_set_aside("bigquery", _CFG, "orders", "d")
+    fake.tables["p.d.orders"]["rows"] = [(7, "partial")]
+    fake.iam_readable = False  # the role lost getIamPolicy during the run
+
+    with pytest.raises(TableDropError, match="access control is unverified"):
+        restore_set_aside("bigquery", _CFG, "orders", backup, "d")
+
+    assert fake.tables["p.d.orders"]["rows"] == list(PRIOR)
+    assert f"p.d.{backup}" in fake.tables, "the backup carrying the policies is kept"
+    assert fake.queries == [] or all("ROW ACCESS POLICY" in q for q in fake.queries)
+
+
+def test_bigquery_approved_unreadable_row_access_never_copies_by_query(monkeypatch):
+    """With the row-access read failed, a buffered table must not be backed up
+    by a query through the policies (a subset), even with the approval."""
+    import connectors.bigquery_conn as bq_conn
+
+    fake = _GovernedBigQuery(buffered=True)
+    fake.add("p.d.orders", PRIOR, governed=False)
+    real = fake._connection
+
+    class _Conn:
+        def api_request(self, **_: Any) -> dict:
+            raise RuntimeError("Access Denied: bigquery.rowAccessPolicies.list")
+
+    monkeypatch.setattr(type(fake), "_connection", property(lambda self: _Conn()))
+    monkeypatch.setattr(bq_conn, "get_client", lambda **_: fake)
+    del real
+
+    with pytest.raises(TableDropError, match="streaming buffer"):
+        retire_set_aside("bigquery", _CFG, "orders", "d", governance_loss_approved=True)
+
+    assert fake.queries == [] and sorted(fake.tables) == ["p.d.orders"]
+
+
 def test_bigquery_ungoverned_table_keeps_the_writer_create_path(bq):
     bq.add("p.d.orders", PRIOR, governed=False)
 

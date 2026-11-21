@@ -582,7 +582,12 @@ class _BigQuery:
             # A query copy reads through row access policies and data masking:
             # a governed table is copied with a copy job or not at all.
             by_query = self._buffered(client, live_id, call)
-            self._copy(client, live_id, bak_id, call, by_query=by_query, query_allowed=gov is None or not gov.governed)
+            # Unreadable access control (approved) is treated as governed for
+            # the copy: a query through row access policies backs up a subset.
+            self._copy(
+                client, live_id, bak_id, call, by_query=by_query,
+                query_allowed=gov is None or not (gov.governed or gov.unreadable),
+            )
             if gov is not None and gov.governed:
                 self._protect_backup(client, bak_id, gov, call, approved=approved)
             client.delete_table(live_id, not_found_ok=True, **call)
@@ -676,12 +681,27 @@ class _BigQuery:
                     backup_gov = bigquery_governance(client, bak_id, call)
                     if backup_gov.governed and not backup_gov.unreadable:
                         gov = backup_gov
+            unknown = list(gov.unreadable) if gov is not None else []
             client.delete_table(live_id, not_found_ok=True, **call)
-            self._copy(client, bak_id, live_id, call, query_allowed=gov is None or not gov.governed)
-            if gov is not None and gov.governed:
+            self._copy(
+                client, bak_id, live_id, call,
+                query_allowed=gov is None or not (gov.governed or unknown),
+            )
+            if gov is not None and (gov.governed or unknown):
                 from connectors.overwrite_governance import bigquery_apply
 
                 bigquery_apply(client, live_id, gov, call)
+            if unknown:
+                # The rows are back, but whether the table's access control is
+                # could not be read: keep the backup (it carries what retire
+                # put on it) and say so, instead of reporting a clean restore.
+                raise TableDropError(
+                    table_name,
+                    f"rows restored, but {', '.join(unknown)} could not be read, so the "
+                    f"restored table's access control is unverified. The backup {backup} is "
+                    "kept; compare its IAM and row access policies with the table's, then "
+                    "drop it before the next run.",
+                )
             client.delete_table(bak_id, not_found_ok=True, **call)
         finally:
             _close_quietly(client)
