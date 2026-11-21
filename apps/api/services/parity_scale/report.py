@@ -64,7 +64,8 @@ def apply_scale_evidence(ev: TableEvidence, job: dict[str, Any]) -> None:
         return
     if status == "error":
         ev.note = (ev.note + " " if ev.note else "") + (
-            f"Verification of {ev.name} could not finish; re-verify the table to compare every row."
+            str(block.get("error") or "")
+            or f"Verification of {ev.name} could not finish; re-verify the table to compare every row."
         )
         return
     evidence = block.get("evidence") or {}

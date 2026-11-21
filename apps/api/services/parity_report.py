@@ -1022,9 +1022,10 @@ def build_parity_report(
 
 def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
     """The Parity at Scale verification phase as the Trust Report shows it (no evidence bodies)."""
-    from services.parity_scale.verification import block_of, table_state
+    from services.parity_scale.verification import effective_block, table_state
 
-    block = block_of(job)
+    # As readers must see it: a run whose worker stopped is not "running".
+    block = effective_block(job)
     if not block:
         return None
     return {

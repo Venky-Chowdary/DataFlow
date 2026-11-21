@@ -1626,6 +1626,15 @@ class MongoDBService:
             jobs.append(slim_job_for_list(doc))
         return jobs
 
+    def list_job_ids_where(self, fields: dict[str, Any], limit: int = 50) -> list[str]:
+        """Ids of jobs (any workspace) whose dotted ``fields`` hold these values, oldest first."""
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return []
+        cursor = db["transfer_jobs"].find(dict(fields), {"_id": 1}).sort("updated_at", 1).limit(max(1, int(limit)))
+        return [str(doc["_id"]) for doc in cursor]
+
     def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
         """Every non-terminal job across workspaces, oldest heartbeat first.
 
@@ -2379,6 +2388,16 @@ class MemoryMongoDBService:
                     job[key] = job[key].isoformat()
             out.append(slim_job_for_list(job))
         return out
+
+    def list_job_ids_where(self, fields: dict[str, Any], limit: int = 50) -> list[str]:
+        """See ``MongoDBService.list_job_ids_where``."""
+        with self._fields_lock:
+            found = [
+                (str(rec.get("updated_at") or ""), str(rec["_id"]))
+                for rec in self._jobs.values()
+                if expected_fields_hold(rec, fields)
+            ]
+        return [job_id for _at, job_id in sorted(found)[: max(1, int(limit))]]
 
     def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
         from services.job_status import UNFINISHED_JOB_STATUSES

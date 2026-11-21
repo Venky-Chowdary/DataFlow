@@ -339,7 +339,8 @@ class ParityScan:
 
     def _abandon_queue(self, reason: str) -> None:
         for item in self.state["queue"]:
-            if item["t"] in {"R", "RL", "H", "HL", "stream"}:
+            # A scan stopped before it even started compared nothing: never a match.
+            if item["t"] in {"R", "RL", "H", "HL", "stream", "start", "held"}:
                 self._not_compared(item, reason)
             elif item["t"] == "judge":
                 self.state["judge"]["not_judged"] += len(item.get("keys") or [])

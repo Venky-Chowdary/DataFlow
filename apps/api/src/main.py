@@ -410,6 +410,16 @@ async def lifespan(app: FastAPI):
             else:
                 print("[+] Orphan resume scan skipped")
 
+            # Parity at Scale: verifications whose worker stopped resume from
+            # their checkpoints (or end as stopped); off unless the flag is on.
+            try:
+                from services.parity_scale.verification import start_sweeper as start_verification_sweeper
+
+                if start_verification_sweeper():
+                    print("[+] Verification sweeper started")
+            except Exception as e:  # noqa: BLE001 — a bad sweeper must not kill boot
+                print(f"[!] Verification sweeper failed to start: {e}")
+
             # D10: the per-step stall watchdog flags and then fails a job whose
             # active phase goes quiet past its threshold — an orphan sweep only
             # sees a job once every owner signal is gone, which a live-but-stuck

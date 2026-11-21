@@ -97,6 +97,18 @@ def _job(src: str, dst: str, *, key: bool = True) -> str:
     })
 
 
+def _live_lease(job_id: str, *, owner: str = "another-worker:1") -> None:
+    """Another worker holds this job's verification right now (a live lease)."""
+    from datetime import datetime, timedelta, timezone
+
+    from services.mongodb_service import get_mongodb_service
+
+    now = datetime.now(timezone.utc)
+    get_mongodb_service().update_job_fields(job_id, {"parity_scale_lease": {
+        "token": "other", "owner": owner, "claimed_at": now.isoformat(),
+        "heartbeat_at": now.isoformat(), "expires_at": (now + timedelta(minutes=10)).isoformat()}})
+
+
 def _report(job_id: str) -> dict[str, Any]:
     from services.mongodb_service import get_mongodb_service
     from services.parity_report import build_parity_report
@@ -126,6 +138,7 @@ def test_running_verification_blocks_signoff_and_is_not_a_verdict(tables) -> Non
     get_mongodb_service().update_job_fields(job_id, {"parity_scale": {
         "state": "running", "tables": [{"name": tables[1], "status": "running", "scan_id": "x",
                                         "progress": {"items_done": 3, "items_queued": 9}}]}})
+    _live_lease(job_id)
     report = _report(job_id)
     assert report["verdict"] == "verifying"
     assert report["signoff"]["status"] == "blocked"
@@ -249,8 +262,9 @@ def test_watermark_waits_for_verification_and_moves_only_when_it_passes(tables, 
     monkeypatch.setattr(store, "get_schedule", lambda _sid: Sched())
     monkeypatch.setattr(store, "update_schedule", lambda sid, data: released.append(data))
     get_mongodb_service().update_job_fields(job_id, {"parity_scale": {"state": "running", "tables": []}})
+    _live_lease(job_id)
     assert verification.schedule_waits_for_verification(Sched()).startswith("Waiting")
-    get_mongodb_service().update_job_fields(job_id, {"parity_scale": {}})
+    get_mongodb_service().update_job_fields(job_id, {"parity_scale": {}, "parity_scale_lease": None})
     assert _verify(job_id)["state"] == "passed"
     assert released == [{"cursor_value": "2024-06-01"}]
     assert verification.schedule_waits_for_verification(Sched()) == ""

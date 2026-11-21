@@ -37,6 +37,7 @@ def _stoppers() -> list[tuple[str, Callable[[float], object], float]]:
     from services.exit_rehearsal import stop_background as stop_exit_verifications
     from services.job_watchdog import stop_stall_watchdog
     from services.orphan_jobs import stop_orphan_sweeper
+    from services.parity_scale.verification import stop_sweeper as stop_verification_sweeper
     from services.signup_service import stop_mail_outbox_sweeper
     from services.transfer_scheduler import drain as drain_transfer_pool
     from services.worker_fleet import stop_api_claim_loop, worker_drain_seconds
@@ -52,6 +53,7 @@ def _stoppers() -> list[tuple[str, Callable[[float], object], float]]:
     return [
         ("exit verifications", stop_exit_verifications, 10.0),
         ("orphan sweeper", stop_orphan_sweeper, 5.0),
+        ("verification sweeper", stop_verification_sweeper, 5.0),
         ("stall watchdog", stop_stall_watchdog, 5.0),
         ("API claim loop", stop_api_claim_loop, drain + 5.0),
         ("transfer pool", drain_transfer_pool, drain),

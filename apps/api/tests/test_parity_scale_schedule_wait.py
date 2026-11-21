@@ -20,12 +20,20 @@ def _env(monkeypatch):
     monkeypatch.setattr(ms, "_mongodb_service", None)
 
 
-def _running_job() -> str:
+def _running_job(*, lease_minutes: int = 10) -> str:
+    """A job whose verification runs on a worker holding a lease (negative minutes: expired)."""
+    from datetime import datetime, timedelta, timezone
+
     from services.mongodb_service import get_mongodb_service
 
     svc = get_mongodb_service()
     job_id = svc.create_transfer_job({"status": "completed"})
-    svc.update_job_fields(job_id, {"parity_scale": {"state": "running", "tables": []}})
+    now = datetime.now(timezone.utc)
+    svc.update_job_fields(job_id, {
+        "parity_scale": {"state": "running", "tables": [{"name": "t", "status": "running", "scan_id": "s"}]},
+        "parity_scale_lease": {"token": "w", "owner": "worker:1",
+                               "expires_at": (now + timedelta(minutes=lease_minutes)).isoformat()},
+    })
     return job_id
 
 
@@ -60,3 +68,17 @@ def test_next_tick_waits_unless_the_schedule_opted_out(monkeypatch) -> None:
     monkeypatch.delenv("DATAWRAP_PARITY_SCALE")
     Sched.wait_for_verification = True
     assert schedule_waits_for_verification(Sched()) == ""  # flag off: nothing changes
+
+
+def test_a_stopped_verification_does_not_hold_the_schedule() -> None:
+    """Defect 1: a worker that died must not make every later tick wait."""
+    from services.parity_scale.verification import schedule_waits_for_verification
+
+    job_id = _running_job(lease_minutes=-1)
+
+    class Sched:
+        id = "s1"
+        last_job_id = job_id
+        wait_for_verification = True
+
+    assert schedule_waits_for_verification(Sched()) == ""

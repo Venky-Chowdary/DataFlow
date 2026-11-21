@@ -14,9 +14,13 @@ from r8_ent_harness import ent  # noqa: F401
 
 
 def _job(workspace_id: str, name: str) -> str:
+    """A completed job whose verification a live worker is running (it holds the lease)."""
+    from datetime import datetime, timedelta, timezone
+
     from services.mongodb_service import get_mongodb_service
 
     store = get_mongodb_service()
+    now = datetime.now(timezone.utc)
     job_id = store.create_transfer_job({
         "name": name, "workspace_id": workspace_id, "status": "completed",
         "reconciliation": {"passed": True, "source_rows": 10, "target_rows": 10,
@@ -25,7 +29,11 @@ def _job(workspace_id: str, name: str) -> str:
         "parity_scale": {"state": "running", "started_at": "2026-11-21T00:00:00+00:00",
                          "tables": [{"name": "payments", "status": "running", "scan_id": "s1",
                                      "progress": {"items_done": 2, "items_queued": 6}}]},
+        "parity_scale_lease": {"token": "w", "owner": "worker:1",
+                               "expires_at": (now + timedelta(minutes=10)).isoformat()},
     })
+    # Completing the job runs its terminal effects: a job that already has a
+    # verification keeps it (the hook starts one only once).
     store.update_job_status(job_id, "completed")
     return job_id
 

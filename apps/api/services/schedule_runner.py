@@ -1521,7 +1521,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     ok = _is_success(status)
     cursor_value = None
     if ok and sched.cursor_column:
-        from services.parity_scale.verification import hold_cursor_until_verified
+        from services.parity_scale.watermark import hold_cursor_until_verified
 
         # The watermark advances only once verification has not failed (owner
         # decision 2): a run still being verified keeps it, and applies it later.
@@ -2166,7 +2166,7 @@ def _run_schedule(
         return None
     if not sched.enabled and not manual:
         return None
-    from services.parity_scale.verification import schedule_waits_for_verification
+    from services.parity_scale.watermark import schedule_waits_for_verification
 
     waiting = "" if manual else schedule_waits_for_verification(sched)
     if waiting:
