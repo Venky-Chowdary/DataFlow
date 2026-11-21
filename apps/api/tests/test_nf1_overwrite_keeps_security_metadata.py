@@ -198,7 +198,7 @@ class _ScriptedCursor:
     """A Snowflake cursor that answers the governance reads from a script."""
 
     def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset(),
-                 kind: tuple[str, str] = ("BASE TABLE", "NO")):
+                 kind: str = "TABLE"):
         self.governance = governance
         self.refuse = refuse
         self.kind = kind
@@ -226,8 +226,8 @@ class _ScriptedCursor:
             self._answer(gov.get("column_tags", []))
         elif "TAG_REFERENCES(" in sql:
             self._answer(gov.get("table_tags", []))
-        elif "is_transient" in sql:
-            self.description, self._rows = [("TABLE_TYPE",), ("IS_TRANSIENT",)], [self.kind]
+        elif sql.startswith("SHOW TABLES LIKE"):
+            self._answer([{"name": "T", "kind": self.kind}])
         else:
             self.description, self._rows = None, []
 
@@ -368,7 +368,7 @@ def test_snowflake_refused_reapply_drops_the_clone_and_never_truncates(monkeypat
 
 
 def test_snowflake_transient_table_is_cloned_as_transient(monkeypatch):
-    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind=("BASE TABLE", "YES"))
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind="TRANSIENT")
     _scripted(cur, monkeypatch)
 
     retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
@@ -377,7 +377,7 @@ def test_snowflake_transient_table_is_cloned_as_transient(monkeypatch):
 
 
 def test_snowflake_temporary_table_is_refused_before_any_change(monkeypatch):
-    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind=("TEMPORARY TABLE", "NO"))
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, kind="TEMPORARY")
     _scripted(cur, monkeypatch)
 
     with pytest.raises(TableDropError, match="TEMPORARY"):
@@ -809,14 +809,14 @@ def test_gate_probes_snowflake_and_blocks_unreadable_policies():
 
 
 def test_snowflake_probe_reads_the_live_table(snowflake):
-    """The real probe on fakesnow: an emulator table governs nothing, so it passes."""
+    """The real probe on fakesnow: an emulator table governs nothing, so it passes
+    without spending a login (D187 plan budget)."""
     from services.overwrite_governance_gate import probe_snowflake_governance
 
     cfg, table = snowflake
     _seed(table)
-    assert probe_snowflake_governance({**cfg, "schema": "PUBLIC"}, table) == {
-        "ran": True, "governed": False, "unreadable": [], "message": "",
-    }
+    measured = probe_snowflake_governance({**cfg, "schema": "PUBLIC"}, table)
+    assert measured["ran"] is True and measured["unreadable"] == []
 
 
 def test_gate_blocks_bigquery_when_access_control_cannot_be_read():

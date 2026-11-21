@@ -214,6 +214,10 @@ def _sf_clone(bak: str, live: str, *, copy_grants: bool, transient: bool = False
     return f"CREATE {kind} {bak} CLONE {live}" + (" COPY GRANTS" if copy_grants else "")
 
 
+def _sf_show_tables(like: str, schema_ref: str) -> str:
+    return f"SHOW TABLES LIKE '{like}' IN SCHEMA {schema_ref}"
+
+
 def _sf_truncate(ref: str) -> str:
     return f"TRUNCATE TABLE {ref}"
 
@@ -297,28 +301,37 @@ class _Snowflake:
 
     @staticmethod
     def _kind(cur: Any, schema: str, name: str) -> str:
-        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent)."""
+        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent).
+
+        ``SHOW TABLES LIKE`` is one object lookup; ``information_schema`` is
+        avoided on this path (D187: it federates on shared catalogs).
+        """
+        from connectors.sql_identifiers import quote_sql_identifier
+
         try:
-            cur.execute(
-                "SELECT table_type, is_transient FROM information_schema.tables "
-                "WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s",
-                (schema, name),
-            )
-            row = cur.fetchone()
+            # Wildcards in the name only widen the match; the exact name is picked below.
+            like = str(name).replace("\\", "\\\\").replace("'", "''")
+            cur.execute(_sf_show_tables(like, quote_sql_identifier(schema)))
+            names = [str(d[0]).lower() for d in (cur.description or [])]
+            rows = [dict(zip(names, r)) for r in cur.fetchall()]
         except Exception as exc:  # noqa: BLE001 - CLONE then reports a mismatch itself
             logger.info("Snowflake table kind of %s unread: %s", name, exc)
             return "permanent"
-        if not row:
-            return "permanent"
-        if "TEMPORARY" in str(row[0] or "").upper():
+        kind = next((str(r.get("kind") or "") for r in rows if str(r.get("name")) == str(name)), "")
+        kind = kind.upper()
+        if "TEMPORARY" in kind:
             return "temporary"
-        return "transient" if str(row[1] or "").upper() in ("YES", "Y", "TRUE") else "permanent"
+        return "transient" if "TRANSIENT" in kind else "permanent"
 
     @staticmethod
-    def _emulator(conn: Any) -> bool:
+    def _emulator(conn: Any, cfg: dict[str, Any] | None = None) -> bool:
+        """fakesnow: by its connection class, or a local account in the config."""
+        from connectors.snowflake_conn import _is_local_account, normalize_account
         from connectors.snowflake_writer import _is_fakesnow_connection
 
-        return _is_fakesnow_connection(conn)
+        if conn is not None and _is_fakesnow_connection(conn):
+            return True
+        return bool(cfg) and _is_local_account(normalize_account(str((cfg or {}).get("host") or "")))
 
     def retire(
         self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
@@ -327,7 +340,7 @@ class _Snowflake:
 
         sch = schema or cfg.get("schema", "PUBLIC")
         conn = _snowflake_connection(cfg, schema)
-        emulator = self._emulator(conn)
+        emulator = self._emulator(conn, cfg)
         try:
             with conn.cursor() as cur:
                 live = self._resolve(cur, sch, table_name)
@@ -346,7 +359,7 @@ class _Snowflake:
                 if not live:
                     return None
                 live_ref, bak_ref = self._ref(sch, live), self._ref(sch, backup)
-                kind = self._kind(cur, sch, live)
+                kind = "permanent" if emulator else self._kind(cur, sch, live)
                 if kind == "temporary":
                     raise TableDropError(
                         live, "a TEMPORARY table's backup would vanish with this session; "
@@ -399,7 +412,7 @@ class _Snowflake:
                     return
                 live_ref = self._ref(sch, live)
                 try:
-                    gov = self._governance(cur, live_ref, cfg, emulator=self._emulator(conn))
+                    gov = self._governance(cur, live_ref, cfg, emulator=self._emulator(conn, cfg))
                     if gov.has_policies is False:
                         self._restore_in_place(cur, sch, live, backup)
                         return

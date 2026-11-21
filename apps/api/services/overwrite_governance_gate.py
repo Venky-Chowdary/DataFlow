@@ -62,17 +62,20 @@ def probe_snowflake_governance(cfg: dict[str, Any], table: str) -> dict[str, Any
     """
     from connectors.overwrite_set_aside import _close_quietly, _Snowflake, _snowflake_connection
 
+    sf = _Snowflake()
+    if sf._emulator(None, cfg):
+        # fakesnow has no grants, policies or tags: no login spent on reading none.
+        return {"ran": True, "governed": False, "unreadable": [], "message": "emulator: no governance"}
     schema = cfg.get("schema") or "PUBLIC"
-    conn = _snowflake_connection(cfg, schema)
+    conn = _snowflake_connection(cfg, cfg.get("schema"))  # the plan's shared login (D187)
     try:
-        sf = _Snowflake()
         with conn.cursor() as cur:
             live = sf._resolve(cur, schema, table)
             if not live:
                 return {"ran": True, "governed": False, "unreadable": [], "message": "table absent"}
             if sf._kind(cur, schema, live) == "temporary":
                 return {"ran": True, "governed": False, "unreadable": ["a TEMPORARY table (no backup can outlive the run)"], "message": ""}
-            gov = sf._governance(cur, sf._ref(schema, live), cfg, emulator=sf._emulator(conn))
+            gov = sf._governance(cur, sf._ref(schema, live), cfg, emulator=False)
     finally:
         _close_quietly(conn)
     return {
