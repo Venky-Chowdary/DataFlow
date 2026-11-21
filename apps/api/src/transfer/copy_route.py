@@ -44,6 +44,31 @@ def _stamp_vector_identity_honesty(
     return proof_line
 
 
+_JSON_CAST_TRANSFORMS = frozenset({"json", "jsonb"})
+
+
+def _jsonb_carry_mappings(mappings: list[dict], declared: dict[str, str]) -> list[dict]:
+    """PostgreSQL→PostgreSQL: a ``json`` cast on a ``jsonb`` column is a plain carry.
+
+    The mapper stamps ``json`` on every JSON column, which made
+    ``comparable_column_pairs`` send any table with a ``jsonb`` column down the
+    row path. Between two PostgreSQL ``jsonb`` columns a binary COPY moves the
+    datum itself — key order, duplicate keys and number scale are what the
+    source stored, and the digest compares ``jsonb::text`` on both sides. Only
+    ``jsonb``: a ``json`` column keeps its text verbatim, which the row path's
+    cast does not, so it stays on the row path.
+    """
+    lowered = {str(k).lower(): str(v or "").strip().lower() for k, v in (declared or {}).items()}
+    out: list[dict] = []
+    for mapping in mappings or []:
+        transform = str(mapping.get("transform") or "").strip().lower()
+        source = str(mapping.get("source") or "").strip().lower()
+        if transform in _JSON_CAST_TRANSFORMS and lowered.get(source) == "jsonb":
+            mapping = dict(mapping, transform="")
+        out.append(mapping)
+    return out
+
+
 def _try_copy_fast_path(
     *,
     source: EndpointConfig,
@@ -2292,7 +2317,9 @@ def _try_copy_fast_path(
         except Exception:  # nosec B110 — probe connection only
             pass
 
-    pairs = comparable_column_pairs(mappings, declared, declared, engine=src_type)
+    pairs = comparable_column_pairs(
+        _jsonb_carry_mappings(mappings, declared), declared, declared, engine=src_type
+    )
     if not pairs:
         return None
     # ``comparable_column_pairs`` compared the source against itself above, which
