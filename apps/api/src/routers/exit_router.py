@@ -294,12 +294,12 @@ async def export_exit_evidence(
 
 
 @router.post("/exit/evidence/verify")
-async def verify_exit_evidence(body: Any = Body(...)):
+async def verify_exit_evidence(request: Request, body: Any = Body(...)):
     """Verify an Exit Evidence Pack (``{"pack": ...}`` or the pack itself): signature, Merkle root, anchor.
 
     A body that is not a signed pack is a 422 naming what is missing, like the proof-pack verify route.
     """
     from services.exit_evidence import verify_pack
-    from services.proof_pack_request import pack_from_body
+    from services.proof_pack_request import pack_from_body, workspace_reader
 
-    return await asyncio.to_thread(verify_pack, pack_from_body(body))
+    return await asyncio.to_thread(verify_pack, pack_from_body(body), may_use_workspace=workspace_reader(request))

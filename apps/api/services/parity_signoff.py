@@ -140,7 +140,10 @@ def sign_off(
             "blocked_reason": None, "signature": None, "signed_at": signed_at,
         }
         final["version"] = int(state.get("version") or 0) + 1
-        pack = build_signed_parity_pack(job_id=job_id, report=final, actor=actor)
+        pack = build_signed_parity_pack(
+            job_id=job_id, report=final, actor=actor,
+            workspace_id=str(job.get("workspace_id") or "") or None,
+        )
         state["signed"] = {
             "signature": "hmac-sha256:" + str(pack["signature"]["value"]),
             "signed_at": signed_at,

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.row_conservation import account_job
-from services.signed_proof_pack import export_proof_pack_for_job, sign_body, verify_body
+from services.signed_proof_pack import export_proof_pack_for_job, sign_body
 
 logger = logging.getLogger(__name__)
 
@@ -567,15 +567,19 @@ def build_migration_certificate(
             "unavailable to someone who already has it.",
         ],
     }
-    return sign_body(body, subject=job_id)
+    return sign_body(body, subject=job_id, workspace_id=str(job.get("workspace_id") or "") or None)
 
 
-def verify_migration_certificate(cert: dict[str, Any]) -> dict[str, Any]:
+def verify_migration_certificate(cert: dict[str, Any], *, may_use_workspace: Any = None) -> dict[str, Any]:
     """Verify certificate content hash + HMAC, and that its claim is legitimate."""
+    from services.signed_proof_pack import verify_body_detail
+
     if not isinstance(cert, dict):
         return {"ok": False, "errors": ["certificate must be an object"]}
     job_id = str(_dict(cert.get("job")).get("job_id") or "")
-    actual_hash, errors = verify_body(cert, subject=job_id)
+    actual_hash, errors, key_info = verify_body_detail(
+        cert, subject=job_id, may_use_workspace=may_use_workspace
+    )
     verdict = _dict(cert.get("verdict"))
     if verdict.get("migration_proven"):
         if verdict.get("assurance_level") != _PROVEN_ASSURANCE:
@@ -584,7 +588,7 @@ def verify_migration_certificate(cert: dict[str, Any]) -> dict[str, Any]:
             errors.append("migration_proven claimed while blockers are present")
         if not _dict(cert.get("row_accounting")).get("balanced"):
             errors.append("migration_proven claimed while row accounting is unbalanced")
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "signing_key": key_info}
 
 
 def render_certificate_markdown(cert: dict[str, Any]) -> str:

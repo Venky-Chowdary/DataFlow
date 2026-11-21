@@ -503,6 +503,13 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/exit/systems/{system_id}/rehearsals", Permission.JOB_RUN),
     ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/exit/evidence/verify", Permission.JOB_READ),
+    # Verifying a signed proof pack, Migration Certificate or Trust Report is a
+    # read: an auditor with read access to the workspace can check a pack was
+    # not changed (P0-2). The routes recompute the HMAC with the evidence key
+    # the pack names and refuse a key of a workspace the caller cannot read.
+    ("POST", "/api/v1/transfer/proof-pack/verify", Permission.JOB_READ),
+    ("POST", "/api/v1/transfer/certificate/verify", Permission.JOB_READ),
+    ("POST", "/api/v1/audit/verify-pack", Permission.AUDIT_READ),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),

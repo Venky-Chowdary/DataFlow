@@ -2424,16 +2424,24 @@ def get_transfer_proof_pack(job_id: str, request: Request):
 
 
 @router.post("/proof-pack/verify")
-async def verify_transfer_proof_pack(body: Any = Body(...)):
-    """Verify a previously exported signed proof pack against the platform secret.
+async def verify_transfer_proof_pack(request: Request, body: Any = Body(...)):
+    """Verify a previously exported signed proof pack against the evidence key it names.
+
+    A read (``job.read``): anyone who can read the pack's workspace can verify
+    it. The key is that workspace's evidence signing key (retired versions
+    included), or the legacy login secret for a pack signed before evidence
+    keys existed. Only this deployment holds the keys: this is not a
+    third-party or offline verification.
 
     Accepts ``{"pack": <pack>}`` or the pack itself, like ``/audit/verify-pack``;
     a body that is not a pack is a 422 naming the missing keys (PP3).
     """
-    from services.proof_pack_request import pack_from_body
+    from services.proof_pack_request import pack_from_body, workspace_reader
     from services.signed_proof_pack import verify_signed_proof_pack
 
-    return verify_signed_proof_pack(pack_from_body(body))
+    pack = pack_from_body(body)
+    may_use = workspace_reader(request)
+    return await asyncio.to_thread(verify_signed_proof_pack, pack, may_use_workspace=may_use)
 
 
 @router.get("/{job_id}/certificate")
@@ -2507,12 +2515,19 @@ class CertificateVerifyBody(BaseModel):
 
 
 @router.post("/certificate/verify")
-async def verify_migration_certificate_endpoint(body: CertificateVerifyBody):
-    """Verify a Migration Certificate's hash, signature, and claim legitimacy."""
-    from services.migration_certificate import verify_migration_certificate
+async def verify_migration_certificate_endpoint(request: Request, body: CertificateVerifyBody):
+    """Verify a Migration Certificate's hash, signature, and claim legitimacy.
 
-    return verify_migration_certificate(
-        body.certificate if isinstance(body.certificate, dict) else {}
+    A read (``job.read``), against the evidence key the certificate names.
+    """
+    from services.migration_certificate import verify_migration_certificate
+    from services.proof_pack_request import workspace_reader
+
+    may_use = workspace_reader(request)
+    return await asyncio.to_thread(
+        verify_migration_certificate,
+        body.certificate if isinstance(body.certificate, dict) else {},
+        may_use_workspace=may_use,
     )
 
 

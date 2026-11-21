@@ -661,14 +661,14 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
     not a pack is a 422 naming the missing keys (PP3).
     """
     from services.evidence_chain import find_anchor
-    from services.proof_pack_request import pack_from_body
+    from services.proof_pack_request import pack_from_body, workspace_reader
     from services.signed_proof_pack import (
         pack_body_digest_excluding_anchor,
         verify_signed_proof_pack,
     )
 
     pack = pack_from_body(body)
-    result = verify_signed_proof_pack(pack)
+    result = verify_signed_proof_pack(pack, may_use_workspace=workspace_reader(request))
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None

@@ -502,7 +502,8 @@ export function JobTheaterPage({
             The report lists what it is based on: reconciliation passed, assurance level full checksum, trust
             score 100, and whether a protection or transform proof applied. Engineering, the data owner, and
             compliance each sign the same version. Every approval goes to the audit log with the signer&apos;s role,
-            and once all required roles have signed, the evidence pack is signed with the workspace proof key.
+            and once all required roles have signed, the evidence pack is signed with the workspace&apos;s own
+            evidence signing key (separate from login). Anyone with access to the workspace can verify it.
           </p>
         </div>
         <ProductShot

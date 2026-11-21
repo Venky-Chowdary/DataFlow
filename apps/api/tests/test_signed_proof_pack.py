@@ -230,34 +230,31 @@ def test_existing_assurance_downgrades_remain_intact(changes, claim_level, verif
     assert assurance["population_proof"] is population
 
 
-@pytest.mark.parametrize("secret", ["", "x" * 31, "dev-only-not-for-production"])
-def test_production_proof_pack_rejects_missing_or_weak_signing_secret(
-    monkeypatch: pytest.MonkeyPatch, secret: str
+def test_production_refuses_to_sign_without_an_evidence_key_and_never_uses_login_secret(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("services.platform_config.is_production", lambda: True)
-    monkeypatch.setattr("services.auth_service._token_secret", lambda: secret)
+    """P0-1: no secrets key in production means no signature, never a login-secret fallback."""
+    login_reads: list[int] = []
 
-    with pytest.raises(RuntimeError, match="Proof pack signing secret"):
+    def login_secret() -> str:
+        login_reads.append(1)
+        return "x" * 64
+
+    monkeypatch.setattr("services.platform_config.is_production", lambda: True)
+    monkeypatch.setattr("services.secret_vault._is_production", lambda: True)
+    monkeypatch.delenv("DATAFLOW_SECRETS_KEY", raising=False)
+    monkeypatch.delenv("DATAWRAP_SECRETS_KEY", raising=False)
+    monkeypatch.setattr("services.auth_service._token_secret", login_secret)
+
+    from services.evidence_signing_keys import EvidenceKeyUnavailable
+
+    with pytest.raises(EvidenceKeyUnavailable, match="evidence signing key could not be loaded"):
         build_signed_proof_pack(
             job_id="job-production-key-check",
             reconciliation={"passed": True},
+            workspace_id="ws-prod-no-key",
         )
-
-
-def test_production_proof_pack_does_not_fallback_when_auth_secret_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unavailable_secret() -> str:
-        raise RuntimeError("secret provider unavailable")
-
-    monkeypatch.setattr("services.platform_config.is_production", lambda: True)
-    monkeypatch.setattr("services.auth_service._token_secret", unavailable_secret)
-
-    with pytest.raises(RuntimeError, match="Proof pack signing secret"):
-        build_signed_proof_pack(
-            job_id="job-production-key-provider-check",
-            reconciliation={"passed": True},
-        )
+    assert login_reads == []
 
 
 def test_build_and_verify_roundtrip():
