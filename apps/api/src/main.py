@@ -69,6 +69,7 @@ from .routers.contact_router import router as contact_router
 from .routers.contracts_router import router as contracts_router
 from .routers.fidelity_router import router as fidelity_router
 from .routers.parity_router import router as parity_router
+from .routers.parity_scale_router import router as parity_scale_router
 from .routers.reversibility_router import router as reversibility_router
 from .routers.exit_router import router as exit_router
 from .routers.resource_acl_router import router as resource_acl_router
@@ -891,6 +892,7 @@ app.include_router(invite_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(parity_router, prefix="/api/v1")
+app.include_router(parity_scale_router, prefix="/api/v1")
 app.include_router(reversibility_router, prefix="/api/v1")
 app.include_router(exit_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
