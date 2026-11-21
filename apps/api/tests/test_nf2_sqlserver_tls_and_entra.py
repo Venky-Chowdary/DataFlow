@@ -170,11 +170,12 @@ def test_access_token_rides_as_a_pre_connect_attribute(odbc, monkeypatch):
     monkeypatch.setattr(gs, "create_engine", _create_engine)
     monkeypatch.setattr("connectors.tls_file_options.guard_engine", lambda engine: None)
     monkeypatch.setattr("services.egress_guard.assert_connector_dial_allowed", lambda *a, **k: None)
-    try:
+    import contextlib
+
+    # Event hooks on the fake engine are not the subject: only the connect args are.
+    with contextlib.suppress(Exception):
         gs._build_engine({"type": "sqlserver", "host": "db.example.test", "port": 1433, "database": "sales",
                           "authentication": "entra_access_token", "password": "eyJ0eXAi.tok"})
-    except Exception:  # noqa: BLE001 - event hooks on the fake engine are not the subject
-        pass
     attrs = seen["connect_args"]["attrs_before"]
     assert attrs[SQL_COPT_SS_ACCESS_TOKEN] == access_token_struct("eyJ0eXAi.tok")
     assert 103 in attrs  # the login timeout is still there
