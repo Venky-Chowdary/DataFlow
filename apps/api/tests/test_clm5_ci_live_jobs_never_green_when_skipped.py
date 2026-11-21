@@ -80,6 +80,11 @@ def test_every_sqlserver_junit_reaches_the_strict_checker() -> None:
     assert spec["mode"] == "strict" and spec["expected_skips"] == []
 
 
+#: In the Required PR gate (three green legs in a row). kafka-live is not
+#: yet: its three legs on 81f5ec525 ran out of time (see ci.yml).
+_REQUIRED_LIVE_JOBS = {"oracle-live"}
+
+
 @pytest.mark.parametrize(("job_name", "engine", "starts"), [
     ("oracle-live", "oracle", "start_ci_databases.sh oracle"),
     ("kafka-live", "kafka", "start_ci_databases.sh kafka"),
@@ -114,6 +119,14 @@ def test_the_container_live_jobs_run_on_every_backend_change_and_feed_every_juni
     assert written == fed, (sorted(written), sorted(fed))
     assert str(checker.get("if")).replace(" ", "") == "${{!cancelled()}}"
     assert job_name in jobs["live-engine-evidence"]["needs"]
+    # Never an opt-in exception in the gate: either required (fails on
+    # anything but success, a web-only reuse skip aside) or not in it at all.
+    gate = jobs["required-checks"]
+    gate_run = "\n".join(str(st.get("run") or "") for st in gate["steps"])
+    assert f'[ "$name" = "{job_name}" ]' not in gate_run
+    if job_name in _REQUIRED_LIVE_JOBS:
+        assert job_name in gate["needs"]
+        assert f'"{job_name}:$' in gate_run
     spec = json.loads(MANIFEST.read_text(encoding="utf-8"))["jobs"][job_name]
     assert spec["proves"] == [engine] and spec["mode"] in {"strict", "engine_scoped"}
     assert not spec.get("emulated"), "a container of the real engine is not an emulator"

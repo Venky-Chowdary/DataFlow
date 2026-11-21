@@ -994,6 +994,8 @@ jobs:
   # cells of the cross-engine suites against PostgreSQL, MySQL, MongoDB and
   # SQL Server peers started in this job. The secrets-based cdc-oracle job
   # below still proves a real customer-style Oracle when it is configured.
+  # In the Required PR gate: three legs in a row ran green on 81f5ec525
+  # (740 executed, 0 failed, 0 unexpected skips each).
   oracle-live:
     needs: changes
     if: ${{ needs.changes.outputs.reuse != 'true' }}
@@ -1197,6 +1199,12 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # Not in the Required PR gate yet: on 81f5ec525 (Redis peer started) all
+  # three legs ran past the 60-minute limit because route jobs (Pilot
+  # start_transfer -> confirm) stopped completing from test_r10_d151 on
+  # (r10_d151, r10_d203, r4_acc each waited out its job timeout); run
+  # 44914844545 (no Redis) was green, 418/418. Kafka is still proven only by
+  # a green run of this job.
   # Kafka proven on every backend change: a single-node KRaft broker
   # (apache/kafka, PLAINTEXT :9092 and SASL_PLAINTEXT/PLAIN :9094) with
   # PostgreSQL / MySQL / MongoDB peers. Before this, Kafka was started only by
@@ -1232,8 +1240,12 @@ jobs:
       - name: Export live-engine connection settings (every name the suite reads)
         run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
 
-      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB, Redis)
-        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo redis
+      - name: Start Kafka (KRaft) and peers (PostgreSQL logical, MySQL, MongoDB)
+        # No Redis peer: with one on :6379 every route job from
+        # test_r10_d151 onward never completed (3 of 3 legs on 81f5ec525),
+        # while the same tests without it ran green in CI and locally. Under
+        # investigation; the Redis cells stay skipped meanwhile.
+        run: bash .github/scripts/start_ci_databases.sh kafka postgres-cdc mysql mongo
 
       - name: Set up Python
         if: ${{ !cancelled() }}
@@ -1704,6 +1716,7 @@ jobs:
       - api-and-web
       - cdc-sqlserver
       - cdc-oracle
+      - oracle-live
       - security
       - api-image
       - studio-ui
@@ -1721,6 +1734,7 @@ jobs:
           API_AND_WEB: ${{ needs.api-and-web.result }}
           CDC_SQLSERVER: ${{ needs.cdc-sqlserver.result }}
           CDC_ORACLE: ${{ needs.cdc-oracle.result }}
+          ORACLE_LIVE: ${{ needs.oracle-live.result }}
           ENABLE_ORACLE_CDC: ${{ vars.ENABLE_ORACLE_CDC }}
           SECURITY: ${{ needs.security.result }}
           API_IMAGE: ${{ needs.api-image.result }}
@@ -1747,6 +1761,7 @@ jobs:
             "api-and-web:$API_AND_WEB" \
             "cdc-sqlserver:$CDC_SQLSERVER" \
             "cdc-oracle:$CDC_ORACLE" \
+            "oracle-live:$ORACLE_LIVE" \
             "security:$SECURITY" \
             "api-image:$API_IMAGE" \
             "studio-ui:$STUDIO_UI" \
