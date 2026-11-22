@@ -5749,6 +5749,12 @@ export function TransferPage({
           // the read, so a gate judging the raw source refuses values the
           // transform already removed.
           shape_recipe: recipePayload(shapeSteps),
+          ...(recipeBinding ? {
+            transform_recipe_id: recipeBinding.recipe_id,
+            transform_recipe_version: recipeBinding.version,
+            transform_recipe_version_mode: recipeBinding.version_mode,
+            transform_recipe_params: recipeBinding.params,
+          } : {}),
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,

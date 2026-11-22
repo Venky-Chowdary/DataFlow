@@ -598,6 +598,11 @@ export async function runPreflight(payload: {
    * never carries.
    */
   shape_recipe?: ShapeRecipeWire;
+  /** Pinned library recipe. Validate compiles this version, not only the steps. */
+  transform_recipe_id?: string;
+  transform_recipe_version?: number;
+  transform_recipe_version_mode?: "pin" | "follow";
+  transform_recipe_params?: Record<string, unknown>;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
