@@ -188,7 +188,7 @@ def test_f4_a_scan_that_stops_blocks_instead_of_warning(monkeypatch):
 def test_f4_the_push_down_counts_the_whole_source_exactly(sqlite_source):
     counts = {
         c: oe.sql_empty_probe(source_connector_id="", source_config=sqlite_source,
-                              source_table="t", column=c)
+                              source_table="t", column=c, count=True)
         for c in ("note", "id", "memo")
     }
     # '  ' is not the empty string; NULL is not either.
@@ -200,7 +200,7 @@ def test_f4_the_push_down_counts_the_whole_source_exactly(sqlite_source):
         column_nullability={"note": False}, destination_table_exists=False,
         destination_column_nullability={}, key_columns=[],
     )
-    measured = oe.measure(targets, probe=lambda col, now: {"state": "found", "count": 7}, whole_scope=True,
+    measured = oe.measure(targets, probe=lambda col, now, secs, count: {"state": "found", "count": 7}, whole_scope=True,
                           walk=lambda cols: pytest.fail("walked"))
     assert measured[0]["count"] == 7 and measured[0]["exact"] and measured[0]["how"] == "pushdown"
 

@@ -66,11 +66,18 @@ could not be ruled out. Every block lists what you can do:
 - **Map `default:<value>`** on the column: empty and blank values are written
   as `<value>`, everything else is unchanged; Validate then needs no read.
 - **Check this column now** (`risk_acceptance: {"option":
-  "oracle_empty_check_now", "columns": [...]}`): a longer bounded read when
-  Validate could not finish one. On BigQuery, Snowflake, Databricks,
+  "oracle_empty_check_now", "columns": [...]}`): a longer read, within a total
+  of 5 minutes for the check (Validate's own check has 60 seconds across all
+  columns). It is recorded with your signed-in user and lasts an hour. Not
+  offered when the source catalog cannot be read: fix the connection. On BigQuery, Snowflake, Databricks,
   ClickHouse and Trino this is the only way Validate reads the column, because
   the warehouse bills the scan.
 - **Replace the empty values in the source**, then validate again.
+
+Execute checks again unless it is confirming the Validate you approved (same
+workspace, destination, source and mapping, within an hour). An empty string
+that reaches the source after the last check is refused by Oracle at write
+time: that batch fails, and nothing is written as a different value.
 
 And, per table:
 
@@ -84,8 +91,8 @@ And, per table:
   "NULL cells in this column: N (table-wide)" and does not call them
   explained. A contract applies only to the column pair, table and workspace
   it was signed for.
-- **Existing table:** Datawrap never alters the column. Add a `DEFAULT` to it,
-  or use one of the actions above, then validate again.
+- **Existing table:** Datawrap never alters the column; use one of the
+  actions above, then validate again.
 - **Key column** (the run's key, or the destination's or source's primary
   key): cannot be made NULL-able; use one of the actions above.
 

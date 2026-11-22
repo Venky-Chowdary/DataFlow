@@ -93,7 +93,8 @@ def test_b_a_column_that_cannot_hold_text_is_not_a_candidate():
         destination_db_type="oracle", mappings=maps,
         column_nullability={c: False for c in ("u", "j", "a", "d", "note")},
         destination_table_exists=False, destination_column_nullability={},
-        column_types={"u": "uuid", "j": "jsonb", "a": "text[]", "d": "date", "note": "text"},
+        column_types={"u": "uuid", "j": "integer", "a": "boolean", "d": "date", "note": "text"},
+        native_source_types=True,
     )
     assert [t["source"] for t in found] == ["note"]
 
@@ -105,7 +106,7 @@ def test_b_one_column_the_source_cannot_answer_for_does_not_disable_the_others()
         destination_column_nullability={},
     )
     answers = {"id": None, "note": {"state": "found", "count": 3}}
-    measured = oe.measure(targets, probe=lambda col, now: answers[col], whole_scope=True,
+    measured = oe.measure(targets, probe=lambda col, now, secs, count: answers[col], whole_scope=True,
                           walk=lambda cols: iter([{"id": "x"}]) if cols == ["id"] else pytest.fail(cols))
     by = {t["source"]: t for t in measured}
     assert by["note"]["how"] == "pushdown" and by["note"]["count"] == 3
@@ -149,8 +150,10 @@ def test_b_c_postgresql_enum_uuid_json_array_date_and_char_padding_live(pg_conn)
                   or {}).get("state")
             for col in ("m", "u", "j", "a", "d", "c", "note")
         }
-        # Only the text column holds ''; a blank-padded char(5) is read as spaces, never ''.
-        assert got == {"m": "zero", "u": "zero", "j": "zero", "a": "zero", "d": "zero",
+        # uuid and date cannot hold ''; a blank-padded char(5) is read as spaces,
+        # never ''; enum, jsonb and arrays are not answered "zero" unseen: the
+        # predicate does not apply to them, so the bounded walk decides (None).
+        assert got == {"m": None, "u": "zero", "j": None, "a": None, "d": "zero",
                        "c": "zero", "note": "found"}, got
     finally:
         with conn.cursor() as cur:
@@ -182,7 +185,9 @@ def test_c_mysql_pad_space_does_not_count_trailing_blanks_live():
         probe = lambda col: oe.sql_empty_probe(source_connector_id="", source_config=cfg,  # noqa: E731
                                               source_table=t, column=col)
         assert probe("v") == {"state": "zero", "count": 0}  # '  ' = '' under PAD SPACE, not empty
-        assert probe("w") == {"state": "found", "count": 1}
+        assert probe("w") == {"state": "found", "count": None}  # exists
+        assert oe.sql_empty_probe(source_connector_id="", source_config=cfg, source_table=t, column="w",
+                                  count=True) == {"state": "found", "count": 1}
     finally:
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{t}`")
@@ -196,9 +201,10 @@ def test_c_the_sql_server_predicate_counts_trailing_blanks_and_an_oracle_source_
     col = sa.column("v")
     assert "datalength(v) = " in str(oe._empty_predicate(col, "mssql").compile(dialect=mssql.dialect()))
     assert "octet_length(v) = " in str(oe._empty_predicate(col, "postgresql").compile(dialect=postgresql.dialect()))
-    # No connection is made: Oracle stores '' as NULL.
-    assert oe.sql_empty_probe(source_connector_id="", source_table="T", column="V",
-                              source_config={"type": "oracle", "host": "203.0.113.1"}) == {"state": "zero", "count": 0}
+    # An Oracle VARCHAR2 cannot be read as '' (zero-length is NULL); a CLOB can
+    # (EMPTY_CLOB() is an empty LOB, not NULL), so it is walked.
+    assert oe.oracle_source_never_empty(sa.VARCHAR(20))
+    assert not oe.oracle_source_never_empty(sa.CLOB())
 
 
 # ------------------------------------------------------------------------ D
@@ -225,7 +231,7 @@ def test_d_a_billed_warehouse_is_never_scanned_unasked(monkeypatch):
     assert gate["status"] == "block"
     assert "which bigquery bills; Datawrap does not do that unasked" in gate["message"]
     check = next(a for a in blockers[0]["suggested_actions"] if a["id"] == oe.CHECK_OPTION)
-    assert "billed by the warehouse" in check["label"]
+    assert "the warehouse bills the scan" in check["label"] and check["budget_seconds"] == oe.CHECK_NOW_SECONDS
 
 
 def test_d_execute_reuses_validates_measurement(sqlite_source, monkeypatch):
@@ -239,12 +245,13 @@ def test_d_execute_reuses_validates_measurement(sqlite_source, monkeypatch):
     monkeypatch.setattr(oe, "sql_empty_probe", counting)
     monkeypatch.setattr(oe, "_MEASURED", {})
     first, _ = oe.preflight_hook(_ctx(sqlite_source))
-    assert sorted(calls) == ["id", "note"]
+    asked = len(calls)
+    assert sorted(set(calls)) == ["id", "note"]
     again, _ = oe.preflight_hook(_ctx(sqlite_source, skip_population_fit=True))
-    assert sorted(calls) == ["id", "note"]  # not asked twice
+    assert len(calls) == asked  # Execute confirming that Validate: not asked twice
     assert again["message"] == first["message"]
     oe.preflight_hook(_ctx(sqlite_source))  # a fresh Validate asks again
-    assert len(calls) == 4
+    assert len(calls) == 2 * asked
 
 
 # ------------------------------------------------------------------------ E
@@ -278,7 +285,7 @@ def test_existing_not_null_column_that_could_not_be_checked_blocks_with_actions(
         column_types={}, key_columns=[], sample_rows=[], walk=lambda cols: iter([{"note": "x"}] * 3),
     )
     assert gate["status"] == "block"
-    assert {"oracle_empty_check_now", "oracle_default_transform", "oracle_not_null_fill"} <= set(_ids(blockers))
+    assert {"oracle_empty_check_now", "oracle_default_transform"} <= set(_ids(blockers))
 
 
 # ------------------------------------------------------------------------ H
@@ -305,6 +312,6 @@ def test_a_check_now_is_recorded_through_the_route_signing_entry_point():
     assert validate_risk_acceptance(acceptance) == acceptance
     out = _sign_required_risk_contracts([dict(m) for m in _MAPS], acceptance, table="T")
     by = {m["target"]: m for m in out}
-    assert by["id"][oe.CHECK_KEY]["requested_by"] == "qa" and oe.CHECK_KEY not in by["note"]
+    assert by["id"][oe.CHECK_KEY]["requested_by"].startswith("local operator") and oe.CHECK_KEY not in by["note"]
     with pytest.raises(ValueError, match="Nothing was recorded"):
         _sign_required_risk_contracts([dict(m) for m in _MAPS], {"option": oe.CHECK_OPTION}, table="T")

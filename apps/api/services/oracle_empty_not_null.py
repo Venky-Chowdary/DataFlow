@@ -89,12 +89,21 @@ def _is_text(mapping: Mapping[str, Any], column_types: Mapping[str, str] | None)
     return normalize_logical_type(declared) in {"string", "text"} if declared else False
 
 
+#: Logical types that provably cannot be ``''`` (a number, a date or time, a
+#: boolean, a uuid). Everything else (an enum, a domain over text, citext,
+#: name, bpchar, tsvector, sql_variant, MySQL ENUM/SET, json, user-defined or
+#: unknown types) may hold ``''`` and is checked.
+NEVER_EMPTY_LOGICAL_TYPES = frozenset({
+    "integer", "decimal", "float", "boolean", "date", "datetime", "time", "interval", "uuid",
+})
+
+
 def _source_can_hold_text(source_type: Any) -> bool:
     if not str(source_type or "").strip():
         return True
     from services.type_system import normalize_logical_type
 
-    return normalize_logical_type(str(source_type)) in {"string", "text"}
+    return normalize_logical_type(str(source_type)) not in NEVER_EMPTY_LOGICAL_TYPES
 
 
 def _no_transform(transform: str) -> bool:
@@ -119,8 +128,15 @@ def candidates(
     destination_column_nullability: Mapping[str, bool] | None,
     column_types: Mapping[str, str] | None = None,
     key_columns: Iterable[str] = (),
+    native_source_types: bool = False,
 ) -> list[dict[str, Any]]:
-    """Text mappings whose Oracle column will be NOT NULL, with ``kind`` and ``approvable``."""
+    """Text mappings whose Oracle column will be NOT NULL, with ``kind`` and ``approvable``.
+
+    ``native_source_types``: ``column_types`` are a SQL catalog's own types, so
+    a number, date, boolean or uuid column is skipped (it can never be ``''``).
+    Inferred types (files, documents) are never trusted for that: a column
+    inferred as a number can still hold an empty cell.
+    """
     if not is_oracle(destination_db_type):
         return []
     keys = {str(k).strip().lower() for k in key_columns or () if str(k).strip()}
@@ -131,7 +147,7 @@ def candidates(
         source, target = str(m.get("source") or ""), str(m.get("target") or "")
         if not source or not target or not _is_text(m, column_types):
             continue
-        if not _source_can_hold_text(_lookup(column_types, source)):
+        if native_source_types and not _source_can_hold_text(_lookup(column_types, source)):
             continue  # a uuid, json, array, date or number is never ''
         if destination_table_exists is False:
             if _lookup(column_nullability, source) is not False:
@@ -252,8 +268,13 @@ def written_value_is_never_empty(transform: str) -> bool:
 BILLED_SCAN_ENGINES = frozenset({"snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto"})
 #: SQLAlchemy dialects whose "exactly ''" predicate is proven (see _empty_predicate).
 _EXACT_DIALECTS = frozenset({"postgresql", "mysql", "mariadb", "mssql", "sqlite", "duckdb"})
-#: "Check this column now": a longer bound the operator asked for.
+#: One total time budget per check, across every column (existence first,
+#: then counts, then the walk); what is not answered in it is "could not check".
+VALIDATE_BUDGET_SECONDS = 60.0
+#: "Check this column now": the stated total budget the operator asked for.
 CHECK_NOW_SECONDS = 300.0
+#: A "Check this column now" request is honoured for this long, once asked.
+CHECK_NOW_VALID_SECONDS = 3600.0
 CHECK_OPTION = "oracle_empty_check_now"
 CHECK_KEY = "empty_check_now"
 DEFAULT_TRANSFORM_HINT = "default:<value>"
@@ -286,6 +307,9 @@ def _unknown_why(t: Mapping[str, Any]) -> str:
         return f"the source catalog could not be read ({t.get('error') or 'no detail'})"
     if why == "timeout":
         return f"the source did not answer within {t.get('seconds') or PUSHDOWN_TIMEOUT_SECONDS:g}s"
+    if why == "budget":
+        return (f"this check's {t.get('seconds') or VALIDATE_BUDGET_SECONDS:g}s budget ran out before "
+                "this column was reached")
     return f"the source could not be read ({t.get('error') or why or 'unknown error'})"
 
 
@@ -307,16 +331,23 @@ def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "risk_acceptance": {"option": OPTION, "columns": [b["target"] for b in approvable],
                                 "approved_by": "<who approves>", "reason": "<why>"},
         })
-    unknown = [b for b in blocked if not b.get("found")]
+    unknown = [b for b in blocked if not b.get("found") and b.get("why") != "catalog"]
     if unknown:
         billed = any(b.get("why") == "billed" for b in unknown)
         actions.append({
             "id": CHECK_OPTION, "kind": CHECK_OPTION,
             "label": "Check " + ", ".join(b["source"] for b in unknown) + " now: Datawrap reads the "
-            f"whole column, which can take up to {CHECK_NOW_SECONDS / 60:g} minutes"
-            + (" and is billed by the warehouse" if billed else ""),
+            f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check"
+            + (" (the warehouse bills the scan)" if billed else ""),
+            "budget_seconds": CHECK_NOW_SECONDS,
             "risk_acceptance": {"option": CHECK_OPTION, "columns": [b["target"] for b in unknown],
                                 "approved_by": "<who asks>"},
+        })
+    catalog = [b for b in blocked if b.get("why") == "catalog"]
+    if catalog:
+        actions.append({
+            "id": "oracle_fix_connection", "kind": "oracle_fix_connection",
+            "label": "Fix the source connection, then validate again: " + str(catalog[0].get("error") or ""),
         })
     for b in blocked:
         actions.append({
@@ -329,12 +360,6 @@ def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
             actions.append({
                 "id": "oracle_fix_source_values", "kind": "oracle_fix_source_values",
                 "label": f"Replace the empty values of {b['source']} in the source, then validate again",
-                "column": b["target"],
-            })
-        if b["kind"] == "existing":
-            actions.append({
-                "id": "oracle_not_null_fill", "kind": "oracle_not_null_fill",
-                "label": f"Give {b['target']} a DEFAULT on the Oracle table (the column is never altered)",
                 "column": b["target"],
             })
     return actions
@@ -439,15 +464,39 @@ def _empty_predicate(column: Any, dialect: str) -> Any:
     return column == ""
 
 
-def _text_column_type(col_type: Any, dialect: str) -> bool:
-    """Whether a reflected column type can hold text (a uuid, json, array, date can never be '')."""
+def provably_never_empty(col_type: Any) -> bool:
+    """A reflected column type that can never hold ``''``: a number, date or time, boolean, uuid.
+
+    Everything else is asked or walked: a PostgreSQL enum accepts the label
+    ``''``, ``''::tsvector`` reads back as ``''``, a SQL Server sql_variant, a
+    MySQL ENUM/SET, citext, name, bpchar, json and user-defined or unknown
+    types can all hold it.
+    """
     import sqlalchemy as sa
 
-    if isinstance(col_type, sa.Enum):
-        # A PostgreSQL enum label is 1-63 bytes, never ''; MySQL stores '' as
-        # the "error" member of an ENUM, so it is checked there.
-        return dialect != "postgresql"
-    return isinstance(col_type, sa.String) or isinstance(col_type, sa.types.NullType)
+    never = [sa.Integer, sa.Numeric, sa.Date, sa.DateTime, sa.Time, sa.Interval, sa.Boolean]
+    if hasattr(sa, "Uuid"):
+        never.append(sa.Uuid)
+    try:
+        from sqlalchemy.dialects.postgresql import UUID as PgUUID
+
+        never.append(PgUUID)
+    except ImportError:  # pragma: no cover
+        pass
+    return isinstance(col_type, tuple(never))
+
+
+def oracle_source_never_empty(col_type: Any) -> bool:
+    """An Oracle source column that cannot be read as ``''``.
+
+    A zero-length character value is NULL in Oracle, so VARCHAR2/CHAR/NVARCHAR2
+    never read as ``''``. A LOB is different: ``EMPTY_CLOB()`` is an empty LOB,
+    not NULL (Oracle SQL Reference, Nulls; DBMS_LOB), and the driver reads it
+    as ``''``, so CLOB/NCLOB columns are walked.
+    """
+    import sqlalchemy as sa
+
+    return not isinstance(col_type, (sa.Text, sa.CLOB, sa.types.NullType))
 
 
 def sql_empty_probe(
@@ -458,14 +507,16 @@ def sql_empty_probe(
     column: str,
     timeout_seconds: float = PUSHDOWN_TIMEOUT_SECONDS,
     check_now: bool = False,
+    count: bool = False,
 ) -> dict[str, Any] | None:
     """Whether ``column`` holds an exactly-empty string, asked of the source, bounded.
 
-    One statement per column: ``EXISTS``-style (``SELECT 1 ... LIMIT 1``,
-    index-friendly, stops at the first hit), then the count only when there
-    is one. Returns ``None`` when the source cannot answer exactly and bounded
-    (not SQL, an engine whose predicate is not proven, no server-side timeout
-    in force, a billed engine not asked): the caller then walks or reports.
+    ``count=False``: ``SELECT 1 ... LIMIT 1`` (index-friendly, stops at the first
+    hit) answers zero or found. ``count=True``: the count (``None`` when it ran
+    out of time: "at least one"). Returns ``None`` when the source cannot
+    answer exactly and bounded (not SQL, an engine whose predicate is not
+    proven, no server-side timeout in force, a billed engine not asked, a type
+    the predicate does not apply to): the caller then walks or reports.
     """
     try:
         import sqlalchemy as sa
@@ -482,43 +533,38 @@ def sql_empty_probe(
         cfg, db_type = _normalize_source_cfg(source_connector_id, source_config)
         if not cfg or cfg.get("source_query") or cfg.get("query"):
             return None
-        if is_oracle(db_type):
-            # An Oracle source cannot hold '' (it is NULL there).
-            return {"state": "zero", "count": 0}
         if not is_sqlish_source(db_type) or (db_type in BILLED_SCAN_ENGINES and not check_now):
             return None
         engine = _engine(dict(cfg))
         dialect = str(getattr(engine.dialect, "name", "") or "")
-        if dialect not in _EXACT_DIALECTS:
-            return None
         schema, name = split_qualified_table(source_table, (cfg.get("schema") or "").strip() or None)
         with engine.connect() as conn:
             reflected = {str(c["name"]).lower(): c for c in sa.inspect(conn).get_columns(name, schema=schema)}
             col = reflected.get(column.lower())
             if col is None:
                 return None
-            if not _text_column_type(col.get("type"), dialect):
+            if provably_never_empty(col.get("type")):
                 return {"state": "zero", "count": 0, "note": f"a {col.get('type')} column cannot hold text"}
+            if is_oracle(db_type) or dialect == "oracle":
+                return {"state": "zero", "count": 0} if oracle_source_never_empty(col.get("type")) else None
+            if dialect not in _EXACT_DIALECTS:
+                return None
             tbl = sa.table(name, sa.column(str(col["name"])), schema=schema or None)
             pred = _empty_predicate(tbl.c[str(col["name"])], dialect)
             family = {"mssql": "sqlserver"}.get(dialect, dialect)
-            with statement_timeout(conn, family, timeout_seconds) as enforced:
+            with statement_timeout(conn, family, max(0.001, timeout_seconds)) as enforced:
                 if not enforced:
                     return None
                 try:
-                    hit = conn.execute(sa.select(sa.literal(1)).select_from(tbl).where(pred).limit(1)).first()
-                except Exception as exc:  # noqa: BLE001 - a timeout is "could not check"
-                    if timed_out(exc):
-                        return {"state": "unknown", "why": "timeout", "seconds": timeout_seconds}
-                    raise
-                if hit is None:
-                    return {"state": "zero", "count": 0}
-                try:
+                    if not count:
+                        hit = conn.execute(sa.select(sa.literal(1)).select_from(tbl).where(pred).limit(1)).first()
+                        return {"state": "found", "count": None} if hit is not None else {"state": "zero", "count": 0}
                     n = conn.execute(sa.select(sa.func.count()).select_from(tbl).where(pred)).scalar()
-                    return {"state": "found", "count": int(n or 0)}
-                except Exception as exc:  # noqa: BLE001 - EXISTS answered: "at least one"
+                    return {"state": "found", "count": int(n or 0)} if n else {"state": "zero", "count": 0}
+                except Exception as exc:  # noqa: BLE001 - a timeout is reported, not raised
                     if timed_out(exc):
-                        return {"state": "found", "count": None}
+                        return ({"state": "found", "count": None} if count
+                                else {"state": "unknown", "why": "timeout", "seconds": timeout_seconds})
                     raise
     except Exception as exc:  # noqa: BLE001 - no exact answer: the walk decides
         logger.info("Oracle empty-string push-down not used for %s.%s: %s", source_table, column, exc)
@@ -536,36 +582,65 @@ def measure(
     walk_allowed: bool = True,
     engine: str = "",
     check_now: Iterable[str] = (),
+    budget_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Give each target ``count``, ``found``, ``exact`` and ``how`` (``why`` when not exact)."""
+    """Give each target ``count``, ``found``, ``exact`` and ``how`` (``why`` when not exact).
+
+    One total budget for the whole check (``VALIDATE_BUDGET_SECONDS``, or the
+    stated ``CHECK_NOW_SECONDS`` when the operator asked): existence questions
+    first (columns the preview already shows empty first), then the counts,
+    then the walk; what the budget does not reach is "could not check".
+    """
     out = [dict(t) for t in targets]
     asked = {str(c).lower() for c in check_now}
+    long_scan = any(t["key"].lower() in asked or t["target"].lower() in asked for t in out)
+    budget = budget_seconds if budget_seconds is not None else (
+        CHECK_NOW_SECONDS if long_scan else VALIDATE_BUDGET_SECONDS)
+    deadline = time.monotonic() + budget
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    def out_of_budget(t: dict[str, Any]) -> None:
+        t.update(count=0, found=False, exact=False, how="pushdown", why="budget", seconds=budget)
+
+    preview_empty = {
+        str(k) for r in sample_rows or [] if isinstance(r, Mapping)
+        for k, v in r.items() if isinstance(v, str) and v == ""
+    }
+    todo = [t for t in out if t.get("why") != "catalog"]
     pending: list[dict[str, Any]] = []
-    for t in out:
-        if t.get("why") == "catalog":
-            continue  # nothing to count against: reported as is
+    asking: list[dict[str, Any]] = []
+    for t in todo:
         if written_value_is_never_empty(t["transform"]):
             t.update(count=0, found=False, exact=True, how="transform")
-            continue
-        if isinstance(population_rows, (list, tuple)):
+        elif isinstance(population_rows, (list, tuple)) or probe is None or not _no_transform(t["transform"]):
             pending.append(t)
+        else:
+            asking.append(t)
+    asking.sort(key=lambda t: t["source"] not in preview_empty)
+    counting: list[dict[str, Any]] = []
+    for t in asking:
+        if remaining() <= 0:
+            out_of_budget(t)
             continue
-        if probe is not None and _no_transform(t["transform"]):
-            res = probe(t["source"], t["key"].lower() in asked or t["target"].lower() in asked)
-            if res is not None:
-                state = res.get("state")
-                if state == "zero":
-                    t.update(count=0, found=False, exact=True, how="pushdown")
-                    continue
-                if state == "found" and whole_scope:
-                    t.update(count=res.get("count"), found=True, exact=res.get("count") is not None,
-                             how="pushdown")
-                    continue
-                if state == "unknown" and not walk_allowed:
-                    t.update(count=0, found=False, exact=False, how="pushdown",
-                             why=res.get("why"), seconds=res.get("seconds"))
-                    continue
-        pending.append(t)
+        res = probe(t["source"], t["key"].lower() in asked or t["target"].lower() in asked, remaining(), False)
+        state = (res or {}).get("state")
+        if state == "zero":
+            t.update(count=0, found=False, exact=True, how="pushdown")
+        elif state == "found" and whole_scope:
+            t.update(count=None, found=True, exact=False, how="pushdown")
+            counting.append(t)
+        elif state == "unknown" and not walk_allowed:
+            t.update(count=0, found=False, exact=False, how="pushdown", why=res.get("why"),
+                     seconds=res.get("seconds"))
+        else:
+            pending.append(t)
+    for t in counting:
+        res = probe(t["source"], t["key"].lower() in asked or t["target"].lower() in asked,
+                    remaining(), True) if remaining() > 0 else None
+        n = (res or {}).get("count")
+        t.update(count=n, exact=n is not None)
     if not pending:
         return out
     if isinstance(population_rows, (list, tuple)):
@@ -575,7 +650,10 @@ def measure(
             t.update(count=n, found=n > 0, exact=not scan["truncated"], how="batch",
                      why=scan["truncated"], rows_scanned=scan["rows_scanned"], error=scan["error"])
         return out
-    long_scan = any(t["key"].lower() in asked or t["target"].lower() in asked for t in pending)
+    if remaining() <= 0:
+        for t in pending:
+            out_of_budget(t)
+        return out
     rows, how, why, error = None, "population", "", ""
     if walk_allowed or long_scan:
         try:
@@ -586,17 +664,13 @@ def measure(
     if rows is None:
         why = "error" if error else ("preview" if walk_allowed or long_scan else "billed")
         rows, how = list(sample_rows or []), "preview"
-    scan = count_empty_strings(
-        rows, pending,
-        max_rows=None if not long_scan else 10**12,
-        max_seconds=CHECK_NOW_SECONDS if long_scan else None,
-    )
+    seconds = max(0.0, remaining())
+    scan = count_empty_strings(rows, pending, max_rows=10**12 if long_scan else None, max_seconds=seconds)
     for t in pending:
         n = scan["counts"][t["key"]]
         t.update(count=n, found=n > 0, how=how, rows_scanned=scan["rows_scanned"],
                  exact=how == "population" and not scan["truncated"], engine=engine,
-                 why=scan["truncated"] or why, error=scan["error"] or error,
-                 seconds=CHECK_NOW_SECONDS if long_scan else SCAN_MAX_SECONDS)
+                 why=scan["truncated"] or why, error=scan["error"] or error, seconds=round(seconds, 1))
     return out
 
 
@@ -691,21 +765,77 @@ def _row_filter(ctx: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     return dict(raw), ""
 
 
-#: Validate's measurements, reused by Execute when it confirms that Validate
-#: (same source, scope and mapping): the same scan is not run twice.
-_MEASURED: dict[str, tuple[float, dict[str, Any]]] = {}
-_MEASURED_TTL_SECONDS = 3600.0
+#: Measurements kept for reuse, bounded (LRU) and keyed by everything the
+#: answer depends on: workspace, destination, source, table, column type,
+#: mapping pair and transform, and the run's scope (filter, recipe,
+#: incremental watermark). Reused only (a) by Execute confirming an approved
+#: Validate, for EXECUTE_REUSE_SECONDS, and (b) for a billed warehouse, the
+#: result of an operator's "Check this column now", for CHECK_REUSE_SECONDS,
+#: so a schedule does not re-bill the scan on every run. Any '' that reaches
+#: the source after the measurement is refused by Oracle at write time
+#: (ORA-01400 fails that batch; nothing is written as a different value).
+_MEASURED: dict[str, dict[str, Any]] = {}
+_MEASURED_MAX = 512
+EXECUTE_REUSE_SECONDS = 3600.0
+CHECK_REUSE_SECONDS = 86400.0
 
 
 def _measure_key(ctx: Mapping[str, Any], t: Mapping[str, Any], scope: str) -> str:
     import hashlib
 
-    cfg = ctx.get("source_config") if isinstance(ctx.get("source_config"), Mapping) else {}
-    ident = {k: cfg.get(k) for k in ("type", "format", "host", "port", "database", "schema")}
-    raw = json.dumps([str(ctx.get("source_connector_id") or ""), ident, str(ctx.get("source_table") or ""),
-                      str(ctx.get("source_file_id") or ""), scope, t["source"], t["target"], t["transform"]],
-                     sort_keys=True, default=str)
+    def ident(cfg: Any) -> dict[str, Any]:
+        cfg = cfg if isinstance(cfg, Mapping) else {}
+        return {k: cfg.get(k) for k in ("type", "format", "host", "port", "database", "schema", "project",
+                                        "dataset", "account", "warehouse")}
+
+    raw = json.dumps([
+        current_workspace(),
+        str(ctx.get("destination_db_type") or ""), str(ctx.get("destination_table") or ""),
+        ident(ctx.get("destination_config")),
+        str(ctx.get("source_connector_id") or ""), ident(ctx.get("source_config")),
+        str(ctx.get("source_table") or ""), str(ctx.get("source_file_id") or ""),
+        str(_lookup(ctx.get("column_types") or {}, t["source"]) or ""),
+        scope, t["source"], t["target"], t["transform"],
+    ], sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _remember(key: str, result: dict[str, Any], *, checked_now: bool) -> None:
+    _MEASURED.pop(key, None)
+    _MEASURED[key] = {"at": time.time(), "result": result, "checked_now": checked_now}
+    while len(_MEASURED) > _MEASURED_MAX:
+        _MEASURED.pop(next(iter(_MEASURED)))
+
+
+def _recall(key: str, *, execute_confirm: bool, billed: bool) -> dict[str, Any] | None:
+    hit = _MEASURED.get(key)
+    if not hit:
+        return None
+    age = time.time() - float(hit["at"])
+    if execute_confirm and age < EXECUTE_REUSE_SECONDS:
+        return dict(hit["result"])
+    if billed and hit["checked_now"] and age < CHECK_REUSE_SECONDS:
+        return dict(hit["result"])
+    if age >= max(EXECUTE_REUSE_SECONDS, CHECK_REUSE_SECONDS):
+        _MEASURED.pop(key, None)
+    return None
+
+
+def _check_now_asked(mapping: Mapping[str, Any]) -> bool:
+    """An unexpired "Check this column now" request on this mapping."""
+    from datetime import datetime, timezone
+
+    stamp = mapping.get(CHECK_KEY)
+    if not isinstance(stamp, Mapping):
+        return False
+    try:
+        expires = datetime.fromisoformat(str(stamp.get("expires_at") or ""))
+    except ValueError:
+        return False
+    bound, here = str(stamp.get("workspace_id") or ""), current_workspace()
+    if bound and here and bound != here:
+        return False
+    return datetime.now(timezone.utc) < expires
 
 
 def preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -744,11 +874,15 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         nulls = {**probed, **nulls}
         keys += source_pk
         pk_known = not catalog_error
+    from services.source_duplicate_probe import is_sqlish_source
+
+    native = str(ctx.get("source_kind") or "").lower() in {"database", "cloud"} and is_sqlish_source(
+        str(ctx.get("source_format") or "")) and not str(ctx.get("source_file_id") or "").strip()
     targets = candidates(
         destination_db_type=dest_db, mappings=maps, column_nullability=nulls,
         destination_table_exists=table_exists,
         destination_column_nullability=ctx.get("destination_column_nullability") or {},
-        column_types=column_types, key_columns=keys,
+        column_types=column_types, key_columns=keys, native_source_types=native,
     )
     if catalog_error:
         seen = {t["key"] for t in targets}
@@ -774,8 +908,7 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
 
     _cfg, src_engine = _normalize_source_cfg(str(ctx.get("source_connector_id") or ""), ctx.get("source_config"))
     src_engine = (src_engine or str(ctx.get("source_format") or "")).lower()
-    asked = [str((m.get(CHECK_KEY) and (m.get("target") or m.get("source"))) or "")
-             for m in maps if m.get(CHECK_KEY)]
+    asked = [str(m.get("target") or m.get("source") or "") for m in maps if _check_now_asked(m)]
 
     def walk(cols: list[str]) -> Any:
         if filter_error:
@@ -787,24 +920,26 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
             rows = shaped_population_rows(recipe_payload, rows) or rows
         return rows
 
-    def probe(column: str, check_now: bool) -> Any:
+    def probe(column: str, check_now: bool, seconds: float, count: bool) -> Any:
         if recipe is not None or stored or filter_error:
             return None
         return sql_empty_probe(
             source_connector_id=str(ctx.get("source_connector_id") or ""),
             source_config=ctx.get("source_config"), source_table=str(ctx.get("source_table") or ""),
-            column=column, check_now=check_now,
-            timeout_seconds=CHECK_NOW_SECONDS if check_now else PUSHDOWN_TIMEOUT_SECONDS,
+            column=column, check_now=check_now, count=count,
+            timeout_seconds=min(seconds, CHECK_NOW_SECONDS if check_now else PUSHDOWN_TIMEOUT_SECONDS),
         )
 
-    scope = json.dumps([row_filter, repr(read_scope), recipe_payload, sorted(asked)], sort_keys=True, default=str)
-    reuse = bool(ctx.get("skip_population_fit"))
-    now = time.monotonic()
+    scope = json.dumps([row_filter, repr(read_scope), recipe_payload], sort_keys=True, default=str)
+    billed = src_engine in BILLED_SCAN_ENGINES
+    execute_confirm = bool(ctx.get("skip_population_fit"))
     fresh, measured = [], []
     for t in targets:
-        hit = _MEASURED.get(_measure_key(ctx, t, scope)) if reuse else None
-        if hit and now - hit[0] < _MEASURED_TTL_SECONDS and t.get("why") != "catalog":
-            measured.append({**t, **hit[1], "reused": True})
+        asked_here = t["target"] in asked
+        hit = (None if t.get("why") == "catalog" or asked_here
+               else _recall(_measure_key(ctx, t, scope), execute_confirm=execute_confirm, billed=billed))
+        if hit:
+            measured.append({**t, **hit, "reused": True})
         else:
             fresh.append(t)
     population = ctx.get("population_rows") if ctx.get("rows_are_population") else None
@@ -812,13 +947,13 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         fresh, population_rows=population, probe=probe,
         whole_scope=not row_filter and read_scope is None and recipe is None, walk=walk,
         sample_rows=list(ctx.get("sample_rows") or []),
-        walk_allowed=src_engine not in BILLED_SCAN_ENGINES, engine=src_engine, check_now=asked,
+        walk_allowed=not billed, engine=src_engine, check_now=asked,
     )
     for t in done:
-        if t.get("why") != "catalog":
+        if t.get("why") != "catalog" and (t.get("exact") or t.get("found")):
             kept = {k: t.get(k) for k in ("count", "found", "exact", "how", "why", "rows_scanned",
                                           "error", "seconds", "engine")}
-            _MEASURED[_measure_key(ctx, t, scope)] = (now, kept)
+            _remember(_measure_key(ctx, t, scope), kept, checked_now=t["target"] in asked)
     measured += done
     needs_decision = [t for t in measured if t["kind"] == "create_new" and t["approvable"]
                       and (int(t.get("count") or 0) > 0 or t.get("found") or not t.get("exact"))]
@@ -867,20 +1002,40 @@ def preflight_gate(
 
 
 def stamp_check_now(mappings: list[dict[str, Any]], acceptance: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Record "Check this column now" on the named columns' mappings (not a risk: no contract)."""
-    from datetime import datetime, timezone
+    """Record "Check this column now" on the named columns' mappings (not a risk: no contract).
+
+    It is asked through the same entry points, under the same permission, as a
+    risk acceptance (the calling route or tool checks it). With authentication
+    on, the request records the signed-in user, never free text, and is
+    refused without one. It is honoured for CHECK_NOW_VALID_SECONDS; the
+    measurement it produces is kept and reused as described at _MEASURED.
+    """
+    from datetime import datetime, timedelta, timezone
 
     named = {str(c).strip().lower() for c in (acceptance.get("columns") or []) if str(c or "").strip()}
     if not named:
         raise ValueError(f"risk_acceptance option {CHECK_OPTION} needs columns. Nothing was recorded.")
+    from services.workspace_filter import current_actor
+    from src.services.auth_service import auth_required
+
+    actor = str(current_actor() or "").strip()
+    if not actor:
+        if auth_required():
+            raise ValueError(f"risk_acceptance option {CHECK_OPTION} needs a signed-in user. "
+                             "Nothing was recorded.")
+        actor = "local operator (authentication is off)"
+    now = datetime.now(timezone.utc)
     out, hit = [], set()
     for raw in mappings or []:
         row = dict(raw)
         source, target = str(row.get("source") or "").lower(), str(row.get("target") or "").lower()
         name = next((n for n in (target, pair_key(source, target), source) if n in named), "")
         if name:
-            row[CHECK_KEY] = {"requested_by": str(acceptance.get("approved_by") or ""),
-                              "at": datetime.now(timezone.utc).isoformat()}
+            row[CHECK_KEY] = {
+                "requested_by": actor, "at": now.isoformat(),
+                "expires_at": (now + timedelta(seconds=CHECK_NOW_VALID_SECONDS)).isoformat(),
+                "workspace_id": current_workspace(), "budget_seconds": CHECK_NOW_SECONDS,
+            }
             hit.add(name)
         out.append(row)
     if mappings and named - hit:

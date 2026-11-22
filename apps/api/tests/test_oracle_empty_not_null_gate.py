@@ -108,7 +108,7 @@ def test_an_existing_not_null_column_blocks_with_no_option_to_alter():
     assert gate["status"] == "block" and "existing NOT NULL column" in gate["message"]
     ids = [a["id"] for a in blockers[0]["suggested_actions"]]
     assert oe.OPTION not in ids
-    assert any("DEFAULT" in a["label"] for a in blockers[0]["suggested_actions"])
+    assert any(a["id"] == "oracle_default_transform" for a in blockers[0]["suggested_actions"])
     # Approval does not unlock an existing column.
     signed = oe.sign_empty_as_null(
         [dict(m) for m in _MAPS], {"option": oe.OPTION, "columns": ["note"],
