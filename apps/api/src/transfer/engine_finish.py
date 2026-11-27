@@ -281,6 +281,10 @@ def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) 
     )
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
+    from .overwrite_outcome import carry_onto_exception
+
+    if carry_onto_exception(destination, exc) is not None:
+        return restored  # the job reports the exact recovery (N1)
     if restore and restored:
         # The stream's undo judged the live object before this restore ran
         # ("already held N row(s) ... left in place"). The backup is the
@@ -420,6 +424,10 @@ def settle_single_overwrite_backup(destination: EndpointConfig, *, restore: bool
             exc_info=exc,
         )
         ok = False
+        from .overwrite_outcome import record_settle_failure
+
+        record_settle_failure(extra, engine=engine_name, table=str(destination.table or ""),
+                              backup=str(backup), restore=restore, exc=exc)
     finally:
         extra.pop("overwrite_backup", None)
         extra.pop("overwrite_backup_engine", None)

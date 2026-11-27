@@ -94,12 +94,42 @@ def _live_name_from_backup(backup: str, fallback: str) -> str:
     return fallback
 
 
-def _refuse_ambiguous(table_name: str, backup: str) -> TableDropError:
+_AMBIGUOUS_HELP = {
+    "snowflake": (
+        "{backup} is a clone of {table} taken before an earlier overwrite whose restore did "
+        "not finish; {table} holds that run's (possibly partial) load. To go back to the rows "
+        "from before it run: ALTER TABLE {table} SWAP WITH {backup}; DROP TABLE {backup};  "
+        "to keep {table} as it is run: DROP TABLE {backup};  then run again."
+    ),
+    "bigquery": (
+        "{backup} is the copy of {table} taken before an earlier overwrite. If that run "
+        "reported 'rows restored, but ... access control is unverified', {table} already "
+        "holds the previous rows: compare its IAM policy and row access policies with "
+        "{backup}'s, then delete {backup}. Otherwise {table} holds that run's load: delete "
+        "it and copy {backup} back (bq cp {backup} {table}), then delete {backup}."
+    ),
+    "elasticsearch": (
+        "{backup} is the write-blocked copy of {table}'s documents from before an earlier "
+        "overwrite (its _meta.dataflow_overwrite holds {table}'s alias definitions); {table} "
+        "holds that run's load. To go back: delete {table}, clone {backup} to {table}, lift "
+        "index.blocks.write, re-add the aliases from the _meta, delete {backup}. To keep "
+        "{table}: delete {backup}. Then run again."
+    ),
+    "s3": (
+        "{backup} holds the export objects from before an earlier overwrite; {table} holds "
+        "that run's export. Copy the objects back or delete the prefix, then run again."
+    ),
+}
+
+
+def _refuse_ambiguous(table_name: str, backup: str, engine: str = "") -> TableDropError:
+    """Both a backup and a live object: say which is which and what to run."""
+    detail = _AMBIGUOUS_HELP.get(engine, "").format(table=table_name, backup=backup)
     return TableDropError(
         table_name,
-        f"backup {backup} from an earlier overwrite is still present next to "
-        f"{table_name}. One of them holds the pre-run data and the other a "
-        "replacement; drop the one you do not need, then run again.",
+        f"backup {backup} from an earlier overwrite is still present next to {table_name}. "
+        + (detail or "One of them holds the pre-run data and the other a replacement; "
+           "drop the one you do not need, then run again."),
     )
 
 
@@ -409,7 +439,7 @@ class _Snowflake:
                 backup = set_aside_backup_name("snowflake", live or table_name)
                 stale = self._resolve(cur, sch, backup)
                 if stale and live:
-                    raise _refuse_ambiguous(live, stale)
+                    raise _refuse_ambiguous(self._ref(sch, live), self._ref(sch, stale), "snowflake")
                 if stale:
                     # A run of the earlier rename-aside design died with the
                     # live table renamed away. That backup IS the original
@@ -669,7 +699,7 @@ class _BigQuery:
             live = self._exists(client, live_id, call)
             stale = self._exists(client, bak_id, call)
             if stale and live:
-                raise _refuse_ambiguous(table_name, backup)
+                raise _refuse_ambiguous(table_name, backup, "bigquery")
             if not live:
                 return backup if stale else None
             gov = self._governance(cfg, client, live_id, call, approved=approved)
@@ -908,7 +938,7 @@ class _Elasticsearch:
         live = bool(client.indices.exists(index=table_name))
         stale = bool(client.indices.exists(index=backup))
         if stale and live:
-            raise _refuse_ambiguous(table_name, backup)
+            raise _refuse_ambiguous(table_name, backup, "elasticsearch")
         if not live:
             if not stale:
                 return None
@@ -1075,7 +1105,7 @@ class _S3:
         live = self._export_keys(client, bucket, base)
         stale = self._list(client, bucket, prefix)
         if stale and live:
-            raise _refuse_ambiguous(base, prefix)
+            raise _refuse_ambiguous(base, prefix, "s3")
         if not live:
             return prefix if stale else None
         for key in live:

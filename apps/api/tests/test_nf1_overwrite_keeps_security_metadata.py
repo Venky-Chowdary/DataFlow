@@ -1018,3 +1018,50 @@ def test_elasticsearch_failed_restore_after_delete_is_finished_by_the_next_run(e
     assert store["orders"]["aliases"]["orders_eu"] == {"filter": {"term": {"region": "EU"}}}
     assert set(store["orders"]["aliases"]) == {"orders_eu", "orders_read"}
     assert "dataflow_overwrite" not in (store["orders"].get("mappings") or {}).get("_meta", {})
+
+
+
+# --------------------------- review 2: the recovery reaches the job (N1)
+
+
+def test_failed_snowflake_restore_puts_the_exact_recovery_on_the_job(snowflake, tmp_path, monkeypatch):
+    """The SWAP / DROP text used to stay in the API log; the job said only 'failed'."""
+    import connectors.overwrite_set_aside as osa
+    import services.sync_cursor as sc
+    import src.transfer.engine as engine_mod
+    from tests.test_currency_to_sqlite import _FakeMongo
+    from tests.test_overwrite_all_quarantined_keeps_set_aside_destination import _run, _sf_destination
+
+    cfg, table = snowflake
+    _seed(table)
+    mongo = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: mongo)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+
+    def _swap_refused(self, cfg, table_name, backup, schema):
+        live_ref, bak_ref = f'"PUBLIC"."{table_name}"', f'"PUBLIC"."{backup}"'
+        raise TableDropError(table_name, f"Insufficient privileges. {osa._sf_recovery(live_ref, bak_ref)}")
+
+    monkeypatch.setattr(osa._Snowflake, "restore", _swap_refused)
+    result = _run(mongo, tmp_path, _sf_destination(table), valid=False)
+
+    assert result.success is False
+    assert "SWAP WITH" in str(result.error) and "could not be put back automatically" in str(result.error)
+    job = mongo.get_job(result.job_id)
+    assert "SWAP WITH" in str(job.get("error"))
+    outcome = (job.get("error_details") or {}).get("overwrite_restore") or {}
+    assert outcome.get("status") == "restore_failed" and outcome.get("engine") == "snowflake"
+
+
+def test_next_run_refusal_says_which_object_is_which_and_what_to_run(snowflake):
+    cfg, table = snowflake
+    _seed(table)
+    _sf(f'CREATE TABLE "{table}__DF_BAK" ("ID" INTEGER)')
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("snowflake", cfg, table, "PUBLIC")
+
+    text = str(info.value)
+    assert f'is a clone of "PUBLIC"."{table}" taken before an earlier overwrite' in text
+    assert f'ALTER TABLE "PUBLIC"."{table}" SWAP WITH "PUBLIC"."{table}__DF_BAK"' in text
