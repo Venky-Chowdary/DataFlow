@@ -236,7 +236,11 @@ Two engine facts that often cause explained differences:
   ever added, and the audit retention purge does not touch the register. A
   store that cannot be read during the snapshot is named on the snapshot
   record and read again at most three times, no more often than every 15
-  minutes; its packs are refused until a retry reads it. A
+  minutes; its packs are refused until a retry reads it. After the third
+  failed retry they stay refused for good, unless an operator reads the store
+  again once it is back: `python -m services.legacy_evidence_register retry`
+  (run from `apps/api` with the API's environment). That adds the packs it
+  finds and prints what it could still not read. A
   deployment that created its first evidence key on an earlier build takes
   the snapshot the first time a legacy pack is verified, counting only audit
   records filed before that key was created.

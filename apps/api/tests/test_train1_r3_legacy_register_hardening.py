@@ -115,3 +115,27 @@ def test_the_export_routes_file_the_jobs_workspace(_isolated, monkeypatch, tmp_p
     events = [e for e in register._audit_events({"proof_pack.export", "migration_certificate.export"})]
     assert {e["action"] for e in events} == {"proof_pack.export", "migration_certificate.export"}, events
     assert all(e.get("workspace_id") == "ws-a" for e in events), events
+
+
+def test_an_operator_can_read_a_source_again_after_the_retry_limit(_isolated, monkeypatch):
+    """Review 3 round 2 item 3: past the automatic retries a failed source stays
+    unread (its packs refused) until an operator runs the retry."""
+    exit_pack = _legacy({"kind": EXIT_PACK_KIND, "system_id": "sys1", "rehearsal_id": "r1"})
+    exit_store.insert(exit_store.REHEARSALS, {"id": "r1", "workspace_id": "",
+                                              "signed": {"pack": exit_pack, "signed_at": "2026-01-01"}})
+    real_exit = register._exit_records
+
+    def broken_exit(cutover):
+        raise OSError("exit store down")
+
+    monkeypatch.setattr(register, "_exit_records", broken_exit)
+    monkeypatch.setattr(register, "_RETRY_SECONDS", 0)
+    for _ in range(register._MAX_RETRIES + 2):
+        register.ensure_snapshot()
+    monkeypatch.setattr(register, "_exit_records", real_exit)
+    register.ensure_snapshot()
+    assert register.lookup(exit_pack["content_sha256"]) is None  # limit reached: refused for good
+    out = register.retry_unread_sources()
+    assert out["unreadable"] == []
+    assert register.lookup(exit_pack["content_sha256"]) is not None
+    assert register.retry_unread_sources()["unreadable"] == []

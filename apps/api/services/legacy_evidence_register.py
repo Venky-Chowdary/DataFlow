@@ -320,7 +320,45 @@ def _pending_retry(first: dict[str, Any]) -> tuple[int, set[str], datetime | Non
         attempt += 1
         unread = set(retry.get("unreadable") or [])
         last = _parse_time(retry.get("taken_at")) or last
+    manual = _latest_manual()
+    if manual is not None:
+        # An operator's retry (:func:`retry_unread_sources`) has the last word.
+        unread = set(manual.get("unreadable") or [])
     return attempt, unread, last
+
+
+_MANUAL_PREFIX = f"{_META_ID}manual:"
+
+
+def _latest_manual() -> dict[str, Any] | None:
+    coll = _collection()
+    if coll is not None:
+        docs = list(coll.find({"_id": {"$regex": "^" + _MANUAL_PREFIX}}))
+        keyed = {str(d["_id"]): {k: v for k, v in d.items() if k != "_id"} for d in docs}
+    else:
+        keyed = {k: v for k, v in _read_all().items() if k.startswith(_MANUAL_PREFIX)}
+    if not keyed:
+        return None
+    return keyed[max(keyed)]
+
+
+def retry_unread_sources() -> dict[str, Any]:
+    """Read the sources the snapshot could not read again, now, past the automatic limit.
+
+    For an operator once a store that failed is back (``python -m
+    services.legacy_evidence_register retry``). Appends its own marker; the
+    register's records are only ever added.
+    """
+    with _LOCK:
+        first = _meta(_META_ID)
+        if first is None:
+            return {"unreadable": [], "note": "no snapshot yet: it is taken on first need"}
+        _attempt, unread, _last = _pending_retry(first)
+        if not unread:
+            return {"unreadable": [], "note": "every source was read"}
+        result = snapshot(_parse_time(first.get("cutover")), only=unread)
+        _insert_if_absent(f"{_MANUAL_PREFIX}{_now()}", result)
+        return result
 
 
 def ensure_snapshot(cutover: datetime | None = None) -> None:
@@ -363,4 +401,15 @@ def digest_of(payload: dict[str, Any]) -> str:
     return sha256_hex(canonical_json(body))
 
 
-__all__ = ["COLLECTION", "digest_of", "ensure_snapshot", "lookup", "snapshot", "snapshot_taken"]
+__all__ = ["COLLECTION", "digest_of", "ensure_snapshot", "lookup", "retry_unread_sources", "snapshot",
+           "snapshot_taken"]
+
+
+if __name__ == "__main__":  # pragma: no cover - operator entry point
+    import json as _json
+    import sys as _sys
+
+    if _sys.argv[1:] != ["retry"]:
+        _sys.stderr.write("usage: python -m services.legacy_evidence_register retry\n")
+        raise SystemExit(2)
+    _sys.stdout.write(_json.dumps(retry_unread_sources(), indent=2, default=str) + "\n")
