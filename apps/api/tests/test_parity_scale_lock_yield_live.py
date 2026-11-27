@@ -213,3 +213,137 @@ def test_mysql_ddl_waiting_on_a_pinned_snapshot_proceeds_within_seconds() -> Non
             cur.execute(f"DROP TABLE IF EXISTS `{table}`")
         conn.commit()
         conn.close()
+
+
+def _least_privileged_login():
+    """A login that may only read this database (no PROCESS): created here, dropped after."""
+    import secrets
+
+    c = parity_engines.cfg("mysql")
+    name, password = f"psd1_ro_{uuid.uuid4().hex[:8]}", secrets.token_hex(12)
+    admin = parity_engines.connect("mysql")
+    try:
+        with admin.cursor() as cur:
+            for host in ("127.0.0.1", "localhost"):
+                cur.execute(f"CREATE USER '{name}'@'{host}' IDENTIFIED BY %s", (password,))
+                cur.execute(f"GRANT SELECT ON `{c['database']}`.* TO '{name}'@'{host}'")
+        admin.commit()
+    except Exception as exc:  # noqa: BLE001 — the test login may not manage users
+        admin.close()
+        pytest.skip(f"cannot create a least-privileged login here ({type(exc).__name__})")
+
+    def connect():
+        import pymysql
+
+        return pymysql.connect(host=c["host"], port=int(c["port"]), database=c["database"], user=name,
+                               password=password, charset="utf8mb4")
+
+    def drop():
+        with admin.cursor() as cur:
+            for host in ("127.0.0.1", "localhost"):
+                cur.execute(f"DROP USER IF EXISTS '{name}'@'{host}'")
+        admin.commit()
+        admin.close()
+
+    return connect, drop
+
+
+@pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
+def test_a_login_that_cannot_see_other_sessions_never_pins() -> None:
+    """Review 3b, item 1: without PROCESS the watch saw only its own login's sessions: an ALTER
+    from another login waited out its lock timeout while the side stayed pinned."""
+    from services.parity_scale.dialects.mysql import MySQLSide
+    from services.parity_scale.driver import ParityScan, ScanConfig
+    from services.parity_scale.plan import build_plan
+    from services.parity_scale.store import MemoryScanStore
+
+    src, dst = f"psd1_lp_s_{uuid.uuid4().hex[:8]}", f"psd1_lp_d_{uuid.uuid4().hex[:8]}"
+    admin = parity_engines.connect("mysql")
+    with admin.cursor() as cur:
+        for table in (src, dst):
+            cur.execute(f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, v INT) ENGINE=InnoDB")
+            cur.execute(f"INSERT INTO `{table}` VALUES (1, 1), (2, 2), (3, 3)")
+    admin.commit()
+    connect, drop = _least_privileged_login()
+    try:
+        types = {"id": "bigint", "v": "int"}
+        plan = build_plan([{"source": "id", "target": "id"}, {"source": "v", "target": "v"}],
+                          source_types=types, dest_types=types, source_engine="mysql", dest_engine="mysql",
+                          key_columns=["id"])
+        side = MySQLSide(role="source", plan=plan, table=src, connection=connect(), connect=connect)
+        assert side.pin()["kind"] == "pinned"
+        reason = side.watch_locks(0.2)
+        assert "cannot see other sessions" in reason, reason
+        side.release_pin()
+        assert side.total_count() == 3  # the read takes no lock it keeps
+        with admin.cursor() as cur:
+            cur.execute("SET SESSION lock_wait_timeout = 6")
+            started = time.monotonic()
+            cur.execute(f"ALTER TABLE `{src}` COMMENT = 'another login'")
+            assert time.monotonic() - started < 3
+        side.close()
+
+        def open_side(role, plan_):
+            return MySQLSide(role=role, plan=plan_, table=src if role == "source" else dst, connection=connect(),
+                             connect=connect)
+
+        scan = ParityScan.start(plan, store=MemoryScanStore(), open_side=open_side,
+                                config=ScanConfig(pin_snapshot=True, pin_max_hold_s=1800))
+        scan.run()
+        ev = scan.result()
+        assert ev["outcome"] == "match"
+        assert ev["consistency"]["kind"] == "not_established"  # never "proven"
+        assert "cannot see other sessions" in " ".join(ev["consistency"]["reasons"])
+    finally:
+        drop()
+        with admin.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        admin.commit()
+        admin.close()
+
+
+def test_only_a_wait_on_exactly_the_pinned_table_counts() -> None:
+    """Review 3b, item 4: a substring or a NULL statement in any database released the snapshot."""
+    from services.parity_scale.dialects.mysql import MySQLSide, names_table
+
+    assert names_table("ALTER TABLE `orders` COMMENT = 'x'", "shop", "shop", "orders")
+    assert names_table("RENAME TABLE shop.orders TO shop.o2", "other", "shop", "orders")
+    assert not names_table("ALTER TABLE orders_archive ENGINE=InnoDB", "shop", "shop", "orders")
+    assert not names_table("ALTER TABLE orders ENGINE=InnoDB", "other_db", "shop", "orders")
+    assert not names_table(None, "shop", "shop", "orders")
+
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            return None
+
+        def fetchall(self):
+            return [(11, "shop", "ALTER TABLE orders_archive ADD c INT"), (12, "other", "ALTER TABLE orders x"),
+                    (13, "shop", None), (14, "shop", "TRUNCATE TABLE `orders`")]
+
+    side = object.__new__(MySQLSide)
+    side.table, side.schema, side._lock_db, side._watch_via = "orders", "", "shop", "processlist"
+    monitor = type("M", (), {"cursor": lambda self: Cur()})()
+    assert side.lock_waiters(monitor, 1) == ["session 14 (waiting for a metadata lock on orders)"]
+
+
+@pg
+def test_a_late_cancel_is_spent_after_its_statement(tables) -> None:
+    """Review 3b, item 5: a cancel flag left set made a later genuine timeout look like a yield."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    side = verification.side_opener(spec)("source", verification.plan_for(spec))
+    try:
+        side._cancel_sent = True  # the watch cancelled a statement that had already finished
+        side.execute("SELECT 1", [])
+        assert side._cancel_sent is False
+    finally:
+        side.close()

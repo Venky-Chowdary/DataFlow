@@ -138,13 +138,17 @@ class SqlSide(Side):
         with self._use:
             self._yield_if_asked()
             try:
-                return self._execute(sql, params)
+                rows = self._execute(sql, params)
             except UnitTimeout:
                 if not self._cancel_sent:
                     raise
                 self._cancel_sent = False
                 self._yield_if_asked()
-                return self._execute(sql, params)
+                rows = self._execute(sql, params)
+            # A cancel that arrived after its statement finished is spent: a later genuine
+            # timeout is never taken for it (and never silently retried).
+            self._cancel_sent = False
+            return rows
 
     # ── a pinned snapshot yields to sessions waiting on its locks ─────────────
     #: Whether an idle streamed read can be let go by a rollback on its own connection
@@ -162,6 +166,10 @@ class SqlSide(Side):
     def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
         """Sessions waiting on a lock ``session`` holds, in words (never a query's text)."""
         return []
+
+    def watch_refusal(self, monitor: Any) -> str:
+        """``""`` when the watch can see other sessions' lock waits, else why not (then no pin)."""
+        return ""
 
     def cancel_running(self, monitor: Any, session: Any) -> None:
         """Cancel this side's running statement (from the lock watch's thread)."""
@@ -194,12 +202,16 @@ class SqlSide(Side):
                 session = self.session_id()
             monitor = self._monitor_connect()
             self.prepare_monitor(monitor)
-            self.lock_waiters(monitor, session)  # the watch works on this server
+            blind = self.watch_refusal(monitor)
+            if not blind:
+                self.lock_waiters(monitor, session)  # the watch works on this server
         except Exception as exc:  # noqa: BLE001 — cannot watch: the caller does not hold the snapshot
+            blind = f"sessions waiting on the snapshot's locks cannot be watched here ({type(exc).__name__})"
+        if blind:
             if monitor is not None:
                 with contextlib.suppress(Exception):
                     monitor.close()
-            return f"sessions waiting on the snapshot's locks cannot be watched here ({type(exc).__name__})"
+            return blind
         stop = threading.Event()
         thread = threading.Thread(target=self._watch_loop, args=(monitor, session, float(interval_s), stop),
                                   name="psd1-lockwatch", daemon=True)

@@ -126,6 +126,26 @@ def field_sql(col: ColumnPlan, *, column: str, role: str, dest_engine: str) -> s
     return f"(CASE WHEN {x} IS NULL THEN 'N' ELSE {body} END)"
 
 
+_NAME = r"(?:`((?:[^`]|``)+)`|([A-Za-z0-9_$\u0080-￿]+))"
+
+
+def names_table(info: Any, waiter_db: str, db: str, table: str) -> bool:
+    """Whether a statement's text names ``db.table`` (qualified, or bare in the waiter's own
+    database). Names compare without case, as table names do on most servers."""
+    import re
+
+    if not info or not table:
+        return False
+    want = (db.lower(), table.lower())
+    for m in re.finditer(_NAME + r"(?:\s*\.\s*" + _NAME + ")?", str(info)):
+        first = (m.group(1) or "").replace("``", "`") or m.group(2) or ""
+        second = (m.group(3) or "").replace("``", "`") or m.group(4) or ""
+        ref = (first, second) if second else (waiter_db, first)
+        if (ref[0].lower(), ref[1].lower()) == want:
+            return True
+    return False
+
+
 class MySQLSide(SqlSide):
     """A MySQL 8 or MariaDB table."""
 
@@ -274,53 +294,85 @@ class MySQLSide(SqlSide):
 
     def session_id(self) -> Any:
         with self.conn.cursor() as cur:
-            cur.execute("SELECT CONNECTION_ID()")
-            return int(cur.fetchone()[0])
+            cur.execute("SELECT CONNECTION_ID(), DATABASE()")
+            session, database = cur.fetchone()
+        #: The database the pinned table is in (the lock watch matches waits on exactly it).
+        self._lock_db = str(self.schema or database or "")
+        return int(session)
 
     def prepare_monitor(self, monitor: Any) -> None:
         monitor.autocommit(True)
 
-    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
-        """Sessions waiting for a metadata lock on this table.
+    #: How the watch sees waits: "performance_schema" (MySQL 8) or "processlist" (PROCESS).
+    _watch_via = ""
 
-        MySQL 8 names the holder (performance_schema.metadata_locks); where that is
-        off (MariaDB's default) a session in the "Waiting for table metadata lock"
-        state whose statement names this table counts (its text is only matched,
-        never kept).
-        """
-        schema = self.schema or None
+    def watch_refusal(self, monitor: Any) -> str:
+        """The watch must see *other* logins' sessions, or a writer could wait on the snapshot
+        unseen: MySQL 8's metadata-lock instrument, or the PROCESS privilege for the process list."""
         with monitor.cursor() as cur:
-            found = self._metadata_lock_waiters(cur, session) if self.server == "mysql" else None
-            if found is not None:
-                return found
+            if self.server == "mysql" and self._metadata_locks_visible(cur):
+                self._watch_via = "performance_schema"
+                return ""
             cur.execute(
-                "SELECT ID, INFO FROM information_schema.PROCESSLIST "
-                "WHERE STATE LIKE 'Waiting for table metadata lock%%' AND ID <> %s "
-                "AND (DB = COALESCE(%s, DATABASE()) OR INFO IS NULL OR INFO LIKE %s)",
-                (int(session), schema, f"%{self.table}%"),
-            )
-            rows = cur.fetchall()
-        table = self.table.lower()
-        return [f"session {pid} (waiting for a metadata lock on {self.table})"
-                for pid, info in rows if info is None or table in str(info).lower()]
+                "SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE IN "
+                "('PROCESS', 'SUPER') AND GRANTEE = CONCAT(CHAR(39), SUBSTRING_INDEX(CURRENT_USER(), '@', 1), "
+                "CHAR(39), '@', CHAR(39), SUBSTRING_INDEX(CURRENT_USER(), '@', -1), CHAR(39))")
+            if int(cur.fetchone()[0] or 0) > 0:
+                self._watch_via = "processlist"
+                return ""
+        return ("the scan's login cannot see other sessions (no PROCESS privilege"
+                + (", and performance_schema's metadata-lock instrument is off or unreadable"
+                   if self.server == "mysql" else "")
+                + "), so a held snapshot could block writers unseen")
 
-    def _metadata_lock_waiters(self, cur: Any, session: Any) -> list[str] | None:
-        """MySQL 8: who waits on a metadata lock this session holds; None when performance_schema is off."""
+    @staticmethod
+    def _metadata_locks_visible(cur: Any) -> bool:
         try:
+            cur.execute("SELECT ENABLED FROM performance_schema.setup_instruments "
+                        "WHERE NAME = 'wait/lock/metadata/sql/mdl'")
+            row = cur.fetchone()
+            if not row or str(row[0]).upper() != "YES":
+                return False
+            cur.execute("SELECT COUNT(*) FROM performance_schema.metadata_locks")
+            cur.fetchone()
+            return True
+        except Exception:  # noqa: BLE001 — performance_schema off or not readable by this login
+            return False
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions waiting for a metadata lock on exactly this table.
+
+        MySQL 8 names the holder (performance_schema.metadata_locks). Otherwise a
+        session in the "Waiting for table metadata lock" state counts only when its
+        statement names this database's table (in its own default database, or
+        qualified); its text is only matched, never kept.
+        """
+        with monitor.cursor() as cur:
+            if self._watch_via == "performance_schema":
+                return self._metadata_lock_waiters(cur, session)
             cur.execute(
-                "SELECT DISTINCT wt.PROCESSLIST_ID, w.LOCK_TYPE FROM performance_schema.metadata_locks w "
-                "JOIN performance_schema.metadata_locks g ON g.OBJECT_TYPE = w.OBJECT_TYPE "
-                "AND g.OBJECT_SCHEMA = w.OBJECT_SCHEMA AND g.OBJECT_NAME = w.OBJECT_NAME "
-                "JOIN performance_schema.threads gt ON gt.THREAD_ID = g.OWNER_THREAD_ID "
-                "JOIN performance_schema.threads wt ON wt.THREAD_ID = w.OWNER_THREAD_ID "
-                "WHERE g.LOCK_STATUS = 'GRANTED' AND w.LOCK_STATUS = 'PENDING' AND gt.PROCESSLIST_ID = %s",
+                "SELECT ID, DB, INFO FROM information_schema.PROCESSLIST "
+                "WHERE STATE LIKE 'Waiting for table metadata lock%%' AND ID <> %s",
                 (int(session),),
             )
             rows = cur.fetchall()
-        except Exception:  # noqa: BLE001 — performance_schema off: the caller reads the process list
-            return None
+        db = str(getattr(self, "_lock_db", "") or self.schema or "")
+        return [f"session {pid} (waiting for a metadata lock on {self.table})"
+                for pid, waiter_db, info in rows if names_table(info, str(waiter_db or ""), db, self.table)]
+
+    def _metadata_lock_waiters(self, cur: Any, session: Any) -> list[str]:
+        """MySQL 8: who waits on a metadata lock this session holds."""
+        cur.execute(
+            "SELECT DISTINCT wt.PROCESSLIST_ID, w.LOCK_TYPE FROM performance_schema.metadata_locks w "
+            "JOIN performance_schema.metadata_locks g ON g.OBJECT_TYPE = w.OBJECT_TYPE "
+            "AND g.OBJECT_SCHEMA = w.OBJECT_SCHEMA AND g.OBJECT_NAME = w.OBJECT_NAME "
+            "JOIN performance_schema.threads gt ON gt.THREAD_ID = g.OWNER_THREAD_ID "
+            "JOIN performance_schema.threads wt ON wt.THREAD_ID = w.OWNER_THREAD_ID "
+            "WHERE g.LOCK_STATUS = 'GRANTED' AND w.LOCK_STATUS = 'PENDING' AND gt.PROCESSLIST_ID = %s",
+            (int(session),),
+        )
         return [f"session {pid} (waiting for a {str(kind).lower()} metadata lock on {self.table})"
-                for pid, kind in rows]
+                for pid, kind in cur.fetchall()]
 
     def cancel_running(self, monitor: Any, session: Any) -> None:
         with monitor.cursor() as cur:
