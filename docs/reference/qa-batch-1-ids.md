@@ -18,3 +18,9 @@ are still open. Do not close one on this evidence.
   `IS [NOT] TRUE`, which Snowflake rejects (001003). Not the backlog D47 story.
 
 New tests, docstrings and commit messages call these "QA batch 1 item N".
+
+## Verified against
+
+- `apps/api/tests/test_d396_require_primary_key_surrogate_e2e.py` (QA batch 1: servers that force a primary key)
+- `apps/api/tests/test_train1_r2_forced_pk_probe_unreadable.py`
+- `apps/api/tests/test_qa_nov21_defects.py` (QA batch 1 retry, schedule Save and Snowflake predicate items)
