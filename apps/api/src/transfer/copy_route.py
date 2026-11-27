@@ -68,14 +68,15 @@ def _jsonb_carry_mappings(
     route stays on the row path. A ``json`` (text) source column always does.
     """
     lowered = {str(k).lower(): str(v or "").strip().lower() for k, v in (declared or {}).items()}
+    # Exact column names: a destination may hold both "Doc" and "doc".
     live = None if dest_types is None else {
-        str(k).lower(): str(v or "").strip().lower() for k, v in dest_types.items()
+        str(k): str(v or "").strip().lower() for k, v in dest_types.items()
     }
     out: list[dict] = []
     for mapping in mappings or []:
         transform = str(mapping.get("transform") or "").strip().lower()
         source = str(mapping.get("source") or "").strip().lower()
-        target = str(mapping.get("target") or mapping.get("source") or "").strip().lower()
+        target = str(mapping.get("target") or mapping.get("source") or "").strip()
         if (
             transform in _JSON_CAST_TRANSFORMS
             and lowered.get(source) == "jsonb"

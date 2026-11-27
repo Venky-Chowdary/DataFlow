@@ -439,6 +439,11 @@ def copy_between_postgres_upsert(
     try:
         dest_conn.autocommit = False
         with dest_conn.cursor() as dst_cur:
+            from services.copy_fast_path import _pair_source_types, pg_lock_and_check_live_types
+
+            pg_lock_and_check_live_types(
+                dst_cur, dest_schema, dest_table, _pair_source_types(pairs, shape.types)
+            )
             preexisting, join_count, dest_count = merge_staging_into_dest(
                 dst_cur,
                 merge_sql=pg_upsert_from_staging_sql(

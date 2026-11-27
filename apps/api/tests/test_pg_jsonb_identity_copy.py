@@ -169,3 +169,97 @@ def test_existing_destination_column_stores_what_the_row_path_stores(mode, dest_
             for t in (src, dst_default, dst_row):
                 cur.execute(f'DROP TABLE IF EXISTS "{t}"')
         conn.close()
+
+
+@pytest.mark.parametrize("mode", ["incremental_deduped", "upsert"])
+def test_column_altered_between_probe_and_merge_takes_the_row_path(mode, monkeypatch):
+    """The route's probe sees a jsonb destination column; an ALTER lands while the
+    staging COPY runs (a hook on the staging copy). The merge transaction re-checks
+    the live type under a lock and declines, so the stored text is the row path's."""
+    from tests.helpers.live_env import pg_up
+
+    if not pg_up():
+        pytest.skip("PostgreSQL not reachable")
+    os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+    os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    import services.copy_fast_path as cfp
+
+    conn, c = _pg_conn()
+    sfx = uuid.uuid4().hex[:8]
+    src, dst, dst_row = f"jba_s_{sfx}", f"jba_d_{sfx}", f"jba_r_{sfx}"
+    real_copy = cfp.copy_between_postgres
+    altered = {"n": 0}
+
+    def copy_then_alter(**kwargs):
+        out = real_copy(**kwargs)
+        if dst in str(kwargs.get("dest_table", "")) and not altered["n"]:
+            altered["n"] += 1
+            with conn.cursor() as cur:
+                cur.execute(f'ALTER TABLE "{dst}" ALTER COLUMN doc TYPE text USING doc::text')
+        return out
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, doc jsonb)')
+            for i in range(1, 31):
+                cur.execute(f'INSERT INTO "{src}" VALUES (%s, %s::jsonb)', (i, _DOCS[i % len(_DOCS)]))
+            cur.execute(f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, doc jsonb)')
+            cur.execute(f'CREATE TABLE "{dst_row}" (id bigint PRIMARY KEY, doc text)')
+        with monkeypatch.context() as m:
+            m.setattr(cfp, "copy_between_postgres", copy_then_alter)
+            method = _run(c, src, dst, mode)
+        assert altered["n"] == 1
+        with monkeypatch.context() as m:
+            m.setenv("DATAWRAP_PG_PG_COPY", "0")
+            _run(c, src, dst_row, mode)
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, doc::text FROM "{dst}" ORDER BY id')
+            got = cur.fetchall()
+            cur.execute(f'SELECT id, doc::text FROM "{dst_row}" ORDER BY id')
+            want = cur.fetchall()
+        assert "copy" not in method, method
+        assert got == want, (got[:2], want[:2])
+    finally:
+        with conn.cursor() as cur:
+            for t in (src, dst, dst_row):
+                cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["incremental_deduped", "upsert"])
+def test_case_variant_destination_columns_are_two_columns(mode, monkeypatch):
+    """Destination holds "doc" text and "Doc" jsonb; the mapping targets "doc".
+    The carry must read "doc" (text), not a case-folded "Doc", so the stored text
+    is the row path's."""
+    from tests.helpers.live_env import pg_up
+
+    if not pg_up():
+        pytest.skip("PostgreSQL not reachable")
+    os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+    os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    conn, c = _pg_conn()
+    sfx = uuid.uuid4().hex[:8]
+    src, dst, dst_row = f"jbc_s_{sfx}", f"jbc_d_{sfx}", f"jbc_r_{sfx}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, doc jsonb)')
+            for i in range(1, 31):
+                cur.execute(f'INSERT INTO "{src}" VALUES (%s, %s::jsonb)', (i, _DOCS[i % len(_DOCS)]))
+            for t in (dst, dst_row):
+                cur.execute(f'CREATE TABLE "{t}" (id bigint PRIMARY KEY, doc text, "Doc" jsonb)')
+        method = _run(c, src, dst, mode)
+        with monkeypatch.context() as m:
+            m.setenv("DATAWRAP_PG_PG_COPY", "0")
+            _run(c, src, dst_row, mode)
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, doc, "Doc"::text FROM "{dst}" ORDER BY id')
+            got = cur.fetchall()
+            cur.execute(f'SELECT id, doc, "Doc"::text FROM "{dst_row}" ORDER BY id')
+            want = cur.fetchall()
+        assert got == want, (method, got[:2], want[:2])
+        assert all(r[2] is None for r in got)
+    finally:
+        with conn.cursor() as cur:
+            for t in (src, dst, dst_row):
+                cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+        conn.close()

@@ -1428,6 +1428,43 @@ def pg_pg_copy_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def pg_lock_and_check_live_types(
+    cur: Any, dest_schema: str, dest_table: str, column_types: dict[str, str]
+) -> None:
+    """Inside the merge transaction: lock the destination, then decline on type drift.
+
+    The route's pre-flight probe runs on another connection; an ALTER (or a
+    concurrent create) between it and the merge would change what the merge's
+    INSERT ... SELECT casts into. ``ROW EXCLUSIVE`` (what the INSERT takes
+    anyway) is taken first so no ALTER can land between this check and the
+    merge. Column names match exactly — ``"Doc"`` and ``"doc"`` are two columns.
+    """
+    from psycopg2 import sql
+
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    cur.execute(
+        sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE").format(
+            sql.Identifier(dest_schema or "public"), sql.Identifier(dest_table)
+        )
+    )
+    cur.execute(
+        "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = to_regclass(%s) AND attnum > 0 AND NOT attisdropped",
+        (pg_regclass_literal(dest_schema or "public", dest_table),),
+    )
+    live = {str(name): str(typ) for name, typ in cur.fetchall()}
+    differs = [
+        col for col, typ in column_types.items()
+        if live.get(col) is None or (typ and live.get(col) != typ)
+    ]
+    if differs:
+        raise FastPathUnavailable(
+            f"live destination column(s) {', '.join(differs)} are absent or typed "
+            "differently from the source at merge time; the row path casts per cell"
+        )
+
+
 def _pair_source_types(pairs: Any, types: dict[str, str]) -> dict[str, str]:
     """Target column -> the source's declared type, matched by case."""
     return {
