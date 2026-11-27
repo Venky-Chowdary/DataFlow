@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from services.atomic_file import write_json_atomic
 from services.brand_env import getenv_brand
-from services.cron_schedule import CronError, validate_cron
+from services.cron_schedule import CronError, resolve_timezone, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
@@ -740,6 +740,65 @@ def count_missed_windows(
             return missed
         missed += 1
     return missed
+
+
+#: Most runs one preview lists.
+PREVIEW_MAX_RUNS = 10
+
+
+def preview_next_runs(
+    interval: str,
+    cron: str = "",
+    tz: str = "UTC",
+    *,
+    stored_next_run_at: str | None = None,
+    cadence_changed: bool = True,
+    enabled: bool = True,
+    count: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """The next runs the scheduler will use, for the schedule form (re-review F).
+
+    The same functions save and the beat use, so the form can never disagree
+    with the scheduler (a browser's own time-zone data can: Africa/Casablanca).
+    ``kind`` is ``clock`` (a cron), ``rolling`` (a preset or an uneven
+    ``*/N``, measured from the previous run), ``paused`` or ``invalid``.
+    An unchanged rolling cadence keeps its stored next run; a new or changed
+    one is anchored when it is saved (now), as update_schedule does.
+    """
+    count = max(1, min(PREVIEW_MAX_RUNS, int(count or 5)))
+    current = now or datetime.now(timezone.utc)
+    if not enabled:
+        return {"kind": "paused", "runs": []}
+    interval, cron = canonicalize_cadence(interval, cron)
+    cron = (cron or "").strip()
+    try:
+        resolve_timezone(tz or "UTC")
+        if cron:
+            validate_cron(cron)
+            runs: list[datetime] = []
+            cursor = current
+            for _ in range(count):
+                cursor = _cron_next_run(cron, cursor, tz or "UTC")
+                runs.append(cursor)
+            return {"kind": "clock", "timezone": tz or "UTC", "runs": [r.isoformat() for r in runs]}
+    except CronError as exc:
+        return {"kind": "invalid", "message": str(exc), "runs": []}
+    if rolling_minutes(interval) is None and interval not in INTERVALS:
+        return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
+    delta = interval_delta(interval)
+    stored = _parse_ts(stored_next_run_at) if stored_next_run_at and not cadence_changed else None
+    if stored is not None and stored.tzinfo is None:
+        stored = stored.replace(tzinfo=timezone.utc)
+    first = stored if stored is not None else current + delta
+    while first <= current:
+        first += delta
+    return {
+        "kind": "rolling",
+        "every_minutes": int(delta.total_seconds() // 60),
+        "from_stored": stored is not None,
+        "runs": [(first + i * delta).isoformat() for i in range(count)],
+    }
 
 
 def next_run_for(sched: PipelineSchedule, from_time: datetime | None = None) -> str:

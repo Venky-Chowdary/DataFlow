@@ -540,6 +540,32 @@ class ScheduleSummaryResponse(BaseModel):
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
+class NextRunsPreviewBody(BaseModel):
+    interval: str = Field(default="daily", max_length=64)
+    cron: str = Field(default="", max_length=256)
+    timezone: str = Field(default="UTC", max_length=64)
+    stored_next_run_at: str | None = Field(default=None, max_length=64)
+    cadence_changed: bool = True
+    enabled: bool = True
+    count: int = Field(default=5, ge=1, le=10)
+
+
+@router.post("/preview")
+async def preview_schedule_next_runs(body: NextRunsPreviewBody):
+    """The next runs the scheduler will use for a cadence (the schedule form's preview).
+
+    Pure computation with the scheduler's own functions: reads no schedule
+    and writes nothing, so the form can never show times the beat will not use.
+    """
+    from services.schedule_store import preview_next_runs
+
+    return preview_next_runs(
+        body.interval, body.cron, body.timezone,
+        stored_next_run_at=body.stored_next_run_at, cadence_changed=body.cadence_changed,
+        enabled=body.enabled, count=body.count,
+    )
+
+
 @router.get("/intervals")
 async def schedule_intervals():
     from services.schedule_store import SCHEMA_POLICIES

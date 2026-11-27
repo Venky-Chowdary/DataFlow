@@ -155,8 +155,8 @@ export function isValidTimeZone(timeZone: string): boolean {
 }
 
 export type NextRunsPreview =
-  | { kind: "clock"; runs: Date[]; timeZone: string; dstChange: Date | null }
-  | { kind: "rolling"; everyMinutes: number; runs: Date[]; fromLastRun: boolean }
+  | { kind: "clock"; runs: Date[]; timeZone: string; dstChange: Date | null; source?: PreviewSource }
+  | { kind: "rolling"; everyMinutes: number; runs: Date[]; fromLastRun: boolean; source?: PreviewSource }
   | { kind: "paused" }
   | { kind: "invalid"; message: string; never?: boolean }
   | { kind: "empty" };
@@ -319,4 +319,46 @@ export function describeEvery(minutes: number): string {
     return hours === 1 ? "every hour" : `every ${hours} hours`;
   }
   return minutes === 1 ? "every minute" : `every ${minutes} minutes`;
+}
+
+/**
+ * Who computed the times shown: the scheduler (POST /schedules/preview, the
+ * functions save and the beat use) or, only until it answers or when it
+ * cannot be reached, this browser (re-review F: a browser's time-zone data can
+ * differ from the server's, e.g. Africa/Casablanca).
+ */
+export type PreviewSource = "scheduler" | "browser";
+
+export interface ServerPreview {
+  kind: "clock" | "rolling" | "paused" | "invalid";
+  runs: string[];
+  timezone?: string;
+  every_minutes?: number;
+  from_stored?: boolean;
+  message?: string;
+}
+
+/** The scheduler's answer replaces the browser's; the browser's stands only while there is none. */
+export function withServerPreview(local: NextRunsPreview, server: ServerPreview | null, timeZone: string): NextRunsPreview {
+  if (!server) {
+    return local.kind === "clock" || local.kind === "rolling" ? { ...local, source: "browser" } : local;
+  }
+  if (server.kind === "paused") return { kind: "paused" };
+  if (server.kind === "invalid") {
+    // Keep the browser's plain sentence when both refuse; the scheduler decides that it is refused.
+    return local.kind === "invalid" ? local : { kind: "invalid", message: server.message || "The scheduler cannot run this cadence." };
+  }
+  const runs = server.runs.map((r) => new Date(r)).filter((d) => !Number.isNaN(d.getTime()));
+  if (server.kind === "rolling") {
+    return { kind: "rolling", everyMinutes: Number(server.every_minutes || 0), runs, fromLastRun: Boolean(server.from_stored), source: "scheduler" };
+  }
+  const zone = server.timezone || timeZone;
+  let dstChange: Date | null = null;
+  for (let i = 1; i < runs.length; i += 1) {
+    if (wallClock(runs[i - 1], zone).offset !== wallClock(runs[i], zone).offset) {
+      dstChange = runs[i];
+      break;
+    }
+  }
+  return { kind: "clock", runs, timeZone: zone, dstChange, source: "scheduler" };
 }

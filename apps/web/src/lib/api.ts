@@ -2104,8 +2104,6 @@ export function streamJobProgress(
         ? raw.stream_progress as JobProgress["stream_progress"]
         : undefined,
       stream_names: Array.isArray(raw.stream_names) ? raw.stream_names.map(String) : selectedStreamNames(raw.transfer_request),
-      stopped_stream: raw.stopped_stream ? String(raw.stopped_stream) : null,
-      undone_streams: Array.isArray(raw.undone_streams) ? raw.undone_streams.map(String) : null,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -6380,6 +6378,24 @@ export async function fetchJobVerdicts(
   if (!res.ok) throw await apiErrorFrom(res, "Could not load verdicts.");
   const body = (await res.json()) as { verdicts?: Record<string, import("./verdict").ListVerdict> };
   return body.verdicts && typeof body.verdicts === "object" ? body.verdicts : {};
+}
+
+/** The next runs the scheduler will use for a cadence (schedule form preview; computation only). */
+export async function previewScheduleNextRuns(
+  body: {
+    interval: string; cron: string; timezone: string; stored_next_run_at?: string | null;
+    cadence_changed?: boolean; enabled?: boolean; count?: number;
+  },
+  init: { signal?: AbortSignal } = {},
+): Promise<import("./scheduleNextRuns").ServerPreview> {
+  const res = await apiFetch(`${API_BASE}/schedules/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: init.signal,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not preview the next runs.");
+  return (await res.json()) as import("./scheduleNextRuns").ServerPreview;
 }
 
 /** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */
