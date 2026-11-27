@@ -1103,3 +1103,183 @@ def test_json_file_whose_last_record_adds_a_field(tmp_path, isolated, monkeypatc
         assert rows[-1] == (ROWS, "late") and rows[0] == (1, None)
         return
     _assert_blocked(result, job, columns, rows)
+
+
+# -- A flattened child is carried inside a parent written whole (G13) ---------
+#
+# Lead decision (27 Nov): a column the reader flattened out of a document field
+# (nested_city from nested) is covered when its parent object is mapped and
+# written whole (pass-through or JSON carry). Disclosed as "carried inside
+# <parent>". A transformed, omitted or unmapped parent leaves the child to
+# decide. One rule at Validate and Execute (classify_source_coverage).
+
+_LINEAGE = {"nested_city": "nested", "nested_geo": "nested", "nested_geo_lat": "nested_geo"}
+_FLAT_COLUMNS = ["pk", "name", "nested", "nested_city", "nested_geo", "nested_geo_lat"]
+
+
+def _flat_maps(parent: dict[str, Any] | None) -> list[dict[str, Any]]:
+    maps = [{"source": "pk", "target": "pk"}, {"source": "name", "target": "name"}]
+    return maps + ([parent] if parent else [])
+
+
+@pytest.mark.parametrize(
+    ("parent", "carried"),
+    [
+        ({"source": "nested", "target": "nested"}, True),
+        ({"source": "nested", "target": "nested", "transform": "none"}, True),
+        ({"source": "nested", "target": "nested", "transform": "json"}, True),
+        ({"source": "nested", "target": "nested", "transform": "lower"}, False),
+        ({"source": "nested", "target": "nested", "code_crosswalk": {"a": "b"}}, False),
+        ({"source": "nested", "target": "", "intentional_omit": True}, False),
+        (None, False),
+    ],
+    ids=["no_transform", "none", "json_carry", "transformed", "crosswalk", "omitted", "unmapped"],
+)
+def test_g13_counts_a_flattened_child_as_carried_only_inside_a_whole_parent(parent, carried):
+    from services.source_coverage_gate import build_source_coverage_gate
+
+    coverage, gate = build_source_coverage_gate(
+        source_columns=_FLAT_COLUMNS, mappings=_flat_maps(parent), lineage=_LINEAGE
+    )
+
+    children = ["nested_city", "nested_geo", "nested_geo_lat"]
+    if carried:
+        assert gate["status"] == "pass", gate["message"]
+        # A grandchild is carried by the ancestor written whole.
+        assert coverage["carried"] == [{"column": c, "parent": "nested"} for c in children]
+        assert "nested_city (carried inside nested)" in gate["message"]
+        assert gate["details"]["carried_sources"] == coverage["carried"]
+        return
+    assert gate["status"] == "block"
+    assert set(children) <= set(coverage["unaccounted"])
+    assert coverage["carried"] == []
+
+
+def test_no_lineage_means_no_carried_children():
+    """A JSON column and a real payload_k column are unrelated unless the reader flattens."""
+    from services.flatten_protection import coverage_lineage
+    from services.mapping_constraints import classify_source_coverage
+
+    rows = [{"payload": {"k": 1}, "payload_k": "a real column"}]
+    assert coverage_lineage("postgresql", {}, rows) == {}
+    assert coverage_lineage("mongodb", {"flatten_nested": False}, rows) == {}
+    assert coverage_lineage("mongodb", {}, rows) == {"payload_k": "payload"}
+    coverage = classify_source_coverage(
+        ["payload", "payload_k"], [{"source": "payload", "target": "payload"}], lineage={}
+    )
+    assert coverage["unaccounted"] == ["payload_k"]
+
+
+@pytest.mark.parametrize("transformed", [False, True], ids=["whole", "transformed"])
+def test_g16_ledger_agrees_with_g13_on_a_carried_child(transformed):
+    from services.field_reduction_ledger import build_field_reduction_evidence
+
+    parent = {"source": "nested", "target": "nested", **({"transform": "lower"} if transformed else {})}
+    ledger, gate = build_field_reduction_evidence(
+        source_columns=_FLAT_COLUMNS, mappings=_flat_maps(parent), lineage=_LINEAGE
+    )
+
+    child = next(e for e in ledger["entries"] if e["source"] == "nested_city")
+    if transformed:
+        # Undecided: G16 records it and leaves the block to G13 (no double count).
+        assert child["disposition"] == "unaccounted" and child["carried"] is False
+        return
+    assert child["carried"] is True and child["disposition_label"] == "carried inside nested"
+    assert child["targets"] == ["nested"]
+    assert gate["status"] != "block"
+
+
+def test_execute_refusal_uses_the_same_carried_rule():
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import (
+        SourceColumnsUnaccounted,
+        refuse_unaccounted_without_validate,
+    )
+
+    request = SimpleNamespace(skip_preflight=True)
+    whole = _flat_maps({"source": "nested", "target": "nested"})
+    refuse_unaccounted_without_validate(request, _FLAT_COLUMNS, whole, _LINEAGE)
+    with pytest.raises(SourceColumnsUnaccounted) as refused:
+        refuse_unaccounted_without_validate(
+            request, _FLAT_COLUMNS, _flat_maps({"source": "nested", "target": "nested", "transform": "lower"}),
+            _LINEAGE,
+        )
+    assert {"nested_city", "nested_geo", "nested_geo_lat"} <= set(refused.value.columns)
+
+
+# Real reader and engine: DynamoDB (moto) flattens ``nested`` into children.
+
+_DDB_TABLE = "owc_ddb_nested"
+
+
+@pytest.fixture()
+def ddb_nested():
+    boto3 = pytest.importorskip("boto3")
+    moto = pytest.importorskip("moto")
+    with moto.mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        client.create_table(
+            TableName=_DDB_TABLE,
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        for pk, city in (("U1", "austin"), ("U2", "oslo")):
+            client.put_item(
+                TableName=_DDB_TABLE,
+                Item={
+                    "pk": {"S": pk}, "name": {"S": f"n-{pk}"},
+                    "nested": {"M": {"city": {"S": city}, "geo": {"L": [{"N": "1"}, {"N": "2"}]}}},
+                },
+            )
+        yield
+
+
+@pytest.mark.parametrize("validate", [True, False], ids=["validate", "no_validate"])
+@pytest.mark.parametrize("transformed", [False, True], ids=["parent_whole", "parent_crosswalk"])
+def test_dynamodb_flattened_children_carried_inside_the_parent(
+    tmp_path, isolated, ddb_nested, validate, transformed  # noqa: F811
+):
+    # A code crosswalk rewrites the parent's value. (A cast the carrier cannot
+    # take, such as lower on an object, is replaced by the JSON carry at
+    # Validate and Execute alike, so the parent is then written whole.)
+    parent = {
+        "source": "nested", "target": "nested", "confidence": 0.99,
+        **({"code_crosswalk": {"austin": "AUS"}} if transformed else {}),
+    }
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="dynamodb", host="us-east-1", port=443, table=_DDB_TABLE),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(tmp_path / "d.sqlite"), table="people"
+        ),
+        sync_mode="full_refresh_overwrite", validation_mode="warn", skip_preflight=not validate,
+        stream_contracts=[{"name": _DDB_TABLE, "sync_mode": "full_refresh_overwrite", "primary_key": "pk", "selected": True}],
+        mappings=[
+            {"source": "pk", "target": "pk", "confidence": 0.99},
+            {"source": "name", "target": "name", "confidence": 0.99},
+            parent,
+        ],
+    )
+
+    result, job = _run(isolated, request)
+
+    if transformed:
+        assert not result.success
+        assert "neither mapped nor declared omitted" in str(result.error)
+        assert "nested_city" in str(result.error)
+        return
+    assert result.success, result.error
+    assert result.records_transferred == 2
+    carried = (job.get("schema_propagation") or {}).get("carried_columns") or []
+    assert {"column": "nested_city", "parent": "nested"} in carried
+    statement = (result.reconciliation.get("column_coverage") or {}).get("statement", "")
+    assert "nested_city (carried inside nested)" in statement
+    conn = sqlite3.connect(tmp_path / "d.sqlite")
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(people)")]
+        nested = [r[0] for r in conn.execute("SELECT nested FROM people ORDER BY pk")]
+    finally:
+        conn.close()
+    assert "nested_city" not in cols
+    assert "austin" in str(nested[0]) and "oslo" in str(nested[1])

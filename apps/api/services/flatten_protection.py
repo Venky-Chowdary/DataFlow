@@ -121,6 +121,26 @@ def flatten_lineage(rows: Iterable[Any] | None) -> dict[str, str]:
     return lineage
 
 
+def coverage_lineage(
+    source_type: str,
+    cfg: Mapping[str, Any] | None,
+    sample_rows: Iterable[Any] | None,
+    mappings: Iterable[Any] | None = None,
+) -> dict[str, str]:
+    """``{child: parent}`` for gate G13, the same at Validate and at Execute.
+
+    Only a source whose reader flattens documents has children; elsewhere a
+    JSON column and a real ``payload_k`` column are unrelated, so the lineage
+    is empty. Stamped lineage (a plan's proof) first, then the sample's.
+    """
+    if not source_flattens(source_type, cfg):
+        return {}
+    lineage = stamped_lineage(mappings)
+    for child, parent in flatten_lineage(sample_rows).items():
+        lineage.setdefault(child, parent)
+    return lineage
+
+
 def _descendants(lineage: Mapping[str, str]) -> dict[str, list[str]]:
     """``{column (lower): every column derived from it, at any depth}``."""
     children: dict[str, list[str]] = {}

@@ -65,7 +65,11 @@ the run, and otherwise the run stops before the first write and names the
 column. Under manual review the run never adds a column on its own, including a
 field a document source first shows partway through the run: the run stops
 before that batch and resumes from it once the field is approved. A field you
-declared omitted is never written, even if it first appears late. A run started without Validate
+declared omitted is never written, even if it first appears late.
+A field flattened out of a document (for example `nested_city` from `nested`)
+counts as carried when its parent object is written whole, and the reports say
+"carried inside nested"; if the parent is transformed or not written, the field
+needs its own decision. A run started without Validate
 (quarantine replay, the SDK) gets the same check at Execute. In a job that moves
 several tables, a table with more columns than the first is written with its
 own columns.

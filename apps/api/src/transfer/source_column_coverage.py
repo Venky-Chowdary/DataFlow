@@ -77,16 +77,21 @@ class SourceColumnsUnaccounted(SchemaPropagationRefused):
 
 
 def source_column_coverage(
-    columns: list[str] | None, mappings: list[dict[str, Any]] | None
+    columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+    lineage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Which source columns this plan writes, leaves out by decision, or leaves unanswered."""
+    """Which source columns this plan writes, carries inside a parent, omits, or leaves unanswered."""
     from services.mapping_constraints import classify_source_coverage
 
-    return classify_source_coverage(list(columns or []), list(mappings or []))
+    return classify_source_coverage(list(columns or []), list(mappings or []), lineage)
 
 
 def refuse_unaccounted_without_validate(
-    request: Any, columns: list[str] | None, mappings: list[dict[str, Any]] | None
+    request: Any,
+    columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+    lineage: dict[str, str] | None = None,
 ) -> None:
     """Raise when Validate will not run and a source column has no decision.
 
@@ -98,7 +103,7 @@ def refuse_unaccounted_without_validate(
     from services.source_coverage_gate import build_source_coverage_gate
 
     coverage, gate = build_source_coverage_gate(
-        source_columns=list(columns or []), mappings=list(mappings or [])
+        source_columns=list(columns or []), mappings=list(mappings or []), lineage=lineage
     )
     if not coverage["unaccounted"]:
         return
@@ -237,26 +242,35 @@ def omitted_source_names(mappings: list[dict[str, Any]] | None) -> frozenset[str
 
 
 def refuse_mid_run_column(
-    destination: Any, dest_type: str, fields: list[str], mappings: list[dict[str, Any]] | None
-) -> None:
+    destination: Any,
+    dest_type: str,
+    fields: list[str],
+    mappings: list[dict[str, Any]] | None,
+    lineage: dict[str, str] | None = None,
+) -> frozenset[str]:
     """Raise before a batch is written when it brings a field the policy does not add.
 
     ``fields`` are the batch's new, unmapped, not-omitted fields. A field whose
-    name the destination table already has is not an ADD COLUMN. A stream run
-    without the engine's stamp (a benchmark or a direct caller) keeps the
-    writer's previous behaviour.
+    name the destination table already has is not an ADD COLUMN. A flattened
+    child whose parent object is written whole is carried inside it (G13): it
+    is neither refused nor added, and is returned so the caller holds it off
+    the write. A stream run without the engine's stamp (a benchmark or a direct
+    caller) keeps the writer's previous behaviour.
     """
     stamp = (getattr(destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
     if not isinstance(stamp, dict) or stamp.get("adds_columns") is not False:
-        return
+        return frozenset()
     from services.db_type_utils import dest_declares_column_ddl
 
     if not dest_declares_column_ddl(str(dest_type or "")):
-        return
+        return frozenset()
+    from services.mapping_constraints import carried_by_parent
+
+    carried = frozenset(f for f in fields if f and carried_by_parent(f, mappings, lineage))
     live = {str(c) for c in stamp.get("dest_columns") or []}
-    new = [f for f in fields if f and not _live_has(f, live)]
+    new = [f for f in fields if f and f not in carried and not _live_has(f, live)]
     if not new:
-        return
+        return carried
     from services.source_coverage_gate import build_source_coverage_gate
 
     _coverage, gate = build_source_coverage_gate(source_columns=new, mappings=list(mappings or []))

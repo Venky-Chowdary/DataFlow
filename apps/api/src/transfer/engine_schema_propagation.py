@@ -39,6 +39,7 @@ def _record_schema_propagation(
     mappings: list[dict[str, Any]],
     dest_schema_types: dict[str, str] | None,
     request: Any = None,
+    sample_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Say on the job which source columns the run added, and which it left out.
 
@@ -73,13 +74,21 @@ def _record_schema_propagation(
         if live
         else []
     )
-    coverage = source_column_coverage(columns, mappings)
+    from services.flatten_protection import coverage_lineage
+
+    source = getattr(request, "source", None)
+    lineage = coverage_lineage(
+        str(getattr(source, "format", "") or ""), getattr(source, "extra", None),
+        sample_rows, mappings,
+    )
+    coverage = source_column_coverage(columns, mappings, lineage)
     skipped = [str(c) for c in coverage["unaccounted"]]
     present = {str(c).strip().lower() for c in columns or []}
     omitted = list(
         dict.fromkeys(str(c) for c in coverage["omitted"] if str(c).strip().lower() in present)
     )
-    if not added and not skipped and not omitted:
+    carried = list(coverage.get("carried") or [])
+    if not added and not skipped and not omitted and not carried:
         return
     if skipped:
         logger.warning(
@@ -95,10 +104,11 @@ def _record_schema_propagation(
             "added_columns": added,
             "skipped_columns": skipped,
             "omitted_columns": omitted,
+            "carried_columns": carried,
             "source_column_count": len(columns or []),
         },
     )
-    refuse_unaccounted_without_validate(request, columns, mappings)
+    refuse_unaccounted_without_validate(request, columns, mappings, lineage)
     refuse_unapproved_add_without_validate(request, columns, mappings, dest_schema_types)
 
 

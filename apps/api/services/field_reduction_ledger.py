@@ -462,8 +462,15 @@ def classify_field_dispositions(
     mappings: list[dict[str, Any]] | None,
     sample_rows: list[dict[str, Any]] | None = None,
     strict: bool | None = None,
+    lineage: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """One typed disposition per declared source column, in source order."""
+    """One typed disposition per declared source column, in source order.
+
+    A flattened child whose parent object is written whole is carried inside
+    it (``mapping_constraints.carried_by_parent``, the rule G13 applies).
+    """
+    from services.mapping_constraints import carried_by_parent
+
     strict_mode = strict_field_reduction() if strict is None else bool(strict)
     by_source, target_sources = _mapping_index(mappings)
     entries: list[dict[str, Any]] = []
@@ -499,6 +506,28 @@ def classify_field_dispositions(
                     observed=observe_field(sample_rows, source),
                     strict=strict_mode,
                 )
+            )
+            continue
+        parent = carried_by_parent(source, mappings, lineage)
+        if parent:
+            parent_targets = [
+                _text(m.get("target")) for m in by_source.get(parent.lower(), []) if _text(m.get("target"))
+            ]
+            entries.append(
+                {
+                    "source": source,
+                    "disposition": FOLDED_MANY_TO_ONE,
+                    "disposition_label": f"carried inside {parent}",
+                    "carried": True,
+                    "carried_inside": parent,
+                    "targets": parent_targets,
+                    "transform": None,
+                    "transform_sha256": None,
+                    "reason_code": None,
+                    "reason_text": None,
+                    "issues": [],
+                    "evidence_complete": True,
+                }
             )
             continue
         entries.append(
@@ -537,6 +566,7 @@ def build_field_reduction_ledger(
     sample_rows: list[dict[str, Any]] | None = None,
     mapping_hash: str | None = None,
     strict: bool | None = None,
+    lineage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the (unsigned) Field Reduction Ledger for a mapping set."""
     strict_mode = strict_field_reduction() if strict is None else bool(strict)
@@ -545,6 +575,7 @@ def build_field_reduction_ledger(
         mappings=mappings,
         sample_rows=sample_rows,
         strict=strict_mode,
+        lineage=lineage,
     )
     counts: dict[str, int] = {}
     for entry in entries:
@@ -744,6 +775,7 @@ def build_field_reduction_evidence(
     sample_rows: list[dict[str, Any]] | None = None,
     mapping_hash: str | None = None,
     strict: bool | None = None,
+    lineage: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Convenience for preflight: returns ``(ledger, gate)``."""
     ledger = build_field_reduction_ledger(
@@ -755,5 +787,6 @@ def build_field_reduction_evidence(
         sample_rows=sample_rows,
         mapping_hash=mapping_hash,
         strict=strict,
+        lineage=lineage,
     )
     return ledger, build_field_reduction_gate(ledger)

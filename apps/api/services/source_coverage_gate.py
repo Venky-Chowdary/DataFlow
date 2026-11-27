@@ -17,26 +17,43 @@ GATE_ID = "g13_source_coverage"
 _NAMED_LIMIT = 8
 
 
+def carried_statement(carried: list[dict[str, str]] | None) -> str:
+    """``"nested_city (carried inside nested)"``, one entry per carried child."""
+    return ", ".join(
+        f"{e['column']} (carried inside {e['parent']})" for e in carried or [] if e.get("column")
+    )
+
+
 def build_source_coverage_gate(
     *,
     source_columns: list[str],
     mappings: list[dict[str, Any]],
+    lineage: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return ``(coverage, gate)`` for the given mapping set."""
-    coverage = classify_source_coverage(source_columns, mappings)
+    """Return ``(coverage, gate)`` for the given mapping set.
+
+    ``lineage`` (``flatten_protection.coverage_lineage``) lets a flattened child
+    whose parent object is written whole count as carried inside it.
+    """
+    coverage = classify_source_coverage(source_columns, mappings, lineage)
     unaccounted = coverage["unaccounted"]
+    carried = coverage.get("carried") or []
     if not unaccounted:
+        message = (
+            f"All {coverage['source_count']} source column(s) accounted for — "
+            f"{len(coverage['written'])} written, "
+            f"{len(coverage['omitted'])} declared omitted"
+        )
+        if carried:
+            message += f", {len(carried)} carried inside their parent: {carried_statement(carried)}"
         return coverage, {
             "id": GATE_ID,
             "status": "pass",
-            "message": (
-                f"All {coverage['source_count']} source column(s) accounted for — "
-                f"{len(coverage['written'])} written, "
-                f"{len(coverage['omitted'])} declared omitted"
-            ),
+            "message": message,
             "duration_ms": 0,
             "details": {
                 "omitted_sources": coverage["omitted"],
+                "carried_sources": carried,
                 "mapped_count": len(coverage["written"]),
                 "source_count": coverage["source_count"],
             },
@@ -58,6 +75,7 @@ def build_source_coverage_gate(
         "duration_ms": 0,
         "details": {
             "unaccounted_sources": unaccounted,
+            "carried_sources": carried,
             "mapped_count": len(coverage["written"]),
             "omitted_count": len(coverage["omitted"]),
             "source_count": coverage["source_count"],

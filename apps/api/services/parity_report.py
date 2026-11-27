@@ -968,7 +968,7 @@ def build_parity_report(
                 f"no recorded decision: {', '.join(undecided[:8])}. Map them or declare them "
                 "omitted, then run again."
             )
-        elif verdict == "proven":
+        elif verdict == "proven" and left_out.get("not_migrated"):
             reason = "No differences in the columns this run wrote."
     parity = _parity_block(tables)
     report: dict[str, Any] = {

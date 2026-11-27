@@ -55,11 +55,23 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
         if new_headers:
             from .source_column_coverage import refuse_mid_run_column
 
+            from services.flatten_protection import coverage_lineage
+
             already = {str(m.get("source") or "") for m in cfg.mappings}
-            refuse_mid_run_column(
+            held = refuse_mid_run_column(
                 cfg.destination, cfg.dest_type,
                 [h for h in new_headers if h not in already], cfg.mappings,
+                coverage_lineage(
+                    str(cfg.src_type or ""), getattr(cfg.source, "extra", None),
+                    [
+                        row if isinstance(row, dict) else dict(zip(batch.headers, row))
+                        for row in batch.rows[:100]
+                    ],
+                    cfg.mappings,
+                ),
             )
+            # Carried inside a parent written whole: not a column of its own here.
+            new_headers = [h for h in new_headers if h not in held]
         cfg.columns = union_attribute_keys(cfg.columns, batch.headers)
         mapped_sources = {str(m.get("source") or "") for m in cfg.mappings}
         meta = getattr(batch, "meta", None) or {}

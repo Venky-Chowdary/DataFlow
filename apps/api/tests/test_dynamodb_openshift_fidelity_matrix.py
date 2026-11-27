@@ -169,12 +169,6 @@ def test_dynamodb_types_land_on_openshift_shaped_postgres():
                 {"source": "nums", "target": "nums", "confidence": 0.99},
                 {"source": "bins", "target": "bins", "confidence": 0.99},
                 {"source": "nested", "target": "nested", "confidence": 0.99},
-                # The reader also flattens ``nested`` into these children. Their
-                # values travel inside the ``nested`` JSON column, so leaving them
-                # out is declared: G13 refuses an undecided column at Validate and,
-                # since a run without Validate makes the same check, at Execute.
-                {"source": "nested_city", "target": "", "intentional_omit": True},
-                {"source": "nested_geo", "target": "", "intentional_omit": True},
                 {"source": "maybe", "target": "maybe", "confidence": 0.99},
                 {"source": "only_bob", "target": "only_bob", "confidence": 0.99},
             ],

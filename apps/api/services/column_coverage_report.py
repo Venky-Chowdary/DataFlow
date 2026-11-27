@@ -96,12 +96,33 @@ def not_migrated_sentence(entries: list[dict[str, str]] | None, *, source_column
     return f"{scope}{len(rows)} source column(s) were not migrated: {named}{more}."
 
 
-def _coverage(entries: list[dict[str, str]], total: int) -> dict[str, Any]:
+def carried_inside(propagation: dict[str, Any] | None) -> list[dict[str, str]]:
+    """``[{column, parent}]``: flattened children written inside their parent object."""
+    recorded = propagation if isinstance(propagation, dict) else {}
+    return [
+        {"column": str(e.get("column")), "parent": str(e.get("parent"))}
+        for e in recorded.get("carried_columns") or []
+        if isinstance(e, dict) and e.get("column") and e.get("parent")
+    ]
+
+
+def _coverage(
+    entries: list[dict[str, str]], total: int, carried: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
+    statement = not_migrated_sentence(entries, source_columns=total)
+    if carried:
+        named = ", ".join(f"{e['column']} (carried inside {e['parent']})" for e in carried[:_NAMED_LIMIT])
+        more = f" (+{len(carried) - _NAMED_LIMIT} more)" if len(carried) > _NAMED_LIMIT else ""
+        statement = (
+            f"{statement} {len(carried)} source column(s) are written inside their parent "
+            f"object, not as columns of their own: {named}{more}."
+        ).strip()
     return {
         "source_columns": total or None,
         "columns_written": max(total - len(entries), 0) if total else None,
         "not_migrated": entries,
-        "statement": not_migrated_sentence(entries, source_columns=total),
+        "carried_inside": list(carried or []),
+        "statement": statement,
     }
 
 
@@ -110,15 +131,16 @@ def column_coverage_of(job: dict[str, Any] | None) -> dict[str, Any] | None:
     doc = job if isinstance(job, dict) else {}
     recon = doc.get("reconciliation") if isinstance(doc.get("reconciliation"), dict) else {}
     stored = recon.get("column_coverage")
-    if isinstance(stored, dict) and stored.get("not_migrated"):
+    if isinstance(stored, dict) and (stored.get("not_migrated") or stored.get("carried_inside")):
         return stored
     # A job finished before the coverage was stamped on Gate-8 still names the
     # columns it skipped (D165) on ``schema_propagation``.
     propagation = doc.get("schema_propagation")
     entries = not_migrated_columns(propagation, doc.get("preflight"))
-    if not entries:
+    carried = carried_inside(propagation)
+    if not entries and not carried:
         return None
-    return _coverage(entries, int((propagation or {}).get("source_column_count") or 0))
+    return _coverage(entries, int((propagation or {}).get("source_column_count") or 0), carried)
 
 
 def stamp_column_coverage(mongo: Any, job_id: str, fields: dict[str, Any]) -> None:
@@ -138,9 +160,10 @@ def stamp_column_coverage(mongo: Any, job_id: str, fields: dict[str, Any]) -> No
     job = job if isinstance(job, dict) else {}
     propagation = job.get("schema_propagation")
     entries = not_migrated_columns(propagation, job.get("preflight"))
-    if not entries:
+    carried = carried_inside(propagation)
+    if not entries and not carried:
         return
-    coverage = _coverage(entries, int((propagation or {}).get("source_column_count") or 0))
+    coverage = _coverage(entries, int((propagation or {}).get("source_column_count") or 0), carried)
     recon["column_coverage"] = coverage
     statement = coverage["statement"]
     for holder in (recon, fields):
