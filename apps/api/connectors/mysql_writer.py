@@ -669,7 +669,8 @@ def _split_salvage_safe(cur: Any, table_name: str, cache: dict[str, bool] | None
     MyISAM / Aria / MEMORY keep the rows before the bad one. Read through the
     session's own view (``SHOW CREATE TABLE``), so a temporary table shadowing
     the permanent one is what is judged — and any temporary table counts as not
-    safe. Unknown → False. ``cache`` holds the answer per table for one run.
+    safe. Unknown → False. ``cache`` holds the answer per table for one
+    ``write_mapped_rows`` call (a later call probes again).
     """
     if cache is not None and table_name in cache:
         return cache[table_name]
@@ -1728,7 +1729,8 @@ def write_mapped_rows(
                 )
                 return ok
 
-            # Per run: is a split salvage safe for this table (engine probe once).
+            # Per write call (not per run): is a split salvage safe for this table
+            # (one engine probe per table per call).
             split_safe_cache: dict[str, bool] = {}
 
             def _land_dense_chunk(batch, chunk_idx, row_numbers):

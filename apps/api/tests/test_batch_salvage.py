@@ -306,7 +306,7 @@ def test_live_pg_held_overwrite_salvage_splits_and_keeps_the_transaction(monkeyp
 def test_mysql_split_safety_is_probed_once_per_table_and_sees_temporary_tables():
     """The engine probe runs through the session (SHOW CREATE TABLE): InnoDB is
     safe, MyISAM is not, a TEMPORARY table shadowing an InnoDB table is not, and
-    the answer is cached per table for the run."""
+    the answer is cached per table for one write call."""
     import pymysql
 
     from connectors.mysql_writer import _split_salvage_safe

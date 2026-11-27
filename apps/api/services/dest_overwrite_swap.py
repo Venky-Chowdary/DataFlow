@@ -279,8 +279,9 @@ def pg_decline_live_type_drift(
     quarantines per cell instead.
     """
     live_reg = _literal(live_ref) + "::regclass"
+    # Exact names: "Doc" and "doc" are two columns of one table.
     live_types = {
-        str(name).casefold(): str(typ)
+        str(name): str(typ)
         for name, typ in _rows(
             cur,
             "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
@@ -289,8 +290,8 @@ def pg_decline_live_type_drift(
     }
     differs = [
         col for col, typ in column_types.items()
-        if live_types.get(col.casefold()) is None
-        or (typ and live_types.get(col.casefold()) != typ)
+        if live_types.get(col) is None
+        or (typ and live_types.get(col) != typ)
     ]
     if differs:
         _decline(

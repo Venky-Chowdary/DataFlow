@@ -27,6 +27,17 @@ route stays on the row path in every mode. The incremental and upsert copies
 also re-check every live destination column type (exact names: `"Doc"` and
 `"doc"` are two columns) inside their merge transaction, under a lock, and
 fall back to the row path if a column changed after the route was chosen.
+A widened destination column keeps the copy when the merge's assignment cast
+cannot change a value: `smallint` → `integer` → `bigint`, `varchar(n)` →
+`varchar(m ≥ n)` or `text`, `numeric(p,s)` → `numeric(p' ≥ p, s)`, and
+`timestamp(p)` / `time(p)` → a higher precision of the same zone kind. Every
+other difference (`json`/`jsonb`, `text` → `varchar`, arrays, domains, enums,
+`char(n)`) still takes the row path. Append and overwrite COPY into the
+destination itself, so they need exact types and exact names; append checks
+them under the same lock, overwrite inside its swap transaction.
+A destination that is not an ordinary table (a foreign table, a view) takes
+the row path: the copy is proven for ordinary tables only, and `LOCK TABLE`
+refuses a foreign table.
 Before, the `json` cast the mapper stamps on JSON columns sent every such
 table down the row path. A `json` (text) column still takes the row path.
 
@@ -115,7 +126,7 @@ What changed, with no change to any result:
   Rows land or are held out exactly as before, in the same order, each with
   its own error. SQL Server and the generic SQL writer still salvage row by
   row, and so does MySQL into a non-transactional or temporary table
-  (MyISAM, Aria, MEMORY; judged once per table per run through the session's
+  (MyISAM, Aria, MEMORY; judged per table once per writer call through the session's
   `SHOW CREATE TABLE`): a failed multi-row INSERT there keeps the rows before
   its bad row.
   On such a table a chunk with a refused row already fails the run today
