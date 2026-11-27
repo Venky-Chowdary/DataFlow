@@ -304,8 +304,8 @@ class _Snowflake:
         return snowflake_governance(cur, ref, database=str(cfg.get("database") or ""))
 
     @staticmethod
-    def _kind(cur: Any, schema: str, name: str) -> str:
-        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent).
+    def _table_row(cur: Any, schema: str, name: str) -> dict[str, Any] | None:
+        """The table's ``SHOW TABLES`` row (kind, owner, ...), or ``None`` when unread.
 
         ``SHOW TABLES LIKE`` is one object lookup; ``information_schema`` is
         avoided on this path (D187: it federates on shared catalogs).
@@ -318,21 +318,51 @@ class _Snowflake:
         # schema wins (review N3).
         own_schema, bare = snowflake_schema_and_table(schema, name)
         sch = own_schema if bare != name else _folded_schema(schema)
-        name = bare
         try:
             # Wildcards in the name only widen the match; the exact name is picked below.
-            like = str(name).replace("\\", "\\\\").replace("'", "''")
+            like = str(bare).replace("\\", "\\\\").replace("'", "''")
             cur.execute(_sf_show_tables(like, quote_sql_identifier(sch)))
             names = [str(d[0]).lower() for d in (cur.description or [])]
             rows = [dict(zip(names, r)) for r in cur.fetchall()]
-        except Exception as exc:  # noqa: BLE001 - CLONE then reports a mismatch itself
-            logger.info("Snowflake table kind of %s unread: %s", name, exc)
-            return "permanent"
-        kind = next((str(r.get("kind") or "") for r in rows if str(r.get("name")) == str(name)), "")
-        kind = kind.upper()
+        except Exception as exc:  # noqa: BLE001 - callers decide what unknown means
+            logger.info("Snowflake SHOW TABLES for %s unread: %s", name, exc)
+            return None
+        return next((r for r in rows if str(r.get("name")) == str(bare)), None)
+
+    @classmethod
+    def _kind(cls, cur: Any, schema: str, name: str) -> str:
+        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent)."""
+        kind = str((cls._table_row(cur, schema, name) or {}).get("kind") or "").upper()
         if "TEMPORARY" in kind:
             return "temporary"
         return "transient" if "TRANSIENT" in kind else "permanent"
+
+    @classmethod
+    def _can_swap(cls, cur: Any, schema: str, name: str) -> tuple[bool, str]:
+        """Whether this session may ``ALTER TABLE <name> SWAP WITH <clone>``.
+
+        Snowflake's ALTER TABLE reference: "To rename a table or swap two
+        tables, the role used to perform the operation must have OWNERSHIP
+        privileges on the table(s)" (docs.snowflake.com/sql-reference/sql/
+        alter-table, access control requirements; read through a search
+        result, the page itself is not reachable from here, and it does not
+        say whether one or both tables). The clone is created, so owned, by
+        this session's role; the live table's owner must be active in the
+        session (IS_ROLE_IN_SESSION: the current role, the roles it inherits,
+        or a secondary role). Unknown means no: the restore could not run.
+        """
+        row = cls._table_row(cur, schema, name)
+        owner = str((row or {}).get("owner") or "").strip()
+        if not owner:
+            return False, "its owner could not be read (SHOW TABLES)"
+        try:
+            cur.execute("SELECT IS_ROLE_IN_SESSION(%s)", (owner,))
+            res = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 - unknown is refused
+            return False, f"whether this role holds its owner {owner} could not be checked ({exc})"
+        if res and str(res[0]).strip().lower() in ("true", "1", "yes"):
+            return True, ""
+        return False, f"it is owned by {owner}, a role this connector's session does not hold"
 
     @staticmethod
     def _drop_clone(cur: Any, bak_ref: str, backup: str) -> None:
@@ -402,6 +432,19 @@ class _Snowflake:
                 source = self._governance(cur, live_ref, cfg, emulator=emulator)
                 if source.unreadable and not approved:
                     raise GovernanceNotPreserved(live, [f"unreadable {u}" for u in source.unreadable])
+                if not emulator and source.has_policies is not False:
+                    # A governed (or unknown) table is restored by SWAP, which
+                    # needs OWNERSHIP. Without it a failed run could not put the
+                    # rows back: refuse before any change. The DDL approval
+                    # accepts lost metadata, never an unrestorable table.
+                    can, why = self._can_swap(cur, sch, live)
+                    if not can:
+                        raise TableDropError(
+                            live,
+                            f"a failed run could not be restored: restoring this table needs "
+                            f"ALTER TABLE ... SWAP WITH, which needs OWNERSHIP, and {why}. Run the "
+                            "overwrite with the owning role (or grant it to the connector's role).",
+                        )
                 transient = kind == "transient"
                 try:
                     cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=True, transient=transient))

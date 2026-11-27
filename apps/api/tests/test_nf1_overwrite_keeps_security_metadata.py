@@ -198,8 +198,9 @@ class _ScriptedCursor:
     """A Snowflake cursor that answers the governance reads from a script."""
 
     def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset(),
-                 kind: str = "TABLE", counts: dict[str, int] | None = None):
+                 kind: str = "TABLE", counts: dict[str, int] | None = None, owns: bool = True):
         self.counts = counts or {}
+        self.owns = owns
         self.governance = governance
         self.refuse = refuse
         self.kind = kind
@@ -230,7 +231,9 @@ class _ScriptedCursor:
         elif sql.startswith("SELECT COUNT(*)"):
             self.description, self._rows = [("N",)], [(self.counts.get(target, 0),)]
         elif sql.startswith("SHOW TABLES LIKE"):
-            self._answer([{"name": "T", "kind": self.kind}])
+            self._answer([{"name": "T", "kind": self.kind, "owner": "OWNER_ROLE"}])
+        elif sql.startswith("SELECT IS_ROLE_IN_SESSION"):
+            self.description, self._rows = [("R",)], [(self.owns,)]
         else:
             self.description, self._rows = None, []
 
@@ -931,3 +934,47 @@ def test_snowflake_failed_truncate_with_unreadable_counts_keeps_both(monkeypatch
         retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
 
     assert not any(s.startswith("DROP") for s in cur.executed)
+
+
+
+# ------------------------------------- review 2: SWAP needs ownership (N2)
+
+
+def test_snowflake_governed_table_not_owned_is_refused_before_any_change(monkeypatch):
+    """A failed run of a governed table is restored by SWAP (OWNERSHIP needed);
+    without it the run could never be undone, approval or not."""
+    cur = _ScriptedCursor({"LIVE": {"policies": [_MASK]}, "BAK": {}}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="owned by OWNER_ROLE"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC", governance_loss_approved=True)
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_unreadable_policies_not_owned_is_refused_even_with_approval(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"POLICY_REFERENCES"}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="needs OWNERSHIP"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC", governance_loss_approved=True)
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_ungoverned_table_not_owned_still_overwrites(monkeypatch):
+    """No masking / row access policy: the restore is INSERT OVERWRITE, no SWAP."""
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur)[-1] == 'TRUNCATE TABLE "PUBLIC"."T"'
+
+
+def test_gate_blocks_an_unrestorable_snowflake_overwrite_even_when_approved():
+    probe = lambda c, t: {"ran": True, "governed": True, "unreadable": [],  # noqa: E731
+                          "unrestorable": "a failed run could not be restored (... OWNERSHIP ...)"}
+    for acknowledged in (False, True):
+        gate = _gate("snowflake", probe=probe, acknowledged=acknowledged)
+        assert gate["status"] == "block" and "OWNERSHIP" in gate["message"]
