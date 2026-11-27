@@ -260,10 +260,13 @@ def test_a_server_below_the_version_floor_is_not_verified_and_says_why(tables, m
     monkeypatch.setattr(PostgresSide, "prepare_session", old)
     job_id = _job(*tables)
     block = verification.start_for_job(job_id, background=False)
-    assert block["state"] == "error"
-    error = block["tables"][0]["error"]
-    assert error.startswith("Not verified at full scale: the comparison inside the database needs PostgreSQL 14")
-    assert "Re-verify" not in error
+    # Before: "error" / "The comparison stopped (ValueError). Re-verify the table to try again."
+    assert block["state"] == "not_eligible"
+    assert block["reason"].startswith("the comparison inside the database needs PostgreSQL 14")
+    report = _report(job_id)
+    # Gate-8's own result stands: the verification neither runs nor blocks sign-off.
+    assert report["verdict"] != "verifying"
+    assert "Verification" not in str(report["signoff"].get("blocked_reason") or "")
 
 
 @pg

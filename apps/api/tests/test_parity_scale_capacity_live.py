@@ -98,6 +98,8 @@ def test_a_queued_verification_reads_queued_with_its_place(tables, monkeypatch) 
     assert report["verification"]["state"] == "queued"
     assert report["verification"]["tables"][0]["queue_position"] == 1
     assert report["signoff"]["status"] == "blocked"
+    # Review 3, item 9: queued, not "still running".
+    assert report["signoff"]["blocked_reason"] == "Verification is queued; sign once every row has been compared."
     capacity.done("other-1")  # capacity frees up: it runs and finishes
     deadline = time.monotonic() + 60
     while verification.is_running(_svc().get_job(job_id)) and time.monotonic() < deadline:

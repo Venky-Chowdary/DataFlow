@@ -455,6 +455,8 @@ def _overall(tables: list[dict[str, Any]]) -> str:
     if any(t.get("status") == QUEUED for t in tables):
         return QUEUED
     outcomes = [str((t.get("evidence") or {}).get("outcome") or "") for t in tables]
+    if tables and all(t.get("status") == "not_eligible" for t in tables):
+        return "not_eligible"  # cannot be compared in the database here: Gate-8's result stands
     if any(t.get("status") == "error" for t in tables):
         return "error"
     if any(o == "differences_found" for o in outcomes):
@@ -681,7 +683,7 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
         # Not a failure to retry: this table cannot be compared in the database (e.g. the server's
         # version). The reason names a version or a type, never a host or SQL.
         try:
-            _finish_table(job_id, spec["name"], token, status="error", error=f"Not verified at full scale: {exc}.")
+            _finish_table(job_id, spec["name"], token, status="not_eligible", error=str(exc))
         except LeaseLost:
             pass
     except LeaseLost:
@@ -766,6 +768,8 @@ def _finish_table(job_id: str, name: str, token: str, *, status: str, evidence: 
                           "progress": {k: v for k, v in (table.get("progress") or {}).items()
                                        if k in {"items_done", "items_queued", "elapsed_s", "mode"}}})
     block["state"] = _overall(block.get("tables") or [])
+    if block["state"] == "not_eligible":
+        block["reason"] = str(error or "")
     if block["state"] != RUNNING:
         block["finished_at"] = _now()
     # The finished scan's checkpoint is not kept: the evidence is the record.
@@ -931,16 +935,6 @@ def stop_sweeper(timeout: float = 5.0) -> None:
 
 
 # ── what the verification blocks ─────────────────────────────────────────────
-
-
-def blocking_reason(job: dict[str, Any] | None) -> str:
-    """Why sign-off and cutover must wait for verification, or ``""``."""
-    state = live_state(job)
-    if state == RUNNING:
-        return "Verification is still running; sign once every row has been compared."
-    if state == "error":
-        return "Verification did not finish; re-verify the table, then sign."
-    return ""
 
 
 # Kept for callers of the phase-3 names.

@@ -922,7 +922,10 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         status = "signed"
     elif verdict == "verifying":
         status = "blocked"
-        blocked_reason = "Verification is still running; sign once every row has been compared."
+        blocked_reason = (
+            "Verification is queued; sign once every row has been compared."
+            if (report.get("verification") or {}).get("state") == "queued"
+            else "Verification is still running; sign once every row has been compared.")
     elif (report.get("verification") or {}).get("state") == "error":
         # A verification that did not finish decides nothing: an earlier result is not signed in its place.
         status = "blocked"
