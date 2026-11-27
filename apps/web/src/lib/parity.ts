@@ -200,6 +200,21 @@ export interface ParityEvidence {
   reread: Record<string, ParityReread>;
 }
 
+/** Why a source column is not on the destination after a successful run. */
+export type ParityNotMigratedReason = "declared_omitted" | "schema_drift_acknowledged" | "no_decision";
+
+/**
+ * Source columns the run did not migrate. Gate-8 compared only the columns the
+ * run wrote; `statement` is also appended to `confidence.statement`, so the
+ * report says it without reading this block.
+ */
+export interface ParityColumnCoverage {
+  source_columns: number | null;
+  columns_written: number | null;
+  not_migrated: { column: string; reason: ParityNotMigratedReason }[];
+  statement: string;
+}
+
 export interface ParityReport {
   job_id: string;
   generated_at: string;
@@ -216,6 +231,8 @@ export interface ParityReport {
   rounds: ParityRound[];
   signoff: ParitySignoff;
   evidence: ParityEvidence;
+  /** Null when every source column was migrated. */
+  column_coverage: ParityColumnCoverage | null;
 }
 
 export interface ParitySummaryRun {

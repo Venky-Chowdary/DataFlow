@@ -953,6 +953,23 @@ def build_parity_report(
     if carried:
         confidence["statement"] = f"{confidence['statement']} Representation: {'; '.join(carried)}."
     verdict, reason = _verdict(job, tables, confidence)
+    # The compare covers the columns the run wrote. A source column it left
+    # out is named with the confidence, and one nobody decided on is never
+    # "proven" (docs/migration-rules.md rules 4 and 12; R9).
+    from services.column_coverage_report import column_coverage_of, undecided_columns
+
+    left_out = column_coverage_of(job) if terminal and recon else None
+    if left_out:
+        confidence["statement"] = f"{confidence['statement']} {left_out['statement']}"
+        undecided = undecided_columns(left_out)
+        if verdict == "proven" and undecided:
+            verdict, reason = "unverifiable", (
+                f"Compared cells match, but {len(undecided)} source column(s) were left out with "
+                f"no recorded decision: {', '.join(undecided[:8])}. Map them or declare them "
+                "omitted, then run again."
+            )
+        elif verdict == "proven":
+            reason = "No differences in the columns this run wrote."
     parity = _parity_block(tables)
     report: dict[str, Any] = {
         "job_id": job_id or job_id_of(job),
@@ -967,6 +984,7 @@ def build_parity_report(
         "explanation": state.get("explanation"),
         "rounds": list(state.get("rounds") or []),
         "evidence": _evidence_block(job, tables_ev),
+        "column_coverage": left_out,
         "_representation_notes": carried,
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),

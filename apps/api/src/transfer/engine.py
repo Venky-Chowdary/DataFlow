@@ -1812,7 +1812,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
@@ -3312,7 +3312,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
@@ -4492,7 +4492,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,

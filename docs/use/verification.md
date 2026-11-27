@@ -58,7 +58,20 @@ gate passes.
 ### Dropping fields on purpose
 
 A source column must be mapped or declared omitted; otherwise the run is
-refused. The field reduction ledger goes further and records why each dropped
+refused. That holds when the destination table already exists and lacks the
+column, in every sync mode: the column is added when the schema policy approves
+it (propagate columns, or backfill new fields), and otherwise the run stops
+before the first write and names the column. A run started without Validate
+(quarantine replay, the SDK) gets the same check at Execute. In a job that moves
+several tables, a table with more columns than the first is written with its
+own columns.
+
+A run that leaves a column out says so. Gate-8 compares the columns the run
+wrote, so its message, the trust score's completeness note and the Trust
+Report's confidence statement name each source column that was not migrated
+and why (declared omitted, or left out under an acknowledged schema drift).
+
+The field reduction ledger goes further and records why each dropped
 field was dropped:
 
 - every source field gets one disposition: carried, folded into a target, or

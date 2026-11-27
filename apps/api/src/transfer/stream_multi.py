@@ -501,6 +501,17 @@ def run_non_cdc_multi_stream_sequential(
                     ),
                 )
                 last_stream_mappings = list(use_mappings or [])
+                if not declared_maps and headers and not _steps_for(stream_name):
+                    # A borrowed map that does not name this table's columns was
+                    # replaced by the stream with its own columns
+                    # (adopt_stream_column_map). Gate-8 must digest under the
+                    # map the rows were written with, or a correct load fails
+                    # on another table's column names.
+                    from services.multi_stream_plan import adopt_inherited_mappings
+
+                    last_stream_mappings, _ = adopt_inherited_mappings(
+                        last_stream_mappings, [str(h) for h in headers]
+                    )
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
                 if limit > 0:

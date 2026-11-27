@@ -7,6 +7,7 @@
 import type { ParityReport, ParitySummary } from "../../lib/parity";
 
 export const reportInitial: ParityReport = {
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -228,6 +229,7 @@ export const reportInitial: ParityReport = {
 };
 
 export const reportResynced: ParityReport = {
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -413,6 +415,7 @@ export const reportResynced: ParityReport = {
 };
 
 export const reportSigned: ParityReport = {
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,

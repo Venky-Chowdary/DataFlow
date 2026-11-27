@@ -77,6 +77,10 @@ MongoDB `_id` is immutable and unique ([documents](https://www.mongodb.com/docs/
 
 An omitted column is not part of the write and is not part of read-back verification.
 
+Leaving a column out is a decision, never a default. A source column whose destination column does not exist is added when the schema policy approves additive columns (`propagate_columns`, `propagate_all`, or backfill new fields), in every sync mode. Otherwise the run stops before the first write and names the column; the operator maps it, approves the new column, or declares it omitted. Validate makes that check (gate G13), and Execute makes the same check for a run that did not go through Validate, so overwrite into an existing table cannot copy the remaining columns and report success (rule 12: the same gates on the same inputs). In a multi-table job, a table whose columns differ from the first table's is written and verified under its own columns, never copied with the first table's map.
+
+A run that left a column out states it. Gate-8 compares the columns the run wrote, so its message, the trust score and the Trust Report name each source column that was not migrated and the reason (`declared_omitted`, `schema_drift_acknowledged`). A stored job that dropped a column with no recorded decision is reported as not proven.
+
 ## 5. Idempotency, delivery and watermarks
 
 Kafka's own exactly-once applies to Kafka-to-Kafka transactions. A consumer that writes to another system and then commits offsets gets at-least-once if it crashes in between; committing offsets first gets at-most-once ([Kafka design](https://kafka.apache.org/39/design/design/)). Datawrap commits source offsets only after the destination commit. The default statement to operators is **at-least-once upsert** until an exactly-once proof exists for that route.
@@ -172,6 +176,8 @@ Checked on 2026-11-20 against PostgreSQL 16, MySQL 8.0, MongoDB 7.0 and SQLite 3
 - `apps/api/services/reversibility_schedule.py` (rule 8: schedule save gate)
 - `apps/api/services/gitops_manifest.py` (rule 8: GitOps apply)
 - `apps/api/services/compliance_guard.py` and `apps/api/services/pii_guard.py` (rule 11: PAN detection)
+- `apps/api/src/transfer/source_column_coverage.py` and `apps/api/services/column_coverage_report.py` (rules 4, 12: the source-coverage check at Execute, and the columns a run left out on Gate-8, the trust score and the Trust Report)
+- `apps/api/tests/test_source_column_missing_on_destination.py` (PostgreSQL 16 to PostgreSQL 16 for every sync mode on the default route and the row path, PostgreSQL to MariaDB 10.11 on the row path, multi-table jobs, SQLite, a CSV source)
 - `apps/api/tests/test_d364_d365_null_filter.py`
 - `apps/api/tests/test_d372_d373_plan_execute.py`
 - `apps/api/tests/test_d295_d399_d297_d318_d374.py`
