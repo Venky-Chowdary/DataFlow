@@ -160,6 +160,7 @@
       "run_form": {
         "source_kind": "database",
         "source_format": "s3",
+        "source_host": "s3.internal.test",
         "source_table": "exports/2026/customers.csv",
         "source_collection": "exports/2026/customers.csv"
       },
@@ -258,6 +259,7 @@
       "run_form": {
         "source_kind": "database",
         "source_format": "s3",
+        "source_host": "s3.internal.test",
         "source_table": "exports/data/customers.csv",
         "source_collection": "exports/data/customers.csv"
       },
