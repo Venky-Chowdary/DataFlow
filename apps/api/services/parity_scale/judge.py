@@ -41,19 +41,29 @@ def source_as_written(value: Any, col: ColumnPlan, dest_engine: str) -> Any:
 REFUSED = "\x00refused-by-the-write-pipeline"
 
 
-def fingerprint(value: Any, col: ColumnPlan, dest_engine: str, *, source: bool) -> str:
+def fingerprint(value: Any, col: ColumnPlan, dest_engine: str, *, source: bool,
+                number_locale: str = "", date_locale: str = "") -> str:
+    """Gate-8's fingerprint of one cell; a source cell as the run wrote it, under the run's
+    number and date locales (a DMY ``to_date`` or an EU number reads as the writer read it)."""
     from services.reconciliation import fingerprint_for_reconcile
 
     if source and col.write_mapping:
         # A crosswalked column: the writer's own pipeline (transform + crosswalk), then the bind.
         from services.write_replay import replay_write
 
-        written, err = replay_write(value, col.write_mapping, target=col.target)
+        written, err = replay_write(value, col.write_mapping, target=col.target, number_locale=number_locale,
+                                    date_locale=date_locale)
         if err:
             return REFUSED
         return fingerprint_for_reconcile(written, ddl_type=col.dest_type, engine=dest_engine, transform=None)
     if source:
         value = source_as_written(value, col, dest_engine)
+        if col.transform and (number_locale or date_locale):
+            from services.write_replay import run_locales
+
+            with run_locales(number_locale, date_locale):
+                return fingerprint_for_reconcile(value, ddl_type=col.dest_type, engine=dest_engine,
+                                                 transform=col.transform)
     return fingerprint_for_reconcile(
         value,
         ddl_type=col.dest_type,
@@ -84,10 +94,13 @@ def judge_row(
     """Compare one row pair cell by cell (values in ``plan.compared_columns`` order)."""
     from services.parity_classifier import CellContext, classify_value
 
+    from services.write_replay import run_locales
+
     cols = plan.compared_columns
     verdict = RowVerdict(key=key_text, equal_by_fingerprint=True)
+    loc = {"number_locale": plan.run_number_locale, "date_locale": plan.run_date_locale}
     for col, src, dst in zip(cols, source_row, dest_row, strict=True):
-        if fingerprint(src, col, plan.dest_engine, source=True) == fingerprint(
+        if fingerprint(src, col, plan.dest_engine, source=True, **loc) == fingerprint(
             dst, col, plan.dest_engine, source=False
         ):
             continue
@@ -99,16 +112,17 @@ def judge_row(
             transforms=(col.transform,) if col.transform else (),
         )
         written = source_as_written(src, col, plan.dest_engine)
-        cause = classify_value(
-            expected=wire_text(written),
-            dest=wire_text(dst),
-            ctx=ctx,
-            source_raw=wire_text(src),
-            raw_known=True,
-            key=key_text,
-            quarantined_keys=quarantined_keys,
-        ) or {"code": "unexplained", "label": "Unexplained", "explained": False,
-              "detail": "The values differ and no rule explains how."}
+        with run_locales(plan.run_number_locale, plan.run_date_locale):
+            cause = classify_value(
+                expected=wire_text(written),
+                dest=wire_text(dst),
+                ctx=ctx,
+                source_raw=wire_text(src),
+                raw_known=True,
+                key=key_text,
+                quarantined_keys=quarantined_keys,
+            ) or {"code": "unexplained", "label": "Unexplained", "explained": False,
+                  "detail": "The values differ and no rule explains how."}
         verdict.cells.append({"column": col.target, "cause": cause})
     return verdict
 

@@ -190,7 +190,8 @@ def values(job: dict[str, Any], table: str, *, offset: int = 0, limit: int = 50)
                 d_val = drow[i] if drow is not None else None
                 differs = (srow is None) != (drow is None) or (
                     srow is not None and drow is not None
-                    and fingerprint(s_val, col, plan.dest_engine, source=True)
+                    and fingerprint(s_val, col, plan.dest_engine, source=True, number_locale=number_locale,
+                                    date_locale=date_locale)
                     != fingerprint(d_val, col, plan.dest_engine, source=False)
                 )
                 try:
@@ -414,8 +415,8 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                     for i, col in enumerate(cols):
                         if col.target.lower() in protected or col.target in key_cols:
                             continue
-                        if fingerprint(srow[i], col, engine, source=True) != fingerprint(drow[i], col, engine,
-                                                                                       source=False):
+                        if fingerprint(srow[i], col, engine, source=True, number_locale=number_locale,
+                                       date_locale=date_locale) != fingerprint(drow[i], col, engine, source=False):
                             sets.append(f"{_quote(engine, col.target)} = "
                                         f"{literal(engine, written(srow[i], col))}")
                 except _Unwritable as exc:

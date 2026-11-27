@@ -46,3 +46,28 @@ def replay_write(value: Any, mapping: dict[str, Any], *, target: str, number_loc
         if date_token is not None:
             reset_active_date_locale(date_token)
         reset_active_number_locale(number_token)
+
+
+class run_locales:  # noqa: N801 — used as ``with run_locales(...)``
+    """The run's number and date locales for the cells replayed inside (empty: unchanged)."""
+
+    def __init__(self, number_locale: str = "", date_locale: str = "") -> None:
+        self.number_locale = number_locale
+        self.date_locale = date_locale
+        self._tokens: list[Any] = []
+
+    def __enter__(self) -> "run_locales":
+        from services.transform_engine import set_active_date_locale, set_active_number_locale
+
+        if self.number_locale:
+            self._tokens.append(("n", set_active_number_locale(self.number_locale)))
+        if self.date_locale:
+            self._tokens.append(("d", set_active_date_locale(self.date_locale)))
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        from services.transform_engine import reset_active_date_locale, reset_active_number_locale
+
+        for kind, token in reversed(self._tokens):
+            (reset_active_number_locale if kind == "n" else reset_active_date_locale)(token)
+        self._tokens.clear()

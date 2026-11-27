@@ -195,6 +195,9 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         "mappings": mappings,
         "key_columns": [t2s.get(k, k) for k in key_targets],
         "error_policy": str(request_of(job).get("error_policy") or "quarantine"),
+        # The run's locales: a source cell is replayed under them, as the writer read it.
+        "number_locale": str(request_of(job).get("number_locale") or ""),
+        "date_locale": str(request_of(job).get("date_locale") or ""),
         # Values of these never reach the job document (examples, causes, keys of a protected key).
         "protected": sorted(str(c).lower() for c in protected_targets(job)),
         "snapshot": snapshot_policy(job),
@@ -343,7 +346,9 @@ def plan_for(spec: dict[str, Any]) -> Any:
     d_types = _types_of(dst)
     return build_plan(spec["mappings"], source_types=s_types, dest_types=d_types,
                       source_engine=src["engine"], dest_engine=dst["engine"],
-                      key_columns=spec["key_columns"], error_policy=spec["error_policy"])
+                      key_columns=spec["key_columns"], error_policy=spec["error_policy"],
+                      run_number_locale=str(spec.get("number_locale") or ""),
+                      run_date_locale=str(spec.get("date_locale") or ""))
 
 
 def side_opener(spec: dict[str, Any]) -> Callable[[str, Any], Any]:

@@ -170,3 +170,59 @@ def test_a_crosswalked_column_is_compared_and_repaired_through_the_writers_pipel
         assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
     finally:
         _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')
+
+
+def test_the_runs_locales_are_replayed_by_the_judge_the_explorer_and_the_repair() -> None:
+    """Review 3, item 5: the judge replayed transforms and crosswalks without the run's locales:
+    every DMY ``to_date`` and EU ``to_number`` row read as changed (unexplained), and the repair
+    SQL rewrote correct rows."""
+    from services.mongodb_service import get_mongodb_service
+    from services.parity_scale import explorer
+
+    src, dst = f"psd1_l_s_{uuid.uuid4().hex[:8]}", f"psd1_l_d_{uuid.uuid4().hex[:8]}"
+    _sql(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, d varchar(20), n varchar(20), c varchar(20))',
+         # DMY dates, EU numbers, and a crosswalked DMY date column
+         f"INSERT INTO \"{src}\" SELECT g, to_char(date '2024-01-01' + g, 'DD/MM/YYYY'), "
+         f"replace(to_char(g * 1.5, 'FM99990.00'), '.', ','), to_char(date '2024-01-01' + g, 'DD/MM/YYYY') "
+         f"FROM generate_series(1, {N}) g",
+         f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, d date, n numeric(12,2), c varchar(20))',
+         f"INSERT INTO \"{dst}\" SELECT g, date '2024-01-01' + g, g * 1.5, 'D' || g "
+         f"FROM generate_series(1, {N}) g",
+         f"UPDATE \"{dst}\" SET n = 0 WHERE id = 1500")
+    try:
+        from datetime import date, timedelta
+
+        # to_date (DMY) first, then the crosswalk of the date: the writer's order.
+        crosswalk = {(date(2024, 1, 1) + timedelta(days=g)).isoformat(): f"D{g}" for g in range(1, N + 1)}
+        job_id = get_mongodb_service().create_transfer_job({
+            "status": "completed",
+            "transfer_request": {
+                "source": _endpoint(src), "destination": _endpoint(dst), "sync_mode": "full_refresh_overwrite",
+                "number_locale": "EU", "date_locale": "DMY",
+                "mappings": [{"source": "id", "target": "id"},
+                             {"source": "d", "target": "d", "transform": "to_date"},
+                             {"source": "n", "target": "n", "transform": "to_number"},
+                             {"source": "c", "target": "c", "transform": "to_date", "code_crosswalk": crosswalk}],
+            },
+            "destination_summary": {"table": dst, "primary_key_columns": ["id"]},
+            "reconciliation": {"passed": True, "source_rows": N, "target_rows": N, "phase": "post_write",
+                               "coverage_limit": {"rows": N, "limit": 100},
+                               "verification_verdict_qualifier": "coverage_limited"},
+        })
+        block = _verify(job_id)
+        evidence = get_mongodb_service().get_job(job_id)["parity_scale"]["tables"][0]["evidence"]
+        diff = evidence["differences"]
+        # Before: thousands of DMY / EU rows read as changed; now only the row that differs.
+        assert diff["changed_rows"] == 1, (diff["changed_rows"], diff["changed_cells_by_column"])
+        assert diff["changed_cells_by_column"] == {"n": 1}
+        assert block["state"] == "failed"
+        values = explorer.values(get_mongodb_service().get_job(job_id), dst)
+        cells = {c["column"]: c for c in values["rows"][0]["cells"]}
+        assert [c for c, cell in cells.items() if cell["differs"]] == ["n"]
+        repair = _repair(job_id, dst)
+        updates = [s for s in _statements(repair["sql"]) if s.startswith("UPDATE")]
+        assert len(updates) == 1 and "2250" in updates[0] and "1500" in updates[0], updates
+        _sql(*_statements(repair["sql"]))
+        assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
+    finally:
+        _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')

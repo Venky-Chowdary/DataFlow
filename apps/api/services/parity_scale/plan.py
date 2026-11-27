@@ -138,6 +138,10 @@ class TablePlan:
     ce_version: str = CE_VERSION
     plan_hash: str = ""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: The run's number and date locales: the judge and the streamed pass read a source cell
+    #: under them, as the writer did (a DMY ``to_date``, an EU number).
+    run_number_locale: str = ""
+    run_date_locale: str = ""
 
     @property
     def keyless(self) -> bool:
@@ -171,6 +175,9 @@ class TablePlan:
         data["columns"] = [{k: v for k, v in asdict(c).items() if k != "write_mapping" or v is not None}
                            for c in self.columns]
         data["key"] = [list(k) for k in self.key]
+        for name in ("run_number_locale", "run_date_locale"):
+            if not data.get(name):
+                data.pop(name, None)  # plans without one hash as before
         return data
 
     @classmethod
@@ -187,6 +194,8 @@ class TablePlan:
             ce_version=data.get("ce_version") or CE_VERSION,
             plan_hash=data.get("plan_hash") or "",
             notes=tuple(data.get("notes") or ()),
+            run_number_locale=str(data.get("run_number_locale") or ""),
+            run_date_locale=str(data.get("run_date_locale") or ""),
         )
 
 
@@ -411,12 +420,13 @@ def classify_column(
                 transform=transform)
     if is_intentional_omit(mapping):
         return ColumnPlan(cls="excluded", reason="declared omission", **base)
-    if transform not in _NO_OP_TRANSFORMS:
-        return ColumnPlan(cls="stream", reason=f"transform {transform!r} is replayed by the judge", **base)
     if declared_crosswalk(mapping):
+        # Transform and crosswalk together: the writer's own pipeline is replayed (both, in its order).
         from services.write_replay import write_mapping
 
         return ColumnPlan(cls="stream", reason="code crosswalk", write_mapping=write_mapping(mapping), **base)
+    if transform not in _NO_OP_TRANSFORMS:
+        return ColumnPlan(cls="stream", reason=f"transform {transform!r} is replayed by the judge", **base)
     if mapping.get("rule_contracts"):
         return ColumnPlan(cls="stream", reason="rule contract (held-out rows are phase 3)", **base)
     if not source_type or not dest_type:
@@ -526,8 +536,13 @@ def build_plan(
     allow_native: bool = True,
     key_collations: dict[str, str] | None = None,
     number_locale: str | None = None,
+    run_number_locale: str = "",
+    run_date_locale: str = "",
 ) -> TablePlan:
-    """Plan a table. ``key_columns`` are *source* column names (empty: keyless)."""
+    """Plan a table. ``key_columns`` are *source* column names (empty: keyless).
+
+    ``run_number_locale`` / ``run_date_locale``: the run's locales, under which the judge
+    replays a source cell's transform or crosswalk (as the writer did)."""
     src_eng = normalize_engine(source_engine)
     dst_eng = normalize_engine(dest_engine)
     if not mappings:
@@ -590,6 +605,8 @@ def build_plan(
         order_reason=why,
         key_encodable=key_encodable,
         notes=tuple(notes),
+        run_number_locale=str(run_number_locale or ""),
+        run_date_locale=str(run_date_locale or ""),
     )
     return TablePlan(**{**plan.__dict__, "plan_hash": compute_plan_hash(plan)})
 

@@ -37,11 +37,14 @@ from services.parity_scale.plan import ColumnPlan, TablePlan
 from services.parity_scale.store import encode_key
 
 
-def row_fingerprint_hash(values: Sequence[Any], columns: Sequence[ColumnPlan], dest_engine: str, *, source: bool) -> str:
-    """SHA-256 over the length-prefixed Gate-8 fingerprints of ``values``."""
+def row_fingerprint_hash(values: Sequence[Any], columns: Sequence[ColumnPlan], dest_engine: str, *, source: bool,
+                         number_locale: str = "", date_locale: str = "") -> str:
+    """SHA-256 over the length-prefixed Gate-8 fingerprints of ``values`` (source cells under the
+    run's locales)."""
     digest = hashlib.sha256()
+    loc = {"number_locale": number_locale, "date_locale": date_locale} if source else {}
     for value, col in zip(values, columns, strict=True):
-        cell = fingerprint(value, col, dest_engine, source=source).encode("utf-8", "surrogatepass")
+        cell = fingerprint(value, col, dest_engine, source=source, **loc).encode("utf-8", "surrogatepass")
         digest.update(str(len(cell)).encode("ascii") + b":" + cell)
     return digest.hexdigest()
 
@@ -80,7 +83,8 @@ def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[C
     rows = side.iter_stream(columns, batch=batch, lo=lo, hi=hi, **extra) if (lo is not None or hi is not None) \
         else side.iter_stream(columns, batch=batch, **extra)
     for key, values in rows:
-        h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source)
+        h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source,
+                                 number_locale=plan.run_number_locale, date_locale=plan.run_date_locale)
         ident = side.key_hex(key) if keyed and key is not None else None
         key_json = json.dumps(encode_key(key)) if keyed and key is not None else None
         vals = json.dumps([wire_text(v) for v in values]) if keep_values else None
