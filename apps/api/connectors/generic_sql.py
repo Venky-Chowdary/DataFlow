@@ -846,10 +846,11 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
             user = form_user or parsed.user
             password = form_password if form_password.strip() else parsed.password
             raw = rebuild_url(parsed, user=user, password=password)
-        from connectors.mssql_security import check_mssql_url
+        from connectors.mssql_security import enforce_mssql_url
 
-        check_mssql_url(raw, cfg)  # a mssql+pymssql:// string obeys the TLS policy too
-        return _normalize_sqlalchemy_url_string(raw, db_type)
+        url = _normalize_sqlalchemy_url_string(raw, db_type)
+        url = enforce_mssql_url(str(url), cfg)  # a connection string obeys the TLS policy too
+        return url
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")

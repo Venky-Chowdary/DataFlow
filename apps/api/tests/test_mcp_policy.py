@@ -191,7 +191,9 @@ def test_policy_persists_after_store_reload(policy_client):
     }
 
     assert store.set_mcp_policy(expected) == expected
-    assert store._load_raw()["mcp_policy"] == expected
+    stored = dict(store._load_raw()["mcp_policy"])
+    assert stored.pop("rev") >= 1  # the compare-and-swap revision (review N7)
+    assert stored == expected
     assert store.get_mcp_policy() == expected
 
 

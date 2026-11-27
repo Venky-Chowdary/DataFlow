@@ -110,8 +110,15 @@ policy (`PUT /api/v1/mcp/policy`, field `confirm`:
   session; an API key or MCP token (the agent it governs) gets 403.
 - A change merges into the stored policy. `default` and other workspaces'
   entries need a platform admin; a workspace admin may set (or clear, with
-  `null`) only their own workspace's entry. The audit event
-  `mcp.policy.updated` records the old and new policy.
+  `null`) only their own workspace's entry, and only as strict as or stricter
+  than the deployment default (`agent` < `interactive` < `four_eyes`).
+  Loosening a workspace below the default needs a platform admin. A
+  workspace admin who sends no `X-Workspace-Id` changes the one workspace
+  they administer. The audit event `mcp.policy.updated` records the old and
+  new policy.
+- The update is atomic: one writer at a time per API process, and a
+  compare-and-swap on the stored policy's revision across replicas (retried on
+  conflict, `409` after five), so two admins cannot lose each other's change.
 - With platform authentication off (`DATAFLOW_REQUIRE_AUTH=0`) there is no
   identity to bind: only the MCP channel is refused.
 - Not covered: a person who copies their own sign-in token into an agent has
