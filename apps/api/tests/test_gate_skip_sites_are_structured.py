@@ -11,7 +11,8 @@ create-new table did exactly that).
 
 This test walks the source (services/, src/, packages/preflight) with the AST,
 finds every gate result built with status "skip" (a literal, an if-expression
-that can be "skip", a variable assigned "skip", or GateStatus.SKIP), and
+that can be "skip", a variable assigned "skip", GateStatus.SKIP, or a status
+looked up with skip as the default for an unknown one), and
 asserts its details literal carries one of those fields. It also keeps
 apps/web/src/lib/__fixtures__/gate_skip_sites.json in step: the web test runs
 gateOutcome over every site and checks the outcome the field means.
@@ -42,6 +43,9 @@ def _is_skip(node: ast.AST, names: set[str]) -> bool:
         return node.attr == "SKIP"
     if isinstance(node, ast.Name):
         return node.id in names
+    if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "get" and len(node.args) == 2:
+        # {"pass": ..., "block": ...}.get(raw, GateStatus.SKIP): an unknown status falls to skip.
+        return _is_skip(node.args[1], names)
     return False
 
 
@@ -79,8 +83,7 @@ def _skip_sites() -> list[dict]:
             for fn in ast.walk(tree):
                 if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                names = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                         and isinstance(n.value, ast.Constant) and n.value.value == "skip"
+                names = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign) and _is_skip(n.value, set())
                          for t in n.targets if isinstance(t, ast.Name)}
                 for node in ast.walk(fn):
                     details = None
@@ -139,3 +142,24 @@ def test_the_web_fixture_lists_every_skip_site():
     if os.environ.get("UPDATE_GATE_SKIP_FIXTURE"):
         FIXTURE.write_text(text, encoding="utf-8")
     assert FIXTURE.read_text(encoding="utf-8") == text, "stale: rerun with UPDATE_GATE_SKIP_FIXTURE=1"
+
+
+def test_a_hosted_gate_without_a_known_status_is_an_unmeasured_skip():
+    """Review round 3 #9: no status / an unknown one proved nothing; the host's details are not passed on."""
+    import sys
+    import time
+
+    sys.path.insert(0, str(REPO / "packages" / "preflight" / "src"))
+    from preflight.gates import _host_gate_to_result
+    from preflight.models import GateId, GateStatus
+
+    for payload, reason in (({}, "host_status_missing"),
+                            ({"status": "maybe", "details": {"applicable": False}}, "host_status_unknown")):
+        result = _host_gate_to_result(GateId.G13_SOURCE_COVERAGE, payload, time.perf_counter())
+        assert result.status == GateStatus.SKIP
+        assert result.details["unmeasured"] is True
+        assert result.details["skip_reason"] == reason
+        assert "applicable" not in result.details
+        assert result.message.startswith("This check could not run")
+    known = _host_gate_to_result(GateId.G13_SOURCE_COVERAGE, {"status": "PASS", "message": "ok"}, time.perf_counter())
+    assert known.status == GateStatus.PASS and known.message == "ok"

@@ -4189,15 +4189,39 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     )
 
 
+_HOST_GATE_STATUS = {
+    "pass": GateStatus.PASS,
+    "block": GateStatus.BLOCK,
+    "skip": GateStatus.SKIP,
+    "warn": GateStatus.WARN,
+}
+
+
 def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float) -> GateResult:
-    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult."""
-    raw = str(payload.get("status") or "skip").strip().lower()
-    status = {
-        "pass": GateStatus.PASS,
-        "block": GateStatus.BLOCK,
-        "skip": GateStatus.SKIP,
-        "warn": GateStatus.WARN,
-    }.get(raw, GateStatus.SKIP)
+    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult.
+
+    A payload with no status, or one this package does not know, proved
+    nothing: it is a skip that says so in structured fields (``unmeasured``,
+    ``skip_reason``), never a skip carrying whatever details the host sent.
+    """
+    raw = str(payload.get("status") or "").strip().lower()
+    status = _HOST_GATE_STATUS.get(raw)
+    if status is None:
+        return GateResult(
+            gate_id=gate_id,
+            status=GateStatus.SKIP,
+            message=(
+                "This check could not run: the service that runs it sent "
+                + ("no result." if not raw else f"a result this version does not know ({raw[:40]}).")
+            ),
+            details={
+                "unmeasured": True,
+                "remediation_kind": "retry_validate",
+                "skip_reason": "host_status_missing" if not raw else "host_status_unknown",
+                "host_status": raw[:40],
+            },
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
     return GateResult(
         gate_id=gate_id,
         status=status,
