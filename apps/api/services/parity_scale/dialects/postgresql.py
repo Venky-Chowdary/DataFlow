@@ -30,6 +30,13 @@ SESSION_SETTINGS: tuple[str, ...] = (
     "SET bytea_output = 'hex'",
 )
 
+#: The snapshot a pinned side reads, by function (PostgreSQL 13+ / 10 to 12).
+_SNAPSHOT_SQL = {
+    "pg_current_snapshot": "SELECT pg_current_snapshot()::text, now()::text",
+    "txid_current_snapshot": "SELECT txid_current_snapshot()::text, now()::text",
+}
+
+
 def quote_ident(name: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 
@@ -277,7 +284,7 @@ class PostgresSide(SqlSide):
             self.conn.rollback()
             self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
             with self.conn.cursor() as cur:
-                cur.execute(f"SELECT {function}()::text, now()::text")
+                cur.execute(_SNAPSHOT_SQL[function])
                 snapshot, at = cur.fetchone()
         except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
             self.unpin()

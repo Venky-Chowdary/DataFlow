@@ -194,7 +194,7 @@ def _seed_job(world) -> Seeded:
         job = get_mongodb_service().get_job(job_id) or {}
         return job.get("status") == "failed" and job.get("name") == SENTINEL
 
-    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": signal.json()["id"]}, intact)
+    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": signal.json()["id"], "table": "t"}, intact)
 
 
 def _seed_proposal(world) -> Seeded:
