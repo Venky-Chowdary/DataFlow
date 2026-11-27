@@ -61,6 +61,18 @@ class ConnectorStoreError(RuntimeError):
     """The configured connector store failed a write; nothing was saved."""
 
 
+class ConnectorRefused(ValueError):
+    """The store will not save this connector configuration; nothing was saved.
+
+    A server-side file read (U1: libpq ``service=``, ODBC ``Driver=<path>`` /
+    ``DSN=`` / ``FILEDSN=``) or SQLite on the hosted cloud (D276). The message
+    is plain and says what to do; every route returns it as a 422 (D425), and
+    none falls back to another store.
+    """
+
+    status_code = 422
+
+
 def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> ConnectorStoreError:
     # Mongo is the system of record once selected: a local-file fallback would
     # report success, leave Mongo unchanged and put credentials on local disk.
@@ -1294,6 +1306,10 @@ _REFUSED_FIELD_KEYS = frozenset({
     "service", "servicefile", "passfile", "dsn", "filedsn",
 })
 _PASSWORD_FIELDS = frozenset({"password", "pwd"})
+# Operator prose in ``extra`` that no driver reads as a connection option: a
+# description that mentions "service=prod" is not a refusal (U1 round 7 nit).
+# What a driver does receive is checked again at dial (``check_guarded``).
+_FREE_TEXT_FIELDS = frozenset({"description", "notes", "note", "comment", "comments", "label", "display_name"})
 
 
 def server_side_dsn_refusal(*texts: Any) -> str:
@@ -1319,7 +1335,7 @@ def _refusal_like_connect(raw: Any, key: str = "") -> str:
     flags = {"libpq": True, "odbc": True, "installed_only": False}
     where = "in this connector's connection settings"
     key_l = str(key or "").strip().lower()
-    if key_l in _PASSWORD_FIELDS:
+    if key_l in _PASSWORD_FIELDS or key_l in _FREE_TEXT_FIELDS:
         return ""
     if key_l in _REFUSED_FIELD_KEYS:
         return (
@@ -1355,23 +1371,36 @@ def _refusal_like_connect(raw: Any, key: str = "") -> str:
     return ""
 
 
+def connector_config_refusal(data: Mapping[str, Any], before: Any = None) -> str:
+    """Why the store refuses to save ``data`` (merged over ``before``), or ``""``.
+
+    One check for every save path (REST create / PUT / PATCH / rotate, the
+    legacy create, Pilot Confirm): a server-side file read, then hosted SQLite.
+    """
+    refused = server_side_dsn_refusal(
+        data.get("connection_string"), data.get("host"), data.get("extra")
+    )
+    if refused:
+        return refused
+    from services.local_file_policy import sqlite_hosted_refusal
+
+    def _field(name: str) -> str:
+        value = data.get(name)
+        if value in (None, "") and before is not None:
+            value = getattr(before, name, "")
+        return str(value or "")
+
+    return sqlite_hosted_refusal(_field("type"), _field("connection_string")) or ""
+
+
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
     from services.connector_request_limits import refuse_control_characters
 
     refuse_control_characters("Connector name", data.get("name"))
-    refused = server_side_dsn_refusal(
-        data.get("connection_string"), data.get("host"), data.get("extra")
-    )
+    refused = connector_config_refusal(data)
     if refused:
-        raise ValueError(refused)
-    from services.local_file_policy import sqlite_hosted_refusal
-
-    hosted = sqlite_hosted_refusal(
-        str(data.get("type") or ""), str(data.get("connection_string") or "")
-    )
-    if hosted:
-        raise ValueError(hosted)
+        raise ConnectorRefused(refused)
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1480,8 +1509,15 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
         data.get("connection_string"), data.get("host"), data.get("extra")
     )
     if refused:
-        raise ValueError(refused)
+        raise ConnectorRefused(refused)
     workspace_id = _workspace_scope(workspace_id)
+    if "type" in data or "connection_string" in data:
+        # D276: an edit that makes the connector SQLite on the hosted cloud.
+        # Only an edit of what it dials: a workspace backfill or an auth_source
+        # stamp on a connector saved before the refusal still applies.
+        refused = connector_config_refusal(data, get_connector(connector_id, workspace_id))
+        if refused:
+            raise ConnectorRefused(refused)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None
     if str(data.get("host") or "").strip():

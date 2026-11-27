@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from services.brand_env import getenv_brand
 from services import connector_executor
-from services.connector_store import ConnectorStoreError
+from services.connector_store import ConnectorRefused, ConnectorStoreError
 from services.control_plane_store import ControlPlaneUnavailable
 from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable, PlanStoreUnreadable
 from services.shared_doc_store import SharedDocConflict
@@ -1104,6 +1104,12 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
     )
+
+
+@app.exception_handler(ConnectorRefused)
+async def connector_refused_handler(request: Request, exc: ConnectorRefused):
+    """A connector config the store will not save: its plain reason as a 422, never a 500 (D425)."""
+    return await http_exception_reference(request, StarletteHTTPException(exc.status_code, str(exc)))
 
 
 @app.exception_handler(ControlPlaneUnavailable)

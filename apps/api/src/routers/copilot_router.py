@@ -951,6 +951,13 @@ async def copilot_confirm(
             conn = create_connector(
                 {k: v for k, v in payload.items() if k != "probe_passed_at"}
             )
+        except ValueError as exc:
+            ledger.release_claim(ack_id)
+            status = getattr(exc, "status_code", None)  # ConnectorRefused
+            if status is None:
+                raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc
+            # U1/D425: the same plain refusal the REST save gives, not "see the API log".
+            raise HTTPException(status_code=int(status), detail=str(exc)) from exc
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc

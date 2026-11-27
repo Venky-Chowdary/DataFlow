@@ -513,6 +513,19 @@ def create_connector(
         "status": "configured",
     }
     _refuse_unsafe_egress(connector_data)
+    from services.api_errors import ApiError
+    from services.connector_store import ConnectorRefused, connector_config_refusal
+
+    # U1/D425: the store's refusal is checked here, for both stores below. It
+    # used to be raised inside the file-store save, logged as suppressed, and
+    # the connector then saved to MongoDB without the check.
+    from services.local_file_policy import sqlite_connector_field_error
+
+    refused = connector_config_refusal(connector_data) or sqlite_connector_field_error(
+        str(config.type or ""), str(config.database or ""), str(config.connection_string or "")
+    )
+    if refused:
+        raise HTTPException(status_code=ConnectorRefused.status_code, detail=refused)
 
     # Canonical persistence: file-backed store (always works without MongoDB)
     try:
@@ -522,7 +535,13 @@ def create_connector(
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
         from services.connector_store import create_connector as fs_create
-        saved = fs_create(connector_data)
+        try:
+            saved = fs_create(connector_data)
+        except ValueError as exc:
+            status = getattr(exc, "status_code", None)  # ConnectorRefused
+            if status is None and "ssl_mode" not in str(exc):
+                raise
+            raise HTTPException(status_code=int(status or 422), detail=str(exc)) from exc
         return ConnectorResponse(
             id=saved.id,
             name=saved.name,
@@ -535,6 +554,8 @@ def create_connector(
             workspace_id=saved.workspace_id or "",
             role=getattr(saved, "role", None) or connector_data.get("role") or "both",
         )
+    except (HTTPException, ApiError):
+        raise  # a refusal: nothing is saved anywhere
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

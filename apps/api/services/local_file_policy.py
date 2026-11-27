@@ -237,9 +237,11 @@ def sqlite_destination_message() -> str:
     return (
         f"SQLite isn't available as a destination on {PRODUCT_NAME} Cloud, and it "
         "isn't available as a source either: the file would live on a single server "
-        "and isn't kept between runs. No server filesystem path is opened. Use "
-        f"PostgreSQL, MySQL or another database, or run {PRODUCT_NAME} self-hosted "
-        f"(where {SQLITE_DESTINATION_FLAG}=on keeps it)."
+        "and isn't kept between runs, and the cloud service can't read a file on "
+        "your computer. No server filesystem path is opened. To copy data out of a "
+        "SQLite file, upload the .sqlite or .db file as a file source (Upload file "
+        "in the Source step). Otherwise use PostgreSQL, MySQL or another database, "
+        f"or run {PRODUCT_NAME} self-hosted (where {SQLITE_DESTINATION_FLAG}=on keeps it)."
     )
 
 
@@ -278,6 +280,39 @@ def sqlite_hosted_refusal(conn_type: str, connection_string: str = "") -> str | 
     if sqlite_destination_allowed() or not _is_sqlite_destination(conn_type, connection_string):
         return None
     return sqlite_destination_message()
+
+
+def sqlite_connector_field_error(conn_type: str, database: str = "", connection_string: str = "") -> str:
+    """Why a SQLite connector with these fields can't be saved, naming the field; ``""`` if it can.
+
+    The hosted-cloud refusal first; then (self-hosted) a missing path, an
+    in-memory database and a URI filename, each a 422 at save instead of a
+    connector that saves and then fails or silently reads an empty database
+    (D425). No file is opened: whether the file exists is the test's answer.
+    """
+    hosted = sqlite_hosted_refusal(conn_type, connection_string)
+    if hosted:
+        return hosted
+    if not _is_sqlite_destination(conn_type, connection_string):
+        return ""
+    from connectors.sqlite_common import sqlite_unconfined_path
+
+    try:
+        path = sqlite_unconfined_path(str(database or ""), str(connection_string or ""))
+    except ValueError as exc:
+        return f"Database: {exc}."
+    if not path:
+        return (
+            "Database: a SQLite connector needs the path of its database file on this "
+            "server, for example /data/orders.db."
+        )
+    if path == ":memory:":
+        return (
+            "Database: a SQLite connector can't use an in-memory database (:memory:). "
+            "It starts empty on every connection and keeps nothing. Enter the path of a "
+            "SQLite file on this server."
+        )
+    return ""
 
 
 def sqlite_destination_refusal(dest_type: str, connection_string: str = "") -> str | None:

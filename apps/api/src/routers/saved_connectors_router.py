@@ -325,6 +325,32 @@ def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
         raise HTTPException(status_code=400, detail=conflict)
 
 
+def _refuse_unusable_sqlite(data: dict[str, Any], existing: Any = None) -> None:
+    """D425: a SQLite connector is saved, or refused (422) naming the field and the reason."""
+    from services.local_file_policy import sqlite_connector_field_error
+
+    sqlite_error = sqlite_connector_field_error(
+        str(data.get("type") or getattr(existing, "type", "") or ""),
+        str(data.get("database") or ""),
+        str(data.get("connection_string") or ""),
+    )
+    if sqlite_error:
+        raise HTTPException(status_code=422, detail=sqlite_error)
+
+
+def _store_write(write: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run a connector-store write; a refusal is a 422 with its own text, never a 500 (U1/D425)."""
+    try:
+        return write(*args, **kwargs)
+    except ValueError as exc:
+        # ConnectorRefused carries its status; read it off the instance so a
+        # reloaded store module's class is still recognised.
+        status = getattr(exc, "status_code", None)
+        if status is None and "ssl_mode" not in str(exc):
+            raise
+        raise HTTPException(status_code=int(status or 422), detail=str(exc)) from exc
+
+
 @router.post("")
 def save_connector(
     body: ConnectorSaveDTO,
@@ -346,6 +372,7 @@ def save_connector(
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
     _refuse_unsafe_egress(data, existing)
+    _refuse_unusable_sqlite(data, existing)
     if existing is None:
         from src.transfer.connector_capabilities import planned_driver_message
 
@@ -353,12 +380,7 @@ def save_connector(
         # could never connect; refuse it instead of saving a dead connector.
         if not_installed := planned_driver_message(str(data.get("type") or "")):
             raise HTTPException(status_code=422, detail=f"{not_installed} Nothing was saved.")
-    try:
-        conn = create_connector(data)
-    except ValueError as exc:
-        if "ssl_mode" not in str(exc):
-            raise
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    conn = _store_write(create_connector, data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
     return _to_ui(refreshed)
@@ -380,12 +402,8 @@ def update_saved_connector(
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
     _refuse_unsafe_egress(data, existing)
-    try:
-        updated = update_connector(connector_id, data, workspace_id=workspace_id)
-    except ValueError as exc:
-        if "ssl_mode" not in str(exc):
-            raise
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _refuse_unusable_sqlite(data, existing)
+    updated = _store_write(update_connector, connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     _persist_form_test_status(connector_id, form_test)
@@ -432,13 +450,9 @@ def patch_saved_connector(
     if not patch:
         return _to_ui(existing)
     _refuse_unsafe_egress(merged, existing)
+    _refuse_unusable_sqlite(merged, existing)
     patch["workspace_id"] = existing.workspace_id or workspace_id
-    try:
-        updated = update_connector(connector_id, patch, workspace_id=workspace_id)
-    except ValueError as exc:
-        if "ssl_mode" not in str(exc):
-            raise
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    updated = _store_write(update_connector, connector_id, patch, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
@@ -511,7 +525,7 @@ def rotate_saved_connector_secrets(
     except Exception:
         pool_invalidated = False
 
-    updated = update_connector(connector_id, payload, workspace_id=workspace_id)
+    updated = _store_write(update_connector, connector_id, payload, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
 

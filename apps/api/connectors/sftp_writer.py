@@ -129,6 +129,19 @@ def _is_unsupported_operation(exc: OSError) -> bool:
     return "unsupported" in text or "not supported" in text or "not implemented" in text
 
 
+def _reported_table(table_name: str, filename: str) -> str:
+    """The destination as the caller named it (``qav3/q3_csv.csv``), with the written file's name.
+
+    Reporting only the file name sent every read-back of a sub-folder
+    destination (COUNT, Gate-8 checksum, sample) to the root folder, where it
+    found no file: "expected target 3 vs target 0" after a correct write (D375).
+    """
+    import posixpath
+
+    folder = posixpath.dirname(str(table_name or "").strip())
+    return posixpath.join(folder, filename) if folder and filename else filename
+
+
 def write_mapped_rows(
     *,
     connection_string: str = "",
@@ -317,7 +330,7 @@ def write_mapped_rows(
                         return WriteResult(
                             ok=False,
                             rows_written=0,
-                            table_name=filename,
+                            table_name=_reported_table(table_name, filename),
                             target_schema=cfg.host,
                             checksum="",
                             chunks_completed=0,
@@ -353,7 +366,7 @@ def write_mapped_rows(
                         return WriteResult(
                             ok=False,
                             rows_written=0,
-                            table_name=filename,
+                            table_name=_reported_table(table_name, filename),
                             target_schema=cfg.host,
                             checksum="",
                             chunks_completed=0,
@@ -386,7 +399,7 @@ def write_mapped_rows(
             return WriteResult(
                 ok=False,
                 rows_written=written,
-                table_name=filename,
+                table_name=_reported_table(table_name, filename),
                 target_schema=cfg.host,
                 checksum="",
                 chunks_completed=1,
@@ -399,7 +412,7 @@ def write_mapped_rows(
         return WriteResult(
             ok=True,
             rows_written=written,
-            table_name=filename,
+            table_name=_reported_table(table_name, filename),
             target_schema=cfg.host,
             checksum=mat.checksum,
             chunks_completed=1,
@@ -413,7 +426,7 @@ def write_mapped_rows(
         return WriteResult(
             ok=False,
             rows_written=0,
-            table_name=filename if "filename" in locals() else table_name,
+            table_name=_reported_table(table_name, filename) if "filename" in locals() else table_name,
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
