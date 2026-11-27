@@ -82,6 +82,13 @@ def _stamp_read_scope(mongo: Any, job_id: str, fields: dict) -> None:
         fields[READ_SCOPE_KEY] = scope
 
 
+def _boundary_duplicates_accepted(summary: Any) -> bool:
+    from .stream_boundary_keyed import BOUNDARY_TIE_KEY
+
+    tie = summary.get(BOUNDARY_TIE_KEY) if isinstance(summary, dict) else None
+    return isinstance(tie, dict) and bool(tie.get("accepted"))
+
+
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
     """Write the success terminal status, or record the commit on a cancelled job.
 
@@ -122,6 +129,9 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     if shortfall:
         status = "failed"
         fields.update(error=shortfall, message=shortfall, phase="failed")
+    elif status == "completed" and _boundary_duplicates_accepted(fields.get("destination_summary")):
+        # D335: a route that accepted possible boundary duplicates never reads green.
+        status = "completed_with_warnings"
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written

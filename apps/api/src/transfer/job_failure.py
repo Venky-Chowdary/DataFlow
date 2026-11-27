@@ -856,6 +856,19 @@ def _fail_runtime_job(
                 outcome["rows_committed"],
             )
     already_complete = "" if cancelled else transfer_already_complete(exc, prev)
+    from .stream_boundary_keyed import BoundaryHeldBack
+
+    if isinstance(exc, BoundaryHeldBack) and not already_complete:
+        from services.validation_mode_contract import normalize_validation_mode
+
+        if normalize_validation_mode(getattr(request, "validation_mode", "strict")) not in {
+            "strict", "maximum",
+        }:
+            # D335: a non-strict run that held its tie group back wrote nothing
+            # past the watermark and kept its cursor: a warning, never green.
+            status = "completed_with_warnings"
+            status_kwargs.update(phase="completed", progress_pct=100, failed_at_phase="")
+            setattr(exc, "completes_with_warnings", True)  # the API result agrees
     if already_complete:
         status = "completed"
         display = already_complete

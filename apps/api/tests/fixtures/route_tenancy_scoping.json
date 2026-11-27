@@ -95,6 +95,10 @@
       "scope": "workspace",
       "resource": "saved_connector"
     },
+    "DELETE /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
     "GET /api/v1/connectors/saved/{connector_id}": {
       "scope": "workspace",
       "resource": "saved_connector"
@@ -104,6 +108,10 @@
       "resource": "saved_connector"
     },
     "PUT /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "POST /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
       "scope": "workspace",
       "resource": "saved_connector"
     },

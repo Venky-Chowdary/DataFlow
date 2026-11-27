@@ -103,3 +103,27 @@ def _boundary_append_dedupe(
             )
         }
     return landed
+
+
+def remap_boundary_rows(cfg, headers: list[str], rows: list[list[str]]) -> list:
+    """Re-read peers mapped as the writer maps them; ``None`` where the remap holds one out."""
+    remap_kw = dict(
+        mappings=cfg.mappings,
+        target_cols=list(cfg.target_cols or []),
+        column_types=cfg.column_types,
+        error_policy=cfg.stream_error_policy,
+        dest_types=(
+            cfg.fingerprint_dest_types
+            if cfg.fingerprint_dest_types is not None
+            else cfg.digest_dest_types
+        ),
+        dest_kind=cfg.dest_bind_dialect,
+        destination_pk_columns=list(cfg.pk_target_cols or []) or None,
+    )
+    out: list = []
+    for row in rows:
+        one, _held = map_rows_for_fingerprint(
+            headers=list(headers or []), data_rows=[row], **remap_kw
+        )
+        out.append(one[0] if len(one) == 1 else None)
+    return out

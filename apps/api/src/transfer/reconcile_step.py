@@ -351,6 +351,18 @@ def _proof_source_batches(
             read_cols=read_cols,
         )
         return
+    from .proof_source_reader import iter_writer_wire_batches, rereads_through_writer
+
+    if rereads_through_writer(src_type):
+        # D331: Oracle is re-read by the stream's own reader, not a raw SELECT
+        # (zone-bearing timestamps, JSON, catalog spellings).
+        yield from iter_writer_wire_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        )
+        return
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import quote_sql_identifier
@@ -1742,12 +1754,18 @@ def _transform_applied_proof_impl(
             src_cfg=src_cfg,
             read_cols=read_cols + _extra,
         ):
+            from .proof_source_reader import decode_wire_rows, is_wire_page
+
+            _wire = is_wire_page(batch)
             if _proof_filter:
                 # D331: the write applied this filter. Rows it excluded are
                 # not "changed in source during run".
                 from services.row_filter import apply_row_filter
 
                 batch = apply_row_filter(list(batch), _proof_filter)
+            if _wire:
+                # Filtered on the wire text, as the write's page was.
+                batch = decode_wire_rows(list(batch), _src_ddl)
             if _proof_window is not None:
                 batch = [
                     {k: v for k, v in r.items() if k not in _extra}
@@ -2272,16 +2290,19 @@ def _transform_applied_proof_impl(
                             qc0 = _oracle_projection(
                                 c0, endpoint, dst_cfg0, sel_cols0
                             )[0]
+                        _q0 = f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
+                        _fix0 = None
+                        if dest_db_type == "oracle":
+                            # D331: zone-bearing columns as instants, not as
+                            # the driver's naive wall clock.
+                            from .proof_source_reader import oracle_zone_safe_rows
+
+                            _q0, _fix0 = oracle_zone_safe_rows(c0, _q0, sel_cols0)
+                        _rows0 = iter_select_row_dicts(c0, sa.text(_q0), sel_cols0)
+                        if _fix0 is not None:
+                            _rows0 = ([_fix0(r) for r in b] for b in _rows0)
                         actual_checksum = canonical_checksum_from_iter(
-                            _scoped_gen(
-                                iter_select_row_dicts(
-                                    c0,
-                                    sa.text(
-                                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
-                                    ),
-                                    sel_cols0,
-                                )
-                            ),
+                            _scoped_gen(_rows0),
                             digest_cols,
                             dest_db_type=dest_db_type,
                             dest_types=dest_types,
@@ -2646,9 +2667,17 @@ def _transform_applied_proof_impl(
                                 else ""
                             )
                         )
+                    _fixd = None
+                    if dest_db_type == "oracle":
+                        from .proof_source_reader import oracle_zone_safe_rows
+
+                        _qd, _fixd = oracle_zone_safe_rows(dconn, str(stmt), sel_cols)
+                        stmt = sa.text(_qd)
                     for batch in iter_select_row_dicts(
                         dconn, stmt, sel_cols
                     ):
+                        if _fixd is not None:
+                            batch = [_fixd(r) for r in batch]
                         for r in batch:
                             if not _dest_in_this_run(r):
                                 continue
@@ -4344,14 +4373,21 @@ def _maybe_attach_verification_ladder(
         )
 
         _ident_keys = list(pk_cols) or ([_t_window.pk] if _t_window.pk else [])
-        out = fail_on_window_duplicates(out, measure_window_duplicates(
+        _window_dups = measure_window_duplicates(
             source_rows=source_rows, target_rows=target_rows,
             match_cols=(
                 list(dict.fromkeys([_t_window.cursor, *_ident_keys]))
                 if _ident_keys else list(target_cols)
             ),
             dest_db_type=dest_type, dest_types=dest_types,
-        ))
+        )
+        from .stream_boundary_keyed import accepted_window_duplicates
+
+        # D335: only the route's audited "accept possible boundary duplicates"
+        # turns them into a disclosed finding; otherwise they fail the run.
+        out = accepted_window_duplicates(out, _window_dups, dest_summary) or fail_on_window_duplicates(
+            out, _window_dups
+        )
     if window is not None and source_reread and keyed and (pk_cols or pk_column):
         # D188 — rows the cursor did not select are not this run's verdict,
         # but a disagreement there is reported, never silently dropped.
@@ -9813,6 +9849,13 @@ def run_reconciliation(
         recon, endpoint=endpoint, mappings=mappings, dest_summary=dest_summary,
         records=records if isinstance(records, list) else None,
         rows_written=int(rows_written or 0), validation_mode=validation_mode,
+    )
+    # D335: the watermark row appended twice fails, whatever the counts say.
+    from .stream_boundary_keyed import apply_boundary_duplicate_gate
+
+    recon = apply_boundary_duplicate_gate(
+        recon, dest_summary=dest_summary, endpoint=endpoint, mappings=mappings,
+        validation_mode=str(validation_mode or "strict"),
     )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a

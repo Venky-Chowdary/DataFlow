@@ -483,6 +483,18 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
     ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
+    # Accepting possible boundary duplicates on an append route is a decision
+    # with consequences, approved like DDL (D335).
+    (
+        "POST",
+        "/api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement",
+        Permission.JOB_MANAGE,
+    ),
+    (
+        "DELETE",
+        "/api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement",
+        Permission.JOB_MANAGE,
+    ),
     # Parity Studio. Explaining stores the explanation and the fix order on the
     # job (audited), so it is job.run; signing attests the report, so it needs
     # job.manage (and services.parity_authority binds each sign-off role to the

@@ -76,6 +76,8 @@ class RunConfig:
     #: The whole key a re-read row is matched on, and whether it is proven unique.
     replay_key: Any = ()
     replay_key_complete: bool = False
+    #: The route's watermark record key: consecutive boundary hold-backs are counted there (D335).
+    boundary_route_key: Any = ""
     #: ``(every, due this run, counter to store)`` of the periodic key census.
     census_plan: Any = None
     text_cursor_judged: bool = False
