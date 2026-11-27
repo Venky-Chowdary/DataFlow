@@ -258,27 +258,31 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
                 detail="The confirm policy can only be changed from an interactive sign-in session.",
             )
     payload = request.model_dump()
+    confirm_merge = None
     if request.confirm is not None:
-        from services.mcp_confirm_policy import merge_confirm_change
+        from services.mcp_confirm_policy import merge_confirm_change, own_admin_workspace
         from services.rbac import holds_platform_admin_role
         from services.effective_role import workspace_id_from_request_headers
         from src.services.auth_service import auth_required
 
-        try:
-            payload["confirm"] = merge_confirm_change(
-                old.get("confirm"), request.confirm,
-                platform_admin=not auth_required()
-                or holds_platform_admin_role(getattr(http_request.state, "user", None)),
-                caller_workspace=workspace_id_from_request_headers(http_request.headers) or "",
+        user = getattr(http_request.state, "user", None)
+        platform_admin = not auth_required() or holds_platform_admin_role(user)
+        caller_ws = own_admin_workspace(user, workspace_id_from_request_headers(http_request.headers) or "")
+
+        def confirm_merge(stored):  # noqa: ANN001 - runs inside the store's atomic update
+            return merge_confirm_change(
+                stored, request.confirm, platform_admin=platform_admin, caller_workspace=caller_ws,
             )
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        payload["confirm"] = None
     try:
-        new = set_mcp_policy(payload)
+        new = set_mcp_policy(payload, confirm_merge=confirm_merge)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     append_audit_event(
         action="mcp.policy.updated",
         resource="/api/v1/mcp/policy",

@@ -37,6 +37,8 @@ from __future__ import annotations
 from typing import Any
 
 MODES = ("interactive", "four_eyes", "agent")
+#: Strictness order: a workspace admin may not go below the deployment default.
+STRICTNESS = {"agent": 0, "interactive": 1, "four_eyes": 2}
 DEFAULT_MODE = "interactive"
 #: Modes whose confirmations are human-bound. Weakening a workspace from one
 #: of these to ``agent`` must itself be done from an interactive session.
@@ -174,8 +176,10 @@ def merge_confirm_change(
     The store is deployment-wide, but ``PUT /api/v1/mcp/policy`` is open to any
     workspace admin. So: ``default`` and other workspaces' entries need a
     platform admin; a workspace admin may set (or clear, with ``null``) only
-    their own workspace's entry. Entries the request does not name are kept —
-    a change merges, it never replaces another workspace's policy.
+    their own workspace's entry, and only as strict as or stricter than the
+    default (agent < interactive < four_eyes). Entries the request does not
+    name are kept — a change merges, it never replaces another workspace's
+    policy.
     Raises ``PermissionError`` (refused) or ``ValueError`` (invalid mode).
     """
     if not isinstance(requested, dict):
@@ -191,7 +195,10 @@ def merge_confirm_change(
                 )
             merged["default"] = mode
     own = str(caller_workspace or "").strip()
-    for ws, mode in dict(requested.get("workspaces") or {}).items():
+    workspaces = requested.get("workspaces")
+    if workspaces is not None and not isinstance(workspaces, dict):
+        raise ValueError("confirm.workspaces must be an object of workspace id -> mode")
+    for ws, mode in dict(workspaces or {}).items():
         key = str(ws or "").strip()
         if not key:
             continue
@@ -202,8 +209,45 @@ def merge_confirm_change(
             raise PermissionError(
                 f"A workspace admin can change only their own workspace's confirm policy, not {key!r}."
             )
+        if (
+            new_mode is not None
+            and not platform_admin
+            and STRICTNESS[new_mode] < STRICTNESS[merged["default"]]
+        ):
+            # The deployment default is a floor: a workspace admin may be as
+            # strict or stricter, never looser (review N6).
+            raise PermissionError(
+                f"'{new_mode}' is looser than the deployment default '{merged['default']}'; "
+                "only a platform admin can set a workspace below the default."
+            )
         if new_mode is None:
             merged["workspaces"].pop(key, None)
         else:
             merged["workspaces"][key] = new_mode
     return merged
+
+
+def own_admin_workspace(user: Any, header_workspace: str) -> str:
+    """The workspace a workspace admin's policy change applies to.
+
+    The ``X-Workspace-Id`` header when sent; otherwise the one workspace the
+    caller administers (review N7: such an admin got 403 for sending none).
+    ``""`` when it is ambiguous or unknown.
+    """
+    if str(header_workspace or "").strip():
+        return str(header_workspace).strip()
+    email = str((user or {}).get("email") or "").strip()
+    if not email:
+        return ""
+    try:
+        from services.team_store import list_memberships_for_user
+
+        rows = list_memberships_for_user(email)
+    except Exception:  # noqa: BLE001 - unknown means no implied workspace
+        return ""
+    admin = {
+        str(r.get("workspace_id") or "")
+        for r in rows
+        if str(r.get("role") or "").lower() in ("admin", "owner") and r.get("workspace_id")
+    }
+    return next(iter(admin)) if len(admin) == 1 else ""

@@ -230,8 +230,8 @@ def test_workspace_admin_cannot_change_the_default_or_another_workspace():
 
 
 def test_workspace_admin_changes_only_their_own_entry_and_b_survives():
-    merged = _merge({"default": "interactive", "workspaces": {"A": "agent"}})
-    assert merged == {"default": "interactive", "workspaces": {"A": "agent", "B": "four_eyes"}}
+    merged = _merge({"default": "interactive", "workspaces": {"A": "four_eyes"}})
+    assert merged == {"default": "interactive", "workspaces": {"A": "four_eyes", "B": "four_eyes"}}
     cleared = _merge({"workspaces": {"A": None}}, stored=merged)
     assert cleared == {"default": "interactive", "workspaces": {"B": "four_eyes"}}
 
@@ -262,9 +262,104 @@ def test_workspace_admin_put_merges_and_cannot_touch_b(app_client, monkeypatch):
     assert refused.status_code == 403, refused.text
 
     ok = client.put("/api/v1/mcp/policy", headers=headers,
-                    json={"enabled": True, "confirm": {"workspaces": {"A": "agent"}}})
+                    json={"enabled": True, "confirm": {"workspaces": {"A": "four_eyes"}}})
     assert ok.status_code == 200, ok.text
-    assert ok.json()["confirm"] == {"default": "interactive", "workspaces": {"A": "agent", "B": "four_eyes"}}
+    assert ok.json()["confirm"] == {"default": "interactive", "workspaces": {"A": "four_eyes", "B": "four_eyes"}}
     audited = [e for e in app_client["audit_events"] if e.get("action") == "mcp.policy.updated"]
     assert audited[-1]["details"]["old"]["confirm"]["workspaces"] == {"B": "four_eyes"}
-    assert audited[-1]["details"]["new"]["confirm"]["workspaces"] == {"A": "agent", "B": "four_eyes"}
+    assert audited[-1]["details"]["new"]["confirm"]["workspaces"] == {"A": "four_eyes", "B": "four_eyes"}
+
+
+
+# ------------------------------------------ review 2: ceiling and atomicity
+
+
+def test_workspace_admin_cannot_loosen_below_the_default():
+    """N6: agent < interactive < four_eyes; the default is a floor for workspace admins."""
+    with pytest.raises(PermissionError, match="looser than the deployment default"):
+        _merge({"workspaces": {"A": "agent"}})
+    with pytest.raises(PermissionError, match="looser"):
+        _merge({"workspaces": {"A": "interactive"}}, stored={"default": "four_eyes", "workspaces": {}})
+    assert _merge({"workspaces": {"A": "agent"}}, admin=True)["workspaces"]["A"] == "agent"
+    assert _merge({"workspaces": {"A": "four_eyes"}})["workspaces"]["A"] == "four_eyes"
+
+
+def test_non_mapping_workspaces_is_a_validation_error():
+    with pytest.raises(ValueError, match="workspaces must be an object"):
+        _merge({"workspaces": ["A"]})
+    with pytest.raises(ValueError, match="workspaces must be an object"):
+        _merge({"workspaces": 5})
+
+
+def test_concurrent_policy_updates_do_not_lose_each_other(app_client, monkeypatch):
+    """N7: read-merge-write raced; two admins of different workspaces lost an update."""
+    import threading
+    import time
+
+    store = app_client["integrations_store"]
+    store.set_mcp_policy({"enabled": True, "confirm": {"default": "interactive", "workspaces": {}}})
+
+    def slow_merge(ws: str):
+        def _m(stored):
+            current = policy.normalize_confirm_policy(stored)
+            time.sleep(0.2)  # both readers see the same stored policy without the lock
+            return policy.merge_confirm_change(current, {"workspaces": {ws: "four_eyes"}},
+                                               platform_admin=False, caller_workspace=ws)
+        return _m
+
+    threads = [threading.Thread(target=store.set_mcp_policy, args=({"enabled": True},),
+                                kwargs={"confirm_merge": slow_merge(ws)}) for ws in ("A", "B", "C")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert store.get_mcp_policy()["confirm"]["workspaces"] == {"A": "four_eyes", "B": "four_eyes", "C": "four_eyes"}
+
+
+def test_compare_and_swap_conflict_merges_onto_the_newer_version(app_client, monkeypatch):
+    """A second replica wrote between read and write: the change is re-merged, not lost."""
+    import json
+
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    calls = {"n": 0}
+
+    def cas(data, expected_rev):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The other replica's write lands now (B -> four_eyes).
+            raw = store._load_raw()
+            raw["mcp_policy"]["confirm"]["workspaces"]["B"] = "four_eyes"
+            raw["mcp_policy"]["rev"] = expected_rev + 1
+            store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
+            return False
+        return None
+
+    monkeypatch.setattr(persistence, "save_sections_if_revision", cas)
+    store.set_mcp_policy({"enabled": True}, confirm_merge=lambda stored: policy.merge_confirm_change(
+        stored, {"workspaces": {"A": "four_eyes"}}, platform_admin=False, caller_workspace="A"))
+
+    assert calls["n"] == 2
+    assert store.get_mcp_policy()["confirm"]["workspaces"] == {"A": "four_eyes", "B": "four_eyes"}
+
+
+def test_single_workspace_admin_without_header_resolves_to_their_workspace(monkeypatch):
+    import services.team_store as team_store
+
+    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
+        {"workspace_id": "ws-a", "role": "admin"}, {"workspace_id": "ws-b", "role": "viewer"}])
+    assert policy.own_admin_workspace({"email": "a@x"}, "") == "ws-a"
+    assert policy.own_admin_workspace({"email": "a@x"}, "ws-z") == "ws-z"
+    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
+        {"workspace_id": "ws-a", "role": "admin"}, {"workspace_id": "ws-b", "role": "owner"}])
+    assert policy.own_admin_workspace({"email": "a@x"}, "") == ""
+
+
+def test_put_with_non_mapping_workspaces_is_422(app_client, monkeypatch):
+    client, admin = app_client["client"], app_client["tokens"]["admin"]
+    monkeypatch.setattr(policy, "credential_kind", lambda request: "session_token")
+    resp = client.put("/api/v1/mcp/policy", headers={"Authorization": f"Bearer {admin}"},
+                      json={"enabled": True, "confirm": {"workspaces": ["A"]}})
+    assert resp.status_code == 422, resp.text

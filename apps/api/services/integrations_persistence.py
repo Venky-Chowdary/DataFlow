@@ -65,3 +65,31 @@ def save_sections(data: dict[str, Any]) -> bool:
         logger.warning("integrations settings write failed; local file kept: %s", exc)
         return False
     return True
+
+
+def save_sections_if_revision(data: dict[str, Any], expected_rev: int) -> bool | None:
+    """Save only if the stored ``mcp_policy.rev`` is still ``expected_rev``.
+
+    ``None`` when there is no database (the caller's process lock is then the
+    only writer guard); ``False`` when another writer got there first.
+    """
+    coll = _collection()
+    if coll is None:
+        return None
+    doc = {k: data[k] for k in SECTIONS if k in data}
+    match: dict[str, Any] = {"_id": DOC_ID}
+    if expected_rev:
+        match["mcp_policy.rev"] = expected_rev
+    else:
+        match["$or"] = [{"mcp_policy.rev": {"$exists": False}}, {"mcp_policy.rev": 0}]
+    try:
+        result = coll.replace_one(match, {"_id": DOC_ID, **doc}, upsert=False)
+        if getattr(result, "matched_count", 0):
+            return True
+        if expected_rev or coll.find_one({"_id": DOC_ID}) is not None:
+            return False
+        coll.insert_one({"_id": DOC_ID, **doc})
+        return True
+    except Exception as exc:  # noqa: BLE001 - a duplicate insert is a lost race
+        logger.warning("integrations settings compare-and-swap failed: %s", exc)
+        return False

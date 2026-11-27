@@ -175,6 +175,7 @@ def _load_raw() -> dict[str, Any]:
             "enabled": bool(policy.get("enabled", True)),
             "allowed_tools": allowed,
             "confirm": normalize_confirm_policy(policy.get("confirm")),
+            "rev": int(policy.get("rev") or 0),
         },
         "api_keys": api_keys,
     }
@@ -261,19 +262,29 @@ def get_mcp_policy() -> dict[str, Any]:
     }
 
 
-def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
+_MCP_POLICY_LOCK = threading.Lock()
+
+
+def set_mcp_policy(policy: dict[str, Any], *, confirm_merge: Any = None) -> dict[str, Any]:
     """Persist MCP policy, rejecting unknown registered tools.
 
-    ``confirm`` omitted (``None``) keeps the stored confirm policy.
+    ``confirm`` omitted (``None``) keeps the stored confirm policy;
+    ``confirm_merge(stored_confirm) -> confirm`` computes it from the stored
+    one. The read-merge-write is atomic (review N7): one writer per process
+    (a lock), and a compare-and-swap on ``mcp_policy.rev`` in the database so
+    two replicas cannot lose each other's update (retried on conflict).
     """
+    from services.integrations_persistence import save_sections_if_revision
     from services.mcp_confirm_policy import normalize_confirm_policy, normalize_mode
     from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 
     confirm = policy.get("confirm")
-    if confirm is not None:
+    if confirm is not None and confirm_merge is None:
         if not isinstance(confirm, dict):
             raise ValueError("confirm must be an object: {default, workspaces}")
         normalize_mode(confirm.get("default") or "interactive")
+        if not isinstance(confirm.get("workspaces") or {}, dict):
+            raise ValueError("confirm.workspaces must be an object of workspace id -> mode")
         for mode in dict(confirm.get("workspaces") or {}).values():
             normalize_mode(mode)
         confirm = normalize_confirm_policy(confirm)
@@ -286,13 +297,26 @@ def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"Unknown MCP tools: {', '.join(unknown)}")
         allowed = sorted(set(allowed))
-    data = _load_raw()
-    if confirm is None:
-        confirm = data["mcp_policy"].get("confirm")
-    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed, "confirm": confirm}
-    data["updated_at"] = _now()
-    _save(data)
-    return get_mcp_policy()
+    with _MCP_POLICY_LOCK:
+        for _attempt in range(5):
+            data = _load_raw()
+            stored = data["mcp_policy"]
+            new_confirm = (
+                confirm_merge(stored.get("confirm")) if confirm_merge is not None
+                else confirm if confirm is not None else stored.get("confirm")
+            )
+            rev = int(stored.get("rev") or 0)
+            data["mcp_policy"] = {
+                "enabled": enabled, "allowed_tools": allowed, "confirm": new_confirm, "rev": rev + 1,
+            }
+            data["updated_at"] = _now()
+            saved = save_sections_if_revision(json.loads(json.dumps(data, default=json_default)), rev)
+            if saved is False:
+                continue  # another replica wrote first: merge onto its version
+            STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
+            return get_mcp_policy()
+    raise RuntimeError("the MCP policy changed concurrently five times; try again")
 
 
 def get_sso_configs() -> dict[str, dict[str, Any]]:
