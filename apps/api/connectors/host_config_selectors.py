@@ -171,7 +171,7 @@ def _odbc_connect_refusal(value: Any, where: str, *, installed_only: bool) -> st
 
 def _odbc_url_refusal(text: str, where: str, *, installed_only: bool) -> str:
     """A ``+pyodbc`` URL as SQLAlchemy's pyodbc connector reads it."""
-    from connectors.tls_file_options import _odbc_pairs, _query_pairs
+    from connectors.tls_file_options import _query_pairs
 
     query = list(_query_pairs(text))
     for key, value in query:

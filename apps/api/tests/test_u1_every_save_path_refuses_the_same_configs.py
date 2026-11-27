@@ -87,9 +87,9 @@ def _assert_refused(r, status: int, words: str) -> str:
     return r.json()["detail"]
 
 
-def _good(client, row: str) -> tuple[str, dict]:
+def _good(api, row: str) -> tuple[str, dict]:
     base, _bad, _s, _w = ROWS[row]
-    r = client.post("/api/v1/connectors/saved", json=_body(f"u1-{row}", base))
+    r = api.post("/api/v1/connectors/saved", json=_body(f"u1-{row}", base))
     assert r.status_code == 200, r.text
     from services.connector_store import get_connector
 
