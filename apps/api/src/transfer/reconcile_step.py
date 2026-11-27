@@ -5612,13 +5612,17 @@ def _generic_key_census(
             for c in (summary.get("conflict_columns") or [])
             if str(c or "").strip()
         ]
+    from services.mapping_constraints import write_mappings
+
+    # D430: a declared omit has no destination column; selecting it crashed the
+    # census (MySQL 1054 "Unknown column 'LONG_TXT'").
     pairs = [
         (
             str(m.get("source") or ""),
             str(m.get("target") or m.get("destination") or m.get("source") or ""),
         )
-        for m in (mappings or [])
-        if isinstance(m, dict) and str(m.get("source") or "").strip()
+        for m in write_mappings([m for m in (mappings or []) if isinstance(m, dict)])
+        if str(m.get("source") or "").strip()
     ]
     if not pk_cols and pairs:
         # The census needs the key the writer joined on — engine-copy

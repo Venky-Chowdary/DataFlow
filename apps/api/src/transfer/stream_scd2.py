@@ -289,6 +289,12 @@ def stream_scd2_mirror_transfer(
         # subtracting the quarantined ones failed every run that held a row
         # out ("expected target 1 vs target 2").
         rows_read = max(rows_staged, int(stage_summary.get("source_row_count") or 0))
+        # D430: the apply's active/scoped digests are compared with the staging
+        # write-pass digest, so they hash on its basis (a text column carrying a
+        # source instant, e.g. Oracle TSTZ as '…-05:00' text in MySQL VARCHAR).
+        _stage_basis = stage_summary.get("gate8_digest_types")
+        if isinstance(_stage_basis, dict):
+            digest_types = {**digest_types, **{str(k): str(v) for k, v in _stage_basis.items() if v}}
         dest_summary = {
             "source_rows": rows_read,
             "source_row_count": rows_read,
@@ -873,6 +879,14 @@ def _stamp_merge_source_digest(
     if checksum:
         dest_summary["checksum"] = checksum
         dest_summary["checksum_mode"] = mode
+        # D430: the read-back hashes on the basis that digest was taken on. The
+        # staging pass marked a text column carrying a source instant; without
+        # it the mirror re-read hashed '…+05:30' text against the instant.
+        for summary in (stage_summary, apply_summary):
+            basis = (summary or {}).get("gate8_digest_types")
+            if str((summary or {}).get("checksum") or "").strip() == checksum and isinstance(basis, dict):
+                dest_summary.setdefault("gate8_digest_types", dict(basis))
+                break
         return
     apply_summary = apply_summary or {}
     if apply_summary.get("checksum") and apply_summary.get("proof_scope"):

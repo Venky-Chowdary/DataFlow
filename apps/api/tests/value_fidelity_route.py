@@ -23,6 +23,9 @@ PG = {
     "password": os.environ.get("PGPASSWORD", ""),
 }
 
+# A private server (own port + datadir) for fail-first runs on old code.
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
+
 
 def up(port: int, host: str = "127.0.0.1") -> bool:
     try:
@@ -50,10 +53,10 @@ def pg_conn():
 def mysql_conn():
     pymysql = pytest.importorskip("pymysql")
     pw = os.environ.get("MYSQL_PASSWORD", "")
-    if not pw or not up(3306):
-        pytest.skip("MySQL not configured (MYSQL_PASSWORD, :3306)")
+    if not pw or not up(MYSQL_PORT):
+        pytest.skip(f"MySQL not configured (MYSQL_PASSWORD, :{MYSQL_PORT})")
     return pymysql.connect(
-        host="127.0.0.1", port=3306, user=os.environ.get("MYSQL_USER", "dataflow"),
+        host="127.0.0.1", port=MYSQL_PORT, user=os.environ.get("MYSQL_USER", "dataflow"),
         password=pw, database=os.environ.get("MYSQL_DATABASE", "dataflow"),
         charset="utf8mb4", autocommit=True,
     )
@@ -117,7 +120,7 @@ def dest_config(kind: str) -> dict[str, Any]:
     if kind == "postgresql":
         return dict(type="postgresql", **PG, schema="public")
     if kind == "mysql":
-        return dict(type="mysql", host="127.0.0.1", port=3306,
+        return dict(type="mysql", host="127.0.0.1", port=MYSQL_PORT,
                     database=os.environ.get("MYSQL_DATABASE", "dataflow"),
                     username=os.environ.get("MYSQL_USER", "dataflow"),
                     password=os.environ["MYSQL_PASSWORD"])
