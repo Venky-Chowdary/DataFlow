@@ -332,7 +332,7 @@ def test_duplicates_that_escape_the_collapse_are_never_green(route, route_ctx) -
 
     mp = route_ctx["monkeypatch"]
     mp.setattr(dp, "keep_last_reads_whole", lambda _request: False)
-    mp.setattr(dp, "iter_keep_last", lambda batches, _keys: batches)
+    mp.setattr(dp, "iter_keep_last", lambda batches, _keys, **_kw: batches)
     result, job, rows, _ = _run(route, route_ctx, "full_refresh_overwrite")
     assert sorted(r[0] for r in rows).count(3) == 2, (route, "the escape was not reproduced", rows)
     assert result.success is False, (route, job.get("message"))

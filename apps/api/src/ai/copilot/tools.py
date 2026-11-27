@@ -146,6 +146,16 @@ _ROW_RULE_PROPS: dict[str, dict] = {
         "type": "string",
         "description": "Column(s) that identify a duplicate row; used as the key when upsert_key is not given.",
     },
+    "dedupe_key_equality": {
+        "type": "string",
+        "enum": ["exact", "destination"],
+        "description": (
+            "When dedupe_key values differ by exact text but are one key to the destination "
+            "('a'/'A' under a case-insensitive collation, 'b'/'b ' under PAD SPACE): "
+            "destination collapses them by the destination's rules (last row wins); exact "
+            "keeps both as distinct keys. Unset refuses such a file before any write."
+        ),
+    },
     "rule_questions": {
         "type": "array",
         "items": {"type": "string"},
@@ -4682,6 +4692,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
         cursor_lookback_days: int = 0,
@@ -4723,6 +4734,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
             cursor_lookback_days=cursor_lookback_days,
@@ -4764,6 +4776,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
         cursor_lookback_days: int = 0,
@@ -4805,6 +4818,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
             cursor_lookback_days=cursor_lookback_days,
@@ -4892,6 +4906,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         limit: int = 0,
@@ -4932,6 +4947,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             limit=limit,

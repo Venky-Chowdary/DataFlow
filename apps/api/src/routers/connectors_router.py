@@ -1976,6 +1976,13 @@ class QuarantineReplayRequest(BaseModel):
 
     rows: list[dict] = Field(default_factory=list, description="Edited rejected_details; empty = all quarantine rows")
     transform_overrides: dict = Field(default_factory=dict, description="Optional per-column transform overrides keyed by source column")
+    acknowledge_endpoint_change: bool = Field(
+        default=False,
+        description=(
+            "The destination connection now points at another host or database than the job "
+            "wrote to; set true to replay into the connection as it is saved now (D413)."
+        ),
+    )
 
 
 _QUARANTINE_DETAIL_KEYS = frozenset({
@@ -2539,14 +2546,22 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     # the host frozen on the parent job (retry/rerun already do, D172).
     from ..transfer.endpoint_refresh import (
         ReplayConnectorMissing,
+        ReplayEndpointChanged,
         refresh_replay_destination,
         replay_endpoint_note,
     )
 
     try:
-        endpoint_resolution = refresh_replay_destination(job_id, payload, transfer_req)
-    except ReplayConnectorMissing as exc:
+        endpoint_resolution = refresh_replay_destination(
+            job_id, payload, transfer_req, acknowledged=bool(body.acknowledge_endpoint_change)
+        )
+    except (ReplayConnectorMissing, ReplayEndpointChanged) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Replay refused: the destination connection could not be resolved: {exc}",
+        ) from exc
     mappings = list(transfer_req.mappings or [])
     if body.transform_overrides:
         from services.transform_engine import transform_override_refusal
@@ -3048,6 +3063,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
             "stale_refused": stale_refused,
+            "endpoint_refresh": endpoint_resolution,
             "quarantine_closure": {
                 "verdict": compact.get("verdict"),
                 "open_count": compact.get("open_count"),

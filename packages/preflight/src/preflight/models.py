@@ -178,6 +178,9 @@ class TransferPlan:
     # In-file duplicate policy. ``keep_last`` collapses the sample before
     # uniqueness gates; ``block`` refuses a repeated key.
     in_file_dedupe: str = ""
+    # ``exact`` / ``destination``: the key equality keep_last collapses under
+    # when the destination would merge distinct key texts (D402). Empty refuses.
+    dedupe_key_equality: str = ""
     # Operator duplicate policy (upsert / dedupe_skip / append). Empty means
     # the sync mode owns uniqueness. Explicit append allows duplicate keys,
     # including on full_refresh_overwrite.

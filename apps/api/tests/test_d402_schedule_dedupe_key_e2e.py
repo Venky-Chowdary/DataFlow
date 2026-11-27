@@ -167,16 +167,22 @@ def test_rest_create_and_patch_store_and_honour_dedupe_key(
         bad = transfer_client.patch(f"/api/v1/schedules/{saved['id']}", json={"in_file_dedupe": "block"})
         assert bad.status_code == 400, bad.text
         assert "dedupe_key" in bad.text
-        # Edit: re-key the dedupe on two columns; the next run honours the stored key.
+        # Edit: the first run's table is keyed on id, so a dedupe on (id, name)
+        # would land id 3 twice into it on the next beat — refused, unchanged.
+        refused = transfer_client.patch(
+            f"/api/v1/schedules/{saved['id']}", json={"dedupe_key": "id,name"}
+        )
+        assert refused.status_code == 400, refused.text
+        assert "keyed on" in refused.text and "(id)" in refused.text, refused.text
+        assert transfer_client.get(f"/api/v1/schedules/{saved['id']}").json()["dedupe_key"] == "id"
+        # With that table gone the edit is saved, and the stream key it bound follows.
+        _drop(table)
         moved = transfer_client.patch(
             f"/api/v1/schedules/{saved['id']}", json={"dedupe_key": "id,name"}
         )
         assert moved.status_code == 200, moved.text
         assert moved.json().get("dedupe_key") == "id,name", moved.json()
-        # The stream key the plan bound from dedupe_key follows the edit.
         assert moved.json()["stream_contracts"][0]["primary_key"] == ["id", "name"], moved.json()
-        # The table the first run created is keyed on id; a new key needs a new table.
-        _drop(table)
         job, rows = _run(saved["id"])
         assert job.get("status") == "completed", (job.get("status"), job.get("message"))
         # (id, name) pairs are unique, so both copies of id 3 are distinct keys now.
@@ -211,5 +217,43 @@ def test_rest_patch_adds_dedupe_key_to_a_schedule_saved_without_one(
         assert (patched.json().get("in_file_dedupe"), patched.json().get("dedupe_key")) == ("keep_last", "id")
         job, rows = _run(sid)
         _assert_landed_last_copy(job, rows)
+    finally:
+        _drop(table)
+
+
+def test_rest_upsert_schedule_with_dedupe_key_collapses_like_a_one_off_upsert(
+    transfer_client, local_object_store
+) -> None:
+    """An upsert plan with dedupe_key collapses the file's repeated keys (last wins)."""
+    key = _stage(local_object_store)
+    source_id, dest_id = _connectors(local_object_store, "s3")
+    table = f"d402_sched_up_{uuid.uuid4().hex[:6]}"
+    body = {
+        "name": f"d402-up-{uuid.uuid4().hex[:6]}", "source_connector_id": source_id,
+        "source_table": key, "dest_connector_id": dest_id, "dest_table": table,
+        "interval": "daily", "sync_mode": "upsert", "schema_policy": "propagate_columns",
+        "validation_mode": "strict", "plan_mappings": True, "dedupe_key": "id",
+    }
+    try:
+        created = transfer_client.post("/api/v1/schedules/", json=body)
+        assert created.status_code == 201, created.text
+        saved = created.json()
+        assert (saved["in_file_dedupe"], saved["dedupe_key"], saved["primary_key"]) == (
+            "keep_last", "id", "id"), saved
+        job, rows = _run(saved["id"])
+        _assert_landed_last_copy(job, rows)
+        # The upsert identity and the dedupe key move together or not at all:
+        # the table is keyed on id, so a dedupe on name is refused.
+        refused = transfer_client.patch(f"/api/v1/schedules/{saved['id']}", json={"dedupe_key": "name"})
+        assert refused.status_code == 400, refused.text
+        kept = transfer_client.get(f"/api/v1/schedules/{saved['id']}").json()
+        assert (kept["dedupe_key"], kept["primary_key"]) == ("id", "id"), kept
+        _drop(table)
+        moved = transfer_client.patch(f"/api/v1/schedules/{saved['id']}", json={"dedupe_key": "name"})
+        assert moved.status_code == 200, moved.text
+        out = moved.json()
+        contract_key = out["stream_contracts"][0]["primary_key"]
+        assert (out["dedupe_key"], out["primary_key"]) == ("name", "name"), out
+        assert contract_key in ("name", ["name"]), out["stream_contracts"]
     finally:
         _drop(table)

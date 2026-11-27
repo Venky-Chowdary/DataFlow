@@ -63,17 +63,7 @@ def read_column_collation(
         ).fetchone()
         if not row or not row[0]:
             return None
-        name = str(row[0])
-        pad_row = conn.execute(
-            sa.text(
-                "SELECT PAD_ATTRIBUTE, CHARACTER_SET_NAME FROM information_schema.COLLATIONS "
-                "WHERE COLLATION_NAME = :n"
-            ),
-            {"n": name},
-        ).fetchone()
-        pad = str(pad_row[0]) if pad_row and pad_row[0] else "NO PAD"
-        charset = str(pad_row[1]) if pad_row and len(pad_row) > 1 and pad_row[1] else ""
-        return ColumnCollation(name=name, pad=pad, charset=charset)
+        return mysql_collation_fact(conn, str(row[0]))
     if kind in {"sqlserver", "mssql", "azure_sql"}:
         row = conn.execute(
             sa.text(
@@ -92,6 +82,35 @@ def read_column_collation(
         binary = name.upper().endswith("_BIN") or name.upper().endswith("_BIN2")
         return ColumnCollation(name=name, pad="NO PAD" if binary else "PAD SPACE")
     return None
+
+
+def mysql_collation_fact(conn: Any, name: str) -> ColumnCollation:
+    """A MySQL/MariaDB collation's PAD attribute and character set.
+
+    MySQL 8 reports ``PAD_ATTRIBUTE``; MariaDB has no such column and spells
+    NO PAD in the name (``utf8mb4_nopad_bin``); every other MariaDB collation,
+    ``_bin`` included, pads trailing spaces.
+    """
+    import sqlalchemy as sa
+
+    try:
+        row = conn.execute(
+            sa.text(
+                "SELECT PAD_ATTRIBUTE, CHARACTER_SET_NAME FROM information_schema.COLLATIONS "
+                "WHERE COLLATION_NAME = :n"
+            ),
+            {"n": name},
+        ).fetchone()
+        pad = str(row[0]) if row and row[0] else "NO PAD"
+        charset = str(row[1]) if row and len(row) > 1 and row[1] else ""
+    except Exception:  # noqa: BLE001 - MariaDB: no PAD_ATTRIBUTE column
+        row = conn.execute(
+            sa.text("SELECT CHARACTER_SET_NAME FROM information_schema.COLLATIONS WHERE COLLATION_NAME = :n"),
+            {"n": name},
+        ).fetchone()
+        pad = "NO PAD" if "nopad" in name.lower() else "PAD SPACE"
+        charset = str(row[0]) if row and row[0] else ""
+    return ColumnCollation(name=name, pad=pad, charset=charset)
 
 
 # Letters a UCA collation expands or folds to a base letter that NFKD does not

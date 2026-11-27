@@ -293,7 +293,16 @@ def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
             "so both copies of a repeated key would be written. Name dedupe_key, "
             "or remove keep_last."
         )
-    collapsed, _dropped = collapse_keep_last(list(records), keys)
+    from services.dedupe_equality import collapse_for_destination
+
+    source = getattr(request, "source", None)
+    dest = getattr(request, "destination", None)
+    # D402: collapse under the key equality the destination will hold.
+    collapsed = collapse_for_destination(
+        list(records), keys, destination=dest, mappings=getattr(request, "mappings", None),
+        extras=(dict(getattr(source, "extra", None) or {}), dict(getattr(dest, "extra", None) or {})),
+        created_key=_keys_are_contract_key(keys, contract),
+    )
     repeated = duplicate_keys_remaining(collapsed, keys)
     if repeated:
         shown = ", ".join(str(item) for item in repeated[:3])
@@ -435,14 +444,22 @@ def schedule_dedupe_key_refusal(payload: Any) -> str:
     return ""
 
 
-def follow_dedupe_key_edit(contracts: Any, old_key: Any, new_key: Any) -> list[dict]:
-    """Stream contracts whose key was the schedule's dedupe key follow its edit.
+def follow_dedupe_key_edit(
+    contracts: Any, old_key: Any, new_key: Any, *, primary_key: Any = ""
+) -> tuple[list[dict], str]:
+    """Stream contracts (and a schedule key) that were the dedupe key follow its edit.
 
-    The plan binds ``dedupe_key`` as the stream's key too. Editing the dedupe
-    key alone left the stale contract key deciding the collapse and the
-    identity gate, so the run did not do what the edit said (D402).
+    The plan binds ``dedupe_key`` as the stream's key too, and an upsert
+    schedule's key is that same dedupe key. Editing the dedupe key alone left
+    the stale contract key deciding the collapse and the identity gate, or
+    moved the contract key while the upsert key stayed (D402). Both move
+    together; a key that was not the dedupe key stays. Returns the contracts
+    and the schedule's primary key.
     """
     old, new = _dedupe_key_text(old_key), _dedupe_key_text(new_key)
+    pk = str(primary_key or "")
+    if old and _dedupe_key_text(pk) == old:
+        pk = new
     out: list[dict] = []
     for raw in contracts or []:
         row = dict(raw) if isinstance(raw, dict) else raw
@@ -450,7 +467,7 @@ def follow_dedupe_key_edit(contracts: Any, old_key: Any, new_key: Any) -> list[d
             listed = isinstance(row.get("primary_key"), (list, tuple))
             row["primary_key"] = new.split(",") if listed and new else new
         out.append(row)
-    return out
+    return out, pk
 
 
 def schedule_dedupe_from_plan(
@@ -475,11 +492,25 @@ def schedule_dedupe_from_plan(
         # The key names copies to drop, not an identity to upsert on: an
         # explicit primary key stays, a key the plan took from dedupe_key does not.
         return {"in_file_dedupe": "keep_last", "dedupe_key": key, "primary_key": str(primary_key or "")}
-    return {
-        "in_file_dedupe": asked or "block",
-        "dedupe_key": _dedupe_key_text(dedupe_key),
-        "primary_key": str((plan.get("data_rules") or {}).get("upsert_key") or primary_key or ""),
-    }
+    identity = str((plan.get("data_rules") or {}).get("upsert_key") or primary_key or "")
+    key = _dedupe_key_text(dedupe_key)
+    if key and not asked and _keyed_file_plan(plan):
+        # A one-off upsert collapses a file's repeated keys on that key, last row
+        # wins. A schedule stamps block or keep_last on every beat, so it stores
+        # keep_last on the same key: the beat does what the one-off did.
+        return {"in_file_dedupe": "keep_last", "dedupe_key": key, "primary_key": identity or key}
+    return {"in_file_dedupe": asked or "block", "dedupe_key": key, "primary_key": identity}
+
+
+def _keyed_file_plan(plan: dict[str, Any]) -> bool:
+    from services.preflight_source_kind import source_is_record_batch
+    from services.sync_cursor import normalize_sync_mode
+
+    source = plan.get("source") or {}
+    mode = normalize_sync_mode(str(plan.get("sync_mode") or ""), default="")
+    return mode in {"upsert", "incremental_deduped"} and source_is_record_batch(
+        str(source.get("kind") or "database"), str(source.get("type") or source.get("format") or "")
+    )
 
 
 def normalize_duplicate_policy(raw: str | None) -> str:
@@ -795,8 +826,19 @@ def collapse_keep_last(
     return kept, dropped
 
 
-def iter_keep_last(batches, key_columns: list[str]):
-    """Collapse one file to last-wins, then yield it in the original chunk sizes."""
+def _keys_are_contract_key(keys: list[str], contract: Any) -> bool:
+    has_key = contract is not None and hasattr(contract, "primary_key_columns")
+    declared = [str(c).lower() for c in (contract.primary_key_columns() if has_key else [])]
+    return bool(declared) and declared == [str(k).lower() for k in keys]
+
+
+def iter_keep_last(batches, key_columns: list[str], *, destination: Any = None,
+                   mappings: Any = None, extras: tuple = (), created_key: bool = False):
+    """Collapse one file to last-wins, then yield it in the original chunk sizes.
+
+    With ``destination`` the collapse follows the destination's key equality
+    (``services.dedupe_equality``); an ambiguous file is refused before any write.
+    """
     rows: list[dict] = []
     width = 0
     for batch in batches:
@@ -804,7 +846,15 @@ def iter_keep_last(batches, key_columns: list[str]):
         if chunk and width == 0:
             width = len(chunk)
         rows.extend(chunk)
-    collapsed, _dropped = collapse_keep_last(rows, key_columns)
+    if destination is not None:
+        from services.dedupe_equality import collapse_for_destination
+
+        collapsed = collapse_for_destination(
+            rows, key_columns, destination=destination, mappings=mappings,
+            extras=extras, created_key=created_key,
+        )
+    else:
+        collapsed, _dropped = collapse_keep_last(rows, key_columns)
     step = width or 1000
     for start in range(0, len(collapsed), step):
         yield collapsed[start : start + step]

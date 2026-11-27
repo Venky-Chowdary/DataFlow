@@ -341,6 +341,9 @@ class PipelineSchedule:
     #: The key keep_last keeps the last row of (comma-separated), as the
     #: one-off plan's ``dedupe_key``. Not an upsert identity (D402).
     dedupe_key: str = ""
+    #: ``exact`` | ``destination`` | "" — the key equality the dedupe collapses
+    #: under when spellings differ only to the destination (services.dedupe_equality).
+    dedupe_key_equality: str = ""
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     #: When the stored acknowledgement was given (ISO-8601 UTC); empty when
@@ -520,6 +523,11 @@ class PipelineSchedule:
             dedupe_key=",".join(
                 p.strip() for p in str(data.get("dedupe_key") or "").replace(";", ",").split(",")
                 if p.strip()
+            ),
+            dedupe_key_equality=(
+                str(data.get("dedupe_key_equality") or "").strip().lower()
+                if str(data.get("dedupe_key_equality") or "").strip().lower() in {"exact", "destination"}
+                else ""
             ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
@@ -2168,10 +2176,14 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
         if "dedupe_key" in data and "stream_contracts" not in data:
+            from services.dedupe_equality import refuse_dedupe_key_edit
             from services.duplicate_policy import follow_dedupe_key_edit
 
-            merged["stream_contracts"] = follow_dedupe_key_edit(
-                s.stream_contracts, s.dedupe_key, data.get("dedupe_key")
+            # The next beat must be able to write what the edit asks for (D402).
+            refuse_dedupe_key_edit(s, data.get("dedupe_key"))
+            merged["stream_contracts"], merged["primary_key"] = follow_dedupe_key_edit(
+                s.stream_contracts, s.dedupe_key, data.get("dedupe_key"),
+                primary_key=merged.get("primary_key"),
             )
         # Pausing or renaming a schedule must work while taps are disabled; only
         # enabling it, or pointing it at other connectors, needs a usable tap.

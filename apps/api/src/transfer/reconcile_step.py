@@ -1830,11 +1830,14 @@ def _transform_applied_proof_impl(
             # here, by asking the destination, not by guessing (D391).
             from services.collation_equality import collapse_destination_equal_keys
 
-            _spill_dropped += collapse_destination_equal_keys(
-                pin_store.db,
-                dialect=dest_db_type,
-                endpoint=endpoint,
-                columns=_collapse_keys,
+            # dedupe_key_equality=exact kept both spellings on the write (D402).
+            _spill_dropped += 0 if dest_summary.get("dedupe_key_equality") == "exact" else (
+                collapse_destination_equal_keys(
+                    pin_store.db,
+                    dialect=dest_db_type,
+                    endpoint=endpoint,
+                    columns=_collapse_keys,
+                )
             )
             _collapsed_duplicates = _spill_dropped
             for (payload,) in pin_store.db.execute(
@@ -6273,11 +6276,9 @@ def _count_dest_key_duplicates(
     endpoint: EndpointConfig,
     table: str,
     columns: list[str],
-    skip_null_keys: bool = False,
 ) -> int:
     """Number of keys appearing more than once on the destination, through
-    the canonical warehouse-SQL engine + table-ref helpers. ``skip_null_keys``
-    leaves out rows with a NULL key part (NULL never equals NULL)."""
+    the canonical warehouse-SQL engine + table-ref helpers."""
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import require_safe_identifier
@@ -6295,16 +6296,8 @@ def _count_dest_key_duplicates(
             quote(require_safe_identifier(c, preserve_case=True))
             for c in columns
         )
-        where = (
-            " WHERE " + " AND ".join(
-                f"{quote(require_safe_identifier(c, preserve_case=True))} IS NOT NULL"
-                for c in columns
-            )
-            if skip_null_keys
-            else ""
-        )
         stmt = sa.text(
-            f"SELECT COUNT(*) FROM (SELECT {qcols} FROM {table_ref}{where} "
+            f"SELECT COUNT(*) FROM (SELECT {qcols} FROM {table_ref} "
             f"GROUP BY {qcols} HAVING COUNT(*) > 1) df_dedupe_dups"
         )
         with engine.connect() as conn:
@@ -6475,24 +6468,16 @@ def _apply_infile_dedupe_gate(
     from services.dedupe_postwrite import apply_infile_dedupe_check, infile_dedupe_check
     from services.sync_cursor import is_overwrite_sync
 
-    db_type = str(ctx.get("engine") or "")
-    cfg = ctx.get("cfg") or {}
-    table_name = str(ctx.get("table_name") or "")
     sync_mode = str(dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or "")
     before = dest_summary.get(PRECOUNT_KEY)
-    dialect = _unique_check_dialect(db_type)
-    endpoint = EndpointConfig(format=db_type, schema=str(ctx.get("schema") or ""), table=table_name)
     check = infile_dedupe_check(
         dest_summary,
-        db_type=db_type,
-        cfg=cfg,
-        table_name=table_name,
+        db_type=str(ctx.get("engine") or ""),
+        cfg=ctx.get("cfg") or {},
+        schema=str(ctx.get("schema") or ""),
+        table_name=str(ctx.get("table_name") or ""),
         whole_table=is_overwrite_sync(sync_mode) or (isinstance(before, int) and before == 0),
-        sql_dialect=dialect,
-        count_sql_duplicates=lambda keys: _count_dest_key_duplicates(
-            str(dialect), cfg, endpoint=endpoint, table=table_name, columns=keys,
-            skip_null_keys=True,
-        ),
+        sql_dialect=_unique_check_dialect(str(ctx.get("engine") or "")),
     )
     apply_infile_dedupe_check(stamped, check)
 
@@ -7426,6 +7411,10 @@ def _run_reconciliation_impl(
         stored_object = export_object_proof(dest_summary, payload)
         if stored_object is not None:
             payload["export_object"] = stored_object
+        from services.dedupe_postwrite import apply_infile_dedupe_check, artifact_dedupe_check
+
+        # D402: the requested dedupe is checked on the file read back too.
+        apply_infile_dedupe_check(payload, artifact_dedupe_check(dest_summary, fmt=str(endpoint.format or "")))
         return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type

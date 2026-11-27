@@ -49,7 +49,7 @@ from services.preflight_file_plan import (
     _fit_scan_deadline,
     _lift_in_file_collapse_advisories,
     _plan_duplicate_policy,
-    _plan_in_file_dedupe,
+    _plan_dedupe_equality, _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
 from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
@@ -1369,6 +1369,7 @@ def run_file_preflight(
         stream_contracts=list(stream_contracts or []),
         in_file_dedupe=_plan_in_file_dedupe(source_config, destination_config),
         duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
+        dedupe_key_equality=_plan_dedupe_equality(source_config, destination_config),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large

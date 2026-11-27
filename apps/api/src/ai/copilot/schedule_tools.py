@@ -81,6 +81,7 @@ def create_schedule(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    dedupe_key_equality: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     limit: int = 0,
@@ -159,6 +160,7 @@ def create_schedule(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        dedupe_key_equality=dedupe_key_equality,
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
         cursor_lookback_days=cursor_lookback_days,
@@ -349,6 +351,7 @@ def create_schedule(
         "duplicate_policy": str(duplicate_policy or ""),
         "in_file_dedupe": dedupe_fields["in_file_dedupe"],
         "dedupe_key": dedupe_fields["dedupe_key"],
+        "dedupe_key_equality": str(plan.get("dedupe_key_equality") or ""),
         "file_wait_seconds": max(0, int(file_wait_seconds or 0)),
     }
     try:

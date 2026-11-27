@@ -195,6 +195,7 @@ class ScheduleCreate(PolicyFieldsModel):
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
     dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
     #: Schedules page: with no mappings, plan the route server-side (the
@@ -285,6 +286,7 @@ class ScheduleUpdate(PolicyFieldsModel):
     duplicate_policy: Optional[str] = None
     in_file_dedupe: Optional[str] = None
     dedupe_key: Optional[str] = None
+    dedupe_key_equality: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -353,6 +355,7 @@ class ScheduleResponse(BaseModel):
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
     dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -481,6 +484,7 @@ class ScheduleSummaryResponse(BaseModel):
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
     dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None

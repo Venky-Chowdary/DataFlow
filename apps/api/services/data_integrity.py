@@ -2456,6 +2456,7 @@ def run_integrity_audit(
     in_file_dedupe: str = "",
     duplicate_policy: str = "",
     stream_name: str = "",
+    dedupe_key_equality: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -2697,7 +2698,12 @@ def run_integrity_audit(
                     dest_kind=dest_kind,
                 )
             )
-        if source_key_collisions and source_key_collisions.get("collision_count"):
+        merged_by_choice = (  # D402: keep_last under the destination's equality merges them
+            str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
+            and str(dedupe_key_equality or "").strip().lower() == "destination"
+            and bool((source_key_collisions or {}).get("destination_equality"))
+        )
+        if source_key_collisions and source_key_collisions.get("collision_count") and not merged_by_choice:
             checks.append(
                 _check_transformed_key_collisions(
                     source_key_collisions,

@@ -445,6 +445,9 @@ def build_schedule_request(
     dedupe_key = str(getattr(sched, "dedupe_key", "") or "").strip()
     if dedupe_key:
         src_extra["dedupe_key"] = dedupe_key
+    equality = str(getattr(sched, "dedupe_key_equality", "") or "").strip()
+    if equality:
+        src_extra["dedupe_key_equality"] = equality
     sched_id = str(getattr(sched, "id", "") or "")
     if sched_id:
         src_extra["schedule_id"] = sched_id
@@ -455,6 +458,8 @@ def build_schedule_request(
     dst_extra["in_file_dedupe"] = in_file
     if dedupe_key:
         dst_extra["dedupe_key"] = dedupe_key
+    if equality:
+        dst_extra["dedupe_key_equality"] = equality
     if sched_id:
         dst_extra["schedule_id"] = sched_id
     if schedule_pk:

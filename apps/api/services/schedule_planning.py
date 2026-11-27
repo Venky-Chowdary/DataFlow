@@ -71,6 +71,7 @@ def plan_schedule_route(payload: dict[str, Any]) -> dict[str, Any]:
         upsert_key=key,
         primary_key=key,
         dedupe_key=str(payload.get("dedupe_key") or ""),
+        dedupe_key_equality=str(payload.get("dedupe_key_equality") or ""),
         cursor_column=str(payload.get("cursor_column") or ""),
         cursor_semantics=str(payload.get("cursor_semantics") or ""),
     )

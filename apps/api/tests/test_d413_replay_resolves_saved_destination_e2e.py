@@ -203,11 +203,12 @@ def parent(tmp_path, monkeypatch):
         _sql(f'DROP TABLE IF EXISTS "{dst_table}"')
 
 
-def _replay(job_id: str) -> dict:
+def _replay(job_id: str, *, acknowledge: bool = False) -> dict:
     from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
 
     rows = [{"source_pk": "id", "pk_value": pk, "values": {"id": pk, **fix}} for pk, fix in FIXES.items()]
-    return asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(rows=rows), _Req()))
+    body = QuarantineReplayRequest(rows=rows, acknowledge_endpoint_change=acknowledge)
+    return asyncio.run(replay_job_quarantine(job_id, body, _Req()))
 
 
 def _open_findings(job_id: str) -> list:
@@ -221,7 +222,17 @@ def test_replay_writes_through_the_connectors_current_endpoint(parent) -> None:
     parent["store"].update_connector(parent["connector"].id, {"port": int(cfg["port"])})
     dialled_before = relay.connections
 
-    resp = _replay(parent["job_id"])
+    # The connector now names another server: refused until the operator says so.
+    with pytest.raises(HTTPException) as caught:
+        _replay(parent["job_id"])
+    assert caught.value.status_code == 409, caught.value.detail
+    detail = str(caught.value.detail)
+    assert f"127.0.0.1:{cfg['port']}/" in detail and f"127.0.0.1:{relay.port}/" in detail, detail
+    assert "acknowledge_endpoint_change" in detail, detail
+    assert len(_open_findings(parent["job_id"])) == 2
+    assert relay.connections == dialled_before
+
+    resp = _replay(parent["job_id"], acknowledge=True)
 
     assert resp.get("success") is True and resp.get("rows_written") == 2, resp
     assert relay.connections == dialled_before, "the replay dialled the old endpoint"
@@ -235,6 +246,9 @@ def test_replay_writes_through_the_connectors_current_endpoint(parent) -> None:
     assert change["from"].startswith(f"127.0.0.1:{relay.port}/"), change
     assert change["to"].startswith(f"127.0.0.1:{cfg['port']}/"), change
     assert "password" not in str(refreshed[-1]).lower()
+    shown = resp.get("endpoint_refresh") or {}
+    assert shown.get("origin") == "saved_connector", resp.keys()
+    assert str(shown.get("endpoint") or "").startswith(f"127.0.0.1:{cfg['port']}/"), shown
     child = parent["memory"].get_job(resp["job_id"]) or {}
     assert (child.get("endpoint_refresh") or {}).get("origin") == "saved_connector", child.keys()
     assert int(((child.get("transfer_request") or {}).get("destination") or {}).get("port") or 0) == int(cfg["port"])
@@ -262,8 +276,35 @@ def test_a_replay_that_cannot_connect_names_the_endpoint_and_its_origin(parent) 
     closed.close()  # nothing listens here now
     parent["store"].update_connector(parent["connector"].id, {"port": dead_port})
     with pytest.raises(HTTPException) as caught:
-        _replay(parent["job_id"])
+        _replay(parent["job_id"], acknowledge=True)
     detail = str(caught.value.detail)
     assert f"127.0.0.1:{dead_port}" in detail, detail
     assert "saved connection" in detail and parent["connector"].id in detail, detail
     assert len(_open_findings(parent["job_id"])) == 2
+
+
+def test_a_credential_rotation_replays_without_an_acknowledgement(parent) -> None:
+    """Same host and database, new password: the replay uses the saved credential."""
+    from src.transfer.models import transfer_request_from_dict, transfer_request_to_dict
+
+    cfg, relay = parent["cfg"], parent["relay"]
+    # The connector is repointed at the server directly, and the job's stored
+    # snapshot names that same endpoint with the password before the rotation.
+    parent["store"].update_connector(parent["connector"].id, {"port": int(cfg["port"])})
+    job = parent["memory"].get_job(parent["job_id"])
+    stored = transfer_request_from_dict(job["transfer_request"])
+    stored.destination.host, stored.destination.port = cfg["host"], int(cfg["port"])
+    stored.destination.database = cfg["database"]
+    stored.destination.password = "rotated-away"  # nosec B105 - synthetic old secret
+    parent["memory"].update_job_fields(
+        parent["job_id"], {"transfer_request": transfer_request_to_dict(stored)}
+    )
+    dialled_before = relay.connections
+
+    resp = _replay(parent["job_id"])
+
+    assert resp.get("success") is True and resp.get("rows_written") == 2, resp
+    assert relay.connections == dialled_before
+    assert (resp.get("endpoint_refresh") or {}).get("changes") == [], resp.get("endpoint_refresh")
+    got = dict(_sql(f'SELECT id, qty FROM "{parent["table"]}"'))  # nosec B608
+    assert got == {11: 10, 12: 30, 13: 20, 14: 40}, got

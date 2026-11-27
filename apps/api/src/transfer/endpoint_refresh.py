@@ -144,7 +144,13 @@ class ReplayConnectorMissing(ValueError):
     """The destination's saved connector is gone: a replay has nowhere honest to write."""
 
 
-def refresh_replay_destination(job_id: str, stored: dict[str, Any], request: Any) -> dict[str, Any]:
+class ReplayEndpointChanged(ValueError):
+    """The saved connector now points at another server or database than the job wrote to."""
+
+
+def refresh_replay_destination(
+    job_id: str, stored: dict[str, Any], request: Any, *, acknowledged: bool = False
+) -> dict[str, Any]:
     """Point a quarantine replay at the destination connector as it is saved *now* (D413).
 
     The replay rebuilds its request from the parent job's ``transfer_request``,
@@ -166,29 +172,40 @@ def refresh_replay_destination(job_id: str, stored: dict[str, Any], request: Any
     if dest is None or not getattr(dest, "connector_id", None):
         return {"origin": "job_snapshot", "endpoint": _label(snapshot), "changes": []}
     connector_id = str(dest.connector_id)
-    try:
-        request.destination = refresh_saved_endpoint(
-            dest, workspace_id=getattr(request, "workspace_id", None) or None
-        )
-    except ValueError as exc:
+    from services.connector_store import get_connector
+
+    workspace = getattr(request, "workspace_id", None) or None
+    if get_connector(connector_id, workspace_id=workspace) is None:
         raise ReplayConnectorMissing(
             f"Replay refused: the destination connection {connector_id} that job {job_id} "
             f"wrote to (table {getattr(dest, 'table', '') or '?'}) no longer exists in this "
             "workspace. Nothing was written and the quarantined rows stay open. Re-create "
             "the connection, or replay into a connection that exists."
-        ) from exc
-    current = _identity(request.destination)
+        )
+    refreshed = refresh_saved_endpoint(dest, workspace_id=workspace)
+    current = _identity(refreshed)
+    recorded = bool(snapshot.get("host") or snapshot.get("dsn"))
+    if recorded and snapshot != current and not acknowledged:
+        # A credential rotation keeps host and database: it passes. A move to
+        # another server or database may be a different system (AC-3).
+        raise ReplayEndpointChanged(
+            f"Replay refused: the destination connection {connector_id} now points at "
+            f"{_label(current)}, but job {job_id} wrote to {_label(snapshot)}. Nothing was "
+            "written and the quarantined rows stay open. If the rows belong on the new "
+            "endpoint, replay again with acknowledge_endpoint_change=true."
+        )
+    request.destination = refreshed
     changes = (
         [{"role": "destination", "connector_id": connector_id,
           "from": _label(snapshot), "to": _label(current)}]
-        if snapshot != current
+        if recorded and snapshot != current
         else []
     )
     _audit_refresh(
         job_id,
         request,
         {"job_id": job_id, "operation": "quarantine_replay", "connector_id": connector_id,
-         "endpoint": _label(current), "changes": changes},
+         "endpoint": _label(current), "changes": changes, "acknowledged": bool(acknowledged)},
         level="warn" if changes else "info",
     )
     return {
