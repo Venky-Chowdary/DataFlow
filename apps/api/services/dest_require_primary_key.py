@@ -335,13 +335,18 @@ def surrogate_key_column_sql(server_version: str = "") -> str:
     )
 
 
+class PrimaryKeyRequirementUnreadable(RuntimeError):
+    """The writer could not read whether its server forces a PRIMARY KEY."""
+
+
 def server_forces_primary_key_on(cursor: Any) -> tuple[bool, str]:
     """``(forced, server_version)`` read on the writer's own connection.
 
     The writer asks at CREATE time with the cursor it creates on, so it obeys
     exactly the session the CREATE runs in. A variable this server does not
-    have is not a requirement; any other failure reads as not forced (the
-    CREATE then reports the server's own answer).
+    have (MySQL / MariaDB 1193) is not a requirement. Any other failure to
+    read it is not an answer: it raises :class:`PrimaryKeyRequirementUnreadable`,
+    never "not forced".
     """
     version = ""
     try:
@@ -354,8 +359,14 @@ def server_forces_primary_key_on(cursor: Any) -> tuple[bool, str]:
         try:
             cursor.execute(f"SELECT @@{variable}")
             row = cursor.fetchone()
-        except Exception:  # noqa: BLE001 — 1193: this server has no such variable
-            continue
+        except Exception as exc:  # noqa: BLE001 — sorted below by the server's code
+            if _mysql_errno(exc) != _ER_UNKNOWN_SYSTEM_VARIABLE:
+                raise PrimaryKeyRequirementUnreadable(
+                    f"Could not read {variable} on the destination "
+                    f"({_mysql_errno(exc) or type(exc).__name__}), so whether it forces a "
+                    "PRIMARY KEY is unknown; nothing was created."
+                ) from exc
+            row = None  # 1193: this server has no such variable
         value = (row[0] if not isinstance(row, dict) else next(iter(row.values()))) if row else None
         if value is not None and str(value).strip().upper() in {"1", "ON", "TRUE"}:
             return True, version
