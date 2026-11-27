@@ -82,11 +82,30 @@ def test_gate8_does_not_name_a_partial_resumed_draw_uniform():
     assert out["sample_seed"]["population_rows"] == 1_000_000
 
 
-def test_shown_checkpoint_masks_the_draw_rows(monkeypatch):
-    """The draw's rows are source values: shown like reconcile_sample is."""
-    from src.transfer import models
+def test_shown_checkpoint_masks_the_draw_rows_and_hides_the_seed():
+    """Review 2 item 8: the persisted draw rows are masked like any sample the
+    product shows, and the seed (it fixes every later sampled position) is not
+    in the operator view while the job can still draw."""
+    from src.transfer.models import sanitize_job_for_api
 
-    monkeypatch.setattr(models, "_shown_wire_sample", lambda rows: [{"masked": len(rows)}])
-    job = {"checkpoint": {"reconcile_sample_draw_state": {"seed": "s", "rows": [{"id": 1, "ssn": "123"}]}}}
-    models._project_operator_quarantine(job)
-    assert job["checkpoint"]["reconcile_sample_draw_state"]["rows"] == [{"masked": 1}]
+    rows = [{"id": 1, "ssn": "123-45-6789", "note": "call 555-867-5309"}]
+    job = {
+        "status": "running",
+        "checkpoint": {
+            "reconcile_sample": [dict(rows[0])],
+            "reconcile_sample_draw_state": {"seed": "s3cr3t", "method": "uniform_random", "rows": rows},
+        },
+        "destination_summary": {
+            "reconcile_sample": [dict(rows[0])],
+            "reconcile_sample_draw": {"seed": "s3cr3t", "method": "uniform_random"},
+        },
+    }
+    shown = sanitize_job_for_api(job)
+    text = str(shown)
+    assert "123-45-6789" not in text and "555-867-5309" not in text
+    assert "s3cr3t" not in text
+    assert shown["checkpoint"]["reconcile_sample_draw_state"]["method"] == "uniform_random"
+    # A finished run's report keeps the seed (the draw is recorded for audit).
+    done = sanitize_job_for_api({**job, "status": "completed"})
+    assert done["destination_summary"]["reconcile_sample_draw"]["seed"] == "s3cr3t"
+    assert "s3cr3t" not in str(done["checkpoint"])
