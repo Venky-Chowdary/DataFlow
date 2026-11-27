@@ -218,6 +218,10 @@ def _sf_show_tables(like: str, schema_ref: str) -> str:
     return f"SHOW TABLES LIKE '{like}' IN SCHEMA {schema_ref}"
 
 
+def _sf_count(ref: str) -> str:
+    return f"SELECT COUNT(*) FROM {ref}"  # nosec B608 - quoted ids
+
+
 def _sf_truncate(ref: str) -> str:
     return f"TRUNCATE TABLE {ref}"
 
@@ -331,6 +335,27 @@ class _Snowflake:
         return "transient" if "TRANSIENT" in kind else "permanent"
 
     @staticmethod
+    def _drop_clone(cur: Any, bak_ref: str, backup: str) -> None:
+        try:
+            cur.execute(_sf_drop(bak_ref))
+        except Exception:  # noqa: BLE001 - report the first failure
+            logger.warning("Could not drop backup clone %s", backup, exc_info=True)
+
+    @staticmethod
+    def _same_rows(cur: Any, live_ref: str, bak_ref: str) -> bool:
+        """True when the live table still has exactly the clone's row count."""
+        try:
+            counts = []
+            for ref in (live_ref, bak_ref):
+                cur.execute(_sf_count(ref))
+                row = cur.fetchone()
+                counts.append(int(row[0]) if row else -1)
+        except Exception as exc:  # noqa: BLE001 - unknown means keep both
+            logger.warning("Row counts after a failed TRUNCATE unread: %s", exc)
+            return False
+        return counts[0] == counts[1] and counts[0] >= 0
+
+    @staticmethod
     def _emulator(conn: Any, cfg: dict[str, Any] | None = None) -> bool:
         """fakesnow: by its connection class, or a local account in the config."""
         from connectors.snowflake_conn import _is_local_account, normalize_account
@@ -389,15 +414,21 @@ class _Snowflake:
                         target=self._governance(cur, bak_ref, cfg, emulator=emulator),
                         target_ref=bak_ref, skip_unreadable=approved,
                     )
-                    cur.execute(_sf_truncate(live_ref))
                 except Exception:
                     # Nothing was emptied: drop the clone so the next run is
                     # not refused for a backup next to a live table.
-                    try:
-                        cur.execute(_sf_drop(bak_ref))
-                    except Exception:  # noqa: BLE001 - report the first failure
-                        logger.warning("Could not drop backup clone %s", backup, exc_info=True)
+                    self._drop_clone(cur, bak_ref, backup)
                     raise
+                try:
+                    cur.execute(_sf_truncate(live_ref))
+                except Exception as exc:
+                    # A TRUNCATE that errored may still have emptied the table
+                    # (a lost reply, a timeout after commit): drop the clone
+                    # only when the live table provably still holds its rows.
+                    if self._same_rows(cur, live_ref, bak_ref):
+                        self._drop_clone(cur, bak_ref, backup)
+                        raise
+                    raise TableDropError(live, f"{exc}. {_sf_recovery(live_ref, bak_ref)}") from exc
             return backup
         finally:
             _close_quietly(conn)

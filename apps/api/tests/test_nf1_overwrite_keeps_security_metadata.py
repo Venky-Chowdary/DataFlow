@@ -198,7 +198,8 @@ class _ScriptedCursor:
     """A Snowflake cursor that answers the governance reads from a script."""
 
     def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset(),
-                 kind: str = "TABLE"):
+                 kind: str = "TABLE", counts: dict[str, int] | None = None):
+        self.counts = counts or {}
         self.governance = governance
         self.refuse = refuse
         self.kind = kind
@@ -226,6 +227,8 @@ class _ScriptedCursor:
             self._answer(gov.get("column_tags", []))
         elif "TAG_REFERENCES(" in sql:
             self._answer(gov.get("table_tags", []))
+        elif sql.startswith("SELECT COUNT(*)"):
+            self.description, self._rows = [("N",)], [(self.counts.get(target, 0),)]
         elif sql.startswith("SHOW TABLES LIKE"):
             self._answer([{"name": "T", "kind": self.kind}])
         else:
@@ -892,3 +895,39 @@ def test_snowflake_kind_reads_the_folded_schema(schema, table, expected_schema, 
     assert _Snowflake._kind(cur, schema, table) == "transient"
     assert cur.sql.endswith(f"IN SCHEMA {expected_schema}")
     assert f"LIKE '{stored}'" in cur.sql
+
+
+
+# ------------------------------------------ review 2: failed TRUNCATE (N5)
+
+
+def test_snowflake_failed_truncate_that_emptied_the_table_keeps_the_clone(monkeypatch):
+    """A TRUNCATE that errors may still have run: the clone is the only copy then."""
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE"}, counts={"LIVE": 0, "BAK": 3})
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert not any(s.startswith("DROP") for s in cur.executed)
+    assert 'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"' in str(info.value)
+
+
+def test_snowflake_failed_truncate_with_rows_intact_drops_the_clone(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE"}, counts={"LIVE": 3, "BAK": 3})
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="TRUNCATE"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur)[-1] == 'DROP TABLE IF EXISTS "PUBLIC"."T__DF_BAK"'
+
+
+def test_snowflake_failed_truncate_with_unreadable_counts_keeps_both(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE", "COUNT(*)"})
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert not any(s.startswith("DROP") for s in cur.executed)
