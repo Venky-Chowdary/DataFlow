@@ -155,8 +155,8 @@ export function isValidTimeZone(timeZone: string): boolean {
 }
 
 export type NextRunsPreview =
-  | { kind: "clock"; runs: Date[]; timeZone: string; dstChange: Date | null; source?: PreviewSource }
-  | { kind: "rolling"; everyMinutes: number; runs: Date[]; fromLastRun: boolean; source?: PreviewSource }
+  | { kind: "clock"; runs: Date[]; timeZone: string; dstChange: Date | null; source?: PreviewSource; dueNow?: boolean }
+  | { kind: "rolling"; everyMinutes: number; runs: Date[]; fromLastRun: boolean; source?: PreviewSource; dueNow?: boolean }
   | { kind: "paused" }
   | { kind: "invalid"; message: string; never?: boolean }
   | { kind: "empty" };
@@ -335,6 +335,8 @@ export interface ServerPreview {
   timezone?: string;
   every_minutes?: number;
   from_stored?: boolean;
+  /** Overdue: the beat runs it at its next check, then counts from then. */
+  due_now?: boolean;
   message?: string;
 }
 
@@ -356,7 +358,7 @@ export function withServerPreview(local: NextRunsPreview, server: ServerPreview 
   }
   const runs = server.runs.map((r) => new Date(r)).filter((d) => !Number.isNaN(d.getTime()));
   if (server.kind === "rolling") {
-    return { kind: "rolling", everyMinutes: Number(server.every_minutes || 0), runs, fromLastRun: Boolean(server.from_stored), source: "scheduler" };
+    return { kind: "rolling", everyMinutes: Number(server.every_minutes || 0), runs, fromLastRun: Boolean(server.from_stored), source: "scheduler", dueNow: Boolean(server.due_now) };
   }
   const zone = server.timezone || timeZone;
   let dstChange: Date | null = null;
@@ -366,5 +368,5 @@ export function withServerPreview(local: NextRunsPreview, server: ServerPreview 
       break;
     }
   }
-  return { kind: "clock", runs, timeZone: zone, dstChange, source: "scheduler" };
+  return { kind: "clock", runs, timeZone: zone, dstChange, source: "scheduler", dueNow: Boolean(server.due_now) };
 }

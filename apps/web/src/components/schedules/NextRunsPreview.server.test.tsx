@@ -89,3 +89,25 @@ describe("NextRunsPreview asks the scheduler", () => {
     await act(async () => root.unmount());
   });
 });
+
+describe("NextRunsPreview says where its times come from (review 8)", () => {
+  it("labels browser times while the scheduler is asked, then the scheduler's", async () => {
+    answer = { kind: "clock", timezone: "UTC", runs: ["2026-11-22T01:30:00+00:00", "2026-11-23T01:30:00+00:00", "2026-11-24T01:30:00+00:00", "2026-11-25T01:30:00+00:00", "2026-11-26T01:30:00+00:00"] };
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => root.render(createElement(NextRunsPreview, { mode: "cron", preset: "daily", cron: "30 1 * * *", timeZone: "UTC", now })));
+    assert.equal(host.querySelector(".df2-next-runs-source")?.getAttribute("data-source"), "browser");
+    assert.match(host.textContent || "", /Worked out in this browser while the scheduler is asked/);
+    await act(async () => { await new Promise((r) => setTimeout(r, PREVIEW_DEBOUNCE_MS + 40)); });
+    assert.equal(host.querySelector(".df2-next-runs-source")?.getAttribute("data-source"), "scheduler");
+    await act(async () => root.unmount());
+  });
+
+  it("an overdue schedule's first run reads Due now, as the beat will run it", async () => {
+    answer = { kind: "rolling", every_minutes: 60, from_stored: true, due_now: true, runs: ["2026-11-21T10:00:00+00:00", "2026-11-21T11:00:00+00:00", "2026-11-21T12:00:00+00:00", "2026-11-21T13:00:00+00:00", "2026-11-21T14:00:00+00:00"] };
+    const { host, root } = await mount({ mode: "preset", preset: "hourly", timeZone: "UTC", storedNextRunAt: "2026-11-21T07:20:00Z" });
+    assert.match(host.querySelector("li")?.textContent || "", /^Due now/);
+    await act(async () => root.unmount());
+  });
+});

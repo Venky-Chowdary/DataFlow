@@ -775,6 +775,32 @@ def preview_next_runs(
         return {"kind": "paused", "runs": []}
     interval, cron = canonicalize_cadence(interval, cron)
     cron = (cron or "").strip()
+    stored = _parse_ts(stored_next_run_at) if stored_next_run_at and not cadence_changed else None
+    if stored is not None and stored.tzinfo is None:
+        stored = stored.replace(tzinfo=timezone.utc)
+    if stored is not None and stored <= current:
+        # Overdue: the beat runs it on its next check and then computes the
+        # following slot from that moment (claim_due_schedules), not from the
+        # stored slot. The preview says the same.
+        try:
+            resolve_timezone(tz or "UTC")
+            if cron:
+                validate_cron(cron)
+            elif rolling_minutes(interval) is None and interval not in INTERVALS:
+                return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
+            runs = [current]
+            for _ in range(count - 1):
+                runs.append(_parse_ts(compute_next_run(interval, runs[-1], cron=cron, tz=tz or "UTC")))
+        except CronError as exc:
+            return {"kind": "invalid", "message": str(exc), "runs": []}
+        out: dict[str, Any] = {"kind": "clock" if cron else "rolling", "due_now": True,
+                               "runs": [r.isoformat() for r in runs]}
+        if cron:
+            out["timezone"] = tz or "UTC"
+        else:
+            out["every_minutes"] = int(interval_delta(interval).total_seconds() // 60)
+            out["from_stored"] = True
+        return out
     try:
         resolve_timezone(tz or "UTC")
         if cron:
@@ -793,12 +819,7 @@ def preview_next_runs(
     if rolling_minutes(interval) is None and interval not in INTERVALS:
         return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
     delta = interval_delta(interval)
-    stored = _parse_ts(stored_next_run_at) if stored_next_run_at and not cadence_changed else None
-    if stored is not None and stored.tzinfo is None:
-        stored = stored.replace(tzinfo=timezone.utc)
     first = stored if stored is not None else current + delta
-    while first <= current:
-        first += delta
     return {
         "kind": "rolling",
         "every_minutes": int(delta.total_seconds() // 60),

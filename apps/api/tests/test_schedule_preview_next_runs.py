@@ -73,3 +73,15 @@ def test_the_preview_is_fast_even_for_rare_dates_and_runs_off_the_event_loop():
         assert time.perf_counter() - start < 0.5, zone
     refused = preview_next_runs("daily", "0 0 31 2 *", "UTC", count=10, now=NOW)
     assert refused["kind"] == "invalid" and "can never fire" in refused["message"]
+
+
+def test_an_overdue_rolling_cadence_runs_now_then_counts_from_now_like_the_beat():
+    """Review: the beat fires an overdue schedule at its next check, then next = now + delta."""
+    out = preview_next_runs("hourly", "", "UTC", stored_next_run_at="2026-11-21T07:20:00+00:00",
+                            cadence_changed=False, now=NOW)
+    assert out["due_now"] is True
+    assert out["runs"][:3] == [NOW.isoformat(), "2026-11-21T11:00:00+00:00", "2026-11-21T12:00:00+00:00"]
+    assert out["runs"][1] == compute_next_run("hourly", NOW)  # what claim_due_schedules stores
+    cron = preview_next_runs("daily", "0 9 * * *", "UTC", stored_next_run_at="2026-11-20T09:00:00+00:00",
+                             cadence_changed=False, now=NOW)
+    assert cron["due_now"] is True and cron["runs"][1] == "2026-11-22T09:00:00+00:00"

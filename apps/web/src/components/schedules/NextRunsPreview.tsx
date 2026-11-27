@@ -121,9 +121,18 @@ export function NextRunsPreview({
       )}
       {(preview.kind === "clock" || preview.kind === "rolling") && (
         <ol className="df2-next-runs-list">
-          {preview.runs.map((at) => {
+          {preview.runs.map((at, index) => {
             const there = formatRunTime(at, zone);
             const here = showLocal ? formatRunTime(at, viewer) : there;
+            if (index === 0 && preview.dueNow) {
+              // Overdue: the beat runs it at its next check, then counts from then.
+              return (
+                <li key={at.getTime()}>
+                  <time dateTime={at.toISOString()}>Due now</time>
+                  <span className="df2-next-runs-local">runs at the scheduler's next check</span>
+                </li>
+              );
+            }
             return (
               <li key={at.getTime()}>
                 <time dateTime={at.toISOString()}>{there}</time>
@@ -133,8 +142,14 @@ export function NextRunsPreview({
           })}
         </ol>
       )}
-      {unconfirmed && (
-        <p className="df2-next-runs-note">Worked out in this browser: the scheduler could not be reached to confirm these times.</p>
+      {(preview.kind === "clock" || preview.kind === "rolling") && (
+        <p className="df2-next-runs-source" data-source={preview.source ?? "browser"}>
+          {unconfirmed
+            ? "Worked out in this browser: the scheduler could not be reached to confirm these times."
+            : preview.source === "scheduler"
+              ? "Times from the scheduler."
+              : "Worked out in this browser while the scheduler is asked…"}
+        </p>
       )}
       {preview.kind === "clock" && preview.dstChange && (
         <p className="df2-next-runs-note">
