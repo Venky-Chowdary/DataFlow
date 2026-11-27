@@ -894,6 +894,21 @@ def _engine_format(info: dict[str, Any]) -> str:
     return fmt or str(info.get("db_type") or "")
 
 
+def _with_dest_location(conn: dict[str, Any], schema: str, database: str) -> dict[str, Any]:
+    """``conn`` aimed at an explicit destination schema / database (empty = its own)."""
+    from services.dialect_profiles import schema_from_cfg
+
+    out = dict(conn)
+    if str(schema or "").strip():
+        kind = str(conn.get("type") or conn.get("format") or "")
+        folded = schema_from_cfg(kind, None, schema=str(schema).strip())
+        if folded:
+            out["schema"] = folded
+    if str(database or "").strip():
+        out["database"] = str(database).strip()
+    return out
+
+
 def _share_catalog_reads(fn):
     """Run a read-only planning tool with one catalog read per object (D145)
     and one Snowflake login per endpoint (D187)."""
@@ -912,21 +927,6 @@ def _share_catalog_reads(fn):
 
 
 @_share_catalog_reads
-def _with_dest_location(conn: dict[str, Any], schema: str, database: str) -> dict[str, Any]:
-    """``conn`` aimed at an explicit destination schema / database (empty = its own)."""
-    from services.dialect_profiles import schema_from_cfg
-
-    out = dict(conn)
-    if str(schema or "").strip():
-        kind = str(conn.get("type") or conn.get("format") or "")
-        folded = schema_from_cfg(kind, None, schema=str(schema).strip())
-        if folded:
-            out["schema"] = folded
-    if str(database or "").strip():
-        out["database"] = str(database).strip()
-    return out
-
-
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
