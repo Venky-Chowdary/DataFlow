@@ -140,7 +140,16 @@ def _stamp_is_key_blind(merged: dict[str, Any]) -> bool:
 
 
 def drop_key_blind_stamp_on_edit(before: dict[str, Any], merged: dict[str, Any]) -> str:
-    """Drop a key-blind stamp when this edit touches what it was taken over; the note, or ''."""
+    """Drop a key-blind stamp when this edit touches what it was taken over; the note, or ''.
+
+    Only the stamp the schedule already held: a different stamp this edit
+    brings (a re-Validate) is judged on its own, and has no key record.
+    """
+    def _stamp(doc: dict[str, Any]) -> str:
+        return str(doc.get("approved_decision_artifact_hash") or "").strip().lower()
+
+    if not _stamp(merged) or _stamp(merged) != _stamp(before):
+        return ""
     if not any(merged.get(key) != before.get(key) for key in _DECISION_FIELDS):
         return ""
     if not _stamp_is_key_blind(merged):
