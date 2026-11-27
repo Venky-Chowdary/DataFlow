@@ -525,8 +525,11 @@ def create_connector(
     # another collection, which saved what the store had refused.
     try:
         saved = fs_create(connector_data)
-    except (ConnectorRefused, ConnectorStoreError):
+    except ConnectorRefused:
         raise
+    except ConnectorStoreError as exc:
+        # Credential-masked by the store; the same 503 the app handler gives.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as e:
