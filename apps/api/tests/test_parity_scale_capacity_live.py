@@ -55,6 +55,29 @@ def test_the_queue_is_bounded(monkeypatch) -> None:
         capacity.admit("one-too-many", "ws", keep_alive=lambda: None, on_position=lambda n: None)
 
 
+def test_a_slot_is_given_back_when_the_running_mark_fails(monkeypatch) -> None:
+    """Review 3, item 4: admitted, then the lease was taken over while marking the table
+    running: the slot leaked (the process ran one scan fewer for good)."""
+    from services.parity_scale import capacity, lease, verification
+
+    monkeypatch.setattr(lease, "release", lambda *a, **k: None)
+    monkeypatch.setattr(lease, "renew", lambda *a, **k: None)
+    ran = []
+
+    def mark(job_id, name, token, **fields):
+        if fields.get("status") == verification.RUNNING:
+            raise lease.LeaseLost("taken over")
+
+    monkeypatch.setattr(verification, "_update_table", mark)
+    monkeypatch.setattr(verification, "_run", lambda *a, **k: ran.append(1))
+    verification._run_guarded("job-leak", {"name": "t"}, "scan", None, False, "tok", "ws1")
+    assert ran == []
+    assert capacity.snapshot() == {"running": {}, "queued": []}
+    # The workspace's one slot is free for the next verification.
+    capacity.admit("next", "ws1", keep_alive=lambda: None, on_position=lambda n: None, beat_seconds=0.01)
+    assert capacity.snapshot()["running"] == {"next": "ws1"}
+
+
 @live
 def test_a_queued_verification_reads_queued_with_its_place(tables, monkeypatch) -> None:
     from services.parity_scale import capacity, verification

@@ -578,7 +578,12 @@ def _wait_for_capacity(job_id: str, name: str, token: str, workspace_id: str) ->
         on_position=lambda n: _update_table(job_id, name, token, status=QUEUED, queue_position=n),
         beat_seconds=max(0.1, float(lease.LEASE_TTL_S) / 5.0),
     )
-    _update_table(job_id, name, token, status=RUNNING, queue_position=None, started_at=_now())
+    try:
+        _update_table(job_id, name, token, status=RUNNING, queue_position=None, started_at=_now())
+    except BaseException:
+        # Admitted but never marked running (the lease was taken over): the slot is given back here.
+        capacity.done(job_id)
+        raise
 
 
 def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: bool,
