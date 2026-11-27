@@ -293,7 +293,16 @@ def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
             "so both copies of a repeated key would be written. Name dedupe_key, "
             "or remove keep_last."
         )
-    collapsed, _dropped = collapse_keep_last(list(records), keys)
+    from services.dedupe_equality import collapse_for_destination
+
+    source = getattr(request, "source", None)
+    dest = getattr(request, "destination", None)
+    # D402: collapse under the key equality the destination will hold.
+    collapsed = collapse_for_destination(
+        list(records), keys, destination=dest, mappings=getattr(request, "mappings", None),
+        extras=(dict(getattr(source, "extra", None) or {}), dict(getattr(dest, "extra", None) or {})),
+        created_key=_keys_are_contract_key(keys, contract),
+    )
     repeated = duplicate_keys_remaining(collapsed, keys)
     if repeated:
         shown = ", ".join(str(item) for item in repeated[:3])
@@ -317,16 +326,21 @@ def declared_dedupe_columns(*extras: Any) -> list[str]:
 
 
 def keep_last_key_columns(request: Any, contract: Any = None) -> list[str]:
-    """Columns keep_last collapses on: the contract key, else the declared dedupe key."""
-    keys = list(contract.primary_key_columns()) if contract is not None and hasattr(contract, "primary_key_columns") else []
-    if keys:
-        return keys
+    """Columns keep_last collapses on: the declared dedupe key, else the contract key.
+
+    The operator's dedupe_key is the explicit ask. A stored contract key can be
+    older (a schedule whose dedupe_key was edited after it was planned, D402).
+    """
     source = getattr(request, "source", None)
     dest = getattr(request, "destination", None)
-    return declared_dedupe_columns(
+    declared = declared_dedupe_columns(
         dict(getattr(source, "extra", None) or {}),
         dict(getattr(dest, "extra", None) or {}),
     )
+    if declared:
+        return declared
+    has_key = contract is not None and hasattr(contract, "primary_key_columns")
+    return list(contract.primary_key_columns()) if has_key else []
 
 
 def duplicate_keys_remaining(rows: list[dict], key_columns: list[str]) -> list[tuple]:
@@ -386,6 +400,116 @@ def schedule_keep_last_refusal(payload: Any) -> str:
     return keep_last_table_refusal(
         str(data.get("sync_mode") or "full_refresh_overwrite"),
         stream_contracts=contracts, source_type=src_type, stream_name=table,
+    )
+
+
+def _dedupe_key_text(raw: Any) -> str:
+    if isinstance(raw, (list, tuple)):
+        raw = ",".join(str(part) for part in raw)
+    parts = [p.strip() for p in str(raw or "").replace(";", ",").split(",") if p.strip()]
+    return ",".join(parts)
+
+
+def schedule_dedupe_key_refusal(payload: Any) -> str:
+    """Why a schedule's stored dedupe options disagree with its run, or "" (D402).
+
+    keep_last needs a key to collapse on (the dedupe key, the schedule key or
+    a stream contract key): without one every beat failed "no dedupe key
+    declared". A dedupe key on an overwrite or append with ``block`` is the
+    D402 false pass: the key was accepted and both copies were written.
+    """
+    data = dict(payload or {})
+    dedupe = str(data.get("in_file_dedupe") or "block").strip().lower().replace("-", "_")
+    key = _dedupe_key_text(data.get("dedupe_key"))
+    contract_key = any(
+        isinstance(c, dict) and str(c.get("primary_key") or "").strip()
+        for c in data.get("stream_contracts") or []
+    )
+    if dedupe == "keep_last" and not (key or str(data.get("primary_key") or "").strip() or contract_key):
+        return (
+            "in_file_dedupe=keep_last needs the key it keeps the last row of. "
+            "Set dedupe_key (or a primary key), or use in_file_dedupe=block."
+        )
+    from services.sync_cursor import normalize_sync_mode
+
+    mode = normalize_sync_mode(str(data.get("sync_mode") or ""), default="")
+    if key and dedupe != "keep_last" and mode in {
+        "full_refresh_overwrite", "overwrite", "full_refresh_append", "append",
+    }:
+        return (
+            f"dedupe_key {key!r} with in_file_dedupe=block would write both copies of a "
+            f"repeated key on {mode}. Set in_file_dedupe=keep_last (the last row of each "
+            "key is written, and the plan says so), or clear dedupe_key."
+        )
+    return ""
+
+
+def follow_dedupe_key_edit(
+    contracts: Any, old_key: Any, new_key: Any, *, primary_key: Any = ""
+) -> tuple[list[dict], str]:
+    """Stream contracts (and a schedule key) that were the dedupe key follow its edit.
+
+    The plan binds ``dedupe_key`` as the stream's key too, and an upsert
+    schedule's key is that same dedupe key. Editing the dedupe key alone left
+    the stale contract key deciding the collapse and the identity gate, or
+    moved the contract key while the upsert key stayed (D402). Both move
+    together; a key that was not the dedupe key stays. Returns the contracts
+    and the schedule's primary key.
+    """
+    old, new = _dedupe_key_text(old_key), _dedupe_key_text(new_key)
+    pk = str(primary_key or "")
+    if old and _dedupe_key_text(pk) == old:
+        pk = new
+    out: list[dict] = []
+    for raw in contracts or []:
+        row = dict(raw) if isinstance(raw, dict) else raw
+        if old and isinstance(row, dict) and _dedupe_key_text(row.get("primary_key")) == old:
+            listed = isinstance(row.get("primary_key"), (list, tuple))
+            row["primary_key"] = new.split(",") if listed and new else new
+        out.append(row)
+    return out, pk
+
+
+def schedule_dedupe_from_plan(
+    plan: dict[str, Any], *, in_file_dedupe: str, dedupe_key: str, primary_key: str
+) -> dict[str, str]:
+    """The dedupe fields a schedule stores so each run does what its plan said (D402).
+
+    The one-off plan turns ``dedupe_key`` on a file overwrite into keep_last on
+    that key. A schedule saved ``block`` and the key as its upsert identity, so
+    every run refused the file the plan had accepted. ``in_file_dedupe`` empty
+    follows the plan; an explicit ``block`` against a keep_last plan is refused.
+    """
+    asked = str(in_file_dedupe or "").strip().lower().replace("-", "_")
+    key = _dedupe_key_text(plan.get("dedupe_key") or dedupe_key)
+    if plan.get("in_file_dedupe") == "keep_last":
+        if asked == "block":
+            raise DuplicatePolicyError(
+                f"dedupe_key {key!r} asks for the last row of each key "
+                "(in_file_dedupe=keep_last); in_file_dedupe=block refuses that file. "
+                "Remove one of the two."
+            )
+        # The key names copies to drop, not an identity to upsert on: an
+        # explicit primary key stays, a key the plan took from dedupe_key does not.
+        return {"in_file_dedupe": "keep_last", "dedupe_key": key, "primary_key": str(primary_key or "")}
+    identity = str((plan.get("data_rules") or {}).get("upsert_key") or primary_key or "")
+    key = _dedupe_key_text(dedupe_key)
+    if key and not asked and _keyed_file_plan(plan):
+        # A one-off upsert collapses a file's repeated keys on that key, last row
+        # wins. A schedule stamps block or keep_last on every beat, so it stores
+        # keep_last on the same key: the beat does what the one-off did.
+        return {"in_file_dedupe": "keep_last", "dedupe_key": key, "primary_key": identity or key}
+    return {"in_file_dedupe": asked or "block", "dedupe_key": key, "primary_key": identity}
+
+
+def _keyed_file_plan(plan: dict[str, Any]) -> bool:
+    from services.preflight_source_kind import source_is_record_batch
+    from services.sync_cursor import normalize_sync_mode
+
+    source = plan.get("source") or {}
+    mode = normalize_sync_mode(str(plan.get("sync_mode") or ""), default="")
+    return mode in {"upsert", "incremental_deduped"} and source_is_record_batch(
+        str(source.get("kind") or "database"), str(source.get("type") or source.get("format") or "")
     )
 
 
@@ -702,8 +826,19 @@ def collapse_keep_last(
     return kept, dropped
 
 
-def iter_keep_last(batches, key_columns: list[str]):
-    """Collapse one file to last-wins, then yield it in the original chunk sizes."""
+def _keys_are_contract_key(keys: list[str], contract: Any) -> bool:
+    has_key = contract is not None and hasattr(contract, "primary_key_columns")
+    declared = [str(c).lower() for c in (contract.primary_key_columns() if has_key else [])]
+    return bool(declared) and declared == [str(k).lower() for k in keys]
+
+
+def iter_keep_last(batches, key_columns: list[str], *, destination: Any = None,
+                   mappings: Any = None, extras: tuple = (), created_key: bool = False):
+    """Collapse one file to last-wins, then yield it in the original chunk sizes.
+
+    With ``destination`` the collapse follows the destination's key equality
+    (``services.dedupe_equality``); an ambiguous file is refused before any write.
+    """
     rows: list[dict] = []
     width = 0
     for batch in batches:
@@ -711,7 +846,15 @@ def iter_keep_last(batches, key_columns: list[str]):
         if chunk and width == 0:
             width = len(chunk)
         rows.extend(chunk)
-    collapsed, _dropped = collapse_keep_last(rows, key_columns)
+    if destination is not None:
+        from services.dedupe_equality import collapse_for_destination
+
+        collapsed = collapse_for_destination(
+            rows, key_columns, destination=destination, mappings=mappings,
+            extras=extras, created_key=created_key,
+        )
+    else:
+        collapsed, _dropped = collapse_keep_last(rows, key_columns)
     step = width or 1000
     for start in range(0, len(collapsed), step):
         yield collapsed[start : start + step]

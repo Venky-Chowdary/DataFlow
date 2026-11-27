@@ -1231,6 +1231,7 @@ def fingerprint_parsed_file(
     duplicate_policy: str = "",
     workspace_id: str = "",
     keep_last_key: list[str] | None = None,
+    destination: Any = None,
 ) -> tuple[FingerprintAccumulator, int]:
     """Second parse of a file the writer already consumed.
 
@@ -1246,7 +1247,15 @@ def fingerprint_parsed_file(
         # The write collapsed in-file copies to the last per key; so does the re-read.
         from services.duplicate_policy import iter_keep_last
 
-        full_iter = iter_keep_last(full_iter, list(keep_last_key))
+        from services.dedupe_equality import DESTINATION, equality_choice
+
+        # Under dedupe_key_equality=destination the re-read merges the same keys (D402).
+        route = dict(getattr(destination, "extra", None) or dest_extra or {})
+        merged = equality_choice(route) == DESTINATION
+        full_iter = iter_keep_last(
+            full_iter, list(keep_last_key), destination=destination if merged else None,
+            mappings=mappings, extras=(route,),
+        )
     if incremental and cursor_source_col:
         from services.sync_cursor import cursor_value_coercer, records_after_watermark
 
@@ -2220,19 +2229,26 @@ def stream_file_to_database(
     if in_file_dedupe == "keep_last":
         from services.duplicate_policy import declared_dedupe_columns, iter_keep_last
 
-        keep_last_key = list(contract.primary_key_columns()) if contract else []
-        if not keep_last_key:
-            keep_last_key = declared_dedupe_columns(
-                dict(getattr(destination, "extra", None) or {}),
-                dict(dest_cfg or {}),
-            )
+        # The operator's dedupe_key first, as keep_last_key_columns (D402).
+        keep_last_key = declared_dedupe_columns(
+            dict(getattr(destination, "extra", None) or {}),
+            dict(dest_cfg or {}),
+        ) or (list(contract.primary_key_columns()) if contract else [])
         if not keep_last_key:
             raise ValueError(
                 "in_file_dedupe=keep_last was set but no dedupe key is declared, "
                 "so both copies of a repeated key would be written. Name dedupe_key, "
                 "or remove keep_last."
             )
-        batch_iter = iter_keep_last(batch_iter, keep_last_key)
+        from services.duplicate_policy import _keys_are_contract_key
+
+        # Collapsed now, before the table is touched: an ambiguous file under
+        # the destination's key equality is refused with nothing written (D402).
+        batch_iter = iter(list(iter_keep_last(
+            batch_iter, keep_last_key, destination=destination, mappings=mappings,
+            extras=(dict(getattr(destination, "extra", None) or {}),),
+            created_key=_keys_are_contract_key(keep_last_key, contract),
+        )))
         dest_summary["in_file_dedupe"] = "keep_last"
 
     if incremental and cursor_source_col:
@@ -3337,6 +3353,7 @@ def stream_file_to_database(
                 duplicate_policy=decision.policy,
                 workspace_id=getattr(shape_runner, "workspace_id", ""),
                 keep_last_key=keep_last_key,
+                destination=destination,
             )
         except Exception:
             if partial_write_pass:

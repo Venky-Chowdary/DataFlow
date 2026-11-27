@@ -966,6 +966,7 @@ def plan_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    dedupe_key_equality: str = "",
     transform_recipe_id: str = "",
     transform_recipe_version: int = 0,
     transform_recipe_version_mode: str = "pin",
@@ -1577,10 +1578,17 @@ def plan_transfer(
             multi = multi_stream_keep_last_refusal(_engine_format(src_info), contracts)
             if multi:
                 return _tool_result(tool, success=False, error=multi)
+            from services.dedupe_equality import CHOICE_KEY, DESTINATION, EXACT
+
+            equality = str(dedupe_key_equality or "").strip().lower()
+            if equality not in {"", EXACT, DESTINATION}:
+                return _tool_result(tool, success=False, error=(
+                    f"Unknown dedupe_key_equality {dedupe_key_equality!r}. Use exact or destination."))
             source_config = {
                 **source_config,
                 "in_file_dedupe": "keep_last",
                 "dedupe_key": dedupe_named,
+                **({CHOICE_KEY: equality} if equality else {}),
             }
         elif str(dedupe_key or "").strip():
             from services.preflight_source_kind import dedupe_key_unhonoured_reason
@@ -1769,6 +1777,11 @@ def plan_transfer(
                 {
                     "in_file_dedupe": "keep_last",
                     "dedupe_key": str(dedupe_key or "").strip(),
+                    **(
+                        {"dedupe_key_equality": str(dedupe_key_equality).strip().lower()}
+                        if str(dedupe_key_equality or "").strip()
+                        else {}
+                    ),
                     "in_file_dedupe_note": (
                         "Overwrite keeps the last row of each "
                         f"{str(dedupe_key or '').strip()}. "
@@ -3067,6 +3080,7 @@ def start_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    dedupe_key_equality: str = "",
     transform_recipe_id: str = "",
     transform_recipe_version: int = 0,
     transform_recipe_version_mode: str = "pin",
@@ -3110,6 +3124,7 @@ def start_transfer(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        dedupe_key_equality=dedupe_key_equality,
         transform_recipe_id=transform_recipe_id,
         transform_recipe_version=transform_recipe_version,
         transform_recipe_version_mode=transform_recipe_version_mode,
@@ -3280,6 +3295,8 @@ def start_transfer(
             extra["in_file_dedupe"] = "keep_last"
             if str(plan.get("dedupe_key") or "").strip():
                 extra["dedupe_key"] = str(plan.get("dedupe_key") or "").strip()
+            if plan.get("dedupe_key_equality"):
+                extra["dedupe_key_equality"] = str(plan["dedupe_key_equality"])
             payload[side]["extra"] = extra
     pii_ack = _pii_acknowledgement(pii_acknowledgement)
     if pii_ack:

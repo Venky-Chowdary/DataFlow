@@ -338,6 +338,12 @@ class PipelineSchedule:
     #: In-file duplicate keys: ``block`` refuses the load, ``keep_last``
     #: writes the last row for each key.
     in_file_dedupe: str = "block"
+    #: The key keep_last keeps the last row of (comma-separated), as the
+    #: one-off plan's ``dedupe_key``. Not an upsert identity (D402).
+    dedupe_key: str = ""
+    #: ``exact`` | ``destination`` | "" — the key equality the dedupe collapses
+    #: under when spellings differ only to the destination (services.dedupe_equality).
+    dedupe_key_equality: str = ""
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     #: When the stored acknowledgement was given (ISO-8601 UTC); empty when
@@ -514,6 +520,15 @@ class PipelineSchedule:
                 in {"keep_last", "last", "last_wins"}
                 else "block"
             ),
+            dedupe_key=",".join(
+                p.strip() for p in str(data.get("dedupe_key") or "").replace(";", ",").split(",")
+                if p.strip()
+            ),
+            dedupe_key_equality=(
+                str(data.get("dedupe_key_equality") or "").strip().lower()
+                if str(data.get("dedupe_key_equality") or "").strip().lower() in {"exact", "destination"}
+                else ""
+            ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
             acknowledgment_at=str(data.get("acknowledgment_at") or ""),
@@ -615,10 +630,15 @@ def uneven_minute_step(cron: str) -> int | None:
 
 
 def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
-    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3)."""
-    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3),
+    and of the plan's dedupe_key answer (D402)."""
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        schedule_dedupe_key_refusal,
+        schedule_keep_last_refusal,
+    )
 
-    refusal = schedule_keep_last_refusal(payload)
+    refusal = schedule_keep_last_refusal(payload) or schedule_dedupe_key_refusal(payload)
     if refusal:
         raise DuplicatePolicyError(refusal)
 
@@ -2167,6 +2187,19 @@ def _update_schedule_locked(
         # No edit goes on without that record.
         record_schedule(s, trusted_rows=True, strict=True)
         merged = {**s.to_dict(), **data, "id": schedule_id}
+        if "dedupe_key" in data:
+            from services.dedupe_equality import refuse_dedupe_key_edit
+
+            # The next beat must be able to write what the edit asks for (D402),
+            # whether or not the same PATCH also replaces the stream contracts.
+            refuse_dedupe_key_edit(s, data.get("dedupe_key"))
+        if "dedupe_key" in data and "stream_contracts" not in data:
+            from services.duplicate_policy import follow_dedupe_key_edit
+
+            merged["stream_contracts"], merged["primary_key"] = follow_dedupe_key_edit(
+                s.stream_contracts, s.dedupe_key, data.get("dedupe_key"),
+                primary_key=merged.get("primary_key"),
+            )
         # Pausing or renaming a schedule must work while taps are disabled; only
         # enabling it, or pointing it at other connectors, needs a usable tap.
         _assert_schedule_connectors_allowed(
@@ -2269,7 +2302,7 @@ def _update_schedule_locked(
         if persisted_mapping_rows(merged.get("mappings")):
             # "Created disabled: no mappings" is history once mappings exist.
             merged["enabled_note"] = ""
-        if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key")):
+        if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key", "dedupe_key")):
             from services.duplicate_policy import validate_schedule_file_policy
 
             policy, dedupe = validate_schedule_file_policy(
@@ -2283,7 +2316,10 @@ def _update_schedule_locked(
             _refuse_dedupe_skip_that_cannot_run(merged)
         if any(
             key in data
-            for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")
+            for key in (
+                "in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts",
+                "source_connector_id", "dedupe_key", "primary_key",
+            )
         ):
             _refuse_keep_last_that_cannot_run(merged)
         # Resume is the re-arm for a finding no signature can clear

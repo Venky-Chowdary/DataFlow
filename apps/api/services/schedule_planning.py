@@ -71,6 +71,8 @@ def plan_schedule_route(payload: dict[str, Any]) -> dict[str, Any]:
         require_signed_contract=payload.get("require_signed_contract"),
         upsert_key=key,
         primary_key=key,
+        dedupe_key=str(payload.get("dedupe_key") or ""),
+        dedupe_key_equality=str(payload.get("dedupe_key_equality") or ""),
         cursor_column=str(payload.get("cursor_column") or ""),
         cursor_semantics=str(payload.get("cursor_semantics") or ""),
         # Plan where this schedule's runs write (QA review Q5).
@@ -131,8 +133,17 @@ def plan_schedule_route(payload: dict[str, Any]) -> dict[str, Any]:
         "cursor_semantics": str(
             rules.get("cursor_semantics") or payload.get("cursor_semantics") or ""
         ).strip().lower(),
-        "primary_key": str(rules.get("upsert_key") or key or ""),
     }
+    from services.duplicate_policy import DuplicatePolicyError, schedule_dedupe_from_plan
+
+    try:
+        # D402: store the plan's dedupe answer, so each run does what the plan said.
+        out.update(schedule_dedupe_from_plan(
+            plan, in_file_dedupe=str(payload.get("in_file_dedupe") or ""),
+            dedupe_key=str(payload.get("dedupe_key") or ""), primary_key=key,
+        ))
+    except DuplicatePolicyError as exc:
+        raise SchedulePlanRefused(str(exc)) from exc
     if plan.get("shape_recipe"):
         out["shape_recipe"] = plan["shape_recipe"]
         out["approved_shape_recipe_hash"] = plan.get("approved_shape_recipe_hash") or ""

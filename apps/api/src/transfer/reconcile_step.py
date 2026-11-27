@@ -263,6 +263,9 @@ def stamp_run_proof_context(dest_summary: dict[str, Any] | None, request: Any) -
     """
     if not isinstance(dest_summary, dict) or request is None:
         return
+    from services.dedupe_postwrite import stamp_dedupe_request
+
+    stamp_dedupe_request(dest_summary, request)  # D402: Gate-8 grades the dedupe ask
     filt = getattr(request, "source_filter", None)
     if filt:
         dest_summary["source_filter"] = filt
@@ -1607,12 +1610,15 @@ def _transform_applied_proof_impl(
         sync_collapses_in_file_duplicates(sync_mode)
         or str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
     ):
+        _keep_last = str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
         _collapse_keys = [
             str(c)
             for c in (
-                scope_pk
+                (_keep_last and dest_summary.get("dedupe_key_columns"))
+                or scope_pk
                 or dest_summary.get("primary_key_columns")
                 or dest_summary.get("conflict_columns")
+                or dest_summary.get("dedupe_key_columns")
                 or []
             )
             if c
@@ -1824,11 +1830,14 @@ def _transform_applied_proof_impl(
             # here, by asking the destination, not by guessing (D391).
             from services.collation_equality import collapse_destination_equal_keys
 
-            _spill_dropped += collapse_destination_equal_keys(
-                pin_store.db,
-                dialect=dest_db_type,
-                endpoint=endpoint,
-                columns=_collapse_keys,
+            # dedupe_key_equality=exact kept both spellings on the write (D402).
+            _spill_dropped += 0 if dest_summary.get("dedupe_key_equality") == "exact" else (
+                collapse_destination_equal_keys(
+                    pin_store.db,
+                    dialect=dest_db_type,
+                    endpoint=endpoint,
+                    columns=_collapse_keys,
+                )
             )
             _collapsed_duplicates = _spill_dropped
             for (payload,) in pin_store.db.execute(
@@ -6460,6 +6469,27 @@ def _run_dedupe_gate_checks(
     return checks
 
 
+def _apply_infile_dedupe_gate(
+    stamped: dict[str, Any], ctx: dict[str, Any], dest_summary: dict[str, Any]
+) -> None:
+    """D402: a requested dedupe must leave one row per key on the destination."""
+    from services.dedupe_postwrite import apply_infile_dedupe_check, infile_dedupe_check
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or "")
+    before = dest_summary.get(PRECOUNT_KEY)
+    check = infile_dedupe_check(
+        dest_summary,
+        db_type=str(ctx.get("engine") or ""),
+        cfg=ctx.get("cfg") or {},
+        schema=str(ctx.get("schema") or ""),
+        table_name=str(ctx.get("table_name") or ""),
+        whole_table=is_overwrite_sync(sync_mode) or (isinstance(before, int) and before == 0),
+        sql_dialect=_unique_check_dialect(str(ctx.get("engine") or "")),
+    )
+    apply_infile_dedupe_check(stamped, check)
+
+
 def _dedupe_winner_ordering_check(
     entry: dict[str, Any],
     step_no: Any,
@@ -6922,6 +6952,7 @@ def _run_reconciliation_impl(
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
     dedupe_stamp_ctx: dict[str, Any] = {}
+    infile_dedupe_ctx: dict[str, Any] = {}  # D402: a requested dedupe_key / keep_last
     # G21/G22 — filled after source/dest engines resolve. Early file-export
     # returns still see mappings so a declared control total cannot skip silently.
     n5_ctx: dict[str, Any] = {
@@ -7162,6 +7193,8 @@ def _run_reconciliation_impl(
                     f"Dedupe winners unverified: check error {exc}"
                     + (f" — {_prior}" if _prior else "")
                 )
+        if infile_dedupe_ctx:
+            _apply_infile_dedupe_gate(stamped, infile_dedupe_ctx, dest_summary)
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(
@@ -7386,6 +7419,10 @@ def _run_reconciliation_impl(
         stored_object = export_object_proof(dest_summary, payload)
         if stored_object is not None:
             payload["export_object"] = stored_object
+        from services.dedupe_postwrite import apply_infile_dedupe_check, artifact_dedupe_check
+
+        # D402: the requested dedupe is checked on the file read back too.
+        apply_infile_dedupe_check(payload, artifact_dedupe_check(dest_summary, fmt=str(endpoint.format or "")))
         return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
@@ -7434,6 +7471,8 @@ def _run_reconciliation_impl(
             ),
         )
 
+    if isinstance(dest_summary, dict) and dest_summary.get("dedupe_key_targets"):
+        infile_dedupe_ctx.update(cfg=cfg, schema=schema, table_name=table_name, engine=db_type)
     if isinstance(dest_summary, dict) and dest_summary.get("shape_dedupe"):
         dedupe_stamp_ctx.update(
             cfg=cfg,
