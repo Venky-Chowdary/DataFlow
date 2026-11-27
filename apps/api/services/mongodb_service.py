@@ -1651,7 +1651,10 @@ class MongoDBService:
                 self._indexed_fields.add(path)
         query: dict[str, Any] = expected_fields_filter(dict(fields))
         if lease_expired_before is not None:
+            # A lease without expires_epoch (written before it existed) can only be judged by
+            # the caller's own re-read: listed, never skipped forever.
             query = {"$and": [query, {"$or": [{"parity_scale_lease": None},
+                                              {"parity_scale_lease.expires_epoch": {"$exists": False}},
                                               {"parity_scale_lease.expires_epoch": {"$lt": lease_expired_before}}]}]}
         cursor = coll.find(query, {"_id": 1}).sort("updated_at", 1).limit(max(1, int(limit)))
         return [str(doc["_id"]) for doc in cursor]

@@ -123,3 +123,86 @@ def test_a_schedule_or_workspace_never_raises_the_snapshot_cap(monkeypatch) -> N
     assert verification.snapshot_policy({})["max_hold_s"] == 300.0
     Tenant.verification_snapshot_max_minutes = 2
     assert verification.snapshot_policy({})["max_hold_s"] == 120.0
+
+
+class _FakeCollection:
+    """Just enough of a MongoDB collection to evaluate the sweeper's query on documents."""
+
+    _MISSING = object()
+
+    def __init__(self, docs):
+        self.docs = docs
+
+    def create_index(self, *args, **kwargs):
+        return "ok"
+
+    @classmethod
+    def _get(cls, doc, path):
+        for part in path.split("."):
+            if not isinstance(doc, dict) or part not in doc:
+                return cls._MISSING
+            doc = doc[part]
+        return doc
+
+    @classmethod
+    def _match(cls, doc, query):
+        for key, cond in query.items():
+            if key == "$and":
+                if not all(cls._match(doc, q) for q in cond):
+                    return False
+                continue
+            if key == "$or":
+                if not any(cls._match(doc, q) for q in cond):
+                    return False
+                continue
+            value = cls._get(doc, key)
+            if isinstance(cond, dict) and any(k.startswith("$") for k in cond):
+                for op, arg in cond.items():
+                    if op == "$in" and not (value in arg or (value is cls._MISSING and None in arg)):
+                        return False
+                    if op == "$exists" and (value is not cls._MISSING) != bool(arg):
+                        return False
+                    if op == "$lt" and not (value is not cls._MISSING and value is not None and value < arg):
+                        return False
+            elif cond is None:
+                if value is not cls._MISSING and value is not None:
+                    return False
+            elif value != cond:
+                return False
+        return True
+
+    def find(self, query, projection=None):
+        docs = [d for d in self.docs if self._match(d, query)]
+
+        class _Cursor(list):
+            def sort(self, *a, **k):
+                return self
+
+            def limit(self, n):
+                return _Cursor(self[:n])
+
+        return _Cursor(docs)
+
+
+def test_the_mongo_sweeper_lists_a_lease_written_without_expires_epoch(monkeypatch) -> None:
+    """Review 3, item 8: a lease from before expires_epoch never matched ``$lt``: never swept."""
+    import time
+
+    from services.mongodb_service import MongoDBService
+
+    now = time.time()
+    docs = [
+        {"_id": "old-lease", "parity_scale": {"state": "running"},
+         "parity_scale_lease": {"token": "t", "expires_at": "2026-01-01T00:00:00+00:00"}},
+        {"_id": "lapsed", "parity_scale": {"state": "running"},
+         "parity_scale_lease": {"token": "t", "expires_epoch": now - 60}},
+        {"_id": "live", "parity_scale": {"state": "running"},
+         "parity_scale_lease": {"token": "t", "expires_epoch": now + 600}},
+        {"_id": "no-lease", "parity_scale": {"state": "queued"}},
+        {"_id": "done", "parity_scale": {"state": "passed"}},
+    ]
+    service = object.__new__(MongoDBService)
+    service._indexed_fields = set()
+    monkeypatch.setattr(service, "get_database", lambda: {"transfer_jobs": _FakeCollection(docs)}, raising=False)
+    found = service.list_job_ids_where({"parity_scale.state": ("running", "queued")}, lease_expired_before=now)
+    assert sorted(found) == ["lapsed", "no-lease", "old-lease"]
