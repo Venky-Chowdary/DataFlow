@@ -80,7 +80,10 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
     keyless = evidence.get("check_kind") == CHECK_MULTISET
     ev.check = CHECK_MULTISET if keyless else CHECK_SEGMENT
     population = evidence.get("population") or {}
-    ev.rows_source = int(population.get("rows_source") or 0)
+    # Rows the write contract held out are excluded from the scan's source side: the
+    # run read them, so they count among the source rows (read = landed + held + skipped).
+    fit_excluded = int(((population.get("held_out") or {}).get("fit_excluded")) or 0)
+    ev.rows_source = int(population.get("rows_source") or 0) + fit_excluded
     ev.rows_destination = int(population.get("rows_destination") or 0)
     ev.sampled_rows = 0
     diff = evidence.get("differences") or {}
@@ -146,7 +149,7 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
     # an append, transforms): that stays explained (services.parity_scale.scope).
     from services.parity_scale.scope import merge_explained
 
-    ev.observations = merge_explained(list(ev.observations), obs)
+    ev.observations = merge_explained(list(ev.observations), obs, fit_excluded=fit_excluded, table=ev.name)
     ev.gate8_unaccounted = False
     ev.capped = False
     ev.note = ""

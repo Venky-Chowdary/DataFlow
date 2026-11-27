@@ -77,51 +77,77 @@ def _explained(obs: Any) -> bool:
     return bool(obs.cause) and obs.cause.get("explained") is True
 
 
-def merge_explained(prior: list[Any], scan: list[Any]) -> list[Any]:
-    """The scan's observations with Gate-8's explained ones kept (never double counted).
+#: Gate-8 observations of rows the run held back by design: never trimmed by a scan.
+HELD_ORIGINS = frozenset({"quarantine", "writer_policy", "recipe_effect"})
 
-    * Missing / extra rows: Gate-8's explained rows of that kind (quarantine,
-      skipped by policy, rows from before an append) account for the scan's
-      rows of that kind first; only the remainder stays the scan's own (and
-      unexplained, unless the scan named a cause). Gate-8's explained rows
-      beyond what the scan found are trimmed: the scan counted every row.
+
+def merge_explained(prior: list[Any], scan: list[Any], *, fit_excluded: int = 0, table: str = "") -> list[Any]:
+    """The scan's observations with Gate-8's explained ones kept, counted exactly.
+
+    * Rows the run held back (quarantined, skipped by policy, held by the
+      write contract) are kept in full, whatever the scan found: they are why
+      the run is at most "explained", never "proven". The scan does not see a
+      row the write contract held out (it is excluded on the source side), so
+      only the held rows it can see are taken off its missing count; the rest
+      of its missing rows stay its own (unexplained unless it named a cause).
+    * Extra rows: Gate-8's explained rows (a destination's rows from before an
+      append) account for the scan's extra rows first, trimmed to what the
+      scan counted.
     * Values: Gate-8's explained value observations stay for a column the
-      scan reported no difference in (the scan compares through the run's
-      transforms, so what Gate-8 explained as a transform is not re-found).
+      scan reported no difference in.
     """
+    from services.parity_classifier import QUARANTINED, cause
+    from services.parity_evidence import Observation
+
     out: list[Any] = []
-    for kind in ("missing_in_destination", "extra_in_destination"):
-        found = [o for o in scan if o.kind == kind]
-        total = sum(int(o.rows) for o in found)
-        named = [o for o in found if _explained(o)]
-        explained_by_scan = sum(int(o.rows) for o in named)
-        capacity = sum(int(o.rows) for o in prior if o.kind == kind and _explained(o))
-        # The scan's own explained rows (quarantined keys) are part of Gate-8's quarantine count.
-        quarantine_prior = sum(int(o.rows) for o in prior if o.kind == kind and _explained(o)
-                               and o.origin == "quarantine")
-        capacity = capacity - min(quarantine_prior, explained_by_scan)
-        out.extend(named)
-        remaining = total - explained_by_scan
-        covered = max(0, min(capacity, remaining))
-        budget = covered
-        for o in prior:
-            if budget <= 0:
-                break
-            if o.kind != kind or not _explained(o):
-                continue
-            if o.origin == "quarantine" and explained_by_scan:
-                continue  # already named by key above
-            take = min(int(o.rows), budget)
-            o.rows = take
+    # Missing: held rows first, in full.
+    held = [o for o in prior if o.kind == "missing_in_destination" and _explained(o) and o.origin in HELD_ORIGINS]
+    found = [o for o in scan if o.kind == "missing_in_destination"]
+    named = [o for o in found if _explained(o)]
+    held_rows = sum(int(o.rows) for o in held)
+    if held:
+        named_keys = [k for o in named for k in o.keys_sample]
+        for o in held:
+            if o.origin == "quarantine" and not o.keys_sample and named_keys:
+                o.keys_sample = list(named_keys)
+        out.extend(held)
+    else:
+        out.extend(named)  # quarantined keys the scan named, when Gate-8 recorded no count
+        held_rows = sum(int(o.rows) for o in named)
+    if fit_excluded > held_rows:
+        out.append(Observation(
+            table=table or (found[0].table if found else ""), kind="missing_in_destination",
+            rows=fit_excluded - held_rows, origin="quarantine",
+            cause=cause(QUARANTINED, "Rows the write contract held out (they do not fit the destination column).",
+                        explained=True),
+        ))
+        held_rows = fit_excluded
+    visible_held = max(0, held_rows - int(fit_excluded))
+    left = max(0, sum(int(o.rows) for o in found) - visible_held)
+    for o in found:
+        if _explained(o) or left <= 0:
+            continue
+        o.rows = min(int(o.rows), left)
+        left -= o.rows
+        out.append(o)
+    # Extra: Gate-8's explanation (rows from before an append) covers what the scan counted.
+    found = [o for o in scan if o.kind == "extra_in_destination"]
+    out.extend(o for o in found if _explained(o))
+    budget = sum(int(o.rows) for o in found if not _explained(o))
+    for o in prior:
+        if budget <= 0:
+            break
+        if o.kind == "extra_in_destination" and _explained(o):
+            o.rows = min(int(o.rows), budget)
+            budget -= o.rows
             out.append(o)
-            budget -= take
-        left = remaining - covered
-        for o in found:
-            if _explained(o) or left <= 0:
-                continue
-            o.rows = min(int(o.rows), left)
-            left -= o.rows
-            out.append(o)
+    left = budget  # the scan's extra rows no explanation covers
+    for o in found:
+        if _explained(o) or left <= 0:
+            continue
+        o.rows = min(int(o.rows), left)
+        left -= o.rows
+        out.append(o)
     scanned_columns = {o.column for o in scan if o.kind == "value" and o.column}
     out.extend(o for o in scan if o.kind not in {"missing_in_destination", "extra_in_destination"})
     out.extend(o for o in prior if o.kind == "value" and _explained(o) and o.column not in scanned_columns)

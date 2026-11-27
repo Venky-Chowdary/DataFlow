@@ -38,6 +38,8 @@ def _job(src: str, dst: str, *, request: dict[str, Any] | None = None, recon: di
             "sync_mode": "full_refresh_overwrite", **(request or {}),
         },
         "destination_summary": {"table": dst, "primary_key_columns": ["id"], **(summary or {})},
+        "mapping_proof": {"mapping_hash": "m" * 64},
+        "connector_versions": {"source": "postgresql 16.15", "destination": "postgresql 16.15"},
         "reconciliation": {"passed": True, "source_rows": N, "target_rows": N, "phase": "post_write",
                            "coverage_limit": {"rows": N, "limit": 100},
                            "verification_verdict_qualifier": "coverage_limited", **(recon or {})},
@@ -124,3 +126,45 @@ def test_explained_value_observations_survive_the_merge() -> None:
                          cause={"code": "unexplained", "label": "x", "explained": False, "detail": ""})]
     merged = merge_explained(prior, [])
     assert [(o.column, o.rows) for o in merged] == [("note", 8)]  # Gate-8's unexplained sample is superseded
+
+
+@live
+def test_rows_held_by_the_write_contract_keep_the_table_explained_and_balance() -> None:
+    """Review 2, 6a: decimal-fit held rows were trimmed away and the table read proven."""
+    import uuid
+
+    from services.parity_scale.verification import start_for_job
+
+    src, dst = f"psd1_h_s_{uuid.uuid4().hex[:8]}", f"psd1_h_d_{uuid.uuid4().hex[:8]}"
+    _sql(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, name varchar(40), amt numeric(14,2), ts timestamp(6))',
+         f"INSERT INTO \"{src}\" SELECT g, 'n' || g, CASE WHEN g <= 3 THEN 12345.67 ELSE g % 900 END, "
+         f"timestamp '2024-01-01' FROM generate_series(1, {N}) g",
+         f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, name varchar(40), amt numeric(5,2), ts timestamp(6))',
+         f'INSERT INTO "{dst}" SELECT * FROM "{src}" WHERE id > 3')
+    try:
+        job_id = _job(src, dst, recon={"rejected_rows": 3, "target_rows": N - 3})
+        start_for_job(job_id, background=False)
+        report = _report(job_id)
+        assert report["verdict"] == "explained", report["verdict_reason"]
+        parity = report["parity"]
+        assert parity["unexplained"] == 0 and parity["explained"] == 3
+        # read = landed + held
+        assert parity["rows_source"] == parity["rows_destination"] + 3 == N
+    finally:
+        _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')
+
+
+@live
+def test_quarantined_rows_are_counted_exactly_when_only_some_are_named(tables) -> None:
+    """Review 2, 6b: three quarantined and missing, one key named, the report showed one row."""
+    from services.parity_scale.verification import start_for_job
+
+    src, dst = tables
+    _sql(f'DELETE FROM "{dst}" WHERE id IN (5, 6, 7)')
+    job_id = _job(src, dst, recon={"rejected_rows": 3, "target_rows": N - 3},
+                  summary={"rejected_details": [{"row": {"id": 5}, "error": "failed validation"}]})
+    start_for_job(job_id, background=False)
+    report = _report(job_id)
+    assert report["verdict"] == "explained", report["verdict_reason"]
+    assert report["parity"]["rows_differ"] == 3 and report["parity"]["explained"] == 3
+    assert report["parity"]["rows_source"] == report["parity"]["rows_destination"] + 3
