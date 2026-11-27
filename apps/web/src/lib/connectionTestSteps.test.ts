@@ -118,7 +118,7 @@ describe("grant snippets cannot be injected (property test)", () => {
     if (engine === "snowflake") out = out.replace(/[A-Za-z_][A-Za-z0-9_$]*/g, (w) => (bare.includes(w) ? "\u0001" : w));
     return out;
   };
-  const alphabet = ["a", "Z", "_", "%", "public", "\u202e", "\u200b", "\u2066", "$", " ", ";", "'", '"', "`", "[", "]", "\\", "-", "--", "/*", "*/", "\n", "\r", "\t", "\u0000",
+  const alphabet = ["a", "Z", "_", "%", "public", "\u202e", "\u200b", "\u2066", "\u3164", "\u034f", "\ufe0f", "\u2800", "$", " ", ";", "'", '"', "`", "[", "]", "\\", "-", "--", "/*", "*/", "\n", "\r", "\t", "\u0000",
     "<", ">", "<u>", "é", "名", "🙂", " ", "%", "@", "DROP", "ALTER ROLE etl SUPERUSER", ".", ","];
   let seed = 20261127;
   const rand = () => {
@@ -182,9 +182,24 @@ describe("review round 3 grant fixes", () => {
   it("PostgreSQL: an unquoted schema name is taken only when it is the whole rest of the message", () => {
     assert.equal(schemaFromMessage("permission denied for schema My Schema", "postgresql"), "");
     assert.equal(schemaFromMessage("permission denied for schema raw", "postgresql"), "raw");
-    assert.equal(schemaFromMessage('schema "a""b" does not exist', "postgresql"), 'a""b', "PostgreSQL does not double quotes: no decoding");
-    assert.equal(schemaFromMessage('The specified schema name "x""y" either does not exist or you do not have permission to use it.', "sqlserver"), 'x""y');
+    // PostgreSQL / SQL Server do not double an inner quote: a name holding one cannot be told apart.
+    assert.equal(schemaFromMessage('schema "a""b" does not exist', "postgresql"), "");
+    assert.equal(schemaFromMessage('The specified schema name "x""y" either does not exist or you do not have permission to use it.', "sqlserver"), "");
     assert.match(grantFixes({ type: "postgresql", username: "etl", database: "d", message: "permission denied for schema My Schema" })[0].sql, /SCHEMA <schema>/);
+  });
+
+  it("a quoted schema name runs to its closing quote, never across the rest of the message (round 4)", () => {
+    assert.equal(schemaFromMessage('ERROR: schema "raw" does not exist (hint: schema "x" does not exist either)', "postgresql"), "raw");
+    assert.equal(schemaFromMessage('The specified schema name "dbo" either does not exist or you do not have permission to use it. Also "q" either does not exist or you do not have permission to use it.', "sqlserver"), "dbo");
+  });
+
+  it("invisible characters that are not Cf become the placeholder too (round 4)", () => {
+    for (const ch of ["\u3164", "\u034f", "\ufe0f", "\u2800", "\u115f", "\uffa0", "\u00a0", "\u3000", "\u180e"]) {
+      const sql = grantFixes({ type: "postgresql", username: `etl${ch}admin`, database: "d", schema: "s" })[0].sql;
+      assert.match(sql, /TO <user>;/, JSON.stringify(ch));
+    }
+    assert.match(grantFixes({ type: "postgresql", username: "etl admin", database: "d", schema: "s" })[0].sql, /TO "etl admin";/);
+    assert.match(grantFixes({ type: "postgresql", username: "名前", database: "d", schema: "s" })[0].sql, /TO "名前";/);
   });
 
   it("Oracle: a value with a double quote cannot be quoted there, so it is the placeholder", () => {

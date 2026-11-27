@@ -136,13 +136,20 @@ export type GrantValue = { kind: "typed"; text: string } | { kind: "placeholder"
  * a control character (newline, NUL, line separator …) would split the
  * snippet's lines, so the placeholder is shown and the person fills it in.
  */
+/**
+ * Characters that change what runs without showing in what an admin reads:
+ * controls (they split lines), format characters (bidi overrides such as
+ * U+202E, zero-width spaces, isolates U+2066-2069: category Cf), every
+ * default-ignorable code point (U+034F, variation selectors such as U+FE0F,
+ * Hangul fillers U+115F/U+1160/U+3164/U+FFA0), the braille blank U+2800, and
+ * spaces other than the ASCII one (U+00A0, U+3000 and the rest of Zs).
+ */
+// eslint-disable-next-line no-control-regex
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u115f\u1160\u3164\uffa0\u2800]|\p{Cf}|\p{Default_Ignorable_Code_Point}|[^\P{Zs} ]/u;
+
 export function grantValue(text: string | undefined | null, placeholder: string): GrantValue {
   const t = String(text ?? "").trim();
-  // Control characters split lines; Unicode format characters (bidi overrides
-  // such as U+202E, zero-width spaces, isolates U+2066-2069 — category Cf)
-  // make what an admin reads differ from what runs. Either: the placeholder.
-  // eslint-disable-next-line no-control-regex
-  if (!t || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/u.test(t) || t.length > 256) return { kind: "placeholder", name: placeholder };
+  if (!t || INVISIBLE.test(t) || t.length > 256) return { kind: "placeholder", name: placeholder };
   return { kind: "typed", text: t };
 }
 
@@ -173,13 +180,14 @@ export function schemaFromMessage(message: string | undefined, type: string): st
   const said = String(message || "");
   const driver = resolveDriverType(type);
   // PostgreSQL and SQL Server print a name between double quotes without
-  // doubling an inner quote, so the quoted text is taken as is (no "" decoding).
+  // doubling an inner quote, so a quoted name runs to the first quote; one
+  // that holds a quote cannot be told apart and is left as the placeholder.
   // An unquoted name is taken only when it is the whole rest of the message:
   // "permission denied for schema My Schema" could be "My" or "My Schema".
   const patterns: RegExp[] = driver === "postgresql" || driver === "redshift"
-    ? [/\bpermission denied for schema ([A-Za-z_][\w$]*)\s*\.?\s*$/, /\bschema "(.+)" does not exist\b/]
+    ? [/\bpermission denied for schema ([A-Za-z_][\w$]*)\s*\.?\s*$/, /\bschema "([^"]+)" does not exist\b/]
     : driver === "sqlserver"
-      ? [/\bThe specified schema name "(.+)" either does not exist or you do not have permission to use it\b/]
+      ? [/\bThe specified schema name "([^"]+)" either does not exist or you do not have permission to use it\b/]
       : driver === "snowflake"
         ? [/\bSchema '(?:[^'.]+\.)?([^'.]+)' does not exist or not authorized\b/]
         : [];
