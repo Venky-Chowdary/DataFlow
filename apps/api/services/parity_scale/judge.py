@@ -37,9 +37,21 @@ def source_as_written(value: Any, col: ColumnPlan, dest_engine: str) -> Any:
     return value
 
 
+#: What a source cell the writer refused fingerprints as: never equal to a written value.
+REFUSED = "\x00refused-by-the-write-pipeline"
+
+
 def fingerprint(value: Any, col: ColumnPlan, dest_engine: str, *, source: bool) -> str:
     from services.reconciliation import fingerprint_for_reconcile
 
+    if source and col.write_mapping:
+        # A crosswalked column: the writer's own pipeline (transform + crosswalk), then the bind.
+        from services.write_replay import replay_write
+
+        written, err = replay_write(value, col.write_mapping, target=col.target)
+        if err:
+            return REFUSED
+        return fingerprint_for_reconcile(written, ddl_type=col.dest_type, engine=dest_engine, transform=None)
     if source:
         value = source_as_written(value, col, dest_engine)
     return fingerprint_for_reconcile(

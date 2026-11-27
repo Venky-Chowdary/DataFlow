@@ -156,7 +156,7 @@ def _cell_text(value: Any) -> str | None:
 
 def values(job: dict[str, Any], table: str, *, offset: int = 0, limit: int = 50) -> dict[str, Any]:
     """Changed keys, source and destination side by side (protected cells never shown)."""
-    from services.parity_scale.judge import fingerprint, source_as_written
+    from services.parity_scale.judge import fingerprint
     from services.parity_scale.store import decode_key
 
     ev = _evidence(job, table)
@@ -169,6 +169,12 @@ def values(job: dict[str, Any], table: str, *, offset: int = 0, limit: int = 50)
     page = encoded[offset: offset + limit]
     keys_ = [decode_key(k) for k in page]
     plan, src, dst = _sides(job)
+    by_target, number_locale, date_locale = _write_context(job)
+
+    def written(value: Any, col: Any) -> Any:
+        return as_written(value, col, plan.dest_engine, mapping=by_target.get(col.target),
+                          number_locale=number_locale, date_locale=date_locale)
+
     try:
         s_rows = src.fetch_rows(keys_)
         d_rows = dst.fetch_rows(keys_)
@@ -187,9 +193,13 @@ def values(job: dict[str, Any], table: str, *, offset: int = 0, limit: int = 50)
                     and fingerprint(s_val, col, plan.dest_engine, source=True)
                     != fingerprint(d_val, col, plan.dest_engine, source=False)
                 )
+                try:
+                    shown = written(s_val, col)
+                except _Unwritable:
+                    shown = s_val  # the run's pipeline refuses it: show what the source holds
                 cells.append({
                     "column": col.target,
-                    "source": PROTECTED if hidden else _cell_text(source_as_written(s_val, col, plan.dest_engine)),
+                    "source": PROTECTED if hidden else _cell_text(shown),
                     "destination": PROTECTED if hidden else _cell_text(d_val),
                     "differs": bool(differs),
                     "protected": hidden,
@@ -262,22 +272,35 @@ def _rows(n: int, noun: str) -> str:
     return f"{n:,} {noun}{'' if n == 1 else 's'}"
 
 
-def as_written(value: Any, col: Any, engine: str) -> Any:
-    """The source value as the run wrote it: its decimal-fit projection and its transform, replayed."""
+def as_written(value: Any, col: Any, engine: str, *, mapping: dict[str, Any] | None = None,
+               number_locale: str = "", date_locale: str = "") -> Any:
+    """The source value as the run wrote it: the writer's own per-cell pipeline, replayed.
+
+    Transform, code crosswalk and the run's locales go through
+    :func:`services.write_replay.replay_write` (the writer's function, not a
+    re-implementation); the decimal-fit projection through the scan's own.
+    :class:`_Unwritable` when the pipeline refuses the value.
+    """
     from services.parity_scale.judge import source_as_written
+    from services.write_replay import replay_write, write_mapping
 
-    value = source_as_written(value, col, engine)
-    transform = str(getattr(col, "transform", "") or "").strip()
-    if transform.lower() in _IDENTITY:
-        return value
-    from services.transform_engine import apply_transform
-    from services.value_serializer import cell_to_string
+    steps = write_mapping(mapping or {})
+    transform = str(steps.get("transform") or "").strip().lower()
+    if transform not in _IDENTITY or steps.get("code_crosswalk") is not None or steps.get("rule_contracts"):
+        value, err = replay_write(value, steps, target=col.target, number_locale=number_locale,
+                                  date_locale=date_locale)
+        if err:
+            raise _Unwritable(f"{col.target}: {err}")
+    return source_as_written(value, col, engine)
 
-    converted, err = apply_transform(None if value is None else cell_to_string(value, preserve_sql_null=True),
-                                     transform)
-    if err:
-        raise _Unwritable(col.target)
-    return converted
+
+def _write_context(job: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], str, str]:
+    """The run's mappings by target, and its number and date locales."""
+    from services.parity_evidence import mappings_of, request_of
+
+    by_target = {str(m.get("target") or m.get("source")): m for m in mappings_of(job)}
+    req = request_of(job)
+    return by_target, str(req.get("number_locale") or ""), str(req.get("date_locale") or "")
 
 
 def _run_scope(job: dict[str, Any], key_cols: list[str]) -> tuple[bool, set[str]]:
@@ -320,6 +343,11 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
         return {"table": table, "available": False, "sql": "",
                 "reason": "The key is a protected column, so repair statements cannot name rows."}
     outside_run, quarantined = _run_scope(job, key_cols)
+    by_target, number_locale, date_locale = _write_context(job)
+
+    def written(value: Any, col: Any) -> Any:
+        return as_written(value, col, engine, mapping=by_target.get(col.target),
+                          number_locale=number_locale, date_locale=date_locale)
     dest_ref = dst.table_ref
     cols = list(plan.compared_columns)
     names = [c.target for c in cols]
@@ -358,7 +386,7 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                 if row is None:
                     continue
                 try:
-                    vals = ", ".join(literal(engine, as_written(row[i], cols[i], engine)) for i in writable)
+                    vals = ", ".join(literal(engine, written(row[i], cols[i])) for i in writable)
                 except _Unwritable as exc:
                     unwritable.add(str(exc))
                     continue
@@ -389,7 +417,7 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                         if fingerprint(srow[i], col, engine, source=True) != fingerprint(drow[i], col, engine,
                                                                                        source=False):
                             sets.append(f"{_quote(engine, col.target)} = "
-                                        f"{literal(engine, as_written(srow[i], col, engine))}")
+                                        f"{literal(engine, written(srow[i], col))}")
                 except _Unwritable as exc:
                     unwritable.add(str(exc))
                     continue
@@ -397,8 +425,8 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                     lines.append(f"UPDATE {dest_ref} SET {', '.join(sets)} WHERE {where(key)};")
                     counts["update"] += 1
         if unwritable:
-            notes.append(f"-- Rows whose transform could not be replayed are left out (columns: "
-                         f"{_comment(', '.join(sorted(unwritable)))}).")
+            notes.append("-- Rows the run's write pipeline refuses are left out (it would not have written "
+                         f"them either): {_comment('; '.join(sorted(unwritable)))}.")
     finally:
         src.close()
         dst.close()

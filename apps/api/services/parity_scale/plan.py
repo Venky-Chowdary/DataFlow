@@ -106,6 +106,9 @@ class ColumnPlan:
     reason: str = ""
     decimal_fit: dict[str, Any] | None = None
     empty_is_null: bool = False
+    #: Code-crosswalked columns: the mapping keys the writer's pipeline reads, so the
+    #: judge replays exactly that pipeline (services.write_replay). None otherwise.
+    write_mapping: dict[str, Any] | None = field(default=None, hash=False, compare=False)
 
     def field_spec(self, dest_engine: str) -> FieldSpec:
         fit = DecimalFit(**self.decimal_fit) if self.decimal_fit else None
@@ -164,7 +167,9 @@ class TablePlan:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["columns"] = [asdict(c) for c in self.columns]
+        # write_mapping is left out when absent, so plans without one hash as before.
+        data["columns"] = [{k: v for k, v in asdict(c).items() if k != "write_mapping" or v is not None}
+                           for c in self.columns]
         data["key"] = [list(k) for k in self.key]
         return data
 
@@ -409,7 +414,9 @@ def classify_column(
     if transform not in _NO_OP_TRANSFORMS:
         return ColumnPlan(cls="stream", reason=f"transform {transform!r} is replayed by the judge", **base)
     if declared_crosswalk(mapping):
-        return ColumnPlan(cls="stream", reason="code crosswalk", **base)
+        from services.write_replay import write_mapping
+
+        return ColumnPlan(cls="stream", reason="code crosswalk", write_mapping=write_mapping(mapping), **base)
     if mapping.get("rule_contracts"):
         return ColumnPlan(cls="stream", reason="rule contract (held-out rows are phase 3)", **base)
     if not source_type or not dest_type:

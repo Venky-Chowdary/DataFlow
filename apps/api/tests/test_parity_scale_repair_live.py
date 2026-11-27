@@ -131,3 +131,42 @@ def test_names_with_a_newline_stay_inside_their_comments(monkeypatch) -> None:
     monkeypatch.setattr(explorer, "_run_scope", lambda job, keys: (False, set()))
     sql = explorer.repair_sql({}, table)["sql"]
     assert all(line.startswith("--") for line in sql.splitlines() if line), sql
+
+
+def test_a_crosswalked_column_is_compared_and_repaired_through_the_writers_pipeline() -> None:
+    """Review 2, item 9: the crosswalk (and the run's locale) are replayed by the writer's own function."""
+    src, dst = f"psd1_x_s_{uuid.uuid4().hex[:8]}", f"psd1_x_d_{uuid.uuid4().hex[:8]}"
+    ddl = "id bigint PRIMARY KEY, name varchar(40), amt numeric(12,2)"
+    _sql(f'CREATE TABLE "{src}" ({ddl})',
+         f"INSERT INTO \"{src}\" SELECT g, 'n' || g, g * 1.25 FROM generate_series(1, {N}) g",
+         f'CREATE TABLE "{dst}" ({ddl})',
+         f"INSERT INTO \"{dst}\" SELECT id, 'MAPPED-' || substr(name, 2), amt FROM \"{src}\"",
+         f"UPDATE \"{dst}\" SET name = 'WRONG' WHERE id = 1500", f'DELETE FROM "{dst}" WHERE id = 20')
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        crosswalk = {f"n{i}": f"MAPPED-{i}" for i in range(1, N + 1)}
+        job_id = get_mongodb_service().create_transfer_job({
+            "status": "completed",
+            "transfer_request": {
+                "source": _endpoint(src), "destination": _endpoint(dst), "sync_mode": "full_refresh_overwrite",
+                "mappings": [{"source": "id", "target": "id"},
+                             {"source": "name", "target": "name", "code_crosswalk": crosswalk},
+                             {"source": "amt", "target": "amt"}],
+            },
+            "destination_summary": {"table": dst, "primary_key_columns": ["id"]},
+            "reconciliation": {"passed": True, "source_rows": N, "target_rows": N - 1, "phase": "post_write",
+                               "coverage_limit": {"rows": N, "limit": 100},
+                               "verification_verdict_qualifier": "coverage_limited"},
+        })
+        block = _verify(job_id)
+        assert block["state"] == "failed", block
+        evidence = get_mongodb_service().get_job(job_id)["parity_scale"]["tables"][0]["evidence"]
+        assert evidence["differences"]["changed_rows"] == 1  # only the row that really differs
+        repair = _repair(job_id, dst)
+        assert "\"name\" = 'MAPPED-1500'" in repair["sql"] and "'MAPPED-20'" in repair["sql"]
+        assert "'n1500'" not in repair["sql"] and "'n20'" not in repair["sql"]
+        _sql(*_statements(repair["sql"]))
+        assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
+    finally:
+        _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')
