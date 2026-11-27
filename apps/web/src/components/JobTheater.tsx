@@ -27,7 +27,7 @@ import { PhaseProfileCard } from "./transfer/PhaseProfileCard";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { gate8AppendIdentity, isGate8AppendDelta, isGate8CellFidelityUnproven, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8AppendDeltaVerified, isGate8CellFidelityUnproven, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
@@ -1922,7 +1922,7 @@ export function JobTheaterView({
               }
               if (recon && isGate8AppendDelta(recon)) {
                 const id = gate8AppendIdentity(recon);
-                return id.deltaOk
+                return id.deltaOk && isGate8AppendDeltaVerified(recon)
                   ? "Append delta verified — whole-table digests not comparable"
                   : "Whole-table digests not comparable (append delta)";
               }

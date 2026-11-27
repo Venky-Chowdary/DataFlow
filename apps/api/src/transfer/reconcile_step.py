@@ -4364,14 +4364,21 @@ def _maybe_attach_verification_ladder(
         )
 
         _ident_keys = list(pk_cols) or ([_t_window.pk] if _t_window.pk else [])
-        out = fail_on_window_duplicates(out, measure_window_duplicates(
+        _window_dups = measure_window_duplicates(
             source_rows=source_rows, target_rows=target_rows,
             match_cols=(
                 list(dict.fromkeys([_t_window.cursor, *_ident_keys]))
                 if _ident_keys else list(target_cols)
             ),
             dest_db_type=dest_type, dest_types=dest_types,
-        ))
+        )
+        from .stream_boundary_keyed import accepted_window_duplicates
+
+        # D335: only the route's audited "accept possible boundary duplicates"
+        # turns them into a disclosed finding; otherwise they fail the run.
+        out = accepted_window_duplicates(out, _window_dups, dest_summary) or fail_on_window_duplicates(
+            out, _window_dups
+        )
     if window is not None and source_reread and keyed and (pk_cols or pk_column):
         # D188 — rows the cursor did not select are not this run's verdict,
         # but a disagreement there is reported, never silently dropped.

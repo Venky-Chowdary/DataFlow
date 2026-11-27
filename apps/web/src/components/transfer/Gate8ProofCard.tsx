@@ -14,6 +14,7 @@ import {
   gate8AppendIdentity,
   gate8SampleDeclinedReason,
   isGate8AppendDelta,
+  isGate8AppendDeltaVerified,
   isGate8IdentityUnproven,
   isGate8KeyedBatch,
   isGate8LastStream,
@@ -301,7 +302,7 @@ export function Gate8ProofCard({
           ? "Keyed sample matched — not population / migration_proven"
           : keyedBatch && passed
             ? "This run’s rows verified — extra destination rows are outside this proof"
-            : appendDelta && passed
+            : appendDelta && passed && isGate8AppendDeltaVerified(report)
               ? "Append delta verified — whole-table checksums not comparable"
               : lastStream && passed
                 ? "Last stream checksum matches — not the whole job"

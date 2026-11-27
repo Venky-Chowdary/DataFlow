@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly, presentMultiStreamGate8 } from "./gate8Status";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8AppendDeltaVerified, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly, presentMultiStreamGate8 } from "./gate8Status";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -404,5 +404,23 @@ describe("classifyGate8Status unverified business rules", () => {
     assert.equal(view.tone, "warn");
     assert.equal(view.fullPass, false);
     assert.notEqual(view.label, "Passed");
+  });
+});
+
+describe("D335: an unmeasured watermark boundary is never 'Append delta verified'", () => {
+  const base = {
+    passed: true,
+    checksum_scope: "whole_table_not_comparable",
+    source_rows: 2,
+    target_rows: 12,
+    target_rows_before: 10,
+    message: "Append delta verified (2 row(s) appended: 10 → 12).",
+  };
+  it("a clean append is still called verified", () => {
+    assert.equal(isGate8AppendDeltaVerified(base), true);
+  });
+  it("an unmeasured boundary check or a failed report is not", () => {
+    assert.equal(isGate8AppendDeltaVerified({ ...base, boundary_check: { status: "unmeasured" } } as never), false);
+    assert.equal(isGate8AppendDeltaVerified({ ...base, passed: false }), false);
   });
 });

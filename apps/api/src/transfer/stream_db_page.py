@@ -181,9 +181,9 @@ def _boundary_rows_already_landed(
                 )
         return {boundary_idx[i] for i in drop}
     except Exception as exc:
-        from .stream_boundary_keyed import BoundaryHeldBack
+        from .stream_boundary_keyed import BoundaryHeldBack, BoundaryRefused
 
-        if isinstance(exc, BoundaryHeldBack):
+        if isinstance(exc, (BoundaryHeldBack, BoundaryRefused)):
             raise
         if requires_upsert(cfg.effective_sync):
             # An upsert rewrites a re-read peer by key: appending it is harmless.
