@@ -27,6 +27,11 @@ class UnitTimeout(Exception):
     """A statement exceeded its time limit; the driver halves or gives up the unit."""
 
 
+class SnapshotYielded(Exception):
+    """A pinned side let its snapshot go part way through a streamed read (a session was
+    waiting on a lock the snapshot held): the read is started again, statement by statement."""
+
+
 @dataclass(frozen=True)
 class LeafRow:
     """One row of a small differing unit.
@@ -70,6 +75,10 @@ def range_predicate(
     return (" AND ".join(clauses) or "TRUE"), params
 
 
+def _noop() -> None:
+    return None
+
+
 class Side(ABC):
     """One table on one engine, under one plan, as source or destination."""
 
@@ -81,6 +90,39 @@ class Side(ABC):
         self.table = table
         self.schema = schema
         self.timeout_seconds: float | None = None
+        #: Set by :meth:`pin`: every later statement reads one snapshot of the table.
+        self.pinned = False
+        #: Called at every statement and every streamed batch: the worker's heartbeat
+        #: counts these as progress (the scan driver sets it).
+        self.tick: Any = _noop
+        #: Server-side timeout of one streamed read (the streamed pass, per key range).
+        self.stream_timeout_seconds: float | None = None
+
+    #: Streams can be limited to a key range (the streamed pass is chunked by range).
+    range_stream = False
+
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
+        """Read every later statement from one snapshot; what was established, in words.
+
+        ``{"kind": "pinned", ...}`` only when the engine guarantees it; any
+        other answer is ``not_established`` with the reason.
+        """
+        return {"kind": "not_established", "reason": f"snapshot pinning is not implemented for {type(self).__name__}"}
+
+    def unpin(self) -> None:
+        """Leave the pinned snapshot (or a failed attempt) and read statement by statement."""
+        self.pinned = False
+
+    #: Why the pinned snapshot was given up early (a session waited on one of its locks).
+    yield_reason = ""
+
+    def watch_locks(self, interval_s: float) -> str:
+        """Watch for sessions waiting on a lock the pinned snapshot holds; ``""`` or why it cannot."""
+        return ""
+
+    def release_pin(self) -> None:
+        """Let the snapshot go now (safe to call from the scan's thread at any time)."""
+        self.unpin()
 
     # column lists in plan order -------------------------------------------------
     def column_name(self, col: ColumnPlan) -> str:
@@ -161,9 +203,18 @@ class Side(ABC):
 
     @abstractmethod
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, *, nulls: bool = False
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
-        """``(key values or None, values of columns)`` for every row, streamed."""
+        """``(key values or None, values of columns)`` for every row with a key value
+        (``nulls``: every row without one), streamed."""
+
+    def null_key_count(self) -> int:
+        """Rows whose key has a NULL column (in no key range; 0 for a keyless table)."""
+        return 0
+
+    @abstractmethod
+    def total_count(self) -> int:
+        """Every row the scan compares (held-out rows excluded): the units must add up to it."""
 
     @abstractmethod
     def held_count(self) -> int:

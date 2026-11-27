@@ -3901,6 +3901,8 @@ export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
   updated_at?: string | null;
   updated_by?: string | null;
 }> {
@@ -3921,6 +3923,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }): Promise<{
   org_name: string;
   timezone: string;
@@ -3928,6 +3932,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`, {
     method: "PATCH",
@@ -5210,6 +5216,10 @@ export type Tenant = {
   enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
+  /** Parity at Scale for this workspace: null = the deployment's setting. */
+  verification_snapshot?: boolean | null;
+  /** Longest snapshot hold in minutes (never above the deployment's cap); null = the deployment's. */
+  verification_snapshot_max_minutes?: number | null;
   created_at: string;
   updated_at: string;
   /** What is enforced now (read and save responses; same source as the posture). */

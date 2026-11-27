@@ -37,11 +37,14 @@ from services.parity_scale.plan import ColumnPlan, TablePlan
 from services.parity_scale.store import encode_key
 
 
-def row_fingerprint_hash(values: Sequence[Any], columns: Sequence[ColumnPlan], dest_engine: str, *, source: bool) -> str:
-    """SHA-256 over the length-prefixed Gate-8 fingerprints of ``values``."""
+def row_fingerprint_hash(values: Sequence[Any], columns: Sequence[ColumnPlan], dest_engine: str, *, source: bool,
+                         number_locale: str = "", date_locale: str = "") -> str:
+    """SHA-256 over the length-prefixed Gate-8 fingerprints of ``values`` (source cells under the
+    run's locales)."""
     digest = hashlib.sha256()
+    loc = {"number_locale": number_locale, "date_locale": date_locale} if source else {}
     for value, col in zip(values, columns, strict=True):
-        cell = fingerprint(value, col, dest_engine, source=source).encode("utf-8", "surrogatepass")
+        cell = fingerprint(value, col, dest_engine, source=source, **loc).encode("utf-8", "surrogatepass")
         digest.update(str(len(cell)).encode("ascii") + b":" + cell)
     return digest.hexdigest()
 
@@ -67,12 +70,21 @@ class StreamResult:
 
 
 def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[ColumnPlan], *,
-           keyed: bool, keep_values: bool, batch: int) -> int:
+           keyed: bool, keep_values: bool, batch: int, lo: Any = None, hi: Any = None,
+           deadline: float | None = None, tick: Any = None, nulls: bool = False) -> int:
+    import time
+
+    from services.parity_scale.dialects.base import UnitTimeout
+
     plan = side.plan
     count = 0
     pending: list[tuple[str | None, str, str | None, str | None]] = []
-    for key, values in side.iter_stream(columns, batch=batch):
-        h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source)
+    extra: dict[str, Any] = {"nulls": True} if nulls else {}
+    rows = side.iter_stream(columns, batch=batch, lo=lo, hi=hi, **extra) if (lo is not None or hi is not None) \
+        else side.iter_stream(columns, batch=batch, **extra)
+    for key, values in rows:
+        h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source,
+                                 number_locale=plan.run_number_locale, date_locale=plan.run_date_locale)
         ident = side.key_hex(key) if keyed and key is not None else None
         key_json = json.dumps(encode_key(key)) if keyed and key is not None else None
         vals = json.dumps([wire_text(v) for v in values]) if keep_values else None
@@ -81,6 +93,10 @@ def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[C
         if len(pending) >= batch:
             conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?)", pending)
             pending.clear()
+            if tick is not None:
+                tick()
+            if deadline is not None and time.monotonic() > deadline:
+                raise UnitTimeout("the scan's wall-clock budget ran out in the streamed pass")
     if pending:
         conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?)", pending)
     conn.commit()
@@ -98,7 +114,14 @@ def stream_compare(
     examples_cap: int = 20,
     batch: int = 5000,
     spill_dir: str | None = None,
+    lo: Any = None,
+    hi: Any = None,
+    deadline: float | None = None,
+    tick: Any = None,
+    nulls: bool = False,
 ) -> StreamResult:
+    """Compare the sides' streamed fingerprints (``nulls``: only the rows with no key value,
+    as a multiset of whole rows, since no key pairs them)."""
     if shape not in {"changed", "keyed", "multiset"}:
         raise ValueError(f"unknown stream shape {shape!r}")
     cols = list(columns if columns is not None else plan.compared_columns)
@@ -107,19 +130,40 @@ def stream_compare(
     fd, path = tempfile.mkstemp(prefix="psd1-stream-", suffix=".sqlite", dir=spill_dir)
     os.close(fd)
     conn = sqlite3.connect(path)
+    if tick is not None or deadline is not None:
+        # The spill's own work (inserts, CREATE INDEX, the merge) can run for minutes on a large
+        # table: it is progress for the worker's heartbeat, and it stops at the wall-clock budget.
+        import time
+
+        def progress() -> int:
+            if tick is not None:
+                tick()
+            return 1 if deadline is not None and time.monotonic() > deadline else 0
+
+        conn.set_progress_handler(progress, 20_000)
     try:
         conn.execute("PRAGMA journal_mode=OFF")
         conn.execute("PRAGMA synchronous=OFF")
         conn.execute("CREATE TABLE s (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
         conn.execute("CREATE TABLE d (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
-        result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch)
-        result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed, batch=batch)
-        if keyed:
-            conn.execute("CREATE INDEX s_k ON s(k)")
-            conn.execute("CREATE INDEX d_k ON d(k)")
-            _merge_keyed(conn, result, full=shape == "keyed", keys_cap=keys_cap)
-        else:
-            _merge_multiset(conn, result, examples_cap=examples_cap)
+        bounds = {"lo": lo, "hi": hi, "deadline": deadline, "tick": tick, "nulls": nulls}
+        result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch,
+                                    **bounds)
+        result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed,
+                                         batch=batch, **bounds)
+        try:
+            if keyed:
+                conn.execute("CREATE INDEX s_k ON s(k)")
+                conn.execute("CREATE INDEX d_k ON d(k)")
+                _merge_keyed(conn, result, full=shape == "keyed", keys_cap=keys_cap)
+            else:
+                _merge_multiset(conn, result, examples_cap=examples_cap)
+        except sqlite3.OperationalError as exc:
+            if "interrupt" in str(exc).lower():
+                from services.parity_scale.dialects.base import UnitTimeout
+
+                raise UnitTimeout("the scan's wall-clock budget ran out while merging the streamed pass") from exc
+            raise
     finally:
         conn.close()
         try:

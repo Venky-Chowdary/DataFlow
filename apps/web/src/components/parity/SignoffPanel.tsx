@@ -20,7 +20,7 @@ import {
 } from "../../lib/parity";
 
 export type ParityBusy =
-  | { kind: "refresh" | "explain" | "sign" | "export" | "pack" | "verify" }
+  | { kind: "refresh" | "explain" | "sign" | "export" | "pack" | "verify" | "reverify" }
   | { kind: "approve" | "dismiss"; id: string }
   | null;
 

@@ -1626,6 +1626,39 @@ class MongoDBService:
             jobs.append(slim_job_for_list(doc))
         return jobs
 
+    _indexed_fields: set[str] = set()
+
+    def list_job_ids_where(self, fields: dict[str, Any], limit: int = 50, *,
+                           lease_expired_before: float | None = None) -> list[str]:
+        """Ids of jobs (any workspace) whose dotted ``fields`` hold these values, oldest first.
+
+        ``lease_expired_before`` (epoch seconds) keeps only jobs whose
+        ``parity_scale_lease`` is absent or expired by then. Each queried field
+        gets a partial index (only documents that have it) once per process.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return []
+        coll = db["transfer_jobs"]
+        for path in fields:
+            if path not in self._indexed_fields:
+                try:
+                    coll.create_index([(path, 1)], name=f"by_{path.replace('.', '_')}",
+                                      partialFilterExpression={path: {"$exists": True}})
+                except Exception:  # noqa: BLE001 — an index is an optimisation; the query still runs
+                    logger.warning("Could not index transfer_jobs.%s", path, exc_info=True)
+                self._indexed_fields.add(path)
+        query: dict[str, Any] = expected_fields_filter(dict(fields))
+        if lease_expired_before is not None:
+            # A lease without expires_epoch (written before it existed) can only be judged by
+            # the caller's own re-read: listed, never skipped forever.
+            query = {"$and": [query, {"$or": [{"parity_scale_lease": None},
+                                              {"parity_scale_lease.expires_epoch": {"$exists": False}},
+                                              {"parity_scale_lease.expires_epoch": {"$lt": lease_expired_before}}]}]}
+        cursor = coll.find(query, {"_id": 1}).sort("updated_at", 1).limit(max(1, int(limit)))
+        return [str(doc["_id"]) for doc in cursor]
+
     def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
         """Every non-terminal job across workspaces, oldest heartbeat first.
 
@@ -2379,6 +2412,24 @@ class MemoryMongoDBService:
                     job[key] = job[key].isoformat()
             out.append(slim_job_for_list(job))
         return out
+
+    def list_job_ids_where(self, fields: dict[str, Any], limit: int = 50, *,
+                           lease_expired_before: float | None = None) -> list[str]:
+        """See ``MongoDBService.list_job_ids_where``."""
+
+        def lapsed(rec: dict) -> bool:
+            lease = rec.get("parity_scale_lease")
+            if lease_expired_before is None or not isinstance(lease, dict):
+                return True
+            return float(lease.get("expires_epoch") or 0) < lease_expired_before
+
+        with self._fields_lock:
+            found = [
+                (str(rec.get("updated_at") or ""), str(rec["_id"]))
+                for rec in self._jobs.values()
+                if expected_fields_hold(rec, fields) and lapsed(rec)
+            ]
+        return [job_id for _at, job_id in sorted(found)[: max(1, int(limit))]]
 
     def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
         from services.job_status import UNFINISHED_JOB_STATUSES

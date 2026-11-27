@@ -50,6 +50,10 @@ _DEFAULTS: dict[str, Any] = {
     # here and in the operator's browser before a new surface renders.
     "studio_schema_browser": False,
     "studio_canvas": False,
+    # Parity at Scale: read each side of a verification from one snapshot (a held
+    # transaction on both databases) for at most this long; see docs/use/verification.md.
+    "verification_snapshot": True,
+    "verification_snapshot_max_minutes": 30,
 }
 
 
@@ -319,6 +323,9 @@ def _present(raw: dict[str, Any]) -> dict[str, Any]:
         "cdc_orphan_auto_drop": _cdc_orphan_auto_drop(),
         "studio_schema_browser": bool(raw.get("studio_schema_browser")),
         "studio_canvas": bool(raw.get("studio_canvas")),
+        "verification_snapshot": raw.get("verification_snapshot") is not False,
+        "verification_snapshot_max_minutes": int(raw.get("verification_snapshot_max_minutes")
+                                                 or _DEFAULTS["verification_snapshot_max_minutes"]),
         "updated_at": raw.get("updated_at"),
         "updated_by": raw.get("updated_by"),
     }
@@ -334,12 +341,16 @@ def update_workspace_settings(
     actor: str | None = None,
     retention_auto_purge: bool | None = None,
     cdc_orphan_auto_drop: bool | None = None,
+    verification_snapshot: bool | None = None,
+    verification_snapshot_max_minutes: int | None = None,
 ) -> dict[str, Any]:
     return update_workspace_settings_with_before(
         org_name=org_name, timezone=timezone, retention_days=retention_days,
         studio_schema_browser=studio_schema_browser, studio_canvas=studio_canvas,
         actor=actor, retention_auto_purge=retention_auto_purge,
         cdc_orphan_auto_drop=cdc_orphan_auto_drop,
+        verification_snapshot=verification_snapshot,
+        verification_snapshot_max_minutes=verification_snapshot_max_minutes,
     )[1]
 
 
@@ -353,6 +364,8 @@ def update_workspace_settings_with_before(
     actor: str | None = None,
     retention_auto_purge: bool | None = None,
     cdc_orphan_auto_drop: bool | None = None,
+    verification_snapshot: bool | None = None,
+    verification_snapshot_max_minutes: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Change only the named fields; ``(before, after)`` from the store itself.
 
@@ -373,6 +386,10 @@ def update_workspace_settings_with_before(
         patch["studio_schema_browser"] = bool(studio_schema_browser)
     if studio_canvas is not None:
         patch["studio_canvas"] = bool(studio_canvas)
+    if verification_snapshot is not None:
+        patch["verification_snapshot"] = bool(verification_snapshot)
+    if verification_snapshot_max_minutes is not None:
+        patch["verification_snapshot_max_minutes"] = max(1, min(1440, int(verification_snapshot_max_minutes)))
     if cdc_orphan_auto_drop is not None:
         from services.cdc_capture_inventory import set_auto_drop
 

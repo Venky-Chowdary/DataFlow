@@ -1561,7 +1561,11 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     ok = _is_success(status)
     cursor_value = None
     if ok and sched.cursor_column:
-        cursor_value = (job_doc or {}).get("cursor_value")
+        from services.parity_scale.watermark import hold_cursor_until_verified
+
+        # The watermark advances only once verification has not failed (owner
+        # decision 2): a run still being verified keeps it, and applies it later.
+        cursor_value = hold_cursor_until_verified(schedule_id, job_id, job_doc, (job_doc or {}).get("cursor_value"))
     failure_class = decision.get("failure_class") or {}
     # How the run ended is stored in the write that releases its claim. Written
     # afterwards, a reader in between saw a refused run as a plain failure with
@@ -2201,6 +2205,15 @@ def _run_schedule(
             raise ScheduleStartError("Schedule not found.", http_status=404, code="not_found")
         return None
     if not sched.enabled and not manual:
+        return None
+    from services.parity_scale.watermark import schedule_waits_for_verification
+
+    waiting = "" if manual else schedule_waits_for_verification(sched)
+    if waiting:
+        # The previous tick's verification is still running: this beat waits
+        # (owner decision 2). Recorded as a skip with its reason.
+        run_id = life.begin_run(schedule_id, trigger=life.TRIGGER_CADENCE, attempt=0)
+        life.finish_run(schedule_id, run_id, life.SKIPPED, reason=waiting, reason_code="verification_running")
         return None
     retrying = bool(getattr(sched, "retry_at", None))
     attempt = int(getattr(sched, "retry_attempt", 0) or 0) if retrying else 0

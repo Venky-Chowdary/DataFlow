@@ -80,6 +80,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [studioSchemaBrowser, setStudioSchemaBrowser] = useState(false);
   const [studioCanvas, setStudioCanvas] = useState(false);
   const [retentionAutoPurge, setRetentionAutoPurge] = useState(false);
+  // Parity at Scale: hold one snapshot per side while verifying, for at most N minutes.
+  const [verificationSnapshot, setVerificationSnapshot] = useState(true);
+  const [snapshotMinutes, setSnapshotMinutes] = useState("30");
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   /** Why General could not be read. Empty means the values below are the API's. */
@@ -205,6 +208,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setStudioSchemaBrowser(ws.studio_schema_browser === true);
         setStudioCanvas(ws.studio_canvas === true);
         setRetentionAutoPurge(ws.retention_auto_purge === true);
+        setVerificationSnapshot(ws.verification_snapshot !== false);
+        setSnapshotMinutes(String(ws.verification_snapshot_max_minutes ?? 30));
         setGeneralLock(platformLock(ws));
         setSettingsLoaded(true);
         setSettingsError("");
@@ -626,11 +631,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         retention_auto_purge: retentionAutoPurge,
         studio_schema_browser: studioSchemaBrowser,
         studio_canvas: studioCanvas,
+        verification_snapshot: verificationSnapshot,
+        verification_snapshot_max_minutes: Math.min(1440, Math.max(1, Number(snapshotMinutes) || 30)),
       });
       setOrgName(ws.org_name);
       setTimezone(ws.timezone);
       setRetention(String(ws.retention_days));
       setRetentionAutoPurge(ws.retention_auto_purge === true);
+      setVerificationSnapshot(ws.verification_snapshot !== false);
+      setSnapshotMinutes(String(ws.verification_snapshot_max_minutes ?? 30));
       setStudioSchemaBrowser(ws.studio_schema_browser === true);
       setStudioCanvas(ws.studio_canvas === true);
       try {
@@ -918,6 +927,45 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           }}
                         />
                         <p className="df2-label-hint" data-testid="retention-auto-purge-hint">{autoPurgeHint(retentionAutoPurge)}</p>
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="verification-snapshot">Consistent snapshot during verification</label>
+                        <input
+                          id="verification-snapshot"
+                          type="checkbox"
+                          data-testid="verification-snapshot"
+                          checked={verificationSnapshot}
+                          disabled={!generalEditable}
+                          title={generalTitle}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setVerificationSnapshot(e.target.checked);
+                          }}
+                        />
+                        <p className="df2-label-hint" data-testid="verification-snapshot-hint">
+                          Deployment-wide, and a ceiling: off here is off for every workspace. Where it is on, each
+                          workspace can turn it off or on for its own runs (its workspace settings), and a schedule
+                          can too. Holds an open read-only transaction on both
+                          databases while every row is compared — needed for a proven result; it delays clean-up on
+                          the source while held and is let go at once if another session waits on the table.
+                        </p>
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="verification-snapshot-minutes">Longest snapshot hold, any workspace (minutes)</label>
+                        <input
+                          id="verification-snapshot-minutes"
+                          className="df2-input"
+                          type="number"
+                          min={1}
+                          max={1440}
+                          value={snapshotMinutes}
+                          disabled={!generalEditable}
+                          title={generalTitle}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setSnapshotMinutes(e.target.value);
+                          }}
+                        />
                       </div>
                       <div className="df2-settings-field">
                         <label htmlFor="studio-schema-browser">Schema browser</label>

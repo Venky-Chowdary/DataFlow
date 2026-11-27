@@ -239,8 +239,29 @@ class SqlServerSide(SqlSide):
                f"TABLESAMPLE SYSTEM ({pct:.6f} PERCENT) REPEATABLE (42) ORDER BY {keys}")
         return [tuple(r) for r in self.execute(sql, [])]
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
-        inner = getattr(self.conn, "_conn", None)
+    def _driver_conn(self) -> Any:
+        """The pymssql ``_mssql`` connection under any wrapper (pool proxy, qmark adapter)."""
+        conn: Any = self.conn
+        for _ in range(5):
+            if hasattr(conn, "query_timeout"):
+                return conn
+            conn = (getattr(conn, "_conn", None) or getattr(conn, "dbapi_connection", None)
+                    or getattr(conn, "driver_connection", None))
+            if conn is None:
+                return None
+        return None
+
+    def _set_query_timeout(self, seconds: float | None) -> None:
+        inner = self._driver_conn()
+        if seconds and inner is not None and hasattr(inner, "query_timeout"):
+            try:
+                inner.query_timeout = max(1, int(round(seconds)))
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        self.tick()
+        inner = self._driver_conn()
         if self.timeout_seconds and inner is not None and hasattr(inner, "query_timeout"):
             try:
                 inner.query_timeout = max(1, int(round(self.timeout_seconds)))
@@ -261,11 +282,14 @@ class SqlServerSide(SqlSide):
             raise
 
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
+        self.tick()
+        self._set_query_timeout(self.stream_timeout_seconds or self.timeout_seconds)
         cur = self.conn.cursor()
         try:
             cur.execute(sql, tuple(params)) if params else cur.execute(sql)
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows

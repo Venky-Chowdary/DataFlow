@@ -116,6 +116,127 @@ strongest form is a five-layer ladder:
   digest covers rows this job never wrote. That difference is classified as a
   matter of scope, not reported as corruption.
 
+### Verification after the write (experimental)
+
+Behind `DATAWRAP_PARITY_SCALE=1`, a completed job whose table Gate-8 could
+not compare in full (above the ladder limit) is verified after the write by
+comparing every row inside both databases (see
+[Parity at Scale](../reference/parity-canonical-encoding.md)).
+
+- It runs only when the run read the whole table: a run that read an
+  incremental window, a query or procedure, a limited number of rows, or
+  rows its filter or recipe dropped or diverted is not compared as a whole
+  table, and the report says why. Gate-8's own record then decides.
+- It is its own state. While it runs the Trust Report reads
+  **Verification running**; the job's write status is not changed, and
+  sign-off and the "proven" verdict wait until it finishes. A verification
+  whose worker stopped (a restart, a lost replica) does not stay "running":
+  it reads as stopped, is resumed from its checkpoint when the app starts or
+  on its next sweep, and **Re-verify** takes it over.
+- The comparison inside the database runs on PostgreSQL 14 or later (it
+  needs exact `numeric` results from `extract(epoch …)`). On an older
+  server the table reads **Not verified at full scale**, with the server's
+  version, and Gate-8's own result stands.
+- **Proven** needs each side read from one snapshot for the whole comparison:
+  PostgreSQL (one repeatable-read transaction) and MySQL / MariaDB on InnoDB
+  (a consistent-snapshot transaction). Otherwise (SQL Server today, a
+  resumed comparison, another storage engine) a clean result reads
+  **no difference found**: the tables matched at scan time, but writes during
+  the scan were not ruled out. An engine pair not certified for every column
+  type reads the same way. Only a proven result becomes a full population
+  proof in the signed proof pack, and only where Gate-8 itself passed with
+  no fidelity veto.
+- **What a held snapshot costs.** The setting "Consistent snapshot during
+  verification" keeps one read-only transaction open on each database for
+  the whole comparison, for at most "Longest snapshot hold". The
+  deployment-wide setting (on, 30 minutes) is a platform admin's, under
+  Settings, General, and it is a ceiling: off there is off for every
+  workspace and schedule. Where it is on, each workspace can turn it off or
+  on for its own runs and set a shorter hold (Settings, workspace enterprise
+  settings), and a schedule can do the same. The hold used is the shortest
+  one set. On MySQL / MariaDB the scan's login must be able to see other
+  sessions (the PROCESS privilege — SUPER alone is not enough — or on
+  MySQL 8 a readable `performance_schema` with the metadata-lock
+  instrument on). This is probed from the watching connection before the
+  snapshot is held; if it cannot be proven, nothing is pinned and the
+  result says why. While it is open:
+  - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
+    xmin horizon is held back), so tables with heavy writes grow until it
+    ends;
+  - MySQL / MariaDB InnoDB keeps undo history for the snapshot, so the undo
+    log grows on a busy server;
+  - on a PostgreSQL hot standby, replication can cancel a long snapshot
+    (a recovery conflict), so a standby is never pinned;
+  - the snapshot holds a lock on the table it has read: PostgreSQL an
+    `AccessShareLock`, MySQL / MariaDB a shared metadata lock. A `TRUNCATE`,
+    a table swap or rename, or DDL needs an exclusive lock and would wait
+    for the snapshot (and everything queued behind it would wait too). So a
+    second connection watches for any session waiting on those locks
+    (`pg_blocking_pids`; MySQL `performance_schema.metadata_locks`, or on
+    MariaDB the process list's "Waiting for table metadata lock"), about
+    once a second, and the comparison lets its snapshot go as soon as one
+    waits: the waiting statement proceeds within about a second, the
+    comparison continues statement by statement, and the result reads
+    **no difference found** with "released the snapshot so session … could
+    proceed". Where no second connection can watch, nothing is pinned.
+  Past the longest hold the comparison lets the snapshot go and continues
+  statement by statement; a server whose `idle_in_transaction_session_timeout`
+  (or `transaction_timeout`) is shorter than the hold is not pinned at all.
+  Either way the result reads **no difference found**, with the reason. The
+  Trust Report shows, per table, whether each side was read from one snapshot
+  and for how long. The two snapshots (source and destination) are taken a
+  few milliseconds apart; the report states the gap.
+- What Gate-8 explained stays explained: quarantined rows, rows skipped by
+  the duplicate policy and rows that were in the destination before an
+  append are not turned into differences. A missing row is explained by
+  quarantine only when its key is one the run recorded as quarantined; a
+  missing row whose key the run did not record stays unexplained (the held
+  row may be one the destination still has). Only missing rows beyond the
+  keys the report keeps are matched to held rows by count, and the report
+  says so.
+- A text key is read in key ranges only when it orders the same way on
+  both databases: a binary collation on both sides (PostgreSQL `C`,
+  `POSIX`, `ucs_basic`, `pg_c_utf8`; MySQL `binary` or `utf8mb4_0900_bin`;
+  MariaDB `utf8mb4_nopad_bin`), read from each catalog. Otherwise the table
+  is compared by hash buckets, and its streamed columns (transformed,
+  crosswalked, floats across engines, JSON) are read in one pass. On MySQL /
+  MariaDB that one read is a single statement limited to the stream timeout
+  (30 minutes), so a table too large to stream within it is reported as not
+  fully compared, with that reason; the Trust Report's coverage says how the
+  pass was read.
+- Rows whose key is NULL fall in no key range: they are compared as whole
+  rows (content), reported as "rows without key", and never attributed to a
+  key. Before any match, each side's units must add up to its row count;
+  if they do not, the table is not fully compared and the report says why.
+- A table with no key is compared as content: the check reads
+  **Content match (no key)**, and a difference cannot be attributed to a key.
+- A verification that found differences makes the report **unexplained** and
+  names the rows.
+- On a schedule, the watermark moves only after verification passed (and
+  only forward), and the next run waits while it runs (set
+  `wait_for_verification` to false on the schedule to not wait).
+
+The Trust Report's difference explorer shows, per verified table, each
+column's differing rows (Columns), the missing, extra, duplicate and changed
+keys (Keys), and the differing values read again from both sides (Values).
+Protected columns never show a value, and their values are never stored with
+the verification. **Re-verify this table** compares every row again.
+**Copy repair SQL** shows statements that make the destination match the
+source for the named keys, with the run's transforms applied; it leaves out
+quarantined rows, rows outside the run and protected columns, and says so.
+Each UPDATE and DELETE carries the destination row's values as read when
+the statements were generated, so a row changed since is left alone; an
+extra row is deleted only if the source still does not hold its key when
+the statements are generated. A changed column of a type with no exact
+equality (floats, JSON, XML, geometric, time-zone timestamps) is not set
+by an UPDATE, since a newer value could not be detected: it is listed for
+review by hand with its keys. MySQL / MariaDB string literals that hold a
+quote or backslash are written in hex, so they mean the same with or
+without `NO_BACKSLASH_ESCAPES`. Datawrap never runs them.
+
+Tested end to end on PostgreSQL to PostgreSQL. Other engine pairs use the same
+comparison but are not yet tested end to end in this mode.
+
 ### What a passing checksum does not prove
 
 - It does not prove referential integrity between tables.
@@ -130,6 +251,8 @@ Each table in a result carries the kind of check that ran.
 |---|---|---|
 | `full_checksum` | Every row compared by checksum | Proof for the rows compared |
 | `key_diff` | Every row compared by key | Proof for the rows compared |
+| `segment_diff` | Every row compared inside both databases, by key (verification after the write) | Proof for the rows compared, on a certified engine pair |
+| `multiset_digest` | Every row compared as content, for a table with no key ("Content match (no key)") | Proof the contents match; a difference cannot be attributed to a key |
 | `sampled` | Values compared on a sample of rows | An estimate with a stated bound, when the sample was a random draw. Nothing, about rows outside it, when it was not. |
 | `readback` | Mirror or SCD2: a digest of every live destination row, re-read after the write, compared with the digest of the rows the run read from the source | Values of every live row were compared, but the source side is the run's own read, not an independent re-read, and a digest names no row. Not proof. |
 | `count_only` | Only row counts compared | Says nothing about values |

@@ -427,3 +427,45 @@ def test_dialect_registry_serves_the_first_wave_and_refuses_later_engines() -> N
     for engine in PLANNED:
         with pytest.raises(PairNotCertified):
             open_side(engine, role="source", plan=plan_for(), table="t")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_rows_without_a_key_value_are_their_own_unit(tmp_path, mode) -> None:
+    """Review 3, item 1: a NULL key is in no key range; once a table had more than one unit
+    its NULL-key rows were compared on neither side. They are a unit of their own now."""
+    path = make_db(tmp_path, 1000, keyless=True)  # no PRIMARY KEY: the key comes from the mapping
+    execute(path, "INSERT INTO src VALUES (NULL, 'a', 1, '')", "INSERT INTO src VALUES (NULL, 'b', 2, '')",
+            "INSERT INTO dst VALUES (NULL, 'a', 1, '')")
+    ev = scan(path, plan_for(key=["id"]), mode=mode)
+    assert ev["population"]["rows_source"] == 1002 and ev["population"]["rows_destination"] == 1001
+    assert ev["population"]["population_check"]["ok"] is True
+    assert ev["differences"]["missing_in_destination"] == 1
+    assert ev["differences"]["rows_without_key"]["missing_content_examples"][0][1] == "b"
+    assert ev["outcome"] == "differences_found"
+    execute(path, "INSERT INTO dst VALUES (NULL, 'b', 2, '')")
+    assert scan(path, plan_for(key=["id"]), mode=mode)["outcome"] == "match"
+
+
+def test_the_streamed_merge_is_progress_for_the_heartbeat(tmp_path, monkeypatch) -> None:
+    """Review 3, item 7: CREATE INDEX and the merge of a large spill made no progress ticks, so
+    a healthy worker could stop renewing its lease and be taken over."""
+    from services.parity_scale import stream
+
+    path = make_db(tmp_path, 3000)
+    maps = [{"source": c, "target": c} for c in TYPES]
+    maps[1]["transform"] = "upper"
+    plan = plan_for(mappings=maps)
+    execute(path, "UPDATE dst SET name = upper(name)")
+    src, dst = opener(path)("source", plan), opener(path)("destination", plan)
+    ticks: list[str] = []
+    phase = ["spill"]
+    real_merge = stream._merge_keyed
+
+    def merge(*args, **kwargs):
+        phase[0] = "merge"
+        return real_merge(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_merge_keyed", merge)
+    result = stream.stream_compare(src, dst, plan, shape="keyed", batch=10**9, tick=lambda: ticks.append(phase[0]))
+    assert result.rows_source == result.rows_destination == 3000 and result.changed == 0
+    assert "merge" in ticks

@@ -34,7 +34,7 @@ from typing import Any
 
 from services.parity_scale import require_enabled
 from services.parity_scale.ce1 import ALGORITHM, CE_VERSION, HASH_SPEC
-from services.parity_scale.dialects.base import EMPTY, LeafRow, Side, UnitTimeout, add
+from services.parity_scale.dialects.base import EMPTY, LeafRow, Side, SnapshotYielded, UnitTimeout, add
 from services.parity_scale.plan import PlanError, TablePlan, require_pair
 from services.parity_scale.store import ScanStore, decode_key, encode_key, utc_now
 
@@ -62,6 +62,10 @@ class ScanConfig:
     boundary_strategy: str = "auto"
     large_table_rows: int = 2_000_000
     statement_timeout_s: float | None = 120.0
+    #: Server-side timeout of one streamed read (one key range of the streamed pass).
+    stream_timeout_s: float | None = 1800.0
+    #: Rows per key range of the streamed pass (each range is its own resumable item).
+    stream_chunk_rows: int = 250_000
     max_retries: int = 2
     max_wall_seconds: float | None = None
     systematic_unit_ratio: float = 0.05
@@ -75,11 +79,28 @@ class ScanConfig:
     spill_dir: str | None = None
     #: Run each statement on both sides at once (one connection per side).
     parallel_sides: bool = True
+    #: Target columns whose values must never be stored (masked, hashed, redacted
+    #: or omitted by the run): examples and causes keep the column, never a value.
+    protected: tuple[str, ...] = ()
+    #: Read each side from one snapshot for the whole scan (verification after
+    #: the write sets it): only then can "every row matched" be a proof.
+    pin_snapshot: bool = False
+    #: The longest a pinned side's snapshot is held; past it the side lets go and
+    #: reads statement by statement (the result is then not pinned, and says why).
+    pin_max_hold_s: float | None = None
+    #: Why the scan is not pinned at all (a setting), for the evidence.
+    pin_off_reason: str = ""
+    #: How often a pinned side looks for sessions waiting on its snapshot's locks (a
+    #: TRUNCATE, a table swap, DDL); it lets the snapshot go as soon as one waits.
+    lock_poll_s: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ScanConfig":
         fields = cls.__dataclass_fields__
-        return cls(**{k: v for k, v in (data or {}).items() if k in fields})
+        values = {k: v for k, v in (data or {}).items() if k in fields}
+        if "protected" in values:
+            values["protected"] = tuple(str(c).lower() for c in values["protected"] or ())
+        return cls(**values)
 
 
 SideFactory = Callable[[str, TablePlan], Side]
@@ -125,6 +146,7 @@ def _new_state(scan_id: str, plan: TablePlan, config: ScanConfig, mode: str, mod
         "stream": None,
         "examples": {"missing_content": [], "extra_content": []},
         "systematic": None,
+        "consistency": {},
         "resumed": 0,
         "started_at": utc_now(),
         "finished_at": None,
@@ -149,6 +171,10 @@ class ParityScan:
         self.config = ScanConfig.from_dict(state["config"])
         self._open_side = open_side
         self._sides: dict[str, Side] = {}
+        self._pinned_at: dict[str, float] = {}
+        #: Monotonic time of the last statement, streamed batch or item: the worker's
+        #: heartbeat renews the lease only while this moves (services.parity_scale.verification).
+        self.last_progress = time.monotonic()
         self._pool: Any = None
         #: Test hook: called before each statement with ``(op, item)``; it may
         #: raise :class:`UnitTimeout` to simulate a slow statement.
@@ -194,6 +220,18 @@ class ParityScan:
             raise ScanStateError("the plan changed since the scan started (schema or mapping): restart it")
         if state.get("status") == "running":
             state["resumed"] = int(state.get("resumed") or 0) + 1
+            inflight = state.pop("inflight", None)
+            if isinstance(inflight, dict):
+                # An item was running when the worker stopped: its time counts against the
+                # wall-clock cap (until now, a conservative bound), so the cap holds across resumes.
+                from datetime import datetime, timezone
+
+                try:
+                    since = datetime.fromisoformat(str(inflight.get("since")))
+                    lost = max(0.0, (datetime.now(timezone.utc) - since).total_seconds())
+                except (TypeError, ValueError):
+                    lost = 0.0
+                state["elapsed_s"] = round(float(state.get("elapsed_s") or 0) + lost, 6)
             store.save(scan_id, state)
         return cls(state, store=store, open_side=open_side, fault=fault)
 
@@ -220,10 +258,84 @@ class ParityScan:
         if role not in self._sides:
             side = self._open_side(role, self.plan)
             side.set_timeout(self.config.statement_timeout_s)
+            side.tick = self._tick
+            side.stream_timeout_seconds = self.config.stream_timeout_s
+            if self.config.pin_snapshot:
+                self._pin(role, side)
             self._sides[role] = side
         return self._sides[role]
 
+    def _pin(self, role: str, side: Side) -> None:
+        """Pin the side to one snapshot and record exactly what that established."""
+        consistency = self.state.setdefault("consistency", {})
+        if role in consistency:
+            # The side was opened before (a resumed scan): the earlier part of
+            # the scan read another snapshot, so nothing pins the whole scan.
+            consistency["broken"] = (
+                f"the {role} was read again after the scan resumed, from a later snapshot"
+            )
+        try:
+            consistency[role] = side.pin(max_hold_s=self.config.pin_max_hold_s)
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is recorded, not fatal
+            # Roll back whatever the attempt left (an aborted transaction): never an errored scan.
+            side.unpin()
+            consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
+        if consistency[role].get("kind") == "pinned":
+            # The snapshot holds locks (PostgreSQL AccessShareLock, MySQL metadata locks): it
+            # must yield to a TRUNCATE / swap / DDL, so it is held only while that is watched.
+            refusal = side.watch_locks(self.config.lock_poll_s)
+            if refusal:
+                side.release_pin()
+                consistency[role] = {"kind": "not_established", "reason": refusal}
+                return
+            self._pinned_at[role] = time.monotonic()
+
+    def _tick(self) -> None:
+        self.last_progress = time.monotonic()
+
+    def _held_for(self, role: str) -> float:
+        return round(time.monotonic() - self._pinned_at[role], 3) if role in self._pinned_at else 0.0
+
+    def _release_overdue_pins(self) -> None:
+        """A snapshot held past its maximum is let go: the side reads statement by statement after."""
+        cap = self.config.pin_max_hold_s
+        if cap is None:
+            return
+        consistency = self.state.setdefault("consistency", {})
+        for role, side in list(self._sides.items()):
+            if role in self._pinned_at and self._held_for(role) >= cap:
+                held = self._held_for(role)
+                side.release_pin()
+                del self._pinned_at[role]
+                consistency[role] = {
+                    **(consistency.get(role) or {}), "kind": "not_established", "held_s": held,
+                    "reason": (f"the snapshot was held for its maximum ({int(cap // 60)} minutes) and let go; "
+                               "the rest of the scan read the table statement by statement"),
+                }
+
+    def _collect_yields(self) -> None:
+        """A side whose lock watch let its snapshot go (a session waited on it): say so."""
+        consistency = self.state.setdefault("consistency", {})
+        for role, side in list(self._sides.items()):
+            reason = str(getattr(side, "yield_reason", "") or "")
+            if not reason or role not in self._pinned_at:
+                continue
+            held = self._held_for(role)
+            side.release_pin()
+            del self._pinned_at[role]
+            consistency[role] = {**(consistency.get(role) or {}), "kind": "not_established",
+                                 "held_s": held, "reason": reason}
+
+    def _record_holds(self) -> None:
+        consistency = self.state.setdefault("consistency", {})
+        for role in list(self._pinned_at):
+            if isinstance(consistency.get(role), dict):
+                consistency[role]["held_s"] = self._held_for(role)
+
     def close(self) -> None:
+        self._collect_yields()
+        self._record_holds()
+        self._pinned_at.clear()
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -277,11 +389,19 @@ class ParityScan:
                     self._abandon_queue("scan wall-clock budget exhausted")
                     continue
                 t0 = time.monotonic()
+                self.last_progress = t0
+                self._release_overdue_pins()
                 item = self.state["queue"].pop(0) if self.state["queue"] else None
                 if item is None:
                     self._finish()
                 else:
+                    if item["t"] == "stream":
+                        # A long item: if the worker stops inside it, a resume still counts its time.
+                        self.state["inflight"] = {"t": item["t"], "since": utc_now()}
+                        self.store.save(self.state["scan_id"], {**self.state, "queue": [item, *self.state["queue"]]})
                     self._process(item)
+                    self._collect_yields()
+                    self.state.pop("inflight", None)
                     self.state["items_done"] += 1
                 self.state["elapsed_s"] = round(float(self.state["elapsed_s"]) + time.monotonic() - t0, 6)
                 self.store.save(self.state["scan_id"], self.state)
@@ -322,6 +442,8 @@ class ParityScan:
             "H": self._bucket_level,
             "HL": self._bucket_leaf,
             "held": self._held,
+            "nullkeys": self._null_keys,
+            "population": self._population,
             "stream": self._stream,
             "judge": self._judge,
             "examples": self._examples,
@@ -339,7 +461,8 @@ class ParityScan:
 
     def _abandon_queue(self, reason: str) -> None:
         for item in self.state["queue"]:
-            if item["t"] in {"R", "RL", "H", "HL", "stream"}:
+            # A scan stopped before it even started compared nothing: never a match.
+            if item["t"] in {"R", "RL", "H", "HL", "stream", "start", "held", "nullkeys", "population"}:
                 self._not_compared(item, reason)
             elif item["t"] == "judge":
                 self.state["judge"]["not_judged"] += len(item.get("keys") or [])
@@ -347,6 +470,10 @@ class ParityScan:
         self._finish()
 
     def _finish(self) -> None:
+        self._collect_yields()
+        self._record_holds()
+        if not self.config.pin_snapshot and self.config.pin_off_reason:
+            self.state.setdefault("consistency", {})["off"] = self.config.pin_off_reason
         self.state["status"] = "done"
         self.state["phase"] = "done"
         self.state["finished_at"] = utc_now()
@@ -364,12 +491,18 @@ class ParityScan:
         tail: list[dict[str, Any]] = []
         if any(c.decimal_fit for c in self.plan.engine_columns):
             tail.append({"t": "held"})
+        # Rows with no key value are in no key range: their own unit, compared by whole row.
+        ends: list[dict[str, Any]] = [] if self.plan.keyless else [{"t": "nullkeys"}]
+        # Before any verdict: per side, the units must add up to the table's row count.
+        ends.append({"t": "population"})
         if mode == "S":
             self.state["phase"] = "stream"
-            self._enqueue({"t": "stream", "shape": "multiset" if self.plan.keyless else "keyed"}, *tail)
+            shape = "multiset" if self.plan.keyless else "keyed"
+            self._enqueue(*self._stream_items(shape), *tail, *ends)
             return
         if self.plan.stream_columns and not self.plan.keyless:
-            tail.append({"t": "stream", "shape": "changed"})
+            tail.append({"t": "stream", "shape": "changed", "chunk": True})
+        tail.extend(ends)
         self.state["phase"] = "level0"
         if mode == "R":
             src = self.side("source")
@@ -389,6 +522,7 @@ class ParityScan:
                 self._enqueue(*tail)
                 return
             bounds = [None, *[encode_key(p) for p in points], None]
+            tail = [x for t in tail for x in (self._stream_items(t["shape"], bounds) if t.get("chunk") else [t])]
             units = [
                 {"t": "R", "lo": bounds[i], "hi": bounds[i + 1], "lvl": 0, "retry": 0,
                  "est": self.config.segment_rows}
@@ -399,7 +533,40 @@ class ParityScan:
             self._enqueue(*units, {"t": "level0_done"})
         else:
             self._enqueue({"t": "H", "lvl": 0, "parents": [], "retry": 0})
+            tail = [x for t in tail for x in (self._stream_items(t["shape"]) if t.get("chunk") else [t])]
         self._enqueue(*tail)
+
+    def _stream_items(self, shape: str, bounds: list[Any] | None = None) -> list[dict[str, Any]]:
+        """The streamed pass as resumable items: one per key range when the key orders the
+        same on both engines (each range read under its own timeouts), else one item."""
+        one = [{"t": "stream", "shape": shape}]
+        src = self.side("source")
+        why = ("the table has no key" if shape == "multiset"
+               else f"its key does not order the same way on both databases ({self.plan.order_reason})"
+               if not self.plan.order_portable
+               else "this engine reads it in one statement" if not getattr(src, "range_stream", False) else "")
+        if why:
+            # One read under the stream's server-side timeout: on MySQL / MariaDB that bounds the
+            # whole SELECT, so a table too large to stream within it is not fully compared.
+            self.state["stream_reads"] = {
+                "parts": 1,
+                "reason": (f"The streamed columns are read in one pass because {why}; that read is "
+                           f"limited to {int((self.config.stream_timeout_s or 0) // 60)} minutes. A key with a "
+                           "binary collation on both sides lets the pass be read in parts."),
+            }
+            return one
+        if bounds is None:
+            try:
+                points, _strategy = src.boundaries(self.config.stream_chunk_rows,
+                                                   strategy=self.config.boundary_strategy,
+                                                   large_table_rows=self.config.large_table_rows)
+                self.state["statements"] += 1
+            except UnitTimeout:
+                return one
+            bounds = [None, *[encode_key(p) for p in points], None]
+        self.state["stream_reads"] = {"parts": len(bounds) - 1, "reason": ""}
+        return [{"t": "stream", "shape": shape, "lo": bounds[i], "hi": bounds[i + 1]}
+                for i in range(len(bounds) - 1)]
 
     # mode R ---------------------------------------------------------------------------
     def _range_unit(self, item: dict[str, Any]) -> None:
@@ -750,6 +917,55 @@ class ParityScan:
         except UnitTimeout as exc:
             self.state["held_out"] = {"fit_excluded": None, "reason": f"count timed out: {exc}"}
 
+    # rows with no key value; the population check ----------------------------------------------
+    def _null_keys(self, item: dict[str, Any]) -> None:
+        try:
+            src, dst = self._both("null_key_count", item, lambda s: s.null_key_count())
+        except UnitTimeout as exc:
+            self._not_compared(item, f"rows with no key value could not be counted: {exc}")
+            return
+        self.state["null_keys"] = {"source": int(src), "destination": int(dst), "missing": 0, "extra": 0}
+        self.state["rows"]["source"] = int(self.state["rows"]["source"]) + int(src)
+        self.state["rows"]["destination"] = int(self.state["rows"]["destination"]) + int(dst)
+        if src or dst:
+            self.state["queue"].insert(0, {"t": "stream", "shape": "multiset", "nulls": True})
+
+    def _population(self, item: dict[str, Any]) -> None:
+        """Hard invariant before any match: per side, ``COUNT(*)`` equals the sum of the units.
+
+        A row in no unit (a hole in the key ranges) would otherwise be compared on
+        neither side and the scan would read "every row matched".
+        """
+        slow = max(float(self.config.statement_timeout_s or 0), float(self.config.stream_timeout_s or 0)) or None
+
+        def count(side: Side) -> int:
+            side.set_timeout(slow)
+            try:
+                return side.total_count()
+            finally:
+                side.set_timeout(self.config.statement_timeout_s)
+
+        try:
+            src, dst = self._both("total_count", item, count)
+        except UnitTimeout as exc:
+            self._not_compared(item, f"the row-count check timed out, so the units are not shown to cover "
+                                     f"every row: {exc}")
+            return
+        rows = self.state["rows"]
+        check: dict[str, Any] = {"ok": True}
+        for role, counted in (("source", int(src)), ("destination", int(dst))):
+            in_units = int(rows.get(role) or 0)
+            check[role] = {"rows": counted, "in_units": in_units}
+            if counted != in_units:
+                check["ok"] = False
+        self.state["population_check"] = check
+        if not check["ok"] and not self.state["not_compared"]:
+            parts = [f"the {role} has {check[role]['rows']} rows but the compared units hold "
+                     f"{check[role]['in_units']}" for role in ("source", "destination")
+                     if check[role]["rows"] != check[role]["in_units"]]
+            self._not_compared(item, "row count check failed: " + "; ".join(parts)
+                               + " (rows outside every unit, or rows written during an unpinned scan)")
+
     # streamed pass ---------------------------------------------------------------------------
     def _stream(self, item: dict[str, Any]) -> None:
         from services.parity_scale.stream import stream_compare
@@ -757,6 +973,8 @@ class ParityScan:
         self.state["phase"] = "stream"
         shape = item["shape"]
         columns = None if shape != "changed" else list(self.plan.stream_columns)
+        wall = self.config.max_wall_seconds
+        deadline = None if wall is None else time.monotonic() + max(0.0, wall - float(self.state["elapsed_s"]))
         try:
             if self._fault is not None:
                 self._fault("stream", item)
@@ -765,28 +983,51 @@ class ParityScan:
                 shape=shape, columns=columns, keys_cap=self.config.keys_stored_cap,
                 examples_cap=self.config.examples_cap, batch=self.config.stream_batch,
                 spill_dir=self.config.spill_dir,
+                lo=decode_key(item["lo"]) if item.get("lo") is not None else None,
+                hi=decode_key(item["hi"]) if item.get("hi") is not None else None,
+                deadline=deadline, tick=self._tick, nulls=bool(item.get("nulls")),
             )
         except UnitTimeout as exc:
-            self._not_compared(item, f"streamed pass timed out: {exc}")
+            single = (self.state.get("stream_reads") or {}).get("reason") if item.get("lo") is None \
+                and item.get("hi") is None and not item.get("nulls") else ""
+            self._not_compared(item, f"streamed pass timed out: {exc}" + (f". {single}" if single else ""))
             return
+        except SnapshotYielded:
+            # A session waited on the snapshot's locks mid-read: that side let it go; this part
+            # is read again, statement by statement (nothing of it was recorded).
+            self.state["queue"].insert(0, item)
+            return
+        diff = self.state["diff"]
+        if item.get("nulls"):
+            # Rows with no key value: a multiset of whole rows; counted, never attributed to a key.
+            nk = self.state.setdefault("null_keys", {"source": 0, "destination": 0, "missing": 0, "extra": 0})
+            nk.update(missing=result.missing, extra=result.extra,
+                      missing_examples=[self._masked(r) for r in result.missing_examples],
+                      extra_examples=[self._masked(r) for r in result.extra_examples])
+            diff["missing"] += result.missing
+            diff["extra"] += result.extra
+            return
+        previous = self.state.get("stream") or {}
         self.state["stream"] = {
             "shape": shape,
             "columns": [c.target for c in (columns or self.plan.compared_columns)],
-            "rows_source": result.rows_source,
-            "rows_destination": result.rows_destination,
+            "rows_source": int(previous.get("rows_source") or 0) + result.rows_source,
+            "rows_destination": int(previous.get("rows_destination") or 0) + result.rows_destination,
         }
-        diff = self.state["diff"]
         if shape == "multiset":
             diff["missing"] += result.missing
             diff["extra"] += result.extra
-            self.state["examples"]["missing_content"] = result.missing_examples
-            self.state["examples"]["extra_content"] = result.extra_examples
+            self.state["examples"]["missing_content"] = [self._masked(r) for r in result.missing_examples]
+            self.state["examples"]["extra_content"] = [self._masked(r) for r in result.extra_examples]
             self.state["rows"].update(source=result.rows_source, destination=result.rows_destination,
                                       level0_complete=True)
             return
         if shape == "keyed":
-            self.state["rows"].update(source=result.rows_source, destination=result.rows_destination,
-                                      level0_complete=True)
+            # Key ranges add up; one unfinished range is "not compared", so the total is never claimed.
+            self.state["rows"]["source"] = int(self.state["rows"].get("source") or 0) + result.rows_source
+            self.state["rows"]["destination"] = (int(self.state["rows"].get("destination") or 0)
+                                                 + result.rows_destination)
+            self.state["rows"]["level0_complete"] = True
             for name in ("missing", "extra", "duplicate"):
                 diff[name] += getattr(result, name)
                 diff[f"{name}_keys"].extend(getattr(result, f"{name}_keys"))
@@ -800,6 +1041,23 @@ class ParityScan:
         if extra_unnamed > 0:
             diff["changed"] += extra_unnamed
             diff["keys_capped"] = True
+
+    # protected values ---------------------------------------------------------------------------
+    def _is_protected(self, column: str) -> bool:
+        return str(column).lower() in self.config.protected
+
+    def _masked(self, values: Sequence[Any]) -> list[Any]:
+        """A row of compared-column values with every protected value replaced (never stored raw)."""
+        cols = self.plan.compared_columns
+        return [
+            "protected" if i < len(cols) and self._is_protected(cols[i].target) else v
+            for i, v in enumerate(values)
+        ]
+
+    def _safe_cause(self, column: str, cause: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_protected(column):
+            return cause
+        return {**cause, "detail": "A protected column: its values are never shown or stored."}
 
     # judge ------------------------------------------------------------------------------------
     def _queue_judge(self) -> None:
@@ -842,13 +1100,24 @@ class ParityScan:
                 judge["explained_rows"] += 1
             else:
                 judge["unexplained_rows"] += 1
-            for cell in verdict.cells:
+            by_column = judge.setdefault("by_column", {})
+            cells = [{**c, "cause": self._safe_cause(c["column"], c["cause"])} for c in verdict.cells]
+            for cell in cells:
                 col = cell["column"]
-                code = cell["cause"].get("code") or "unexplained"
+                cause = cell["cause"]
+                code = cause.get("code") or "unexplained"
                 judge["cells_by_column"][col] = judge["cells_by_column"].get(col, 0) + 1
                 judge["causes"][code] = judge["causes"].get(code, 0) + 1
+                # Per column and cause: what the Trust Report groups a difference by.
+                slot = by_column.setdefault(col, {}).setdefault(code, {
+                    "rows": 0, "explained": bool(cause.get("explained")), "label": cause.get("label") or code,
+                    "detail": cause.get("detail") or "", "keys": [],
+                })
+                slot["rows"] += 1
+                if len(slot["keys"]) < 20:
+                    slot["keys"].append(text)
             if len(judge["examples"]) < self.config.examples_cap:
-                judge["examples"].append({"key": text, "cells": verdict.cells})
+                judge["examples"].append({"key": text, "cells": cells})
 
     def _examples(self, _item: dict[str, Any]) -> None:
         from services.parity_scale.judge import wire_text
@@ -864,13 +1133,13 @@ class ParityScan:
             except UnitTimeout:
                 continue
             self.state["examples"][f"{name}_content"] = [
-                [wire_text(v) for v in values] for _h, values in rows
+                self._masked([wire_text(v) for v in values]) for _h, values in rows
             ]
 
     # the queue's tail: judge after every unit is merged ---------------------------------------------
     def _maybe_queue_judge(self) -> None:
         if not self.state.get("judge_queued") and not any(
-            i["t"] in {"R", "RL", "H", "HL", "stream", "held", "level0_done", "start"}
+            i["t"] in {"R", "RL", "H", "HL", "stream", "held", "nullkeys", "population", "level0_done", "start"}
             for i in self.state["queue"]
         ):
             self.state["judge_queued"] = True

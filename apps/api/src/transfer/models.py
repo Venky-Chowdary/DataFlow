@@ -506,6 +506,29 @@ def _endpoint_address(ep: dict) -> dict:
     return {"type": kind.lower(), "host": host.lower(), "port": port, "database": database}
 
 
+def _strip_verification_internals(out: dict) -> None:
+    """Parity at Scale's checkpoints, lease and evidence bodies are the worker's, not the client's.
+
+    The verification state and outcome stay; scan state (keys, examples) is
+    served only by the explorer routes, which mask protected columns.
+    """
+    for name in ("parity_scale_checkpoints", "parity_scale_lease", "parity_scale_pending_cursor"):
+        out.pop(name, None)
+    block = out.get("parity_scale")
+    if isinstance(block, dict):
+        tables = []
+        for table in block.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            evidence = table.get("evidence") if isinstance(table.get("evidence"), dict) else {}
+            tables.append({
+                **{k: v for k, v in table.items() if k != "evidence"},
+                "outcome": evidence.get("outcome"),
+                "check_kind": evidence.get("check_kind"),
+            })
+        out["parity_scale"] = {**block, "tables": tables}
+
+
 def sanitize_job_for_api(job: dict) -> dict:
     """Strip plaintext connector secrets from a job document before returning to clients."""
     import copy
@@ -520,6 +543,7 @@ def sanitize_job_for_api(job: dict) -> dict:
                 tr[side]["address"] = address
         out["transfer_request"] = tr
     _project_operator_quarantine(out)
+    _strip_verification_internals(out)
     from src.ai.copilot.job_reads import job_lineage
 
     lineage = job_lineage(out)

@@ -483,6 +483,77 @@ def verify_body(
 def classify_post_write_assurance(
     reconciliation: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Gate-8's classification, upgraded by a Parity at Scale scan that compared every row.
+
+    A scan recorded on ``reconciliation.parity_at_scale`` (phase 3, behind
+    ``DATAWRAP_PARITY_SCALE``) is an independent re-read of both populations.
+    It upgrades the claim to a full population proof (provenance
+    ``engine_segment_digest``) only where Gate-8 itself was merely
+    coverage-limited (it passed, nothing vetoed it, it claimed no more than a
+    sample): it never overrides a failed Gate-8, a fidelity veto (coerced
+    cells, a failed ladder layer) or a narrower scope. A scan that found
+    differences never adds to the claim.
+    """
+    base = _classify_gate8_assurance(reconciliation)
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict):
+        return base
+    if scan.get("outcome") == "differences_found":
+        return {**base, "migration_proven": False, "population_proof": False,
+                "note": f"{base.get('note') or ''} Parity at Scale compared every row and found differences "
+                        "(see the Trust Report).".strip()}
+    if scan_upgrades_assurance(recon, base):
+        return {**base, "claim_level": "full_checksum", "post_write_verified": True, "migration_proven": True,
+                "population_proof": True, "checksum_match": True,
+                "source_checksum_provenance": "engine_segment_digest",
+                "note": "Every row compared inside both databases (Parity at Scale) and none differs."}
+    return base
+
+
+#: Gate-8 claims a coverage-limited run ends with; anything else is decided by Gate-8 alone.
+_UPGRADABLE_CLAIMS = frozenset({"none", "sample"})
+
+
+def scan_upgrades_assurance(reconciliation: dict[str, Any] | None, base: dict[str, Any] | None = None) -> bool:
+    """True when a Parity at Scale scan may replace Gate-8's claim with a full population proof."""
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    if not scan_proves_population(recon):
+        return False
+    if recon.get("passed") is not True or fidelity_veto(recon) is not None:
+        return False
+    coverage_limited = bool(recon.get("coverage_limit")) or (
+        recon.get("verification_verdict_qualifier") == "coverage_limited")
+    if not coverage_limited:
+        return False
+    base = base if base is not None else _classify_gate8_assurance(recon)
+    return base.get("claim_level") in _UPGRADABLE_CLAIMS
+
+
+def scan_proves_population(reconciliation: dict[str, Any] | None) -> bool:
+    """A Parity at Scale scan that may stand as a full population proof (design §4.2).
+
+    Every unit compared, nothing differs, every in-engine column kind
+    certified for the server pair, and each side read from one snapshot
+    (consistency ``pinned``): without that, writes during the scan were not
+    ruled out and the match proves only that the tables matched at scan time.
+    """
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict):
+        return False
+    consistency = scan.get("consistency") if isinstance(scan.get("consistency"), dict) else {}
+    return (
+        scan.get("outcome") == "match"
+        and scan.get("complete") is True
+        and scan.get("certified") is True
+        and consistency.get("kind") == "pinned"
+    )
+
+
+def _classify_gate8_assurance(
+    reconciliation: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Classify Gate-8 evidence — never invent migration_proven from samples/preview.
 
     claim_level:
@@ -950,7 +1021,9 @@ def proof_pack_evidence_completeness_errors(
         recon = reconciliation if isinstance(reconciliation, dict) else {}
         src = str(recon.get("source_checksum") or "").strip()
         tgt = str(recon.get("target_checksum") or "").strip()
-        if not src or not tgt or src != tgt:
+        # A complete, certified, pinned Parity at Scale match is an independent
+        # re-read of both populations, compared unit by unit (digests per segment).
+        if (not src or not tgt or src != tgt) and not scan_upgrades_assurance(recon):
             errors.append(
                 "migration_proven refused: independent matching checksums required"
             )

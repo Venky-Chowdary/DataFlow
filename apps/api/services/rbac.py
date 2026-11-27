@@ -490,6 +490,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_MANAGE),
+    # Parity at Scale: re-verifying a table reads both databases again (job.run).
+    ("POST", "/api/v1/jobs/{job_id}/verification/tables/{table}", Permission.JOB_RUN),
     # Reversibility Proof. Declaring a system configures recurring extracts of a
     # saved connection (job.manage); a rehearsal runs those extracts (job.run);
     # signing attests the Exit Evidence Pack (job.manage, plus the authority
