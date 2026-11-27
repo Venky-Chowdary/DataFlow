@@ -91,10 +91,13 @@ def test_oracle_catalog_keeps_timestamp_scale() -> None:
         )
         is False
     )
-    assert (
-        is_lossy_coercion("TIMESTAMP_TZ(7)", "TIMESTAMP_TZ(7)", dest_db="oracle")
-        is False
-    )
+    # An Oracle source into its own table (a non-Oracle offset source into an
+    # Oracle zone column needs a Risk Contract: finding 8, source_engine_semantics).
+    with bind_source_engine("oracle"):
+        assert (
+            is_lossy_coercion("TIMESTAMP_TZ(7)", "TIMESTAMP_TZ(7)", dest_db="oracle")
+            is False
+        )
     assert (
         temporal_precision_would_narrow(
             "TIMESTAMP_TZ(7)", "TIMESTAMP(6) WITH TIME ZONE", dest_db="oracle"

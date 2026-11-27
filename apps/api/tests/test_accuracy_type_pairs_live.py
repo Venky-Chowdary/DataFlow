@@ -9,7 +9,10 @@ Where a create-new carrier could lose values on write, the real engine path
 * MySQL zero dates (``0000-00-00``, month 0, day 0) are refused, never written
   as NULL or as a different date;
 * PostgreSQL unbounded ``numeric`` lands exactly in ``DECIMAL(38,15)`` when the
-  values fit and is refused when a value has more fraction or integer digits.
+  values fit and is refused when a value has more fraction or integer digits;
+* PostgreSQL ``timestamptz`` with non-UTC offsets lands in MariaDB
+  ``DATETIME(6)`` / ``TIMESTAMP(6)`` and a created ``timestamptz`` as the same
+  instant, and an existing wall-clock ``TIMESTAMP(6)`` refuses it (finding 8).
 
 SQL Server and Oracle pairs: tests/test_c3_lossy_pairs_sqlserver_live.py and
 tests/test_c3_lossy_pairs_oracle_live.py (CI live jobs); grading in
@@ -22,7 +25,9 @@ from decimal import Decimal
 
 import pytest
 
-from tests.c3_live_helpers import mysql_endpoint, mysql_sql, pg_endpoint, pg_sql, run_transfer, token
+from tests.c3_live_helpers import (
+    mysql_endpoint, mysql_sql, pg_endpoint, pg_sql, refused_at_validate, run_transfer, token,
+)
 from tests.test_commit_safe_review_round2 import isolated  # noqa: F401 — fixture
 
 
@@ -141,3 +146,62 @@ def test_live_unbounded_numeric_lands_exactly_or_is_refused(isolated, values, la
         assert [(i, Decimal(v)) for i, v in got] == [(i, Decimal(v)) for i, v in enumerate(values, 1)]
     finally:
         _drop(table)
+
+
+# Accuracy review finding 8: what each writer does with an offset-bearing instant.
+# PostgreSQL timestamptz values written with non-UTC offsets; every route that
+# lands must hold the same instant, and the wall-clock route is refused.
+_TZ_ROWS = [(1, "2024-01-02 03:04:05.123+05:30"), (2, "2024-07-01 23:30:00+02:00")]
+_UTC_DIGITS = [(1, "2024-01-01 21:34:05.123000"), (2, "2024-07-01 21:30:00.000000")]
+
+
+def _pg_tz_source(table: str) -> list[str]:
+    pg_sql(f'CREATE TABLE public."{table}" (id INT PRIMARY KEY, at TIMESTAMPTZ(6))')
+    for i, v in _TZ_ROWS:
+        pg_sql(f'INSERT INTO public."{table}" VALUES (%s, %s)', (i, v))
+    return [str(r[0]) for r in pg_sql(
+        f'SELECT extract(epoch FROM at) FROM public."{table}" ORDER BY id', fetch=True)]
+
+
+@pytest.mark.parametrize("existing", [None, "DATETIME(6)", "TIMESTAMP(6)"])
+def test_live_timestamptz_lands_in_mariadb_as_the_utc_instant(isolated, existing):  # noqa: F811
+    table = f"acc8_tz_{token()}"
+    try:
+        _pg_tz_source(table)
+        if existing:
+            mysql_sql(f"CREATE TABLE {table} (id INT PRIMARY KEY, at {existing})")
+        result = run_transfer(isolated, pg_endpoint(table), mysql_endpoint(table))
+        assert result.success, result.error
+        got = mysql_sql(f"SELECT id, CAST(at AS CHAR) FROM {table} ORDER BY id", fetch=True)
+        assert [(i, s) for i, s in got] == _UTC_DIGITS
+    finally:
+        _drop(table)
+
+
+def test_live_timestamptz_create_new_in_postgres_keeps_the_instant(isolated):  # noqa: F811
+    src, dst = f"acc8_ts_{token()}", f"acc8_td_{token()}"
+    try:
+        epochs = _pg_tz_source(src)
+        dest = pg_endpoint(dst)
+        result = run_transfer(isolated, pg_endpoint(src), dest)
+        assert result.success, result.error
+        got = pg_sql(f'SELECT extract(epoch FROM at), pg_typeof(at)::text FROM public."{dst}" ORDER BY id',
+                     fetch=True)
+        assert [str(e) for e, _ in got] == epochs
+        assert {t for _, t in got} == {"timestamp with time zone"}
+    finally:
+        _drop(src)
+        _drop(dst)
+
+
+def test_live_timestamptz_into_a_wall_clock_column_is_refused(isolated):  # noqa: F811
+    src, dst = f"acc8_ws_{token()}", f"acc8_wd_{token()}"
+    try:
+        _pg_tz_source(src)
+        pg_sql(f'CREATE TABLE public."{dst}" (id INT PRIMARY KEY, at TIMESTAMP(6))')
+        result = run_transfer(isolated, pg_endpoint(src), pg_endpoint(dst))
+        assert refused_at_validate(result, "at")
+        assert _pg_rows(dst) == 0
+    finally:
+        _drop(src)
+        _drop(dst)

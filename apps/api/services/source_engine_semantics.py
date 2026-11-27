@@ -155,6 +155,39 @@ def offset_dropped(source_type: str, target_type: str, *, dest_db: str = "", sou
     )
 
 
+def oracle_zone_bind_shifts_instant(
+    source_type: str, target_type: str, *, dest_db: str = "", source_db: str = ""
+) -> str:
+    """Why an instant written into an Oracle zone-bearing column moves, or ``""``.
+
+    The row writer hands python-oracledb an aware ``datetime`` (the originating
+    offset for ``WITH TIME ZONE``, UTC for ``WITH LOCAL TIME ZONE``). The driver
+    encodes only the civil digits: ``encode_date``/``encode_timestamp`` never
+    read ``tzinfo`` and ``encode_timestamp_tz`` writes a fixed ``+00:00``
+    (python-oracledb ``impl/base/encoders.pyx``). Oracle then reads those
+    digits in the session time zone, which the thin driver sets from the
+    client process's local offset; DataFlow pins neither. So the wall clock is
+    kept and the offset dropped: the instant moves by the source offset (or by
+    the process offset for ``LOCAL``). That route needs a Risk Contract
+    (accuracy review finding 8). Same-instance Oracle to Oracle copies run
+    server side (``INSERT ... SELECT``) and are not judged here.
+    """
+    from connectors.oracle_tstz import oracle_tz_kind
+    from services.type_system import datetime_timezone_polarity
+
+    if _dest(dest_db) not in _ORACLE or (source_db or "") in _ORACLE:
+        return ""
+    if oracle_tz_kind(target_type) is None:
+        return ""
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return ""
+    return (
+        f"{target_type} is written through python-oracledb, which sends a value's "
+        "clock digits without its offset; Oracle reads them in the session time "
+        f"zone, so a {source_type} instant moves by its offset"
+    )
+
+
 def _offsets_all_utc(population: Any) -> bool:
     if population is None:
         return False
@@ -195,6 +228,9 @@ def engine_semantic_loss(
     from services.decision_kernel.types import normalize_logical_type
 
     engine = _engine(source_db)
+    shifted = oracle_zone_bind_shifts_instant(source_type, target_type, dest_db=dest_db, source_db=engine)
+    if shifted:
+        return shifted
     if not engine:
         return ""
     base = _base(source_type)

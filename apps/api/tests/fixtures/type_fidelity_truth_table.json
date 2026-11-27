@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "reviewed": "2026-11-22, hand-reviewed against vendor documentation (one citation or more per row); not derived from the product's classifier",
+ "reviewed": "2026-11-22, hand-reviewed against vendor documentation (one citation or more per row); not derived from the product's classifier; offset-bearing sources into every destination added 2026-11-27 with the writer's measured behaviour (writer_values)",
  "truth_values": {
   "keeps": "every value of the source type lands unchanged",
   "loses": "some legal source value cannot land unchanged",
@@ -350,7 +350,8 @@
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
-   ]
+   ],
+   "writer": "utc"
   },
   {
    "engine": "oracle",
@@ -362,7 +363,8 @@
    "citations": [
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
-   ]
+   ],
+   "writer": "utc"
   },
   {
    "engine": "postgresql",
@@ -374,7 +376,8 @@
    "citations": [
     "https://www.postgresql.org/docs/current/datatype-datetime.html",
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql"
-   ]
+   ],
+   "writer": "offset"
   },
   {
    "engine": "postgresql",
@@ -386,7 +389,8 @@
    "citations": [
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
-   ]
+   ],
+   "writer": "utc"
   },
   {
    "engine": "oracle",
@@ -434,7 +438,8 @@
    "citations": [
     "https://www.mongodb.com/docs/manual/reference/bson-types/",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
-   ]
+   ],
+   "writer": "utc"
   },
   {
    "engine": "postgresql",
@@ -532,6 +537,403 @@
     "https://www.postgresql.org/docs/current/datatype-json.html",
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql"
    ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "sqlserver",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "offset",
+   "why": "datetimeoffset to datetimeoffset keeps the offset. The writer binds the value with its own offset.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "sqlserver",
+   "target": "DATETIME2(7)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "datetime2 has no offset. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime2-transact-sql"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "postgresql",
+   "target": "TIMESTAMP(6)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "timestamp without time zone is a wall clock. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "mysql",
+   "target": "DATETIME(6)",
+   "truth": "loses",
+   "writer": "utc",
+   "why": "MySQL has no offset type; DATETIME has no zone, so the UTC digits are a convention, not stored. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "mariadb",
+   "target": "TIMESTAMP(6)",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "MariaDB TIMESTAMP stores the UTC instant without the offset. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://mariadb.com/kb/en/timestamp/"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "mariadb",
+   "target": "DATETIME(6)",
+   "truth": "loses",
+   "writer": "utc",
+   "why": "DATETIME has no zone; UTC digits are a convention, not stored. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://mariadb.com/kb/en/timestamp/"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "snowflake",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "offset",
+   "why": "TIMESTAMP_TZ stores the offset. The writer binds the value with its own offset.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "snowflake",
+   "target": "TIMESTAMP_LTZ(9)",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "TIMESTAMP_LTZ stores the instant without the offset. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "snowflake",
+   "target": "TIMESTAMP_NTZ(9)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "TIMESTAMP_NTZ is a wall clock. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "bigquery",
+   "target": "TIMESTAMP",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "BigQuery TIMESTAMP is a UTC instant with microseconds. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "bigquery",
+   "target": "DATETIME",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "BigQuery DATETIME is a civil time with no zone. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "oracle",
+   "target": "create_new",
+   "truth": "loses",
+   "writer": "driver",
+   "why": "TIMESTAMP WITH TIME ZONE would keep the offset, but the bind does not carry it. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "oracle",
+   "target": "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+   "truth": "loses",
+   "writer": "driver",
+   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "oracle",
+   "target": "TIMESTAMP(6)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "Oracle TIMESTAMP has no zone. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "mongodb",
+   "target": "create_new",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "BSON date is a UTC instant (D136): the offset is disclosed, not kept. The writer binds the UTC instant.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://www.mongodb.com/docs/manual/reference/bson-types/"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "sqlserver",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "offset",
+   "why": "datetimeoffset stores the offset. The writer binds the value with its own offset.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "mysql",
+   "target": "DATETIME(6)",
+   "truth": "loses",
+   "writer": "utc",
+   "why": "DATETIME has no zone. The writer binds the UTC instant.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "snowflake",
+   "target": "TIMESTAMP_NTZ(9)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "TIMESTAMP_NTZ is a wall clock. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "bigquery",
+   "target": "TIMESTAMP",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "BigQuery TIMESTAMP keeps the instant, not the offset. The writer binds the UTC instant.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "mongodb",
+   "target": "create_new",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "why": "BSON date is a UTC instant (D136). The writer binds the UTC instant.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://www.mongodb.com/docs/manual/reference/bson-types/"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "postgresql",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "utc",
+   "why": "timestamptz to timestamptz keeps the instant. The writer binds the UTC instant.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "postgresql",
+   "target": "TIMESTAMP(6)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "timestamp without time zone is a wall clock. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "sqlserver",
+   "target": "DATETIME2(7)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "datetime2 has no offset. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime2-transact-sql"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "mariadb",
+   "target": "TIMESTAMP(6)",
+   "truth": "keeps",
+   "writer": "utc",
+   "why": "MariaDB TIMESTAMP is a UTC instant, as timestamptz is. The writer binds the UTC instant.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://mariadb.com/kb/en/timestamp/"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "snowflake",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "utc",
+   "why": "TIMESTAMP_LTZ is an instant. The writer binds the UTC instant.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "snowflake",
+   "target": "TIMESTAMP_NTZ(9)",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "TIMESTAMP_NTZ is a wall clock. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://docs.snowflake.com/en/sql-reference/data-types-datetime"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "bigquery",
+   "target": "create_new",
+   "truth": "keeps",
+   "writer": "utc",
+   "why": "BigQuery TIMESTAMP is a UTC instant. The writer binds the UTC instant.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "bigquery",
+   "target": "DATETIME",
+   "truth": "loses",
+   "writer": "wall_clock",
+   "why": "BigQuery DATETIME is a civil time. The writer keeps the clock digits and drops the offset, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "oracle",
+   "target": "create_new",
+   "truth": "loses",
+   "writer": "driver",
+   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "oracle",
+   "target": "TIMESTAMP(6) WITH TIME ZONE",
+   "truth": "loses",
+   "writer": "driver",
+   "why": "The bind does not carry the offset. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ]
   }
- ]
+ ],
+ "writer_values": {
+  "offset": "the writer binds the value with its own offset",
+  "utc": "the writer binds the UTC instant",
+  "wall_clock": "the writer keeps the clock digits and drops the offset, so the instant moves",
+  "driver": "python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves"
+ }
 }
