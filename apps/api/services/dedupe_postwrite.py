@@ -166,6 +166,32 @@ def _set_timeout(conn: Any, dialect: str) -> None:
             logger.debug("dedupe check timeout %s not applied", stmt)
 
 
+def _text_columns(conn: Any, dialect: str, *, schema: str, table: str) -> set[str]:
+    """Lower-cased names of the table's character columns (unknown types count as text)."""
+    import sqlalchemy as sa
+
+    out: set[str] = set()
+    try:
+        columns = sa.inspect(conn).get_columns(
+            table, schema=(None if dialect == "mysql" else schema) or None)
+    except Exception:  # noqa: BLE001 - unread types: keep the exact comparison on every key
+        logger.debug("dedupe check: column types unread for %s", table)
+        return _ALL_TEXT
+    for col in columns:
+        kind = col.get("type")
+        if isinstance(kind, (sa.String, sa.types.NullType)) or kind is None:
+            out.add(str(col.get("name") or "").lower())
+    return out
+
+
+class _AllText(set):
+    def __contains__(self, _item: object) -> bool:
+        return True
+
+
+_ALL_TEXT = _AllText()
+
+
 def count_duplicate_keys(
     dialect: str,
     cfg: dict[str, Any],
@@ -194,7 +220,13 @@ def count_duplicate_keys(
             if _unique_key_covers(conn, dialect, schema="" if dialect == "mysql" else schema,
                                   table=table, columns=columns):
                 return None
-            keys = ", ".join(_key_expr(dialect, c, exact) for c in cols)
+            text_cols = _text_columns(conn, dialect, schema=schema, table=table)
+            # Exact bytes only for text: a numeric, date/time, uuid or binary key
+            # is one value however it is spelled ('1.0' = '1.00'), so it groups natively.
+            keys = ", ".join(
+                _key_expr(dialect, q, exact and name.lower() in text_cols)
+                for name, q in zip(columns, cols)
+            )
             where = " AND ".join(f"{c} IS NOT NULL" for c in cols)
             top, limit = ("TOP 3 ", "") if dialect in {"mssql", "sqlserver"} else ("", " LIMIT 3")
             stmt = sa.text(

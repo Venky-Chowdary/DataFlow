@@ -247,3 +247,37 @@ def test_billed_scan_opt_in_is_a_json_boolean(transfer_client) -> None:
     })
     assert resp.status_code == 422, resp.text
     assert "dedupe_check_billed_scan must be true or false" in resp.text, resp.text
+
+
+@pytest.mark.parametrize("key_type", ["NUMERIC(10,2)", "NUMERIC", "DOUBLE PRECISION"])
+def test_exact_check_groups_a_numeric_key_by_its_value_on_postgresql(key_type) -> None:
+    """1.0 and 1.00 are one numeric key: the exact check must not compare them as text."""
+    from services.dedupe_postwrite import count_duplicate_keys
+
+    cfg = pg_test_cfg()
+    table = f"d402r3_num_{uuid.uuid4().hex[:6]}"
+    _pg_exec(f'CREATE TABLE "{table}" (k {key_type}, v TEXT)')
+    try:
+        _pg_exec(f"INSERT INTO \"{table}\" VALUES (1.0, 'a'), (1.00, 'b'), (2, 'c')")
+        dest = {"type": "postgresql", "host": cfg["host"], "port": cfg["port"],
+                "database": cfg["database"], "username": cfg["username"], "password": cfg["password"]}
+        assert count_duplicate_keys("postgresql", dest, schema="public", table=table,
+                                    columns=["k"], exact=True) == 1
+    finally:
+        _pg_exec(f'DROP TABLE IF EXISTS "{table}"')
+
+
+@pytest.mark.parametrize("key_type", ["DECIMAL(10,2)", "DOUBLE"])
+def test_exact_check_groups_a_numeric_key_by_its_value_on_mariadb(key_type) -> None:
+    from services.dedupe_postwrite import count_duplicate_keys
+    from tests.test_d402_dedupe_key_equality_e2e import _mariadb, _sql
+
+    table = f"d402r3_num_{uuid.uuid4().hex[:6]}"
+    _sql(f"CREATE TABLE `{table}` (k {key_type}, v VARCHAR(10))")
+    try:
+        _sql(f"INSERT INTO `{table}` VALUES (1.0, 'a'), (1.00, 'b'), (2, 'c')")
+        dest = {"type": "mysql", **_mariadb()}
+        assert count_duplicate_keys("mysql", dest, schema="", table=table,
+                                    columns=["k"], exact=True) == 1
+    finally:
+        _sql(f"DROP TABLE IF EXISTS `{table}`")
