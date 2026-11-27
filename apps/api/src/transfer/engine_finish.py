@@ -307,7 +307,12 @@ def _settle_backup_after_error(
 
         held = restorable_on_cancel(destination, request)
         if held:
-            return restore_on_cancel(destination, exc, held, request)
+            ok = restore_on_cancel(destination, exc, held, request)
+            from .overwrite_outcome import carry_onto_exception
+
+            # A backup restore / drop that failed during the cancel reaches the job too.
+            carry_onto_exception(destination, exc)
+            return ok
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
     from .overwrite_outcome import carry_onto_exception

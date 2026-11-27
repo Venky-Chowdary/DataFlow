@@ -267,7 +267,20 @@ def restore_on_cancel(
 
 
 def stamp_cancel_outcome(exc: BaseException, outcome: dict[str, Any]) -> dict[str, Any]:
-    """Replace the cancel message with what the restore did (no-op without one)."""
+    """Replace the cancel message with what the restore did (no-op without one).
+
+    A backup restore or drop that failed while the cancel settled (carried on
+    ``exc.overwrite_restore``) is added to the message: the job names it.
+    """
+    out = _stamp_cancel_restore(exc, outcome)
+    failed = getattr(exc, "overwrite_restore", None)
+    message = str((failed or {}).get("message") or "").strip() if isinstance(failed, dict) else ""
+    if message and message not in str(out.get("message") or ""):
+        out = {**out, "message": f"{out.get('message') or ''} {message}".strip()}
+    return out
+
+
+def _stamp_cancel_restore(exc: BaseException, outcome: dict[str, Any]) -> dict[str, Any]:
     info = getattr(exc, "cancel_restore", None)
     if not isinstance(info, dict):
         return outcome
