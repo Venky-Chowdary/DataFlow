@@ -102,3 +102,15 @@ Execute did not preflight is counted as unvalidated whatever its outcome. It
 holds counts and connector types only, no table, column or user names. The
 rate covers runs recorded since this ledger was added; no historical figure
 is claimed.
+
+## Verified against
+
+- `apps/api/tests/fixtures/mapping_holdout_v1.json` (the labelled tables and
+  their dev / dev2 splits)
+- `apps/api/scripts/run_mapping_holdout.py`, `apps/api/services/mapping_holdout_eval.py`
+  (the measurement and the gated floors; `tests/test_mapping_holdout_gate.py`)
+- `apps/api/services/mapping_holdout_leak.py` (`tests/test_mapping_holdout_leak.py`)
+- `apps/api/tests/test_mapping_policy_invariant.py` (no new auto-approval)
+- `apps/api/services/validate_execute_ledger.py`, `apps/api/src/routers/ops_router.py`
+  (`GET /api/v1/ops/validate-execute`)
+- `.github/workflows/ci.yml` (the `mapping-evidence` job)
