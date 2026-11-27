@@ -10,7 +10,11 @@ destination carrier below, with a fixed seed:
 * **no false unexplained**: another driver spelling of the same destination
   value (str/Decimal/float/int, ISO date or datetime, 1/'true') must keep the
   fingerprint, or Gate-8 would raise a mismatch on equal data;
-* NULL never fingerprints like an empty string, zero or false.
+* NULL never fingerprints like an empty string, zero or false;
+* text is compared as stored: a change of case, a leading or trailing space,
+  a no-break space or a tab for a space is a difference, except where the
+  carrier itself makes them equal (``CITEXT`` ignores case, ``CHAR(n)`` pads
+  trailing spaces), and those equalities must hold.
 
 Runs offline in well under 60 s (CI job ai-offline-correctness).
 """
@@ -36,7 +40,9 @@ CARRIERS = {
             ("oracle", "NUMBER(38,10)"), ("snowflake", "NUMBER(38,10)")],
     "float": [("postgresql", "DOUBLE PRECISION"), ("mysql", "DOUBLE"), ("sqlserver", "FLOAT")],
     "text": [("postgresql", "TEXT"), ("postgresql", "VARCHAR(50)"), ("sqlserver", "NVARCHAR(50)"),
-             ("oracle", "VARCHAR2(50)"), ("mysql", "VARCHAR(50)"), ("postgresql", "CITEXT")],
+             ("oracle", "VARCHAR2(50)"), ("mysql", "VARCHAR(50)"), ("postgresql", "CITEXT"),
+             ("snowflake", "VARCHAR(50)")],
+    "char": [("postgresql", "CHAR(10)"), ("sqlserver", "CHAR(10)"), ("mysql", "CHAR(10)"), ("oracle", "CHAR(10)")],
     "ts": [("postgresql", "TIMESTAMP(6)"), ("mysql", "DATETIME(6)"), ("sqlserver", "DATETIME2(7)"),
            ("snowflake", "TIMESTAMP_NTZ(9)")],
     "date": [("postgresql", "DATE"), ("mysql", "DATE"), ("sqlserver", "DATE")],
@@ -57,9 +63,10 @@ def _gen(R: random.Random, kind: str):
         return v if R.random() < .8 else -v
     if kind == "float":
         return R.uniform(-1e6, 1e6)
-    if kind == "text":
-        alpha = "abcdefghijklmnopqrstuvwxyz0123456789 -_"
-        return "".join(R.choice(alpha) for _ in range(R.randint(1, 20))).strip() or "x"
+    if kind in ("text", "char"):
+        alpha = "abcdefghijklmnopqrstuvwxyzABCXYZ0123456789 -_"
+        n = 9 if kind == "char" else 20
+        return "".join(R.choice(alpha) for _ in range(R.randint(1, n))).strip() or "x"
     if kind in ("ts", "date"):
         t = dt.datetime(2000, 1, 1) + dt.timedelta(seconds=R.randint(0, 10**9), microseconds=R.randint(0, 999999))
         return t if kind == "ts" else t.date()
@@ -74,15 +81,27 @@ def _mutate(R: random.Random, kind: str, v, ddl: str):
         return v + Decimal(1).scaleb(-R.randint(0, min(scale, 18))) if R.random() < .8 else (-v if v else Decimal(1))
     if kind == "float":
         return v * (1 + 1e-9) + 1e-6 if R.random() < .5 else (-v if v else 1.0)
-    if kind == "text":
+    if kind in ("text", "char"):
         i = R.randrange(len(v))
         alts = [x for x in "qwrtyp7531" if x.lower() != v[i].lower()]
         c = R.random()
-        if c < .5:
+        if c < .3:
             return v[:i] + R.choice(alts) + v[i + 1:]
-        if c < .75:
+        if c < .45:
             return v + R.choice(alts)
-        return "0" + v  # a leading zero stays significant on text
+        if c < .55:
+            return "0" + v  # a leading zero stays significant on text
+        if c < .65:
+            return " " + v  # a leading space is data
+        if c < .75:
+            return v.replace(" ", "\u00a0", 1) if " " in v else v + "\u00a0"  # no-break space
+        if c < .85:
+            return v.replace(" ", "\t", 1) if " " in v else "\t" + v
+        if "CITEXT" not in ddl.upper() and v.lower() != v.upper():
+            return v.swapcase()  # case is data except on CITEXT
+        if kind == "text":
+            return v + " "  # a trailing space is data except on CHAR(n)
+        return "0" + v
     if kind == "ts":
         return v + dt.timedelta(microseconds=R.choice([1, 1000, 10**6]))
     if kind == "date":
@@ -99,7 +118,11 @@ def _respell(R: random.Random, kind: str, v):
     if kind == "float":
         return R.choice([repr(v), Decimal(repr(v))])
     if kind == "text":
+        if "CITEXT" in _DDL.get(id(R), ""):
+            return R.choice([v.upper(), v.lower(), v.swapcase()])  # CITEXT ignores case
         return str(v)
+    if kind == "char":
+        return v + " " * R.randint(0, 3)  # CHAR(n) pads trailing spaces
     if kind == "ts":
         return R.choice([v.isoformat(), v.isoformat(sep=" ")])
     if kind == "date":
@@ -107,8 +130,12 @@ def _respell(R: random.Random, kind: str, v):
     return R.choice([int(v), "true" if v else "false", "1" if v else "0"])
 
 
+_DDL: dict[int, str] = {}
+
+
 def probe(kind: str, eng: str, ddl: str, fingerprint=fp) -> dict[str, list[str]]:
     R = _rng(kind, eng, ddl)
+    _DDL[id(R)] = ddl.upper()
     out: dict[str, list[str]] = {"false_proven": [], "false_unexplained": []}
     for _ in range(N):
         a = _gen(R, kind)
@@ -134,9 +161,9 @@ def test_single_cell_change_is_never_proven_and_respelling_never_flagged(kind, e
 @pytest.mark.parametrize("kind,eng,ddl", CASES, ids=[f"{e}:{d}" for _k, e, d in CASES])
 def test_null_is_not_an_empty_zero_or_false_value(kind, eng, ddl) -> None:
     null = fp(None, ddl_type=ddl, engine=eng)
-    blanks = {"text": [""], "int": [0, "0"], "dec": [Decimal(0), "0"], "float": [0.0],
+    blanks = {"text": [""], "char": [""], "int": [0, "0"], "dec": [Decimal(0), "0"], "float": [0.0],
               "bool": [False, 0], "ts": [], "date": []}[kind]
-    if eng == "oracle" and kind == "text":
+    if eng == "oracle" and kind in ("text", "char"):
         blanks = []  # Oracle stores '' as NULL: the same destination value (D210).
     for v in blanks:
         assert fp(v, ddl_type=ddl, engine=eng) != null, (v, ddl)
@@ -151,13 +178,26 @@ def test_the_property_catches_a_lossy_fingerprint() -> None:
     def unstable(value, *, ddl_type="", engine=""):
         return f"{type(value).__name__}:{fp(value, ddl_type=ddl_type, engine=engine)}"
 
+    def casefolding(value, *, ddl_type="", engine=""):
+        v = value.casefold() if isinstance(value, str) else value
+        return fp(v, ddl_type=ddl_type, engine=engine)
+
+    def stripping(value, *, ddl_type="", engine=""):
+        v = " ".join(value.split()) if isinstance(value, str) else value
+        return fp(v, ddl_type=ddl_type, engine=engine)
+
     assert probe("text", "postgresql", "TEXT", truncating)["false_proven"]
     assert probe("int", "postgresql", "BIGINT", unstable)["false_unexplained"]
+    # Review finding 13: a case-folding or whitespace-stripping fingerprint fails.
+    for kind, eng, ddl in (("text", "postgresql", "TEXT"), ("text", "sqlserver", "NVARCHAR(50)"),
+                           ("char", "postgresql", "CHAR(10)")):
+        assert probe(kind, eng, ddl, casefolding)["false_proven"], ddl
+        assert probe(kind, eng, ddl, stripping)["false_proven"], ddl
 
 
 def test_property_is_deterministic_and_bounded() -> None:
     start = time.perf_counter()
     first = [probe(k, e, d) for k, e, d in CASES[:3]]
     assert first == [probe(k, e, d) for k, e, d in CASES[:3]]
-    # The full matrix (29 carriers x 400 pairs) must stay far inside 60 s.
+    # The full matrix (34 carriers x 400 pairs) must stay far inside 60 s.
     assert (time.perf_counter() - start) * len(CASES) / 6 < 60

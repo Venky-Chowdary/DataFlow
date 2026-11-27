@@ -99,19 +99,21 @@ jobs:
         run: |
           python -m pytest tests/test_evidence_pack.py -q --tb=short
 
-      # Blind held-out mapping benchmark (tests/fixtures/mapping_holdout_v1.json).
-      # Floors/ceilings in services/mapping_holdout_eval.py, measured values,
-      # ratchet only: auto-approve precision >= 0.98, no column without a true
-      # counterpart auto-mapped, top-1/top-3 floors. The leak check fails when a
-      # test-split answer appears in dictionaries, synonyms, training data or
-      # mapping fixtures (tune on the dev split only).
+      # Held-out mapping benchmark (tests/fixtures/mapping_holdout_v1.json),
+      # measured on Map's pipeline (run_mapping_pipeline, use_llm=False) and,
+      # labelled, the bare scorer. Floors/ceilings in
+      # services/mapping_holdout_eval.py, ratchet only: auto-approve precision
+      # >= 0.98, no column without a right answer auto-approved. dev2 is an
+      # inspected split; the blind number comes from a sealed external fixture.
+      # The leak check fails on any new name/token association of a dev2
+      # answer; the invariant test forbids any policy-made auto-approval.
       - name: Held-out mapping gate + leak check
         working-directory: apps/api
         env:
           PYTHONPATH: .:../../packages/preflight/src
         run: |
-          python -m pytest tests/test_mapping_holdout_gate.py tests/test_mapping_holdout_leak.py -q --tb=short
-          { echo "### Held-out mapping benchmark (test split)"; echo '```'; python scripts/run_mapping_holdout.py --split test; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          python -m pytest tests/test_mapping_holdout_gate.py tests/test_mapping_holdout_leak.py tests/test_mapping_policy_invariant.py -q --tb=short
+          { echo "### Held-out mapping benchmark (dev2, inspected; Map pipeline)"; echo '```'; python scripts/run_mapping_holdout.py --split dev2 --bootstrap 500; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: God-module size budgets (Phase F8)
         working-directory: apps/api
@@ -188,6 +190,7 @@ jobs:
             tests/test_fingerprint_properties.py \
             tests/test_mapping_assignment_policy.py \
             tests/test_accuracy_type_pairs.py \
+            tests/test_type_fidelity_truth_table.py \
             -q --tb=short
 
   # Data Pilot answer floors: local engine only, no network LLM. The provider
