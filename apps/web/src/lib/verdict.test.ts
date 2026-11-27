@@ -14,6 +14,8 @@ import { VERDICT_WORDS } from "./runResult.ts";
 import type { TransferJob } from "./types.ts";
 import {
   VERDICT_CHIP_WORDS,
+  VERDICT_RANK,
+  jobVerdictState,
   jobsNeedingVerdicts,
   mergeListVerdicts,
   verdictIdsToFetch,
@@ -42,6 +44,19 @@ describe("verdictPresentation", () => {
     assert.match(html, /<svg[^>]*aria-hidden="true"/);
     assert.match(html, /Unexplained<\/span><span class="df2-verdict-count">· 4 rows</);
     assert.doesNotMatch(renderToStaticMarkup(React.createElement(VerdictChip, { state: "proven", unexplainedRows: 4 })), /rows/);
+  });
+});
+
+describe("Parity at Scale's verifying state (train 2)", () => {
+  it("a listed 'verifying' is a waiting state with its own word, never a verdict or 'Checking'", () => {
+    const job = { status: "completed", verification_summary: { passed: true } } as unknown as Pick<TransferJob, "status" | "verification_summary">;
+    const state = jobVerdictState(job, { verdict: "verifying", unexplained: 0 }, "ready");
+    assert.equal(state, "verifying");
+    const shown = verdictPresentation(state);
+    assert.equal(shown.word, "Verification running");
+    assert.equal(shown.isVerdict, false);
+    assert.equal(shown.tone, "neutral");
+    assert.ok(VERDICT_RANK.verifying > VERDICT_RANK.checking && VERDICT_RANK.verifying < VERDICT_RANK.explained);
   });
 });
 

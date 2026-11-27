@@ -52,6 +52,17 @@ describe("run result: one verdict in the product's five words", () => {
     assert.equal(v.supportsSuccess, true);
   });
 
+  it("says verification is still running when Parity at Scale reports verifying (train 2)", () => {
+    // p3's API states "verifying" after the write while every row is compared; it is
+    // not one of the five verdicts and never earns a success colour.
+    const v = presentRunVerification(ready("verifying", { reason: "Verification is running for orders." }), { status: "completed", reconciliation: RECON });
+    assert.equal(v.verdict, "verifying");
+    assert.equal(v.word, "Verification running");
+    assert.equal(v.tone, "neutral");
+    assert.equal(v.supportsSuccess, false);
+    assert.ok(!Object.values(VERDICT_WORDS).includes(v.word));
+  });
+
   it("says a failed run never reached verification, as the Trust Report does", () => {
     const v = presentRunVerification(
       ready("unverifiable", { reason: "Gate-8 recorded no reconciliation for this job, so nothing was compared.", passed: null, method: "none", rows: null }),

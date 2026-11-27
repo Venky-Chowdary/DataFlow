@@ -74,6 +74,7 @@ const VERDICT_NEXT: Record<VerdictState, string> = {
   unverifiable: "Open the Trust Report to see what evidence is missing, then re-run with verification on.",
   not_checked: "Wait for the run to finish; verification starts after the load.",
   checking: "Wait a moment while the verdict loads.",
+  verifying: "Wait for the comparison to finish; the verdict appears in the Trust Report.",
   not_loaded: "Open the Trust Report, or refresh the list.",
 };
 
@@ -85,6 +86,7 @@ const VERDICT_HOW: Record<VerdictState, string> = {
   unverifiable: "The run kept too little evidence to decide: counts only, no compare, or the run stopped first.",
   not_checked: "The run has not finished, so nothing has been compared yet.",
   checking: "The verdict is being read from the Trust Report.",
+  verifying: "The load finished. Every row is being compared by Parity at Scale; there is no verdict until it ends.",
   not_loaded: "The verdict could not be read just now.",
 };
 

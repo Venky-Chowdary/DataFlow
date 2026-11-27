@@ -25,13 +25,16 @@ import { jobStatusLabel } from "./uiUtils";
 export type RunTone = "success" | "warning" | "danger" | "info" | "neutral";
 
 /** The five verdicts, as docs/use/verification.md names them (sentence case). */
-export const VERDICT_WORDS: Record<ParityVerdict, string> = {
+export const VERDICT_WORDS: Record<Exclude<ParityVerdict, "verifying">, string> = {
   proven: "Proven",
   explained: "Explained",
   no_difference_found: "No difference found",
   unexplained: "Unexplained",
   unverifiable: "Unverifiable",
 };
+
+/** Not a verdict: Parity at Scale is still comparing every row after the write. */
+export const VERIFYING_WORD = "Verification running";
 
 export type VerificationLoad =
   | { kind: "loading" }
@@ -87,7 +90,7 @@ export function presentRunVerification(
   if (load.kind === "ready") {
     const { report } = load;
     const verdict = report.verdict;
-    const word = VERDICT_WORDS[verdict] ?? VERDICT_WORDS.unverifiable;
+    const word = verdict === "verifying" ? VERIFYING_WORD : VERDICT_WORDS[verdict] ?? VERDICT_WORDS.unverifiable;
     const reason = (unverifiableNotice(report, status) ?? report.verdict_reason ?? "").trim();
     const tone = verdictTone(verdict, report.evidence?.reconciliation_passed);
     return { verdict, word, tone, reason, supportsSuccess: tone === "success" };

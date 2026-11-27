@@ -83,6 +83,15 @@ const PRESENTATION: Record<VerdictState, Omit<VerdictPresentation, "state">> = {
     meaning: "Reading the verdict for this run.",
     isVerdict: false,
   },
+  // Parity at Scale: the API states "verifying" while every row is compared
+  // after the write. Not a verdict, so it is a waiting state here.
+  verifying: {
+    word: "Verification running",
+    icon: "spinner",
+    tone: "neutral",
+    meaning: "The load finished and every row is being compared now.",
+    isVerdict: false,
+  },
   not_loaded: {
     word: "Not loaded",
     icon: "verdict-not-checked",
@@ -97,7 +106,7 @@ export const VERDICT_CHIP_WORDS: readonly string[] = Object.values(PRESENTATION)
 
 export function isParityVerdict(value: unknown): value is ParityVerdict {
   return value === "proven" || value === "explained" || value === "no_difference_found"
-    || value === "unexplained" || value === "unverifiable";
+    || value === "unexplained" || value === "unverifiable" || value === "verifying";
 }
 
 export function verdictPresentation(state: VerdictState): VerdictPresentation {
@@ -149,9 +158,10 @@ export const VERDICT_RANK: Record<VerdictState, number> = {
   not_loaded: 2,
   no_difference_found: 3,
   checking: 4,
-  not_checked: 5,
-  explained: 6,
-  proven: 7,
+  verifying: 5,
+  not_checked: 6,
+  explained: 7,
+  proven: 8,
 };
 
 /** Job ids whose verdict the list needs: finished runs that Gate-8 reconciled. */
