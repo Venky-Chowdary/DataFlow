@@ -183,26 +183,26 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "holdout_mapping",
-        "claim": "Blind held-out mapping accuracy (test split, never tuned on)",
+        "claim": "Map's mapping on an inspected held-out set (dev2), production path",
         "buyer_line": (
-            "On the test split of a blind held-out set (tables of renames, abbreviations, "
-            "five languages, JSON paths and public schemas), auto-approved mappings meet the "
-            "precision floor, no column without a true counterpart is auto-mapped, and the "
-            "right column is in the top 3 at the measured rate."
+            "Through Map's own pipeline (no AI model) on the dev2 split of the held-out set "
+            "(renames, abbreviations, five languages, JSON paths, public schemas), "
+            "auto-approved mappings meet the precision floor and no column without a right "
+            "answer is auto-approved. The blind number from a separate author is pending."
         ),
-        # Floors mirror services.mapping_holdout_eval.HOLDOUT_FLOORS["test"].
+        # Floors mirror services.mapping_holdout_eval.HOLDOUT_FLOORS["pipeline"]["dev2"].
         "floors": {
-            "top1": 0.6636,
-            "top3": 0.8909,
+            "top1": 0.6727,
+            "top3": 0.8727,
             "auto_precision": 0.98,
             "neg_auto_zero": 1,
             "min_matchable": 100,
         },
         "honesty": (
-            "One author, about 230 columns; the test split is about half of it, so a 95% "
-            "interval on top-1 is roughly +/-9 points. Typed schemas with samples against an "
-            "existing PostgreSQL table. Not a customer schema study and not an external "
-            "benchmark (Valentine, MIMIC-OMOP)."
+            "dev2 is inspected, not blind: it was re-measured while tuning. One author, 14 "
+            "tables; intervals are a cluster bootstrap over tables. Few rows are "
+            "auto-approved on the pipeline, so the precision floor rests on few rows. "
+            "Not an external benchmark (Valentine, MIMIC-OMOP)."
         ),
     },
 ]
@@ -636,12 +636,13 @@ def measure_create_new_type_risk() -> dict[str, Any]:
 def measure_holdout_mapping() -> dict[str, Any]:
     from services.mapping_holdout_eval import evaluate
 
-    overall = evaluate("test")["overall"]
+    overall = evaluate("dev2", engine="pipeline")["overall"]
     return {
         **{k: v for k, v in overall.items()},
         "neg_auto_zero": int(overall["neg_auto"] == 0),
         "min_matchable": overall["n_matchable"],
-        "split": "test",
+        "split": "dev2",
+        "engine": "pipeline",
     }
 
 

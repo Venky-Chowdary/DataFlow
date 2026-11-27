@@ -1,7 +1,9 @@
 """Accuracy Track A items 2-5: assignment and suggestion policy around map_columns.
 
-Names here are invented for the tests (none come from the held-out test split,
-which tests/test_mapping_holdout_leak.py polices).
+Most names here are invented. Some come from the held-out ``dev`` split and are
+dev knowledge, said openly: ``dsch_dt``, ``los``, ``attd_phys`` (abbreviation
+cases) and the Stripe ``customer`` id case. None come from ``dev2``, which
+tests/test_mapping_holdout_leak.py polices.
 """
 
 from __future__ import annotations
@@ -85,7 +87,7 @@ def test_freed_column_backfills_a_no_match_row_for_review() -> None:
         ("los", "length_of_stay", (), True),            # acronym across a stopword
         ("attd_phys", "attending_physician", (), True),  # skeleton + truncation
         ("wh_fnm", "first_name", ("wh",), True),         # entity prefix dropped
-        ("bldg", "building_code", (), True),             # trailing generic leaf
+        ("prgm", "program_code", (), True),              # trailing generic leaf
         ("rate", "registration_date", (), False),        # a word is not a skeleton
         ("paid", "payment_id", (), False),               # inner vowels: not an abbreviation
         ("amount", "amount", (), False),                 # identical: lexical scorer's job
@@ -202,3 +204,51 @@ def test_masked_samples_do_not_contradict_an_exact_email_name() -> None:
     out = map_columns(["email"], ["email"], source_schemas=src, target_schemas=tgt,
                       destination_db_type="postgresql", destination_table_exists=True)
     assert out[0]["target"] == "email" and out[0]["confidence"] >= 0.85
+
+
+# ---------------- review findings 1, 9, 10 ----------------
+
+
+def _map(src, tgt):
+    return _by_source(map_columns(
+        [c["name"] for c in src], [t["name"] for t in tgt], source_schemas=src, target_schemas=tgt,
+        destination_db_type="postgresql", destination_table_exists=True, source_db_type="postgresql",
+    ))
+
+
+@pytest.mark.parametrize(
+    "name,samples,targets",
+    [
+        ("contact", ["a@b.io", "c@d.org"], ["contact_website", "contact_phone"]),
+        ("customer", ["cus_9s6", "cus_1Ab"], ["customer_email", "customer_name"]),
+        ("profile", ["usr_81a", "usr_2B"], ["profile_email", "profile_name"]),
+    ],
+)
+def test_a_cap_never_hands_the_sibling_column_an_auto_approval(name, samples, targets) -> None:
+    out = _map(_typed([(name, "VARCHAR", samples)]), [{"name": t, "inferred_type": "VARCHAR"} for t in targets])
+    row = out[name]
+    assert row.get("create_new") or row["requires_review"] is True, row
+    assert row["confidence"] < 0.85
+
+
+@pytest.mark.parametrize(
+    "name,samples,target,other",
+    [
+        ("unsubscribe_url", ["https://x.io/u/1", "https://x.io/u/2"], "email_unsubscribe_url", "email_subject"),
+        ("locale", ["en_US", "de_DE"], "email_locale", "email_subject"),
+    ],
+)
+def test_head_word_decides_the_name_kind(name, samples, target, other) -> None:
+    out = _map(_typed([(name, "VARCHAR", samples)]),
+               [{"name": target, "inferred_type": "VARCHAR"}, {"name": other, "inferred_type": "VARCHAR"}])
+    assert out[name]["target"] == target and not out[name].get("create_new")
+    assert sample_kind(["en_US", "de_DE"]) == "other"
+    assert name_kind("email_unsubscribe_url") == "url" and name_kind("email_locale") == ""
+
+
+def test_a_real_word_is_not_an_initial_plus_stopword() -> None:
+    assert inferred_abbreviation("cat", "created_at") is False
+    assert inferred_abbreviation("los", "length_of_stay") is True
+    out = _map(_typed([("cat", "VARCHAR", ["Shoes"])]),
+               [{"name": "category", "inferred_type": "VARCHAR"}, {"name": "created_at", "inferred_type": "TIMESTAMP"}])
+    assert out["cat"]["target"] == "category"

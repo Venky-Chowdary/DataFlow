@@ -31,6 +31,8 @@ DECISIVE_MARGIN = 0.05
 # Review suggestions below this confidence are not shown as the mapping: the
 # row becomes "no match" with the candidate kept first in its alternatives.
 # Dev split: proposals under 0.70 were right 1 time in 6; 0.70-0.72, 6 in 9.
+# (The rule was also checked against dev2, then called "test", so dev2 is an
+# inspected split, not a blind one.)
 SUGGESTION_FLOOR = 0.70
 INFERRED_ABBREVIATION_SCORE = 0.80
 VALUE_PATTERN_MATCH_SCORE = 0.80
@@ -110,7 +112,7 @@ def _abbreviates(tok: str, word: str) -> bool:
 
     Same first letter, shorter, and either a truncation (``phys`` ->
     ``physician``) or a consonant skeleton taken in order (``dsch`` ->
-    ``discharge``, ``bldg`` -> ``building``). A real word with inner vowels
+    ``discharge``, ``prgm`` -> ``program``). A real word with inner vowels
     (``rate``) is not read as a skeleton of another word (``registration``).
     """
     if tok == word:
@@ -137,7 +139,10 @@ def _covers(tok: str, words: list[str], expand: Callable[[str], list[str]]) -> b
             return i == len(tok)
         if i >= len(tok) or tok[i] != words[k][0]:
             return False
-        for j in range(i + 1, len(tok) + 1):
+        # A stopword is covered by its initial only (``los``: o = of), so a
+        # real word is not read as initial + stopword (``cat`` != created_at).
+        last = i + 2 if words[k] in _STOP else len(tok) + 1
+        for j in range(i + 1, last):
             piece = tok[i:j]
             if _skeleton(piece) and _subseq(piece, words[k]) and rec(j, k + 1):
                 return True
@@ -196,10 +201,10 @@ def inferred_abbreviation(
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 _URL = re.compile(r"^(https?://|www\.)\S+$", re.I)
 # Stripe-style object ids (cus_9s6, ch_3Mx, pm_1): a short lowercase prefix,
-# then a token with a digit or a capital, so snake_case words never match.
-_PREFIXED_ID = re.compile(r"^[a-z]{2,6}_(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]+$")
+# then a token with a digit, so snake_case words and locales (en_US) never match.
+_PREFIXED_ID = re.compile(r"^[a-z]{2,6}_(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]+$")
 _NAME_KIND = {
-    "email": frozenset({"email", "mail"}),
+    "email": frozenset({"email"}),
     "url": frozenset({"url", "website", "homepage", "link", "uri"}),
 }
 
@@ -215,9 +220,12 @@ def sample_kind(samples: list[str] | None) -> str:
 
 
 def name_kind(name: str) -> str:
-    toks = set(name_tokens(name))
+    """The kind the name's head word says the column holds (``email_unsubscribe_url``
+    is a URL, ``email_locale`` is neither)."""
+    toks = name_tokens(name)
+    head = toks[-1] if toks else ""
     for kind, words in _NAME_KIND.items():
-        if toks & words:
+        if head in words:
             return kind
     return ""
 
@@ -244,8 +252,14 @@ def rescore_pairs(
     source_samples: dict[str, list[str]] | None = None,
     expand: Callable[[str], list[str]] = lambda t: [t],
     blocked: Callable[[str, str], bool] = lambda s, t: False,
-) -> None:
-    """Adjust ``pair_scores`` in place with abbreviation and value-pattern evidence."""
+) -> set[str]:
+    """Adjust ``pair_scores`` in place with abbreviation and value-pattern evidence.
+
+    Returns the sources any rule fired for: their rows are review-only. A cap
+    lowers a near-tie competitor, so the sibling column would otherwise clear
+    the 0.08 gap and auto-approve (accuracy review finding 1).
+    """
+    fired: set[str] = set()
     samples = source_samples or {}
     prefixes = _entity_prefixes(source_columns)
     tgt_kinds = {t: name_kind(t) for t in target_columns}
@@ -262,6 +276,7 @@ def rescore_pairs(
             # and a literal name equality is left to the type grade.
             if tkind and skind not in ("", "other", tkind) and name_tokens(src) != name_tokens(tgt):
                 if score > VALUE_PATTERN_CONFLICT_CAP:
+                    fired.add(src)
                     pair_scores[(src, tgt)] = (
                         VALUE_PATTERN_CONFLICT_CAP,
                         f"{reason} · samples are not {tkind} values — {REVIEW_TAG}",
@@ -270,16 +285,40 @@ def rescore_pairs(
             if score >= INFERRED_ABBREVIATION_SCORE:
                 continue
             if tkind and skind == tkind and sum(1 for k in tgt_kinds.values() if k == tkind) == 1:
+                fired.add(src)
                 pair_scores[(src, tgt)] = (
                     max(score, VALUE_PATTERN_MATCH_SCORE),
                     f"Samples are {tkind} values and this is the only {tkind} column — {REVIEW_TAG}",
                 )
                 continue
             if inferred_abbreviation(src, tgt, entity_prefixes=prefixes, expand=expand):
+                fired.add(src)
                 pair_scores[(src, tgt)] = (
                     INFERRED_ABBREVIATION_SCORE,
                     f"Inferred abbreviation of {tgt} — {REVIEW_TAG}",
                 )
+    return fired
+
+
+def solver_moves(
+    base_scores: dict[tuple[str, str], tuple[float, str]],
+    source_columns: list[str],
+    target_columns: list[str],
+    exact_pins: dict[str, str],
+    final: dict[str, tuple],
+) -> set[str]:
+    """Sources whose solver target differs from the base solver's (exact-name
+    pins only, unrescored scores). Their rows are review-only: pinning may move
+    a column only under review, never auto-approve a different one (finding 11)."""
+    from services.semantic_mapper import _optimal_assignment
+
+    base: dict[str, tuple] = {s: (t,) for s, t in exact_pins.items()}
+    base.update(_optimal_assignment(
+        [s for s in source_columns if s not in exact_pins],
+        [t for t in target_columns if t not in set(exact_pins.values())],
+        base_scores,
+    ))
+    return {s for s in source_columns if (final.get(s) or (None,))[0] != (base.get(s) or (None,))[0]}
 
 
 # --------------------------------------------------------------------------
@@ -352,9 +391,30 @@ def suggestion_policy(
     target_columns: list[str],
     ctx: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Apply the suggestion floor, then let freed columns back-fill "no match" rows."""
+    """Force review where a rule fired or the solver moved, apply the suggestion
+    floor, then let freed columns back-fill "no match" rows."""
     tset = set(target_columns)
+    mappings = force_review(mappings, tset, ctx.get("review_sources") or set())
     return _backfill_freed_alternatives(hide_low_suggestions(mappings, target_columns, ctx), tset, ctx)
+
+
+def force_review(mappings: list[dict[str, Any]], tset: set[str], sources: set[str]) -> list[dict[str, Any]]:
+    """Rows of ``sources`` onto an existing column are review-only, capped below G4."""
+    from services.semantic_mapper import _calibrated_confidence
+
+    out = []
+    for row in mappings:
+        if row.get("source") in sources and row.get("target") in tset and not row.get("create_new"):
+            row = {
+                **row,
+                "requires_review": True,
+                "confidence": _calibrated_confidence(
+                    float(row.get("confidence") or 0.0), score_gap=float(row.get("score_gap") or 0.0),
+                    requires_review=True,
+                ),
+            }
+        out.append(row)
+    return out
 
 
 def hide_low_suggestions(
@@ -365,8 +425,8 @@ def hide_low_suggestions(
     """Hide review suggestions under :data:`SUGGESTION_FLOOR`.
 
     A proposal onto an existing column that the mapper itself rates below the
-    floor is noise in the review queue (Hungarian leftovers such as
-    ``etl_batch_id`` -> ``first_name``). It becomes the same "no match" row the
+    floor is noise in the review queue (Hungarian leftovers such as a batch
+    sequence column proposed onto a person's name). It becomes the same "no match" row the
     mapper emits when nothing fits, with the candidate first in its
     alternatives, so an operator can still pick it.
     """
@@ -430,3 +490,18 @@ def _backfill_freed_alternatives(
             "requires_review": True,
         }
     return rows
+
+
+def presented_mappings(source_columns: list[str], target_columns: list[str], **kwargs: Any) -> list[dict[str, Any]]:
+    """Mappings as Map presents them: the pipeline (no AI model), never the bare scorer.
+
+    The scorer alone can rate a pair 0.99 that the pipeline then demotes to
+    review; a surface that shows confidences (Pilot, RAG, the LLM chain) must
+    show what Map would (accuracy review finding 2).
+    """
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    if "threshold" in kwargs:
+        kwargs["confidence_threshold"] = kwargs.pop("threshold")
+    result = run_mapping_pipeline(list(source_columns), list(target_columns), use_llm=False, **kwargs)
+    return list(result.get("mappings") or [])

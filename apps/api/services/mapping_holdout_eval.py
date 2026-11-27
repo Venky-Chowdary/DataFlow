@@ -1,28 +1,40 @@
-"""Held-out mapping benchmark: score ``semantic_mapper.map_columns`` on a blind set.
+"""Mapping benchmark evaluator: score Map's mapping on a labelled fixture.
 
-The fixture (``tests/fixtures/mapping_holdout_v1.json``) was written before the
-mapper's dictionaries were read and is split by table into ``dev`` (tune here)
-and ``test`` (report and gate here, never tune). Every number is computed by
-calling the real mapper with typed source schemas (with samples) and typed
-destination schemas against an existing PostgreSQL table.
+Two engines are scored:
+
+* ``pipeline`` (default, the gate and every published number):
+  :func:`services.mapping_pipeline.run_mapping_pipeline` with ``use_llm=False``,
+  the path Map and Validate use, including its later demotions and promotions;
+* ``scorer``: :func:`services.semantic_mapper.map_columns` alone, labelled as
+  scorer-level wherever it is quoted.
+
+Fixtures. ``tests/fixtures/mapping_holdout_v1.json`` is split by table into
+``dev`` (tuned on) and ``dev2`` (formerly called "test"; it was re-measured
+after each change and two of its rows were cited while tuning, so it is an
+inspected set, not a blind one). A sealed blind fixture from another author is
+scored with ``--fixture PATH``: the evaluator then prints aggregates only, and
+per-row output needs ``--debug``.
 
 Definitions (one row per source column):
 
-* ``pred``: the existing destination column the mapper proposes (create-new and
-  pending rows are abstentions, ``pred = None``).
-* ``auto``: ``pred`` is set, the row is not flagged for review and its
-  confidence is at least the G4 floor (0.85). This is what Map approves without
-  an operator.
-* ``top1``: ``pred == gold`` over matchable columns (gold exists).
-* ``top3``: gold within the proposal plus the first alternatives, in order.
-* ``auto_precision``: correct auto rows / auto rows; ``wrong_auto`` counts the rest.
-* ``neg_auto``: columns with no true counterpart that were auto-mapped.
+* ``pred``: the existing destination column proposed (create-new and pending
+  rows are abstentions, ``pred = None``);
+* ``auto``: ``pred`` set, not flagged for review, confidence at least the G4
+  floor (0.85): what Map approves without an operator;
+* ``top1``: ``pred == gold`` over columns with a right answer; ``top3``: gold in
+  the proposal plus the first alternatives;
+* ``auto_precision``: correct auto rows / auto rows; ``neg_auto``: columns with
+  no right answer that were auto-approved.
+
+Intervals are a cluster bootstrap over tables (columns of one table are not
+independent), seed fixed.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,25 +42,39 @@ from typing import Any, Iterable
 API_ROOT = Path(__file__).resolve().parents[1]
 HOLDOUT_V1 = API_ROOT / "tests" / "fixtures" / "mapping_holdout_v1.json"
 AUTO_APPROVE_FLOOR = 0.85
-SPLITS = ("dev", "test")
+SPLITS = ("dev", "dev2")
+ENGINES = ("pipeline", "scorer")
+BOOTSTRAP_SEED = 20261122
 
-# CI floors (minimums) and ceilings (maximums) per split, set to the values
-# measured on this fixture. Ratchet only: raise a floor or lower a ceiling
-# after a re-measurement; never loosen one. ``test`` is the reported number;
-# ``dev`` is where changes are tuned. Auto-approve precision >= 0.98 and
-# no auto-mapped negatives hold on every split.
-HOLDOUT_FLOORS: dict[str, dict[str, float]] = {
-    "test": {"top1": 0.6636, "top3": 0.8909, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.9124,
-             "auto_coverage": 0.3636, "proposal_precision": 0.9241},
-    "dev": {"top1": 0.7604, "top3": 0.9688, "auto_precision": 1.0, "auto_coverage": 0.375,
-            "proposal_precision": 0.9481},
-    "all": {"top1": 0.7087, "top3": 0.9272, "auto_precision": 0.98},
+# CI floors (minimums) and ceilings (maximums) per engine and split, set to the
+# values measured on this fixture. Ratchet only: raise a floor or lower a
+# ceiling after a re-measurement; never loosen one. Auto-approve precision
+# >= 0.98 and no auto-approved column without a right answer hold everywhere.
+# (Scorer coverage was lowered once, by the review-only invariant of
+# tests/test_mapping_policy_invariant.py: no policy-made auto-approval.)
+HOLDOUT_FLOORS: dict[str, dict[str, dict[str, float]]] = {
+    "pipeline": {
+        "dev2": {"top1": 0.6727, "top3": 0.8727, "auto_precision": 0.98, "auto_precision_wilson_lb": 0.7009,
+                 "auto_coverage": 0.0818, "proposal_precision": 0.9367},
+        "dev": {"top1": 0.7708, "top3": 0.9479, "auto_precision": 0.98, "auto_coverage": 0.0938,
+                "proposal_precision": 0.9487},
+        "all": {"top1": 0.7184, "top3": 0.9078, "auto_precision": 0.98},
+    },
+    # Scorer-level (map_columns alone): never quoted as what Map approves.
+    "scorer": {
+        "dev2": {"top1": 0.6636, "top3": 0.8909, "auto_precision": 0.98, "auto_coverage": 0.3455,
+                 "proposal_precision": 0.9241},
+        "dev": {"top1": 0.7604, "top3": 0.9688, "auto_precision": 0.98, "auto_coverage": 0.3333,
+                "proposal_precision": 0.9481},
+        "all": {"top1": 0.7087, "top3": 0.9272, "auto_precision": 0.98},
+    },
 }
-HOLDOUT_CEILINGS: dict[str, dict[str, int]] = {
-    "test": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
+_CEIL = {
+    "dev2": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
     "dev": {"neg_auto": 0, "wrong_auto": 0, "neg_proposed": 1},
     "all": {"neg_auto": 0, "wrong_auto": 0},
 }
+HOLDOUT_CEILINGS: dict[str, dict[str, dict[str, int]]] = {"pipeline": _CEIL, "scorer": _CEIL}
 
 
 def load_holdout(path: Path | None = None) -> dict[str, Any]:
@@ -60,7 +86,7 @@ def tables_for(doc: dict[str, Any], split: str | None) -> list[dict[str, Any]]:
         return list(doc["tables"])
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r}")
-    return [t for t in doc["tables"] if t["split"] == split]
+    return [t for t in doc["tables"] if t.get("split") == split]
 
 
 def _ranked(m: dict[str, Any], proposed: str | None, tnames: set[str]) -> list[str]:
@@ -76,9 +102,21 @@ def _ranked(m: dict[str, Any], proposed: str | None, tnames: set[str]) -> list[s
     return out[:5]
 
 
-def run_table(table: dict[str, Any], *, names_only: bool = False, dest: dict | None = None) -> list[dict]:
-    from services.semantic_mapper import map_columns
+def _map(engine: str, sources: list[str], targets: list[str], **kw: Any) -> list[dict]:
+    if engine == "scorer":
+        from services.semantic_mapper import map_columns
 
+        return map_columns(sources, targets, **kw)
+    if engine != "pipeline":
+        raise ValueError(f"unknown engine {engine!r}")
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    return list(run_mapping_pipeline(sources, targets, use_llm=False, **kw).get("mappings") or [])
+
+
+def run_table(
+    table: dict[str, Any], *, names_only: bool = False, dest: dict | None = None, engine: str = "pipeline"
+) -> list[dict]:
     dest = dest or {"destination_db_type": "postgresql", "destination_table_exists": True}
     src = table["source"]
     tgt = table["target"]
@@ -86,7 +124,7 @@ def run_table(table: dict[str, Any], *, names_only: bool = False, dest: dict | N
     kw: dict[str, Any] = dict(
         destination_db_type=dest["destination_db_type"],
         destination_table_exists=dest["destination_table_exists"],
-        source_db_type=table["source_db"],
+        source_db_type=table.get("source_db", ""),
     )
     if not names_only:
         kw["source_schemas"] = [
@@ -94,7 +132,7 @@ def run_table(table: dict[str, Any], *, names_only: bool = False, dest: dict | N
             for s in src
         ]
         kw["target_schemas"] = [{"name": t["name"], "inferred_type": t["type"]} for t in tgt]
-    out = map_columns([s["name"] for s in src], tnames, **kw)
+    out = _map(engine, [s["name"] for s in src], tnames, **kw)
     by = {m["source"]: m for m in out}
     tset = set(tnames)
     rows = []
@@ -107,7 +145,7 @@ def run_table(table: dict[str, Any], *, names_only: bool = False, dest: dict | N
         auto = bool(proposed) and not m.get("requires_review") and conf >= AUTO_APPROVE_FLOOR
         rows.append(
             dict(
-                table=table["id"], bucket=table["bucket"], split=table["split"], source=n,
+                table=table["id"], bucket=table.get("bucket", ""), split=table.get("split", ""), source=n,
                 gold=table["gold"].get(n), pred=proposed, raw_target=raw,
                 create_new=bool(m.get("create_new")), conf=conf,
                 review=bool(m.get("requires_review")), auto=auto,
@@ -118,11 +156,13 @@ def run_table(table: dict[str, Any], *, names_only: bool = False, dest: dict | N
     return rows
 
 
-def run_holdout(split: str | None = None, *, names_only: bool = False, path: Path | None = None) -> list[dict]:
+def run_holdout(
+    split: str | None = None, *, names_only: bool = False, path: Path | None = None, engine: str = "pipeline"
+) -> list[dict]:
     doc = load_holdout(path)
     rows: list[dict] = []
     for table in tables_for(doc, split):
-        rows.extend(run_table(table, names_only=names_only, dest=doc.get("destination")))
+        rows.extend(run_table(table, names_only=names_only, dest=doc.get("destination"), engine=engine))
     return rows
 
 
@@ -171,31 +211,65 @@ def metrics(rows: Iterable[dict]) -> dict[str, Any]:
     )
 
 
-def evaluate(split: str | None = None, *, names_only: bool = False, path: Path | None = None) -> dict[str, Any]:
-    rows = run_holdout(split, names_only=names_only, path=path)
+def cluster_bootstrap(rows: Iterable[dict], *, reps: int = 2000, seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
+    """95% percentile intervals, resampling whole tables with replacement."""
+    by_table: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_table[r["table"]].append(r)
+    tables = sorted(by_table)
+    keys = ("top1", "top3", "proposal_precision", "auto_precision", "auto_coverage")
+    if not tables:
+        return {k: None for k in keys}
+    R = random.Random(seed)
+    draws: dict[str, list[float]] = {k: [] for k in keys}
+    for _ in range(reps):
+        sample = [r for _t in range(len(tables)) for r in by_table[R.choice(tables)]]
+        m = metrics(sample)
+        for k in keys:
+            if m[k] is not None:
+                draws[k].append(m[k])
+    out: dict[str, Any] = {"tables": len(tables), "reps": reps, "seed": seed}
+    for k in keys:
+        vals = sorted(draws[k])
+        out[k] = (
+            (round(vals[int(0.025 * (len(vals) - 1))], 4), round(vals[int(0.975 * (len(vals) - 1))], 4))
+            if vals else None
+        )
+    return out
+
+
+def evaluate(
+    split: str | None = None, *, names_only: bool = False, path: Path | None = None,
+    engine: str = "pipeline", bootstrap: int = 0,
+) -> dict[str, Any]:
+    rows = run_holdout(split, names_only=names_only, path=path, engine=engine)
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_bucket[r["bucket"]].append(r)
-    return {
+    out = {
         "split": split or "all",
+        "engine": engine,
         "mode": "names_only" if names_only else "typed_with_samples",
         "overall": metrics(rows),
         "buckets": {b: metrics(v) for b, v in sorted(by_bucket.items())},
         "rows": rows,
     }
+    if bootstrap:
+        out["intervals"] = cluster_bootstrap(rows, reps=bootstrap)
+    return out
 
 
-def gate_failures(split: str, overall: dict[str, Any]) -> list[str]:
-    """Floors/ceilings this split misses (empty when the gate passes)."""
+def gate_failures(split: str, overall: dict[str, Any], engine: str = "pipeline") -> list[str]:
+    """Floors/ceilings this engine+split misses (empty when the gate passes)."""
     out = []
-    for key, floor in HOLDOUT_FLOORS.get(split, {}).items():
+    for key, floor in HOLDOUT_FLOORS.get(engine, {}).get(split, {}).items():
         got = overall.get(key)
         if got is None or got < floor:
-            out.append(f"{split}.{key}={got} < floor {floor}")
-    for key, ceiling in HOLDOUT_CEILINGS.get(split, {}).items():
+            out.append(f"{engine}.{split}.{key}={got} < floor {floor}")
+    for key, ceiling in HOLDOUT_CEILINGS.get(engine, {}).get(split, {}).items():
         got = overall.get(key)
         if got is None or got > ceiling:
-            out.append(f"{split}.{key}={got} > ceiling {ceiling}")
+            out.append(f"{engine}.{split}.{key}={got} > ceiling {ceiling}")
     return out
 
 

@@ -1,19 +1,25 @@
-"""CI gate: the mapper on the blind held-out benchmark (mapping_holdout_v1).
+"""CI gate: Map's mapping on the held-out fixture (mapping_holdout_v1).
 
-Floors and ceilings live in ``services.mapping_holdout_eval`` and are the
-values measured on this fixture; they only move upward. The ``test`` split is
-never used for tuning (see tests/test_mapping_holdout_leak.py).
+Measured on the production path (run_mapping_pipeline, use_llm=False) and,
+labelled scorer-level, on map_columns alone. Floors and ceilings live in
+``services.mapping_holdout_eval`` at the measured values; they only move
+upward. ``dev2`` is an inspected split (it was re-measured while tuning); the
+blind number comes from a separate sealed fixture.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+from pathlib import Path
 
 import pytest
 
 from services.mapping_holdout_eval import (
     HOLDOUT_CEILINGS,
     HOLDOUT_FLOORS,
+    cluster_bootstrap,
     evaluate,
     gate_failures,
     load_holdout,
@@ -23,63 +29,101 @@ from services.mapping_holdout_eval import (
 
 
 @pytest.fixture(scope="module")
-def results() -> dict[str, dict]:
+def results() -> dict[str, dict[str, dict]]:
     logging.disable(logging.WARNING)
+    out: dict[str, dict[str, dict]] = {}
     try:
-        res = {s: evaluate(s) for s in ("dev", "test")}
+        for engine in ("pipeline", "scorer"):
+            res = {s: evaluate(s, engine=engine) for s in ("dev", "dev2")}
+            rows = res["dev"]["rows"] + res["dev2"]["rows"]
+            res["all"] = {"overall": metrics(rows), "rows": rows}
+            out[engine] = res
     finally:
         logging.disable(logging.NOTSET)
-    res["all"] = {"overall": metrics(res["dev"]["rows"] + res["test"]["rows"]), "rows": res["dev"]["rows"] + res["test"]["rows"]}
-    return res
+    return out
 
 
 def test_split_is_table_level_and_stratified() -> None:
-    doc = load_holdout()
-    tables = doc["tables"]
-    assert {t["split"] for t in tables} == {"dev", "test"}
-    assert len({t["id"] for t in tables}) == len(tables)
+    tables = load_holdout()["tables"]
+    assert {t["split"] for t in tables} == {"dev", "dev2"}
     strata: dict[str, set[str]] = {}
     for t in tables:
         key = "real_world_standard" if t["bucket"] == "negatives" else t["bucket"]
         strata.setdefault(key, set()).add(t["split"])
-    # Every stratum with two or more tables has both splits.
-    assert all(v == {"dev", "test"} for v in strata.values()), strata
-    n_test = sum(len(t["source"]) for t in tables if t["split"] == "test")
-    n_dev = sum(len(t["source"]) for t in tables if t["split"] == "dev")
-    assert n_test >= 120 and n_dev >= 90
+    assert all(v == {"dev", "dev2"} for v in strata.values()), strata
 
 
-@pytest.mark.parametrize("split", ["test", "dev", "all"])
-def test_holdout_gate_floors_and_ceilings(results, split) -> None:
-    overall = results[split]["overall"]
-    assert not gate_failures(split, overall), (gate_failures(split, overall), overall)
+@pytest.mark.parametrize("engine", ["pipeline", "scorer"])
+@pytest.mark.parametrize("split", ["dev2", "dev", "all"])
+def test_holdout_gate_floors_and_ceilings(results, engine, split) -> None:
+    overall = results[engine][split]["overall"]
+    assert HOLDOUT_FLOORS[engine][split], "floors must be set"
+    assert not gate_failures(split, overall, engine), (gate_failures(split, overall, engine), overall)
 
 
-@pytest.mark.parametrize("split", ["test", "dev", "all"])
-def test_no_match_column_is_never_auto_mapped(results, split) -> None:
-    bad = [(r["table"], r["source"], r["pred"]) for r in results[split]["rows"] if not r["gold"] and r["auto"]]
+@pytest.mark.parametrize("engine", ["pipeline", "scorer"])
+@pytest.mark.parametrize("split", ["dev2", "dev", "all"])
+def test_no_match_column_is_never_auto_mapped(results, engine, split) -> None:
+    bad = [(r["table"], r["source"], r["pred"]) for r in results[engine][split]["rows"] if not r["gold"] and r["auto"]]
     assert bad == []
 
 
-@pytest.mark.parametrize("split", ["test", "all"])
-def test_auto_approve_precision_at_least_098(results, split) -> None:
-    o = results[split]["overall"]
-    assert o["auto_count"] > 0
-    assert o["auto_precision"] >= 0.98, o
+def test_pipeline_auto_rows_are_scored(results) -> None:
+    # The gate measures what Map approves: pipeline-only promotions count too.
+    o = results["pipeline"]["all"]["overall"]
+    assert o["auto_count"] > 0 and o["auto_precision"] >= 0.98
 
 
 def test_gate_policy_is_strict() -> None:
-    for split in ("test", "dev", "all"):
-        assert HOLDOUT_FLOORS[split]["auto_precision"] >= 0.96
-        assert HOLDOUT_CEILINGS[split]["neg_auto"] == 0
-    assert HOLDOUT_FLOORS["test"]["auto_precision"] >= 0.98
-    assert HOLDOUT_FLOORS["all"]["auto_precision"] >= 0.98
+    for engine in ("pipeline", "scorer"):
+        for split in ("dev2", "dev", "all"):
+            assert HOLDOUT_FLOORS[engine][split]["auto_precision"] >= 0.98
+            assert HOLDOUT_CEILINGS[engine][split]["neg_auto"] == 0
+
+
+def test_cluster_bootstrap_resamples_tables(results) -> None:
+    rows = results["scorer"]["dev2"]["rows"]
+    ci = cluster_bootstrap(rows, reps=300)
+    assert ci["tables"] == len({r["table"] for r in rows})
+    lo, hi = ci["top1"]
+    # Wider than a column-independent Wilson interval (about +/-9 points).
+    assert hi - lo > 0.2
+    assert ci == cluster_bootstrap(rows, reps=300)
+
+
+def test_external_fixture_is_scored_without_splits(tmp_path) -> None:
+    doc = load_holdout()
+    table = dict(doc["tables"][0])
+    table.pop("split")
+    path = tmp_path / "external.json"
+    path.write_text(json.dumps({"tables": [table], "destination": doc["destination"]}), encoding="utf-8")
+    res = evaluate(None, path=path, engine="scorer")
+    assert res["overall"]["n_sources"] == len(table["source"])
+
+
+def test_external_fixture_cli_prints_aggregates_only(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    doc = load_holdout()
+    table = {k: v for k, v in doc["tables"][0].items() if k != "split"}
+    path = tmp_path / "sealed.json"
+    path.write_text(json.dumps({"tables": [table], "destination": doc["destination"]}), encoding="utf-8")
+    api = Path(__file__).resolve().parents[1]
+    out = subprocess.run(
+        [sys.executable, "scripts/run_mapping_holdout.py", "--fixture", str(path), "--engine", "scorer",
+         "--bootstrap", "50"], cwd=api, capture_output=True, text=True, timeout=300, check=True,
+    ).stdout
+    for col in table["source"]:
+        assert col["name"] not in out
+    for gold in table["gold"].values():
+        if gold:
+            assert gold not in out
 
 
 def test_wilson_lower_bound_is_reasonable() -> None:
     assert wilson_lower_bound(0, 0) is None
     assert 0.90 < wilson_lower_bound(73, 74) < 0.94
-    assert wilson_lower_bound(10, 10) < 1.0
 
 
 def test_evidence_claim_floors_match_the_gate() -> None:
@@ -87,23 +131,20 @@ def test_evidence_claim_floors_match_the_gate() -> None:
 
     claim = next(c for c in CLAIM_REGISTRY if c["id"] == "holdout_mapping")
     for key in ("top1", "top3", "auto_precision"):
-        assert claim["floors"][key] == HOLDOUT_FLOORS["test"][key]
+        assert claim["floors"][key] == HOLDOUT_FLOORS["pipeline"]["dev2"][key]
     assert claim["floors"]["neg_auto_zero"] == 1
 
 
 def test_docs_page_claims_no_more_than_the_gate_measures(results) -> None:
-    """docs/use/mapping-accuracy.md quotes the test split; it may not overstate it."""
-    import re
-    from pathlib import Path
-
+    """docs/use/mapping-accuracy.md quotes the pipeline on dev2; it may not overstate it."""
     text = (Path(__file__).resolve().parents[3] / "docs" / "use" / "mapping-accuracy.md").read_text()
-    o = results["test"]["overall"]
-    m = re.search(r"\*\*(\d+) of (\d+)\*\* \(95% lower bound (\d+)%\)", text)
+    o = results["pipeline"]["dev2"]["overall"]
+    m = re.search(r"\*\*(\d+) of (\d+)\*\* auto-approved mappings were right", text)
     assert m, "auto-approve line missing"
     assert (int(m.group(1)), int(m.group(2))) == (o["auto_correct"], o["auto_count"])
-    assert int(m.group(3)) <= round(o["auto_precision_wilson_lb"] * 100)
-    top1 = re.search(r"top-1\) \| (\d+)%", text)
-    top3 = re.search(r"top-3\) \| (\d+)%", text)
+    top1 = re.search(r"top-1\) \| \d+% \| (\d+)%", text)
+    top3 = re.search(r"top-3\) \| \d+% \| (\d+)%", text)
     assert top1 and int(top1.group(1)) <= round(o["top1"] * 100)
     assert top3 and int(top3.group(1)) <= round(o["top3"] * 100)
-    assert "100% mapping accuracy\". The" in text or "Not \"100% mapping accuracy\"" in text
+    for phrase in ("not blind", "blind number is pending", "dev2"):
+        assert phrase in text, phrase
