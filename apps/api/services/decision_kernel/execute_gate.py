@@ -28,6 +28,7 @@ from services.decision_kernel.models import (
     decision_artifact_from_dict,
     decision_stamps_match,
     same_structural_decision,
+    stamp_is_previous_release_format,
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
@@ -518,8 +519,11 @@ def create_new_validate_holds_after_dest_exists(
                             artifact_id="da_inline",
                             created_at="1970-01-01T00:00:00+00:00",
                         )
-                        if decision_stamps_match(approved, create_new) or (
-                            reference is not None and same_structural_decision(reference, create_new)
+                        if decision_stamps_match(
+                            approved, create_new, previous_formats_only=legacy
+                        ) or (
+                            not legacy and reference is not None
+                            and same_structural_decision(reference, create_new)
                         ):
                             matched = True
                             break
@@ -637,6 +641,26 @@ def enforce_decision_artifact(
         if supplied.content_hash:
             # Recompute expected from supplied body (tamper check already in from_dict)
             # and require ddl identity + mapping conversion alignment with live maps.
+            if (
+                supplied.ddl.ddl_identity_hash != current.ddl.ddl_identity_hash
+                and stamp_is_previous_release_format(supplied)
+            ):
+                # Review 2 item 7: a payload the previous release stamped is
+                # rebuilt under its type rules (a stored Studio request
+                # retried after the upgrade), like a schedule's stamp.
+                with legacy_plan_rules():
+                    legacy_current = build_artifact_from_mappings(
+                        mappings, dest_db=dest_db, tenant_id=tenant_id or supplied.tenant_id,
+                        route_id=route_id or supplied.route_id, source_fingerprint=src_fp,
+                        dest_fingerprint=dest_fp, sync_mode=sync_mode or supplied.sync_mode,
+                        error_policy=error_policy or supplied.error_policy,
+                        artifact_id="da_compare", created_at="1970-01-01T00:00:00+00:00",
+                    )
+                if supplied.ddl.ddl_identity_hash == legacy_current.ddl.ddl_identity_hash and (
+                    _legacy_plan_holds(legacy_current, current, live_column_types,
+                                       destination_table_exists)
+                ):
+                    current = legacy_current
             if supplied.ddl.ddl_identity_hash != current.ddl.ddl_identity_hash:
                 return (
                     "Decision Artifact DDL identity diverged from current Map — "
@@ -789,7 +813,7 @@ def enforce_decision_artifact(
             # type rules graded or spelled a few pairs differently.
             with legacy_plan_rules():
                 legacy = _rebuild(rid, dest_fp_now)
-            if decision_stamps_match(approved, legacy) and _legacy_plan_holds(
+            if decision_stamps_match(approved, legacy, previous_formats_only=True) and _legacy_plan_holds(
                 legacy, current, live_column_types, destination_table_exists
             ):
                 return (None, current)

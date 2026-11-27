@@ -551,8 +551,7 @@ from .engine_kafka import (  # noqa: E402
     stamp_kafka_source,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
-    _enforce_ddl_identity,
-    _enforce_decision_artifact,
+    _decision_stamped, _enforce_ddl_identity, _enforce_decision_artifact,
     _inline_stamp_ddl_identity,
     decision_artifact_source,
     _operator_contract_maps,
@@ -2060,7 +2059,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -3498,7 +3497,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4652,7 +4651,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(

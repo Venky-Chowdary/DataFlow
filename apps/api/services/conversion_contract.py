@@ -587,8 +587,15 @@ def assert_ddl_identity(
     *,
     dest_db: str = "",
     approved_columns: list[dict[str, Any]] | None = None,
+    allow_previous_release: bool = False,
 ) -> str:
-    """Fail closed when materialize/Execute DDL diverges from approved Map."""
+    """Fail closed when materialize/Execute DDL diverges from approved Map.
+
+    ``allow_previous_release``: the caller also enforces a Decision Artifact
+    stamp, which matches the previous release's type rules only for a stamp
+    in a previous-release format. Only then may this fingerprint, which has no
+    format of its own, be matched under those rules too (review 2, item 5).
+    """
     expected = (approved_fingerprint or "").strip().lower()
     if not expected:
         raise DdlIdentityError(
@@ -603,10 +610,11 @@ def assert_ddl_identity(
         # still names it; the destination keeps whatever it already has.
         from services.decision_kernel.legacy_rules import legacy_plan_rules
 
-        with legacy_plan_rules():
-            legacy = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
-        if legacy.lower() == expected:
-            return legacy
+        if allow_previous_release:
+            with legacy_plan_rules():
+                legacy = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
+            if legacy.lower() == expected:
+                return legacy
         diverged = ddl_identity_divergence(
             approved_columns, mappings, dest_db=dest_db
         )

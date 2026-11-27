@@ -85,13 +85,17 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
                             artifact_id="da_inline",
                             created_at="1970-01-01T00:00:00+00:00",
                         )
-                        if art.content_hash:
+                        if art.content_hash and not legacy:
                             found.add(art.content_hash.lower())
+                        if art.content_hash:
                             # The same decision under every accepted digest (the
                             # feature/Cleanup and PR #435 interim stamps).
-                            from services.decision_kernel.models import accepted_stamps
+                            from services.decision_kernel.models import (
+                                accepted_stamps,
+                                previous_release_stamps,
+                            )
 
-                            found.update(accepted_stamps(art))
+                            found.update(previous_release_stamps(art) if legacy else accepted_stamps(art))
     return found
 
 

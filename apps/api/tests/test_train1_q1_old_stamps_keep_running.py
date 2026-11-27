@@ -68,7 +68,8 @@ def test_a_feature_cleanup_stamp_of_an_unchanged_map_still_runs(name):
     assert err is None, (name, err)
     assert art is not None
     # The Map -> DDL identity stamp the schedule carries is still accepted.
-    assert assert_ddl_identity(case["ddl_identity_hash"], case["mappings"], dest_db=case["dest_db"])
+    assert assert_ddl_identity(case["ddl_identity_hash"], case["mappings"], dest_db=case["dest_db"],
+                               allow_previous_release=True)
 
 
 @pytest.mark.parametrize("name", [n for n in _CASES if n.startswith(("bit1", "varbit_"))

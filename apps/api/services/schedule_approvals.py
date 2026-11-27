@@ -727,7 +727,7 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
                     artifact_id="da_inline",
                     created_at="1970-01-01T00:00:00+00:00",
                 )
-                if decision_stamps_match(approved, art):
+                if decision_stamps_match(approved, art, previous_formats_only=legacy):
                     return True
     return False
 

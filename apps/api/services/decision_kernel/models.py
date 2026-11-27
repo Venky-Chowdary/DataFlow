@@ -389,7 +389,23 @@ def same_structural_decision(left: DecisionArtifact, right: DecisionArtifact) ->
     return compute_content_hash(_payload(left)) == compute_content_hash(_payload(right))
 
 
-def decision_stamps_match(approved: str, art: DecisionArtifact) -> bool:
+def previous_release_stamps(artifact: DecisionArtifact | Mapping[str, Any]) -> set[str]:
+    """The digests only a stamp minted before this release can carry.
+
+    The current content hash is not among them: a stamp in the current format
+    was minted under the current type rules, so it is never matched under the
+    previous release's rules (review 2, item 5).
+    """
+    return accepted_stamps(artifact) - {compute_content_hash(_payload(artifact))}
+
+
+def stamp_is_previous_release_format(art: DecisionArtifact) -> bool:
+    """``art`` (a stored artifact) carries a digest only the previous release minted."""
+    stamp = (art.content_hash or "").strip().lower()
+    return bool(stamp) and stamp != compute_content_hash(_payload(art))
+
+
+def decision_stamps_match(approved: str, art: DecisionArtifact, *, previous_formats_only: bool = False) -> bool:
     """True when a stored stamp names this artifact.
 
     The current content hash, the feature/Cleanup digest, or PR #435's interim
@@ -400,6 +416,8 @@ def decision_stamps_match(approved: str, art: DecisionArtifact) -> bool:
     stamp = (approved or "").strip().lower()
     if not stamp:
         return False
+    if previous_formats_only:
+        return stamp in previous_release_stamps(art)
     if stamp == (art.content_hash or "").strip().lower():
         return True
     return stamp in accepted_stamps(art)

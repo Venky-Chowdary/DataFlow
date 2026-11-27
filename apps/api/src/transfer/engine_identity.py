@@ -43,8 +43,13 @@ def _enforce_ddl_identity_once(
     approved_ddl_identity_hash: str = "",
     skip_preflight: bool = False,
     preflight_mappings: list | None = None,
+    legacy_ok: bool = False,
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
+
+    ``legacy_ok``: a Decision Artifact stamp is enforced too (it alone tells a
+    previous-release stamp from a current one), so a previous-release DDL
+    fingerprint may match under that release's type rules (review 2 item 5).
 
     Returns an error message when identity fails.
 
@@ -113,6 +118,7 @@ def _enforce_ddl_identity_once(
             checked,
             dest_db=dest_db or "",
             approved_columns=approved_columns,
+            allow_previous_release=bool(legacy_ok),
         )
     except DdlIdentityError as exc:
         return str(exc)
@@ -120,6 +126,14 @@ def _enforce_ddl_identity_once(
         logger.error("DDL identity check crashed: %s", exc, exc_info=exc)
         return f"DDL identity check failed closed: {exc}"
     return None
+
+
+def _decision_stamped(request) -> bool:
+    """The request carries a Decision Artifact stamp (hash or payload) to enforce."""
+    return bool(
+        str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
+        or _request_decision_artifact_payload(request)
+    )
 
 
 def _request_decision_artifact_payload(request) -> dict | None:
