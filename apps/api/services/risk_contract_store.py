@@ -7,7 +7,7 @@ kind and origin, so a contract can be looked up by id + digest.
 Contracts signed before the keyed signature (``mrc-sha256:``, an unkeyed digest
 anyone could recompute) are honoured only when this store holds that exact
 contract: :func:`backfill_legacy_contracts` records the ones found in records
-the server itself stored before :data:`LEGACY_CUTOVER` (schedules, transfer
+the server itself stored before the recorded cutover (schedules, transfer
 plans, jobs). A legacy contract presented by a client with no server record is
 refused ("re-approve this risk").
 """
@@ -23,10 +23,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 COLLECTION = "risk_contracts"
-#: Records the server stored before this instant may carry unkeyed contracts it
-#: created; anything stored later must carry a keyed one. Overridable with
-#: DATAFLOW_RISK_CONTRACT_CUTOVER (ISO-8601) by the operator who deploys it.
-LEGACY_CUTOVER = "2026-11-28T00:00:00+00:00"
+#: The cutover is the moment this release first started against the store:
+#: recorded once (first writer wins, so every replica reads the same one) by
+#: :func:`record_cutover`. Records the server stored before it may carry
+#: unkeyed contracts the old code created; anything stored later must carry a
+#: keyed one. DATAFLOW_RISK_CONTRACT_CUTOVER (ISO-8601) is only an explicit
+#: operator override.
+_CUTOVER_ID = "_cutover"
 LEGACY_PREFIX = "mrc-sha256:"
 _CONTRACT_KEYS = ("risk_contract", "riskContract", "empty_as_null_contract")
 
@@ -89,26 +92,63 @@ def holds(risk_id: str, signature: str) -> bool:
         return False
 
 
-def cutover() -> datetime:
+def _parse(raw: Any) -> datetime:
+    at = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _override() -> datetime | None:
     from services.brand_env import getenv_brand
 
-    raw = (getenv_brand("RISK_CONTRACT_CUTOVER", "") or "").strip() or LEGACY_CUTOVER
-    at = datetime.fromisoformat(raw)
-    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+    raw = (getenv_brand("RISK_CONTRACT_CUTOVER", "") or "").strip()
+    return _parse(raw) if raw else None
+
+
+def recorded_cutover() -> datetime | None:
+    """The cutover this store recorded, or ``None`` before this release first started."""
+    coll = _collection()
+    if coll is not None:
+        doc = coll.find_one({"_id": _CUTOVER_ID})
+        return _parse(doc["at"]) if doc and doc.get("at") else None
+    from services.metadata_backend import load_json_doc
+
+    raw = (load_json_doc(_file_path(), {"contracts": {}}).get("cutover") or {}).get("at")
+    return _parse(raw) if raw else None
+
+
+def record_cutover() -> datetime:
+    """Record now as the cutover unless one is recorded already (first writer wins); return it."""
+    now = _now()
+    coll = _collection()
+    if coll is not None:
+        coll.update_one({"_id": _CUTOVER_ID}, {"$setOnInsert": {"at": now}}, upsert=True)
+        return _parse(coll.find_one({"_id": _CUTOVER_ID})["at"])
+    from services.metadata_backend import json_doc_transaction
+
+    with json_doc_transaction(_file_path(), {"contracts": {}}) as data:
+        doc = data.setdefault("cutover", {"at": now})
+        return _parse(doc["at"])
+
+
+def cutover() -> datetime | None:
+    """The operator's override, else the recorded cutover (``None`` when none is recorded yet)."""
+    return _override() or recorded_cutover()
 
 
 def _stored_before_cutover(*stamps: Any) -> bool:
     """Every server-set timestamp of the record is before the cutover (an edit after it is not)."""
+    limit = cutover()
+    if limit is None:
+        return False  # no cutover recorded yet: nothing is adopted
     seen = []
     for raw in stamps:
         if not raw:
             continue
         try:
-            at = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            seen.append(_parse(raw))
         except ValueError:
             return False
-        seen.append(at if at.tzinfo else at.replace(tzinfo=timezone.utc))
-    return bool(seen) and max(seen) < cutover()
+    return bool(seen) and max(seen) < limit
 
 
 def legacy_contracts_in(value: Any) -> list[dict[str, Any]]:
@@ -166,7 +206,8 @@ def _stored_records() -> Iterable[tuple[str, Mapping[str, Any]]]:
 
 
 def backfill_legacy_contracts() -> int:
-    """Record the unkeyed contracts the server stored before the cutover. Idempotent."""
+    """Record the cutover (first start only), then the unkeyed contracts stored before it. Idempotent."""
+    record_cutover()
     adopted = 0
     for origin, doc in _stored_records():
         adopted += adopt_stored(doc, origin=f"legacy:{origin}")

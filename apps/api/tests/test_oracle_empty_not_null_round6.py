@@ -172,39 +172,63 @@ def test_1_an_unsigned_draft_is_signed_in_the_signed_in_users_name_never_the_dra
     assert mrc.hydrate_risk_contract_dict({"source": "note", "target": "NOTE", "risk_contract": oracle_draft}) is None
 
 
-def test_1_a_legacy_contract_the_server_stored_before_the_cutover_is_honoured_a_newer_one_is_not():
+@pytest.fixture
+def fresh_store(tmp_path, monkeypatch):
+    """An empty contract store (no cutover recorded yet), as on this release's first start."""
     from services import risk_contract_store as store
 
-    old = _generic_contract(risk_id=f"mrc-old-{uuid.uuid4().hex[:8]}")
-    old["signature"] = mrc.legacy_digest(old)
-    late = _generic_contract(risk_id=f"mrc-late-{uuid.uuid4().hex[:8]}")
-    late["signature"] = mrc.legacy_digest(late)
-    assert not mrc.verify_risk_contract(old) and not mrc.verify_risk_contract(late)
-    before = (store.cutover() - timedelta(days=30)).isoformat()
-    after = (store.cutover() + timedelta(minutes=1)).isoformat()
-    assert store.adopt_stored({"created_at": before, "mappings": [{"risk_contract": old}]}, origin="schedule") == 1
+    monkeypatch.setattr(store, "_collection", lambda: None)
+    monkeypatch.setattr(store, "_file_path", lambda: tmp_path / "risk_contracts.json")
+    monkeypatch.delenv("DATAFLOW_RISK_CONTRACT_CUTOVER", raising=False)
+    return store
+
+
+def _legacy(prefix):
+    c = _generic_contract(risk_id=f"{prefix}-{uuid.uuid4().hex[:8]}")
+    c["signature"] = mrc.legacy_digest(c)
+    return c
+
+
+def test_1_the_cutover_is_this_releases_first_start_and_a_second_start_does_not_move_it(fresh_store, monkeypatch):
+    store = fresh_store
+    assert store.cutover() is None  # nothing recorded: nothing is adopted
+    stored_by_old_code = _legacy("mrc-old")
+    # Stored by the old code a day before this release first starts (no fixed calendar date).
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    records = [("schedule", {"created_at": yesterday, "mappings": [{"risk_contract": stored_by_old_code}]})]
+    monkeypatch.setattr(store, "_stored_records", lambda: iter(records))
+    assert not mrc.verify_risk_contract(stored_by_old_code)
+    assert store.backfill_legacy_contracts() == 1  # first start
+    first = store.recorded_cutover()
+    assert first is not None and abs((datetime.now(timezone.utc) - first).total_seconds()) < 60
+    assert mrc.verify_risk_contract(stored_by_old_code)
+    # A forged old-format contract presented after the cutover: no server record, refused.
+    forged = _legacy("mrc-forged")
+    assert not mrc.verify_risk_contract(forged)
+    # ...even if it lands in a record stored after the cutover and a replica starts later.
+    later = (first + timedelta(seconds=1)).isoformat()
+    records.append(("job", {"created_at": later, "transfer_request": {"mappings": [{"risk_contract": forged}]}}))
+    assert store.backfill_legacy_contracts() == 1  # second start: idempotent, cutover unchanged
+    assert store.recorded_cutover() == first and store.record_cutover() == first
+    assert not mrc.verify_risk_contract(forged)
     # Created before but edited after the cutover: not the server's pre-cutover record.
-    assert store.adopt_stored({"created_at": before, "updated_at": after,
-                               "transfer_request": {"mappings": [{"risk_contract": late}]}}, origin="job") == 0
-    assert store.adopt_stored({"created_at": after, "mappings": [{"risk_contract": late}]}, origin="job") == 0
-    assert mrc.verify_risk_contract(old) and store.holds(old["risk_id"], old["signature"])
-    assert not mrc.verify_risk_contract(late)
+    edited_after = _legacy("mrc-edited")
+    assert store.adopt_stored({"created_at": yesterday, "updated_at": later,
+                               "mappings": [{"risk_contract": edited_after}]}, origin="job") == 0
     # The same id with other content (another digest) is not the recorded contract.
-    edited = {**old, "approved_by": "mallory@example.com"}
-    edited["signature"] = mrc.legacy_digest(edited)
-    assert not mrc.verify_risk_contract(edited)
+    changed = {**stored_by_old_code, "approved_by": "mallory@example.com"}
+    changed["signature"] = mrc.legacy_digest(changed)
+    assert not mrc.verify_risk_contract(changed)
 
 
-def test_1_the_startup_backfill_reads_the_servers_own_records(monkeypatch):
-    from services import risk_contract_store as store
-
-    old = _generic_contract(risk_id=f"mrc-bf-{uuid.uuid4().hex[:8]}")
-    old["signature"] = mrc.legacy_digest(old)
-    before = (store.cutover() - timedelta(days=1)).isoformat()
-    monkeypatch.setattr(store, "_stored_records", lambda: iter([
-        ("schedule", {"created_at": before, "mappings": [{"risk_contract": old}]}),
-    ]))
-    assert store.backfill_legacy_contracts() == 1 and mrc.verify_risk_contract(old)
+def test_1_the_operator_override_wins_over_the_recorded_cutover(fresh_store, monkeypatch):
+    store = fresh_store
+    store.record_cutover()
+    monkeypatch.setenv("DATAFLOW_RISK_CONTRACT_CUTOVER", "2020-01-01T00:00:00+00:00")
+    assert store.cutover() == datetime(2020, 1, 1, tzinfo=timezone.utc)
+    c = _legacy("mrc-ovr")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    assert store.adopt_stored({"created_at": yesterday, "mappings": [{"risk_contract": c}]}, origin="plan") == 0
 
 
 # ------------------------------------------------------------------------ 2
