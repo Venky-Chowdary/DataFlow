@@ -33,6 +33,22 @@ NOT_ESTABLISHED_NOTE = (
 )
 
 
+def _ms_apart(a: Any, b: Any) -> int | None:
+    from datetime import datetime, timezone
+
+    def parse(value: Any) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace(" ", "T", 1))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    left, right = parse(a), parse(b)
+    if left is None or right is None:
+        return None
+    return int(round(abs((left - right).total_seconds()) * 1000))
+
+
 def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
     """What the scan established about writes during it, and nothing more.
 
@@ -47,7 +63,11 @@ def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
         if info.get("kind") != "pinned":
             reasons.append(f"{role}: {info.get('reason') or 'read statement by statement, not from one snapshot'}")
     if not reasons:
-        return {"kind": "pinned", "source": sides["source"], "destination": sides["destination"]}
+        out = {"kind": "pinned", "source": sides["source"], "destination": sides["destination"]}
+        apart = _ms_apart(sides["source"].get("at"), sides["destination"].get("at"))
+        if apart is not None:
+            out["snapshots_ms_apart"] = apart
+        return out
     return {"kind": "not_established", "reasons": reasons, "note": NOT_ESTABLISHED_NOTE}
 
 

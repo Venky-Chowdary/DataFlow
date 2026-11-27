@@ -165,3 +165,52 @@ def test_mysql_innodb_pins_a_consistent_snapshot() -> None:
             cur.execute(f"DROP TABLE IF EXISTS `{table}`")
         conn.commit()
         conn.close()
+
+
+@pg
+def test_proven_says_each_side_was_read_from_its_own_snapshot(tables) -> None:
+    """Review 2, N8: the claim is worded to what was established."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    consistency = _svc().get_job(job_id)["reconciliation"]["parity_at_scale"]["consistency"]
+    assert isinstance(consistency["snapshots_ms_apart"], int)
+    reason = _report(job_id)["verdict_reason"]
+    assert "each side was read from one snapshot" in reason and "ms apart" in reason
+    assert "after its snapshot is not part of this result" in reason
+
+
+@pg
+def test_a_failed_stream_keeps_the_pinned_snapshot_usable(tables) -> None:
+    """Review 2, N8: a pinned PostgreSQL stream that errors must not leave the transaction aborted."""
+    from services.parity_scale import verification
+
+    src, _dst = tables
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    plan = verification.plan_for(spec)
+    side = verification.side_opener(spec)("source", plan)
+    try:
+        assert side.pin()["kind"] == "pinned"
+        before = side.execute(f'SELECT count(*) FROM "{src}"', [])[0][0]
+        with pytest.raises(Exception):
+            list(side.stream("SELECT no_such_column FROM pg_class", [], 10))
+        _sql(f'DELETE FROM "{src}" WHERE id <= 10')
+        assert side.execute(f'SELECT count(*) FROM "{src}"', [])[0][0] == before  # same snapshot, still usable
+    finally:
+        side.close()
+
+
+@pg
+def test_a_hashed_key_is_not_eligible_and_never_errors(tables) -> None:
+    """Review 2, N8: a hash_pii key made every scan error; it is now not eligible, with the reason."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    job = _svc().get_job(job_id)
+    job["transfer_request"]["mappings"][0]["transform"] = "hash_pii"
+    _svc().update_job_fields(job_id, {"transfer_request": job["transfer_request"]})
+    block = verification.start_for_job(job_id, background=False)
+    assert block["state"] == "not_eligible", block
+    assert "key is a protected column" in block["reason"]

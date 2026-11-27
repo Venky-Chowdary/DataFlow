@@ -14,6 +14,7 @@ phase 3 switches that path to the CE1 digest.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -332,8 +333,13 @@ class PostgresSide(SqlSide):
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import uuid as _uuid
 
+        if self.pinned:
+            # A savepoint keeps the pinned snapshot usable when the stream fails part way.
+            with self.conn.cursor() as plain:
+                plain.execute("SAVEPOINT psd1_stream")
         cur = self.conn.cursor(name=f"psd1_stream_{_uuid.uuid4().hex[:12]}")
         cur.itersize = batch
+        failed = False
         try:
             cur.execute(sql, list(params))
             while True:
@@ -341,7 +347,15 @@ class PostgresSide(SqlSide):
                 if not rows:
                     break
                 yield from rows
+        except BaseException:
+            failed = True
+            raise
         finally:
-            cur.close()
-            if not self.pinned:  # a pinned scan keeps its transaction (and its snapshot)
+            if self.pinned:
+                with contextlib.suppress(Exception):
+                    cur.close()
+                with self.conn.cursor() as plain:
+                    plain.execute("ROLLBACK TO SAVEPOINT psd1_stream" if failed else "RELEASE SAVEPOINT psd1_stream")
+            else:
+                cur.close()
                 self.conn.rollback()

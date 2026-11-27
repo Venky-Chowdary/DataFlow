@@ -174,6 +174,10 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     refusal = scope_refusal(job)
     if refusal:
         return None, refusal
+    protected = {str(c).lower() for c in protected_targets(job)}
+    if any(str(k).lower() in protected for k in key_columns_of(job)):
+        # A masked or hashed key cannot be paired with its source row inside the databases.
+        return None, "the key is a protected column (masked or hashed), so rows cannot be paired in the database"
     t2s = target_to_source(job)
     key_targets = key_columns_of(job)
     return {

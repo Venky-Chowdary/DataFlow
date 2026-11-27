@@ -174,4 +174,6 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
         "ce_stricter_than_fp": int(diff.get("ce_stricter_than_fp") or 0),
         # "pinned" (one snapshot per side) or "not_established": only pinned may read proven.
         "consistency": str((evidence.get("consistency") or {}).get("kind") or "not_established"),
+        "snapshots_ms_apart": (evidence.get("consistency") or {}).get("snapshots_ms_apart"),
+        "consistency_reasons": list((evidence.get("consistency") or {}).get("reasons") or []),
     }

@@ -580,6 +580,8 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
             "certified": ev.scale.get("certified"),
             "certification_pair": ev.scale.get("certification_pair"),
             "consistency": ev.scale.get("consistency"),
+            "snapshots_ms_apart": ev.scale.get("snapshots_ms_apart"),
+            "consistency_reasons": ev.scale.get("consistency_reasons") or [],
         } if ev.scale else {}),
     }
 
@@ -785,16 +787,22 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
               and t.get("consistency") != "pinned"]
     if moving:
         # Design §4.2: proven needs each side read from one snapshot (pinned).
+        why = next((r for t in tables for r in (t.get("consistency_reasons") or [])), "")
         return "no_difference_found", (
             f"Every row of {', '.join(moving[:5])} was compared and none differs. The tables matched at "
-            "scan time, but writes during the scan were not ruled out."
+            "scan time, but writes during the scan were not ruled out"
+            + (f" ({why})." if why else ".")
         )
-    content = [t["name"] for t in tables if t.get("check") == "multiset_digest"]
-    if content:
+    pinned = [t for t in tables if t.get("check") in {"segment_diff", "multiset_digest"}]
+    if pinned:
+        apart = max((t.get("snapshots_ms_apart") or 0) for t in pinned)
+        content = [t["name"] for t in pinned if t.get("check") == "multiset_digest"]
         return "proven", (
-            "No differences: the destination matches the source. "
-            f"{', '.join(content[:5])}: content match (no key) — every row has an identical counterpart; "
-            "the table has no key, so a difference could not be attributed to a key."
+            f"No differences: each side was read from one snapshot (taken {apart:,} ms apart). The destination "
+            "as of its snapshot matches the source as of its snapshot; a change to the source after its "
+            "snapshot is not part of this result."
+            + (f" {', '.join(content[:5])}: content match (no key) — every row has an identical counterpart; "
+               "the table has no key, so a difference could not be attributed to a key." if content else "")
         )
     return "proven", "No differences: the destination matches the source."
 
