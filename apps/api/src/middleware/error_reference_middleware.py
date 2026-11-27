@@ -49,13 +49,10 @@ def complete_error_body(body: Any, status: int, reference: str) -> Any:
         return {**body, "reference": reference}
     from services.safe_errors import _platform_envelope
 
+    from services.refusal_cause import refusal_message
+
     raw = body.get("detail")
-    if isinstance(raw, str) and raw:
-        message = raw
-    elif isinstance(raw, dict):
-        message = str(raw.get("message") or raw.get("detail") or "Request refused")
-    else:
-        message = "Request refused" if status < 500 else "Something went wrong"
+    message = refusal_message(raw, status)
     envelope = _platform_envelope(message, reference, message, status)
     return {**body, "error": envelope["error"], "detail": raw if "detail" in body else message}
 

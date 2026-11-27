@@ -947,10 +947,21 @@ async def copilot_confirm(
                 detail=connector_name_conflict_message(str(payload.get("name") or "")),
             )
         probe_passed_at = str(payload.get("probe_passed_at") or "")
+        to_save = {k: v for k, v in payload.items() if k != "probe_passed_at"}
+        from services.connector_save_policy import ConnectorRefused, as_http, connector_save_refusal
+
+        # U1: the REST save check, on the payload as it will be saved. Staging
+        # checked only the metadata endpoint, and the ledger is the only copy.
+        refused = connector_save_refusal(to_save)
+        if refused is not None:
+            ledger.release_claim(ack_id)
+            raise as_http(refused)
         try:
-            conn = create_connector(
-                {k: v for k, v in payload.items() if k != "probe_passed_at"}
-            )
+            conn = create_connector(to_save)
+        except ConnectorRefused as exc:
+            ledger.release_claim(ack_id)
+            # The same plain refusal the REST save gives, not "see the API log".
+            raise as_http(exc) from exc
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc

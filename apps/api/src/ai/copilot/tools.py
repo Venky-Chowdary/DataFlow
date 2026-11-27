@@ -2424,6 +2424,11 @@ class DataPilotTools:
             workspace_id=str(draft.get("workspace_id") or ""),
             db_type=str(draft.get("type") or ""),
         )
+        if not refusal:
+            from services.connector_save_policy import connector_save_refusal
+
+            # U1: refused at staging with the REST save's words; Confirm checks again.
+            refusal = str(connector_save_refusal(draft) or "")
         if refusal:
             from .ack_ledger import redact_payload
 

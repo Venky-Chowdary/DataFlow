@@ -458,16 +458,12 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
 
 
 def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
-    """Refuse to persist a connector whose dial targets break the egress policy.
+    """The egress part of the shared save check, as a 400 (kept for its callers)."""
+    from services.connector_save_policy import as_http, egress_refusal
 
-    Audit-first for private hosts and never applied to an unchanged target
-    (``connector_save_refusal``); metadata and link-local always refuse.
-    """
-    from services.egress_guard import connector_save_refusal
-
-    refusal = connector_save_refusal(data)
-    if refusal:
-        raise HTTPException(status_code=400, detail=refusal)
+    refused = egress_refusal(data)
+    if refused is not None:
+        raise as_http(refused)
 
 
 @router.post("/", response_model=ConnectorResponse)
@@ -477,7 +473,7 @@ def create_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Create and save a new connector configuration (file store + MongoDB when available)."""
+    """Create and save a new connector configuration in the configured connector store."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
     from src.transfer.connector_capabilities import unproven_wire_brand_refusal
@@ -512,55 +508,44 @@ def create_connector(
         "workspace_id": workspace_id,
         "status": "configured",
     }
-    _refuse_unsafe_egress(connector_data)
+    from services.connector_save_policy import ConnectorRefused, as_http, connector_save_refusal
 
-    # Canonical persistence: file-backed store (always works without MongoDB)
+    # U1: the same save check as every other create and update path. It used to
+    # be only the egress guard here; the store's refusal was then logged as
+    # suppressed and the connector saved to MongoDB without it.
+    refused = connector_save_refusal(connector_data)
+    if refused is not None:
+        raise as_http(refused)
+    from services.connector_store import ConnectorStoreError
+    from services.connector_store import create_connector as fs_create
+
+    # One store, no fallback: the configured connector store (file or MongoDB)
+    # is the system of record. A refusal is a 4xx with the store's text, a store
+    # failure is the app's 503 (ConnectorStoreError); neither falls through to
+    # another collection, which saved what the store had refused.
     try:
-        import sys
-        from pathlib import Path
-        _api_root = Path(__file__).resolve().parents[2]
-        if str(_api_root) not in sys.path:
-            sys.path.insert(0, str(_api_root))
-        from services.connector_store import create_connector as fs_create
         saved = fs_create(connector_data)
-        return ConnectorResponse(
-            id=saved.id,
-            name=saved.name,
-            type=saved.type,
-            host=saved.host,
-            port=saved.port,
-            database=saved.database,
-            status="configured",
-            created_at=saved.created_at,
-            workspace_id=saved.workspace_id or "",
-            role=getattr(saved, "role", None) or connector_data.get("role") or "both",
-        )
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-
-    try:
-        mongo = get_mongodb_service()
-
-        # Persist topology role + ssl — dropping them made every DB look like a source.
-        mongo_data = dict(connector_data)
-        connector_id = mongo.save_connector(mongo_data)
-        connector = mongo.get_connector(connector_id)
-
-        return ConnectorResponse(
-            id=connector["_id"],
-            name=connector["name"],
-            type=connector["type"],
-            host=connector["host"],
-            port=connector["port"],
-            database=connector["database"],
-            status=connector["status"],
-            created_at=connector["created_at"].isoformat(),
-            workspace_id=connector.get("workspace_id", ""),
-            role=connector.get("role") or connector_data.get("role") or "both",
-        )
-
+    except ConnectorRefused:
+        raise
+    except ConnectorStoreError as exc:
+        # Credential-masked by the store; the same 503 the app handler gives.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as e:
         raise safe_http_exception(e, event="connectors.create_connector.failed", public_message="Couldn't save the connection.", status_code=500)
+    return ConnectorResponse(
+        id=saved.id,
+        name=saved.name,
+        type=saved.type,
+        host=saved.host,
+        port=saved.port,
+        database=saved.database,
+        status="configured",
+        created_at=saved.created_at,
+        workspace_id=saved.workspace_id or "",
+        role=getattr(saved, "role", None) or connector_data.get("role") or "both",
+    )
 
 
 @router.get("/")
@@ -1442,7 +1427,11 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "error": "Resume refused — checkpoint not safe",
+                    # D424: the remedy is Retry, and the message says so.
+                    "error": (
+                        "Resume refused: the checkpoint is not safe to continue from. "
+                        "Use Retry to run the job again from the start."
+                    ),
                     "reasons": safety.get("reasons") or [],
                     "warnings": safety.get("warnings") or [],
                     "age_hours": safety.get("age_hours"),

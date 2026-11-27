@@ -102,6 +102,12 @@ TEMPLATES: dict[str, Template] = {
         "Replace the token or key on the connection, then test it again.",
         "open_connection", _EDIT_API,
     ),
+    "auth.token_expired": Template(
+        "Token expired",
+        "{engine} rejected the access token because it has expired.",
+        "Edit the connection and replace the token, then test it again.",
+        "open_connection", _EDIT_API,
+    ),
     "auth.mfa_required": Template(
         "Multi-factor sign-in required",
         "{engine} requires multi-factor authentication for this user, which a connection cannot answer.",
@@ -412,8 +418,27 @@ TEMPLATES: dict[str, Template] = {
     "platform.request_refused": Template(
         "Request not accepted",
         "Datawrap couldn't accept this request as sent.",
-        "Check the values on the form, then try again.",
+        "Fix what the message names, then try again.",
         "edit",
+    ),
+    # D424: refusals whose remedy is not "edit the form".
+    "platform.step_timed_out": Template(
+        "Took too long",
+        "A step didn't finish in time.",
+        "Try again. If it times out again, check the slow step the message names.",
+        "retry", retriable=True,
+    ),
+    "platform.use_retry": Template(
+        "Resume not possible",
+        "This job can't continue from where it stopped.",
+        "Use Retry to run the job again from the start.",
+        "retry", _RETRY_API,
+    ),
+    "platform.state_conflict": Template(
+        "Not possible right now",
+        "The request is valid, but the item's current state doesn't allow it.",
+        "Do what the message says, then try again. The values you sent don't need changing.",
+        "reload",
     ),
     "platform.internal": Template(
         "Something went wrong",
@@ -918,6 +943,12 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"password authentication failed for user|access denied for user '[^']*'(?:@'[^']*')? \(using password|"
         r"login failed for user|ora-01017|invalid username/password", re.I)),
     ("auth.user_unknown", re.compile(r'^role "[^"]+" does not exist', re.I)),
+    # D436: Snowflake PAT 394401 / OAuth 390318, and the product's own copy of them.
+    ("auth.token_expired", re.compile(
+        r"\b394401\b|\b390318\b|(?:programmatic|oauth) access token (?:is |has )?expired|"
+        r"rejected the access token because it has expired", re.I)),
+    ("auth.token_invalid", re.compile(
+        r"\b390144\b|jwt token is invalid|refused the programmatic access token", re.I)),
     ("auth.mongo_auth_source", re.compile(r"^authentication failed\.?$|'codename': 'authenticationfailed'", re.I)),
     ("object.database_not_found", re.compile(r'database "[^"]+" does not exist|unknown database \'', re.I)),
     ("network.tls_untrusted", re.compile(
@@ -950,7 +981,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"mysql server has gone away|terminating connection due to administrator command|connection reset by peer|"
         r"ssl connection has been closed unexpectedly|"
         r"can'?t reconnect until invalid transaction is rolled back", re.I)),
-    ("object.file_not_found", re.compile(r"^unable to open database file|\[errno 2\] no such file", re.I)),
+    ("object.file_not_found", re.compile(
+        r"^unable to open database file|\[errno 2\] no such file|^sqlite file .+ is not on this server", re.I)),
     ("object.table_not_found", re.compile(
         r"^no such table: |relation \"[^\"]+\" does not exist|table '[^']+' doesn't exist|"
         r"invalid object name '|ora-00942", re.I)),

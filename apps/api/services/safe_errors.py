@@ -65,23 +65,29 @@ def _platform_envelope(public_message: str, cid: str, detail: str, status_code: 
     from services.error_taxonomy import TEMPLATES
 
     # A refusal the caller can act on is not "Something went wrong, try again".
-    if status_code == 404:
-        code = "platform.not_found"
-    elif 400 <= status_code < 500:
-        code = "platform.request_refused"
-    elif status_code == 504:
-        code = "platform.gateway_timeout"
+    if 400 <= status_code < 500 and status_code != 404:
+        from services.refusal_cause import refusal_envelope_fields
+
+        # D424: the code, action and retriable follow the cause, not the status.
+        fields = refusal_envelope_fields(status_code, public_message)
     else:
-        code = "platform.internal"
-    tpl = TEMPLATES[code]
+        if status_code == 404:
+            code = "platform.not_found"
+        elif status_code == 504:
+            code = "platform.gateway_timeout"
+        else:
+            code = "platform.internal"
+        tpl = TEMPLATES[code]
+        fields = {"code": code, "title": tpl.title, "retriable": tpl.retriable,
+                  "action": {"label": tpl.action, "ui": tpl.ui, "api": tpl.api}}
     return {
         "error": {
-            "code": code,
-            "title": tpl.title,
+            "code": fields["code"],
+            "title": fields["title"],
             "message": public_message,
-            "action": {"label": tpl.action, "ui": tpl.ui, "api": tpl.api},
+            "action": fields["action"],
             "object": {},
-            "retriable": tpl.retriable,
+            "retriable": fields["retriable"],
             "reference": cid,
         },
         "detail": detail,

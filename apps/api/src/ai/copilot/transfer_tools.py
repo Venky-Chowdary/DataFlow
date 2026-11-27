@@ -1260,6 +1260,22 @@ def plan_transfer(
                 success=False,
                 error=_source_read_error(src_conn, src_table, str(src_info["error"] or "")),
             )
+    if dest_exists is None and not dst_info.get("ok"):
+        # D436: a destination that refused the sign-in is that finding, not an
+        # unread schema with a mapping review on every column.
+        from services.credential_finding import credential_finding
+
+        finding = credential_finding(
+            dst_info.get("error"),
+            engine=str(dst_info.get("db_type") or dst_conn.get("type") or ""),
+            auth_mode=str(dst_conn.get("auth_mode") or ""),
+        )
+        if finding:
+            return _tool_result(
+                tool,
+                success=False,
+                error=f"Destination connection {dst_conn.get('name') or dst_table}: {finding} Nothing was staged.",
+            )
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
 
@@ -1867,6 +1883,14 @@ def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) ->
     target = describe_target(src_conn)
     name = src_conn.get("name") or "the source"
     where = f"{name} ({target})" if target else str(name)
+    from services.credential_finding import credential_finding
+
+    finding = credential_finding(
+        detail, engine=str(src_conn.get("type") or ""), auth_mode=str(src_conn.get("auth_mode") or "")
+    )
+    if finding:
+        # D436: a rejected sign-in names the credential, not "list tables".
+        return f"Source connection {name}: {finding} Nothing was staged."
     from services.error_taxonomy import (
         SQLSERVER_OBJECT_OR_AUTH,
         sqlserver_error_numbers,
