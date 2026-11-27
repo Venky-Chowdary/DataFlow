@@ -44,7 +44,7 @@ _ROW_CAP = 50_000
 _SQL_FAMILIES = frozenset({"postgresql", "mysql", "sqlserver", "oracle", "sqlite"})
 _EPOCH = datetime(1970, 1, 1)
 _TEXT_TS = re.compile(
-    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?$"
+    r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?)?\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?$"
 )
 _OFFSET = re.compile(r"\s*(Z|z|[+-]\d{2}(?::?\d{2})?)$")
 
@@ -72,7 +72,7 @@ def _instant(value: Any) -> tuple[Decimal, bool] | None:
     if not m:
         return None
     day, hh, mi, ss, frac, off = m.groups()
-    base = datetime.fromisoformat(f"{day}T{hh}:{mi}:{ss}")
+    base = datetime.fromisoformat(f"{day}T{hh or '00'}:{mi or '00'}:{ss or '00'}")
     seconds = Decimal((base - _EPOCH) // timedelta(seconds=1))
     if frac:
         seconds += Decimal("0." + frac)
@@ -174,6 +174,8 @@ def _cursor_window(col: Any, watermark: str, dialect: str) -> Any:
         m = _TEXT_TS.match(str(watermark).strip())
         if not m:
             return col == str(watermark)
+        if m.group(2) is None:
+            return col.like(f"{m.group(1)}%")
         day, hh, mi = m.group(1), m.group(2), m.group(3)
         return sa.or_(*[col.like(f"{day}{sep}{hh}:{mi}%") for sep in ("T", " ")])
     raise BoundaryUnmeasured(f"the cursor column type {col.type!r} cannot be windowed")
