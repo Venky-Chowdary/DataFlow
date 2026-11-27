@@ -360,6 +360,13 @@ async def lifespan(app: FastAPI):
                 adopted = await asyncio.to_thread(backfill_legacy_contracts)
                 if adopted:
                     print(f"[+] Recorded {adopted} pre-cutover risk contract(s) from stored schedules/plans/jobs")
+                from services.risk_contract_store import upgrade_report
+
+                pending = await asyncio.to_thread(upgrade_report)
+                if pending:
+                    named = "; ".join(f"{e['kind']} {e['name'] or e['record_id']}: {e['route']}" for e in pending[:5])
+                    print(f"[!] {len(pending)} pre-upgrade risk approval(s) must be re-approved before their "
+                          f"schedules resume (GET /api/v1/ops/risk-contract-upgrade-report): {named}")
             except Exception as contract_exc:  # noqa: BLE001 - unrecorded legacy contracts are refused, not trusted
                 print(f"[!] Legacy risk contract backfill skipped: {contract_exc}")
 

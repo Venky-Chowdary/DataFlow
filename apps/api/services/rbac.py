@@ -444,6 +444,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 # Exact method/path entries preserve fallback behavior on root and special
 # paths that cannot be represented safely by a prefix.
 _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
+    ("GET", "/api/v1/ops/risk-contract-upgrade-report", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors/keys", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-cursors/clear", Permission.WORKSPACE_MANAGE),

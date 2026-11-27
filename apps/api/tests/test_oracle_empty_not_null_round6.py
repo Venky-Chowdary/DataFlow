@@ -189,7 +189,7 @@ def _legacy(prefix, **over):
     return c
 
 
-def _audit_signed(contract, workspace):
+def _audit_signed(contract, workspace, **target):
     """The event the old server-side signing path (hydrate) wrote: no digest, like the old one."""
     from services.audit_log import append_audit_event
 
@@ -197,7 +197,7 @@ def _audit_signed(contract, workspace):
                        actor=contract["approved_by"], workspace_id=workspace,
                        details={"risk_id": contract["risk_id"], "column": contract["column"],
                                 "execution_policy": contract["execution_policy"],
-                                "approved_by": contract["approved_by"]})
+                                "approved_by": contract["approved_by"], **target})
 
 
 def _in_workspace(monkeypatch, ws):
@@ -286,6 +286,74 @@ def test_2_an_adopted_legacy_contract_is_honoured_only_in_its_own_workspace(fres
     assert not mrc.verify_risk_contract(audited)  # presented with no workspace
     store.record(no_ws, origin="test", workspace_id="")
     assert not mrc.verify_risk_contract(no_ws)  # an empty recorded workspace never matches
+
+
+def test_2_an_old_event_without_a_workspace_naming_a_schedule_is_adopted_only_in_that_schedules_workspace(
+        fresh_store, monkeypatch):
+    from types import SimpleNamespace
+
+    from services import schedule_store
+
+    store = fresh_store
+    c = _legacy("mrc-sched", approved_by="ops@example.com")
+    _audit_signed(c, None, schedule_id="sch-1")  # the pre-release code wrote no workspace
+    # The workspace comes from the server's own schedule record, not from the stored request.
+    monkeypatch.setattr(schedule_store, "get_schedule",
+                        lambda sid: SimpleNamespace(id=sid, workspace_id="ws-s") if sid == "sch-1" else None)
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    monkeypatch.setattr(store, "_stored_records", lambda: iter([
+        ("schedule", {"id": "sch-1", "name": "nightly", "created_at": yesterday, "workspace_id": "ws-s",
+                      "mappings": [{"source": "qty", "target": "qty", "risk_contract": c}]}),
+    ]))
+    assert store.backfill_legacy_contracts() == 1 and store.upgrade_report() == []
+    _in_workspace(monkeypatch, "ws-s")
+    assert mrc.verify_risk_contract(c)
+    _in_workspace(monkeypatch, "ws-other")
+    assert not mrc.verify_risk_contract(c)
+
+
+def test_2_an_old_event_with_no_target_is_not_adopted_and_is_listed_for_re_approval(fresh_store, monkeypatch,
+                                                                                    tmp_path):
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    from tests import r4_route_harness as h
+
+    store = fresh_store
+    c = _legacy("mrc-notarget", approved_by="ops@example.com")
+    _audit_signed(c, None)  # no workspace, nothing to derive one from
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    monkeypatch.setattr(store, "_stored_records", lambda: iter([
+        ("schedule", {"id": "sch-2", "name": "hourly orders", "created_at": yesterday, "workspace_id": "ws-a",
+                      "source_table": "orders", "dest_table": "ORDERS",
+                      "mappings": [{"source": "qty", "target": "QTY", "risk_contract": c}]}),
+    ]))
+    assert store.backfill_legacy_contracts() == 0
+    _in_workspace(monkeypatch, "ws-a")
+    assert not mrc.verify_risk_contract(c)
+    [entry] = store.upgrade_report()
+    assert entry["kind"] == "schedule" and entry["name"] == "hourly orders" and entry["reason"] == "audited_without_target"
+    assert entry["route"] == "orders → ORDERS (qty → QTY)" and entry["risk_id"] == c["risk_id"]
+    # Admin-visible list (workspace.manage), and a line in the Validate result for that route.
+    h.isolate(tmp_path, monkeypatch)
+    from src.main import app
+
+    with TestClient(app) as client:
+        resp = client.get("/api/v1/ops/risk-contract-upgrade-report")
+    assert resp.status_code == 200 and resp.json()["entries"][0]["name"] == "hourly orders"
+    # (RBAC: workspace.manage, pinned in tests/fixtures/rbac_route_permissions.json.)
+    [warning] = store.reapproval_warnings([{"source": "qty", "target": "QTY", "risk_contract": c}])
+    assert "qty → QTY" in warning["message"] and "Re-approve this risk once" in warning["message"]
+    from services.preflight_service import run_file_preflight
+
+    result = run_file_preflight(
+        columns=["qty"], column_types={"qty": "TEXT"}, row_count=1,
+        mappings=[{"source": "qty", "target": "QTY", "confidence": 0.99, "target_type": "TEXT", "risk_contract": c}],
+        destination_connected=True, sample_rows=[{"qty": "1"}], destination_table_exists=False,
+        destination_can_create=True, destination_db_type="postgresql", source_kind="file", source_format="csv",
+        sync_mode="full_refresh_overwrite", destination_table="ORDERS")
+    assert any(w.get("id") == "risk_contract_reapprove" for w in result.get("warnings") or [])
 
 
 def test_1_the_operator_override_wins_over_the_recorded_cutover(fresh_store, monkeypatch):

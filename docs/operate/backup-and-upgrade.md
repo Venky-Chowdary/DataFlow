@@ -356,20 +356,39 @@ Changed shapes:
 
 #### Keyed risk approvals (Oracle '' gate round)
 
-- **Risk contracts are now signed with the deployment's key.** Contracts
-  approved before this release carry an older, unkeyed signature. Each one is
-  honoured only if the server's own audit log recorded signing it before the
-  cutover, in the same workspace. The cutover is the moment this release
-  first starts against the store; it is recorded once and every replica uses
-  it. At start, the server records those contracts from stored schedules,
-  plans and jobs. Any other old contract (one written by an API caller, one
-  with no workspace, or one used in another workspace) is refused with
-  "re-approve this risk once". Re-approve it in Validate.
-- **Upgrade every replica before resuming schedules.** An older replica
-  still running after the cutover signs contracts the old way. They are
-  refused later with "approved during the upgrade window: re-approve this
-  risk once". Drain or stop the old API and worker processes, or pause
-  schedules, until every process runs this build.
+Risk contracts are now signed with the deployment's key. Contracts approved
+before this release carry an older, unkeyed signature that anyone could
+compute. The cutover is the moment this release first starts against the
+store; it is recorded once and every replica uses it. At each start the
+server checks every older contract in the schedules, plans and jobs it
+stored before the cutover. One of three cases applies:
+
+1. **Its audit log recorded signing it in that workspace.** The contract is
+   kept and works in that workspace only.
+2. **Its audit log recorded signing it with no workspace, but the record
+   names a schedule, plan or job.** Releases before this one wrote no
+   workspace. The contract is kept for the workspace stored on that
+   schedule, plan or job (the server's own record), and works there only.
+3. **Anything else.** This covers an audit record that names nothing a
+   workspace can be taken from (what the previous release wrote in most
+   cases), no audit record at all, or a contract written by an API caller.
+   The contract no longer counts. Each one is listed for re-approval:
+   - in the start log: `[!] N pre-upgrade risk approval(s) must be
+     re-approved …`, naming the schedule, plan or job and its route;
+   - at `GET /api/v1/ops/risk-contract-upgrade-report`, for workspace
+     admins (as of the last start);
+   - as a `risk_contract_reapprove` warning in Validate for that route.
+
+   Their runs stop with "re-approve this risk once". **What to do:** before
+   resuming schedules, open each listed route, run Validate and approve the
+   risk again (or send `risk_acceptance` again over MCP or the API). The new
+   approval is keyed and needs no further action.
+
+**Upgrade every replica before resuming schedules.** An older replica
+still running after the cutover signs contracts the old way. They are
+refused later with "approved during the upgrade window: re-approve this
+risk once". Drain or stop the old API and worker processes, or pause
+schedules, until every process runs this build.
 
 ## Not covered
 

@@ -2837,6 +2837,9 @@ def run_file_preflight(
     from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
 
     out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
+    from services.risk_contract_store import reapproval_warnings  # pre-upgrade approvals to re-approve
+
+    out["warnings"].extend(reapproval_warnings(mappings))
     from services.temporal_tick_disclosure import temporal_tick_warnings  # D372/R3
 
     out.setdefault("warnings", []).extend(temporal_tick_warnings(

@@ -12,6 +12,22 @@ from services.safe_errors import classified_http_exception
 router = APIRouter(prefix="/ops", tags=["Ops"])
 
 
+@router.get("/risk-contract-upgrade-report")
+async def get_risk_contract_upgrade_report(request: Request) -> dict[str, Any]:
+    """Pre-upgrade risk approvals this server cannot prove it signed (workspace admins).
+
+    Each entry names the schedule, plan or job and the route whose approval
+    must be re-approved before it runs again (services.risk_contract_store);
+    as of the last start of the API.
+    """
+    from services.risk_contract_store import upgrade_report
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request).single_workspace_filter()
+    entries = [e for e in upgrade_report() if scope.matches(e.get("workspace_id"))]
+    return {"entries": entries, "count": len(entries)}
+
+
 @router.get("/freshness")
 async def get_freshness(
     request: Request,

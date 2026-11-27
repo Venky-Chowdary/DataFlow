@@ -61,7 +61,8 @@ kind, reason and the signature; no data values). Contracts signed before the
 keyed signature are honoured only if the server's audit log recorded
 signing them before the cutover (the moment this release first started,
 recorded once and shared by every replica). They must also be used in the
-same workspace they were signed in. The server records those contracts at
+workspace the audit record (or the schedule, plan or job it names) belongs
+to. Any other one shows a `risk_contract_reapprove` warning in Validate. The server records those contracts at
 startup from stored schedules, plans and jobs. Any other such contract is
 refused with "re-approve this risk once" (see
 [backup and upgrade](../operate/backup-and-upgrade.md)).
