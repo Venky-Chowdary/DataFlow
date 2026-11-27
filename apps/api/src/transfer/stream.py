@@ -3728,36 +3728,9 @@ def _typed_value_source(fmt: str) -> bool:
         return False
 
 
-class _NoOpCheckpointService:
-    """A checkpoint service that does not persist anything.
-
-    Used for temporary staging transfers so the parent job's checkpoint is not
-    overwritten by an internal phase.
-
-    Module 14 honesty: this phase is not crash-recoverable on its own.
-    """
-
-    failed_saves = 0
-    durable = False
-    resume_supported = False
-
-    @property
-    def has_failed_saves(self) -> bool:
-        return False
-
-    def save(self, checkpoint: Any) -> bool:  # noqa: ARG002
-        return True
-
-    def require_save(self, checkpoint: Any) -> None:  # noqa: ARG002
-        return None
-
-    def load(self, job_id: str) -> Any | None:  # noqa: ARG002
-        return None
-
-    def honesty(self) -> dict:
-        from services.execution_engine_contract import noop_checkpoint_posture
-
-        return noop_checkpoint_posture()
+# The no-op checkpoint service lives in its own module (size budget) and is
+# re-exported here because callers import it from this module.
+from .stream_noop_checkpoint import _NoOpCheckpointService  # noqa: E402,F401 — re-export
 
 
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
