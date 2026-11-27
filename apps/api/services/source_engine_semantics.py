@@ -158,33 +158,36 @@ def offset_dropped(source_type: str, target_type: str, *, dest_db: str = "", sou
 def oracle_zone_bind_shifts_instant(
     source_type: str, target_type: str, *, dest_db: str = "", source_db: str = ""
 ) -> str:
-    """Why an instant written into an Oracle zone-bearing column moves, or ``""``.
+    """Why an instant written into an Oracle zone-bearing column may move, or ``""``.
 
-    The row writer hands python-oracledb an aware ``datetime`` (the originating
-    offset for ``WITH TIME ZONE``, UTC for ``WITH LOCAL TIME ZONE``). The driver
-    encodes only the civil digits: ``encode_date``/``encode_timestamp`` never
-    read ``tzinfo`` and ``encode_timestamp_tz`` writes a fixed ``+00:00``
-    (python-oracledb ``impl/base/encoders.pyx``). Oracle then reads those
-    digits in the session time zone, which the thin driver sets from the
-    client process's local offset; DataFlow pins neither. So the wall clock is
-    kept and the offset dropped: the instant moves by the source offset (or by
-    the process offset for ``LOCAL``). That route needs a Risk Contract
-    (accuracy review finding 8). Same-instance Oracle to Oracle copies run
-    server side (``INSERT ... SELECT``) and are not judged here.
+    python-oracledb encodes only a ``datetime``'s clock digits
+    (``impl/base/encoders.pyx`` never reads ``tzinfo``; ``encode_timestamp_tz``
+    writes a fixed ``+00:00``) and Oracle reads them in the session time zone.
+    The writer binds UTC digits on a session pinned to ``+00:00``
+    (:mod:`connectors.oracle_session`), so the instant is kept only when this
+    run's destination session read back UTC (:mod:`services.oracle_session_scope`).
+    Otherwise the wall clock lands in whatever zone the session has and the
+    pair needs a Risk Contract (accuracy review finding 8). A same-instance
+    Oracle to Oracle copy runs server side and is not judged here.
     """
     from connectors.oracle_tstz import oracle_tz_kind
+    from services.oracle_session_scope import oracle_same_instance, oracle_utc_pin
     from services.type_system import datetime_timezone_polarity
 
-    if _dest(dest_db) not in _ORACLE or (source_db or "") in _ORACLE:
-        return ""
-    if oracle_tz_kind(target_type) is None:
+    if _dest(dest_db) not in _ORACLE or oracle_tz_kind(target_type) is None:
         return ""
     if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
         return ""
+    if (source_db or "") in _ORACLE and oracle_same_instance():
+        return ""
+    confirmed, reason = oracle_utc_pin()
+    if confirmed:
+        return ""
     return (
         f"{target_type} is written through python-oracledb, which sends a value's "
-        "clock digits without its offset; Oracle reads them in the session time "
-        f"zone, so a {source_type} instant moves by its offset"
+        "clock digits without its offset, and Oracle reads them in the session time "
+        f"zone; the session is not confirmed UTC ({reason}), so a {source_type} "
+        "instant may move"
     )
 
 
@@ -208,7 +211,14 @@ def _keeps_offset(target_type: str, dest: str) -> bool:
     text = " ".join((target_type or "").upper().split())
     if "DATETIMEOFFSET" in text or "TIMESTAMP_TZ" in text:
         return True
-    return dest in _ORACLE and "WITH TIME ZONE" in text and "LOCAL" not in text
+    # Oracle's column stores an offset, but the row writer binds UTC digits
+    # (python-oracledb cannot carry one): only a server-side copy keeps it.
+    from services.oracle_session_scope import oracle_same_instance
+
+    return (
+        dest in _ORACLE and "WITH TIME ZONE" in text and "LOCAL" not in text
+        and oracle_same_instance()
+    )
 
 
 def _zone_aware(target_type: str) -> bool:

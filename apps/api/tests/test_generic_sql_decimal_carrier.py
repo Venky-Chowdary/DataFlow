@@ -96,6 +96,7 @@ def test_to_sa_value_coerces_decimal_carrier_and_iso_z():
     dt_ora_ntz = _to_sa_value("2026-07-04T06:57:37Z", "datetime", db_type="oracle")
     assert dt_ora_ntz.tzinfo is None
     assert dt_ora_ntz == datetime(2026, 7, 4, 6, 57, 37)
-    # Oracle TIMESTAMPTZ → aware UTC
+    # Oracle TIMESTAMPTZ → UTC digits: python-oracledb drops tzinfo, and the
+    # session is pinned to +00:00 (accuracy review finding 8).
     dt_ora = _to_sa_value("2026-07-04T06:57:37Z", "TIMESTAMPTZ", db_type="oracle")
-    assert dt_ora == datetime(2026, 7, 4, 6, 57, 37, tzinfo=timezone.utc)
+    assert dt_ora == datetime(2026, 7, 4, 6, 57, 37) and dt_ora.tzinfo is None

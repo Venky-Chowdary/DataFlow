@@ -717,6 +717,40 @@ def takes_streaming_route(request: Any) -> bool:
     return not staging_merge_dest_refusal(sync, request.destination.format)
 
 
+def _oracle_session_scope(request: Any) -> Any:
+    """Bind whether this run's Oracle destination session is pinned to UTC.
+
+    Probed once per run on the destination's own engine, so Validate's grade of
+    instants into Oracle zone columns and the writer's session agree (accuracy
+    review finding 8). Any other destination: a no-op.
+    """
+    from contextlib import nullcontext
+
+    from services.oracle_session_scope import is_oracle, oracle_destination_scope
+
+    dest = getattr(request, "destination", None)
+    if dest is None or not is_oracle(getattr(dest, "format", "")):
+        return nullcontext()
+    from .adapters import resolve_connector_config
+
+    workspace = getattr(request, "workspace_id", None)
+    try:
+        dest_cfg = resolve_connector_config(dest, workspace_id=workspace)
+    except Exception:  # noqa: BLE001 - an unresolved login leaves the pin unchecked
+        dest_cfg = None
+    src = getattr(request, "source", None)
+    src_cfg = None
+    if src is not None and is_oracle(getattr(src, "format", "")):
+        try:
+            src_cfg = resolve_connector_config(src, workspace_id=workspace)
+        except Exception:  # noqa: BLE001
+            src_cfg = None
+    return oracle_destination_scope(
+        dest.format, dest_cfg, source_db=getattr(src, "format", "") if src is not None else "",
+        source_cfg=src_cfg,
+    )
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -953,7 +987,9 @@ class UniversalTransferEngine:
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
-            ), baseline_before_success(request, job_id) as pending_baseline:
+            ), _oracle_session_scope(request), baseline_before_success(
+                request, job_id
+            ) as pending_baseline:
                 from services.destination_write_lock import hold_destination_write_lock
 
                 hold_destination_write_lock(request, job_id)  # released by tracked_job_scope

@@ -145,8 +145,14 @@ def _oracle_connect(cfg: dict[str, Any]) -> Any:
     except Exception as exc:
         raise FastPathUnavailable(f"Oracle connect failed: {exc}") from exc
     from connectors.oracle_numbers import attach_oracle_number_output
+    from connectors.oracle_session import pin_utc_session
 
     attach_oracle_number_output(conn)
+    # Every Oracle writer session runs in UTC (finding 8). The bulk paths decline
+    # zone-bearing sources, so an unconfirmed pin here only gets logged.
+    pinned, reason = pin_utc_session(conn)
+    if not pinned:
+        logger.warning("Oracle bulk session time zone pin not confirmed: %s", reason)
     return conn
 
 

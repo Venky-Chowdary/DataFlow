@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
+
 from connectors.generic_sql import _to_sa_value
 from connectors.sql_temporal import dest_uses_sql_wire_probe, logical_to_temporal_ddl
 from services.coercion_probe import analyze_coercion
@@ -32,9 +34,12 @@ def test_generic_sql_iso_z_to_datetime_bind():
     assert got.tzinfo is None
     assert got == datetime(2024, 8, 9, 1, 58, 42)
 
-    # TIMESTAMPTZ carriers must stay aware UTC (refuse naive invent).
-    aware = _to_sa_value("2024-08-09T01:58:42Z", "TIMESTAMPTZ", None, "", "oracle")
-    assert aware == datetime(2024, 8, 9, 1, 58, 42, tzinfo=timezone.utc)
+    # An Oracle zone column binds the instant's UTC digits: python-oracledb drops
+    # tzinfo and the session is pinned to +00:00 (accuracy review finding 8).
+    utc_digits = _to_sa_value("2024-08-09T01:58:42Z", "TIMESTAMPTZ", None, "", "oracle")
+    assert utc_digits == datetime(2024, 8, 9, 1, 58, 42) and utc_digits.tzinfo is None
+    with pytest.raises(ValueError, match="naive"):
+        _to_sa_value("2024-08-09T01:58:42", "TIMESTAMPTZ", None, "", "oracle")
 
 
 def test_generic_sql_iso_z_to_date_bind():

@@ -687,12 +687,13 @@
    "target": "create_new",
    "truth": "loses",
    "writer": "driver",
-   "why": "TIMESTAMP WITH TIME ZONE would keep the offset, but the bind does not carry it. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "why": "TIMESTAMP WITH TIME ZONE would keep the offset, but the bind does not carry it. python-oracledb sends clock digits without the offset; the writer binds UTC digits on a session pinned to +00:00, so the instant is kept only when that session reads back UTC.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
-   ]
+   ],
+   "truth_on_utc_session": "loses_disclosed"
   },
   {
    "engine": "sqlserver",
@@ -701,12 +702,13 @@
    "target": "TIMESTAMP(6) WITH LOCAL TIME ZONE",
    "truth": "loses",
    "writer": "driver",
-   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. python-oracledb sends clock digits without the offset; the writer binds UTC digits on a session pinned to +00:00, so the instant is kept only when that session reads back UTC.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
-   ]
+   ],
+   "truth_on_utc_session": "loses"
   },
   {
    "engine": "sqlserver",
@@ -908,12 +910,13 @@
    "target": "create_new",
    "truth": "loses",
    "writer": "driver",
-   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. python-oracledb sends clock digits without the offset; the writer binds UTC digits on a session pinned to +00:00, so the instant is kept only when that session reads back UTC.",
    "citations": [
     "https://www.postgresql.org/docs/current/datatype-datetime.html",
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
-   ]
+   ],
+   "truth_on_utc_session": "keeps"
   },
   {
    "engine": "postgresql",
@@ -922,11 +925,54 @@
    "target": "TIMESTAMP(6) WITH TIME ZONE",
    "truth": "loses",
    "writer": "driver",
-   "why": "The bind does not carry the offset. Python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves.",
+   "why": "The bind does not carry the offset. python-oracledb sends clock digits without the offset; the writer binds UTC digits on a session pinned to +00:00, so the instant is kept only when that session reads back UTC.",
    "citations": [
     "https://www.postgresql.org/docs/current/datatype-datetime.html",
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ],
+   "truth_on_utc_session": "keeps"
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "oracle",
+   "target": "TIMESTAMP(6) WITH TIME ZONE",
+   "truth": "loses",
+   "writer": "driver",
+   "truth_on_utc_session": "loses_disclosed",
+   "why": "Cross-host Oracle to Oracle goes through the row writer: python-oracledb sends clock digits without the offset, so the instant is kept only on a UTC session, and the offset label is not (a same-instance copy runs server side and keeps both).",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
+   ]
+  },
+  {
+   "engine": "csv",
+   "source_type": "TIMESTAMPTZ",
+   "dest": "mysql",
+   "target": "DATETIME(6)",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "route": "file_text",
+   "why": "Timestamp text with a UTC offset (profiled TIMESTAMPTZ) into DATETIME: the writer stores the UTC instant as UTC digits; the offset is not stored and Validate discloses it.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
+    "https://mariadb.com/kb/en/datetime/"
+   ]
+  },
+  {
+   "engine": "csv",
+   "source_type": "TIMESTAMPTZ",
+   "dest": "mariadb",
+   "target": "DATETIME(6)",
+   "truth": "loses_disclosed",
+   "writer": "utc",
+   "route": "file_text",
+   "why": "Timestamp text with a UTC offset (profiled TIMESTAMPTZ) into DATETIME: the writer stores the UTC instant as UTC digits; the offset is not stored and Validate discloses it.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
+    "https://mariadb.com/kb/en/datetime/"
    ]
   }
  ],
@@ -934,6 +980,6 @@
   "offset": "the writer binds the value with its own offset",
   "utc": "the writer binds the UTC instant",
   "wall_clock": "the writer keeps the clock digits and drops the offset, so the instant moves",
-  "driver": "python-oracledb sends the clock digits without the offset and Oracle reads them in the session zone, so the instant moves"
+  "driver": "python-oracledb sends the clock digits without the offset; the writer binds UTC digits, so the instant is kept only on a session that reads back UTC (truth_on_utc_session)"
  }
 }

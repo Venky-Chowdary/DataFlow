@@ -12,7 +12,9 @@ Where a create-new carrier could lose values on write, the real engine path
   values fit and is refused when a value has more fraction or integer digits;
 * PostgreSQL ``timestamptz`` with non-UTC offsets lands in MariaDB
   ``DATETIME(6)`` / ``TIMESTAMP(6)`` and a created ``timestamptz`` as the same
-  instant, and an existing wall-clock ``TIMESTAMP(6)`` refuses it (finding 8).
+  instant, and an existing wall-clock ``TIMESTAMP(6)`` refuses it (finding 8);
+* CSV timestamp text with offsets lands in MariaDB ``DATETIME(6)`` as the UTC
+  instant, and Validate discloses that the offset is not stored.
 
 SQL Server and Oracle pairs: tests/test_c3_lossy_pairs_sqlserver_live.py and
 tests/test_c3_lossy_pairs_oracle_live.py (CI live jobs); grading in
@@ -205,3 +207,32 @@ def test_live_timestamptz_into_a_wall_clock_column_is_refused(isolated):  # noqa
     finally:
         _drop(src)
         _drop(dst)
+
+
+@pytest.mark.parametrize("existing", [None, "DATETIME(6)"])
+def test_live_offset_text_into_mariadb_datetime_keeps_the_instant_and_says_so(isolated, existing):  # noqa: F811
+    import uuid
+
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    table = f"acc8_csv_{token()}"
+    try:
+        if existing:
+            mysql_sql(f"CREATE TABLE {table} (id INT PRIMARY KEY, at {existing})")
+        request = TransferRequest(
+            source=EndpointConfig(kind="file", format="csv"), destination=mysql_endpoint(table),
+            source_filename="offsets.csv",
+            source_content=("id,at\n" + "".join(f"{i},{v.replace(' ', 'T')}\n" for i, v in _TZ_ROWS)).encode(),
+            sync_mode="full_refresh_append", validation_mode="strict",
+        )
+        job_id = "acc8" + uuid.uuid4().hex[:12]
+        isolated.update_job_status(job_id, "pending", transfer_request={})
+        result = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert result.success, result.error
+        got = mysql_sql(f"SELECT id, CAST(at AS CHAR) FROM {table} ORDER BY id", fetch=True)
+        assert [(i, s) for i, s in got] == _UTC_DIGITS
+        g3 = next(g for g in result.validation_plan["gates"] if g["id"] == "g3_schema_contract")
+        assert any("not the offset" in w for w in g3["details"]["warnings"]), g3
+    finally:
+        _drop(table)

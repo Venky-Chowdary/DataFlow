@@ -294,8 +294,33 @@ def _policy_source_config(
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
 
 
+def _with_oracle_session_pin(fn):
+    """Judge instants into an Oracle destination on its session's read-back zone.
+
+    Execute binds the pin for the whole run; a Validate call outside a run
+    probes the destination session here, so both grade the same way (accuracy
+    review finding 8). Without a destination config the pin stays unchecked and
+    the Oracle zone pairs keep requiring a Risk Contract.
+    """
+
+    def wrapper(*args, **kwargs):
+        from services.oracle_session_scope import oracle_destination_scope
+
+        source = kwargs.get("source_config")
+        with oracle_destination_scope(
+            kwargs.get("destination_db_type") or "",
+            kwargs.get("destination_config") if kwargs.get("destination_connected") else None,
+            source_db=_preflight_source_engine(kwargs),
+            source_cfg=source if isinstance(source, Mapping) else None,
+        ):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 @_with_date_locale
 @_with_source_engine
+@_with_oracle_session_pin
 def run_file_preflight(
     *,
     columns: list[str],

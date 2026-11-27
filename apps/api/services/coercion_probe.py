@@ -34,6 +34,7 @@ CoercionColumn shape::
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from services.decision_kernel.findings import FailureClass as _FailureClass
@@ -478,6 +479,46 @@ def _transform_rewrites_empty(transform: Any, mapping: dict[str, Any], *, target
     return False
 
 
+_NONZERO_OFFSET = re.compile(r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*([+-])(\d{2}):?(\d{2})?$")
+
+
+def _nonzero_offset(cell: str) -> bool:
+    """True for a timestamp text that ends in a non-zero ``±HH[:MM]`` offset."""
+    match = _NONZERO_OFFSET.search(str(cell or "").strip())
+    return bool(match) and (int(match.group(2)) or int(match.group(3) or 0)) > 0
+
+
+def _offset_label_not_stored(target_type: str, dest_db_type: str) -> bool:
+    """MySQL/MariaDB DATETIME and TIMESTAMP: an instant kept, its offset not."""
+    if (dest_db_type or "").strip().lower() not in {"mysql", "mariadb", "aurora_mysql", "tidb"}:
+        return False
+    base = re.sub(r"\s*\(.*$", "", str(target_type or "").strip().upper())
+    return base in {"DATETIME", "TIMESTAMP"}
+
+
+def _created_offset_disclosure(src: str, src_type: str, rows: list[dict[str, Any]], dest_db_type: str) -> str:
+    """A zone-aware column created on MySQL/MariaDB lands as ``DATETIME(6)`` UTC digits.
+
+    ``connectors.generic_sql_sa_types`` creates every aware source except a
+    MySQL ``TIMESTAMP`` as ``DATETIME(6)``; offset text keeps its instant there,
+    not its offset.
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    if not _offset_label_not_stored("DATETIME(6)", dest_db_type):
+        return ""
+    if datetime_timezone_polarity(src_type) not in {"tz", "ltz"}:
+        return ""
+    cells = [str(r.get(src)) for r in rows if r.get(src) is not None]
+    hits = [c for c in cells if _nonzero_offset(c)]
+    if not hits:
+        return ""
+    return (
+        f"{len(hits)} of {len(rows)} sampled value(s) carry a UTC offset (e.g. {hits[0][:120]!r}); "
+        "the created DATETIME(6) keeps the instant (stored as UTC digits) but not the offset"
+    )
+
+
 def analyze_coercion(
     *,
     sample_rows: list[dict[str, Any]] | None,
@@ -556,6 +597,9 @@ def analyze_coercion(
                 "dest_schema_unloaded": False,
                 "note": "Destination object does not exist yet — column will be created.",
             }
+            created_offsets = _created_offset_disclosure(src, src_type, rows, dest_db_type)
+            if created_offsets:
+                entry["unmeasured_loss"] = created_offsets
             columns.append(entry)
             by_source[src] = entry
             continue
@@ -643,6 +687,11 @@ def analyze_coercion(
         raw_failure_values: list[str] = []
         observed_values: list[str] = []
         sample_wire_form: str | None = None
+        # Offset-bearing text into a MySQL/MariaDB DATETIME or TIMESTAMP: the
+        # writer keeps the instant (UTC digits) but not the offset (finding 8).
+        offset_drops = 0
+        offset_examples: list[str] = []
+        offset_disclosed = _offset_label_not_stored(tgt_type, dest_db_type)
 
         use_wire = False
         wire_check_fn = None
@@ -984,6 +1033,10 @@ def analyze_coercion(
                             })
                             raw_failure_values.append(cell[:120])
                         continue
+                    if offset_disclosed and _nonzero_offset(cell):
+                        offset_drops += 1
+                        if len(offset_examples) < SAMPLE_FAILURE_LIMIT:
+                            offset_examples.append(cell[:120])
                     # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
                     if use_wire and wire_check_fn is not None:
                         probe_val = converted if converted is not None else cell
@@ -1138,6 +1191,7 @@ def analyze_coercion(
             and sentinel_nulls == 0
             and wire_normalize == 0
             and json_scalar_wraps == 0
+            and offset_drops == 0
             and not coercion_required
             and not structural_pair
             and not fidelity_collapse
@@ -1179,7 +1233,7 @@ def analyze_coercion(
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
-        elif sentinel_nulls or wire_normalize or json_scalar_wraps:
+        elif sentinel_nulls or wire_normalize or json_scalar_wraps or offset_drops:
             severity = "warn"
         else:
             severity = "ok"
@@ -1252,6 +1306,15 @@ def analyze_coercion(
                 f"Datawrap will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
                 f"at write time for destination SQL/warehouse temporal bind."
             )
+        offset_disclosure = ""
+        if offset_drops:
+            offset_disclosure = (
+                f"{offset_drops} of {len(rows)} sampled value(s) carry a UTC offset "
+                f"(e.g. {offset_examples[0]!r}); {tgt_type} keeps the instant (stored as "
+                "UTC digits) but not the offset"
+            )
+            if not fix:
+                fix = f"Column '{src}' → {tgt_type}: {offset_disclosure}."
         if json_scalar_wraps and not fix:
             example = wrap_examples[0] if wrap_examples else {}
             fix = (
@@ -1365,6 +1428,8 @@ def analyze_coercion(
             "wire_normalize": wire_normalize,
             "wire_failures": wire_failures,
             "json_scalar_wraps": json_scalar_wraps,
+            "offset_label_drops": offset_drops,
+            "unmeasured_loss": offset_disclosure,
             "sample_failures": sample_failures,
             "sentinel_examples": sentinel_examples,
             "wire_examples": wire_examples,

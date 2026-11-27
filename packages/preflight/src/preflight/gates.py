@@ -1065,6 +1065,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # operators to a fidelity Risk Contract for a nullability problem.
         probe_only = False
         probe_early = by_source.get(m.source) if value_aware else None
+        if not lossy and probe_early and probe_early.get("unmeasured_loss"):
+            # Instant kept, offset label not stored (e.g. offset text into a
+            # MySQL DATETIME): disclosed, as the declared instant routes are
+            # (D136, accuracy review finding 8). Not a block.
+            warnings.append(f"{m.source} → {m.target}: {probe_early['unmeasured_loss']}")
         if not lossy and probe_early:
             sev = str(probe_early.get("severity") or "").lower()
             if sev == "block" or bool(probe_early.get("has_blocking_failures")):

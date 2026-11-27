@@ -59,9 +59,21 @@ def _stamp(result, target: str) -> str:
 
 @pytest.mark.parametrize("dest", _DESTS)
 def test_validate_declared_zone_creates_an_instant_carrier(dest):
-    result = _validate(dest, "assume_timezone:UTC")
+    from contextlib import nullcontext
+
+    from services.oracle_session_scope import bind_oracle_utc_pin
+
+    # Oracle: instants keep only on a destination session that read back UTC
+    # (accuracy review finding 8); Validate here has no live session to probe.
+    pinned = bind_oracle_utc_pin(True, "session time zone read back as +00:00") if dest == "oracle" else nullcontext()
+    with pinned:
+        result = _validate(dest, "assume_timezone:UTC")
     assert _blocked(result) == [], (dest, _stamp(result, "ts"))
     assert "NTZ" not in _stamp(result, "ts").upper()
+
+
+def test_validate_into_oracle_without_a_confirmed_utc_session_needs_a_risk_contract():
+    assert "g3_schema_contract" in _blocked(_validate("oracle", "assume_timezone:UTC"))
 
 
 def test_validate_without_a_declared_zone_still_creates_the_wall_clock_carrier():

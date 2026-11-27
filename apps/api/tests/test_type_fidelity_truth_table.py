@@ -53,21 +53,45 @@ def test_every_row_is_cited() -> None:
         assert r["citations"] and all(c.startswith("https://") for c in r["citations"]), r
 
 
-@pytest.mark.parametrize("r", ROWS, ids=IDS)
-def test_grade_agrees_with_the_truth_table(r) -> None:
+def _grade(r):
     with bind_source_engine(r["engine"]):
         target = (create_new_mapping_target_type(r["source_type"], r["dest"], source_db=r["engine"])
                   if r["target"] == "create_new" else r["target"])
         conv = classify_conversion(r["source_type"], target, dest_db=r["dest"])
         lossy = bool(is_lossy_coercion(r["source_type"], target, dest_db=r["dest"], source_db=r["engine"],
                                        dest_table_exists=True))
+    return target, conv, lossy
+
+
+def _agrees(truth, target, conv, lossy) -> None:
     cls = conv["conversion_class"]
-    if r["truth"] == "loses":
+    if truth == "loses":
         assert cls not in SAFE and (lossy or conv.get("requires_risk_contract")), (target, conv)
-    elif r["truth"] in ("loses_if_values", "loses_disclosed"):
+    elif truth in ("loses_if_values", "loses_disclosed"):
         assert cls not in SAFE or conv.get("unmeasured_loss"), (target, conv)
     else:
         assert not lossy, (target, conv)
+
+
+@pytest.mark.parametrize("r", ROWS, ids=IDS)
+def test_grade_agrees_with_the_truth_table(r) -> None:
+    # No Oracle destination session was checked: the unpinned truth applies.
+    _agrees(r["truth"], *_grade(r))
+
+
+PINNED = [r for r in ROWS if r.get("truth_on_utc_session")]
+PINNED_IDS = [i for i, r in zip(IDS, ROWS) if r.get("truth_on_utc_session")]
+
+
+@pytest.mark.parametrize("r", PINNED, ids=PINNED_IDS)
+def test_grade_on_a_session_that_read_back_utc(r) -> None:
+    from services.oracle_session_scope import bind_oracle_utc_pin
+
+    with bind_oracle_utc_pin(True, "session time zone read back as +00:00"):
+        target, conv, lossy = _grade(r)
+    _agrees(r["truth_on_utc_session"], target, conv, lossy)
+    if r["truth_on_utc_session"] == "loses_disclosed":
+        assert conv.get("unmeasured_loss") and not lossy, conv
 
 
 # One aware wire value: 03:04:05.123 at +05:30 is 21:34:05.123 UTC the day before.
@@ -88,6 +112,18 @@ def test_every_destination_of_an_offset_source_is_covered() -> None:
 def test_writer_route_matches_the_row(r) -> None:
     if r["writer"] in {"wall_clock", "driver"}:
         assert r["truth"] == "loses", "a route that moves the instant needs a Risk Contract"
+    if r["writer"] == "driver":
+        # The Oracle writer binds UTC clock digits (python-oracledb drops tzinfo),
+        # so the instant holds exactly when the session reads them as UTC.
+        from sqlalchemy.dialects import oracle
+
+        from connectors.generic_sql import _to_sa_value
+
+        local = "LOCAL" in r["target"].upper() or r["target"] == "create_new" and r["engine"] == "postgresql"
+        sa_type = oracle.TIMESTAMP(local_timezone=True) if local else oracle.TIMESTAMP(timezone=True)
+        got = _to_sa_value(_WIRE, "TIMESTAMP(6) WITH TIME ZONE", sa_type=sa_type, db_type="oracle")
+        assert got.tzinfo is None and got == _INSTANT.replace(tzinfo=None)
+        return
     if r["dest"] == "mongodb":
         # The BSON writer is pinned by D136 (tests/test_d136_d148_d156_bson_date_instant_model.py).
         return
@@ -99,9 +135,26 @@ def test_writer_route_matches_the_row(r) -> None:
         assert got.utcoffset() == timedelta(hours=5, minutes=30) and got == _INSTANT
     elif r["writer"] == "utc":
         assert (got.astimezone(timezone.utc) if got.tzinfo else got.replace(tzinfo=timezone.utc)) == _INSTANT
-    elif r["writer"] == "wall_clock":
-        assert got == _CLOCK
     else:
-        # driver: the product hands python-oracledb an aware value, whose encoder
-        # reads only the clock digits (cited in the row).
-        assert got.tzinfo is not None and got == _INSTANT
+        assert r["writer"] == "wall_clock" and got == _CLOCK
+
+
+FILE_ROWS = [r for r in ROWS if r.get("route") == "file_text"]
+
+
+@pytest.mark.parametrize("r", FILE_ROWS, ids=[f"{r['dest']}:{r['target']}" for r in FILE_ROWS])
+def test_offset_text_into_a_zoneless_column_is_disclosed_by_validate(r) -> None:
+    from services.coercion_probe import analyze_coercion
+
+    def probe(values, table_exists=True):
+        report = analyze_coercion(
+            sample_rows=[{"at": v} for v in values], mappings=[{"source": "at", "target": "at"}],
+            source_types={"at": r["source_type"]}, dest_types={"at": r["target"]} if table_exists else {},
+            dest_db_type=r["dest"], table_exists=table_exists,
+        )
+        return (report["by_source"].get("at") or {}).get("unmeasured_loss", "")
+
+    offsets = ["2024-01-02T03:04:05.123+05:30", "2024-07-01T23:30:00-09:30"]
+    assert "not the offset" in probe(offsets)
+    assert "not the offset" in probe(offsets, table_exists=False)
+    assert probe(["2024-01-02T03:04:05Z", "2024-07-01 23:30:00+00:00"]) == ""
