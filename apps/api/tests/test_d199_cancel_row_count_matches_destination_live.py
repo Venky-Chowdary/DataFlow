@@ -218,14 +218,22 @@ def test_pooled_writer_mid_commit_is_counted(monkeypatch):
     assert int(outcome.get("committed_batches_tally") or 0) < settled, outcome
 
 
-def test_overwrite_of_an_existing_table_counts_the_replacement(monkeypatch):
+def test_overwrite_of_an_existing_table_puts_the_pre_run_rows_back(monkeypatch):
     settled, job, _ = _run_and_cancel(
         monkeypatch, source="mysql", rows=60000, prefill=500, sync="full_refresh_overwrite"
     )
     outcome = job.get("cancel_outcome") or {}
-    # The overwrite cleared the 500 old rows; every row now there is this run's.
-    assert outcome.get("rows_committed") == settled, (outcome, settled)
-    assert _stated(str(job.get("message") or "")) == settled
+    # The overwrite cleared the 500 old rows into its pre-run backup. Owner
+    # decision (D302 follow-up): a cancelled overwrite puts them back instead
+    # of keeping a partial replacement, and the record counts exactly that.
+    assert settled == 500, settled
+    assert outcome.get("pre_run_rows_restored") is True, outcome
+    assert outcome.get("rows_committed") == 0, outcome
+    assert outcome.get("destination_rows_now") == 500, outcome
+    assert outcome.get("destination_rows_before") == 500, outcome
+    assert job.get("message") == (
+        "Cancelled. The destination holds the rows it had before this run (500 rows)."
+    ), job.get("message")
 
 
 def test_copy_route_cancel_shows_the_destination_count(monkeypatch):

@@ -821,6 +821,10 @@ def _fail_runtime_job(
         )
         if per_stream:
             outcome["streams"] = list(getattr(exc, "destination_streams", None) or [])
+        from .cancel_restore import stamp_cancel_outcome
+
+        # A cancelled overwrite put its pre-run rows back (or kept them aside).
+        outcome = stamp_cancel_outcome(exc, outcome)
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
