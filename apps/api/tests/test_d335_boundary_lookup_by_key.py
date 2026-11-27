@@ -286,6 +286,18 @@ def test_a_reappended_watermark_row_fails_loudly(isolated, oracle_cursor_text, m
         # Oracle TIMESTAMP(6) and DATE (whole seconds).
         ("2026-11-24T10:31:00.827167", datetime(2026, 11, 24, 10, 31, 0, 827167), "TIMESTAMP(6)", "oracle", True),
         ("2026-11-24T10:31:00.400000", datetime(2026, 11, 24, 10, 31, 0), "DATE", "oracle", True),
+        # A 1/300 s tick: .005 is stored (and read back) as .007.
+        ("2026-11-24T10:31:00.005", datetime(2026, 11, 24, 10, 31, 0, 7000), "DATETIME", "sqlserver", True),
+        # Bare DATETIME2 is DATETIME2(7): an eighth digit rounds into the seventh.
+        ("2026-11-24T10:31:00.12345678", "2026-11-24 10:31:00.1234568", "DATETIME2", "sqlserver", True),
+        # PostgreSQL bare timestamp keeps microseconds and rounds a seventh digit.
+        ("2026-11-24 10:10:00.9999996", datetime(2026, 11, 24, 10, 10, 1), "timestamp", "postgresql", True),
+        ("2026-11-24 10:10:00.9999996", datetime(2026, 11, 24, 10, 10, 0, 999999), "timestamp", "postgresql", False),
+        ("2026-11-24 10:10:00.9999994", datetime(2026, 11, 24, 10, 10, 0, 999999), "timestamp", "postgresql", True),
+        # MySQL DATETIME / DATETIME(0) keeps whole seconds and rounds.
+        ("2026-11-24 10:10:00.654321", datetime(2026, 11, 24, 10, 10, 1), "DATETIME", "mysql", True),
+        ("2026-11-24 10:10:00.654321", datetime(2026, 11, 24, 10, 10, 0), "DATETIME", "mysql", False),
+        ("2026-11-24 10:10:00.4", datetime(2026, 11, 24, 10, 10, 0), "DATETIME(0)", "mysql", True),
         # Oracle TIMESTAMP WITH TIME ZONE read back as an aware instant.
         ("2026-11-24T10:31:00.827167+00:00", "2026-11-24T16:01:00.827167+05:30", "TIMESTAMP(6) WITH TIME ZONE", "oracle", True),
     ],
@@ -296,7 +308,7 @@ def test_same_cursor_on_destination_value_shapes(src, dest, ddl, dialect, same):
 
     if isinstance(dest, str) and "+" in dest:
         dest = parse_oracle_tstz_text(dest)
-    assert same_cursor(src, dest, ddl=ddl, dialect=dialect, dest_types={}) is same
+    assert same_cursor(src, dest, ddl=ddl, dialect=dialect) is same
 
 
 # --- Oracle's cursor-keyed sample read converts the text explicitly (fake) ---

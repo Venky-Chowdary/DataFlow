@@ -9793,7 +9793,8 @@ def run_reconciliation(
     from .stream_boundary_keyed import apply_boundary_duplicate_gate
 
     recon = apply_boundary_duplicate_gate(
-        recon, dest_summary=dest_summary, endpoint=endpoint, mappings=mappings
+        recon, dest_summary=dest_summary, endpoint=endpoint, mappings=mappings,
+        validation_mode=str(validation_mode or "strict"),
     )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a
@@ -9828,14 +9829,6 @@ def run_reconciliation(
             recon["transform_applied"] = proof
             if proof.get("status") == "failed":
                 steps_txt = ", ".join(proof.get("culprit_steps") or [])
-                from services.proof_failure_retention import (
-                    TRANSFORM_PROOF,
-                    mark_proof_layer_failure,
-                )
-
-                mark_proof_layer_failure(
-                    recon, TRANSFORM_PROOF, was_passing=bool(recon.get("passed", True))
-                )
                 recon["passed"] = False
                 recon["verification_verdict"] = "failed"
                 non_recipe = list(proof.get("non_recipe_drift_columns") or [])

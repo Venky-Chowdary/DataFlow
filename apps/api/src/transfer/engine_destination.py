@@ -383,29 +383,6 @@ def _failed_batch_undo_note_impl(
         dest_summary["partial_batch_undo_note"] = note
         base = message or "Reconciliation failed"
         return base if note in base else f"{base} {note}"
-    from services.proof_failure_retention import proof_layer_retention_note
-
-    kept_note = proof_layer_retention_note(recon)
-    if kept_note:
-        # D331: a verification bug must never become data loss.
-        logger.warning(
-            "Skipping failed-batch undo for table=%s: proof-layer verdict only",
-            dest_summary.get("table"),
-        )
-        from services.batch_undo import keep_failed_validation_for_inspection
-
-        where = "" if dest_summary.get("multi_stream") else keep_failed_validation_for_inspection(
-            destination=getattr(request, "destination", None),
-            dest_summary=dest_summary,
-            sync_mode=str(getattr(request, "sync_mode", "") or ""),
-        )
-        if where:
-            # The overwrite's own "Data kept at <table>" note names the place.
-            kept_note = f"{where} {kept_note}"
-        dest_summary["partial_batch_undo"] = dest_summary.get("partial_batch_undo") or "retained"
-        dest_summary["partial_batch_undo_note"] = kept_note
-        base = message or "Reconciliation failed"
-        return base if kept_note in base else f"{base} {kept_note}"
     destination = getattr(request, "destination", None)
     if dest_summary.get("multi_stream") and destination is not None:
         from services.batch_undo import keep_failed_validation_for_inspection

@@ -303,6 +303,22 @@ def _pg_rows(table: str) -> list[tuple]:
         conn.close()
 
 
+def _pg_count(table: str) -> int:
+    """Rows in the destination; 0 when the undo dropped the table it created."""
+    from tests import r4_route_harness as h
+
+    conn = h.pg_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT to_regclass(%s)", (f'public."{table}"',))
+        if cur.fetchone()[0] is None:
+            return 0
+        cur.execute(f'SELECT count(*) FROM public."{table}"')  # nosec B608
+        return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
 def test_oracle_source_upsert_proof_verifies_exact_data(oracle_source):
     """ORA -> PG upsert with a recipe over the canonical seed shape: the proof
     verifies. On 70cb it said "29 of 30 keys do not hold the recipe output"."""
@@ -328,7 +344,8 @@ def test_oracle_source_upsert_proof_verifies_exact_data(oracle_source):
 
 def test_oracle_source_wrong_destination_value_still_fails(oracle_source, monkeypatch):
     """R9: the check is not weakened - a value changed in the destination
-    after the write fails the proof, naming the key, and the strict run fails."""
+    after the write fails the proof, naming the key; the strict run fails and
+    its batch is undone."""
     import src.transfer.reconcile_step as rs
     from tests import r4_route_harness as h
 
@@ -354,34 +371,10 @@ def test_oracle_source_wrong_destination_value_still_fails(oracle_source, monkey
         assert proof.get("culprit_columns") == ["note"], proof
         assert "7" in (proof.get("culprit_keys") or {}).get("changed", []), proof
         assert not result.success
-        # D331 (b): a proof verdict alone never deletes the committed rows.
-        assert len(_pg_rows(table)) == 30
-        assert "proof verdict alone never deletes rows" in str(result.error or "")
-    finally:
-        h.drop_table("postgresql", table)
-
-
-def test_oracle_source_unmeasured_null_marker_check_keeps_the_rows(oracle_source, monkeypatch):
-    """The strict Oracle -> Oracle deletion route (QA r67-r72): a check that
-    could not be measured failed a correct strict run and the undo emptied the
-    table. Here the NULL-marker probe is made unmeasurable; the run still
-    fails in strict mode, and the 30 correct rows stay."""
-    import services.null_marker_guard as nmg
-    from tests import r4_route_harness as h
-
-    def _unmeasured(**_kw):
-        return {
-            "status": "not_measured", "table": "t", "reason": "ORA-22848 (fake)",
-            "probed": False, "leaked": False,
-        }
-
-    monkeypatch.setattr(nmg, "null_marker_verdict", _unmeasured)
-    table = f"d331o_{uuid.uuid4().hex[:8]}"
-    try:
-        result = _run(oracle_source, _request(_pg_dest(table)))
-        assert not result.success
-        assert "could not be measured" in str(result.error or "")
-        assert len(_pg_rows(table)) == 30, "a correct batch was deleted by an unmeasured check"
+        # The job names the culprit key, and the failed run's own batch is
+        # undone as before (the destination was empty: nothing older is lost).
+        assert "changed: 7" in str(result.error or ""), result.error
+        assert _pg_count(table) == 0
     finally:
         h.drop_table("postgresql", table)
 
@@ -410,3 +403,105 @@ def test_wire_decode_is_the_readers_exact_inverse():
     assert {k: out[k] for k in typed} == typed
     assert out["N"] is None
     assert all(cell_to_string(out[k], preserve_sql_null=True) == wire[k] for k in typed)
+
+
+class _FakeOracleDestConn(_FakeOracleConn):
+    """An Oracle *destination* holding ``rows`` (dicts keyed by lower-case name).
+
+    Answers the zero-row description probe with python-oracledb's type names
+    and renders ``TO_CHAR`` columns as Oracle's ISO text with the stored
+    offset; a raw zone-bearing column comes back naive, as python-oracledb
+    returns it.
+    """
+
+    def __init__(self, rows, tz_cols):
+        super().__init__(rows)
+        self.tz_cols = set(tz_cols)
+
+    def rollback(self):
+        return None
+
+    def execute(self, stmt, *a, **k):
+        text = str(stmt)
+        self.sql.append(text)
+        head = re.match(r"\s*SELECT\s+(.*?)\s+FROM\s+(\(|\")", text, re.S | re.I)
+        parts = [p.strip() for p in re.split(r",(?![^(]*\))", head.group(1))] if head else []
+        if text.rstrip().endswith("WHERE 1=0"):
+            inner = re.search(r"FROM \(SELECT (.*?) FROM ", text, re.S)
+            names = re.findall(r'"([^"]+)"(?:\s*,|\s*$)', inner.group(1) + ",") if inner else []
+            res = _FakeOracleResult([], names)
+            res.cursor = type("C", (), {"description": [
+                (n, "DB_TYPE_TIMESTAMP_TZ" if n in self.tz_cols else "DB_TYPE_VARCHAR", None, None, None, 6, True)
+                for n in names
+            ]})()
+            return res
+        cols, render = [], []
+        for p in parts:
+            alias = re.findall(r'"([^"]+)"', p)[-1]
+            cols.append(alias)
+            render.append(p.upper().startswith("TO_CHAR("))
+
+        def _cell(row, col, as_text):
+            v = row.get(col)
+            if isinstance(v, datetime) and col in self.tz_cols:
+                local = v.astimezone(_IST)
+                if as_text:
+                    return local.strftime("%Y-%m-%dT%H:%M:%S.%f") + "+05:30"
+                return local.replace(tzinfo=None)  # python-oracledb: naive wall clock
+            return v
+
+        return _FakeOracleResult(
+            [tuple(_cell(r, c, t) for c, t in zip(cols, render)) for r in self.source], cols
+        )
+
+
+def test_oracle_destination_proof_reads_zone_bearing_columns_as_instants(oracle_source, monkeypatch):
+    """The proof's Oracle destination read-back renders TIMESTAMP WITH TIME
+    ZONE with TO_CHAR (an instant). Read raw, python-oracledb's naive wall
+    clock (+05:30 dropped) no longer equals the recipe output on any row."""
+    import contextlib
+
+    import services.dest_precount as dp
+    import src.transfer.reconcile_step as rs
+    from tests import r4_route_harness as h
+
+    captured = {}
+    original = rs._transform_applied_proof
+
+    def _spy(**kwargs):
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(rs, "_transform_applied_proof", _spy)
+    table = f"d331o_{uuid.uuid4().hex[:8]}"
+    try:
+        result = _run(oracle_source, _request(_pg_dest(table)))
+        assert result.success, result.error
+        conn = h.pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(f'SELECT id, note, updated_at, seen_at FROM public."{table}"')  # nosec B608
+            stored = [dict(zip(["id", "note", "updated_at", "seen_at"], r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    finally:
+        h.drop_table("postgresql", table)
+
+    dest_conn = _FakeOracleDestConn(stored, {"updated_at", "seen_at"})
+
+    @contextlib.contextmanager
+    def _dest_engine(db_type, cfg):
+        yield type("E", (), {"connect": lambda self: dest_conn})()
+
+    monkeypatch.setattr(dp, "warehouse_sql_engine", _dest_engine)
+    monkeypatch.setattr(
+        rs, "_oracle_projection",
+        lambda conn, ep, cfg, cols: (", ".join(f'"{c}"' for c in cols), lambda n: f'"{n}"'),
+    )
+    oracle_dest = EndpointConfig(
+        kind="database", format="oracle", host="oracle.invalid", port=1521,
+        database="FREEPDB1", schema="APP", table=table.upper(), username="app", password="x",
+    )
+    proof = rs._transform_applied_proof_impl(**{**captured, "endpoint": oracle_dest})
+    assert proof.get("status") == "verified", proof
+    assert any("TO_CHAR" in s for s in dest_conn.sql), dest_conn.sql

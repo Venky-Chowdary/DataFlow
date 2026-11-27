@@ -122,3 +122,29 @@ def test_live_pg_to_sqlserver_incremental_append_never_reappends_the_watermark_r
         dest_ids=_ids,
         drop_dest=_drop,
     )
+
+
+def test_live_pg_to_sqlserver_datetime_destination_compares_at_1_300_s(store):
+    """A pre-existing DATETIME cursor column stores 1/300 s ticks: .005 reads
+    back as .007, .827 as .827 (0.82666...). The boundary row is found at the
+    carrier's precision, never appended again."""
+    from tests.c3_live_helpers import pg_endpoint, pg_sql, sqlalchemy_sql
+    from tests.helpers.d335_boundary_scenario import run_boundary_scenario
+
+    def _pre_create(table: str) -> None:
+        sqlalchemy_sql(
+            _cfg(),
+            f"CREATE TABLE dbo.{table} (id BIGINT, note NVARCHAR(40), updated_at DATETIME)",
+        )
+
+    run_boundary_scenario(
+        store,
+        pg_sql=pg_sql,
+        pg_endpoint=pg_endpoint,
+        dest_endpoint=_endpoint,
+        dest_ids=_ids,
+        drop_dest=_drop,
+        source_cursor_type="TIMESTAMP(3)",
+        ts=lambda i: f"2026-11-24 10:{i:02d}:00.{(5 + i * 211) % 1000:03d}",
+        pre_create=_pre_create,
+    )

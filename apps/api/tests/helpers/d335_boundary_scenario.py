@@ -47,6 +47,9 @@ def run_boundary_scenario(
     dest_endpoint: Callable[[str], Any],
     dest_ids: Callable[[str], list[int]],
     drop_dest: Callable[[str], None],
+    source_cursor_type: str = "TIMESTAMP(6)",
+    ts: Callable[[int], str] = _ts,
+    pre_create: Callable[[str], None] | None = None,
 ) -> None:
     from src.transfer.engine import UniversalTransferEngine
 
@@ -59,20 +62,25 @@ def run_boundary_scenario(
 
     src, dst = f"d335s_{uuid.uuid4().hex[:8]}", f"D335D_{uuid.uuid4().hex[:8]}".upper()
     try:
-        pg_sql(f'CREATE TABLE public."{src}" (id INT PRIMARY KEY, note TEXT, updated_at TIMESTAMP(6) NOT NULL)')
+        pg_sql(
+            f'CREATE TABLE public."{src}" (id INT PRIMARY KEY, note TEXT, '
+            f"updated_at {source_cursor_type} NOT NULL)"
+        )
+        if pre_create is not None:
+            pre_create(dst)
         for i in range(1, 31):
-            pg_sql(f'INSERT INTO public."{src}" VALUES (%s, %s, %s)', (i, None if i == 30 else f"n{i}", _ts(i)))
+            pg_sql(f'INSERT INTO public."{src}" VALUES (%s, %s, %s)', (i, None if i == 30 else f"n{i}", ts(i)))
         first = _run()
         assert first.success, first.error
         assert dest_ids(dst) == list(range(1, 31))
 
-        pg_sql(f'INSERT INTO public."{src}" VALUES (31, %s, %s)', ("n31", _ts(31)))
+        pg_sql(f'INSERT INTO public."{src}" VALUES (31, %s, %s)', ("n31", ts(31)))
         second = _run()
         assert dest_ids(dst) == list(range(1, 32)), "run 2 re-appended the watermark row (id 30)"
         assert second.success, second.error
 
         pg_sql(f'ALTER TABLE public."{src}" ADD COLUMN tier INT DEFAULT 1')
-        pg_sql(f'INSERT INTO public."{src}" (id, note, updated_at) VALUES (32, %s, %s)', ("n32", _ts(32)))
+        pg_sql(f'INSERT INTO public."{src}" (id, note, updated_at) VALUES (32, %s, %s)', ("n32", ts(32)))
         third = _run()
         assert dest_ids(dst) == list(range(1, 33)), "run 3 re-appended the watermark row (id 31)"
         assert third.success, third.error
