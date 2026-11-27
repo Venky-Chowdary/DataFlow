@@ -112,6 +112,8 @@ export interface GrantFix {
   /** "To read (source)" / "To write (destination)". */
   purpose: string;
   sql: string;
+  /** Why a typed value was not filled in (e.g. PUBLIC is every role). */
+  note?: string;
 }
 
 /** Engines whose access is granted in SQL: the step checklist and grants apply to these only (review UI2 #10). */
@@ -136,8 +138,11 @@ export type GrantValue = { kind: "typed"; text: string } | { kind: "placeholder"
  */
 export function grantValue(text: string | undefined | null, placeholder: string): GrantValue {
   const t = String(text ?? "").trim();
+  // Control characters split lines; Unicode format characters (bidi overrides
+  // such as U+202E, zero-width spaces, isolates U+2066-2069 — category Cf)
+  // make what an admin reads differ from what runs. Either: the placeholder.
   // eslint-disable-next-line no-control-regex
-  if (!t || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(t) || t.length > 256) return { kind: "placeholder", name: placeholder };
+  if (!t || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/u.test(t) || t.length > 256) return { kind: "placeholder", name: placeholder };
   return { kind: "typed", text: t };
 }
 
@@ -167,18 +172,20 @@ const sf = (text: string) => (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(text) ? text : dq
 export function schemaFromMessage(message: string | undefined, type: string): string {
   const said = String(message || "");
   const driver = resolveDriverType(type);
+  // PostgreSQL and SQL Server print a name between double quotes without
+  // doubling an inner quote, so the quoted text is taken as is (no "" decoding).
+  // An unquoted name is taken only when it is the whole rest of the message:
+  // "permission denied for schema My Schema" could be "My" or "My Schema".
   const patterns: RegExp[] = driver === "postgresql" || driver === "redshift"
-    ? [/\bpermission denied for schema ("(?:[^"]|"")+"|[A-Za-z_][\w$]*)(?=$|[\s.,;:)])/, /\bschema ("(?:[^"]|"")+") does not exist\b/]
+    ? [/\bpermission denied for schema ([A-Za-z_][\w$]*)\s*\.?\s*$/, /\bschema "(.+)" does not exist\b/]
     : driver === "sqlserver"
-      ? [/\bThe specified schema name "((?:[^"]|"")+)" either does not exist or you do not have permission to use it\b/]
+      ? [/\bThe specified schema name "(.+)" either does not exist or you do not have permission to use it\b/]
       : driver === "snowflake"
         ? [/\bSchema '(?:[^'.]+\.)?([^'.]+)' does not exist or not authorized\b/]
         : [];
   for (const re of patterns) {
     const m = re.exec(said);
-    if (!m) continue;
-    const raw = m[1];
-    return raw.startsWith('"') ? raw.slice(1, -1).replace(/""/g, '"') : raw.replace(/""/g, '"');
+    if (m && m[1]) return m[1];
   }
   return "";
 }
@@ -208,26 +215,33 @@ export function grantFixes(input: {
   const db = grantValue(input.database, "database");
   const schema = grantValue(input.schema || schemaFromMessage(input.message, input.type), "schema");
   const line = (...parts: string[]) => parts.join("\n");
+  // PostgreSQL / Redshift: PUBLIC (any case, quoted or not) is every role, never a login.
+  const isPublic = user.kind === "typed" && /^"?public"?$/i.test(user.text);
+  const pgUser: GrantValue = isPublic ? { kind: "placeholder", name: "user" } : user;
+  const publicNote = isPublic ? "PUBLIC means every role, so it was not filled in: enter the login's own name." : undefined;
   switch (driver) {
     case "postgresql": {
-      const u = show(user, dq);
+      const u = show(pgUser, dq);
       const s = show(schema, dq);
       return [
-        { engine: driver, purpose: "To read (source)", sql: line(`GRANT CONNECT ON DATABASE ${show(db, dq)} TO ${u};`, `GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
-        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To read (source)", note: publicNote, sql: line(`GRANT CONNECT ON DATABASE ${show(db, dq)} TO ${u};`, `GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To write (destination)", note: publicNote, sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
       ];
     }
     case "redshift": {
-      const u = show(user, dq);
+      const u = show(pgUser, dq);
       const s = show(schema, dq);
       return [
-        { engine: driver, purpose: "To read (source)", sql: line(`GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
-        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To read (source)", note: publicNote, sql: line(`GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To write (destination)", note: publicNote, sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
       ];
     }
     case "mysql":
     case "mariadb": {
-      const target = `${show(db, bq)}.*`;
+      // In a database-level GRANT, _ and % are wildcards even inside backticks:
+      // `app_prod`.* also grants on appXprod. Escape them (and the backslash)
+      // so the grant names exactly this database (MySQL GRANT docs, "Database Privileges").
+      const target = `${show(db, (text) => bq(text.replace(/\\/g, "\\\\").replace(/([_%])/g, "\\$1")))}.*`;
       const who = `${show(user, sq)}@'%'`;
       return [
         { engine: driver, purpose: "To read (source)", sql: `GRANT SELECT, SHOW VIEW ON ${target} TO ${who};` },
@@ -244,7 +258,11 @@ export function grantFixes(input: {
     }
     case "oracle": {
       // Oracle stores unquoted names in upper case; the quoted form names exactly that.
-      const up = (v: GrantValue): GrantValue => (v.kind === "typed" ? { kind: "typed", text: v.text.toUpperCase() } : v);
+      // Oracle quoted identifiers cannot contain a double quote at all (doubling is
+      // not an escape there): such a value becomes the placeholder.
+      const up = (v: GrantValue): GrantValue => (v.kind !== "typed" ? v
+        : v.text.includes('"') ? { kind: "placeholder", name: v === user ? "user" : "owner" }
+          : { kind: "typed", text: v.text.toUpperCase() });
       const u = show(up(user), dq);
       const owner = show(schema.kind === "typed" ? up(schema) : { kind: "placeholder", name: "owner" }, dq);
       return [

@@ -118,7 +118,7 @@ describe("grant snippets cannot be injected (property test)", () => {
     if (engine === "snowflake") out = out.replace(/[A-Za-z_][A-Za-z0-9_$]*/g, (w) => (bare.includes(w) ? "\u0001" : w));
     return out;
   };
-  const alphabet = ["a", "Z", "_", "$", " ", ";", "'", '"', "`", "[", "]", "\\", "-", "--", "/*", "*/", "\n", "\r", "\t", "\u0000",
+  const alphabet = ["a", "Z", "_", "%", "public", "\u202e", "\u200b", "\u2066", "$", " ", ";", "'", '"', "`", "[", "]", "\\", "-", "--", "/*", "*/", "\n", "\r", "\t", "\u0000",
     "<", ">", "<u>", "é", "名", "🙂", " ", "%", "@", "DROP", "ALTER ROLE etl SUPERUSER", ".", ","];
   let seed = 20261127;
   const rand = () => {
@@ -148,5 +148,67 @@ describe("grant snippets cannot be injected (property test)", () => {
         });
       }
     }
+  });
+});
+
+describe("review round 3 grant fixes", () => {
+  /** The database name a MySQL db-level pattern matches, or null if it has a wildcard. */
+  const literalDbPattern = (sql: string): string | null => {
+    const m = /ON `((?:[^`]|``)*)`\.\*/.exec(sql);
+    assert.ok(m, sql);
+    const inner = m![1].replace(/``/g, "`");
+    let out = "";
+    for (let i = 0; i < inner.length; i += 1) {
+      const c = inner[i];
+      if (c === "\\") { out += inner[i + 1] ?? ""; i += 1; continue; }
+      if (c === "_" || c === "%") return null; // an unescaped wildcard
+      out += c;
+    }
+    return out;
+  };
+
+  it("MySQL / MariaDB: _ and % in a database name are escaped, so the grant names exactly that database", () => {
+    for (const engine of ["mysql", "mariadb"]) {
+      const fixes = grantFixes({ type: engine, username: "etl", database: "app_prod" });
+      assert.match(fixes[1].sql, /ON `app\\_prod`\.\* TO 'etl'@'%';/);
+      for (const name of ["app_prod", "50%off", "a\\_b", "x`y_z", "plain"]) {
+        for (const fix of grantFixes({ type: engine, username: "etl", database: name })) {
+          assert.equal(literalDbPattern(fix.sql), name, `${engine} ${name}`);
+        }
+      }
+    }
+  });
+
+  it("PostgreSQL: an unquoted schema name is taken only when it is the whole rest of the message", () => {
+    assert.equal(schemaFromMessage("permission denied for schema My Schema", "postgresql"), "");
+    assert.equal(schemaFromMessage("permission denied for schema raw", "postgresql"), "raw");
+    assert.equal(schemaFromMessage('schema "a""b" does not exist', "postgresql"), 'a""b', "PostgreSQL does not double quotes: no decoding");
+    assert.equal(schemaFromMessage('The specified schema name "x""y" either does not exist or you do not have permission to use it.', "sqlserver"), 'x""y');
+    assert.match(grantFixes({ type: "postgresql", username: "etl", database: "d", message: "permission denied for schema My Schema" })[0].sql, /SCHEMA <schema>/);
+  });
+
+  it("Oracle: a value with a double quote cannot be quoted there, so it is the placeholder", () => {
+    const sql = grantFixes({ type: "oracle", username: 'a"b', schema: 'o"w' }).map((f) => f.sql).join("\n");
+    assert.doesNotMatch(sql, /a""b|o""w/);
+    assert.match(sql, /TO <user>;/);
+    assert.match(sql, /ON <owner>\.<table>/);
+  });
+
+  it("Unicode format characters (bidi overrides, zero-width, isolates) become the placeholder", () => {
+    for (const ch of ["‮", "​", "⁦", "⁩", "­", "﻿"]) {
+      const sql = grantFixes({ type: "postgresql", username: `etl${ch}admin`, database: "d", schema: "s" })[0].sql;
+      assert.match(sql, /TO <user>;/, JSON.stringify(ch));
+    }
+  });
+
+  it("PostgreSQL / Redshift: a user typed as PUBLIC (any case, quoted or not) is never filled in", () => {
+    for (const engine of ["postgresql", "redshift"]) {
+      for (const user of ["public", "PUBLIC", '"public"', "Public"]) {
+        const fixes = grantFixes({ type: engine, username: user, database: "d", schema: "s" });
+        assert.match(fixes[0].sql, /TO <user>;/, `${engine} ${user}`);
+        assert.match(fixes[0].note || "", /PUBLIC means every role/);
+      }
+    }
+    assert.equal(grantFixes({ type: "postgresql", username: "publisher", database: "d", schema: "s" })[0].note, undefined);
   });
 });

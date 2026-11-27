@@ -78,6 +78,7 @@ export function ConnectionTestChecklist({
                 <CopySql sql={fix.sql} label={`grants ${fix.purpose.toLowerCase()}`} />
               </div>
               <pre className="df2-ctest-sql"><code>{fix.sql}</code></pre>
+              {fix.note && <p className="df2-ctest-grants-note">{fix.note}</p>}
             </div>
           ))}
         </details>
