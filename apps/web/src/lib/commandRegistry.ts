@@ -108,11 +108,24 @@ export function shellShortcut(event: ShellKey, doc: Pick<Document, "querySelecto
   if (event.defaultPrevented) return null;
   if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
     const owners = Array.from(doc.querySelectorAll<HTMLElement>("[data-owns-command-key]"));
-    if (owners.some((el) => !el.closest("[hidden]"))) return null;
+    if (owners.some(isVisibleOwner)) return null;
     return "menu";
   }
   if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target)) {
+    // A screen with its own shortcuts help (the Transform canvas) answers "?" itself
+    // when focus is inside it: one owner per key (re-review E).
+    const target = event.target as Element | null;
+    if (target && typeof target.closest === "function" && target.closest("[data-owns-help-key]")) return null;
     return "shortcuts";
   }
   return null;
+}
+
+/**
+ * True when a key-owning screen is on screen now: connected and not inside a
+ * hidden kept-mounted screen. A screen kept mounted behind another one owns
+ * no keys (re-review E).
+ */
+export function isVisibleOwner(el: Element | null | undefined): boolean {
+  return Boolean(el && el.isConnected && !el.closest("[hidden]"));
 }

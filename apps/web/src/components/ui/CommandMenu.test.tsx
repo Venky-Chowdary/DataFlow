@@ -183,3 +183,33 @@ describe("the menu joins the overlay stack while open (review UI2 #6)", () => {
     await act(async () => root.unmount());
   });
 });
+
+describe("one owner per key (re-review E)", () => {
+  const key = (k: string, extra: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; defaultPrevented: boolean; target: EventTarget | null }> = {}) =>
+    ({ key: k, metaKey: false, ctrlKey: false, altKey: false, defaultPrevented: false, target: document.body, ...extra });
+
+  it("'?' inside the canvas is the canvas's own help, not also the shell's sheet", async () => {
+    const { shellShortcut } = await import("../../lib/commandRegistry.js");
+    const canvas = document.createElement("div");
+    canvas.setAttribute("data-owns-help-key", "");
+    const node = document.createElement("button");
+    canvas.appendChild(node);
+    document.body.appendChild(canvas);
+    assert.equal(shellShortcut(key("?", { target: node })), null);
+    assert.equal(shellShortcut(key("?", { target: document.body })), "shortcuts", "outside the canvas the shell owns it");
+    canvas.remove();
+  });
+
+  it("a canvas kept mounted behind another screen owns no key", async () => {
+    const { isVisibleOwner } = await import("../../lib/commandRegistry.js");
+    const kept = document.createElement("div");
+    const canvas = document.createElement("div");
+    kept.appendChild(canvas);
+    document.body.appendChild(kept);
+    assert.equal(isVisibleOwner(canvas), true);
+    kept.hidden = true;
+    assert.equal(isVisibleOwner(canvas), false);
+    kept.remove();
+    assert.equal(isVisibleOwner(canvas), false, "detached");
+  });
+});

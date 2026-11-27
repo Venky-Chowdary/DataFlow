@@ -7,6 +7,7 @@ import { Drawer } from "../ui/Drawer";
 import { StudioPicker } from "../ui/StudioPicker";
 import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
+import { isVisibleOwner } from "../../lib/commandRegistry";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { usePointerDrag } from "../../lib/pointerDrag";
 import { previewCellText, stepPreviewCsv } from "../../lib/stepPreviewCsv";
@@ -166,6 +167,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   } = props;
   const stackRef = useRef(createUndoStack(steps));
   const filterRef = useRef<HTMLInputElement>(null);
+  const canvasRootRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<number | null>(null);
   const [draftOp, setDraftOp] = useState("");
@@ -695,6 +697,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   }, [propertiesHeight, viewMode]);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
+      // Only while this canvas is on screen: kept mounted behind another screen it owns no key.
+      if (!isVisibleOwner(canvasRootRef.current)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPaletteOpen(true);
@@ -728,8 +732,10 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
 
   return (
     <div
+      ref={canvasRootRef}
       className="df2-studio-next df2-canvas"
       data-owns-command-key=""
+      data-owns-help-key=""
       data-view={viewMode}
       data-testid="transform-canvas"
       data-document={documentKind(graph)}
