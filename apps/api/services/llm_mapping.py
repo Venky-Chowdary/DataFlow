@@ -351,6 +351,9 @@ def refine_mappings_with_llm(
                     "transform": llm.get("transform"),
                     "confidence": llm.get("confidence"),
                     "reasoning": llm.get("reasoning"),
+                    # Who proposed it, for the AI decisions ledger (provider and model id only).
+                    "llm_provider": getattr(response, "provider", None),
+                    "llm_model": getattr(response, "model", None),
                     "suppressed": True,
                     "reason": (
                         "operator_locked_mapping_not_silently_overwritten"

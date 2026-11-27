@@ -340,6 +340,80 @@ comparison but are not yet tested end to end in this mode.
 - It does not prove referential integrity between tables.
 - It does not prove the source was right.
 - It does not prove anything about rows written to the source after the read.
+- It does not prove the mapping means the right thing. `first_name → last_name`
+  copies perfectly and verifies perfectly. The Mapping Witness below checks that.
+
+## Mapping Witness (before the write)
+
+On the Map step, Datawrap checks each mapped pair against a bounded sample of
+the data (at most 500 rows) and flags pairs to review:
+
+- **Destination already holds the rows** (an existing table, read by key): a
+  pair whose values sit in another column is flagged as a likely swap or wrong
+  target. A pair that matches only after ×100 is flagged as a unit mismatch.
+  Dates that match only when read in the order the run does not use are
+  flagged as a format mismatch. The read names its columns and joins on the
+  destination's key; a warehouse (BigQuery, Snowflake, …) is read only when you
+  choose Check mapping.
+- **Before load** (new table, or no key to join on): the values are checked
+  against what the destination column promises. Examples: user names headed
+  for an `email` column, fractional amounts headed for a `*_cents` column,
+  surnames headed for `first_name` while given names go to `last_name`.
+
+A flag is evidence with a reason; the witness never changes a mapping, and it
+prefers silence to a wrong flag. "Witnessed" needs agreement beyond chance and
+no other column that matches better. A column with one distinct value proves
+nothing ("Consistent"). A pair the mapping transforms (mask, hash, an
+expression) is "Not comparable". A destination column that was not read (not
+in the table yet, a name the sampler cannot address as written, or past the
+columns one check reads) is "Not read". A pair it cannot judge says "No
+evidence", not "passed". Results carry column names and counts, never values.
+
+When a job is submitted, the evidence for exactly the mapping and destination
+it runs is frozen onto the job. The Trust Report and the AI decisions ledger
+read only that copy.
+
+A job takes evidence only from the Map session it was submitted from, for its
+own source and destination, at most a day old; the Trust Report says who ran
+the check and when. A flag counts as kept only when someone chose Keep this
+mapping on it; continuing past it is recorded as not reviewed. A Keep stays
+with its flag when the same inputs are checked again, and only then: a flag
+that points at another column, gives another reason or other counts, or comes
+from an edited source (same file name and row count, other contents) is a new
+flag and shows again. A file or object is named by its whole path, letter case
+included; a table or query by its text, where spacing and keyword case fold
+outside quotes and a name's case folds only on engines that fold unquoted names
+(PostgreSQL, Redshift, Oracle, Snowflake, SQL Server, SQLite). Map approvals and
+changed flags count only for the source they were given on: switching the
+file or table in one session starts them over. The session is only a key:
+the people named are the ones who checked, approved and ran.
+
+Evidence of a session still open is never pruned to make room for other
+checks; older evidence goes first. If a workspace's hard limit ever removes
+it, the job says "Evidence expired", not that no check matched. Editing the
+pairs in an open session replaces that session's earlier check of the same
+source and destination, unless a job was already submitted with it. A check
+that ran past its time limit is not recorded; if it was recorded just before
+the limit, you get its result rather than a time-out.
+
+Measured on a synthetic benchmark written for the witness (120 rows per table,
+at least 30 distinct values per column, the destination holding the same rows
+with trailing spaces, other letter case, other number spellings, other time
+zones and a few stale rows): no false flags on the correct mappings, and 20 of
+20 injected swaps flagged on both sides. These are the CI floors.
+
+The held-out mapping benchmark (206 matchable columns, 23 tables) gives no
+usable witness figures: 203 of its 231 columns carry a single sample value,
+and the destination there is an exact copy, so a pair can only come out
+"consistent". Its false-flag count (0) and swap recall (19 of 399) are
+reported, not claimed. Command:
+`python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
+
+Until that held-out file (`tests/fixtures/mapping_holdout_v1.json`) is on the
+branch, CI runs the held-out gate with a synthetic stand-in
+(`tests/fixtures/witness/holdout_minimal_synthetic.json`) and the job summary
+says "witness held-out: synthetic fixture — real held-out set not yet on this
+branch". Once the real file is present the script uses it on its own.
 
 ## Coverage: which comparison ran
 

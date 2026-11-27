@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "note": "SYNTHETIC minimal fixture in the held-out file's format. It exercises the ai-benchmarks held-out gate only; no published accuracy number comes from it. The real held-out set is tests/fixtures/mapping_holdout_v1.json (Track A).",
+  "tables": [
+    {
+      "id": "synthetic_people",
+      "source": [
+        {"name": "fn", "type": "VARCHAR", "samples": ["Ann", "Bob", "Cy"]},
+        {"name": "ln", "type": "VARCHAR", "samples": ["Kim", "Lo", "Moe"]},
+        {"name": "em", "type": "VARCHAR", "samples": ["a@x.io", "b@y.io", "c@z.io"]}
+      ],
+      "target": [
+        {"name": "first_name", "type": "VARCHAR"},
+        {"name": "last_name", "type": "VARCHAR"},
+        {"name": "email", "type": "VARCHAR"}
+      ],
+      "gold": {"fn": "first_name", "ln": "last_name", "em": "email"}
+    }
+  ]
+}

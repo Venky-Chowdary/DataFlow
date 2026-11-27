@@ -23,6 +23,7 @@ import { DifferenceSplitBar, ParityRing, TableParityBars } from "../charts/Parit
 import { SignoffPanel, type ParityBusy } from "./SignoffPanel";
 import { DifferenceExplorer } from "./DifferenceExplorer";
 import { VerificationCard } from "./VerificationCard";
+import { VerifiedAiSection } from "../trust/VerifiedAiSection";
 import {
   approveParityFix,
   dismissParityFix,
@@ -302,6 +303,8 @@ export interface TrustReportViewProps {
   verificationPollStopped?: boolean;
   /** Track W's AI decisions section, mounted as given (self-contained). */
   aiDecisions?: ReactNode;
+  /** Verified AI evidence (Mapping Witness, AI decisions), mounted above sign-off. */
+  aiEvidence?: ReactNode;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -351,6 +354,7 @@ export function TrustReportView({
   reverifyError,
   verificationPollStopped = false,
   aiDecisions,
+  aiEvidence,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -711,6 +715,8 @@ export function TrustReportView({
         </dl>
       </section>
 
+      {aiEvidence}
+
       <SignoffPanel
         report={report}
         busy={busy}
@@ -954,6 +960,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, re
   return (
     <TrustReportView
       report={report}
+      aiEvidence={<VerifiedAiSection jobId={jobId} />}
       busy={busy}
       canFix={fixGate.allowed}
       fixDeniedReason={fixGate.reason}

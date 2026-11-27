@@ -391,6 +391,8 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     priority_direction: str = "desc"
     limit: int = Field(default=0, ge=0, le=10_000_000)
     plan_id: Optional[str] = None
+    #: The Map session the mapping was checked in (defaults to the plan id): the job takes that evidence only.
+    witness_session_id: Optional[str] = Field(default=None, max_length=128)
     stream_contracts: list[dict] = Field(default_factory=list)
     data_region: str = ""
     contract_id: str = ""
@@ -491,6 +493,8 @@ class MapColumnsRequest(PolicyFieldsModel):
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
+    # The Map session (plan id or the id Map minted): model suggestions are recorded under it.
+    witness_session_id: str = Field(default="", max_length=128)
     # Optional job / plan id so N2 AI-egress events are job-scoped in the chain.
     # Studio Map before a job exists leaves this empty; the manifest records
     # resource ``map:unscoped`` rather than inventing a job.
@@ -710,6 +714,12 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
             prior_mappings=list(body.prior_mappings or []),
             job_id=str(body.job_id or "").strip(),
         )
+    if body.destination is not None and any(
+        isinstance(m.get("engine_suggestion"), dict) and m["engine_suggestion"].get("llm_provider")
+        for m in result["mappings"]
+    ):
+        # The AI decisions ledger reads model suggestions from the server's own record of this answer.
+        await asyncio.to_thread(_record_model_suggestions, request, body, result)
     from services.schema_drift_map_review import flag_rename_suggestions
 
     flag_rename_suggestions(
@@ -753,6 +763,41 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "nested_fields": nested_fields,
         "correlation_id": get_correlation_id(),
     }
+
+
+def _record_model_suggestions(request: Request, body: MapColumnsRequest, result: dict[str, Any]) -> None:
+    from services.mapping_witness_service import destination_identity, record_model_suggestions
+
+    from ..transfer.models import EndpointConfig
+
+    try:
+        workspace = resolve_write_workspace(request, request.headers.get("X-Workspace-Id", ""))
+        dest = body.destination
+        endpoint = EndpointConfig.from_dict(dest.kind, dest.model_dump(by_alias=True))
+        record_model_suggestions(workspace_id=workspace, session=body.witness_session_id,
+                                 identity=destination_identity(endpoint, workspace),
+                                 mappings=list(result["mappings"]), llm=result.get("llm"))
+    except Exception as exc:  # noqa: BLE001 - Map answers whatever the evidence store does
+        logging.getLogger(__name__).warning("model suggestions not recorded: %s", type(exc).__name__)
+
+
+def _record_plan_suggestions(request: Request, plan_id: str, result: Any) -> None:
+    """Model suggestions from a plan's Map, recorded under the plan (its Map session)."""
+    from services.mapping_witness_service import destination_identity, record_model_suggestions
+    from services.transfer_plan_store import get_plan
+
+    try:
+        mappings = list((result or {}).get("mappings") or []) if isinstance(result, dict) else []
+        if not any(isinstance(m.get("engine_suggestion"), dict) and m["engine_suggestion"].get("llm_provider")
+                   for m in mappings if isinstance(m, dict)):
+            return
+        plan = get_plan(plan_id)
+        workspace = resolve_write_workspace(request, request.headers.get("X-Workspace-Id", ""))
+        record_model_suggestions(workspace_id=workspace, session=plan_id,
+                                 identity=destination_identity(dict(getattr(plan, "destination", {}) or {}), workspace),
+                                 mappings=mappings, llm=result.get("llm"))
+    except Exception as exc:  # noqa: BLE001 - Map answers whatever the evidence store does
+        logging.getLogger(__name__).warning("plan model suggestions not recorded: %s", type(exc).__name__)
 
 
 async def _map_key_columns(body: MapColumnsRequest, request: Request) -> tuple[list[str], str]:
@@ -1032,14 +1077,14 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
 
 
 @router.post("/plans/{plan_id}/map")
-async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
+async def map_transfer_plan(plan_id: str, body: PlanMapRequest, request: Request):
     from services.transfer_plan_service import run_plan_mapping
     from services.transfer_plan_store import PlanVersionConflict
 
     try:
         # The pipeline on the default executor; its plan write (which can wait
         # on the store lock) on the plan-write pool.
-        return await compute_then_commit(
+        result = await compute_then_commit(
             run_plan_mapping,
             plan_id,
             validation_mode=body.validation_mode,
@@ -1047,6 +1092,8 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
             source_samples=body.source_samples or None,
             client_request_id=body.client_request_id,
         )
+        await asyncio.to_thread(_record_plan_suggestions, request, plan_id, result)
+        return result
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
             e, "The plan changed while Map ran (a newer mapping revision was saved, or a "
@@ -1510,6 +1557,7 @@ async def execute_transfer_json(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=str(body.plan_id or "").strip())
+    request_obj.witness_session_id = str(body.witness_session_id or body.plan_id or "").strip()
     from services.transform_binding import compile_transfer_recipe
 
     try:
@@ -1719,6 +1767,7 @@ async def run_universal_transfer(
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
     plan_id: Optional[str] = Form(None),
+    witness_session_id: str = Form(""),
     sync_mode: str = Form("full_refresh_append"),
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("balanced"),
@@ -2221,6 +2270,7 @@ async def run_universal_transfer(
 
     # SEC-APPROVAL-1 P1/P2: a validated plan runs only under its Validate's approval.
     await asyncio.to_thread(assert_execute_approved, request_obj, plan_id=(plan_id or "").strip())
+    request_obj.witness_session_id = (witness_session_id or plan_id or "").strip()
     from services.transform_binding import compile_transfer_recipe
 
     try:

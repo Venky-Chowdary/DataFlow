@@ -158,6 +158,7 @@ import {
   streamExtractPlaceholder,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
+import { witnessSourceRef } from "../lib/mappingWitness";
 import {
   describeDestRoute,
   destRouteKey,
@@ -608,6 +609,19 @@ export function TransferPage({
   const setTsvNullMarker = fileExportOptions.setTsvNull;
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
+  // The Map session the Mapping Witness binds its evidence to: the plan id when one exists when Map
+  // starts, else an id minted for this session. The run submits the same id, so the job takes only
+  // evidence of its own session.
+  const witnessSessionRef = useRef("");
+  const witnessSessionId = (() => {
+    if (!witnessSessionRef.current && persistedPlanId) witnessSessionRef.current = persistedPlanId;
+    if (!witnessSessionRef.current) {
+      witnessSessionRef.current = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? `map-${crypto.randomUUID()}`
+        : `map-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+    }
+    return witnessSessionRef.current;
+  })();
   // The newest revision version of the persisted plan as this page last saw
   // it: sent as base_version so a save never lands on a newer revision the
   // user has not seen (the API answers 409 instead).
@@ -6501,6 +6515,7 @@ export function TransferPage({
         })(),
         streamContracts,
         planId: runPlanId,
+        witnessSessionId,
         priorityColumn: priorityColumn || undefined,
         priorityDirection,
         limit: rowLimit > 0 ? rowLimit : undefined,
@@ -7669,6 +7684,18 @@ export function TransferPage({
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
+          dateLocale={dateLocale}
+          witnessSessionId={witnessSessionId}
+          witnessSource={witnessSourceRef({
+            sourceKind,
+            fileName: sourceFileName,
+            cloudPath,
+            activeStream: mapActiveStream,
+            primaryStream: primarySourceStream,
+            readMode: sourceReadMode,
+            statement: procedureCall,
+            engine: sourceConnector?.type,
+          })}
           hideFooter={studioFlags.canvas}
           analysis={analysis}
           destColumns={destColumns}

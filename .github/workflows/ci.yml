@@ -203,6 +203,69 @@ jobs:
             tests/test_type_fidelity_truth_table.py \
             -q --tb=short
 
+  # Every AI feature against recorded model responses (tests/fixtures/ai_cassettes):
+  # offline, deterministic, no keys. Floors are what the product guarantees
+  # against adversarial answers; known gaps are measured and printed, not gated.
+  # The live run against a real provider is the nightly ai-benchmarks-nightly.yml.
+  ai-benchmarks:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt
+
+      - name: Replay every AI feature (recorded responses)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          set +e
+          # The real held-out set (tests/fixtures/mapping_holdout_v1.json) is not on this
+          # branch yet: the synthetic stand-in runs the gate, the summary says so, and the
+          # script takes the real file on its own once it is present.
+          python scripts/run_ai_benchmarks.py --mode replay \
+            --holdout tests/fixtures/witness/holdout_minimal_synthetic.json \
+            --out "$RUNNER_TEMP/ai_benchmarks.json" --summary "$RUNNER_TEMP/ai_benchmarks.md"
+          status=$?
+          cat "$RUNNER_TEMP/ai_benchmarks.md" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Benchmark and coverage tests
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          python -m pytest tests/test_ai_benchmarks.py tests/test_mapping_witness.py \
+            tests/test_mapping_witness_review.py tests/test_ai_decision_ledger.py -q --tb=short
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-benchmarks-replay
+          path: ${{ runner.temp }}/ai_benchmarks.*
+
   # Data Pilot answer floors: local engine only, no network LLM. The provider
   # eval skips here (no key) — run it by hand with DATAFLOW_PILOT_EVAL_PROVIDER.
   # The test_pilot_truth_* files are the ground-truth suite: each case seeds
@@ -2135,6 +2198,7 @@ jobs:
       - changes
       - mapping-evidence
       - ai-offline-correctness
+      - ai-benchmarks
       - pilot-answer-quality
       - no-config-transfer
       - gitops
@@ -2154,6 +2218,7 @@ jobs:
         env:
           MAPPING_EVIDENCE: ${{ needs.mapping-evidence.result }}
           AI_OFFLINE: ${{ needs.ai-offline-correctness.result }}
+          AI_BENCHMARKS: ${{ needs.ai-benchmarks.result }}
           PILOT_QUALITY: ${{ needs.pilot-answer-quality.result }}
           NO_CONFIG_TRANSFER: ${{ needs.no-config-transfer.result }}
           GITOPS: ${{ needs.gitops.result }}
@@ -2171,7 +2236,7 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           REUSE: ${{ needs.changes.outputs.reuse }}
           REUSED_FROM: ${{ needs.changes.outputs.from }}
-          REUSABLE: " mapping-evidence ai-offline-correctness pilot-answer-quality no-config-transfer gitops api-tests mysql-forced-pk cdc-sqlserver oracle-live kafka-live security api-image "
+          REUSABLE: " mapping-evidence ai-offline-correctness ai-benchmarks pilot-answer-quality no-config-transfer gitops api-tests mysql-forced-pk cdc-sqlserver oracle-live kafka-live security api-image "
         run: |
           failed=0
           if [ "$CHANGES" != "success" ]; then
@@ -2182,6 +2247,7 @@ jobs:
           for check in \
             "mapping-evidence:$MAPPING_EVIDENCE" \
             "ai-offline-correctness:$AI_OFFLINE" \
+            "ai-benchmarks:$AI_BENCHMARKS" \
             "pilot-answer-quality:$PILOT_QUALITY" \
             "no-config-transfer:$NO_CONFIG_TRANSFER" \
             "gitops:$GITOPS" \

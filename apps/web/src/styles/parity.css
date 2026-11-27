@@ -1302,3 +1302,70 @@
 .df2-pscale-consistency {
   flex-basis: 100%;
 }
+
+/* ---- Verified AI sections (Mapping evidence, AI involvement) ---------- */
+
+.df2-trust-ai-list {
+  display: grid;
+  gap: var(--df-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-trust-ai-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--df-space-1) var(--df-space-2);
+  min-width: 0;
+  padding-bottom: var(--df-space-2);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-trust-ai-item:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.df2-trust-ai-subject {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-trust-ai-detail {
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.df2-trust-ai-details > summary {
+  cursor: pointer;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-trust-ai-details > summary:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-trust-ai-kind {
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+}
+
+.df2-trust-ai-digest {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.df2-trust-ai-all {
+  margin-top: var(--df-space-2);
+}

@@ -33,6 +33,7 @@ BACKEND_CHECKS = (
     "mysql-forced-pk",
     "mapping-evidence",
     "ai-offline-correctness",
+    "ai-benchmarks",
     "pilot-answer-quality",
     "gitops",
     "security",

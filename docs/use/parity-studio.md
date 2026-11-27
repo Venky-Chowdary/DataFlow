@@ -139,6 +139,26 @@ The signed pack uses the same envelope that
 so anyone with access to the job's workspace can verify the pack. See
 [verification.md](verification.md#how-evidence-is-signed-and-verified).
 
+## AI involvement
+
+The report lists every AI proposal on the job and what became of it:
+mapping proposals (who ran the job with them, who changed them), model
+mapping suggestions (adopted or not), Mapping Witness flags (kept or changed,
+by whom), the explanation's wording (model or template), fix decisions with
+their re-check, and every model call recorded by the AI-egress chain.
+
+Each row names the proposer (a deterministic engine, or the provider and
+model), a fingerprint of its inputs (names, types and settings, never
+values), the decision, who made it (the person who approved or changed the
+pair in Map; the account or schedule that started the run is shown
+separately) and the check that verified it. A row no check confirmed says "Not
+checked". If part of the evidence could not be read, the ledger says
+"Partial" and why. The ledger is sealed into the signed pack and the proof
+pack, so editing a row breaks the signature. Approvals attest its decision
+rows: an approval given before this was added stays valid for what it
+attested.
+`GET /api/v1/jobs/{job_id}/ai-decisions` returns the same rows.
+
 ## Limits
 
 - The report can only be as strong as the comparison Gate-8 ran. A sampled run
@@ -179,4 +199,5 @@ so anyone with access to the job's workspace can verify the pack. See
   `apps/api/services/parity_state.py`, `apps/api/services/parity_stats.py`
 - `apps/api/src/ai/copilot/tool_permissions.py` (the `explain_parity` tool)
 - `apps/web/src/components/parity/` (Trust Report tab, sign-off panel, health section)
+- `apps/api/services/ai_decision_ledger.py`, `apps/api/tests/test_ai_decision_ledger.py`
 - `apps/api/tests/fixtures/rbac_route_permissions.json`

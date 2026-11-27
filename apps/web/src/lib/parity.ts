@@ -219,6 +219,8 @@ export interface ParityApproval {
   /** The report version and content digest this approval attests. */
   version?: number;
   content_sha256?: string;
+  /** Which attested content the digest covers (2 adds the AI decisions ledger; absent = 1). */
+  content_version?: number;
 }
 
 export interface ParitySignoff {
@@ -268,6 +270,8 @@ export interface ParityEvidence {
 export interface ParityReport {
   job_id: string;
   generated_at: string;
+  /** Digest of the AI decisions ledger's decision rows; sign-off content v2 attests it. */
+  ai_decisions_attested_sha256?: string | null;
   /** Bumps on every state change; a lower version is older news. */
   version: number;
   verdict: ParityVerdict;
@@ -725,7 +729,12 @@ export interface SignoffRow {
   role: string;
   label: string;
   approval: ParityApproval | null;
+  /** The role's approval that no longer counts (given on an earlier version), when it has no current one. */
+  invalidated: ParityApproval | null;
 }
+
+/** What a role whose approval stopped counting reads, instead of plain "unsigned". */
+export const INVALIDATED_APPROVAL_REASON = "approval was given on an earlier version of this report — sign again";
 
 /** One row per required role, with its approval when one is recorded. */
 export function signoffRows(signoff: ParitySignoff): SignoffRow[] {
@@ -734,10 +743,18 @@ export function signoffRows(signoff: ParitySignoff): SignoffRow[] {
   for (const approval of signoff.approvals) {
     if (!byRole.has(approval.role)) byRole.set(approval.role, approval);
   }
-  const rows: SignoffRow[] = roles.map((role) => ({ role, label: roleLabel(role), approval: byRole.get(role) ?? null }));
+  const stale = new Map<string, ParityApproval>();
+  for (const approval of signoff.invalidated_approvals ?? []) {
+    if (!byRole.has(approval.role)) stale.set(approval.role, approval);
+  }
+  const rows: SignoffRow[] = roles.map((role) => ({
+    role, label: roleLabel(role), approval: byRole.get(role) ?? null, invalidated: stale.get(role) ?? null,
+  }));
   // An approval for a role that is not required still belongs on the record.
   for (const approval of signoff.approvals) {
-    if (!roles.includes(approval.role)) rows.push({ role: approval.role, label: roleLabel(approval.role), approval });
+    if (!roles.includes(approval.role)) {
+      rows.push({ role: approval.role, label: roleLabel(approval.role), approval, invalidated: null });
+    }
   }
   return rows;
 }

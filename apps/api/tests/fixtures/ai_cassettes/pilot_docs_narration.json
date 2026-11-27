@@ -1,0 +1,60 @@
+{
+  "cases": {
+    "denies_docs": {
+      "prompt_sha256": [
+        "01f484d4c0f652e74d87636a8a926c7a9f331a02b50e8d7582f67d9d5388b3f8"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Quarantine means failed rows are dropped and cannot be reviewed; Datawrap does not record the column, the value or the rule.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "from_prior": {
+      "prompt_sha256": [
+        "01f484d4c0f652e74d87636a8a926c7a9f331a02b50e8d7582f67d9d5388b3f8"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Rows that fail are usually logged by most ETL tools; check your warehouse error tables.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "grounded": {
+      "prompt_sha256": [
+        "01f484d4c0f652e74d87636a8a926c7a9f331a02b50e8d7582f67d9d5388b3f8"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Quarantine is how Datawrap handles rows that fail: a bad row is quarantined rather than dropped, so no row disappears silently. Each quarantined row records the column, the offending value and the rule that refused it, and you review them in the Quarantine tab of the job.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "at": "2026-11-21",
+    "how": "seeded",
+    "model": "hand-written reference and adversarial answers",
+    "note": "Replace with a live recording: run_ai_benchmarks.py --mode live --record DIR",
+    "provider": "anthropic"
+  },
+  "suite": "pilot_docs_narration"
+}

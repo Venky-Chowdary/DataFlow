@@ -1759,3 +1759,76 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   white-space: nowrap;
   overflow-wrap: normal;
 }
+
+/* ---- Mapping Witness flag (evidence on one mapped pair) --------------- */
+
+.df2-witness {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  min-width: 0;
+}
+
+.df2-witness-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+  padding: 1px 6px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-warning-border);
+  background: var(--df-warning-bg);
+  color: var(--df-warning-text);
+  font: inherit;
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.df2-witness-chip:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-witness-why {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-witness-reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-witness-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  margin-top: var(--df-space-2);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-witness-bar.is-error {
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-witness-chip.is-kept {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-witness-error {
+  flex-basis: 100%;
+  color: var(--df2-ms-danger-ink);
+}

@@ -43,6 +43,7 @@ import {
   shouldPollApplying,
   PARITY_APPLYING_POLL_LIMIT,
   approvalAuthority,
+  INVALIDATED_APPROVAL_REASON,
   invalidatedApprovalsNote,
   fixStatusPresentation,
   approveOutcome,
@@ -218,6 +219,15 @@ describe("sign-off", () => {
       invalidatedApprovalsNote({ invalidated_approvals: [stale] }),
       /^1 approval \(Engineering\) attested an earlier version of this report and no longer counts; that role signs again\.$/,
     );
+  });
+
+  it("a role whose approval was invalidated says why and asks to sign again, never just 'unsigned'", () => {
+    const base = unexplainedReport().signoff;
+    const stale = { role: "engineering", user: "e@x.io", at: "2026-11-11T10:00:00Z", note: "", signer_role: "editor" };
+    const rows = signoffRows({ ...base, approvals: [], invalidated_approvals: [stale] });
+    assert.equal(rows[0].invalidated?.user, "e@x.io");
+    assert.equal(rows[1].invalidated, null);
+    assert.equal(INVALIDATED_APPROVAL_REASON, "approval was given on an earlier version of this report — sign again");
   });
 
   it("shortens a signature for display and keeps its scheme", () => {

@@ -7,6 +7,7 @@
 import type { ParityReport, ParitySummary } from "../../lib/parity";
 
 export const reportInitial: ParityReport = {
+  "ai_decisions_attested_sha256": "d351240aa64c0d396b3638454aa0aa305f7eade05c03bec44c2eee24a9bb8791",
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -228,6 +229,7 @@ export const reportInitial: ParityReport = {
 };
 
 export const reportResynced: ParityReport = {
+  "ai_decisions_attested_sha256": "b59f52c86550a46f490929047766f0695bfbf0b05ad245180418bc8ed602377e",
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -413,6 +415,7 @@ export const reportResynced: ParityReport = {
 };
 
 export const reportSigned: ParityReport = {
+  "ai_decisions_attested_sha256": "b59f52c86550a46f490929047766f0695bfbf0b05ad245180418bc8ed602377e",
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -570,7 +573,8 @@ export const reportSigned: ParityReport = {
       {
         "at": "2026-11-11T14:00:00+00:00",
         "authority": "workspace editor",
-        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
+        "content_sha256": "695cee430476844f2107bb3ef2a2c26455484cb0b8f61bb461ff2f000c1ead82",
+        "content_version": 2,
         "note": "checked",
         "role": "engineering",
         "signer_role": "editor",
@@ -580,7 +584,8 @@ export const reportSigned: ParityReport = {
       {
         "at": "2026-11-11T14:00:00+00:00",
         "authority": "workspace editor",
-        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
+        "content_sha256": "695cee430476844f2107bb3ef2a2c26455484cb0b8f61bb461ff2f000c1ead82",
+        "content_version": 2,
         "note": "",
         "role": "data_owner",
         "signer_role": "editor",
@@ -590,7 +595,8 @@ export const reportSigned: ParityReport = {
       {
         "at": "2026-11-11T14:00:00+00:00",
         "authority": "workspace admin",
-        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
+        "content_sha256": "695cee430476844f2107bb3ef2a2c26455484cb0b8f61bb461ff2f000c1ead82",
+        "content_version": 2,
         "note": "ok",
         "role": "compliance",
         "signer_role": "admin",

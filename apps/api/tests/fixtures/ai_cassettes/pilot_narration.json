@@ -1,0 +1,76 @@
+{
+  "cases": {
+    "changed_number": {
+      "prompt_sha256": [
+        "4d68c7c8a7c66d6a5a3549f15875862a62a4fd57aa05ca5a317c6a3519ea43b1"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Datawrap's quarantine keeps bad rows instead of dropping them: 41 rows in job job_31 were quarantined, each with the column, value and rule that refused it. You can review them in the Quarantine tab.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "denies_draft": {
+      "prompt_sha256": [
+        "4d68c7c8a7c66d6a5a3549f15875862a62a4fd57aa05ca5a317c6a3519ea43b1"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Datawrap's quarantine keeps bad rows instead of dropping them: 14 rows in job job_31 were quarantined, but you cannot review them in the Quarantine tab.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "faithful": {
+      "prompt_sha256": [
+        "4d68c7c8a7c66d6a5a3549f15875862a62a4fd57aa05ca5a317c6a3519ea43b1"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Datawrap's quarantine keeps bad rows instead of dropping them: 14 rows in job job_31 were quarantined, each with the column, value and rule that refused it. You can review them in the Quarantine tab.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "moved_number": {
+      "prompt_sha256": [
+        "4d68c7c8a7c66d6a5a3549f15875862a62a4fd57aa05ca5a317c6a3519ea43b1"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Quarantine keeps bad rows rather than dropping them. Job job_31 refused 14 rules, recording the column and value of each row. Open the Quarantine tab to review them.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "at": "2026-11-21",
+    "how": "seeded",
+    "model": "hand-written reference and adversarial answers",
+    "note": "Replace with a live recording: run_ai_benchmarks.py --mode live --record DIR",
+    "provider": "anthropic"
+  },
+  "suite": "pilot_narration"
+}

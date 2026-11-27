@@ -1094,6 +1094,7 @@ def build_signed_proof_pack(
     timing: dict[str, Any] | None = None,
     parity: dict[str, Any] | None = None,
     workspace_id: str | None = None,
+    ai_decisions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -1222,6 +1223,9 @@ def build_signed_proof_pack(
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
+    if ai_decisions is not None:
+        # Every AI proposal on the job and what became of it (services.ai_decision_ledger).
+        body["ai_decisions"] = ai_decisions
     # Normalize before anchoring: the anchor commits to the digest of the body,
     # and that has to be the digest of the body as exported.
     body = json_ready_body(body)
@@ -1528,7 +1532,14 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         timing=_timing_for_pack(dest),
         parity=parity_section_for_pack(job),
         workspace_id=str(job.get("workspace_id") or "") or None,
+        ai_decisions=_ai_decisions_for_pack(job),
     )
+
+
+def _ai_decisions_for_pack(job: dict[str, Any]) -> dict[str, Any]:
+    from services.ai_decision_ledger import ledger_for_pack
+
+    return ledger_for_pack(str(job.get("_id") or job.get("id") or ""), job)
 
 
 def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
@@ -1597,5 +1608,13 @@ def build_signed_parity_pack(
         # later reading under other rules is not "drift since signing".
         "fingerprint_version": FINGERPRINT_VERSION,
         "parity": report,
+        # Every AI proposal on the job and what became of it, sealed with the report.
+        "ai_decisions": _parity_ai_decisions(job_id),
     }
     return sign_body(body, subject=pack_subject(body), workspace_id=workspace_id)
+
+
+def _parity_ai_decisions(job_id: str) -> dict[str, Any]:
+    from services.ai_decision_ledger import ledger_for_pack
+
+    return ledger_for_pack(job_id)
