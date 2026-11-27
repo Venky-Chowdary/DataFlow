@@ -392,7 +392,17 @@ def _failed_batch_undo_note_impl(
             "Skipping failed-batch undo for table=%s: proof-layer verdict only",
             dest_summary.get("table"),
         )
-        dest_summary["partial_batch_undo"] = "retained"
+        from services.batch_undo import keep_failed_validation_for_inspection
+
+        where = "" if dest_summary.get("multi_stream") else keep_failed_validation_for_inspection(
+            destination=getattr(request, "destination", None),
+            dest_summary=dest_summary,
+            sync_mode=str(getattr(request, "sync_mode", "") or ""),
+        )
+        if where:
+            # The overwrite's own "Data kept at <table>" note names the place.
+            kept_note = f"{where} {kept_note}"
+        dest_summary["partial_batch_undo"] = dest_summary.get("partial_batch_undo") or "retained"
         dest_summary["partial_batch_undo_note"] = kept_note
         base = message or "Reconciliation failed"
         return base if kept_note in base else f"{base} {kept_note}"
