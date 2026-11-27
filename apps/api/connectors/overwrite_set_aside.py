@@ -306,12 +306,19 @@ class _Snowflake:
         ``SHOW TABLES LIKE`` is one object lookup; ``information_schema`` is
         avoided on this path (D187: it federates on shared catalogs).
         """
+        from connectors.snowflake_conn import _folded_schema, snowflake_schema_and_table
         from connectors.sql_identifiers import quote_sql_identifier
 
+        # Fold the schema the way every other reference does (_ref): a config
+        # schema ``public`` is the stored "PUBLIC"; a qualified name's own
+        # schema wins (review N3).
+        own_schema, bare = snowflake_schema_and_table(schema, name)
+        sch = own_schema if bare != name else _folded_schema(schema)
+        name = bare
         try:
             # Wildcards in the name only widen the match; the exact name is picked below.
             like = str(name).replace("\\", "\\\\").replace("'", "''")
-            cur.execute(_sf_show_tables(like, quote_sql_identifier(schema)))
+            cur.execute(_sf_show_tables(like, quote_sql_identifier(sch)))
             names = [str(d[0]).lower() for d in (cur.description or [])]
             rows = [dict(zip(names, r)) for r in cur.fetchall()]
         except Exception as exc:  # noqa: BLE001 - CLONE then reports a mismatch itself

@@ -859,3 +859,36 @@ def test_governance_error_names_the_loss_and_the_remedy():
     exc = GovernanceNotPreserved("p.d.t", ["unreadable row access policies"])
     assert "unreadable row access policies" in str(exc)
     assert "Approve the disclosed loss at Validate" in str(exc)
+
+
+# ------------------------------------------------- review 2: schema folding (N3)
+
+
+@pytest.mark.parametrize(
+    ("schema", "table", "expected_schema", "stored"),
+    [
+        ("public", "T", '"PUBLIC"', "T"),
+        ("PUBLIC", "T", '"PUBLIC"', "T"),
+        ("MySchema", "Orders", '"MySchema"', "Orders"),
+        ("public", "other.T", '"OTHER"', "T"),
+    ],
+)
+def test_snowflake_kind_reads_the_folded_schema(schema, table, expected_schema, stored):
+    """A lower-case config schema used to be quoted raw (IN SCHEMA "public"), so a
+    transient table in "PUBLIC" read as permanent and its CLONE failed."""
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.sql = ""
+            self.description = [("name",), ("kind",)]
+
+        def execute(self, sql: str, *_: Any) -> None:
+            self.sql = sql
+
+        def fetchall(self) -> list[tuple]:
+            return [(stored, "TRANSIENT")]
+
+    cur = _Cur()
+    assert _Snowflake._kind(cur, schema, table) == "transient"
+    assert cur.sql.endswith(f"IN SCHEMA {expected_schema}")
+    assert f"LIKE '{stored}'" in cur.sql
