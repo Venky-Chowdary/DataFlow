@@ -96,3 +96,22 @@ def test_every_row_path_floor_stays_above_the_pre_fast_path_rate():
         assert lowest > 271 * 1.05, (name, lowest)
     assert throughput_smoke.load_floors()["reference_calibration_seconds"] > 0
     assert 0 < throughput_smoke.calibrate(rounds=1) < 60
+
+
+def test_pr_smoke_runs_the_copy_route_and_dispatch_checks_the_rest():
+    """The PR job exercises the PG->PG binary COPY (jsonb carry, load method
+    checked); every floor the PR job does not run is checked by the dispatch job."""
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    dispatch = (repo / ".github" / "workflows" / "throughput-benchmark.yml").read_text(
+        encoding="utf-8")
+    floors = throughput_smoke.load_floors()["routes"]
+    pr = re.search(r"throughput_smoke[^\n]*\n[^\n]*--routes ([\w,-]+)", ci).group(1).split(",")
+    full = re.search(r"--routes ([\w,-]+)", dispatch.split("Check floors", 1)[1]).group(1).split(",")
+    assert set(pr) <= set(floors) and set(full) <= set(floors)
+    assert any("copy" in str(floors[n].get("expect_load_method", "")) for n in pr)
+    assert set(floors) == set(pr) | set(full)
+    assert "job in ci.yml (200k rows per route)" not in dispatch

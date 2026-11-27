@@ -2,6 +2,7 @@
   "about": [
     "Floors for the CI throughput smoke (benchmarks/throughput_smoke.py, ci.yml job throughput-smoke,",
     "report-only: not in the Required PR gate until it has 5 consecutive green runs).",
+    "The PR job runs pg-pg-pr (PG->PG binary COPY incl. the jsonb carry, 20k rows, load method checked), pg-pg-row and pg-mysql; the dispatch workflow's check_floors step checks every other floor (pg-pg, mysql-pg) on the full matrix.",
     "Each entry runs benchmarks/db_throughput.py and fails below min_rows_per_second. rows/s is over",
     "the whole engine call, Gate-8 included; at or below 250k rows the in-memory verification ladder",
     "runs too, so it is lower than a 1M run on the same route.",
@@ -15,6 +16,13 @@
     "(MySQL 8 in CI: 469-953), mysql-pg 550, pg-pg copy 1768. Raise a floor only with CI artifacts."
   ],
   "routes": {
+    "pg-pg-pr": {
+      "route": "pg-pg",
+      "row_path": false,
+      "rows": 20000,
+      "min_rows_per_second": 600,
+      "expect_load_method": "copy_binary"
+    },
     "pg-pg": {
       "route": "pg-pg",
       "row_path": false,

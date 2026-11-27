@@ -90,10 +90,11 @@ def main(argv: list[str] | None = None) -> int:
         # and just after it is the runner's speed with the least neighbour noise.
         before = calibrate(rounds=5)
         out = out_dir / f"{name}.json"
+        rows = int(entry_cfg.get("rows") or args.rows)
         cmd = [
             sys.executable, "-m", "benchmarks.db_throughput",
             "--route", str(entry_cfg.get("route") or name),
-            "--rows", str(args.rows), "--out", str(out), "--label", f"ci-smoke-{name}",
+            "--rows", str(rows), "--out", str(out), "--label", f"ci-smoke-{name}",
         ]
         if entry_cfg.get("row_path"):
             cmd.append("--row-path")
@@ -107,8 +108,14 @@ def main(argv: list[str] | None = None) -> int:
         rate = report.get("rows_per_second")
         if rate is not None and float(rate) < floor:
             failures.append(f"rows/s {rate} is below the floor {floor}")
+        expected = str(entry_cfg.get("expect_load_method") or "")
+        method = str(report.get("load_methods") or "")
+        if expected and report and expected not in method:
+            failures.append(f"load method {method!r} is not the expected {expected!r}")
         entry = {
             "exit": 1 if failures else 0,
+            "rows": rows,
+            "load_methods": report.get("load_methods"),
             "calibration_seconds": round(measured, 4),
             "floor_rows_per_second": floor,
             "rows_per_second": rate,

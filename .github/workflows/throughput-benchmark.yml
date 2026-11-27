@@ -3,8 +3,11 @@ name: Throughput benchmark
 # Large-scale runs of apps/api/benchmarks/db_throughput.py (NF-6): N
 # deterministic mixed-type rows through the real engine and Gate-8 on
 # PostgreSQL / MySQL service containers, plus an independent cell-by-cell
-# re-read. Manual only — never on a pull request. The per-PR gate is the
-# `throughput-smoke` job in ci.yml (200k rows per route).
+# re-read. Manual only — never on a pull request. The per-PR check is the
+# report-only `throughput-smoke` job in ci.yml (row path 100k rows on PG->PG
+# and PG->MySQL, PG->PG binary COPY 20k). This workflow is where the full floor
+# matrix of apps/api/benchmarks/throughput_floors.json is checked (the
+# "check_floors" step, 200k rows per route).
 #
 # Sizing: a hosted runner has ~14 GB of free disk and a 6 h job limit. The
 # mixed table is ~200 bytes/row per copy, so 10M rows needs ~4-5 GB (source +
@@ -37,6 +40,10 @@ on:
         description: "Runner label (self-hosted for 100M)"
         required: true
         default: "ubuntu-latest"
+      check_floors:
+        description: "Also check every floor in throughput_floors.json at 200k rows"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -103,6 +110,29 @@ jobs:
             df -h /
           done
           exit "$rc"
+
+      - name: Check floors (full matrix, 200k rows per route)
+        if: ${{ inputs.check_floors }}
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+        run: |
+          python -m benchmarks.throughput_smoke --rows 200000 \
+            --routes pg-pg,pg-pg-row,pg-mysql,mysql-pg \
+            --out-dir "$RUNNER_TEMP/throughput/floors"
 
       - name: Upload results
         if: ${{ always() }}

@@ -296,10 +296,11 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
-  # Throughput regression smoke (NF-6): 100k mixed-type rows through the real
-  # engine and Gate-8 on the live PostgreSQL / MySQL services (the row path
-  # PG->PG and PG->MySQL), with an independent cell-by-cell re-read of both
-  # tables. Fails when a route errs, a cell differs, or rows/s falls below the
+  # Throughput regression smoke (NF-6): mixed-type rows through the real
+  # engine and Gate-8 on the live PostgreSQL / MySQL services — 100k rows on
+  # the row path (PG->PG, PG->MySQL) and 20k on the PG->PG binary COPY that
+  # carries jsonb (load method checked) — with an independent cell-by-cell
+  # re-read of both tables. Fails when a route errs, a cell differs, or rows/s falls below the
   # runner-calibrated floor in apps/api/benchmarks/throughput_floors.json.
   # Report-only: not in the Required PR gate until it has five consecutive
   # green runs. The full route matrix and 10M+ runs are the workflow_dispatch
@@ -327,7 +328,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r apps/api/requirements-dev.txt
 
-      - name: Throughput smoke (100k rows, row path)
+      - name: Throughput smoke (row path 100k, PG->PG COPY 20k)
         working-directory: apps/api
         env:
           PYTHONPATH: .
@@ -347,7 +348,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/throughput"
           python -m benchmarks.throughput_smoke --rows 100000 \
-            --routes pg-pg-row,pg-mysql --out-dir "$RUNNER_TEMP/throughput"
+            --routes pg-pg-pr,pg-pg-row,pg-mysql --out-dir "$RUNNER_TEMP/throughput"
 
       - name: Upload throughput results
         if: ${{ always() }}
