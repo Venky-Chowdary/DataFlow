@@ -282,3 +282,79 @@ def test_mysql_literals_mean_the_same_under_every_sql_mode(sql_mode: str) -> Non
                 assert (got.decode("utf-8") if isinstance(got, bytes) else got) == value, (sql_mode, value)
     finally:
         conn.close()
+
+
+@pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
+@pytest.mark.parametrize("column", [
+    "VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+    "VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci",
+    "VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
+    "VARCHAR(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin",
+    "VARCHAR(40) CHARACTER SET latin1 COLLATE latin1_swedish_ci",
+])
+def test_mysql_hex_literals_work_against_every_column_collation(column: str) -> None:
+    """Review 3b, item 2: CONVERT(X'…' USING utf8mb4) is an implicit-coercibility expression, so
+    `col = CONVERT(…)` on a utf8mb4_unicode_ci column failed with 1267 (illegal mix of collations)."""
+    from services.parity_scale.explorer import literal
+
+    table = f"psd1_lit_{uuid.uuid4().hex[:8]}"
+    old, new = "it's C:\\old", "it's C:\\new"
+    conn = parity_engines.connect("mysql")
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(f"CREATE TABLE `{table}` (id INT PRIMARY KEY, c {column}) ENGINE=InnoDB")
+            except Exception as exc:  # noqa: BLE001 — a collation this server does not have
+                pytest.skip(f"collation not available here ({type(exc).__name__})")
+            cur.execute(f"INSERT INTO `{table}` VALUES (1, {literal('mysql', old)})")
+            for mode in ("", "NO_BACKSLASH_ESCAPES"):
+                cur.execute("SET SESSION sql_mode = %s", (mode,))
+                cur.execute(f"UPDATE `{table}` SET c = {literal('mysql', new)} "
+                            f"WHERE id = 1 AND c = {literal('mysql', old)}")
+                assert cur.rowcount == 1, mode
+                cur.execute(f"SELECT c FROM `{table}` WHERE id = 1")
+                assert cur.fetchone()[0] == new
+                old, new = new, old
+        conn.commit()
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        conn.commit()
+        conn.close()
+
+
+def test_types_without_exact_equality_stay_out_of_the_guard_and_the_repair_says_so() -> None:
+    """Review 3b, item 3: a float4, json, xml, point or timestamptz value in the guard made the
+    repair statement match nothing or fail; such columns are left out of the guard, and said so."""
+    from services.mongodb_service import get_mongodb_service
+
+    src, dst = f"psd1_g_s_{uuid.uuid4().hex[:8]}", f"psd1_g_d_{uuid.uuid4().hex[:8]}"
+    ddl = ("id bigint PRIMARY KEY, name varchar(40), f real, j json, x xml, p point, t timestamptz")
+    cols = ["id", "name", "f", "j", "x", "p", "t"]
+    fill = ("SELECT g, 'n' || g, g * 1.1, json_build_object('k', g), xmlelement(name v, g), point(g, g), "
+            "timestamptz '2024-01-01 00:00+00' + g * interval '1 hour' FROM generate_series(1, 50) g")
+    _sql(f'CREATE TABLE "{src}" ({ddl})', f'INSERT INTO "{src}" {fill}',
+         f'CREATE TABLE "{dst}" ({ddl})', f'INSERT INTO "{dst}" {fill}',
+         f"UPDATE \"{dst}\" SET f = 0.5, t = timestamptz '2000-01-01 00:00+00' WHERE id = 7",
+         f"INSERT INTO \"{dst}\" VALUES (-1, 'extra', 1.1, '{{\"k\": -1}}', '<v>-1</v>', point(1, 2), "
+         f"timestamptz '2024-01-01 00:00+00')")
+    try:
+        job_id = get_mongodb_service().create_transfer_job({
+            "status": "completed",
+            "transfer_request": {"source": _endpoint(src), "destination": _endpoint(dst),
+                                 "sync_mode": "full_refresh_overwrite",
+                                 "mappings": [{"source": c, "target": c} for c in cols]},
+            "destination_summary": {"table": dst, "primary_key_columns": ["id"]},
+            "reconciliation": {"passed": True, "source_rows": 50, "target_rows": 51, "phase": "post_write",
+                               "coverage_limit": {"rows": 50, "limit": 10},
+                               "verification_verdict_qualifier": "coverage_limited"},
+        })
+        assert _verify(job_id)["state"] == "failed"
+        repair = _repair(job_id, dst)
+        statements = _statements(repair["sql"])
+        assert [s.split(" ")[0] for s in statements] == ["DELETE", "UPDATE"], repair["sql"]
+        assert "-- The guard does not compare f, j, p, t, x" in repair["sql"]
+        _sql(*statements)  # never an erroring statement
+        assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
+    finally:
+        _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')

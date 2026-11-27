@@ -250,15 +250,41 @@ def literal(engine: str, value: Any) -> str:
         return "'" + value.isoformat(sep=" ") + "'" if isinstance(value, _dt.datetime) else f"'{value.isoformat()}'"
     if isinstance(value, _uuid.UUID):
         value = str(value)
+    if isinstance(value, (dict, list)):
+        import json
+
+        value = json.dumps(value, ensure_ascii=False, separators=(", ", ": "))  # JSON text, not a Python repr
     text = str(value)
     if engine == "mysql" and ("\\" in text or "'" in text):
         # What a quote or backslash means in a MySQL string depends on sql_mode
-        # (NO_BACKSLASH_ESCAPES): the bytes in hex read the same either way.
-        return f"CONVERT(X'{text.encode('utf-8', 'surrogatepass').hex()}' USING utf8mb4)"
+        # (NO_BACKSLASH_ESCAPES): the bytes in hex read the same either way. The introducer
+        # keeps it a literal (coercible), so the column's own collation wins in a comparison.
+        return f"_utf8mb4 X'{text.encode('utf-8', 'surrogatepass').hex()}'"
     return ("N'" if engine == "sqlserver" else "'") + text.replace("'", "''") + "'"
 
 
 _IDENTITY = frozenset({"", "none", "identity", "passthrough"})
+
+#: Destination types whose values have no exact, portable ``=`` from a literal here: floats
+#: (a float4 read back as a double), JSON / XML / geometric / array / interval types (no
+#: ``=`` or no text form that round-trips), and time-zone-converted timestamps.
+_UNGUARDABLE = ("float", "real", "double", "json", "xml", "point", "line", "lseg", "box", "path", "polygon",
+                "circle", "geometry", "geography", "[]", "array", "interval", "money", "hierarchyid",
+                "sql_variant", "with time zone", "timestamptz", "timetz", "datetimeoffset", "image")
+
+
+def guardable(engine: str, dest_type: str) -> bool:
+    """Whether a repair statement's old-value guard can compare this column with ``=``."""
+    t = str(dest_type or "").strip().lower()
+    if not t:
+        return False
+    if any(word in t for word in _UNGUARDABLE):
+        return False
+    if engine == "mysql" and t.startswith("timestamp"):
+        return False  # stored in UTC, read in the session's time zone
+    if engine == "sqlserver" and t in {"text", "ntext"}:
+        return False  # no = on the legacy LOB types
+    return True
 
 
 class _Unwritable(ValueError):
@@ -371,15 +397,22 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
         def where(key: tuple[Any, ...]) -> str:
             return " AND ".join(f"{_quote(engine, k)} = {literal(engine, v)}" for k, v in zip(key_cols, key))
 
-        def unchanged(column: str, value: Any) -> str:
-            """The destination still holds the value the comparison read (an old-value guard)."""
-            if value is None:
-                return f"{_quote(engine, column)} IS NULL"
-            return f"{_quote(engine, column)} = {literal(engine, value)}"
+        unguarded: set[str] = set()
 
         def guarded(key: tuple[Any, ...], drow: Sequence[Any], only: Sequence[int] | None = None) -> str:
-            checks = [unchanged(cols[i].target, drow[i]) for i in (only if only is not None else range(len(cols)))
-                      if cols[i].target.lower() not in protected and cols[i].target not in key_cols]
+            """The key, and each column still holding the value the comparison read (an old-value
+            guard). A column with no exact ``=`` here is left out of the guard, and said so."""
+            checks = []
+            for i in (only if only is not None else range(len(cols))):
+                col = cols[i]
+                if col.target.lower() in protected or col.target in key_cols:
+                    continue
+                if drow[i] is None:
+                    checks.append(f"{_quote(engine, col.target)} IS NULL")
+                elif guardable(engine, col.dest_type):
+                    checks.append(f"{_quote(engine, col.target)} = {literal(engine, drow[i])}")
+                else:
+                    unguarded.add(col.target)
             return " AND ".join([where(key), *checks])
 
         missing = [decode_key(k) for k in (diff.get("missing_keys") or [])[:REPAIR_KEYS_MAX]]
@@ -456,6 +489,10 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                     # Old-value guard: a value changed in the destination since the comparison is kept.
                     lines.append(f"UPDATE {dest_ref} SET {', '.join(sets)} WHERE {guarded(key, drow, set_cols)};")
                     counts["update"] += 1
+        if unguarded:
+            notes.append("-- The guard does not compare " + _comment(", ".join(sorted(unguarded)))
+                         + " (no exact equality for that type here): a change made since to only those "
+                         "columns is not detected.")
         if unwritable:
             notes.append("-- Rows the run's write pipeline refuses are left out (it would not have written "
                          f"them either): {_comment('; '.join(sorted(unwritable)))}.")
