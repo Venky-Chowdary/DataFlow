@@ -6,6 +6,7 @@ import os
 import socket
 import tempfile
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -732,6 +733,25 @@ def schedule_loop_on(monkeypatch):
     """Opt in to the app's cadence loop (off for the session: SCHEDULE_LOOP_DEFAULT)."""
     for prefix in ("DATAFLOW", "DATAWRAP"):
         monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "1")
+
+
+#: The instant ``frozen_schedule_clock`` pins the scheduler to: mid-way between
+#: */5 boundaries, so "the next slot is in the future" has one exact answer.
+FROZEN_SCHEDULE_NOW = datetime(2026, 11, 27, 12, 2, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def frozen_schedule_clock(monkeypatch):
+    """Pin schedule_store / schedule_runner's "now" (services.schedule_clock).
+
+    An assertion like ``next_run_at > datetime.now()`` flips when a run crosses
+    a minute boundary between the scheduler computing the slot and the test
+    reading the clock. Compare against the returned instant instead.
+    """
+    from services import schedule_clock
+
+    monkeypatch.setattr(schedule_clock, "utc_now", lambda: FROZEN_SCHEDULE_NOW)
+    return FROZEN_SCHEDULE_NOW
 
 
 # Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)

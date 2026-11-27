@@ -12,7 +12,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+
+from services.cron_schedule import next_run
 
 
 def _isolate(tmp_path, monkeypatch):
@@ -44,7 +46,7 @@ def _wait(job_id: str) -> dict:
 
 
 def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, frozen_schedule_clock
 ):
     _isolate(tmp_path, monkeypatch)
     from services import schedule_runner
@@ -74,7 +76,9 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
         cur = store.get_schedule(sched.id)
         assert cur.running is False and not cur.running_job_id
         nxt = datetime.fromisoformat(str(cur.next_run_at).replace("Z", "+00:00"))
-        assert nxt > datetime.now(timezone.utc), cur.next_run_at
+        # The scheduler's clock is pinned: the next */5 slot after it, exactly.
+        assert nxt > frozen_schedule_clock, cur.next_run_at
+        assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC"), cur.next_run_at
         return cur
 
     first = _wait(schedule_runner._run_schedule(sched.id, manual=True))
@@ -120,7 +124,7 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
     assert still.approval_request["code"] == "SOURCE_DRIFT"
 
 
-def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkeypatch):
+def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkeypatch, frozen_schedule_clock):
     """The runner raised between claim and job bind; the beat must not hold it.
 
     Before: the claim stayed ``running`` with no job for the unbound grace
@@ -163,4 +167,5 @@ def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkey
     assert after.running is False, "claim held after the dispatch raised"
     assert store.claim_holder(after) is None
     nxt = datetime.fromisoformat(str(after.next_run_at).replace("Z", "+00:00"))
-    assert nxt > datetime.now(timezone.utc)
+    assert nxt > frozen_schedule_clock
+    assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")

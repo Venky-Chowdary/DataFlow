@@ -5,7 +5,7 @@ Named fixtures only. No live service is required.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy.dialects import mssql
@@ -332,7 +332,7 @@ def test_sentinel_is_not_a_rejected_upsert_row() -> None:
     assert len(details) == 1
 
 
-def test_claim_moves_a_past_next_run_forward(tmp_path, monkeypatch) -> None:
+def test_claim_moves_a_past_next_run_forward(tmp_path, monkeypatch, frozen_schedule_clock) -> None:
     import services.schedule_store as store
 
     monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules.json")
@@ -357,7 +357,8 @@ def test_claim_moves_a_past_next_run_forward(tmp_path, monkeypatch) -> None:
     assert claimed is not None
     nxt = store._parse_ts(claimed.next_run_at)
     assert nxt is not None
-    assert nxt > datetime.now(timezone.utc) - timedelta(seconds=1)
+    # Hourly and overdue: the claim fires now and the next slot is one hour on.
+    assert nxt == frozen_schedule_clock + timedelta(hours=1)
 
 
 def test_silent_running_job_releases_the_claim(monkeypatch) -> None:

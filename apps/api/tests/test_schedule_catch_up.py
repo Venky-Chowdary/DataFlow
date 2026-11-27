@@ -41,7 +41,10 @@ def _new_schedule(store, **extra):
 
 
 def _past(hours: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    """``hours`` before the scheduler's clock (pinned by frozen_schedule_clock where a test uses it)."""
+    from services import schedule_clock
+
+    return (schedule_clock.utc_now() - timedelta(hours=hours)).isoformat()
 
 
 def _overdue(store, sched, hours: float):
@@ -72,7 +75,7 @@ def test_catch_up_replays_one_window_per_run(tmp_path, monkeypatch):
     assert len(set(boundaries)) == 3
 
 
-def test_catch_up_completion_advances_one_boundary_not_now(tmp_path, monkeypatch):
+def test_catch_up_completion_advances_one_boundary_not_now(tmp_path, monkeypatch, frozen_schedule_clock):
     """Marking a catch-up run done keeps the sequence: next due is the next
     historical boundary, still in the past while windows remain."""
     store = _file_store(tmp_path, monkeypatch)
@@ -82,13 +85,13 @@ def test_catch_up_completion_advances_one_boundary_not_now(tmp_path, monkeypatch
     done = store.mark_schedule_run(sched.id, "job-a", status="succeeded")
     next_at = datetime.fromisoformat(done.next_run_at)
     # Still due (past) because 2 catch-up windows remain.
-    assert next_at <= datetime.now(timezone.utc)
+    assert next_at <= frozen_schedule_clock
     # The claim already placed next_run_at on the next overdue boundary —
     # completion keeps it exactly (no double-advance, no jump-to-now).
     assert next_at == datetime.fromisoformat(claimed.next_run_at)
 
 
-def test_catch_up_exhausts_then_jumps_to_now(tmp_path, monkeypatch):
+def test_catch_up_exhausts_then_jumps_to_now(tmp_path, monkeypatch, frozen_schedule_clock):
     store = _file_store(tmp_path, monkeypatch)
     sched = _overdue(store, _new_schedule(store), 2.5)
     store.request_schedule_catch_up(sched.id, 2)
@@ -100,7 +103,7 @@ def test_catch_up_exhausts_then_jumps_to_now(tmp_path, monkeypatch):
     c = store.mark_schedule_running(sched.id, "inst-1", "job-last")
     assert c is not None
     assert c.claimed_catch_up is False
-    assert datetime.fromisoformat(c.next_run_at) > datetime.now(timezone.utc)
+    assert datetime.fromisoformat(c.next_run_at) > frozen_schedule_clock
 
 
 def test_catch_up_caps_at_window_cap(tmp_path, monkeypatch):

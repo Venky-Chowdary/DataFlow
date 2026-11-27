@@ -835,7 +835,7 @@ def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
     assert store.get_schedule(sched.id).running is True
 
 
-def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store):
+def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store, frozen_schedule_clock):
     """A run that finishes after later */5 slots counts them and waits for the next boundary.
 
     The finished run is the catch-up. Pinning next_run to the completion instant
@@ -851,13 +851,13 @@ def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store)
     assert done.missed_window_count >= 1
     assert done.run_count == 1
     nxt = store._parse_ts(done.next_run_at)
-    now = datetime.now(timezone.utc)
-    assert nxt is not None and nxt > now
+    assert nxt is not None and nxt > frozen_schedule_clock
+    assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")
     assert nxt.second == 0
     assert done.id not in {item.id for item in store.due_schedules()}
 
 
-def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypatch):
+def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypatch, frozen_schedule_clock):
     """DEF-B-013: a catch-up that stored next_run_at = last_run_at fired again.
 
     The extra run was 23 seconds before the real */5 tick. The beat must move
@@ -885,13 +885,14 @@ def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypat
     nxt = store._parse_ts(done.next_run_at)
     last = store._parse_ts(done.last_run_at)
     assert nxt is not None and last is not None
-    assert nxt > datetime.now(timezone.utc)
+    assert nxt > frozen_schedule_clock
+    assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")
     assert nxt.second == 0 and nxt.microsecond == 0
     assert abs((nxt - last).total_seconds()) > 2
     assert done.id not in {item.id for item in store.due_schedules()}
 
 
-def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
+def test_resume_catch_up_lands_on_the_next_boundary(temp_store, frozen_schedule_clock):
     """Enabling a paused cron waits for the next slot. It does not fire the missed one."""
     sched = _make(store, cron="*/5 * * * *", interval="hourly")
     past = "2026-10-08T01:10:00+00:00"
@@ -906,13 +907,14 @@ def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
     assert resumed is not None
     resumed_due = store._parse_ts(resumed.next_run_at)
     assert resumed_due is not None
-    assert resumed_due > datetime.now(timezone.utc)
+    assert resumed_due > frozen_schedule_clock
+    assert resumed_due == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")
     assert resumed.next_run_at != past
     claimed = store.mark_schedule_running(sched.id, "beat")
     assert claimed is not None
     claimed_next = store._parse_ts(claimed.next_run_at)
     assert claimed_next is not None
-    assert claimed_next > datetime.now(timezone.utc)
+    assert claimed_next > frozen_schedule_clock
     assert claimed_next.second == 0 and claimed_next.microsecond == 0
     store.set_running_job(sched.id, "job-catchup")
     done = store.mark_schedule_run(
@@ -922,7 +924,7 @@ def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
     final = store._parse_ts(done.next_run_at)
     last = store._parse_ts(done.last_run_at)
     assert final is not None and last is not None
-    assert final > datetime.now(timezone.utc)
+    assert final > frozen_schedule_clock
     assert final.second == 0 and final.microsecond == 0
     assert 0 < (final - last).total_seconds() <= 300
     assert done.id not in {item.id for item in store.due_schedules()}
@@ -1050,7 +1052,7 @@ def test_running_claim_is_not_replaced_when_the_next_slot_is_due(temp_store, mon
     assert store.get_schedule(sched.id).running_job_id == "job-live"
 
 
-def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monkeypatch):
+def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monkeypatch, frozen_schedule_clock):
     sched = _make(store, cron="*/5 * * * *", interval="hourly")
     past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
     store._save_all([
@@ -1082,7 +1084,8 @@ def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monk
     assert recorded.run_count == 1
     assert recorded.last_job_id == "job-1"
     nxt = store._parse_ts(recorded.next_run_at)
-    assert nxt is not None and nxt > datetime.now(timezone.utc)
+    assert nxt is not None and nxt > frozen_schedule_clock
+    assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")
 
 
 def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeypatch):

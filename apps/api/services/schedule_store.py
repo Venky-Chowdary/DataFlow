@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
+from services import schedule_clock
 from services.atomic_file import write_json_atomic
 from services.brand_env import getenv_brand
 from services.cron_schedule import CronError, resolve_timezone, validate_cron
@@ -539,7 +540,7 @@ def _as_version(raw: Any) -> int:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return schedule_clock.utc_now().isoformat()
 
 
 def _parse_ts(value: str | datetime | None) -> datetime | None:
@@ -547,7 +548,7 @@ def _parse_ts(value: str | datetime | None) -> datetime | None:
 
     Mongo returns ``datetime``; the file store returns ISO text. A naive value
     is UTC, the same clock ``_now`` writes. Mixing that naive value with
-    ``datetime.now(timezone.utc)`` raised ``TypeError`` inside ``due_schedules``
+    ``schedule_clock.utc_now()`` raised ``TypeError`` inside ``due_schedules``
     and aborted every schedule on the beat.
     """
     if value is None or value == "":
@@ -687,7 +688,7 @@ def compute_next_run(
     wall-clock times — use cron for “every day at 10:10”. A minute step that
     does not divide 60 is anchored to the previous run instead of ``*/N``.
     """
-    base = from_time or datetime.now(timezone.utc)
+    base = from_time or schedule_clock.utc_now()
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
     interval, cron = canonicalize_cadence(interval, cron)
@@ -722,7 +723,7 @@ def count_missed_windows(
     due = _parse_ts(next_run_at)
     if due is None:
         return 0
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
     if due > current:
@@ -773,7 +774,7 @@ def preview_next_runs(
     one is anchored when it is saved (now), as update_schedule does.
     """
     count = max(1, min(PREVIEW_MAX_RUNS, int(count or 5)))
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if not enabled:
         return {"kind": "paused", "runs": []}
     interval, cron = canonicalize_cadence(interval, cron)
@@ -1207,7 +1208,7 @@ def schedule_overdue_seconds(
         return 0
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     return max(0, int((current - due).total_seconds()))
 
 
@@ -1315,7 +1316,7 @@ def _validate_cadence(
         try:
             validate_cron(cron)
             # Also validates the timezone against the cron horizon computation.
-            _cron_next_run(cron, datetime.now(timezone.utc), tz or "UTC")
+            _cron_next_run(cron, schedule_clock.utc_now(), tz or "UTC")
         except CronError as exc:
             raise ValueError(str(exc)) from exc
     return sync_mode
@@ -2420,7 +2421,7 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         # next_run_at used to be left in place, so the beat fired immediately.
         if enabling:
             due = _parse_ts(updated.next_run_at)
-            now = datetime.now(timezone.utc)
+            now = schedule_clock.utc_now()
             if due is None or due <= now:
                 updated.next_run_at = next_run_for(updated, now)
         schedules[i] = updated
@@ -2568,12 +2569,12 @@ def _job_is_live(job_id: str) -> bool | None:
         heartbeat = job.get("heartbeat_at") or job.get("last_progress_at")
         if heartbeat:
             seen = _parse_ts(heartbeat)
-            if seen is None or datetime.now(timezone.utc) - seen > _HEARTBEAT_STALE:
+            if seen is None or schedule_clock.utc_now() - seen > _HEARTBEAT_STALE:
                 return _job_lease_held(job_id)
             return True
         updated = job.get("updated_at")
         seen = _parse_ts(updated) if updated else None
-        if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
+        if seen is not None and schedule_clock.utc_now() - seen > _RUNNING_SILENCE:
             # A silent document is not proof of a dead worker: one long batch
             # writes no checkpoint. The worker lease is the owner signal the
             # orphan sweeper uses — one authority for "is anybody running it".
@@ -2651,7 +2652,7 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     started = _parse_ts(sched.running_started_at)
     if started is None:
         return True
-    age = datetime.now(timezone.utc) - started
+    age = schedule_clock.utc_now() - started
     job_id = str(sched.running_job_id or "").strip()
     if not job_id:
         if _dispatching_here(sched.id):
@@ -2900,7 +2901,7 @@ def mark_schedule_running(
             # fire again (a resumed schedule ran three times in one window)
             # and a crashed finalize left the schedule due forever.
             nxt = _parse_ts(s.next_run_at)
-            current = _parse_ts(now) or datetime.now(timezone.utc)
+            current = _parse_ts(now) or schedule_clock.utc_now()
             advanced = s.next_run_at
             missed = 0
             catching_up = False
@@ -3362,7 +3363,7 @@ def _pinned_to_completion(sched: PipelineSchedule, *, now: datetime | None = Non
         last = last.replace(tzinfo=timezone.utc)
     if abs((nxt - last).total_seconds()) > 2:
         return False
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return nxt <= current
@@ -3391,7 +3392,7 @@ def request_schedule_catch_up(
     sched = get_schedule(schedule_id)
     if sched is None:
         return None, 0
-    current = datetime.now(timezone.utc)
+    current = schedule_clock.utc_now()
     nxt = _parse_ts(sched.next_run_at)
     outstanding = 0
     if nxt is not None and nxt <= current:
@@ -3425,7 +3426,7 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
     time becomes the next real cadence boundary from now, and the skipped
     windows are added to the existing miss count.
     """
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     with _CLAIM_LOCK:
         changed, missed_schedules = _unstick_pinned_locked(current)
     for schedule_id, missed in missed_schedules:
@@ -3727,7 +3728,7 @@ def _record_approval_skip(sched: PipelineSchedule) -> None:
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     due: list[PipelineSchedule] = []
@@ -3793,7 +3794,7 @@ def seconds_until_next_schedule(
     ``cap``. An already-due schedule waits 1s so a document that fails to
     advance ``next_run_at`` cannot busy-loop the process.
     """
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     soonest: datetime | None = None

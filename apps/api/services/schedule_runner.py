@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services import schedule_clock
 from services.brand_env import getenv_brand
 from services.failure_retry_policy import DETERMINISTIC, TRANSIENT
 from services.ops_events import emit_event
@@ -114,7 +115,7 @@ def _scheduler_instance_id() -> str:
 
 
 def _lock_expiry() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=LOCK_TTL_SECONDS)
+    return schedule_clock.utc_now() + timedelta(seconds=LOCK_TTL_SECONDS)
 
 
 def _mongo_backend():
@@ -149,7 +150,7 @@ def _acquire_scheduler_lock() -> bool:
             return False
         return True
     db = svc.get_database()
-    now = datetime.now(timezone.utc)
+    now = schedule_clock.utc_now()
     instance = _scheduler_instance_id()
     try:
         result = db["schedule_locks"].find_one_and_update(
@@ -939,7 +940,7 @@ def _remember_source_schema(
             {
                 "source_schema": dict(schema),
                 "source_schema_fingerprint": fingerprint,
-                "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+                "source_schema_observed_at": schedule_clock.utc_now().isoformat(),
                 "source_primary_key": pk,
             },
         )
@@ -950,7 +951,7 @@ def _remember_source_schema(
 
 def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
     doc = job_doc or {}
-    finished = datetime.now(timezone.utc)
+    finished = schedule_clock.utc_now()
     ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
     hist = doc.get("load_history_report")
     if not isinstance(hist, dict):
@@ -1483,7 +1484,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
     if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
-        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        retry_at = schedule_clock.utc_now() + timedelta(seconds=delay)
         parked = schedule_retry(
             schedule_id,
             retry_at=retry_at,
@@ -1567,7 +1568,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
                 return finding_closed_by_success(after)
             if backs_off:
-                due, backoff["delay"] = _transient_backoff(after, datetime.now(timezone.utc))
+                due, backoff["delay"] = _transient_backoff(after, schedule_clock.utc_now())
                 return {"next_run_at": due}
             if finding:
                 return _finding_patch(after, **finding)
@@ -1652,7 +1653,7 @@ def _park_on_decision(
     from services.schedule_store import RunOutcome, mark_schedule_run
 
     message = str(exc)
-    now = datetime.now(timezone.utc).isoformat()
+    now = schedule_clock.utc_now().isoformat()
     outcome = RunOutcome(
         lambda after: _finding_patch(after, exc, attempt=attempt, job_id=job_id)
     )
@@ -1989,7 +1990,7 @@ def _dispatch_transfer(
             job_id, "pending", read_scope=read_scope,
             retry_decision=full_pass_decision({"kind": "schedule_retry"}, read_scope),
         )
-    started_at = datetime.now(timezone.utc)
+    started_at = schedule_clock.utc_now()
     from services.schedule_store import (
         _CLAIM_LOCK,
         describe_claim_holder,
@@ -2237,7 +2238,7 @@ def _fail_unstarted_run(
         job_id = str(record.get("job_id") or "")
         if job_id:
             life.settle_lost_job(job_id, _job_doc(job_id))
-        now = datetime.now(timezone.utc).isoformat()
+        now = schedule_clock.utc_now().isoformat()
         entry = {
             "run_id": run_id, "status": "failed", "attempt": attempt, "job_id": job_id,
             "finished_at": now, "error": reason, "reason": reason,
@@ -2333,7 +2334,7 @@ def _start_schedule_run(
         if _job_dispatch_state(held) == "terminal" and _job_is_live(held) is not True:
             from services.schedule_store import ScheduleWriteContended
 
-            started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+            started = _parse_ts(sched.running_started_at) or schedule_clock.utc_now()
             try:
                 _finalize_run(
                     schedule_id,
@@ -2465,7 +2466,7 @@ def record_schedule_for_finished_job(job_id: str) -> None:
             continue
         if not sched.running:
             return
-        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        started = _parse_ts(sched.running_started_at) or schedule_clock.utc_now()
         _finalize_run(
             sched.id,
             job_id,
@@ -2508,7 +2509,7 @@ def _finalize_finished_schedule_claims() -> None:
             continue
         if _job_is_live(sched.running_job_id) is not False:
             continue
-        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        started = _parse_ts(sched.running_started_at) or schedule_clock.utc_now()
         try:
             _finalize_run(
                 sched.id,
@@ -2620,7 +2621,7 @@ def _clear_stale_running_schedules() -> None:
                 if _job_dispatch_state(s.running_job_id) == "terminal":
                     from services.schedule_store import ScheduleWriteContended
 
-                    started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
+                    started = _parse_ts(s.running_started_at) or schedule_clock.utc_now()
                     try:
                         _finalize_run(
                             s.id,
@@ -2638,7 +2639,7 @@ def _clear_stale_running_schedules() -> None:
                         schedules[i] = fresh
                     continue
             if s.running and _is_running_stale(s):
-                current = datetime.now(timezone.utc)
+                current = schedule_clock.utc_now()
                 nxt = _parse_ts(s.next_run_at)
                 advanced = s.next_run_at
                 if nxt is None or nxt <= current:
