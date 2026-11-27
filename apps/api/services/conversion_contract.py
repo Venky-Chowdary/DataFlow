@@ -347,11 +347,15 @@ def classify_conversion(
     # instead of grading it a plain safe path (Accuracy A6).
     from services.decision_kernel.type_invent import temporal_tick_disclosure
 
-    unmeasured = temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population) or (
-        _value_dependent_loss(src, tgt, dest_db=dest_db) if population is None else ""
-    )
-    if kept_instant and kept_instant not in unmeasured and "the offset is not" not in unmeasured:
-        unmeasured = "; ".join(p.rstrip(".") for p in (unmeasured, kept_instant) if p)
+    # Every part that applies, in one sentence: a 7th digit not measured, a
+    # value-dependent loss, and an offset label the instant leaves behind.
+    parts = [
+        temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population),
+        _value_dependent_loss(src, tgt, dest_db=dest_db) if population is None else "",
+    ]
+    if kept_instant and ("zone-less" in kept_instant or not any("the offset is not" in p for p in parts if p)):
+        parts.append(kept_instant)
+    unmeasured = "; ".join(p.rstrip(".") for p in parts if p)
     if unmeasured:
         out["reason"] = (
             f"{src} → {tgt} keeps every value up to the destination's precision; {unmeasured}"

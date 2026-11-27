@@ -3848,6 +3848,12 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
     # spelling, and missing it would fall through and invent TZ polarity.
     # Keep ``raw`` for the dialect checks that need the parenthesis.
     collapsed = re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
+    # A time of day (TIME, TIMETZ, TIME [(p)] WITH TIME ZONE) is not a
+    # timestamp: it has no date and is not an instant, whatever its offset.
+    # Its offset polarity is :func:`time_timezone_polarity`'s; every spelling
+    # answers ``None`` here (only TIME WITH TIME ZONE used to match "tz").
+    if re.match(r"^TIME(TZ)?\b", collapsed) and not collapsed.startswith("TIMESTAMP"):
+        return None
     ntz_tokens = (
         "TIMESTAMP NTZ",
         "TIMESTAMP WITHOUT TIME ZONE",

@@ -368,7 +368,7 @@ Changed shapes:
   the session time zone. Before this release, rows loaded from offset or
   instant sources (SQL Server `datetimeoffset`, Oracle `TIMESTAMP WITH TIME
   ZONE`, PostgreSQL `timestamptz`, offset text in files) into those Oracle
-  columns can hold a shifted instant. That happens when the DataFlow
+  columns can hold a shifted instant. That happens when the Datawrap
   process did not run in UTC (`TZ` set on the host, `ORA_SDTZ`, thick-mode
   client settings), and for `WITH TIME ZONE` columns that received the
   source's own offset digits. The default container runs in UTC and stores

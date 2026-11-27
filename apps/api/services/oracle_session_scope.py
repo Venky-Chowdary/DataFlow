@@ -27,6 +27,7 @@ routes evaluate, and the advisory for rows an earlier release wrote unpinned.
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import threading
 from contextlib import contextmanager, nullcontext
@@ -34,6 +35,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+
+logger = logging.getLogger(__name__)
 
 _ORACLE = frozenset({"oracle", "oracledb", "oracle_db", "oracle_autonomous", "oracle_autonomous_warehouse",
                      "amazon_rds_oracle"})
@@ -47,7 +50,7 @@ _ROWS_WRITTEN: ContextVar[list[int] | None] = ContextVar("df_oracle_rows_written
 JOB_STAMP = "oracle_session"
 
 ZONE_CHANGE_NOTICE = (
-    "This Oracle session defaulted to {zone}; DataFlow now pins Oracle sessions to "
+    "This Oracle session defaulted to {zone}; Datawrap now pins Oracle sessions to "
     "UTC, so CURRENT_DATE, CURRENT_TIMESTAMP, LOCALTIMESTAMP, implicit comparisons "
     "of timestamp literals, LogMiner renderings of TIMESTAMP WITH LOCAL TIME ZONE, "
     "destination DEFAULT CURRENT_* values and mirror _deleted_at stamps evaluate in "
@@ -486,17 +489,22 @@ def oracle_run_scope(request: Any, job_id: str = "", store: Any = None) -> Itera
 
 
 def _stamp_job(store: Any, job_id: str, confirmed: bool, reason: str, prior: str) -> None:
-    """Stamp the run's session on its job: through ``update_job_fields`` or, when the
-    store has none, ``update_job_status`` at the job's current status."""
+    """Stamp the run's session on its job through the store's field update only.
+
+    Never the status update (that would rewrite the job's status), and never
+    fatal: a store without a field update, or a store error, is logged and the
+    run goes on — the stamp only feeds the upgrade advisory.
+    """
     if not job_id or store is None:
         return
-    stamp = {JOB_STAMP: {"utc_pinned": confirmed, "reason": reason, "default_zone": prior}}
     update = getattr(store, "update_job_fields", None)
-    if callable(update):
-        update(job_id, stamp)
+    if not callable(update):
+        logger.warning("job %s: store has no field update; Oracle session stamp skipped", job_id)
         return
-    current = (store.get_job(job_id) or {}).get("status") if hasattr(store, "get_job") else None
-    store.update_job_status(job_id, str(current or "running"), **stamp)
+    try:
+        update(job_id, {JOB_STAMP: {"utc_pinned": confirmed, "reason": reason, "default_zone": prior}})
+    except Exception:  # noqa: BLE001 - a stamp must not fail the transfer
+        logger.warning("job %s: Oracle session stamp not written", job_id, exc_info=True)
 
 
 def with_oracle_session_pin(fn: Callable[..., Any]) -> Callable[..., Any]:

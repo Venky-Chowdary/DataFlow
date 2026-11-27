@@ -2520,6 +2520,9 @@ def temporal_tick_disclosure(
     )
 
 
+_FRACTION_CEILINGS_WITHOUT_TYPMOD = {"bigquery": 6}
+
+
 def _temporal_precision_assessment(
     source_type: str,
     target_type: str,
@@ -2626,7 +2629,10 @@ def _temporal_precision_assessment(
     from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import _TEMPORAL_FSP_CAPS
 
-    cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
+    db_key = _normalize_dest_db(dest_db) if dest_db else ""
+    # BigQuery takes no typmod (so it has no DDL cap) but keeps microseconds:
+    # an unused 7th digit is judged as on PostgreSQL/MySQL (finding 8, D372).
+    cap = _TEMPORAL_FSP_CAPS.get(db_key, _FRACTION_CEILINGS_WITHOUT_TYPMOD.get(db_key))
     if (
         cap is not None
         and tgt_p >= cap

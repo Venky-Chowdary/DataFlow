@@ -427,12 +427,14 @@ def test_upgrade_advisory_reads_the_whole_window_not_the_last_200(monkeypatch):
 
 
 class _StatusOnlyStore:
-    """A job store with no ``update_job_fields``: the stamp goes through the status update."""
+    """A job store with no field update."""
 
     def __init__(self):
         self.jobs: dict = {}
+        self.status_writes = 0
 
     def update_job_status(self, job_id, status, **kw):
+        self.status_writes += 1
         self.jobs.setdefault(job_id, {}).update(kw)
         self.jobs[job_id]["status"] = status
         return True
@@ -441,18 +443,35 @@ class _StatusOnlyStore:
         return self.jobs.get(job_id)
 
 
-@pytest.mark.parametrize("make", ["fake_mongo", "status_only"])
-def test_run_stamps_its_job_whatever_the_store_offers(monkeypatch, make):
+class _BrokenFieldStore(_StatusOnlyStore):
+    def update_job_fields(self, job_id, fields):
+        raise ConnectionError("job store unavailable")
+
+
+def test_run_stamps_its_job_through_the_field_update(monkeypatch):
     from services.oracle_session_scope import oracle_run_scope
     from tests.test_property2_golden_path_never_blocked import _FakeMongo
 
     _fake_sessions(monkeypatch)
-    store = _FakeMongo() if make == "fake_mongo" else _StatusOnlyStore()
+    store = _FakeMongo()
     store.update_job_status("j1", "running")
     with oracle_run_scope(_req(), "j1", store):
         pass
     assert store.get_job("j1")["oracle_session"]["utc_pinned"] is True
     assert store.get_job("j1")["status"] == "running"
+
+
+@pytest.mark.parametrize("store_cls", [_StatusOnlyStore, _BrokenFieldStore])
+def test_a_store_that_cannot_stamp_never_touches_status_or_fails_the_run(monkeypatch, caplog, store_cls):
+    from services.oracle_session_scope import oracle_run_scope
+
+    _fake_sessions(monkeypatch)
+    store = store_cls()
+    store.update_job_status("j1", "running")
+    with caplog.at_level("WARNING"), oracle_run_scope(_req(), "j1", store):
+        assert oracle_utc_pin()[0] is True  # the run goes on
+    assert store.status_writes == 1 and "oracle_session" not in store.get_job("j1")
+    assert any("Oracle session stamp" in r.getMessage() for r in caplog.records)
 
 
 def test_partial_range_append_declines_after_the_lock_and_leaves_no_mark(monkeypatch):

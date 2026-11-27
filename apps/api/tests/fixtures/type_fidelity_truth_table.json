@@ -345,8 +345,8 @@
    "source_type": "datetimeoffset(7)",
    "dest": "postgresql",
    "target": "TIMESTAMPTZ(6)",
-   "truth": "loses_disclosed",
-   "why": "datetimeoffset preserves each value's offset; timestamptz stores UTC only.",
+   "truth": "loses_if_values",
+   "why": "datetimeoffset preserves each value's offset; timestamptz stores UTC only. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
@@ -582,9 +582,9 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mysql",
    "target": "DATETIME(6)",
-   "truth": "loses_disclosed",
+   "truth": "loses_if_values",
    "writer": "utc",
-   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html"
@@ -596,9 +596,9 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mariadb",
    "target": "TIMESTAMP(6)",
-   "truth": "loses_disclosed",
+   "truth": "loses_if_values",
    "writer": "utc",
-   "why": "MariaDB TIMESTAMP stores the UTC instant without the offset. The writer binds the UTC instant.",
+   "why": "MariaDB TIMESTAMP stores the UTC instant without the offset. The writer binds the UTC instant. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://mariadb.com/kb/en/timestamp/"
@@ -609,9 +609,9 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mariadb",
    "target": "DATETIME(6)",
-   "truth": "loses_disclosed",
+   "truth": "loses_if_values",
    "writer": "utc",
-   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://mariadb.com/kb/en/timestamp/"
@@ -664,7 +664,7 @@
    "target": "TIMESTAMP",
    "truth": "loses_if_values",
    "writer": "utc",
-   "why": "BigQuery TIMESTAMP keeps the instant (not the offset) to microseconds: a datetimeoffset(7) value using its 7th digit loses it. The writer binds the UTC instant.",
+   "why": "BigQuery TIMESTAMP keeps the instant (not the offset) to microseconds: a datetimeoffset(7) value using its 7th digit loses it. The writer binds the UTC instant. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"
@@ -731,9 +731,9 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mongodb",
    "target": "create_new",
-   "truth": "loses_disclosed",
+   "truth": "loses_if_values",
    "writer": "utc",
-   "why": "BSON date is a UTC instant (D136): the offset is disclosed, not kept. The writer binds the UTC instant.",
+   "why": "BSON date is a UTC instant (D136): the offset is disclosed, not kept. The writer binds the UTC instant. A value that uses datetimeoffset(7)'s 7th digit (or, for BSON, anything below the millisecond) loses it; with no sample that is disclosed, a measured one needs the Risk Contract.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://www.mongodb.com/docs/manual/reference/bson-types/"

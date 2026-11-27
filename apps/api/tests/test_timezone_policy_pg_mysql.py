@@ -1,8 +1,8 @@
 """PostgreSQL → MySQL timezone policy: one named contract, no blanket block.
 
 The rule under test: MySQL ``TIMESTAMP`` is a UTC instant carrier (epoch-bounded),
-MySQL ``DATETIME`` is a zoneless wall clock that can only carry an instant under an
-explicit UTC-normalize contract. Validate and Execute must read the same policy, and
+MySQL ``DATETIME`` is a zoneless wall clock that carries an instant as UTC digits,
+disclosed rather than contracted (finding 8). Validate and Execute must read the same policy, and
 an out-of-range instant must be held out rather than zeroed by MySQL.
 """
 

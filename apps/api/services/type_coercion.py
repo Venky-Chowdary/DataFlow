@@ -630,8 +630,9 @@ def assess_create_new_type_risk(
                         if outside
                         else ". "
                     )
-                    + "Use DATETIME(6) with a UTC-normalize contract for the full "
-                    "1000..9999 range, or accept that out-of-range rows quarantine."
+                    + "Use DATETIME(6) for the full 1000..9999 range (the instant is "
+                    "stored as UTC digits in a zone-less column, disclosed at "
+                    "Validate), or accept that out-of-range rows quarantine."
                 ),
             })
     if uuid_would_collapse(src, tgt, dest_db=db):

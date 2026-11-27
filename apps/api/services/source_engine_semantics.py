@@ -211,8 +211,13 @@ def instant_kept_label_lost(source_type: str, target_type: str, *, dest_db: str 
     ZONE`` on a session that read back UTC. A narrower fraction than the
     source keeps (below six digits) is a different loss and is not covered.
     """
+    from services.decision_kernel.types import normalize_logical_type
     from services.type_system import datetime_timezone_polarity
 
+    # Only a date+time instant: a time of day has no date to keep (the writer
+    # would invent one), so it is never this rule's.
+    if normalize_logical_type(source_type) != "datetime":
+        return ""
     if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
         return ""
     dest = _dest(dest_db)

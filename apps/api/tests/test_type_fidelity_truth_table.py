@@ -165,3 +165,44 @@ def test_zone_less_mysql_datetime_is_disclosed_by_validate(r) -> None:
     assert phrase in probe(["2024-01-02T03:04:05.123+05:30"], table_exists=False)
     # A UTC instant still lands in a zone-less column: disclosed too, without an offset count.
     assert phrase in probe(["2024-01-02T03:04:05Z"]) and "carry a UTC offset" not in probe(["2024-01-02T03:04:05Z"])
+
+
+@pytest.mark.parametrize("dest,target", [("bigquery", "TIMESTAMP"), ("mysql", "DATETIME(6)"),
+                                         ("mariadb", "TIMESTAMP(6)"), ("postgresql", "TIMESTAMPTZ(6)")])
+def test_a_seventh_digit_is_judged_the_same_way_everywhere(dest, target) -> None:
+    """datetimeoffset(7) into a microsecond carrier: no sample -> disclosed, a used 7th digit -> contract."""
+    with bind_source_engine("sqlserver"):
+        unmeasured = classify_conversion("datetimeoffset(7)", target, dest_db=dest)
+        measured = classify_conversion("datetimeoffset(7)", target, dest_db=dest,
+                                       population=["2024-01-01 00:00:00.1234567 +05:30"])
+    assert not unmeasured["requires_risk_contract"], unmeasured
+    assert "a 7th fractional digit was not observed" in unmeasured["unmeasured_loss"]
+    assert "the offset is not" in unmeasured["unmeasured_loss"]
+    assert measured["requires_risk_contract"], measured
+
+
+TIME_OF_DAY = ["time with time zone", "timetz", "TIME(6) WITH TIME ZONE", "TIMETZ(3)"]
+INSTANT_TARGETS = [("mysql", "DATETIME(6)"), ("mariadb", "TIMESTAMP(6)"), ("snowflake", "TIMESTAMP_LTZ(9)"),
+                   ("bigquery", "TIMESTAMP"), ("oracle", "TIMESTAMP(6) WITH LOCAL TIME ZONE")]
+
+
+@pytest.mark.parametrize("source", TIME_OF_DAY)
+@pytest.mark.parametrize("dest,target", INSTANT_TARGETS)
+def test_a_time_of_day_is_never_graded_as_a_kept_instant(source, dest, target) -> None:
+    """A time with an offset has no date: into a timestamp the writer invents one."""
+    from services.oracle_session_scope import bind_oracle_utc_pin
+    from services.type_system import datetime_timezone_polarity
+
+    assert datetime_timezone_polarity(source) is None  # every spelling alike
+    with bind_source_engine("postgresql"), bind_oracle_utc_pin(True, "session time zone read back as +00:00"):
+        conv = classify_conversion(source, target, dest_db=dest)
+    assert conv["requires_risk_contract"] and conv["conversion_class"] not in SAFE, conv
+
+
+def test_out_of_range_refusal_names_the_current_rule() -> None:
+    from connectors.sql_temporal import coerce_sql_temporal
+
+    with pytest.raises(ValueError) as refused:
+        coerce_sql_temporal("2050-01-01 00:00:00+00:00", "TIMESTAMP(6)", engine="mysql")
+    text = str(refused.value)
+    assert "DATETIME(6)" in text and "zone-less column" in text and "contract" not in text
