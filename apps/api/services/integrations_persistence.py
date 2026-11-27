@@ -79,32 +79,46 @@ def load_sections() -> dict[str, Any] | None:
 _KEYED_SECTIONS = ("sso", "ai_providers")
 
 
-def save_sections(data: dict[str, Any]) -> bool:
-    """Heal a database with no document from the local file, never over a writer.
-
-    Each section (each entry of a keyed section) is set only where the
-    document does not have it yet, so a concurrent writer's upsert of one
-    section — before or after this — keeps its value and loses no other
-    section of the file (review round 4).
-    """
-    coll = _collection()
-    if coll is None:
-        return False
+def _heal_paths(data: dict[str, Any], doc: dict[str, Any] | None) -> dict[str, Any]:
+    """The file's sections (keyed sections: entries) that ``doc`` does not have."""
+    doc = doc or {}
     paths: dict[str, Any] = {}
     for section in SECTIONS:
         if section not in data or section == "updated_at":
             continue
-        value = data[section]
+        value, have = data[section], doc.get(section)
         if section in _KEYED_SECTIONS and isinstance(value, dict):
-            paths.update({f"{section}.{key}": item for key, item in value.items()})
-        else:
+            have = have if isinstance(have, dict) else {}
+            paths.update({f"{section}.{k}": v for k, v in value.items() if k not in have})
+        elif section not in doc:
             paths[section] = value
+    return paths
+
+
+def save_sections(data: dict[str, Any], doc: dict[str, Any] | None = None) -> bool:
+    """Copy up what the local file has and the database document lacks.
+
+    Missing-only: each section (each entry of a keyed section) is set only
+    where the document does not have it, so a database value — a concurrent
+    writer's upsert, before or after this — is never overwritten. ``doc`` is
+    the document as just read (``None``: there was none). Called on every
+    read that finds the file ahead of the database, so a heal cut short, or
+    a document another node created first, is finished by the next read
+    (review rounds 4-5).
+    """
+    paths = _heal_paths(data, doc)
+    if doc is not None and not paths:
+        return True
+    coll = _collection()
+    if coll is None:
+        return False
     try:
-        coll.update_one(
-            {"_id": DOC_ID},
-            {"$setOnInsert": {"updated_at": data.get("updated_at") or ""}},
-            upsert=True,
-        )
+        if doc is None:
+            coll.update_one(
+                {"_id": DOC_ID},
+                {"$setOnInsert": {"updated_at": data.get("updated_at") or ""}},
+                upsert=True,
+            )
         for path, value in paths.items():
             coll.update_one({"_id": DOC_ID, path: {"$exists": False}}, {"$set": {path: value}})
     except Exception as exc:  # noqa: BLE001 - the next read tries again

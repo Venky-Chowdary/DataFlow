@@ -135,11 +135,11 @@ def _load_raw_state() -> tuple[dict[str, Any], str]:
 
     file_raw = _read_file()
     state, durable = read_document()
-    if state == "absent" and file_raw is not None:
-        # Heal: a settings file written before the database held them is copied
-        # up once. Only when the document is truly absent: a failed read is not
-        # an empty database, and must not overwrite it with this node's file.
-        save_sections(file_raw)
+    if state in ("absent", "ok") and file_raw is not None:
+        # Heal: what this node's file holds and the database lacks is copied
+        # up, missing paths only (never over a database value). Never on a
+        # failed read: that is not an empty database.
+        save_sections(file_raw, durable if state == "ok" else None)
     return _normalize_raw({**(file_raw or {}), **(durable or {})}), state
 
 

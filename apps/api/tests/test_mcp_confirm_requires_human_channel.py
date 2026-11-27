@@ -689,3 +689,61 @@ def test_two_fields_of_one_provider_updated_at_once_both_stick(app_client, monke
     cfg = store._load_raw()["ai_providers"]["openai"]
     assert cfg["model"] == "m2"
     assert cfg["api_key"] and cfg["api_key"] != before, "the concurrent key change was reverted"
+
+
+# -------------------------- review 5: the heal finishes on a later read
+
+
+def _file_ahead_of_database(store) -> None:
+    import json
+
+    store.STORE_PATH.write_text(json.dumps({
+        "sso": {"saml": {"entity_id": "https://idp.example/saml"}},
+        "pilot": {"engine": "local"},
+        "ai_providers": {"openai": {"model": "file-model"}},
+    }), encoding="utf-8")
+
+
+def test_a_heal_cut_short_is_finished_by_the_next_read(app_client, monkeypatch):
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    _file_ahead_of_database(store)
+    coll = _FakeSettingsCollection()
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+    real_update = coll.update_one
+    failed = {"n": 0}
+
+    def update_one(match, update, upsert=False):
+        if "sso.saml" in match and not failed["n"]:
+            failed["n"] = 1
+            raise ConnectionError("primary stepped down")
+        return real_update(match, update, upsert=upsert)
+
+    monkeypatch.setattr(coll, "update_one", update_one)
+    store._load_raw()  # created the document, then failed part-way
+    assert failed["n"] == 1 and "saml" not in (coll.doc.get("sso") or {})
+
+    store._load_raw()  # the document exists now: the next read still finishes the heal
+    assert coll.doc["sso"]["saml"] == {"entity_id": "https://idp.example/saml"}
+    assert coll.doc["ai_providers"]["openai"] == {"model": "file-model"}
+
+
+def test_a_document_another_node_created_still_gets_this_nodes_sections(app_client, monkeypatch):
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    _file_ahead_of_database(store)
+    coll = _FakeSettingsCollection()
+    coll.doc = {"_id": persistence.DOC_ID, "pilot": {"engine": "cloud"},
+                "ai_providers": {"anthropic": {"model": "db-model"}}}
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+
+    store._load_raw()
+
+    assert coll.doc["sso"]["saml"] == {"entity_id": "https://idp.example/saml"}
+    assert coll.doc["ai_providers"] == {"anthropic": {"model": "db-model"}, "openai": {"model": "file-model"}}
+    assert coll.doc["pilot"] == {"engine": "cloud"}, "a database value is never healed over"
+    writes = len(coll.writes)
+    store._load_raw()
+    assert len(coll.writes) == writes, "nothing missing: a read writes nothing"
