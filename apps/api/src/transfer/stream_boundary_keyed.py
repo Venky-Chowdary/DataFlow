@@ -20,7 +20,7 @@ The destination is now read at its own precision (``stream_boundary_read``):
   reason. The next run retries the same tie group;
 * a structural one (no such column, key not on the page, a cursor that cannot
   be compared) fails with the remedy (:data:`STRUCTURAL_REMEDY`) unless the
-  route carries the audited acknowledgement ``accept_boundary_duplicates``,
+  route carries the audited acknowledgement (``services.boundary_ack_store``),
   in which case the peers are appended and the acceptance is recorded.
 
 After the write, Gate-8 re-reads the boundary the same way and fails when a
@@ -91,14 +91,43 @@ def _refused_message(reason: str) -> str:
     )
 
 
-def _accepted(destination: Any) -> dict[str, str] | None:
-    """The route's audited acknowledgement, when it names an actor and a reason."""
-    extra = getattr(destination, "extra", None) or {}
-    ack = extra.get("accept_boundary_duplicates") if isinstance(extra, dict) else None
-    if not isinstance(ack, dict):
+def _accepted(destination: Any, table: str) -> dict[str, str] | None:
+    """The route's recorded acknowledgement (``services.boundary_ack_store``).
+
+    Only one recorded through the audited API counts; ``accept_boundary_duplicates``
+    typed into the destination's options is ignored.
+    """
+    from services.boundary_ack_store import lookup
+
+    ack = lookup(str(getattr(destination, "connector_id", "") or ""), str(table or ""))
+    if not ack or not str(ack.get("actor") or "").strip():
         return None
-    actor, reason = str(ack.get("actor") or "").strip(), str(ack.get("reason") or "").strip()
-    return {"actor": actor, "reason": reason} if actor and reason else None
+    return {"actor": str(ack["actor"]), "reason": str(ack.get("reason") or ""), "at": str(ack.get("at") or "")}
+
+
+#: Consecutive held-back runs after which the route stops retrying (review r4).
+HOLDBACK_LIMIT = 3
+
+
+def _holdbacks(run: Any, *, failed: bool) -> int:
+    """Count consecutive hold-backs on the route's stored watermark record.
+
+    ``failed`` adds one; a measured boundary resets it. The watermark value
+    itself is written back unchanged.
+    """
+    key = str(getattr(run.cfg, "boundary_route_key", "") or "")
+    if not key:
+        return 1 if failed else 0
+    from services import sync_cursor as sc
+
+    watermark, meta = sc.get_watermark_record(key)
+    if watermark is None:
+        return 1 if failed else 0
+    before = int(meta.get("boundary_holdbacks") or 0)
+    after = before + 1 if failed else 0
+    if after != before:
+        sc.set_watermark(key, watermark, metadata={**meta, "boundary_holdbacks": after})
+    return after
 
 
 def _fp(values: tuple, cols: list[str], dialect: str, types: dict) -> str:
@@ -157,10 +186,13 @@ def append_boundary_rows_landed(
     if state.get("fps") is None:
         state["fps"] = set()  # the re-read digest asks the same question of its page
     try:
-        return _landed(run, headers, rows, cursor_dest_col=cursor_dest_col,
-                       watermark=watermark, keyed=keyed, record=not verify)
+        landed = _landed(run, headers, rows, cursor_dest_col=cursor_dest_col,
+                         watermark=watermark, keyed=keyed, record=not verify)
+        if not verify:
+            _holdbacks(run, failed=False)
+        return landed
     except BoundaryStructural as exc:
-        ack = _accepted(getattr(run.cfg, "destination", None))
+        ack = _accepted(getattr(run.cfg, "destination", None), run.cfg.dest_table)
         summary = _summary(run)
         if ack is None:
             raise BoundaryRefused(_refused_message(str(exc))) from exc
@@ -178,10 +210,19 @@ def append_boundary_rows_landed(
             f"the destination read failed ({type(exc).__name__})"
         )
         summary = _summary(run)
+        count = _holdbacks(run, failed=True) if not verify else 0
         if summary is not None:
             summary.setdefault(BOUNDARY_TIE_KEY, {})["held_back"] = {
-                "rows": len(rows), "reason": reason, "watermark": str(watermark),
+                "rows": len(rows), "reason": reason, "watermark": str(watermark), "consecutive": count,
             }
+        if count >= HOLDBACK_LIMIT:
+            # A deterministic failure (an unindexed cursor timing out) would
+            # hold back forever: from the third run on it is structural.
+            raise BoundaryRefused(
+                f"The destination did not answer the watermark check on {count} consecutive "
+                f"runs ({reason}). Add an index on {cursor_dest_col} (or declare a key) so "
+                "the check finishes, or accept boundary duplicates for this route."
+            ) from exc
         raise BoundaryHeldBack(held_back_message(len(rows), watermark, reason)) from exc
 
 
@@ -207,7 +248,7 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
         stored = read_candidates(
             dialect=dialect, dest_cfg=cfg.dest_cfg, table=cfg.dest_table,
             cursor_col=cursor_dest_col, watermark=str(watermark), key_cols=[], keys=None,
-            columns=targets,
+            columns=targets, ddl=str(types.get(cursor_dest_col) or ""),
         )
         pool: dict[str, int] = {}
         cols: list[str] | None = None
@@ -255,7 +296,7 @@ def _keyed_landed(run, headers, rows, mapped, tie, *, dialect, types, cursor_des
         for r in read_candidates(
             dialect=dialect, dest_cfg=cfg.dest_cfg, table=cfg.dest_table,
             cursor_col=cursor_dest_col, watermark=str(watermark), key_cols=key_cols,
-            keys=todo, columns=[cursor_dest_col, *key_cols],
+            keys=todo, columns=[cursor_dest_col, *key_cols], ddl=str(types.get(cursor_dest_col) or ""),
         ):
             kfp = _fp(tuple(r.get(c.lower()) for c in key_cols), key_cols, dialect, types)
             by_fp[kfp] = by_fp.get(kfp, 0) + 1
@@ -324,6 +365,7 @@ def boundary_duplicates(*, dest_summary: Any, endpoint: Any, mappings: list[dict
         for r in read_candidates(
             dialect=dialect, dest_cfg=dest_cfg, table=table, cursor_col=cursor_col,
             watermark=watermark, key_cols=key_cols, keys=keys, columns=[cursor_col, *key_cols],
+            ddl=str(types.get(cursor_col) or ""),
         ):
             kfp = _fp(tuple(r.get(c.lower()) for c in key_cols), key_cols, dialect, types)
             if kfp in wanted:
@@ -340,6 +382,7 @@ def boundary_duplicates(*, dest_summary: Any, endpoint: Any, mappings: list[dict
     for r in read_candidates(
         dialect=dialect, dest_cfg=dest_cfg, table=table, cursor_col=cursor_col,
         watermark=watermark, key_cols=[], keys=None, columns=[cursor_col, *cols],
+        ddl=str(types.get(cursor_col) or ""),
     ):
         rfp = _fp(tuple(r.get(c.lower()) for c in cols), cols, dialect, types)
         counts[rfp] = counts.get(rfp, 0) + 1

@@ -107,6 +107,10 @@
       "scope": "workspace",
       "resource": "saved_connector"
     },
+    "POST /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
     "POST /api/v1/connectors/saved/{connector_id}/region-verification": {
       "scope": "platform",
       "resource": "saved_connector",

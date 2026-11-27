@@ -637,6 +637,9 @@ _BODIES: dict[str, Any] = {
     "POST /api/v1/transfer/plans/{plan_id}/map": {"use_llm": False},
     "POST /api/v1/transfer/plans/{plan_id}/preflight": {},
     "PATCH /api/v1/connectors/saved/{connector_id}": {"name": "renamed-by-b"},
+    "POST /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
+        "table": "orders", "reason": "tenancy probe: duplicates tolerated",
+    },
     "PUT /api/v1/connectors/saved/{connector_id}": {
         "name": "renamed-by-b", "type": "postgresql", "host": "b.example.com", "port": 5432,
     },

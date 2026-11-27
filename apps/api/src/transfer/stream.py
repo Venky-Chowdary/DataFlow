@@ -1008,7 +1008,7 @@ def _stream_database_transfer_impl(
             run, scope, _src_rich_catalog, contract,
             "" if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg) else run.cfg.table,
         )
-        cursor_key = scope.cursor_key
+        cursor_key = run.cfg.boundary_route_key = scope.cursor_key  # D335 hold-back count
         run.cfg.watermark = scope.read_watermark
         from services.preflight_cursor_gate import refuse_unusable_cursor_state
         from services.sync_cursor import reconcile_cursor_tiebreak

@@ -585,6 +585,50 @@ def verify_saved_connector_region(
     return _to_ui(updated)
 
 
+class BoundaryDuplicatesAckBody(BaseModel):
+    """Accept possible boundary duplicates for one table of this destination."""
+
+    table: str = Field(min_length=1, max_length=512)
+    reason: str = Field(min_length=10, max_length=500)
+
+
+@router.post("/{connector_id}/boundary-duplicates-acknowledgement")
+def acknowledge_boundary_duplicates(
+    connector_id: str,
+    body: BoundaryDuplicatesAckBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Record that an incremental append into ``table`` may append its watermark row again (D335).
+
+    Only for a route whose boundary cannot be checked; ``job.manage`` (as for
+    approving DDL), the actor from the session, an audit event. Runs into the
+    table then complete with warnings and name the accepted duplicates.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.boundary_ack_store import record
+
+    conn = _writable_connector_or_404(
+        request, get_connector(connector_id, workspace_id=_resolve_workspace(request, workspace_id))
+    )
+    actor = actor_from_request(request)
+    if actor in ("", "anonymous"):
+        raise HTTPException(status_code=401, detail="Sign in to accept boundary duplicates")
+    ack = record(
+        connector_id, body.table, actor=actor, reason=body.reason.strip(),
+        workspace_id=str(conn.workspace_id or ""),
+    )
+    append_audit_event(
+        action="route.boundary_duplicates_accepted",
+        resource=f"connector:{connector_id}",
+        actor=actor,
+        level="warning",
+        workspace_id=str(conn.workspace_id or "") or None,
+        details={"table": body.table, "reason": body.reason.strip()},
+    )
+    return ack
+
+
 @router.post("/{connector_id}/test")
 def test_saved_connector(
     connector_id: str,

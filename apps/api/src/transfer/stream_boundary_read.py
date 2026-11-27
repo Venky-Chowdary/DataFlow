@@ -12,8 +12,10 @@ It is asked at the destination's own precision, with nothing wider:
   datetime bind is a DATE there);
 * a text cursor (SQLite, VARCHAR) is matched on the spellings that instant
   can have (``T`` or space, fraction digits, offset forms);
-* a keyed append adds every key column (OR of ANDs, chunked) and pages the
-  answer by keyset; a keyless append streams it. Nothing is capped.
+* a keyed append adds every key column (OR of ANDs, chunked); both stream
+  the answer (a page boundary never splits a key's copies). Nothing is capped.
+  BigQuery and Snowflake are asked with typed parameters too
+  (``stream_boundary_warehouse``).
 
 Errors are split. :class:`BoundaryStructural` - the destination has no such
 column, the key is not on the page, the cursor type cannot be compared - will
@@ -43,8 +45,9 @@ _MSSQL = frozenset({"sqlserver", "mssql", "azure_sql", "azuresql"})
 STRUCTURAL_REMEDY = (
     "Declare a primary key or dedupe key on this route (a keyed append is "
     "matched by key), or record the per-route acknowledgement "
-    "'accept possible boundary duplicates' (destination option "
-    "accept_boundary_duplicates with an actor and a reason)."
+    "'accept possible boundary duplicates' (recorded by a user with job.manage "
+    "through POST /api/v1/connectors/saved/{connector_id}/"
+    "boundary-duplicates-acknowledgement)."
 )
 
 
@@ -267,17 +270,6 @@ def _key_terms(table_cols: dict[str, Any], key_cols: list[str], keys: list[dict]
     return sa.or_(*terms)
 
 
-def _after(cols: list[Any], last: tuple) -> Any:
-    """Keyset continuation ``(c1, c2, ...) > last`` spelled for every engine."""
-    import sqlalchemy as sa
-
-    ors = []
-    for i, col in enumerate(cols):
-        eqs = [cols[j] == last[j] for j in range(i)]
-        ors.append(sa.and_(*eqs, col > last[i]))
-    return sa.or_(*ors)
-
-
 def _bound_session(conn: Any, fam: str) -> None:
     """A per-statement time budget on PostgreSQL, scoped to this transaction (R10).
 
@@ -290,14 +282,22 @@ def _bound_session(conn: Any, fam: str) -> None:
 
 def read_candidates(
     *, dialect: str, dest_cfg: dict, table: str, cursor_col: str, watermark: str,
-    key_cols: list[str], keys: list[dict] | None, columns: list[str],
+    key_cols: list[str], keys: list[dict] | None, columns: list[str], ddl: str = "",
 ) -> Iterator[dict[str, Any]]:
-    """Destination rows stored at the watermark (lower-cased names), every one."""
+    """Destination rows stored at the watermark (lower-cased names), every one.
+
+    ``ddl`` is the destination cursor column's type where the engine's own
+    catalog is not read here (document and file stores).
+    """
     from .engine_family import family_or_kind
 
-    if family_or_kind(dialect) not in _SQL_FAMILIES:
-        yield from _sample_rows(dialect=dialect, dest_cfg=dest_cfg, table=table, cursor_col=cursor_col,
-                                watermark=watermark, key_cols=key_cols, keys=keys, columns=columns)
+    fam = family_or_kind(dialect)
+    if fam not in _SQL_FAMILIES:
+        from .stream_boundary_warehouse import bigquery_rows, snowflake_rows
+
+        reader = {"bigquery": bigquery_rows, "snowflake": snowflake_rows}.get(fam, _sample_rows)
+        yield from reader(dialect=dialect, dest_cfg=dest_cfg, table=table, cursor_col=cursor_col,
+                          watermark=watermark, key_cols=key_cols, keys=keys, columns=columns, ddl=ddl)
         return
     import sqlalchemy as sa
 
@@ -333,25 +333,24 @@ def read_candidates(
                     for row in rows:
                         yield {c.lower(): v for c, v in zip(names, row)}
                 return
-            order = [cols[c.lower()] for c in key_cols]
             for i in range(0, len(keys), _KEY_CHUNK):
-                base = sa.and_(where, _key_terms(cols, key_cols, keys[i : i + _KEY_CHUNK], fam))
-                last = None
+                # Streamed, never keyset-paged: a page boundary inside one key's
+                # copies skipped the rest of them (review r4).
+                cond = sa.and_(where, _key_terms(cols, key_cols, keys[i : i + _KEY_CHUNK], fam))
+                result = conn.execution_options(stream_results=True).execute(
+                    sa.select(*select).where(cond)
+                )
                 while True:
-                    cond = base if last is None else sa.and_(base, _after(order, last))
-                    rows = conn.execute(
-                        sa.select(*select).where(cond).order_by(*order).limit(_PAGE_ROWS)
-                    ).fetchall()
+                    rows = result.fetchmany(_PAGE_ROWS)
+                    if not rows:
+                        break
                     for row in rows:
                         yield {c.lower(): v for c, v in zip(names, row)}
-                    if len(rows) < _PAGE_ROWS:
-                        break
-                    last = tuple(row[names.index(c)] for c in key_cols)
     finally:
         release_engine(engine)
 
 
-def _sample_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols, keys, columns):
+def _sample_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols, keys, columns, ddl=""):
     """Document and file destinations: the sample reader, filtered here."""
     from services.target_sample import read_target_sample
 
@@ -367,7 +366,7 @@ def _sample_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols, k
     )
     for r in rows or []:
         low = {str(k).lower(): v for k, v in r.items()}
-        if same_cursor(watermark, low.get(cursor_col.lower()), ddl="", dialect=dialect):
+        if same_cursor(watermark, low.get(cursor_col.lower()), ddl=ddl, dialect=dialect):
             yield low
 
 
