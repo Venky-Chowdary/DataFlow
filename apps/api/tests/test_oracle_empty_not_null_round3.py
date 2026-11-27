@@ -231,12 +231,15 @@ def test_4_a_billed_warehouse_is_scanned_once_on_request_and_its_result_reused(m
     cfg = {"type": "bigquery", "project": "p", "dataset": "d"}
     unasked, _ = oe.preflight_hook(_ctx(cfg, source_format="bigquery"))
     assert unasked["status"] == "block" and walks == []
-    maps = oe.stamp_check_now([dict(m) for m in _MAPS], {"option": oe.CHECK_OPTION, "columns": ["id", "note"]})
+    maps = oe.stamp_check_now([dict(m) for m in _MAPS], {"option": oe.CHECK_OPTION, "columns": ["id", "note"]},
+                              table="DEST")
     asked, _ = oe.preflight_hook(_ctx(cfg, source_format="bigquery", write_maps=maps))
     assert asked is None and len(walks) == 1  # read once, nothing empty
-    # A later Validate (a schedule beat) without the request reuses that result: no second scan.
-    later, _ = oe.preflight_hook(_ctx(cfg, source_format="bigquery"))
-    assert later is None and len(walks) == 1
+    # A later Validate (a schedule beat) without the request reuses that result: no
+    # second scan, and the gate says so (round 4: never a silent reuse).
+    later, later_blockers = oe.preflight_hook(_ctx(cfg, source_format="bigquery"))
+    assert later["status"] == "warn" and later_blockers == [] and len(walks) == 1
+    assert "being reused" in later["message"]
 
 
 # ------------------------------------------------------------------------ 5

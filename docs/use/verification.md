@@ -59,19 +59,42 @@ Execute. A SQL source counts them itself; otherwise Validate reads the rows the
 run will read (with its filter, incremental window and transform). If there
 are none, nothing is shown. If there are some, the run is blocked and the gate
 names the column and the count. If Validate could not count them exactly (only
-a preview could be read, the scan stopped, or the source or its catalog could
-not be read), the column is blocked too, and the gate says why empty strings
-could not be ruled out. Every block lists what you can do:
+a preview could be read, the scan stopped, the time ran out, or the source or
+its catalog could not be read), the column is blocked too, and the gate says
+why empty strings could not be ruled out.
+
+A column whose type cannot hold `''` is ruled out from the source catalog,
+without reading a row, however large the table: numbers, dates and times,
+booleans and uuids; on PostgreSQL also an enum whose labels do not include
+`''`, `json`/`jsonb` (read as JSON text), arrays and `inet`/`cidr`/`macaddr`;
+on MySQL also `JSON`. A type that can hold `''` is always checked: text and
+char types, an enum with a `''` label, `tsvector`, `xml`, a MySQL `ENUM` or
+`SET`, MariaDB's `JSON` (a text column), and every SQLite column (SQLite's
+declared types do not restrict what is stored).
+
+Validate's check has 60 seconds in total. The columns you asked to check now
+go first, then the columns the preview already shows empty, then the rest,
+each with an equal share of the time left (what one column does not use goes
+to the next), so one slow column does not use up the others' time. A column
+the time does not reach is blocked with the reason and the actions below.
+
+Every block lists what you can do:
 
 - **Map `default:<value>`** on the column: empty and blank values are written
   as `<value>`, everything else is unchanged; Validate then needs no read.
 - **Check this column now** (`risk_acceptance: {"option":
   "oracle_empty_check_now", "columns": [...]}`): a longer read, within a total
-  of 5 minutes for the check (Validate's own check has 60 seconds across all
-  columns). It is recorded with your signed-in user and lasts an hour. Not
-  offered when the source catalog cannot be read: fix the connection. On BigQuery, Snowflake, Databricks,
-  ClickHouse and Trino this is the only way Validate reads the column, because
-  the warehouse bills the scan.
+  of 5 minutes for the check, the asked columns first. Datawrap issues the
+  request itself, signed and bound to the column pair, the destination table,
+  the workspace and your signed-in user; it lasts at most an hour from when it
+  was issued. A request written by hand (or edited) in the API body is
+  ignored. Not offered when the source catalog cannot be read: fix the
+  connection. On BigQuery, Snowflake, Databricks, ClickHouse and Trino this
+  is the only way Validate reads the column, because the warehouse bills the
+  scan. There, the result is reused for 24 hours so a schedule does not pay
+  for the scan again, and the gate says so (status "warn"): the column was
+  checked at `<time>`, the result is being reused until `<time>`, and how to
+  check again now.
 - **Replace the empty values in the source**, then validate again.
 
 Execute checks again unless it is confirming the Validate you approved (same

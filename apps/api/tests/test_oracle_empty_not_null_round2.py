@@ -151,9 +151,11 @@ def test_b_c_postgresql_enum_uuid_json_array_date_and_char_padding_live(pg_conn)
             for col in ("m", "u", "j", "a", "d", "c", "note")
         }
         # uuid and date cannot hold ''; a blank-padded char(5) is read as spaces,
-        # never ''; enum, jsonb and arrays are not answered "zero" unseen: the
-        # predicate does not apply to them, so the bounded walk decides (None).
-        assert got == {"m": None, "u": "zero", "j": None, "a": None, "d": "zero",
+        # never ''; an enum without a '' label, jsonb (read as JSON text, '""'
+        # at least) and an array (read as '[]' at least) are ruled out from the
+        # catalog (round 4): an enum WITH a '' label is still checked
+        # (test_oracle_empty_not_null_round4).
+        assert got == {"m": "zero", "u": "zero", "j": "zero", "a": "zero", "d": "zero",
                        "c": "zero", "note": "found"}, got
     finally:
         with conn.cursor() as cur:
