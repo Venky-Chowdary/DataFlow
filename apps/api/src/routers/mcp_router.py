@@ -280,7 +280,12 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
     try:
         new = set_mcp_policy(payload, confirm_merge=confirm_merge)
     except ControlPlaneUnavailable as exc:  # a RuntimeError: before the 409 below
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        from services.safe_errors import safe_http_exception
+
+        raise safe_http_exception(
+            exc, event="mcp.policy.store_unavailable", status_code=503, logger=logger,
+            public_message="The settings store is unavailable, so the MCP policy was not changed. Try again.",
+        ) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
