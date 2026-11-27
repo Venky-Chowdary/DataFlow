@@ -550,16 +550,45 @@ class NextRunsPreviewBody(BaseModel):
     count: int = Field(default=5, ge=1, le=10)
 
 
+#: Preview calls per caller: a burst of 10, refilled one a second (10 per 10 s).
+PREVIEW_RATE_CAPACITY = 10.0
+PREVIEW_RATE_REFILL_PER_SEC = 1.0
+
+
+@functools.lru_cache(maxsize=1)
+def _preview_rate_store():
+    from services.mcp_rate_limit import TokenBucketStore
+
+    return TokenBucketStore()
+
+
 @router.post("/preview")
-def preview_schedule_next_runs(body: NextRunsPreviewBody):
+def preview_schedule_next_runs(body: NextRunsPreviewBody, request: Request):
     # Sync on purpose: FastAPI runs it on the worker thread pool, never on the
     # event loop; next_run is milliseconds and the service caps count and time.
     """The next runs the scheduler will use for a cadence (the schedule form's preview).
 
     Pure computation with the scheduler's own functions: reads no schedule
     and writes nothing, so the form can never show times the beat will not use.
+    Limited per caller (the signed-in account, else the client address): the
+    form asks once per edit, a loop asking faster gets 429 and Retry-After.
     """
     from services.schedule_store import preview_next_runs
+    from services.workspace_access import actor_email
+
+    who = actor_email(request)
+    if who == "anonymous":
+        who = f"ip:{request.client.host if request.client else 'unknown'}"
+    verdict = _preview_rate_store().consume(
+        f"schedule-preview:{who}", capacity=PREVIEW_RATE_CAPACITY, refill_per_sec=PREVIEW_RATE_REFILL_PER_SEC
+    )
+    if not verdict["allowed"]:
+        retry = max(1, int(float(verdict.get("retry_after_sec") or 1) + 0.999))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many schedule previews; try again in a moment.",
+            headers={"Retry-After": str(retry)},
+        )
 
     return preview_next_runs(
         body.interval, body.cron, body.timezone,

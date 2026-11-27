@@ -110,4 +110,14 @@ describe("NextRunsPreview says where its times come from (review 8)", () => {
     assert.match(host.querySelector("li")?.textContent || "", /^Due now/);
     await act(async () => root.unmount());
   });
+  it("says when the scheduler's time budget cut the list short", async () => {
+    answer = { kind: "clock", timezone: "UTC", truncated: true, runs: ["2026-11-22T09:00:00+00:00", "2026-11-23T09:00:00+00:00"] };
+    const { host, root } = await mount({ cron: "0 9 * * *", timeZone: "UTC" });
+    assert.equal(times(host).length, 2);
+    assert.match(host.querySelector("[data-truncated]")?.textContent || "", /Only the first 2 runs could be worked out in time/);
+    answer = { kind: "clock", timezone: "UTC", runs: ["2026-11-22T09:00:00+00:00"] };
+    const whole = await mount({ cron: "0 9 * * *", timeZone: "UTC" });
+    assert.equal(whole.host.querySelector("[data-truncated]"), null);
+    await act(async () => { root.unmount(); whole.root.unmount(); });
+  });
 });

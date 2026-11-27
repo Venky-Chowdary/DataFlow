@@ -792,12 +792,15 @@ def preview_next_runs(
             elif rolling_minutes(interval) is None and interval not in INTERVALS:
                 return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
             runs = [current]
-            for _ in range(count - 1):
+            deadline = time.monotonic() + PREVIEW_TIME_BUDGET_SECONDS
+            while len(runs) < count and time.monotonic() <= deadline:
                 runs.append(_parse_ts(compute_next_run(interval, runs[-1], cron=cron, tz=tz or "UTC")))
         except CronError as exc:
             return {"kind": "invalid", "message": str(exc), "runs": []}
         out: dict[str, Any] = {"kind": "clock" if cron else "rolling", "due_now": True,
                                "runs": [r.isoformat() for r in runs]}
+        if len(runs) < count:
+            out["truncated"] = True  # the budget ran out: fewer runs than asked, said so
         if cron:
             out["timezone"] = tz or "UTC"
         else:
@@ -816,7 +819,10 @@ def preview_next_runs(
                 runs.append(cursor)
                 if time.monotonic() > deadline:
                     break  # a hard budget: list what was found in time
-            return {"kind": "clock", "timezone": tz or "UTC", "runs": [r.isoformat() for r in runs]}
+            clock: dict[str, Any] = {"kind": "clock", "timezone": tz or "UTC", "runs": [r.isoformat() for r in runs]}
+            if len(runs) < count:
+                clock["truncated"] = True  # the budget ran out: fewer runs than asked, said so
+            return clock
     except CronError as exc:
         return {"kind": "invalid", "message": str(exc), "runs": []}
     if rolling_minutes(interval) is None and interval not in INTERVALS:

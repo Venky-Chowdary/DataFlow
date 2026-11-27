@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { previewScheduleNextRuns } from "../../lib/api";
+import { plural } from "../../lib/plural";
 import {
   describeEvery,
   formatRunTime,
@@ -149,6 +150,11 @@ export function NextRunsPreview({
             : preview.source === "scheduler"
               ? "Times from the scheduler."
               : "Worked out in this browser while the scheduler is asked…"}
+        </p>
+      )}
+      {(preview.kind === "clock" || preview.kind === "rolling") && preview.truncated && (
+        <p className="df2-next-runs-note" data-truncated="true">
+          Only the first {plural(preview.runs.length, "run")} could be worked out in time; later runs follow the same rule.
         </p>
       )}
       {preview.kind === "clock" && preview.dstChange && (

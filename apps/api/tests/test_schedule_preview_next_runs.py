@@ -85,3 +85,47 @@ def test_an_overdue_rolling_cadence_runs_now_then_counts_from_now_like_the_beat(
     cron = preview_next_runs("daily", "0 9 * * *", "UTC", stored_next_run_at="2026-11-20T09:00:00+00:00",
                              cadence_changed=False, now=NOW)
     assert cron["due_now"] is True and cron["runs"][1] == "2026-11-22T09:00:00+00:00"
+
+
+def test_a_list_cut_by_the_time_budget_says_so(monkeypatch):
+    """Review round 4 #2: fewer runs than asked must not look like the whole answer."""
+    import services.schedule_store as store
+
+    full = preview_next_runs("daily", "0 9 * * *", "UTC", count=5, now=NOW)
+    assert len(full["runs"]) == 5 and "truncated" not in full
+    monkeypatch.setattr(store, "PREVIEW_TIME_BUDGET_SECONDS", -1.0)
+    cut = preview_next_runs("daily", "0 9 * * *", "UTC", count=5, now=NOW)
+    assert cut["truncated"] is True and 1 <= len(cut["runs"]) < 5
+    overdue = preview_next_runs("daily", "0 9 * * *", "UTC", stored_next_run_at="2026-11-20T09:00:00+00:00",
+                                cadence_changed=False, count=5, now=NOW)
+    assert overdue["truncated"] is True and overdue["runs"] == [NOW.isoformat()]
+
+
+def _request(email: str | None, host: str = "10.0.0.7"):
+    from starlette.requests import Request
+
+    req = Request({"type": "http", "method": "POST", "path": "/api/v1/schedules/preview", "headers": [],
+                   "client": (host, 5000)})
+    if email:
+        req.state.user_email = email
+    return req
+
+
+def test_each_caller_gets_ten_previews_per_ten_seconds():
+    """Review round 4 #2: the preview is CPU on the worker pool; a loop must not monopolise it."""
+    import pytest
+    from fastapi import HTTPException
+
+    from src.routers.schedules_router import NextRunsPreviewBody, _preview_rate_store, preview_schedule_next_runs
+
+    _preview_rate_store().clear()
+    body = NextRunsPreviewBody(interval="daily", cron="0 9 * * *", timezone="UTC")
+    for _ in range(10):
+        assert preview_schedule_next_runs(body, _request("ana@example.com"))["kind"] == "clock"
+    with pytest.raises(HTTPException) as refused:
+        preview_schedule_next_runs(body, _request("ana@example.com"))
+    assert refused.value.status_code == 429 and int(refused.value.headers["Retry-After"]) >= 1
+    # Another account, and an anonymous caller by address, have their own allowance.
+    assert preview_schedule_next_runs(body, _request("bo@example.com"))["kind"] == "clock"
+    assert preview_schedule_next_runs(body, _request(None))["kind"] == "clock"
+    _preview_rate_store().clear()
