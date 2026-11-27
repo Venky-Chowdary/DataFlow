@@ -553,9 +553,11 @@ def _shown_wire_sample(rows: list) -> list:
 
 
 #: The uniform draw's seed decides every later sampled position: never shown
-#: while the job can still draw (review 2, item 8). A finished run's report
-#: keeps it so an auditor can replay the draw.
-_DRAW_SECRET_KEYS = ("seed",)
+#: while the job can still draw (review 2, item 8) - queued, running, paused,
+#: or failed or cancelled and resumable (review 3, item 6). Only a completed
+#: run's report keeps it, so an auditor can replay the draw. The sealed rows
+#: are never shown.
+_DRAW_SECRET_KEYS = ("seed", "sealed_rows")
 
 
 def _without_draw_seed(draw: dict) -> dict:
@@ -582,7 +584,9 @@ def _project_operator_quarantine(job: dict) -> None:
         if isinstance(summary.get("reconcile_sample"), list):
             summary["reconcile_sample"] = _shown_wire_sample(summary["reconcile_sample"])
         draw = summary.get("reconcile_sample_draw")
-        if isinstance(draw, dict) and str(job.get("status") or "") in {"", "queued", "running", "retrying"}:
+        from services.job_status import COMPLETED_STATUSES
+
+        if isinstance(draw, dict) and str(job.get("status") or "") not in COMPLETED_STATUSES:
             summary["reconcile_sample_draw"] = _without_draw_seed(draw)
     checkpoint = job.get("checkpoint")
     if isinstance(checkpoint, dict):

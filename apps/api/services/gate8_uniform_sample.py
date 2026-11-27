@@ -29,9 +29,12 @@ method only (:data:`services.parity_evidence.UNIFORM_RANDOM_SAMPLE_METHODS`).
 
 from __future__ import annotations
 
+import logging
 import random
 import secrets
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 METHOD = "uniform_random"
 ALGORITHM = (
@@ -90,11 +93,119 @@ class UniformSampleMerger:
         }
 
     def state(self, draw: dict[str, Any], chunk_index: int) -> dict[str, Any]:
-        """The checkpointed draw after page ``chunk_index``: enough to continue it."""
-        return {
-            **draw, "population_rows": self.population, "rows": list(self.rows),
+        """The checkpointed draw after page ``chunk_index``: enough to continue it.
+
+        The drawn rows are source values: at rest in the job store they are
+        sealed with the platform key (``sealed_rows``, review 3 item 6), never
+        stored in the clear. A seal that fails drops them and marks the state
+        partial, so a resume states no bound rather than a wrong one.
+        """
+        out = {
+            **draw, "population_rows": self.population,
             "chunk_index": int(chunk_index), "partial": self.partial,
         }
+        try:
+            out["sealed_rows"] = seal_rows(self.rows)
+        except Exception:  # noqa: BLE001 - no sealed rows: the resumed draw is partial
+            logger.warning("Gate-8 draw rows could not be sealed; a resume will be partial",
+                           exc_info=True)
+            out["partial"] = True
+        return out
+
+
+# -- sealing the drawn rows at rest ------------------------------------------------
+
+
+def _encode(value: Any) -> Any:
+    import base64
+    from datetime import date, datetime, time, timedelta
+    from decimal import Decimal
+    from uuid import UUID
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return {"$t": "dec", "v": str(value)}
+    if isinstance(value, datetime):
+        return {"$t": "dt", "v": value.isoformat()}
+    if isinstance(value, date):
+        return {"$t": "d", "v": value.isoformat()}
+    if isinstance(value, time):
+        return {"$t": "tm", "v": value.isoformat()}
+    if isinstance(value, timedelta):
+        return {"$t": "td", "v": [value.days, value.seconds, value.microseconds]}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"$t": "b", "v": base64.b64encode(bytes(value)).decode("ascii")}
+    if isinstance(value, UUID):
+        return {"$t": "u", "v": str(value)}
+    if isinstance(value, dict):
+        return {"$t": "m", "v": [[str(k), _encode(v)] for k, v in value.items()]}
+    if isinstance(value, (list, tuple)):
+        return {"$t": "l", "v": [_encode(v) for v in value]}
+    return {"$t": "s", "v": str(value)}
+
+
+def _decode(value: Any) -> Any:
+    import base64
+    from datetime import date, datetime, time, timedelta
+    from decimal import Decimal
+    from uuid import UUID
+
+    if not isinstance(value, dict):
+        return value
+    tag, inner = value.get("$t"), value.get("v")
+    if tag == "dec":
+        return Decimal(inner)
+    if tag == "dt":
+        return datetime.fromisoformat(inner)
+    if tag == "d":
+        return date.fromisoformat(inner)
+    if tag == "tm":
+        return time.fromisoformat(inner)
+    if tag == "td":
+        return timedelta(days=inner[0], seconds=inner[1], microseconds=inner[2])
+    if tag == "b":
+        return base64.b64decode(inner)
+    if tag == "u":
+        return UUID(inner)
+    if tag == "m":
+        return {k: _decode(v) for k, v in inner}
+    if tag == "l":
+        return [_decode(v) for v in inner]
+    return inner
+
+
+def seal_rows(rows: list[Any]) -> str:
+    """The drawn rows, typed and encrypted with the platform key."""
+    import json
+
+    from services.secret_vault import _fernet_encrypt
+
+    text = json.dumps([_encode(row) for row in rows if isinstance(row, dict)], separators=(",", ":"))
+    return _fernet_encrypt(text)
+
+
+def open_rows(sealed: str) -> list[dict[str, Any]]:
+    """The rows :func:`seal_rows` sealed."""
+    import json
+
+    from services.secret_vault import _fernet_decrypt
+
+    rows = [_decode(item) for item in json.loads(_fernet_decrypt(sealed))]
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _state_rows(state: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The checkpointed drawn rows (sealed, or a pre-seal checkpoint's clear rows)."""
+    sealed = state.get("sealed_rows")
+    if isinstance(sealed, str) and sealed:
+        try:
+            return open_rows(sealed)
+        except Exception:  # noqa: BLE001 - unreadable: the resumed draw is partial
+            logger.warning("Gate-8 draw rows could not be opened; the resumed draw is partial",
+                           exc_info=True)
+            return None
+    return [row for row in state.get("rows") or [] if isinstance(row, dict)]
 
 
 def resume_draw(checkpoint: Any, k: int, *, resumed: bool) -> tuple[dict[str, Any], UniformSampleMerger]:
@@ -117,9 +228,11 @@ def resume_draw(checkpoint: Any, k: int, *, resumed: bool) -> tuple[dict[str, An
     ):
         draw = {key: state[key] for key in ("method", "seed", "size", "algorithm") if key in state}
         merger = UniformSampleMerger(str(state["seed"]), int(state.get("size") or k))
-        merger.population = max(int(state.get("population_rows") or 0), 0)
-        merger.rows = [row for row in state.get("rows") or [] if isinstance(row, dict)][: merger.k]
-        return draw, merger
+        rows = _state_rows(state)
+        if rows is not None:
+            merger.population = max(int(state.get("population_rows") or 0), 0)
+            merger.rows = rows[: merger.k]
+            return draw, merger
     draw = new_draw(k)
     merger = UniformSampleMerger(draw["seed"], k)
     merger.partial = bool(resumed)

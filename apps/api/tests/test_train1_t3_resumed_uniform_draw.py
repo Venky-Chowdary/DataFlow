@@ -109,3 +109,39 @@ def test_shown_checkpoint_masks_the_draw_rows_and_hides_the_seed():
     done = sanitize_job_for_api({**job, "status": "completed"})
     assert done["destination_summary"]["reconcile_sample_draw"]["seed"] == "s3cr3t"
     assert "s3cr3t" not in str(done["checkpoint"])
+
+
+def test_the_seed_stays_hidden_while_a_run_can_still_draw():
+    """Review 3 item 6: a paused run, and a failed or cancelled one a retry
+    resumes from its checkpoint, can still draw; only a completed run shows it."""
+    from src.transfer.models import sanitize_job_for_api
+
+    for status in ("paused", "failed", "cancelled", "pending", "queued", "running", "retrying", ""):
+        job = {"status": status, "destination_summary": {
+            "reconcile_sample_draw": {"seed": "s3cr3t", "method": "uniform_random"}}}
+        assert "s3cr3t" not in str(sanitize_job_for_api(job)), status
+    for status in ("completed", "completed_with_quarantine", "completed_with_warnings"):
+        job = {"status": status, "destination_summary": {
+            "reconcile_sample_draw": {"seed": "s3cr3t", "method": "uniform_random"}}}
+        assert sanitize_job_for_api(job)["destination_summary"]["reconcile_sample_draw"]["seed"] == "s3cr3t"
+
+
+def test_the_checkpointed_draw_rows_are_sealed_at_rest_and_resume_exactly():
+    """Review 3 item 6: the draw rows are source values; the job store holds
+    them sealed, never in the clear, and a resume reads them back typed."""
+    from datetime import date, datetime, timezone
+    from decimal import Decimal
+
+    rows = [{"id": 1, "ssn": "123-45-6789", "amt": Decimal("10.50"),
+             "at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), "d": date(2026, 1, 2),
+             "blob": b"\x00\x01", "doc": {"$t": "not a tag", "n": [1, 2]}}]
+    merger = UniformSampleMerger("seed-1", 50)
+    merger.add(0, rows, 1)
+    state = merger.state({"method": METHOD, "seed": "seed-1", "size": 50}, 0)
+    stored = Checkpoint(job_id="j", chunk_index=0, reconcile_sample_draw_state=state).to_dict()
+    assert "123-45-6789" not in str(stored)
+    assert "rows" not in stored["reconcile_sample_draw_state"]
+    _draw, resumed = resume_draw(Checkpoint.from_dict(stored), 50, resumed=True)
+    assert not resumed.partial
+    assert resumed.rows == rows
+    assert resumed.population == 1
