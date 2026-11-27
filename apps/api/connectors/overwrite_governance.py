@@ -32,6 +32,7 @@ shows for each engine.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -173,29 +174,41 @@ def _sf_literal(value: str) -> str:
     return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
+def _sf_grantee(name: str) -> str:
+    """A grantee as SHOW GRANTS names it, quoted (``DB.ROLE`` for a database role)."""
+    return ".".join(_q(part) for part in str(name).split("."))
+
+
 def snowflake_reconcile(
-    cur: Any, *, source: SnowflakeGovernance, target: SnowflakeGovernance, target_ref: str
+    cur: Any,
+    *,
+    source: SnowflakeGovernance,
+    target: SnowflakeGovernance,
+    target_ref: str,
+    skip_unreadable: bool = False,
 ) -> list[str]:
     """Put on ``target_ref`` every grant, direct policy and tag ``source`` has and it lacks.
 
     Returns the statements run. Raises :class:`GovernanceNotPreserved` when an
     item of ``source`` is unknown (unreadable) or a statement is refused: the
     caller must then not publish ``target_ref`` under the live name.
+    ``skip_unreadable`` (a loss approved at Validate) reconciles only the
+    categories both sides could read.
     """
     unknown = [item for item in source.unreadable]
     unknown += [f"{item} (on the backup)" for item in target.unreadable]
-    if unknown:
+    if unknown and not skip_unreadable:
         raise GovernanceNotPreserved(target_ref, [f"unreadable {u}" for u in unknown])
     statements: list[str] = []
     have = set(target.grants or [])
-    for privilege, kind, grantee in source.grants or []:
+    for privilege, kind, grantee in (source.grants if target.grants is not None else None) or []:
         if (privilege, kind, grantee) in have:
             continue
         statements.append(
-            f"GRANT {privilege} ON TABLE {target_ref} TO {_SF_GRANTEE_KINDS[kind]} {grantee}"
+            f"GRANT {privilege} ON TABLE {target_ref} TO {_SF_GRANTEE_KINDS[kind]} {_sf_grantee(grantee)}"
         )
     have_policies = {(p["kind"], p["policy"], p["column"]) for p in target.policies or []}
-    for p in source.policies or []:
+    for p in (source.policies if target.policies is not None else None) or []:
         if (p["kind"], p["policy"], p["column"]) in have_policies:
             continue
         if p["kind"] == "ROW_ACCESS_POLICY":
@@ -214,7 +227,7 @@ def snowflake_reconcile(
         else:
             raise GovernanceNotPreserved(target_ref, [f"{p['kind'].lower()} {p['policy']}"])
     have_tags = {(t["tag"], t["value"], t["column"]) for t in target.tags or []}
-    for t in source.tags or []:
+    for t in (source.tags if target.tags is not None else None) or []:
         if (t["tag"], t["value"], t["column"]) in have_tags:
             continue
         if t["column"]:
@@ -379,26 +392,60 @@ def bigquery_create_like(client: Any, table_id: str, gov: BigQueryGovernance, ca
 # ------------------------------------------------------------ Elasticsearch
 
 
+def _es_body(raw: Any) -> dict[str, Any]:
+    """The JSON body of an elasticsearch-py response.
+
+    elasticsearch-py 8 returns ``ObjectApiResponse`` (not a ``dict``); its
+    payload is ``.body``. Reading only dicts made every index look alias-less.
+    """
+    body = getattr(raw, "body", raw)
+    if isinstance(body, Mapping):
+        return dict(body)
+    try:
+        return dict(body or {})
+    except (TypeError, ValueError):
+        return {}
+
+
 def elasticsearch_aliases(client: Any, index: str) -> list[dict[str, Any]]:
     """The aliases of ``index`` as ``update_aliases`` add actions."""
-    raw = client.indices.get_alias(index=index) or {}
-    body = dict(raw.get(index) or {}) if isinstance(raw, dict) else {}
+    raw = _es_body(client.indices.get_alias(index=index))
+    entry = raw.get(index)
+    if entry is None and len(raw) == 1:
+        # An alias-resolved name answers under the concrete index name.
+        entry = next(iter(raw.values()))
+    body = _es_body(entry or {})
     actions: list[dict[str, Any]] = []
-    for alias, spec in (body.get("aliases") or {}).items():
+    for alias, spec in _es_body(body.get("aliases") or {}).items():
         add = {"index": index, "alias": alias}
+        spec = _es_body(spec)
         for key in ("filter", "routing", "index_routing", "search_routing", "is_write_index", "is_hidden"):
-            if isinstance(spec, dict) and key in spec:
+            if key in spec:
                 add[key] = spec[key]
         actions.append({"add": add})
     return actions
 
 
 def elasticsearch_restore_aliases(client: Any, index: str, actions: list[dict[str, Any]]) -> None:
+    """Re-add the aliases, then read them back: a missing alias fails the restore.
+
+    A filtered alias is often the access boundary readers go through; a
+    restore that silently dropped it would report success on an index nobody
+    can read the way they did before.
+    """
     if not actions:
         return
     for action in actions:
         action["add"]["index"] = index
     client.indices.update_aliases(actions=actions)
+    wanted = {a["add"]["alias"]: a["add"] for a in actions}
+    present = {a["add"]["alias"]: a["add"] for a in elasticsearch_aliases(client, index)}
+    missing = sorted(
+        name for name, spec in wanted.items()
+        if name not in present or present[name].get("filter") != spec.get("filter")
+    )
+    if missing:
+        raise GovernanceNotPreserved(index, [f"alias(es) {missing} were not re-added"])
 
 
 # ----------------------------------------------------------------- Validate
@@ -416,8 +463,9 @@ def describe_overwrite_governance(db_type: str) -> dict[str, Any] | None:
         return {
             "engine": "snowflake",
             "mechanism": (
-                "The live table is kept: a zero-copy CLONE is the backup, the live table is "
-                "emptied with TRUNCATE and loaded in place."
+                "The live table is kept: its grants, policies and tags are read first, a zero-copy "
+                "CLONE (TRANSIENT for a transient table) is the backup and is given the same grants, "
+                "policies and tags, then the live table is emptied with TRUNCATE and loaded in place."
             ),
             "preserved": [
                 "grants", "masking and row access policies", "object tags", "streams on the table",
@@ -425,12 +473,16 @@ def describe_overwrite_governance(db_type: str) -> dict[str, Any] | None:
             ],
             "on_failure": (
                 "A failed run puts the previous rows back with INSERT OVERWRITE when the table has no "
-                "masking or row access policy. Otherwise it swaps the backup clone in (ALTER TABLE ... "
-                "SWAP WITH) after copying every grant, policy and tag the live table has onto it; a "
-                "stream on the table then follows the swapped-out object and goes stale."
+                "masking or row access policy. Otherwise it swaps the governed backup clone in "
+                "(ALTER TABLE ... SWAP WITH); a stream on the table then follows the swapped-out "
+                "object and goes stale. If that cannot finish, both tables stay and the error names "
+                "the exact SWAP / DROP statements that put the previous rows back."
             ),
             "not_preserved": [],
             "notes": [
+                "Grants, policies or tags the connector's role cannot read block Validate and refuse "
+                "the overwrite before any change, unless the destination DDL is approved.",
+                "A TEMPORARY table is refused: its backup could not outlive the session.",
                 "TRUNCATE plus reload reaches stream consumers as delete-all and insert-all.",
                 "Columns the table has and the run does not write stay (NULL); a type the "
                 "table cannot take fails the run and restores the previous rows.",

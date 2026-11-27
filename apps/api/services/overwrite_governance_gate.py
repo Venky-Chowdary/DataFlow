@@ -53,13 +53,49 @@ def probe_bigquery_governance(cfg: dict[str, Any], table: str) -> dict[str, Any]
     }
 
 
-def _bounded_probe(cfg: dict[str, Any], table: str, seconds: float) -> dict[str, Any]:
+def probe_snowflake_governance(cfg: dict[str, Any], table: str) -> dict[str, Any]:
+    """``{"ran", "governed", "unreadable", "message"}`` for one Snowflake table.
+
+    The same reads the overwrite makes before it changes anything
+    (``_Snowflake.retire``): grants, masking / row access policies and tags.
+    A TEMPORARY table is reported, since its backup could not outlive the run.
+    """
+    from connectors.overwrite_set_aside import _close_quietly, _Snowflake, _snowflake_connection
+
+    sf = _Snowflake()
+    if sf._emulator(None, cfg):
+        # fakesnow has no grants, policies or tags: no login spent on reading none.
+        return {"ran": True, "governed": False, "unreadable": [], "message": "emulator: no governance"}
+    schema = cfg.get("schema") or "PUBLIC"
+    conn = _snowflake_connection(cfg, cfg.get("schema"))  # the plan's shared login (D187)
+    try:
+        with conn.cursor() as cur:
+            live = sf._resolve(cur, schema, table)
+            if not live:
+                return {"ran": True, "governed": False, "unreadable": [], "message": "table absent"}
+            if sf._kind(cur, schema, live) == "temporary":
+                return {"ran": True, "governed": False, "unreadable": ["a TEMPORARY table (no backup can outlive the run)"], "message": ""}
+            gov = sf._governance(cur, sf._ref(schema, live), cfg, emulator=False)
+    finally:
+        _close_quietly(conn)
+    return {
+        "ran": True,
+        "governed": bool(gov.grants or gov.policies or gov.tag_policies or gov.tags),
+        "unreadable": list(gov.unreadable),
+        "message": "",
+    }
+
+
+_PROBES = {"bigquery": probe_bigquery_governance, "snowflake": probe_snowflake_governance}
+
+
+def _bounded_probe(cfg: dict[str, Any], table: str, seconds: float, engine: str = "bigquery") -> dict[str, Any]:
     from src.ai.copilot.tool_deadline import bounded_step
 
     try:
         run = bounded_step(
             f"reading the access control of destination {table}",
-            lambda: probe_bigquery_governance(dict(cfg or {}), table),
+            lambda: _PROBES[engine](dict(cfg or {}), table),
             seconds=seconds,
             conn=cfg,
             role="destination",
@@ -102,7 +138,8 @@ def build_overwrite_governance_gate(
         "ddl_acknowledged": bool(acknowledged),
     }
     kept = ", ".join(disclosure["preserved"])
-    if disclosure["engine"] != "bigquery":
+    engine = disclosure["engine"]
+    if engine == "elasticsearch":
         return {
             "id": GATE_ID,
             "status": "pass",
@@ -112,16 +149,17 @@ def build_overwrite_governance_gate(
             "duration_ms": 0,
             "details": {**details, "requires_approval": False},
         }
-    measured = (probe or (lambda c, t: _bounded_probe(c, t, seconds)))(
+    measured = (probe or (lambda c, t: _bounded_probe(c, t, seconds, engine)))(
         dict(destination_config or {}), destination_table
     )
     details["measurement"] = measured
     losses: list[str] = []
+    what = (
+        "the table's grants, masking / row access policies and tags" if engine == "snowflake"
+        else "the table's IAM policy and row access policies"
+    )
     if not measured.get("ran"):
-        losses.append(
-            "the table's IAM policy and row access policies could not be read "
-            f"({measured.get('message') or 'unmeasured'})"
-        )
+        losses.append(f"{what} could not be read ({measured.get('message') or 'unmeasured'})")
     else:
         losses.extend(f"{item} cannot be read, so it cannot be re-created" for item in measured.get("unreadable") or [])
     details["measured_losses"] = losses
@@ -131,6 +169,8 @@ def build_overwrite_governance_gate(
             "id": GATE_ID,
             "status": "pass",
             "message": (
+                f"Overwrite keeps the live object of '{destination_table}': {kept} stay in place."
+                if engine == "snowflake" else
                 f"Overwrite re-creates '{destination_table}' with its {kept} before any row is written. "
                 "Not kept: " + "; ".join(disclosure["not_preserved"]) + "."
             ),
@@ -152,9 +192,14 @@ def build_overwrite_governance_gate(
         "status": "block",
         "message": (
             f"Overwrite of '{destination_table}' would lose access control: " + "; ".join(losses)
-            + ". Grant the connector's service account bigquery.tables.getIamPolicy / setIamPolicy "
-            "and bigquery.rowAccessPolicies.list / create, or approve the destination DDL to "
-            "overwrite without them."
+            + (
+                ". Give the connector's role what SHOW GRANTS, POLICY_REFERENCES and TAG_REFERENCES "
+                "need on this table (ownership, or APPLY on its policies and tags)"
+                if engine == "snowflake" else
+                ". Grant the connector's service account bigquery.tables.getIamPolicy / setIamPolicy "
+                "and bigquery.rowAccessPolicies.list / create"
+            )
+            + ", or approve the destination DDL to overwrite without them."
         ),
         "duration_ms": 0,
         "details": details,

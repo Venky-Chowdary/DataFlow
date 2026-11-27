@@ -209,3 +209,62 @@ def test_policy_store_rejects_an_unknown_mode(app_client):
     saved = store.set_mcp_policy({"enabled": True, "confirm": {"default": "four_eyes",
                                                                "workspaces": {"ops": "agent"}}})
     assert saved["confirm"] == {"default": "four_eyes", "workspaces": {"ops": "agent"}}
+
+
+# ------------------------------------------- who may change the confirm policy
+
+
+def _merge(requested: dict, *, admin: bool = False, ws: str = "A", stored: dict | None = None) -> dict:
+    stored = stored or {"default": "interactive", "workspaces": {"B": "four_eyes"}}
+    return policy.merge_confirm_change(stored, requested, platform_admin=admin, caller_workspace=ws)
+
+
+def test_workspace_admin_cannot_change_the_default_or_another_workspace():
+    """Review: PUT /mcp/policy needs only workspace.manage, the store is deployment-wide."""
+    with pytest.raises(PermissionError, match="platform admin"):
+        _merge({"default": "agent"})
+    with pytest.raises(PermissionError, match="'B'"):
+        _merge({"workspaces": {"B": "agent"}})
+    with pytest.raises(PermissionError, match="'B'"):
+        _merge({"workspaces": {"B": None}})
+
+
+def test_workspace_admin_changes_only_their_own_entry_and_b_survives():
+    merged = _merge({"default": "interactive", "workspaces": {"A": "agent"}})
+    assert merged == {"default": "interactive", "workspaces": {"A": "agent", "B": "four_eyes"}}
+    cleared = _merge({"workspaces": {"A": None}}, stored=merged)
+    assert cleared == {"default": "interactive", "workspaces": {"B": "four_eyes"}}
+
+
+def test_platform_admin_may_change_the_default_and_any_workspace():
+    merged = _merge({"default": "four_eyes", "workspaces": {"B": "interactive"}}, admin=True)
+    assert merged == {"default": "four_eyes", "workspaces": {"B": "interactive"}}
+
+
+def test_workspace_admin_put_merges_and_cannot_touch_b(app_client, monkeypatch):
+    import services.effective_role as effective_role
+    import services.rbac as rbac
+
+    client, admin = app_client["client"], app_client["tokens"]["admin"]
+    store = app_client["integrations_store"]
+    store.set_mcp_policy({"enabled": True, "confirm": {"default": "interactive", "workspaces": {"B": "four_eyes"}}})
+    # A workspace admin of A, signed in interactively (not a platform admin).
+    monkeypatch.setattr(policy, "credential_kind", lambda request: "session_token")
+    monkeypatch.setattr(rbac, "holds_platform_admin_role", lambda user: False)
+    monkeypatch.setattr(effective_role, "workspace_id_from_request_headers", lambda headers: "A")
+    headers = {"Authorization": f"Bearer {admin}"}
+
+    refused = client.put("/api/v1/mcp/policy", headers=headers,
+                         json={"enabled": True, "confirm": {"workspaces": {"B": "agent"}}})
+    assert refused.status_code == 403, refused.text
+    refused = client.put("/api/v1/mcp/policy", headers=headers,
+                         json={"enabled": True, "confirm": {"default": "agent"}})
+    assert refused.status_code == 403, refused.text
+
+    ok = client.put("/api/v1/mcp/policy", headers=headers,
+                    json={"enabled": True, "confirm": {"workspaces": {"A": "agent"}}})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["confirm"] == {"default": "interactive", "workspaces": {"A": "agent", "B": "four_eyes"}}
+    audited = [e for e in app_client["audit_events"] if e.get("action") == "mcp.policy.updated"]
+    assert audited[-1]["details"]["old"]["confirm"]["workspaces"] == {"B": "four_eyes"}
+    assert audited[-1]["details"]["new"]["confirm"]["workspaces"] == {"A": "agent", "B": "four_eyes"}

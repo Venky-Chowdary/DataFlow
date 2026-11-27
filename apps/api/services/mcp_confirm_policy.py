@@ -160,3 +160,50 @@ def check_confirm_channel(
             "Only the person who staged this approval, or a workspace admin, can confirm it."
         )
     return mode
+
+
+def merge_confirm_change(
+    stored: Any,
+    requested: Any,
+    *,
+    platform_admin: bool,
+    caller_workspace: str,
+) -> dict[str, Any]:
+    """Apply a requested confirm-policy change on top of the stored one.
+
+    The store is deployment-wide, but ``PUT /api/v1/mcp/policy`` is open to any
+    workspace admin. So: ``default`` and other workspaces' entries need a
+    platform admin; a workspace admin may set (or clear, with ``null``) only
+    their own workspace's entry. Entries the request does not name are kept —
+    a change merges, it never replaces another workspace's policy.
+    Raises ``PermissionError`` (refused) or ``ValueError`` (invalid mode).
+    """
+    if not isinstance(requested, dict):
+        raise ValueError("confirm must be an object: {default, workspaces}")
+    current = normalize_confirm_policy(stored)
+    merged = {"default": current["default"], "workspaces": dict(current["workspaces"])}
+    if "default" in requested and requested["default"] is not None:
+        mode = normalize_mode(requested["default"])
+        if mode != current["default"]:
+            if not platform_admin:
+                raise PermissionError(
+                    "Only a platform admin can change the default confirm policy for every workspace."
+                )
+            merged["default"] = mode
+    own = str(caller_workspace or "").strip()
+    for ws, mode in dict(requested.get("workspaces") or {}).items():
+        key = str(ws or "").strip()
+        if not key:
+            continue
+        new_mode = None if mode is None else normalize_mode(mode)
+        if new_mode == current["workspaces"].get(key):
+            continue
+        if key != own and not platform_admin:
+            raise PermissionError(
+                f"A workspace admin can change only their own workspace's confirm policy, not {key!r}."
+            )
+        if new_mode is None:
+            merged["workspaces"].pop(key, None)
+        else:
+            merged["workspaces"][key] = new_mode
+    return merged

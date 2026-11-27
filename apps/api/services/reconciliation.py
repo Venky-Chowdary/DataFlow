@@ -2397,7 +2397,7 @@ def verify_sqlserver_table(
         conn = connect_sqlserver_dbapi({
             **dict(options or {}),
             "host": host, "port": port, "database": database or "master",
-            "username": username or "sa", "password": password,
+            "username": username, "password": password,
             "connection_string": connection_string,
         })
         sch = (schema or "dbo").strip() or "dbo"

@@ -29,6 +29,7 @@ from connectors.mysql_load_data import (  # noqa: E402
     parse_mysql_family_version,
 )
 
+IDENTITY_SQL = "SELECT @@version, @@version_comment"
 MARIADB_10_11 = "5.5.5-10.11.14-MariaDB-0ubuntu0.24.04.1"
 MARIADB_10_6_0 = "5.5.5-10.6.0-MariaDB"
 MARIADB_10_5 = "5.5.5-10.5.27-MariaDB-log"
@@ -49,8 +50,12 @@ class _Cursor:
     """Records SQL; answers the few reads the helpers make."""
 
     def __init__(self, server_version: Any = None, *, session=(1, 1), version_row=None,
-                 fail_on: str = "") -> None:
+                 fail_on: str = "", comment: str = "") -> None:
         self.connection = _Conn(server_version)
+        # What the server answers to SELECT @@version, @@version_comment: by
+        # default the handshake value (no proxy in between).
+        if version_row is None and server_version is not None:
+            version_row = (server_version.decode() if isinstance(server_version, bytes) else server_version, comment)
         self.session = list(session)
         self.version_row = version_row
         self.fail_on = fail_on
@@ -61,7 +66,7 @@ class _Cursor:
         if self.fail_on and self.fail_on in sql:
             raise RuntimeError("refused")
         self.sql.append(sql)
-        if sql == "SELECT VERSION()":
+        if sql == IDENTITY_SQL:
             self._row = self.version_row
         elif sql.startswith("SELECT @@SESSION.unique_checks"):
             self._row = tuple(self.session)
@@ -155,33 +160,38 @@ def test_bulk_load_session_settings_per_engine(version, checks):
 def test_mysql_bulk_session_is_unchanged_checks_off():
     cur = _Cursor(MYSQL_8)
     assert apply_mysql_bulk_load_session(cur) == {"unique_checks": 0, "foreign_key_checks": 0}
-    # The exact statements the route ran before this fix; no extra round trip.
-    assert cur.sql == ["SET SESSION unique_checks=0", "SET SESSION foreign_key_checks=0"]
+    # The server is asked once (the handshake is not trusted), then the
+    # exact statements the route ran before.
+    assert cur.sql == [IDENTITY_SQL, "SET SESSION unique_checks=0", "SET SESSION foreign_key_checks=0"]
 
 
 def test_mariadb_bulk_session_keeps_both_checks_on_explicitly():
     cur = _Cursor(MARIADB_10_11, session=(0, 0))  # e.g. server globals off
     assert apply_mysql_bulk_load_session(cur) == {"unique_checks": 1, "foreign_key_checks": 1}
-    assert cur.sql == ["SET SESSION unique_checks=1", "SET SESSION foreign_key_checks=1"]
+    assert cur.sql == [IDENTITY_SQL, "SET SESSION unique_checks=1", "SET SESSION foreign_key_checks=1"]
     assert cur.session == [1, 1]
 
 
 def test_bulk_session_reads_version_when_the_driver_does_not_expose_it():
     cur = _Cursor(None, version_row=("10.11.14-MariaDB",))
     assert apply_mysql_bulk_load_session(cur)["unique_checks"] == 1
-    assert cur.sql[0] == "SELECT VERSION()"
+    assert cur.sql[0] == IDENTITY_SQL
     cur = _Cursor(None, version_row=("8.0.40",))
     assert apply_mysql_bulk_load_session(cur)["unique_checks"] == 0
 
 
 def test_bulk_session_unreadable_version_fails_safe_to_checks_on():
-    cur = _Cursor(None, fail_on="SELECT VERSION()")
+    cur = _Cursor(None, fail_on="@@version_comment")
     assert apply_mysql_bulk_load_session(cur) == {"unique_checks": 1, "foreign_key_checks": 1}
 
 
-def test_explicit_conn_wins_over_cursor_connection():
-    cur = _Cursor(MYSQL_8)
-    assert apply_mysql_bulk_load_session(cur, _Conn(MARIADB_10_11))["unique_checks"] == 1
+def test_explicit_conn_caches_the_answer_it_was_given():
+    conn = _Conn(MYSQL_8)
+    cur = _Cursor(MYSQL_8, version_row=(MARIADB_10_11, ""))
+    assert apply_mysql_bulk_load_session(cur, conn)["unique_checks"] == 1
+    again = _Cursor(MYSQL_8, version_row=("8.0.40", ""))
+    assert apply_mysql_bulk_load_session(again, conn)["unique_checks"] == 1  # cached per connection
+    assert IDENTITY_SQL not in again.sql
 
 
 @pytest.mark.parametrize(
@@ -196,11 +206,28 @@ def test_guard_turns_unique_checks_on_only_when_both_are_off_on_mariadb(session,
     assert not any("foreign_key_checks=" in s for s in cur.sql)
 
 
-@pytest.mark.parametrize("version", [MYSQL_8, PERCONA, MARIADB_10_5, None])
-def test_guard_runs_no_sql_off_mariadb_10_6(version):
+@pytest.mark.parametrize("version", [MYSQL_8, PERCONA, MARIADB_10_5])
+def test_guard_changes_nothing_off_mariadb_10_6(version):
     cur = _Cursor(version, session=(0, 0))
     assert guard_mariadb_bulk_insert_session(cur) is False
-    assert cur.sql == []
+    assert cur.sql == [IDENTITY_SQL]
+
+
+def test_mariadb_behind_a_proxy_announcing_mysql_is_guarded():
+    """Review: ProxySQL / MaxScale can announce 8.0.x in the handshake for a
+    MariaDB backend; the handshake alone made the guard skip it."""
+    cur = _Cursor(MYSQL_8, session=(0, 0), version_row=(MARIADB_10_11, "mariadb.org binary distribution"))
+    assert guard_mariadb_bulk_insert_session(cur) is True
+    assert "SET SESSION unique_checks=1" in cur.sql
+
+
+@pytest.mark.parametrize("row", [("8.0.40", "(ProxySQL)"), ("5.5.30", "MaxScale"), None])
+def test_unknown_or_proxy_answered_identity_fails_safe(row):
+    cur = _Cursor(MYSQL_8, session=(0, 0), version_row=row, fail_on="" if row else "@@version_comment")
+    assert guard_mariadb_bulk_insert_session(cur) is True
+    assert apply_mysql_bulk_load_session(_Cursor(MYSQL_8, version_row=row,
+                                                 fail_on="" if row else "@@version_comment")) == {
+        "unique_checks": 1, "foreign_key_checks": 1}
 
 
 def test_every_load_data_on_mariadb_runs_with_a_check_on(tmp_path):
@@ -217,7 +244,8 @@ def test_load_data_on_mysql_adds_no_statement(tmp_path):
     staged.write_text("1\n")
     cur = _Cursor(MYSQL_8, session=(0, 0))
     execute_load_data_local(cur, path=str(staged), table_q="`t`", columns=["a"])
-    assert len(cur.sql) == 1 and cur.sql[0].startswith("LOAD DATA LOCAL INFILE")
+    assert cur.sql[0] == IDENTITY_SQL
+    assert len(cur.sql) == 2 and cur.sql[1].startswith("LOAD DATA LOCAL INFILE")
 
 
 class _GuardConn(_Conn):
@@ -242,7 +270,9 @@ def test_write_session_guards_turn_a_check_on_for_mariadb_with_globals_off():
 
 
 def test_pooled_sqlalchemy_mariadb_session_is_guarded_and_never_breaks_the_pool():
-    from connectors.generic_sql import _guard_mariadb_bulk_insert_pool_session
+    from connectors.mysql_load_data import (
+        guard_mariadb_bulk_insert_pool_session as _guard_mariadb_bulk_insert_pool_session,
+    )
 
     conn = _GuardConn(MARIADB_11, session=(0, 0))
     _guard_mariadb_bulk_insert_pool_session(conn)
