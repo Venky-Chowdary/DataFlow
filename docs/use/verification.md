@@ -160,6 +160,18 @@ Two engine facts that often cause explained differences:
   refuses a number the destination cannot store with the same value, so the
   failure appears before the write, not after.
 
+- **Oracle zone columns.** Instants are written as UTC digits on a session
+  pinned to UTC. The `WITH TIME ZONE` column then holds `+00:00`, not the
+  source's offset; only a server-side Oracle-to-Oracle copy keeps the offset.
+  Validate reports this as a loss it accepts on your behalf, not as a
+  difference. Rows written by a release before the pin may hold shifted
+  instants. Validate names such a table in one line, and a full re-run with
+  overwrite corrects it; see
+  [Backup and upgrade](../operate/backup-and-upgrade.md).
+- **MySQL and MariaDB `DATETIME`.** An instant is stored as UTC digits in a
+  column with no zone. Validate says so for that column; it is not a
+  difference.
+
 ## Evidence you can export
 
 - **Proof pack**: `GET /api/v1/transfer/{job_id}/proof-pack`. A signed record

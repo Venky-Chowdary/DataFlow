@@ -90,8 +90,6 @@ def test_grade_on_a_session_that_read_back_utc(r) -> None:
     with bind_oracle_utc_pin(True, "session time zone read back as +00:00"):
         target, conv, lossy = _grade(r)
     _agrees(r["truth_on_utc_session"], target, conv, lossy)
-    if r["truth_on_utc_session"] == "loses_disclosed":
-        assert conv.get("unmeasured_loss") and not lossy, conv
 
 
 # One aware wire value: 03:04:05.123 at +05:30 is 21:34:05.123 UTC the day before.
@@ -119,9 +117,12 @@ def test_writer_route_matches_the_row(r) -> None:
 
         from connectors.generic_sql import _to_sa_value
 
-        local = "LOCAL" in r["target"].upper() or r["target"] == "create_new" and r["engine"] == "postgresql"
-        sa_type = oracle.TIMESTAMP(local_timezone=True) if local else oracle.TIMESTAMP(timezone=True)
-        got = _to_sa_value(_WIRE, "TIMESTAMP(6) WITH TIME ZONE", sa_type=sa_type, db_type="oracle")
+        with bind_source_engine(r["engine"]):
+            target = (create_new_mapping_target_type(r["source_type"], r["dest"], source_db=r["engine"])
+                      if r["target"] == "create_new" else r["target"])
+        local = "LOCAL" in target.upper()
+        sa_type = oracle.TIMESTAMP(local_timezone=local, timezone=not local)
+        got = _to_sa_value(_WIRE, target, sa_type=sa_type, db_type="oracle")
         assert got.tzinfo is None and got == _INSTANT.replace(tzinfo=None)
         return
     if r["dest"] == "mongodb":
@@ -139,11 +140,12 @@ def test_writer_route_matches_the_row(r) -> None:
         assert r["writer"] == "wall_clock" and got == _CLOCK
 
 
-FILE_ROWS = [r for r in ROWS if r.get("route") == "file_text"]
+DISCLOSED = [r for r in ROWS if r.get("disclosed_by") == "validate"]
 
 
-@pytest.mark.parametrize("r", FILE_ROWS, ids=[f"{r['dest']}:{r['target']}" for r in FILE_ROWS])
-def test_offset_text_into_a_zoneless_column_is_disclosed_by_validate(r) -> None:
+@pytest.mark.parametrize("r", DISCLOSED, ids=[f"{r['engine']}->{r['dest']}:{r['target']}" for r in DISCLOSED])
+def test_zone_less_mysql_datetime_is_disclosed_by_validate(r) -> None:
+    """Instant kept, zone marker lost: Validate says "stored as UTC digits in a zone-less column"."""
     from services.coercion_probe import analyze_coercion
 
     def probe(values, table_exists=True):
@@ -154,7 +156,8 @@ def test_offset_text_into_a_zoneless_column_is_disclosed_by_validate(r) -> None:
         )
         return (report["by_source"].get("at") or {}).get("unmeasured_loss", "")
 
-    offsets = ["2024-01-02T03:04:05.123+05:30", "2024-07-01T23:30:00-09:30"]
-    assert "not the offset" in probe(offsets)
-    assert "not the offset" in probe(offsets, table_exists=False)
-    assert probe(["2024-01-02T03:04:05Z", "2024-07-01 23:30:00+00:00"]) == ""
+    phrase = "stored as UTC digits in a zone-less column"
+    assert phrase in probe(["2024-01-02T03:04:05.123+05:30", "2024-07-01T23:30:00-09:30"])
+    assert phrase in probe(["2024-01-02T03:04:05.123+05:30"], table_exists=False)
+    # A UTC instant still lands in a zone-less column: disclosed too, without an offset count.
+    assert phrase in probe(["2024-01-02T03:04:05Z"]) and "carry a UTC offset" not in probe(["2024-01-02T03:04:05Z"])

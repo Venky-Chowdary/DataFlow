@@ -28,6 +28,8 @@ PIN_STATEMENT = "ALTER SESSION SET TIME_ZONE = '+00:00'"
 READ_BACK = "SELECT SESSIONTIMEZONE FROM DUAL"
 #: ``connection_record.info`` key: ``(pinned, reason)`` from the connect-time pin.
 INFO_KEY = "df_oracle_utc_session"
+#: ``connection_record.info`` key: the session zone the connection opened with.
+PRIOR_KEY = "df_oracle_default_zone"
 
 _UTC_READINGS = frozenset({"+00:00", "-00:00", "00:00", "UTC", "GMT", "Z", "ETC/UTC", "ETC/GMT", "UCT"})
 
@@ -41,20 +43,25 @@ def session_zone_is_utc(reading: Any) -> bool:
     return text in _UTC_READINGS
 
 
-def read_session_zone(dbapi_conn: Any) -> tuple[bool, str]:
-    """Read ``SESSIONTIMEZONE`` on a DB-API connection: ``(is_utc, reason)``."""
+def _zone(dbapi_conn: Any) -> str:
     cur = dbapi_conn.cursor()
     try:
         cur.execute(READ_BACK)
         row = cur.fetchone()
-    except Exception as exc:  # noqa: BLE001 - an unreadable zone is an unconfirmed pin
-        return False, f"SESSIONTIMEZONE could not be read back ({type(exc).__name__})"
     finally:
         try:
             cur.close()
         except Exception:  # noqa: BLE001
             pass
-    reading = str(row[0] if row else "").strip()
+    return str(row[0] if row else "").strip()
+
+
+def read_session_zone(dbapi_conn: Any) -> tuple[bool, str]:
+    """Read ``SESSIONTIMEZONE`` on a DB-API connection: ``(is_utc, reason)``."""
+    try:
+        reading = _zone(dbapi_conn)
+    except Exception as exc:  # noqa: BLE001 - an unreadable zone is an unconfirmed pin
+        return False, f"SESSIONTIMEZONE could not be read back ({type(exc).__name__})"
     if session_zone_is_utc(reading):
         return True, f"session time zone read back as {reading}"
     return False, f"session time zone read back as {reading or 'nothing'}, not UTC"
@@ -83,33 +90,25 @@ def confirm_utc_session(connection: Any) -> tuple[bool, str]:
 
 
 def install_utc_session_pin(engine: Any) -> None:
-    """Pin every pooled connection of ``engine`` at connect; refuse unpinned checkouts.
+    """Pin every pooled connection of ``engine`` at connect, noting the zone it opened with.
 
-    The connect-time result is kept on the pool record. A checkout of an
-    unpinned connection raises only while the run was graded on a confirmed pin
-    (no Risk Contract): writing then would move the instant the grade promised
-    to keep. A run that carries the Risk Contract writes as accepted.
+    The zone before the pin tells Validate whether pinning changes what a
+    route's own SQL evaluates (:func:`services.oracle_session_scope.require_route_ack`).
+    The writer re-reads the zone on the connection each batch writes through
+    (:func:`services.oracle_session_scope.assert_writer_session`).
     """
     from sqlalchemy import event
 
     @event.listens_for(engine, "connect")
     def _oracle_utc_session(dbapi_conn, connection_record):  # noqa: ANN001
+        try:
+            connection_record.info[PRIOR_KEY] = _zone(dbapi_conn)
+        except Exception:  # noqa: BLE001 - unknown default, the pin still runs
+            connection_record.info[PRIOR_KEY] = ""
         pinned, reason = pin_utc_session(dbapi_conn)
         connection_record.info[INFO_KEY] = (pinned, reason)
         if not pinned:
             logger.warning("Oracle session time zone pin not confirmed: %s", reason)
-
-    @event.listens_for(engine, "checkout")
-    def _oracle_utc_checkout(_dbapi_conn, connection_record, _proxy):  # noqa: ANN001
-        from services.oracle_session_scope import oracle_utc_pin
-
-        pinned, reason = connection_record.info.get(INFO_KEY, (False, "the connection was never pinned"))
-        if not pinned and oracle_utc_pin()[0]:
-            raise RuntimeError(
-                "Oracle session time zone pin lost on a pooled connection "
-                f"({reason}); Validate graded this run's instants on a UTC "
-                "session, so nothing is written. Re-run Validate."
-            )
 
 
 def oracle_instant_bind(value: datetime) -> datetime:
@@ -129,6 +128,7 @@ def oracle_instant_bind(value: datetime) -> datetime:
 __all__ = [
     "INFO_KEY",
     "PIN_STATEMENT",
+    "PRIOR_KEY",
     "READ_BACK",
     "confirm_utc_session",
     "install_utc_session_pin",

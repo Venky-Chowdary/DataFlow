@@ -565,7 +565,7 @@ def resolve_timezone_policy(
         from services.type_system import _SINGLE_AWARE_TIMESTAMP_DIALECTS
 
         src_label = stores_originating_offset("", source_type)
-        dst_label = stores_originating_offset(db, target_type)
+        dst_label = stores_originating_offset(db, target_type, as_destination=True)
         label = src_label and dst_label
         rewrite = {src, tgt} == {"tz", "ltz"}
         spelling_only = rewrite and db in _SINGLE_AWARE_TIMESTAMP_DIALECTS

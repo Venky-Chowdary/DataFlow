@@ -233,6 +233,6 @@ def test_live_offset_text_into_mariadb_datetime_keeps_the_instant_and_says_so(is
         got = mysql_sql(f"SELECT id, CAST(at AS CHAR) FROM {table} ORDER BY id", fetch=True)
         assert [(i, s) for i, s in got] == _UTC_DIGITS
         g3 = next(g for g in result.validation_plan["gates"] if g["id"] == "g3_schema_contract")
-        assert any("not the offset" in w for w in g3["details"]["warnings"]), g3
+        assert any("stored as UTC digits in a zone-less column" in w for w in g3["details"]["warnings"]), g3
     finally:
         _drop(table)

@@ -5620,6 +5620,10 @@ def write_mapped_rows(
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
+            if _is_oracle_wire("", db_type):
+                from services.oracle_session_scope import assert_writer_session
+
+                assert_writer_session(conn)  # the batch's own session reads back UTC (finding 8)
             if db_type == "questdb":
                 # QuestDB's pg_catalog reflection is incomplete; use idempotent DDL.
                 table_exists = False
@@ -6216,6 +6220,10 @@ def write_mapped_rows(
             if identity_session is not None:
                 identity_session.close()
                 identity_session = None
+            if _is_oracle_wire("", db_type):
+                from services.oracle_session_scope import note_oracle_rows_written
+
+                note_oracle_rows_written(written)
 
         if ledger_chunks_skipped:
             transform_errors.append(

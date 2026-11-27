@@ -5,7 +5,7 @@
   "keeps": "every value of the source type lands unchanged",
   "loses": "some legal source value cannot land unchanged",
   "loses_if_values": "loses only for some values; a safe grade must say so (unmeasured_loss) unless measured",
-  "loses_disclosed": "always loses part of the value (here the UTC offset) where the product deliberately loads the rest; a safe grade must say so (unmeasured_loss)"
+  "loses_disclosed": "always loses part of the value (the UTC offset, or the zone marker of a zone-less column) where the product deliberately loads the rest; the grade or Validate must say so"
  },
  "rows": [
   {
@@ -384,13 +384,14 @@
    "source_type": "timestamptz",
    "dest": "mysql",
    "target": "DATETIME(6)",
-   "truth": "loses",
-   "why": "DATETIME is a wall clock with no zone.",
+   "truth": "loses_disclosed",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
     "https://www.postgresql.org/docs/current/datatype-datetime.html"
    ],
-   "writer": "utc"
+   "writer": "utc",
+   "disclosed_by": "validate"
   },
   {
    "engine": "oracle",
@@ -581,13 +582,14 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mysql",
    "target": "DATETIME(6)",
-   "truth": "loses",
+   "truth": "loses_disclosed",
    "writer": "utc",
-   "why": "MySQL has no offset type; DATETIME has no zone, so the UTC digits are a convention, not stored. The writer binds the UTC instant.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html"
-   ]
+   ],
+   "disclosed_by": "validate"
   },
   {
    "engine": "sqlserver",
@@ -607,13 +609,14 @@
    "source_type": "datetimeoffset(7)",
    "dest": "mariadb",
    "target": "DATETIME(6)",
-   "truth": "loses",
+   "truth": "loses_disclosed",
    "writer": "utc",
-   "why": "DATETIME has no zone; UTC digits are a convention, not stored. The writer binds the UTC instant.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://mariadb.com/kb/en/timestamp/"
-   ]
+   ],
+   "disclosed_by": "validate"
   },
   {
    "engine": "sqlserver",
@@ -699,16 +702,16 @@
    "engine": "sqlserver",
    "source_type": "datetimeoffset(7)",
    "dest": "oracle",
-   "target": "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+   "target": "TIMESTAMP(9) WITH LOCAL TIME ZONE",
    "truth": "loses",
    "writer": "driver",
-   "why": "LOCAL TIME ZONE reads the bound digits in the session zone. python-oracledb sends clock digits without the offset; the writer binds UTC digits on a session pinned to +00:00, so the instant is kept only when that session reads back UTC.",
+   "why": "LOCAL TIME ZONE keeps the instant only: on a session that read back UTC the writer's UTC digits keep it and the offset label is lost (as Snowflake TIMESTAMP_LTZ); on any other session the instant moves.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://github.com/oracle/python-oracledb/blob/main/src/oracledb/impl/base/encoders.pyx"
    ],
-   "truth_on_utc_session": "loses"
+   "truth_on_utc_session": "loses_disclosed"
   },
   {
    "engine": "sqlserver",
@@ -754,13 +757,14 @@
    "source_type": "TIMESTAMP(6) WITH TIME ZONE",
    "dest": "mysql",
    "target": "DATETIME(6)",
-   "truth": "loses",
+   "truth": "loses_disclosed",
    "writer": "utc",
-   "why": "DATETIME has no zone. The writer binds the UTC instant.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html"
-   ]
+   ],
+   "disclosed_by": "validate"
   },
   {
    "engine": "oracle",
@@ -955,11 +959,12 @@
    "truth": "loses_disclosed",
    "writer": "utc",
    "route": "file_text",
-   "why": "Timestamp text with a UTC offset (profiled TIMESTAMPTZ) into DATETIME: the writer stores the UTC instant as UTC digits; the offset is not stored and Validate discloses it.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
     "https://mariadb.com/kb/en/datetime/"
-   ]
+   ],
+   "disclosed_by": "validate"
   },
   {
    "engine": "csv",
@@ -969,11 +974,12 @@
    "truth": "loses_disclosed",
    "writer": "utc",
    "route": "file_text",
-   "why": "Timestamp text with a UTC offset (profiled TIMESTAMPTZ) into DATETIME: the writer stores the UTC instant as UTC digits; the offset is not stored and Validate discloses it.",
+   "why": "DATETIME is zone-less: the writer keeps the instant, stored as UTC digits in a zone-less column; the offset or zone is not stored, and Validate discloses it.",
    "citations": [
     "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
     "https://mariadb.com/kb/en/datetime/"
-   ]
+   ],
+   "disclosed_by": "validate"
   }
  ],
  "writer_values": {
