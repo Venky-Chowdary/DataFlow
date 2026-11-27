@@ -16,10 +16,10 @@ export function ShortcutsSheet({ open, onClose }: { open: boolean; onClose: () =
       <input
         className="df2-input"
         type="search"
+        aria-label="Filter shortcuts"
+        placeholder="Filter shortcuts"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="Filter shortcuts"
-        aria-label="Filter shortcuts"
       />
       <table className="df2-shortcuts">
         <caption className="df2-sr-only">Keyboard shortcuts</caption>
