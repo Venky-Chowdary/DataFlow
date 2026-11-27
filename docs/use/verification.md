@@ -58,11 +58,13 @@ read: Validate, Execute, a schedule run and the proof pack. With a signed-in
 user, the contract names that user as the approver, whatever the request
 says. Each signing writes an audit event (who, workspace, column, table,
 kind, reason and the signature; no data values). Contracts signed before the
-keyed signature are honoured only if the server stored them (in a schedule,
-plan or job) before the cutover: the moment this release first started,
-recorded once and shared by every replica. The server records those
-contracts at startup. Any other such contract is refused with "re-approve
-this risk".
+keyed signature are honoured only if the server's audit log recorded
+signing them before the cutover (the moment this release first started,
+recorded once and shared by every replica). They must also be used in the
+same workspace they were signed in. The server records those contracts at
+startup from stored schedules, plans and jobs. Any other such contract is
+refused with "re-approve this risk once" (see
+[backup and upgrade](../operate/backup-and-upgrade.md)).
 
 **Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
 cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is

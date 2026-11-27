@@ -54,11 +54,11 @@ def _doc_id(risk_id: str, signature: str) -> str:
     return f"{risk_id}|{signature}"
 
 
-def record(contract: Mapping[str, Any], *, origin: str, workspace_id: str = "") -> None:
-    """Record one contract the server signed (or adopted from its own storage)."""
+def record(contract: Mapping[str, Any], *, origin: str, workspace_id: str = "") -> bool:
+    """Record one contract the server signed (or adopted); ``True`` when it was not recorded before."""
     risk_id, signature = str(contract.get("risk_id") or ""), str(contract.get("signature") or "")
     if not risk_id or not signature:
-        return
+        return False
     doc = {
         "risk_id": risk_id, "signature": signature, "origin": origin, "recorded_at": _now(),
         "workspace_id": workspace_id or str((contract.get("metadata") or {}).get("workspace_id") or ""),
@@ -67,29 +67,44 @@ def record(contract: Mapping[str, Any], *, origin: str, workspace_id: str = "") 
     }
     coll = _collection()
     if coll is not None:
-        coll.update_one({"_id": _doc_id(risk_id, signature)}, {"$setOnInsert": doc}, upsert=True)
-        return
+        res = coll.update_one({"_id": _doc_id(risk_id, signature)}, {"$setOnInsert": doc}, upsert=True)
+        return res.upserted_id is not None
     from services.metadata_backend import json_doc_transaction
 
     with json_doc_transaction(_file_path(), {"contracts": {}}) as data:
-        data.setdefault("contracts", {}).setdefault(_doc_id(risk_id, signature), doc)
+        contracts = data.setdefault("contracts", {})
+        if _doc_id(risk_id, signature) in contracts:
+            return False
+        contracts[_doc_id(risk_id, signature)] = doc
+        return True
 
 
-def holds(risk_id: str, signature: str) -> bool:
-    """True when the server recorded exactly this contract (id and digest)."""
+def holds(risk_id: str, signature: str, *, workspace: str | None = None) -> bool:
+    """True when the server recorded exactly this contract (id and digest).
+
+    With ``workspace``, only in that workspace: the recorded workspace must
+    equal it exactly, and an empty workspace never matches.
+    """
     if not risk_id or not signature:
         return False
     try:
         coll = _collection()
         if coll is not None:
-            return coll.find_one({"_id": _doc_id(risk_id, signature)}) is not None
-        from services.metadata_backend import load_json_doc
+            doc = coll.find_one({"_id": _doc_id(risk_id, signature)})
+        else:
+            from services.metadata_backend import load_json_doc
 
-        data = load_json_doc(_file_path(), {"contracts": {}})
-        return _doc_id(risk_id, signature) in (data.get("contracts") or {})
+            data = load_json_doc(_file_path(), {"contracts": {}})
+            doc = (data.get("contracts") or {}).get(_doc_id(risk_id, signature))
     except Exception as exc:  # noqa: BLE001 - an unreadable store honours nothing (fail closed)
         logger.warning("risk contract store unreadable: %s", exc)
         return False
+    if doc is None:
+        return False
+    if workspace is None:
+        return True
+    bound = str(doc.get("workspace_id") or "")
+    return bool(bound) and bound == str(workspace or "")
 
 
 def _parse(raw: Any) -> datetime:
@@ -171,15 +186,57 @@ def legacy_contracts_in(value: Any) -> list[dict[str, Any]]:
     return found
 
 
+def _audited_before(contract: Mapping[str, Any], workspace: str, limit: datetime) -> bool:
+    """The server's own audit chain holds a ``migration_risk_contract.signed`` event for this contract.
+
+    Same workspace (never an empty one), same risk id, approver and column
+    (and digest when the event recorded one), written before the cutover, and
+    its chain signature verifies. Contract JSON inside a stored plan, job or
+    schedule was written by an API caller and proves nothing by itself.
+    """
+    if not workspace:
+        return False
+    from services.audit_chain_keys import check_signature
+    from services.audit_log import list_audit_events
+
+    rid = str(contract.get("risk_id") or "")
+    events = list_audit_events(action="migration_risk_contract.signed", workspace_id=workspace,
+                               search=f"risk_contract:{rid}", limit=50)
+    for ev in events:
+        d = ev.get("details") if isinstance(ev.get("details"), Mapping) else {}
+        if str(ev.get("workspace_id") or "") != workspace or str(d.get("risk_id") or "") != rid:
+            continue
+        if any(d.get(k) and str(d.get(k)) != str(contract.get(k) or "") for k in ("approved_by", "column")):
+            continue
+        if d.get("digest") and str(d.get("digest")) != str(contract.get("signature") or ""):
+            continue
+        try:
+            at = _parse(ev.get("time") or ev.get("timestamp") or "")
+        except ValueError:
+            continue
+        if at < limit and check_signature(dict(ev))[0] == "ok":
+            return True
+    return False
+
+
 def adopt_stored(record_doc: Mapping[str, Any], *, origin: str) -> int:
-    """Record the legacy contracts of one server-stored record created and last changed before the cutover."""
+    """Record (count newly) the legacy contracts of one stored record the server provably signed before the cutover.
+
+    The record must be created and last changed before the cutover, belong to a
+    workspace, and each contract must have its own pre-cutover audit event
+    (:func:`_audited_before`). Anything else is left unrecorded: refused, to be
+    re-approved.
+    """
     if not _stored_before_cutover(record_doc.get("created_at"), record_doc.get("updated_at")):
         return 0
-    contracts = legacy_contracts_in(record_doc)
+    limit = cutover()
     workspace = str(record_doc.get("workspace_id") or "")
-    for c in contracts:
-        record(c, origin=origin, workspace_id=workspace)
-    return len(contracts)
+    adopted = 0
+    for c in legacy_contracts_in(record_doc):
+        if limit is not None and _audited_before(c, workspace, limit) \
+                and record(c, origin=origin, workspace_id=workspace):
+            adopted += 1
+    return adopted
 
 
 def _stored_records() -> Iterable[tuple[str, Mapping[str, Any]]]:

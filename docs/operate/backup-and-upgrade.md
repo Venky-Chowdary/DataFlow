@@ -354,6 +354,23 @@ Changed shapes:
   label that the client does dial (a dot-less host plus a port) is still
   checked.
 
+#### Keyed risk approvals (Oracle '' gate round)
+
+- **Risk contracts are now signed with the deployment's key.** Contracts
+  approved before this release carry an older, unkeyed signature. Each one is
+  honoured only if the server's own audit log recorded signing it before the
+  cutover, in the same workspace. The cutover is the moment this release
+  first starts against the store; it is recorded once and every replica uses
+  it. At start, the server records those contracts from stored schedules,
+  plans and jobs. Any other old contract (one written by an API caller, one
+  with no workspace, or one used in another workspace) is refused with
+  "re-approve this risk once". Re-approve it in Validate.
+- **Upgrade every replica before resuming schedules.** An older replica
+  still running after the cutover signs contracts the old way. They are
+  refused later with "approved during the upgrade window: re-approve this
+  risk once". Drain or stop the old API and worker processes, or pause
+  schedules, until every process runs this build.
+
 ## Not covered
 
 - Tested restore times or recovery objectives. No restore has been rehearsed

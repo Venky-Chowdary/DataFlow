@@ -183,42 +183,109 @@ def fresh_store(tmp_path, monkeypatch):
     return store
 
 
-def _legacy(prefix):
-    c = _generic_contract(risk_id=f"{prefix}-{uuid.uuid4().hex[:8]}")
+def _legacy(prefix, **over):
+    c = _generic_contract(risk_id=f"{prefix}-{uuid.uuid4().hex[:8]}", **over)
     c["signature"] = mrc.legacy_digest(c)
     return c
+
+
+def _audit_signed(contract, workspace):
+    """The event the old server-side signing path (hydrate) wrote: no digest, like the old one."""
+    from services.audit_log import append_audit_event
+
+    append_audit_event(action="migration_risk_contract.signed", resource=f"risk_contract:{contract['risk_id']}",
+                       actor=contract["approved_by"], workspace_id=workspace,
+                       details={"risk_id": contract["risk_id"], "column": contract["column"],
+                                "execution_policy": contract["execution_policy"],
+                                "approved_by": contract["approved_by"]})
+
+
+def _in_workspace(monkeypatch, ws):
+    from services import transform_engine
+
+    monkeypatch.setattr(transform_engine, "_current_workspace", lambda: ws)
 
 
 def test_1_the_cutover_is_this_releases_first_start_and_a_second_start_does_not_move_it(fresh_store, monkeypatch):
     store = fresh_store
     assert store.cutover() is None  # nothing recorded: nothing is adopted
-    stored_by_old_code = _legacy("mrc-old")
+    signed_by_old_server = _legacy("mrc-old", approved_by="ops@example.com")
+    _audit_signed(signed_by_old_server, "ws-a")
     # Stored by the old code a day before this release first starts (no fixed calendar date).
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    records = [("schedule", {"created_at": yesterday, "mappings": [{"risk_contract": stored_by_old_code}]})]
+    records = [("plan", {"created_at": yesterday, "workspace_id": "ws-a",
+                         "mappings": [{"risk_contract": signed_by_old_server}]})]
     monkeypatch.setattr(store, "_stored_records", lambda: iter(records))
-    assert not mrc.verify_risk_contract(stored_by_old_code)
+    _in_workspace(monkeypatch, "ws-a")
+    assert not mrc.verify_risk_contract(signed_by_old_server)
     assert store.backfill_legacy_contracts() == 1  # first start
     first = store.recorded_cutover()
     assert first is not None and abs((datetime.now(timezone.utc) - first).total_seconds()) < 60
-    assert mrc.verify_risk_contract(stored_by_old_code)
+    assert mrc.verify_risk_contract(signed_by_old_server)
     # A forged old-format contract presented after the cutover: no server record, refused.
     forged = _legacy("mrc-forged")
     assert not mrc.verify_risk_contract(forged)
-    # ...even if it lands in a record stored after the cutover and a replica starts later.
     later = (first + timedelta(seconds=1)).isoformat()
-    records.append(("job", {"created_at": later, "transfer_request": {"mappings": [{"risk_contract": forged}]}}))
-    assert store.backfill_legacy_contracts() == 1  # second start: idempotent, cutover unchanged
+    records.append(("job", {"created_at": later, "workspace_id": "ws-a",
+                            "transfer_request": {"mappings": [{"risk_contract": forged}]}}))
+    assert store.backfill_legacy_contracts() == 0  # second start: idempotent, cutover unchanged
     assert store.recorded_cutover() == first and store.record_cutover() == first
     assert not mrc.verify_risk_contract(forged)
-    # Created before but edited after the cutover: not the server's pre-cutover record.
-    edited_after = _legacy("mrc-edited")
-    assert store.adopt_stored({"created_at": yesterday, "updated_at": later,
-                               "mappings": [{"risk_contract": edited_after}]}, origin="job") == 0
     # The same id with other content (another digest) is not the recorded contract.
-    changed = {**stored_by_old_code, "approved_by": "mallory@example.com"}
+    changed = {**signed_by_old_server, "approved_by": "mallory@example.com"}
     changed["signature"] = mrc.legacy_digest(changed)
     assert not mrc.verify_risk_contract(changed)
+
+
+def test_1_a_planted_pre_cutover_plan_with_a_client_computed_contract_is_not_adopted(fresh_store, monkeypatch,
+                                                                                      sqlite_source):
+    """The review repro: client-authored contract JSON in a stored plan proves nothing."""
+    store = fresh_store
+    _in_workspace(monkeypatch, "ws-a")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    planted = _legacy("mrc-planted")  # approved_by cfo@example.com, never signed by the server
+    oracle_planted = _forged_oracle_contract(risk_id=f"mrc-op-{uuid.uuid4().hex[:6]}",
+                                             metadata={"option": oe.OPTION, "workspace_id": "ws-a"})
+    # Same risk id audited, but for another approver: still not this contract.
+    _audit_signed({**planted, "approved_by": "ops@example.com"}, "ws-a")
+    monkeypatch.setattr(store, "_stored_records", lambda: iter([
+        ("plan", {"created_at": yesterday, "workspace_id": "ws-a",
+                  "mappings": [{"risk_contract": planted}, {"empty_as_null_contract": oracle_planted}]}),
+    ]))
+    assert store.backfill_legacy_contracts() == 0
+    assert not mrc.verify_risk_contract(planted) and not mrc.verify_risk_contract(oracle_planted)
+    mapping = {"source": "qty", "target": "qty", "fidelity": "lossy_cast", "risk_contract": planted}
+    assert not mrc.mapping_has_clearing_risk_contract(mapping)
+    monkeypatch.setattr(oe, "current_workspace", lambda: "ws-a")
+    gate, _ = oe.preflight_hook(_ctx(sqlite_source, [dict(_MAPS[0]), {**_MAPS[1], oe.CONTRACT_KEY: oracle_planted}]))
+    assert gate["status"] == "block" and "re-approve this risk once" in gate["message"]
+    assert "approved during the upgrade window" in mrc.REAPPROVE_MESSAGE
+
+
+def test_2_an_adopted_legacy_contract_is_honoured_only_in_its_own_workspace(fresh_store, monkeypatch):
+    store = fresh_store
+    audited = _legacy("mrc-ws", approved_by="ops@example.com")
+    _audit_signed(audited, "ws-a")
+    no_ws = _legacy("mrc-nows", approved_by="ops@example.com")
+    _audit_signed(no_ws, None)
+    other_ws_event = _legacy("mrc-otherws", approved_by="ops@example.com")
+    _audit_signed(other_ws_event, "ws-b")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    monkeypatch.setattr(store, "_stored_records", lambda: iter([
+        ("schedule", {"created_at": yesterday, "workspace_id": "ws-a",
+                      "mappings": [{"risk_contract": audited}, {"risk_contract": other_ws_event}]}),
+        ("job", {"created_at": yesterday, "workspace_id": "", "mappings": [{"risk_contract": no_ws}]}),
+    ]))
+    assert store.backfill_legacy_contracts() == 1  # only the one audited in its own workspace
+    _in_workspace(monkeypatch, "ws-a")
+    assert mrc.verify_risk_contract(audited)
+    assert not mrc.verify_risk_contract(other_ws_event) and not mrc.verify_risk_contract(no_ws)
+    _in_workspace(monkeypatch, "ws-b")
+    assert not mrc.verify_risk_contract(audited)  # presented in another workspace
+    _in_workspace(monkeypatch, "")
+    assert not mrc.verify_risk_contract(audited)  # presented with no workspace
+    store.record(no_ws, origin="test", workspace_id="")
+    assert not mrc.verify_risk_contract(no_ws)  # an empty recorded workspace never matches
 
 
 def test_1_the_operator_override_wins_over_the_recorded_cutover(fresh_store, monkeypatch):
@@ -226,9 +293,11 @@ def test_1_the_operator_override_wins_over_the_recorded_cutover(fresh_store, mon
     store.record_cutover()
     monkeypatch.setenv("DATAFLOW_RISK_CONTRACT_CUTOVER", "2020-01-01T00:00:00+00:00")
     assert store.cutover() == datetime(2020, 1, 1, tzinfo=timezone.utc)
-    c = _legacy("mrc-ovr")
+    c = _legacy("mrc-ovr", approved_by="ops@example.com")
+    _audit_signed(c, "ws-a")
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    assert store.adopt_stored({"created_at": yesterday, "mappings": [{"risk_contract": c}]}, origin="plan") == 0
+    assert store.adopt_stored({"created_at": yesterday, "workspace_id": "ws-a",
+                               "mappings": [{"risk_contract": c}]}, origin="plan") == 0
 
 
 # ------------------------------------------------------------------------ 2

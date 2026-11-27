@@ -220,8 +220,8 @@ HMAC_PREFIX = "mrc-hmac:"
 LEGACY_PREFIX = "mrc-sha256:"
 _HMAC_LABEL = b"datawrap-migration-risk-contract\x00"
 REAPPROVE_MESSAGE = (
-    "This risk approval was not signed by this server (or was changed after it was): "
-    "re-approve this risk."
+    "This risk approval was not signed by this server, was changed after it was, or was approved "
+    "during the upgrade window (an older replica was still running): re-approve this risk once."
 )
 
 
@@ -263,7 +263,9 @@ def _signature_valid(payload: dict[str, Any]) -> bool:
     if sig.startswith(LEGACY_PREFIX) and sig == legacy_digest(payload):
         from services.risk_contract_store import holds
 
-        return holds(str(payload.get("risk_id") or ""), sig)
+        from services.transform_engine import _current_workspace
+
+        return holds(str(payload.get("risk_id") or ""), sig, workspace=_current_workspace() or "")
     return False
 
 
