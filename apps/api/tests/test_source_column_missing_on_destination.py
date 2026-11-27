@@ -70,20 +70,34 @@ def seed_doc(i: int) -> str | None:
 
 EXPECTED_DOC = [(i, seed_doc(i)) for i in range(1, ROWS + 1)]
 
-#: The decision context of a run, and what must happen to ``doc`` in it.
-#: ``None`` means the outcome depends on the sync mode (see ``_expected``).
+#: The decision context of a run, and what must happen to ``doc`` in it. The
+#: same in every sync mode: under ``manual_review`` Execute never adds a column
+#: ("Execute does not ADD COLUMN"); propagate, backfill or an acknowledged
+#: drift approve it.
 VARIANTS: dict[str, dict[str, Any]] = {
     # Validate on, default policy: the operator has not approved a new column.
     "validate_manual_review": {"expect": "blocked"},
     # Validate on, the policy approves additive columns.
     "validate_propagate": {"schema_policy": "propagate_columns", "expect": "added"},
-    # No Validate, nothing mapped: the engine maps by itself.
-    "no_validate_automap": {"skip_preflight": True, "expect": None},
+    # No Validate, nothing mapped: the engine maps by itself (it proposes the
+    # column as an ADD COLUMN, which manual_review does not approve).
+    "no_validate_automap": {"skip_preflight": True, "expect": "blocked"},
+    # No Validate, auto-map, and the operator turned on backfill new fields.
+    "no_validate_automap_backfill": {
+        "skip_preflight": True, "backfill_new_fields": True, "expect": "added",
+    },
     # No Validate, mappings stored before the column existed (a schedule replay).
     "no_validate_stored_mappings": {"skip_preflight": True, "stored": True, "expect": "blocked"},
     # The same stored mappings, and the policy approves additive columns.
     "no_validate_stored_propagate": {
         "skip_preflight": True, "stored": True, "schema_policy": "propagate_columns",
+        "expect": "added",
+    },
+    # No Validate, the operator's map proposes doc as a new column.
+    "no_validate_create_new": {"skip_preflight": True, "create_new": True, "expect": "blocked"},
+    # The same map, and the drift is acknowledged for this run.
+    "no_validate_create_new_acknowledged": {
+        "skip_preflight": True, "create_new": True, "schema_drift_acknowledged": True,
         "expect": "added",
     },
 }
@@ -103,17 +117,23 @@ WHOLE_SOURCE_MODES = frozenset({"scd2", "mirror"})
 
 
 def _expected(variant: str, mode: str) -> str:
-    fixed = VARIANTS[variant]["expect"]
-    if fixed:
-        return fixed
-    # Overwrite's auto-map binds the existing table's columns and leaves the
-    # extra source column to G13 (tests/test_source_column_coverage_gate.py).
-    # The other modes' auto-map proposes the new column and adds it.
-    return "blocked" if mode == "full_refresh_overwrite" else "added"
+    del mode  # one rule for every sync mode
+    return VARIANTS[variant]["expect"]
 
 
 def _stored_mappings() -> list[dict[str, Any]]:
     return [{"source": c, "target": c, "confidence": 0.99} for c in KEPT]
+
+
+def _create_new_mappings() -> list[dict[str, Any]]:
+    """What Map proposes for a source column the destination lacks."""
+    return [
+        *_stored_mappings(),
+        {
+            "source": "doc", "target": "doc", "confidence": 0.99, "create_new": True,
+            "assignment_strategy": "create_compatible_new", "target_type": "TEXT",
+        },
+    ]
 
 
 def _contract(table: str, mode: str) -> dict[str, Any]:
@@ -134,6 +154,11 @@ def _request(source: Any, destination: Any, table: str, mode: str, path: str, va
         extra.update(schema_policy=spec["schema_policy"], schema_policy_declared=True)
     if spec.get("stored"):
         extra["mappings"] = _stored_mappings()
+    if spec.get("create_new"):
+        extra["mappings"] = _create_new_mappings()
+    for flag in ("backfill_new_fields", "schema_drift_acknowledged"):
+        if spec.get(flag):
+            extra[flag] = True
     if path == "row":
         # A source filter keeps the run off every COPY fast path (copy_route).
         extra["source_filter"] = {"column": "id", "op": "gte", "value": 0}
@@ -396,7 +421,7 @@ def test_pg_to_mysql_row_path_source_column_is_added_or_blocks(
 # -- SQLite and a file source: the same rule with no live engine --------------
 
 LOCAL_MODES = ("full_refresh_overwrite", "full_refresh_append", "incremental_append", "incremental_deduped")
-LOCAL_VARIANTS = ("no_validate_automap", "no_validate_stored_mappings", "no_validate_stored_propagate")
+LOCAL_VARIANTS = tuple(v for v in VARIANTS if v.startswith("no_validate"))
 
 
 def _sqlite_dest(path: Path) -> EndpointConfig:
@@ -425,14 +450,7 @@ def _assert_local(
     result: Any, job: dict[str, Any], dst: Path, variant: str, mode: str, expected_doc: list
 ) -> None:
     columns, rows = _sqlite_state(dst)
-    expected = _expected(variant, mode)
-    if mode == "full_refresh_overwrite" and expected == "added":
-        # Known gap, not this fix: the SQLite writer does not ADD COLUMN on an
-        # overwrite, so an approved column stops the run at the writer with the
-        # table intact (PostgreSQL adds it: the table above). Either way the
-        # column is not dropped.
-        expected = "added" if result.success else "blocked"
-    if expected == "added":
+    if _expected(variant, mode) == "added":
         assert result.success, result.error
         assert "doc" in columns, f"{mode}/{variant}: succeeded without the column doc"
         assert rows == expected_doc, rows
@@ -803,3 +821,66 @@ def test_a_run_that_moved_every_column_reports_nothing_extra():
         "message": "Row fidelity verified", "reconciliation": {"message": "Row fidelity verified"}
     }
     assert column_coverage_of({"reconciliation": {"passed": True}}) is None
+
+
+# -- SQLite overwrite publish: ADD COLUMN on the live table, rolled back on failure
+
+
+def _publish_fixture(tmp_path: Path, *, live_unique_name: bool = False) -> sqlite3.Connection:
+    conn = sqlite3.connect(tmp_path / "pub.sqlite")
+    unique = " UNIQUE" if live_unique_name else ""
+    conn.execute(f"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT{unique})")
+    conn.execute("INSERT INTO t VALUES (1001, 'old')")
+    conn.execute("CREATE TABLE t__df_stage (id INTEGER PRIMARY KEY, name TEXT, doc TEXT)")
+    conn.executemany(
+        "INSERT INTO t__df_stage VALUES (?,?,?)",
+        [(1, "n", seed_doc(2)), (2, "n" if live_unique_name else "m", seed_doc(8))],
+    )
+    conn.commit()
+    return conn
+
+
+def _live(conn: sqlite3.Connection) -> tuple[list[str], list[tuple]]:
+    return (
+        [r[1] for r in conn.execute("PRAGMA table_info(t)")],
+        conn.execute("SELECT * FROM t ORDER BY id").fetchall(),
+    )
+
+
+def _publish(conn: sqlite3.Connection, *, add_missing: bool) -> None:
+    from connectors.sqlite_writer import _publish_sqlite_stage
+
+    _publish_sqlite_stage(
+        conn, stage_quoted='"t__df_stage"', stage_name="t__df_stage", live_name="t",
+        columns=["id", "name", "doc"], add_missing_columns=add_missing,
+    )
+
+
+def test_sqlite_publish_adds_an_approved_column_to_the_live_table(tmp_path):
+    conn = _publish_fixture(tmp_path)
+    try:
+        _publish(conn, add_missing=True)
+        assert _live(conn) == (["id", "name", "doc"], [(1, "n", ""), (2, "m", "line1\nline2")])
+    finally:
+        conn.close()
+
+
+def test_sqlite_publish_without_approval_fails_closed_and_keeps_the_live_table(tmp_path):
+    conn = _publish_fixture(tmp_path)
+    try:
+        with pytest.raises(sqlite3.Error):
+            _publish(conn, add_missing=False)
+        assert _live(conn) == (["id", "name"], [(1001, "old")])
+    finally:
+        conn.close()
+
+
+def test_sqlite_publish_that_fails_after_the_add_rolls_the_add_back(tmp_path):
+    """R7: DDL applied by a failed run is rolled back. The live table is as before."""
+    conn = _publish_fixture(tmp_path, live_unique_name=True)  # the stage repeats name 'n'
+    try:
+        with pytest.raises(sqlite3.Error):
+            _publish(conn, add_missing=True)
+        assert _live(conn) == (["id", "name"], [(1001, "old")])
+    finally:
+        conn.close()

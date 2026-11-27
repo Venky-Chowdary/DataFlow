@@ -55,6 +55,7 @@ def _record_schema_propagation(
 
     from .source_column_coverage import (
         refuse_unaccounted_without_validate,
+        refuse_unapproved_add_without_validate,
         source_column_coverage,
     )
 
@@ -94,6 +95,7 @@ def _record_schema_propagation(
         },
     )
     refuse_unaccounted_without_validate(request, columns, mappings)
+    refuse_unapproved_add_without_validate(request, columns, mappings, dest_schema_types)
 
 
 def _forget_cached_table_shapes(*endpoints: Any) -> None:

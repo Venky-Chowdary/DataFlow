@@ -45,18 +45,34 @@ _REMEDY = (
 )
 
 
-class SourceColumnsUnaccounted(SchemaPropagationRefused):
-    """A run without Validate would have dropped a source column nobody decided on."""
+_ADD_REMEDY = (
+    "Nothing was written. Set the schema policy to propagate columns (or turn on "
+    "backfill new fields), or acknowledge the schema drift for this run, so the run "
+    "adds the column; or declare it omitted, then run again."
+)
 
-    def __init__(self, message: str, *, columns: list[str]) -> None:
+
+class SourceColumnsUnaccounted(SchemaPropagationRefused):
+    """A run without Validate would have dropped, or added unapproved, a source column."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        columns: list[str],
+        gate: str = "g13_source_coverage",
+        rule_id: str = "g13_source_coverage.unaccounted",
+        fix: str = _REMEDY,
+    ) -> None:
         super().__init__(message)
         self.columns = list(columns)
         #: Merged into the job's ``error_details`` (``_job_failure_fields``), so
-        #: the refusal is classified by gate id, as the Validate block is.
+        #: the refusal is classified by the gate id Validate blocks with.
         self.failure_details = {
             "retriable": False,
             "unaccounted_sources": list(columns),
-            "guidance": [{"gate": "g13_source_coverage", "message": message, "fix": _REMEDY}],
+            "rule_id": rule_id,
+            "guidance": [{"gate": gate, "message": message, "fix": fix}],
         }
 
 
@@ -91,8 +107,90 @@ def refuse_unaccounted_without_validate(
     )
 
 
+def _live_has(target: str, live: set[str]) -> bool:
+    """Whether the destination already holds ``target``, under any spelling it stores."""
+    from connectors.sql_identifiers import sanitized_spellings
+
+    name = str(target or "").strip()
+    if not name:
+        return True
+    if name.lower() in live:
+        return True
+    return any(str(spelling).lower() in live for spelling in sanitized_spellings(name))
+
+
+def refuse_unapproved_add_without_validate(
+    request: Any,
+    columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+    dest_schema_types: dict[str, str] | None,
+) -> None:
+    """Raise when Validate will not run and a mapping would ADD a column unapproved.
+
+    Under ``manual_review`` Execute does not ADD COLUMN in any sync mode
+    (``SCHEMA_POLICY_HONESTY``); Validate blocks the same proposal. Without
+    Validate, auto-map (or a stored ``create_new`` stamp) still armed the
+    writer's ADD COLUMN lane in every mode but overwrite. The approval is the
+    predicate Validate and Execute share (``destination_evolution_approved``):
+    a propagate policy, backfill new fields, or an acknowledged drift. The
+    refusal is Validate's own sentence (``schema_review_copy``).
+    """
+    if request is None or not bool(getattr(request, "skip_preflight", False)):
+        return
+    live = {str(c).strip().lower() for c in (dest_schema_types or {}) if str(c).strip()}
+    if not live:
+        return  # no existing table: its columns are a CREATE, not an ADD COLUMN
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if not dest_declares_column_ddl(str(getattr(request.destination, "format", "") or "")):
+        return
+    from services.schema_drift import (
+        destination_evolution_approved,
+        effective_schema_policy,
+        schema_review_copy,
+    )
+
+    policy = effective_schema_policy(
+        getattr(request, "schema_policy", None),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+    )
+    if destination_evolution_approved(
+        policy, acknowledged=bool(getattr(request, "schema_drift_acknowledged", False))
+    ):
+        return
+    from services.shape_contract import write_ready_mappings
+
+    source_names = {str(c).strip().lower() for c in columns or [] if str(c).strip()}
+    missing: list[str] = []
+    for mapping in write_ready_mappings(mappings):
+        source = str(mapping.get("source") or "").strip()
+        if source.lower() not in source_names or _live_has(str(mapping.get("target") or ""), live):
+            continue
+        if source not in missing:
+            missing.append(source)
+    if not missing:
+        return
+    copy = schema_review_copy(
+        {
+            "saved_contract": False,
+            "schema_evolution": {
+                "additive": [{"kind": "add_column", "column": name} for name in missing]
+            },
+        },
+        policy=policy,
+    )
+    raise SourceColumnsUnaccounted(
+        f"{copy['message']} Schema policy '{policy}' does not add columns. {_ADD_REMEDY}",
+        columns=missing,
+        gate=str(copy["gate_id"]),
+        rule_id=str(copy["rule_id"]),
+        fix=_ADD_REMEDY,
+    )
+
+
 __all__ = [
     "SourceColumnsUnaccounted",
     "refuse_unaccounted_without_validate",
+    "refuse_unapproved_add_without_validate",
     "source_column_coverage",
 ]

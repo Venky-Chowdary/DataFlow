@@ -60,8 +60,9 @@ gate passes.
 A source column must be mapped or declared omitted; otherwise the run is
 refused. That holds when the destination table already exists and lacks the
 column, in every sync mode: the column is added when the schema policy approves
-it (propagate columns, or backfill new fields), and otherwise the run stops
-before the first write and names the column. A run started without Validate
+it (propagate columns, or backfill new fields) or the drift is acknowledged for
+the run, and otherwise the run stops before the first write and names the
+column. Under manual review the run never adds a column on its own. A run started without Validate
 (quarantine replay, the SDK) gets the same check at Execute. In a job that moves
 several tables, a table with more columns than the first is written with its
 own columns.
