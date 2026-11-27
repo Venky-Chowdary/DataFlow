@@ -456,6 +456,12 @@ def _legacy_pack_status(payload: dict[str, Any], may_use_workspace: Any = None) 
     if not record:
         return LEGACY_NOT_ON_RECORD, LEGACY_NOT_ON_RECORD_REASON
     workspace = str(record.get("workspace_id") or "")
+    if not workspace and record.get("evidence_type") != "exit_evidence_pack":
+        # Recorded from an export filed without a workspace (review 3 item 5):
+        # the job's workspace decides who may verify it.
+        from services.legacy_evidence_register import job_workspace
+
+        workspace = job_workspace(str(record.get("ref_id") or ""))
     if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
         return LEGACY_NOT_ON_RECORD, (
             "signed with another workspace's evidence key: it can be verified only "

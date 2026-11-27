@@ -103,7 +103,7 @@ def _insert_if_absent(key: str, doc: dict[str, Any]) -> bool:
 def lookup(digest: str) -> dict[str, Any] | None:
     """The register's record for ``digest``, or None."""
     key = _key(digest)
-    if not key or key == _META_ID:
+    if not key or key.startswith(_META_ID):
         return None
     coll = _collection()
     if coll is not None:
@@ -111,13 +111,6 @@ def lookup(digest: str) -> dict[str, Any] | None:
         return {k: v for k, v in doc.items() if k != "_id"} if isinstance(doc, dict) else None
     record = _read_all().get(key)
     return dict(record) if isinstance(record, dict) else None
-
-
-def snapshot_taken() -> bool:
-    coll = _collection()
-    if coll is not None:
-        return coll.find_one({"_id": _META_ID}) is not None
-    return _META_ID in _read_all()
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -165,23 +158,73 @@ def _audit_records(cutover: datetime | None) -> Iterable[dict[str, Any]]:
         else:
             digest, kind = details.get("content_sha256"), _EXPORT_ACTIONS[action]
         if digest:
+            ref = str(details.get("job_id") or event.get("resource") or "")
             yield {
                 "digest": str(digest), "evidence_type": kind,
                 "created_at": str(event.get("time") or ""),
-                "ref_id": str(details.get("job_id") or event.get("resource") or ""),
-                "workspace_id": str(event.get("workspace_id") or ""),
+                "ref_id": ref,
+                # Export records filed with no workspace (review 3 item 5): the
+                # job's own workspace.
+                "workspace_id": str(event.get("workspace_id") or "") or job_workspace(ref),
             }
 
 
+def _genuine_legacy_digest(pack: dict[str, Any]) -> str:
+    """The pack's recomputed digest when its login-secret signature verifies, else ''.
+
+    A stored ``content_sha256`` is not trusted (review 3 item 4): the body is
+    hashed again and the HMAC checked, so a pack edited in the store, or
+    signed with something else, is never recorded.
+    """
+    import hmac as _hmac
+
+    from services.signed_proof_pack import _platform_secret, hmac_sha256_hex, pack_subject
+
+    digest = digest_of(pack)
+    if digest != str(pack.get("content_sha256") or "").strip().lower():
+        return ""
+    sig = pack.get("signature") if isinstance(pack.get("signature"), dict) else {}
+    claimed = str(sig.get("value") or "")
+    expected = hmac_sha256_hex(_platform_secret(), f"{digest}:{pack_subject(pack)}")
+    return digest if claimed and _hmac.compare_digest(claimed, expected) else ""
+
+
+def _before(created_at: str, cutover: datetime | None) -> bool:
+    if cutover is None:
+        return True
+    when = _parse_time(created_at)
+    return when is not None and when < cutover
+
+
+def job_workspace(ref_id: str) -> str:
+    """The workspace of the job ``ref_id`` names (``job:<id>`` or ``<id>``), or ''."""
+    job_id = str(ref_id or "").strip()
+    if job_id.startswith("job:"):
+        job_id = job_id[4:]
+    if not job_id:
+        return ""
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job(job_id)
+    except Exception:  # noqa: BLE001 - unknown workspace; the caller decides
+        logger.warning("legacy evidence register: job lookup failed", exc_info=True)
+        return ""
+    return str((job or {}).get("workspace_id") or "") if isinstance(job, dict) else ""
+
+
 def _pack_record(pack: dict[str, Any], kind: str, ref_id: str, workspace_id: str,
-                 created_at: str) -> dict[str, Any] | None:
-    if not _legacy_signed(pack) or not pack.get("content_sha256"):
+                 created_at: str, cutover: datetime | None) -> dict[str, Any] | None:
+    if not _legacy_signed(pack) or not _before(created_at, cutover):
         return None
-    return {"digest": str(pack["content_sha256"]), "evidence_type": kind,
+    digest = _genuine_legacy_digest(pack)
+    if not digest:
+        return None
+    return {"digest": digest, "evidence_type": kind,
             "created_at": created_at, "ref_id": ref_id, "workspace_id": workspace_id}
 
 
-def _parity_records() -> Iterable[dict[str, Any]]:
+def _parity_records(cutover: datetime | None) -> Iterable[dict[str, Any]]:
     """Signed parity sign-off packs, held in each job's parity state."""
     from services.mongodb_service import get_mongodb_service
 
@@ -198,12 +241,12 @@ def _parity_records() -> Iterable[dict[str, Any]]:
         signed = ((job or {}).get("parity") or {}).get("signed") or {}
         rec = _pack_record(signed.get("pack") or {}, "parity_signoff_pack",
                            str(job.get("job_id") or ""), str(job.get("workspace_id") or ""),
-                           str(signed.get("signed_at") or ""))
+                           str(signed.get("signed_at") or ""), cutover)
         if rec:
             yield rec
 
 
-def _exit_records() -> Iterable[dict[str, Any]]:
+def _exit_records(cutover: datetime | None) -> Iterable[dict[str, Any]]:
     """Signed Exit Evidence Packs, held on each rehearsal."""
     from services import exit_store
 
@@ -211,7 +254,8 @@ def _exit_records() -> Iterable[dict[str, Any]]:
         signed = doc.get("signed") if isinstance(doc.get("signed"), dict) else {}
         rec = _pack_record(signed.get("pack") or {}, "exit_evidence_pack",
                            str(doc.get("id") or doc.get("_id") or ""),
-                           str(doc.get("workspace_id") or ""), str(signed.get("signed_at") or ""))
+                           str(doc.get("workspace_id") or ""), str(signed.get("signed_at") or ""),
+                           cutover)
         if rec:
             yield rec
 
@@ -219,48 +263,96 @@ def _exit_records() -> Iterable[dict[str, Any]]:
 def _sources(cutover: datetime | None) -> list[tuple[str, Any]]:
     return [
         ("audit", lambda: _audit_records(cutover)),
-        ("parity", _parity_records),
-        ("exit", _exit_records),
+        ("parity", lambda: _parity_records(cutover)),
+        ("exit", lambda: _exit_records(cutover)),
     ]
 
 
-def snapshot(cutover: datetime | None) -> dict[str, Any]:
+#: A source that could not be read is retried at most this many times, and no
+#: more often than every ``_RETRY_SECONDS``: a broken store never turns every
+#: legacy verify into a whole-store rescan (review 3 item 4).
+_MAX_RETRIES = 3
+_RETRY_SECONDS = 15 * 60
+
+
+def snapshot(cutover: datetime | None, only: set[str] | None = None) -> dict[str, Any]:
     """Record every legacy-signed evidence digest the server holds (idempotent).
 
-    ``cutover``: audit records filed at or after it are not legacy evidence.
-    A source that cannot be read is reported, not hidden; the snapshot marker
-    is written only when every source was read, so a later call retries.
+    ``cutover``: evidence made at or after it is not legacy evidence. ``only``:
+    the sources to read (a retry of the ones that failed). Returns the counts
+    and the sources that could not be read.
     """
     counts: dict[str, int] = {}
     unreadable: list[str] = []
     for name, source in _sources(cutover):
+        if only is not None and name not in only:
+            continue
         try:
             for rec in source():
                 key = _key(rec["digest"])
                 if key and _insert_if_absent(key, {k: v for k, v in rec.items() if k != "digest"}):
                     counts[rec["evidence_type"]] = counts.get(rec["evidence_type"], 0) + 1
-        except Exception as exc:  # noqa: BLE001 - reported; the snapshot retries later
+        except Exception as exc:  # noqa: BLE001 - recorded on the marker; retried, bounded
             logger.error("legacy evidence register: %s unreadable: %s", name, type(exc).__name__)
             unreadable.append(name)
-    meta = {"taken_at": _now(), "cutover": cutover.isoformat() if cutover else None,
+    return {"taken_at": _now(), "cutover": cutover.isoformat() if cutover else None,
             "recorded": counts, "unreadable": unreadable}
-    if not unreadable:
-        _insert_if_absent(_META_ID, meta)
-    return meta
+
+
+def _meta(key: str) -> dict[str, Any] | None:
+    coll = _collection()
+    if coll is not None:
+        doc = coll.find_one({"_id": key})
+        return {k: v for k, v in doc.items() if k != "_id"} if isinstance(doc, dict) else None
+    record = _read_all().get(key)
+    return dict(record) if isinstance(record, dict) else None
+
+
+def _pending_retry(first: dict[str, Any]) -> tuple[int, set[str], datetime | None]:
+    """``(attempt, sources still unread, when last tried)`` from the markers."""
+    unread = set(first.get("unreadable") or [])
+    last = _parse_time(first.get("taken_at"))
+    attempt = 0
+    while unread and attempt < _MAX_RETRIES:
+        retry = _meta(f"{_META_ID}retry:{attempt + 1}")
+        if retry is None:
+            break
+        attempt += 1
+        unread = set(retry.get("unreadable") or [])
+        last = _parse_time(retry.get("taken_at")) or last
+    return attempt, unread, last
 
 
 def ensure_snapshot(cutover: datetime | None = None) -> None:
-    """Take the snapshot once: at the cutover, or on first need after it."""
-    if snapshot_taken():
-        return
-    with _LOCK:
-        if snapshot_taken():
-            return
-        if cutover is None:
-            from services.evidence_signing_keys import legacy_cutover_at
+    """Take the snapshot once (at the cutover or on first need); retry unread sources, bounded.
 
-            cutover = legacy_cutover_at()
-        snapshot(cutover)
+    The marker is written whatever happened, naming the sources that could
+    not be read. Those alone are read again, at most ``_MAX_RETRIES`` times
+    and no more often than every ``_RETRY_SECONDS``; each retry is its own
+    append-only marker.
+    """
+    with _LOCK:
+        first = _meta(_META_ID)
+        if first is None:
+            if cutover is None:
+                from services.evidence_signing_keys import legacy_cutover_at
+
+                cutover = legacy_cutover_at()
+            _insert_if_absent(_META_ID, snapshot(cutover))
+            return
+        attempt, unread, last = _pending_retry(first)
+        if not unread or attempt >= _MAX_RETRIES:
+            return
+        now = datetime.now(timezone.utc)
+        if last is not None and (now - last).total_seconds() < _RETRY_SECONDS:
+            return
+        recorded_cutover = _parse_time(first.get("cutover"))
+        _insert_if_absent(f"{_META_ID}retry:{attempt + 1}", snapshot(recorded_cutover, only=unread))
+
+
+def snapshot_taken() -> bool:
+    """True once the snapshot marker is written (some sources may still be retried)."""
+    return _meta(_META_ID) is not None
 
 
 def digest_of(payload: dict[str, Any]) -> str:

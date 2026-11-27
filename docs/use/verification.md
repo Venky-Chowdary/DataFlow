@@ -229,8 +229,14 @@ Two engine facts that often cause explained differences:
   chain anchors (the whole audit store, not the newest 20,000 records), signed
   parity sign-off packs from the job store, and signed Exit Evidence Packs
   from the exit store. Each record keeps the digest, the evidence type, when
-  it was made, the job or report id and the workspace. Records are only ever
-  added, and the audit retention purge does not touch the register. A
+  it was made, the job or report id and the workspace (for an export record
+  filed without one, the job's workspace). A stored parity or exit pack is
+  recorded only when it was signed before the cutover, its body still hashes
+  to its digest and its login-secret signature checks out. Records are only
+  ever added, and the audit retention purge does not touch the register. A
+  store that cannot be read during the snapshot is named on the snapshot
+  record and read again at most three times, no more often than every 15
+  minutes; its packs are refused until a retry reads it. A
   deployment that created its first evidence key on an earlier build takes
   the snapshot the first time a legacy pack is verified, counting only audit
   records filed before that key was created.

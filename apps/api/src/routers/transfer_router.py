@@ -2416,6 +2416,7 @@ def get_transfer_proof_pack(job_id: str, request: Request):
             resource=f"job:{job_id}",
             actor=actor,
             level="info",
+            workspace_id=str(job.get("workspace_id") or "") or None,
             details={"content_sha256": pack.get("content_sha256"), "version": pack.get("version")},
         )
     except Exception as exc:
@@ -2482,6 +2483,7 @@ def get_migration_certificate(job_id: str, request: Request, format: str = "json
             resource=f"job:{job_id}",
             actor=actor,
             level="info",
+            workspace_id=str(job.get("workspace_id") or "") or None,
             details={
                 "content_sha256": cert.get("content_sha256"),
                 "verdict": (cert.get("verdict") or {}).get("headline"),
