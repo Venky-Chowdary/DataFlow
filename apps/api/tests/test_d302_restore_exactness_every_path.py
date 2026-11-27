@@ -188,14 +188,25 @@ def test_a_set_aside_backup_is_put_back_whole_on_a_cancel(monkeypatch):
 
 
 class _Store:
+    """Job store double with the real store's compare-and-swap semantics."""
+
     def __init__(self):
         self.jobs = {"job1": {"status": "running"}}
+        self.on_read = None
 
     def get_job(self, job_id):
-        return dict(self.jobs.get(job_id) or {})
+        snapshot = dict(self.jobs.get(job_id) or {})
+        if self.on_read is not None:
+            self.on_read(self.jobs[job_id])
+        return snapshot
 
-    def update_job_fields(self, job_id, fields):
+    def update_job_fields(self, job_id, fields, *, expected=None, touch_updated_at=True):
+        from services.mongodb_service import expected_fields_hold
+
+        if expected and not expected_fields_hold(self.jobs[job_id], expected):
+            return False
         self.jobs[job_id].update(fields)
+        return True
 
 
 def _bound(store, fn):
@@ -297,3 +308,56 @@ def test_generic_row_copy_restore_on_live_postgresql(shape):
             cur.execute(f"DROP TABLE IF EXISTS {t}_audit")
             cur.execute(f"DROP FUNCTION IF EXISTS {t}_f()")
         conn.close()
+
+
+def _wait_watcher_done(job_id: str = "job1", budget: float = 5.0) -> bool:
+    from src.transfer import cancel_restore
+
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        with cancel_restore._LATE_LOCK:
+            if job_id not in cancel_restore._LATE_WATCHED:
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def test_the_late_cancel_note_never_overwrites_the_final_cancel_record(monkeypatch):
+    """The run writes its final cancelled record (cancel_outcome) between the
+    watcher's read and its write: the note must not replace it."""
+    import src.transfer.cancel_restore as cr
+    from src.transfer.models import EndpointConfig
+
+    store = _Store()
+    final = "Cancelled after 3,000 row(s) were already committed to the destination"
+
+    def engine_finishes_now(rec):
+        if rec.get("cancel_requested") and not rec.get("cancel_outcome"):
+            rec.update(cancel_outcome={"rows_committed": 3000}, message=final)
+
+    store.jobs["job1"].update(status="cancelled", cancel_requested=True)
+    store.on_read = engine_finishes_now
+    dest = EndpointConfig(kind="database", format="mysql", table="orders")
+    _bound(store, lambda: cr.mark_write_complete(dest, "orders"))
+    assert _wait_watcher_done()
+    assert store.jobs["job1"]["message"] == final
+    assert "cancel_note" not in store.jobs["job1"]
+
+
+@pytest.mark.parametrize(
+    "status", ["completed", "completed_with_quarantine", "completed_with_warnings", "failed"]
+)
+def test_the_late_cancel_watcher_stops_on_every_terminal_status(status):
+    """A finished run's watcher must not linger and label a later cancel or
+    resume of the same job id."""
+    import src.transfer.cancel_restore as cr
+    from src.transfer.models import EndpointConfig
+
+    store = _Store()
+    dest = EndpointConfig(kind="database", format="mysql", table="orders")
+    store.jobs["job1"]["status"] = status
+    _bound(store, lambda: cr.mark_write_complete(dest, "orders"))
+    assert _wait_watcher_done(), f"watcher still polling after {status}"
+    store.jobs["job1"].update(status="cancelled", cancel_requested=True)
+    time.sleep(0.3)
+    assert "cancel_note" not in store.jobs["job1"]

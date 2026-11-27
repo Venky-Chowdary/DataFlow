@@ -88,19 +88,30 @@ def _watch_for_late_cancel(interval: float = 2.0, budget: float = 3600.0) -> Non
                 _LATE_WATCHED.discard(job_id)
 
     def _poll() -> None:
+        from services.job_status import TERMINAL_STATUSES
+
         deadline = time.monotonic() + budget
         while time.monotonic() < deadline:
             try:
-                job = mongo.get_job(job_id) or {}
+                job = mongo.get_job(job_id)
             except Exception:  # noqa: BLE001 - a missed read is retried
                 job = {}
+            if job is None:
+                return  # the job record is gone
             status = str(job.get("status") or "")
-            if job.get("cancel_outcome") or status in {"completed", "failed"}:
-                return
-            if job.get("cancel_requested") or status == "cancelled":
+            if job.get("cancel_outcome"):
+                return  # the run already wrote its final cancelled record
+            cancelled = bool(job.get("cancel_requested")) or status == "cancelled"
+            if status in TERMINAL_STATUSES and status != "cancelled":
+                return  # completed (with quarantine / warnings) or failed: done
+            if cancelled:
                 try:
+                    # Compare-and-swap: never over the run's final record (it
+                    # sets cancel_outcome), never over a status that moved on.
                     mongo.update_job_fields(
-                        job_id, {"message": LATE_CANCEL_MESSAGE, "cancel_note": LATE_CANCEL_MESSAGE}
+                        job_id,
+                        {"message": LATE_CANCEL_MESSAGE, "cancel_note": LATE_CANCEL_MESSAGE},
+                        expected={"cancel_outcome": None, "status": status or None},
                     )
                 except Exception:  # noqa: BLE001 - a note never fails the run
                     logger.warning("late-cancel note not written for %s", job_id, exc_info=True)

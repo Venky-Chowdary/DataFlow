@@ -89,6 +89,21 @@ def _paced_source(pg, table: str) -> str:
     return view
 
 
+def _cancelled_record(store, job_id: str) -> dict:
+    """The job's final cancelled record, which the engine's cancel path writes.
+
+    Every cancelled run ends with ``cancel_outcome`` (what landed, counted).
+    A run that stops without it (once seen: phase still 'writing', message
+    only the operator's 'Cancelled') must fail here, loudly, with the record.
+    """
+    job = store.get_job(job_id) or {}
+    assert str(job.get("status")) == "cancelled", job
+    assert isinstance(job.get("cancel_outcome"), dict) and job["cancel_outcome"], (
+        "no final cancelled record (cancel_outcome missing)", job,
+    )
+    return job
+
+
 def _assert_engine_cancelled(store, job_id: str, result: dict, my, dst_t: str) -> int:
     """The engine itself ended the run as cancelled, and its ledger is exact.
 
@@ -101,7 +116,7 @@ def _assert_engine_cancelled(store, job_id: str, result: dict, my, dst_t: str) -
     assert r is not None and r.success is False, r
     raw = str((getattr(r, "error_details", None) or {}).get("raw") or "")
     assert raw.startswith("Transfer cancelled by user"), raw
-    job = store.get_job(job_id) or {}
+    job = _cancelled_record(store, job_id)
     assert job.get("phase") == "cancelled", (job.get("phase"), job.get("message"))
     outcome = job.get("cancel_outcome") or {}
     assert outcome, job.get("message")
@@ -601,7 +616,7 @@ def test_a_cancel_before_the_publish_is_reported_as_nothing_landed(monkeypatch):
     try:
         r = UniversalTransferEngine().execute_tracked(request, job_id)
         assert r.success is False, r
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         assert job.get("phase") == "cancelled", (job.get("phase"), job.get("message"))
         outcome = job.get("cancel_outcome") or {}
         # Nothing of this run landed, and the record says what the table holds.

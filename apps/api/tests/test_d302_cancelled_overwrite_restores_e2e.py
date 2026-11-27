@@ -23,6 +23,7 @@ import uuid
 import pytest
 
 from tests.test_d302_cancel_releases_pg_source_txn_e2e import (
+    _cancelled_record,
     _endpoint,
     _engine,
     _paced_source,
@@ -162,7 +163,7 @@ def test_a_cancelled_overwrite_puts_the_pre_run_rows_back(monkeypatch, dest, rou
         assert not worker.is_alive(), "the cancelled job is still running"
         r = result.get("r")
         assert r is not None and r.success is False, r
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         assert job.get("phase") == "cancelled", (job.get("phase"), job.get("message"))
         # The live table holds exactly its pre-run rows; no backup or stage is left.
         assert _dest_rows(dest, my, pgd, dst_t) == PRE_RUN
@@ -223,7 +224,7 @@ def test_a_cancel_after_the_overwrite_committed_keeps_the_new_rows(monkeypatch):
     store.update_job_status(job_id, "pending", transfer_request={})
     try:
         UniversalTransferEngine().execute_tracked(request, job_id)
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         assert job.get("status") == "cancelled", job.get("status")
         assert "the load had finished when the cancel landed" in str(job.get("message")), job
         assert (job.get("cancel_outcome") or {}).get("rows_committed") == 3000
@@ -270,7 +271,7 @@ def test_a_cancel_at_the_final_progress_write_keeps_the_complete_load(monkeypatc
     store.update_job_status(job_id, "pending", transfer_request={})
     try:
         UniversalTransferEngine().execute_tracked(request, job_id)
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         assert job.get("status") == "cancelled", job.get("status")
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*), MIN(id), MAX(id) FROM `{dst_t}`")  # nosec B608
@@ -313,7 +314,7 @@ def test_a_restore_puts_the_pre_run_auto_increment_back(monkeypatch):
     p, c, pg, my, src_t, dst_t, pgd = env
     try:
         assert alive, f"the cancel did not land mid-load: {result}"
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         assert job.get("message") == RESTORED_MESSAGE, job.get("message")
         assert _dest_rows("mysql", my, pgd, dst_t) == PRE_RUN
         assert _auto_increment(my, dst_t) == 700
@@ -350,7 +351,7 @@ def test_a_table_with_triggers_is_not_restored_blindly_and_gets_exact_steps(monk
     backup = f"{dst_t}__df_bak"
     try:
         assert alive, f"the cancel did not land mid-load: {result}"
-        job = store.get_job(job_id) or {}
+        job = _cancelled_record(store, job_id)
         msg = str(job.get("message"))
         outcome = job.get("cancel_outcome") or {}
         assert outcome.get("pre_run_rows_restored") is False, outcome
