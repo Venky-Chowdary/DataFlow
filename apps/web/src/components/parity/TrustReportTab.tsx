@@ -12,6 +12,7 @@
  * cards on this job; this tab links to them instead of drawing them twice.
  */
 
+import { Info } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
@@ -361,6 +362,11 @@ export function TrustReportView({
   const ringTone =
     report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" || report.verdict === "verifying" ? "idle" : "ok";
   const verification = report.verification && report.verification.state !== "not_eligible" ? report.verification : null;
+  // Why the run was not compared at full scale; Gate-8's own verdict above stands unchanged.
+  const notVerifiedReason =
+    report.verification?.state === "not_eligible"
+      ? `${(report.verification.reason || "no comparison of every row was possible for this run").replace(/\.$/, "")}.`
+      : "";
   const running = verificationRunning(report);
   const explorable = running ? [] : explorableTables(verification);
   const signoffAnchor = `parity-signoff-${report.job_id}`;
@@ -453,6 +459,13 @@ export function TrustReportView({
         <p className="df2-parity-notice is-warn" role="status">
           <DtIcon name="alert" size={14} />
           <span>{notice}</span>
+        </p>
+      )}
+
+      {notVerifiedReason && (
+        <p className="df2-pscale-banner" role="note">
+          <Info size={16} strokeWidth={2} aria-hidden="true" />
+          <span>Not verified at full scale: {notVerifiedReason}</span>
         </p>
       )}
 

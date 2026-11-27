@@ -217,6 +217,20 @@ describe("Trust Report with verification after the write (static)", () => {
     assert.doesNotMatch(t, /Comparing/);
   });
 
+  it("a run not eligible says why, and Gate-8's verdict stands (review 2, N5)", () => {
+    const report = provenReport({
+      verification: {
+        state: "not_eligible",
+        reason: "the run read a window of the source (incremental); comparing the whole table would not match what this run wrote",
+        tables: [],
+      },
+    });
+    const t = text(view(report));
+    assert.match(t, /Not verified at full scale: the run read a window of the source \(incremental\)/);
+    assert.match(t, /Proven equal/); // the verdict Gate-8 reached is unchanged
+    assert.doesNotMatch(t, /Verification after the write/);
+  });
+
   it("mounts Track W's AI decisions section as given", () => {
     const t = text(view(provenReport(), { aiDecisions: <section aria-label="AI decisions">Ledger here</section> }));
     assert.match(t, /Ledger here/);

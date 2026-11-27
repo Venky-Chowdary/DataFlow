@@ -958,6 +958,11 @@
   min-width: 12ch;
 }
 
+.df2-pscale-banner > span {
+  flex: 1 1 0;
+  min-width: 12ch;
+}
+
 .df2-pscale-banner > svg {
   flex-shrink: 0;
   margin-top: 2px;
