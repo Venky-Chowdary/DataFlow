@@ -159,8 +159,23 @@ class SqlSide(Side):
             clauses.append("(" + " OR ".join(ors) + ")")
         return (" AND ".join(clauses) or "1 = 1"), params
 
-    def where(self, lo: KeyBound, hi: KeyBound) -> tuple[str, list[Any]]:
-        sql, params = self.range_predicate(lo, hi) if self.key_cols else ("1 = 1", [])
+    def null_key(self) -> str:
+        """Rows with no key value (any key column NULL): no key range holds them."""
+        return " OR ".join(f"{k} IS NULL" for k in self.quoted_keys())
+
+    def where(self, lo: KeyBound, hi: KeyBound, *, nulls: bool = False) -> tuple[str, list[Any]]:
+        """``lo <= key < hi`` over rows with a key value, or (``nulls``) the rows without one.
+
+        A NULL key compares as unknown, so it is in no range: key ranges hold only
+        non-NULL keys, and the NULL-key rows are their own unit (compared by row).
+        """
+        if not self.key_cols:
+            sql, params = "1 = 1", []
+        elif nulls:
+            sql, params = f"({self.null_key()})", []
+        else:
+            sql, params = self.range_predicate(lo, hi)
+            sql = f"{sql} AND NOT ({self.null_key()})"
         if self._held:
             sql = f"{sql} AND NOT ({self._held})"
         return sql, params
@@ -239,7 +254,7 @@ class SqlSide(Side):
         if strategy in {"auto", "sample"}:
             per_unit = 50
             fraction = min(1.0, units * per_unit / estimate)
-            keys = self.sample_keys(fraction, units * per_unit * 4)
+            keys = [k for k in (self.sample_keys(fraction, units * per_unit * 4) or []) if None not in tuple(k)]
             if keys:
                 pick = max(1, len(keys) // units)
                 points = []
@@ -365,14 +380,27 @@ class SqlSide(Side):
     range_stream = True
 
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000, lo: KeyBound = None, hi: KeyBound = None
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, lo: KeyBound = None, hi: KeyBound = None,
+        *, nulls: bool = False,
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
         width = len(self.key_cols)
         names = [*self.quoted_keys(), *(self.quote(self.column_name(c)) for c in columns)]
-        where, params = self.where(lo, hi)
+        where, params = self.where(lo, hi, nulls=nulls)
         sql = f"SELECT {', '.join(names)} FROM {self.table_ref} WHERE {where}"
         for row in self.stream(sql, params, batch):
             yield (tuple(row[:width]) if width else None), tuple(row[width:])
+
+    def null_key_count(self) -> int:
+        if not self.key_cols:
+            return 0
+        where, params = self.where(None, None, nulls=True)
+        sql = f"SELECT COUNT(*) FROM {self.table_ref} WHERE {where}"
+        return int(self.execute(sql, params)[0][0])
+
+    def total_count(self) -> int:
+        where = f"NOT ({self._held})" if self._held else "1 = 1"
+        sql = f"SELECT COUNT(*) FROM {self.table_ref} WHERE {where}"
+        return int(self.execute(sql, [])[0][0])
 
     def held_count(self) -> int:
         if not self._held:

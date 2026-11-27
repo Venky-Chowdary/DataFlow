@@ -417,6 +417,8 @@ class ParityScan:
             "H": self._bucket_level,
             "HL": self._bucket_leaf,
             "held": self._held,
+            "nullkeys": self._null_keys,
+            "population": self._population,
             "stream": self._stream,
             "judge": self._judge,
             "examples": self._examples,
@@ -435,7 +437,7 @@ class ParityScan:
     def _abandon_queue(self, reason: str) -> None:
         for item in self.state["queue"]:
             # A scan stopped before it even started compared nothing: never a match.
-            if item["t"] in {"R", "RL", "H", "HL", "stream", "start", "held"}:
+            if item["t"] in {"R", "RL", "H", "HL", "stream", "start", "held", "nullkeys", "population"}:
                 self._not_compared(item, reason)
             elif item["t"] == "judge":
                 self.state["judge"]["not_judged"] += len(item.get("keys") or [])
@@ -463,13 +465,18 @@ class ParityScan:
         tail: list[dict[str, Any]] = []
         if any(c.decimal_fit for c in self.plan.engine_columns):
             tail.append({"t": "held"})
+        # Rows with no key value are in no key range: their own unit, compared by whole row.
+        ends: list[dict[str, Any]] = [] if self.plan.keyless else [{"t": "nullkeys"}]
+        # Before any verdict: per side, the units must add up to the table's row count.
+        ends.append({"t": "population"})
         if mode == "S":
             self.state["phase"] = "stream"
             shape = "multiset" if self.plan.keyless else "keyed"
-            self._enqueue(*self._stream_items(shape), *tail)
+            self._enqueue(*self._stream_items(shape), *tail, *ends)
             return
         if self.plan.stream_columns and not self.plan.keyless:
             tail.append({"t": "stream", "shape": "changed", "chunk": True})
+        tail.extend(ends)
         self.state["phase"] = "level0"
         if mode == "R":
             src = self.side("source")
@@ -873,6 +880,55 @@ class ParityScan:
         except UnitTimeout as exc:
             self.state["held_out"] = {"fit_excluded": None, "reason": f"count timed out: {exc}"}
 
+    # rows with no key value; the population check ----------------------------------------------
+    def _null_keys(self, item: dict[str, Any]) -> None:
+        try:
+            src, dst = self._both("null_key_count", item, lambda s: s.null_key_count())
+        except UnitTimeout as exc:
+            self._not_compared(item, f"rows with no key value could not be counted: {exc}")
+            return
+        self.state["null_keys"] = {"source": int(src), "destination": int(dst), "missing": 0, "extra": 0}
+        self.state["rows"]["source"] = int(self.state["rows"]["source"]) + int(src)
+        self.state["rows"]["destination"] = int(self.state["rows"]["destination"]) + int(dst)
+        if src or dst:
+            self.state["queue"].insert(0, {"t": "stream", "shape": "multiset", "nulls": True})
+
+    def _population(self, item: dict[str, Any]) -> None:
+        """Hard invariant before any match: per side, ``COUNT(*)`` equals the sum of the units.
+
+        A row in no unit (a hole in the key ranges) would otherwise be compared on
+        neither side and the scan would read "every row matched".
+        """
+        slow = max(float(self.config.statement_timeout_s or 0), float(self.config.stream_timeout_s or 0)) or None
+
+        def count(side: Side) -> int:
+            side.set_timeout(slow)
+            try:
+                return side.total_count()
+            finally:
+                side.set_timeout(self.config.statement_timeout_s)
+
+        try:
+            src, dst = self._both("total_count", item, count)
+        except UnitTimeout as exc:
+            self._not_compared(item, f"the row-count check timed out, so the units are not shown to cover "
+                                     f"every row: {exc}")
+            return
+        rows = self.state["rows"]
+        check: dict[str, Any] = {"ok": True}
+        for role, counted in (("source", int(src)), ("destination", int(dst))):
+            in_units = int(rows.get(role) or 0)
+            check[role] = {"rows": counted, "in_units": in_units}
+            if counted != in_units:
+                check["ok"] = False
+        self.state["population_check"] = check
+        if not check["ok"] and not self.state["not_compared"]:
+            parts = [f"the {role} has {check[role]['rows']} rows but the compared units hold "
+                     f"{check[role]['in_units']}" for role in ("source", "destination")
+                     if check[role]["rows"] != check[role]["in_units"]]
+            self._not_compared(item, "row count check failed: " + "; ".join(parts)
+                               + " (rows outside every unit, or rows written during an unpinned scan)")
+
     # streamed pass ---------------------------------------------------------------------------
     def _stream(self, item: dict[str, Any]) -> None:
         from services.parity_scale.stream import stream_compare
@@ -892,10 +948,20 @@ class ParityScan:
                 spill_dir=self.config.spill_dir,
                 lo=decode_key(item["lo"]) if item.get("lo") is not None else None,
                 hi=decode_key(item["hi"]) if item.get("hi") is not None else None,
-                deadline=deadline, tick=self._tick,
+                deadline=deadline, tick=self._tick, nulls=bool(item.get("nulls")),
             )
         except UnitTimeout as exc:
             self._not_compared(item, f"streamed pass timed out: {exc}")
+            return
+        diff = self.state["diff"]
+        if item.get("nulls"):
+            # Rows with no key value: a multiset of whole rows; counted, never attributed to a key.
+            nk = self.state.setdefault("null_keys", {"source": 0, "destination": 0, "missing": 0, "extra": 0})
+            nk.update(missing=result.missing, extra=result.extra,
+                      missing_examples=[self._masked(r) for r in result.missing_examples],
+                      extra_examples=[self._masked(r) for r in result.extra_examples])
+            diff["missing"] += result.missing
+            diff["extra"] += result.extra
             return
         previous = self.state.get("stream") or {}
         self.state["stream"] = {
@@ -904,7 +970,6 @@ class ParityScan:
             "rows_source": int(previous.get("rows_source") or 0) + result.rows_source,
             "rows_destination": int(previous.get("rows_destination") or 0) + result.rows_destination,
         }
-        diff = self.state["diff"]
         if shape == "multiset":
             diff["missing"] += result.missing
             diff["extra"] += result.extra
@@ -1030,7 +1095,7 @@ class ParityScan:
     # the queue's tail: judge after every unit is merged ---------------------------------------------
     def _maybe_queue_judge(self) -> None:
         if not self.state.get("judge_queued") and not any(
-            i["t"] in {"R", "RL", "H", "HL", "stream", "held", "level0_done", "start"}
+            i["t"] in {"R", "RL", "H", "HL", "stream", "held", "nullkeys", "population", "level0_done", "start"}
             for i in self.state["queue"]
         ):
             self.state["judge_queued"] = True

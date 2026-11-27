@@ -85,7 +85,9 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
     keyless = not plan.get("key")
     systematic = state.get("systematic")
     done = state["status"] == "done"
-    complete = done and not not_compared and not systematic
+    # A match needs the units to add up to each side's row count (the population check).
+    population_check = state.get("population_check") or {}
+    complete = done and not not_compared and not systematic and population_check.get("ok") is True
 
     engine_changed = int(diff["changed"])
     judged_equal = int(judge["ce_stricter_than_fp"])
@@ -131,6 +133,18 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "examples": judge["examples"],
             }
         )
+        null_keys = state.get("null_keys") or {}
+        if null_keys.get("source") or null_keys.get("destination"):
+            differences["rows_without_key"] = {
+                "rows_source": int(null_keys.get("source") or 0),
+                "rows_destination": int(null_keys.get("destination") or 0),
+                "missing_in_destination": int(null_keys.get("missing") or 0),
+                "extra_in_destination": int(null_keys.get("extra") or 0),
+                "missing_content_examples": null_keys.get("missing_examples") or [],
+                "extra_content_examples": null_keys.get("extra_examples") or [],
+                "note": "Rows whose key is NULL are in no key range: they were compared as whole rows "
+                        "(content), and a difference among them cannot be attributed to a key.",
+            }
     any_difference = bool(
         differences["missing_in_destination"]
         or differences["extra_in_destination"]
@@ -177,6 +191,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "rows_destination": int(state["rows"]["destination"]),
             "rows_compared_complete": bool(state["rows"].get("level0_complete")) and not not_compared,
             "held_out": held,
+            "population_check": population_check or None,
         },
         "coverage": {
             "complete": complete,

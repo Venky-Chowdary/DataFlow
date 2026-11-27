@@ -187,9 +187,18 @@ class Side(ABC):
 
     @abstractmethod
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, *, nulls: bool = False
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
-        """``(key values or None, values of columns)`` for every row, streamed."""
+        """``(key values or None, values of columns)`` for every row with a key value
+        (``nulls``: every row without one), streamed."""
+
+    def null_key_count(self) -> int:
+        """Rows whose key has a NULL column (in no key range; 0 for a keyless table)."""
+        return 0
+
+    @abstractmethod
+    def total_count(self) -> int:
+        """Every row the scan compares (held-out rows excluded): the units must add up to it."""
 
     @abstractmethod
     def held_count(self) -> int:

@@ -68,7 +68,7 @@ class StreamResult:
 
 def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[ColumnPlan], *,
            keyed: bool, keep_values: bool, batch: int, lo: Any = None, hi: Any = None,
-           deadline: float | None = None, tick: Any = None) -> int:
+           deadline: float | None = None, tick: Any = None, nulls: bool = False) -> int:
     import time
 
     from services.parity_scale.dialects.base import UnitTimeout
@@ -76,8 +76,9 @@ def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[C
     plan = side.plan
     count = 0
     pending: list[tuple[str | None, str, str | None, str | None]] = []
-    rows = side.iter_stream(columns, batch=batch, lo=lo, hi=hi) if (lo is not None or hi is not None) \
-        else side.iter_stream(columns, batch=batch)
+    extra: dict[str, Any] = {"nulls": True} if nulls else {}
+    rows = side.iter_stream(columns, batch=batch, lo=lo, hi=hi, **extra) if (lo is not None or hi is not None) \
+        else side.iter_stream(columns, batch=batch, **extra)
     for key, values in rows:
         h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source)
         ident = side.key_hex(key) if keyed and key is not None else None
@@ -113,7 +114,10 @@ def stream_compare(
     hi: Any = None,
     deadline: float | None = None,
     tick: Any = None,
+    nulls: bool = False,
 ) -> StreamResult:
+    """Compare the sides' streamed fingerprints (``nulls``: only the rows with no key value,
+    as a multiset of whole rows, since no key pairs them)."""
     if shape not in {"changed", "keyed", "multiset"}:
         raise ValueError(f"unknown stream shape {shape!r}")
     cols = list(columns if columns is not None else plan.compared_columns)
@@ -127,7 +131,7 @@ def stream_compare(
         conn.execute("PRAGMA synchronous=OFF")
         conn.execute("CREATE TABLE s (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
         conn.execute("CREATE TABLE d (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
-        bounds = {"lo": lo, "hi": hi, "deadline": deadline, "tick": tick}
+        bounds = {"lo": lo, "hi": hi, "deadline": deadline, "tick": tick, "nulls": nulls}
         result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch,
                                     **bounds)
         result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed,

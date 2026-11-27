@@ -427,3 +427,20 @@ def test_dialect_registry_serves_the_first_wave_and_refuses_later_engines() -> N
     for engine in PLANNED:
         with pytest.raises(PairNotCertified):
             open_side(engine, role="source", plan=plan_for(), table="t")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_rows_without_a_key_value_are_their_own_unit(tmp_path, mode) -> None:
+    """Review 3, item 1: a NULL key is in no key range; once a table had more than one unit
+    its NULL-key rows were compared on neither side. They are a unit of their own now."""
+    path = make_db(tmp_path, 1000, keyless=True)  # no PRIMARY KEY: the key comes from the mapping
+    execute(path, "INSERT INTO src VALUES (NULL, 'a', 1, '')", "INSERT INTO src VALUES (NULL, 'b', 2, '')",
+            "INSERT INTO dst VALUES (NULL, 'a', 1, '')")
+    ev = scan(path, plan_for(key=["id"]), mode=mode)
+    assert ev["population"]["rows_source"] == 1002 and ev["population"]["rows_destination"] == 1001
+    assert ev["population"]["population_check"]["ok"] is True
+    assert ev["differences"]["missing_in_destination"] == 1
+    assert ev["differences"]["rows_without_key"]["missing_content_examples"][0][1] == "b"
+    assert ev["outcome"] == "differences_found"
+    execute(path, "INSERT INTO dst VALUES (NULL, 'b', 2, '')")
+    assert scan(path, plan_for(key=["id"]), mode=mode)["outcome"] == "match"
