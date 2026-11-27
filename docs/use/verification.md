@@ -97,6 +97,19 @@ Every block lists what you can do:
   check again now.
 - **Replace the empty values in the source**, then validate again.
 
+In Studio these are listed under "Oracle empty strings" on the Validate
+screen. Map `default:<value>` asks for the value; Create NULL-able asks for
+a reason and is signed by the server in your name; Check now and Check again
+are issued by the server; Fix the connection opens Connectors. Each then runs
+Validate again. Replacing the source's values is something only you can do,
+so it is listed as text, not as a button. Over MCP, Pilot and the API, send
+the same `risk_acceptance`.
+
+A found empty string is not forgotten: when a later, shorter check stops
+before the row where an earlier check found it (within 24 hours, same
+source, scope and mapping), the column stays blocked with that finding, the
+gate says when it was checked, and Check again reads it afresh.
+
 Execute checks again unless it is confirming the Validate you approved (same
 workspace, destination, source and mapping, within an hour). An empty string
 that reaches the source after the last check is refused by Oracle at write

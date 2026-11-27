@@ -519,6 +519,9 @@ export async function runPreflight(payload: {
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
     risk_contract?: Record<string, unknown>;
+    /** Oracle '' gate: server-signed contract / server-issued Check now (verified by the API). */
+    empty_as_null_contract?: Record<string, unknown>;
+    empty_check_now?: Record<string, unknown>;
     /** G21 — independent SUM of this monetary column after write. */
     control_total?: boolean;
     struct_policy?: string;
@@ -606,6 +609,24 @@ export async function runPreflight(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Preflight failed", "Validate"));
+  return res.json();
+}
+
+/**
+ * Take an Oracle '' gate action the server must sign: "Create NULL-able"
+ * (oracle_empty_as_null) or "Check now" (oracle_empty_check_now). Returns the
+ * signed contract / issued request per mapping pair; Studio keeps it on the
+ * mapping and sends it with the next /preflight/run (lib/oracleEmptyActions).
+ */
+export async function signOracleEmptyAction(
+  body: import("./oracleEmptyActions").OracleEmptySignBody,
+): Promise<import("./oracleEmptyActions").OracleEmptySignResponse> {
+  const res = await apiFetch(`${API_BASE}/preflight/oracle-empty/sign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not record the action", "Validate"));
   return res.json();
 }
 

@@ -19,6 +19,8 @@ import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
+import { performOracleEmptyAction, STUDIO_ORACLE_EMPTY_KINDS } from "../lib/oracleEmptyActions";
 import { CONTINUITY_GATE_ID } from "../components/transfer/ContinuityRecoveryForm";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
@@ -127,6 +129,7 @@ import {
   rebaselineContinuity,
   openJournal,
   profileStoredUpload,
+  signOracleEmptyAction,
 } from "../lib/api";
 import { planJobStudioRoute } from "../lib/jobStudioRoute";
 import type { ValidateProgress } from "../lib/engineProgress";
@@ -412,6 +415,7 @@ export function TransferPage({
   seedStudioIntent = null,
 }: TransferPageProps) {
   const { toast, dismissMatching } = useToast();
+  const { ask } = useConfirm();
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
   /** UX-22: a viewer cannot plan (map/validate); say so before they build a route. */
   const jobPlan = useWriteGate(PERMISSIONS.jobPlan, "map, validate or run a transfer");
@@ -4931,11 +4935,42 @@ export function TransferPage({
     void executePreflight(next);
   };
 
+  /** An Oracle '' gate action: ask, have the API sign it where needed, re-validate. */
+  const applyOracleEmptyAction = async (action: ValidationSuggestedAction) => {
+    const outcome = await performOracleEmptyAction(action, {
+      mappings: columnMappings,
+      destTable: targetCollection,
+      ask,
+      sign: signOracleEmptyAction,
+    });
+    if (outcome.status === "cancelled") return;
+    if (outcome.status === "open_connectors") {
+      window.location.hash = "#/connectors";
+      toast({
+        title: "Opened Connectors",
+        message: "Fix the source connection, Test until green, then return to Validate and Re-run.",
+        tone: "info",
+      });
+      return;
+    }
+    if (outcome.status === "failed") {
+      toast({ title: outcome.title, message: outcome.message, tone: "warning" });
+      return;
+    }
+    setColumnMappings(outcome.next);
+    toast({ title: outcome.title, message: outcome.message, tone: "success" });
+    void executePreflight(outcome.next);
+  };
+
   /** Map an AI `suggested_action` onto the real Studio controls. */
   const applySuggestedAction = (action: ValidationSuggestedAction) => {
     const matches = (m: EditableMapping) =>
       (action.target && m.target === action.target) || (action.column && m.source === action.column);
 
+    if (STUDIO_ORACLE_EMPTY_KINDS.has(String(action.kind))) {
+      void applyOracleEmptyAction(action);
+      return;
+    }
     switch (action.kind) {
       case "change_target_type": {
         if (!action.to_type) return;
@@ -5238,6 +5273,12 @@ export function TransferPage({
         });
         break;
       default:
+        // Nothing was done: say so, never "Applied".
+        toast({
+          title: "Not available in Studio",
+          message: `${action.label || action.kind}: Studio cannot do this for you.`,
+          tone: "warning",
+        });
         break;
     }
   };

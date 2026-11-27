@@ -383,14 +383,17 @@ def _reuse_notice(reused: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | N
     parts = []
     for t in reused:
         seen = _count_words(t) if t.get("found") else "no empty strings"
-        parts.append(f"{t['target']} was checked for empty strings by Check now at "
+        billed = t["reused_check"].get("billed", True)
+        parts.append(f"{t['target']} was checked for empty strings{' by Check now' if billed else ''} at "
                      f"{t['reused_check']['at']} ({seen}); that result is being reused until "
-                     f"{t['reused_check']['until']}, so the warehouse does not bill the scan again")
+                     f"{t['reused_check']['until']}" + (", so the warehouse does not bill the scan again"
+                                                       if billed else ", because this check stopped first"))
+    billed_any = any(t["reused_check"].get("billed", True) for t in reused)
     again = {
         "id": "oracle_empty_check_again", "kind": CHECK_OPTION,
         "label": "Check " + ", ".join(t["source"] for t in reused) + " again now: Datawrap reads the "
-        f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check "
-        "(the warehouse bills the scan)",
+        f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check"
+        + (" (the warehouse bills the scan)" if billed_any else ""),
         "budget_seconds": CHECK_NOW_SECONDS,
         "risk_acceptance": {"option": CHECK_OPTION, "columns": [t["target"] for t in reused],
                             "approved_by": "<who asks>"},
@@ -466,6 +469,8 @@ def build_gate(
         + (f" {notice}" if notice else "")
     )
     details["recommended_fix"] = "; or ".join(_fix_text(a) for a in actions)
+    # On the gate too: Studio reads one place for a warn and a block (round 5).
+    details["suggested_actions"] = actions
     gate = {"id": GATE_ID, "status": "block", "message": message, "duration_ms": 0, "details": details}
     return gate, [{"id": GATE_ID, "message": message, "details": details, "suggested_actions": actions}]
 
@@ -945,8 +950,6 @@ def _recall(key: str, *, execute_confirm: bool, billed: bool) -> dict[str, Any] 
     checked at that time, that the result is being reused, and how to check
     again (:func:`_reuse_notice`).
     """
-    from datetime import datetime, timezone
-
     hit = _MEASURED.get(key)
     if not hit:
         return None
@@ -954,14 +957,31 @@ def _recall(key: str, *, execute_confirm: bool, billed: bool) -> dict[str, Any] 
     if execute_confirm and age < EXECUTE_REUSE_SECONDS:
         return dict(hit["result"])
     if billed and hit["checked_now"] and age < CHECK_REUSE_SECONDS:
-        at = float(hit["at"])
-        return {**hit["result"], "reused_check": {
-            "at": datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds"),
-            "until": datetime.fromtimestamp(at + CHECK_REUSE_SECONDS, timezone.utc).isoformat(timespec="seconds"),
-        }}
+        return {**hit["result"], "reused_check": _reused_window(float(hit["at"]), billed=True)}
     if age >= max(EXECUTE_REUSE_SECONDS, CHECK_REUSE_SECONDS):
         _MEASURED.pop(key, None)
     return None
+
+
+def _reused_window(at: float, *, billed: bool) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    return {"at": datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds"),
+            "until": datetime.fromtimestamp(at + CHECK_REUSE_SECONDS, timezone.utc).isoformat(timespec="seconds"),
+            "billed": billed}
+
+
+def _recall_found(key: str) -> dict[str, Any] | None:
+    """An earlier check's "found" for this exact run scope, when this check could not finish.
+
+    A found ``''`` only ever blocks, so it is kept (CHECK_REUSE_SECONDS) rather
+    than downgraded to "could not rule out" when a later, shorter check stops
+    before reaching that row; the gate states it and offers checking again.
+    """
+    hit = _MEASURED.get(key)
+    if not hit or not hit["result"].get("found") or time.time() - float(hit["at"]) >= CHECK_REUSE_SECONDS:
+        return None
+    return {**hit["result"], "reused_check": _reused_window(float(hit["at"]), billed=False)}
 
 
 _STAMP_FIELDS = ("requested_by", "at", "expires_at", "workspace_id", "budget_seconds",
@@ -1142,11 +1162,14 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         sample_rows=list(ctx.get("sample_rows") or []),
         walk_allowed=not billed, engine=src_engine, check_now=asked,
     )
-    for t in done:
+    for i, t in enumerate(done):
+        key = _measure_key(ctx, t, scope)
         if t.get("why") != "catalog" and (t.get("exact") or t.get("found")):
             kept = {k: t.get(k) for k in ("count", "found", "exact", "how", "why", "rows_scanned",
                                           "error", "seconds", "engine")}
-            _remember(_measure_key(ctx, t, scope), kept, checked_now=t["target"] in asked)
+            _remember(key, kept, checked_now=t["target"] in asked)
+        elif t.get("why") != "catalog" and t["target"] not in asked and (earlier := _recall_found(key)):
+            done[i] = {**t, **earlier, "reused": True}
     measured += done
     needs_decision = [t for t in measured if t["kind"] == "create_new" and t["approvable"]
                       and (int(t.get("count") or 0) > 0 or t.get("found") or not t.get("exact"))]

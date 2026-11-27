@@ -68,6 +68,8 @@ import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { DateLocalePanel, NumberLocalePanel } from "./NumberLocalePanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
+import { oracleEmptyActions, oracleEmptyGate, STUDIO_ORACLE_EMPTY_KINDS } from "../../lib/oracleEmptyActions";
+import { studioPerforms } from "../../lib/studioActionKinds";
 
 type GateMeta = {
   key: string;
@@ -1326,7 +1328,9 @@ export function ValidateDashboard({
     if (!explain?.suggested_actions?.length) return [];
     return collapseEncodingSuggestedActions(
       explain.suggested_actions.filter((action) => (
-        action.kind !== "open_mapping_proof"
+        // A button is offered only for what Studio performs (never a dead "Applied").
+        studioPerforms(action.kind)
+        && action.kind !== "open_mapping_proof"
         && action.kind !== "mapping_proof"
         && !(duplicateRoot && (
           action.kind === "fix_source_keys"
@@ -1358,6 +1362,12 @@ export function ValidateDashboard({
     isFkOrphanBlock,
     createNewWidens.length,
   ]);
+  const oracleEmptyStrip = useMemo(() => {
+    const gate = oracleEmptyGate(preflight);
+    if (!gate || running) return null;
+    const { buttons, notes } = oracleEmptyActions(preflight);
+    return { status: gate.status, message: gate.message, buttons, notes };
+  }, [preflight, running]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
@@ -1672,6 +1682,15 @@ export function ValidateDashboard({
     if (action.kind === "fix_orphans") {
       // Do not claim applied / re-validating — DataFlow cannot invent parent rows.
       onApplyAction?.(action);
+      return;
+    }
+    if (STUDIO_ORACLE_EMPTY_KINDS.has(String(action.kind))) {
+      // The page asks, signs and re-validates; it says what happened itself.
+      onApplyAction?.(action);
+      return;
+    }
+    if (!studioPerforms(action.kind)) {
+      // Never claim "Applied" for an action Studio does not perform.
       return;
     }
     pendingVerifyRef.current = true;
@@ -3069,6 +3088,36 @@ export function ValidateDashboard({
           }
         />
       ) : null}
+
+      {oracleEmptyStrip && (
+        <section
+          className={`df2-vd-assist-actions status-${oracleEmptyStrip.status}`}
+          aria-label="Oracle empty strings"
+          data-testid="oracle-empty-actions"
+        >
+          <span className="df2-vd-assist-actions-title">Oracle empty strings</span>
+          <p className="df2-vd-rule-msg">{oracleEmptyStrip.message}</p>
+          {oracleEmptyStrip.buttons.length > 0 && (
+            <div className="df2-vd-fix-actions">
+              {oracleEmptyStrip.buttons.map((action, i) => (
+                <Button
+                  key={`${action.id ?? action.kind}-${action.column ?? ""}-${i}`}
+                  size="sm"
+                  variant={i === 0 ? dashCta("other") : "secondary"}
+                  disabled={remediating || !onApplyAction}
+                  title={action.label}
+                  onClick={() => handleSuggestedAction(action)}
+                >
+                  {action.label}
+                </Button>
+              ))}
+            </div>
+          )}
+          {oracleEmptyStrip.notes.map((note, i) => (
+            <p key={`oracle-note-${i}`} className="df2-vd-rule-scope">{note}</p>
+          ))}
+        </section>
+      )}
 
       <div className="df2-vd-rules">
         <div className="df2-vd-rules-head">
