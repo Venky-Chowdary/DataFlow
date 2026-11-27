@@ -104,6 +104,12 @@ describe("real backend payloads (static)", () => {
     assert.match(t, /hmac-sha256:5e5e…5e5e/);
     assert.match(t, /Download signed pack/);
     assert.match(t, /Download report \(\.md\)/);
+    // Trust audit P0-1/2/8: the copy says which key signs, who can verify, and what the pack holds.
+    assert.match(t, /this workspace's evidence signing key, separate from login/);
+    assert.match(t, /Anyone with access to this workspace can verify/);
+    assert.match(t, /cannot yet be checked outside Datawrap/);
+    assert.match(t, /the status only; the transforms and the destination schema are not in the pack/);
+    assert.doesNotMatch(t, /workspace proof key|anyone can check|schema changes/i);
   });
 
   it("summary: KPIs, trend and heatmap from the workspace summary", () => {

@@ -601,11 +601,15 @@ def build_field_reduction_ledger(
     }
 
 
-def sign_field_reduction_ledger(ledger: dict[str, Any], *, job_id: str) -> dict[str, Any]:
-    """Bind a ledger to a job with a content hash + HMAC (same scheme as proof packs)."""
+def sign_field_reduction_ledger(
+    ledger: dict[str, Any], *, job_id: str, workspace_id: str | None = None,
+) -> dict[str, Any]:
+    """Bind a ledger to a job with a content hash + HMAC (same scheme and evidence key as proof packs)."""
     from services.signed_proof_pack import sign_body
 
-    return sign_body(dict(ledger or {}), subject=f"field_reduction:{job_id}")
+    return sign_body(
+        dict(ledger or {}), subject=f"field_reduction:{job_id}", workspace_id=workspace_id
+    )
 
 
 def verify_field_reduction_ledger(

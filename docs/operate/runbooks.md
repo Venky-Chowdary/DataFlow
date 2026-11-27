@@ -257,8 +257,9 @@ starting `[FATAL] Production config:` or naming a topology error. See
 
 ## Not covered
 
-- "Rehearsal" runs. No rehearsal feature was found in the service code at this
-  commit, so its states are not described.
+- Exit rehearsals. They are a product feature, described with their states in
+  [../use/exit-readiness.md](../use/exit-readiness.md); this page does not
+  repeat them.
 - Alert thresholds and dashboards.
 - Recovery of the service's own database. See
   [backup-and-upgrade.md](backup-and-upgrade.md).

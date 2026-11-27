@@ -308,12 +308,13 @@ def _check_kind(recon: dict[str, Any], *, sync_mode: str = "") -> str:
 
 
 #: Gate-8 sample methods that draw uniformly at random from the whole population, so a
-#: Clopper-Pearson bound on the population's difference rate holds. None does today:
-#: Gate-8 samples from the first ``_RECONCILE_SAMPLE_CAP`` rows the run read (stream.py),
-#: then keeps the lowest keys (``keyed_sorted``), the first rows (``positional_sorted``)
-#: or a seeded per-stratum pick among them (``stratified``) — none is a random draw over
-#: the population. Add a method here only when Gate-8 records one that is.
-UNIFORM_RANDOM_SAMPLE_METHODS: frozenset[str] = frozenset()
+#: Clopper-Pearson bound on the population's difference rate holds. ``uniform_random`` is
+#: the streaming writer's seeded draw over every row it was offered
+#: (:mod:`services.gate8_uniform_sample`), named on a compare only when every drawn row
+#: was compared (``reconcile_step._stamp_uniform_draw``). The other methods are not
+#: random draws: the first rows read (``positional_sorted``), the lowest keys among
+#: them (``keyed_sorted``) or a seeded per-stratum pick among them (``stratified``).
+UNIFORM_RANDOM_SAMPLE_METHODS: frozenset[str] = frozenset({"uniform_random"})
 
 
 def sample_bound_valid(method: str) -> bool:
@@ -327,7 +328,11 @@ def describe_sample(sample_compare: dict[str, Any]) -> tuple[str, str]:
     method = str(seed.get("method") or "")
     sort_key = str(seed.get("sort_key") or "").strip()
     stratum = str(seed.get("stratify_by") or "").strip()
-    if method == "keyed_sorted":
+    if method == "uniform_random":
+        population = _int(seed.get("population_rows"))
+        of = f" of the {population:,} rows this run wrote" if population else " of every row this run wrote"
+        how = f"a uniform random draw{of} (seed {str(seed.get('seed') or '')[:12]})"
+    elif method == "keyed_sorted":
         how = f"the lowest {sort_key or 'key'} values among the first rows the run read"
     elif method == "positional_sorted":
         how = "the first rows the run read"
@@ -431,12 +436,19 @@ def _failure_observations(recon: dict[str, Any], table: str, key_cols: list[str]
     columns: dict[str, str] = {}
     ladder = _dict(recon.get("verification_ladder"))
     layers = _dict(ladder.get("layers"))
-    for layer in ("L2", "L4"):
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+
+    # An append or upsert into an occupied table: the ladder's whole-table
+    # aggregates (L2/L4) cover rows this run never wrote, so their gap is the
+    # out-of-scope population (filed by _count_observations), not a value that
+    # differs. Gate-8 itself does not fail on them (the ladder skips L3 there).
+    aggregates_in_scope = str(recon.get("checksum_scope") or "") != WHOLE_TABLE_NOT_COMPARABLE
+    for layer in ("L2", "L4") if aggregates_in_scope else ():
         info = _dict(layers.get(layer))
         if info.get("passed") is False:
             for col in _dict(info.get("details")).get("mismatched_columns") or []:
                 columns.setdefault(str(col), f"Gate-8's column check ({layer})")
-    if any(_dict(layers.get(x)).get("passed") is False for x in ("L2", "L4")):
+    if aggregates_in_scope and any(_dict(layers.get(x)).get("passed") is False for x in ("L2", "L4")):
         for col in _dict(ladder.get("localization")).get("columns") or []:
             columns.setdefault(str(col), "Gate-8's column localization")
     unattributed = _dict(recon.get(UNATTRIBUTED_KEY))

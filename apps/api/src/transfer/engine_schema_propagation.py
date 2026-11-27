@@ -150,6 +150,37 @@ def _mapping_review_waits_for_evolution(request: Any) -> bool:
     )
 
 
+def _destination_is_managed(request: Any) -> bool:
+    """True when the destination table carries Datawrap's ownership comment."""
+    dest = getattr(request, "destination", None)
+    if dest is None:
+        return False
+    table = str(getattr(dest, "table", "") or getattr(dest, "collection", "") or "")
+    if not table:
+        return False
+    cfg = {
+        "host": getattr(dest, "host", "") or "",
+        "port": getattr(dest, "port", None),
+        "database": getattr(dest, "database", "") or "",
+        "username": getattr(dest, "username", "") or "",
+        "password": getattr(dest, "password", "") or "",
+        "schema": getattr(dest, "schema", "") or "",
+        "connection_string": getattr(dest, "connection_string", "") or "",
+        "ssl": bool(getattr(dest, "ssl", False)),
+    }
+    try:
+        from services.managed_table import destination_table_is_managed
+
+        return destination_table_is_managed(
+            str(getattr(dest, "format", "") or ""),
+            cfg,
+            schema=str(cfg["schema"] or ""),
+            table=table,
+        )
+    except Exception:
+        return False
+
+
 def destination_evolution_approved_for(request: Any) -> bool:
     """Whether this request's policy alone would apply destination evolution (propagate_*)."""
     from services.schema_drift import destination_evolution_approved, effective_schema_policy
@@ -188,6 +219,22 @@ def _apply_schema_auto_propagate(
     return planned
 
 
+def _with_request_destination_ownership(fn: Any) -> Any:
+    """Answer ``managed_table.destination_is_owned`` for ``request`` (probed on demand)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        from services.managed_table import destination_ownership
+
+        request = kwargs.get("request")
+        with destination_ownership(lambda: _destination_is_managed(request)):
+            return fn(*args, **kwargs)
+
+    return wrapped
+
+
+@_with_request_destination_ownership
 def _plan_schema_auto_propagate(
     *,
     request: Any,

@@ -94,6 +94,8 @@ def test_read_target_sample_sqlserver_keyed(monkeypatch):
     conn.cursor.return_value = cur
 
     monkeypatch.setattr(pymssql, "connect", lambda **_kw: conn)
+    # A host without the Microsoft ODBC driver reads back through pymssql (NF-2).
+    monkeypatch.setattr("connectors.mssql_security._odbc_installed", lambda: False)
 
     out = rec.read_target_sample(
         "sqlserver",

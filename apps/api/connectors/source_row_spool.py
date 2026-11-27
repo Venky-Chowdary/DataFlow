@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from decimal import Decimal
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -39,6 +40,7 @@ from services.value_serializer import (
     is_reader_null_cell,
     json_default,
     json_loads_exact,
+    nonfinite_wire_token,
     unescape_wire_text,
 )
 
@@ -110,6 +112,13 @@ def iter_matrix_rows(
 def _spool_cell(value: Any) -> Any:
     if is_missing_sentinel(value):
         return DF_MISSING_SENTINEL
+    if isinstance(value, Decimal) and not value.is_finite():
+        # JSON has no NaN / Infinity for a Decimal, and the JSON default reads
+        # ``value != value`` as "missing": a source NaN reached the writer as
+        # SQL NULL and was written without any contract saying so. Spool the
+        # wire token instead; the writer then fits it (PostgreSQL NUMERIC keeps
+        # NaN), holds it out, or NULLs it only under a signed contract.
+        return nonfinite_wire_token(value)
     if isinstance(value, WireLiteral):
         # JSON keeps no str subclass: spool the literal wire-escaped, so the
         # writer's one decode still yields the text, not NULL (D121).

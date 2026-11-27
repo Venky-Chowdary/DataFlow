@@ -19,6 +19,19 @@ Rounding, not truncation, is the measured behaviour of MySQL and PostgreSQL
 (the measurement record was removed with the old docs); SQL Server ``datetime`` rounds to
 1/300 s and ``smalldatetime`` to the minute, both modelled here. An engine that
 truncated instead would fail Gate-8 rather than pass it — the honest direction.
+
+Each engine's own rule, measured live (``tests/test_carrier_instant_engine_rounding.py``):
+
+* **PostgreSQL** keeps ``timestamp``/``timestamptz`` as microseconds since
+  2000-01-01 and rounds a narrowing *half away from zero on that axis*:
+  ``1999-12-31 23:59:59.9995`` → ``…59.999`` but ``2000-01-01 00:00:00.0005``
+  → ``….001``. Instants before 2000 therefore round half *down* on the
+  timeline, and the model follows the engine.
+* **MySQL** rounds the fractional field half up (half up on the timeline).
+  **MariaDB** truncates unless the session has ``TIME_ROUND_FRACTIONAL``; the
+  MySQL-family writer sets it (``write_resilience``), so what lands is the
+  rounded value this model predicts on both servers.
+* **SQL Server** ``datetime2(n)`` rounds half up (ticks since 0001-01-01).
 """
 
 from __future__ import annotations
@@ -41,6 +54,31 @@ MSSQL_LEGACY_DATETIME_TICK_US = 10_000 / 3
 # roll-over past midnight matters.
 _EPOCH_DAY = date(2000, 1, 1)
 _MSSQL_ENGINES = frozenset({"sqlserver", "mssql", "azuresql", "azure_sql", "synapse"})
+#: Engines with PostgreSQL's timestamp storage (microseconds since 2000-01-01).
+_PG_TIMESTAMP_ENGINES = frozenset(
+    {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "pgvector"}
+)
+_PG_EPOCH = datetime(2000, 1, 1)
+
+
+def _round_pg_timestamp(value: datetime, digits: int) -> datetime:
+    """PostgreSQL ``AdjustTimestampForTypmod``: half away from zero around 2000-01-01."""
+    from datetime import timezone
+
+    step = 10 ** (6 - digits)
+    half = step // 2
+    if value.tzinfo is not None:
+        base = _PG_EPOCH.replace(tzinfo=timezone.utc)
+        moment = value.astimezone(timezone.utc)
+    else:
+        base, moment = _PG_EPOCH, value
+    micros = (moment - base) // timedelta(microseconds=1)
+    if micros >= 0:
+        rounded = (micros + half) // step * step
+    else:
+        rounded = -((-micros + half) // step * step)
+    out = base + timedelta(microseconds=rounded)
+    return out.astimezone(value.tzinfo) if value.tzinfo is not None else out
 
 
 def carrier_instant_digits(ddl_type: str | None, *, engine: str = "") -> int | None:
@@ -345,4 +383,9 @@ def quantize_instant_for_carrier(
         total = abs(total)
         rounded = ((total + step_us // 2) // step_us) * step_us
         return timedelta(microseconds=sign * rounded)
+    if isinstance(value, datetime) and eng in _PG_TIMESTAMP_ENGINES and digits < 6:
+        try:
+            return _round_pg_timestamp(value, digits)
+        except OverflowError:
+            return value
     return _round_microseconds(value, digits)

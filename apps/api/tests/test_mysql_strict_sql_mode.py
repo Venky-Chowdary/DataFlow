@@ -39,9 +39,28 @@ def test_ensure_mysql_strict_noop_when_already_strict():
 
     _ensure_mysql_strict_sql_mode(cur)
 
-    # Only the SELECT @@SESSION.sql_mode — no SET.
-    assert cur.execute.call_count == 1
-    assert "SELECT" in str(cur.execute.call_args.args[0]).upper()
+    # Only reads (the session sql_mode, then the server version for the
+    # MariaDB rounding mode) — no SET.
+    statements = [str(c.args[0]).upper() for c in cur.execute.call_args_list]
+    assert statements and all(s.startswith("SELECT") for s in statements)
+
+
+def test_mariadb_gets_fractional_rounding_and_mysql_loses_truncation():
+    """What lands must be the rounded instant Gate-8 models (carrier_instant)."""
+    strict = ",".join(_MYSQL_STRICT_MODES)
+    for version, mode, want, gone in (
+        ("10.11.14-MariaDB-0ubuntu0.24.04.1", strict, "TIME_ROUND_FRACTIONAL", None),
+        ("8.0.36", strict + ",TIME_TRUNCATE_FRACTIONAL", None, "TIME_TRUNCATE_FRACTIONAL"),
+        ("10.3.39-MariaDB", strict, None, "TIME_ROUND_FRACTIONAL"),
+    ):
+        cur = MagicMock()
+        cur.fetchone.side_effect = [(mode,), (version,)]
+        _ensure_mysql_strict_sql_mode(cur)
+        sets = [c.args[1][0] for c in cur.execute.call_args_list if len(c.args) > 1]
+        if want:
+            assert sets and want in sets[0].split(","), (version, sets)
+        if gone:
+            assert all(gone not in s.split(",") for s in sets), (version, sets)
 
 def test_apply_mysql_session_guards_sets_timeouts_and_strict():
     conn = MagicMock()

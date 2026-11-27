@@ -93,6 +93,12 @@ _OVERWRITE_KEEPS_EXISTING_TABLE = frozenset({
     "greenplum",
     "db2",
     "teradata",
+    # NF-1: the overwrite keeps the live Snowflake table (CLONE backup,
+    # TRUNCATE, load in place) and the live Elasticsearch index (clone backup,
+    # delete-by-query), so their grants, policies, tags, streams and aliases
+    # stay. The live columns / mapping are this run's contract, not a CREATE.
+    "snowflake",
+    "elasticsearch",
 })
 
 

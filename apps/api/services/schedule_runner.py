@@ -385,6 +385,31 @@ def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     return normalize_sync_mode(mode)
 
 
+def _sync_decision_hash(sched: Any) -> str:
+    """The decision hash this beat sends: the one Validate stored, never re-minted.
+
+    The execute gate relaxes only "the destination now exists" and checks the
+    source fingerprint, sync mode and error policy against that stamp.
+    """
+    from services.schedule_decision_stamp import decision_hash_for_sync
+
+    merged = {
+        "mappings": list(getattr(sched, "mappings", None) or []),
+        "stream_contracts": list(getattr(sched, "stream_contracts", None) or []),
+        "sync_mode": getattr(sched, "sync_mode", "") or "",
+        "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
+        "source_connector_id": getattr(sched, "source_connector_id", "") or "",
+        "workspace_id": getattr(sched, "workspace_id", "") or "",
+        "approved_decision_artifact_hash": getattr(sched, "approved_decision_artifact_hash", "") or "",
+        "approved_ddl_identity_hash": getattr(sched, "approved_ddl_identity_hash", "") or "",
+        "source_schema_fingerprint": getattr(sched, "source_schema_fingerprint", "") or "",
+    }
+    try:
+        return decision_hash_for_sync(merged)
+    except Exception:
+        return str(merged["approved_decision_artifact_hash"] or "")
+
+
 def build_schedule_request(
     sched, src: dict, dst: dict, *, resync_mode: str = "", triggered_by: str = ""
 ):
@@ -577,6 +602,11 @@ def build_schedule_request(
     from services.schedule_mapping_contract import assert_schedule_mappings_replayable
 
     mappings = assert_schedule_mappings_replayable(sched.mappings)
+    from services.stamp_key_records import record_schedule
+
+    # Review 3 item 1: unedited since it was stored, the schedule's rows are
+    # the rows saved with its stamp (a no-op once a record exists).
+    record_schedule(sched, trusted_rows=True)
     schema_policy = sched.schema_policy or "manual_review"
     sched_shape_recipe = (
         dict(getattr(sched, "shape_recipe", None) or {})
@@ -641,9 +671,8 @@ def build_schedule_request(
             getattr(sched, "approved_shape_recipe_hash", "") or ""
         ),
         approved_set_hash=str(getattr(sched, "approved_set_hash", "") or ""),
-        approved_decision_artifact_hash=str(
-            getattr(sched, "approved_decision_artifact_hash", "") or ""
-        ),
+        approved_decision_artifact_hash=_sync_decision_hash(sched),
+        decision_stamp_schedule_id=str(getattr(sched, "id", "") or ""),
         approved_ddl_identity_hash=str(
             getattr(sched, "approved_ddl_identity_hash", "") or ""
         ),

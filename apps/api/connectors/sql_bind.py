@@ -1908,6 +1908,9 @@ def coerce_bitstring_wire(
         return bound
     bits: str
     if isinstance(value, (bytes, bytearray, memoryview)):
+        # Raw bytes are MSB-first bits. ASCII ``b'01'`` is the integer 12337
+        # (or 49 for one byte), not the bit text ``"01"``. PostgreSQL bit/varbit
+        # arrives as a str of 0/1 digits; only that form is bit text.
         bits = "".join(f"{b:08b}" for b in bytes(value))
     else:
         text = str(value).strip()
@@ -1928,6 +1931,9 @@ def coerce_bitstring_wire(
                     f"bitstring length {len(bits)} exceeds BIT VARYING({width})"
                 )
         elif len(bits) != width:
+            # Never left-pad a short value into a fixed BIT(n) (MySQL included):
+            # '1010' and '001010' are different bit strings. A varying source
+            # lands in MySQL as 0/1 digit text instead (D320, type_ddl_specialty).
             raise ValueError(
                 f"bitstring length {len(bits)} does not match BIT({width})"
             )
@@ -2161,6 +2167,21 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
     )
 
 
+
+#: Engines whose NUMERIC stores NaN (Infinity does not fit a declared (p,s)).
+_PG_NAN_ENGINES = frozenset({"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase"})
+
+
+def _is_nan_cell(value: Any) -> bool:
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        return value.is_nan()
+    if isinstance(value, float):
+        return value != value  # noqa: PLR0124 — the IEEE NaN test
+    return isinstance(value, str) and value.strip().lower() == "nan"
+
+
 def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> Any:
     """Exact ``Decimal`` bind — write-path parse, never float64 invent.
 
@@ -2190,6 +2211,10 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
         # NUMBER(1)/DECIMAL(1,0) is the boolean carrier on engines without a
         # native boolean — binding 1/0 there is total, not an invented number.
         return Decimal(carrier_bool)
+    if _is_nan_cell(value) and str(engine or "").strip().lower() in _PG_NAN_ENGINES:
+        # PostgreSQL NUMERIC(p,s) stores NaN (DATA-8; ``fits_decimal`` agrees):
+        # writing it is faithful, holding it out or NULLing it loses a value.
+        return Decimal("NaN")
     try:
         if isinstance(value, Decimal):
             d = value

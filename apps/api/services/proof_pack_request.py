@@ -56,3 +56,16 @@ def pack_from_body(body: Any) -> dict[str, Any]:
             },
         )
     return candidate
+
+
+def workspace_reader(request: Any) -> Any:
+    """``may_use_workspace`` for the verify routes: may this caller read the keyring's workspace?
+
+    A pack signed with workspace W's evidence key is verified only for a caller
+    whose scope can read W (the same visibility rule as W's jobs), so a
+    workspace's keyring is never an oracle for another tenant's packs.
+    """
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
+    return lambda workspace_id: bool(scope.allows(workspace_id))

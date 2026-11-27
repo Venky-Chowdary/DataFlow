@@ -1,0 +1,343 @@
+{
+ "base_commit": "70cb4669c",
+ "cases": {
+  "bit1_mysql|create_new": {
+   "column_ddl": {
+    "c": "BOOLEAN",
+    "id": "BIGINT"
+   },
+   "content_hash": "5a2efdcee346a67536d2cfb6d11c56a16fd6bc237f2836de05b0ee4991aa21b2",
+   "ddl_identity_hash": "e679a9701e5f82b6db95928a981eccbc995aead66b3b8a7dab318a6209822c22",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "bit(1)",
+     "target": "c",
+     "target_type": "bit(1)"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "bit1_mysql|existing": {
+   "column_ddl": {
+    "c": "BOOLEAN",
+    "id": "BIGINT"
+   },
+   "content_hash": "d7d5914b93a05ff5e401973c04dc0faa20274e4efd7c8861694511db9ce7151a",
+   "ddl_identity_hash": "e679a9701e5f82b6db95928a981eccbc995aead66b3b8a7dab318a6209822c22",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "bit(1)",
+     "target": "c",
+     "target_type": "bit(1)"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_string|create_new": {
+   "column_ddl": {
+    "c": "VARCHAR",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "e2fa30f7ed13c6803b7a2dd6d6070c50e38e548bc748a86fa2edda8648f4437d",
+   "ddl_identity_hash": "e5d3f35c51e7cb3d49d22c7196ba261bfe418c972f7c22fa5342b18c277f3967",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "STRING"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_string|existing": {
+   "column_ddl": {
+    "c": "VARCHAR",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "7ec8d86310de0f63133c045935326c0fa76d4dc90ebacb54261b3a323e338351",
+   "ddl_identity_hash": "e5d3f35c51e7cb3d49d22c7196ba261bfe418c972f7c22fa5342b18c277f3967",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "STRING"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_text|create_new": {
+   "column_ddl": {
+    "c": "TEXT",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "b4ddcf0e0854c5d991d96fefc75b4d0f4140e3738f4abcd0f6198a70db98ee62",
+   "ddl_identity_hash": "c7d18618b27a0db9064f6ec8d9c3c3bf3e38af0ab272e5c5cbec36056ab3ce28",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "TEXT"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_text|existing": {
+   "column_ddl": {
+    "c": "TEXT",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "435af6f5f93aaf21063d3e02d9b34f306048639b718b4ab2ad9f5fc64559ddb0",
+   "ddl_identity_hash": "c7d18618b27a0db9064f6ec8d9c3c3bf3e38af0ab272e5c5cbec36056ab3ce28",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "TEXT"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_varchar|create_new": {
+   "column_ddl": {
+    "c": "VARCHAR",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "4a9383336b8247d11980736563cb07fe6605c68b1bf55bf88d01a454f3df1e04",
+   "ddl_identity_hash": "e5d3f35c51e7cb3d49d22c7196ba261bfe418c972f7c22fa5342b18c277f3967",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "VARCHAR"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "uuid_snowflake_varchar|existing": {
+   "column_ddl": {
+    "c": "VARCHAR",
+    "id": "NUMBER(38,0)"
+   },
+   "content_hash": "fc9edafae73a0cdb81cf427b29536ac5f5f0f092643766b81585c278816f7718",
+   "ddl_identity_hash": "e5d3f35c51e7cb3d49d22c7196ba261bfe418c972f7c22fa5342b18c277f3967",
+   "dest_db": "snowflake",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "uuid",
+     "target": "c",
+     "target_type": "VARCHAR"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "varbit100_mysql|create_new": {
+   "column_ddl": {
+    "c": "varbit(100)",
+    "id": "BIGINT"
+   },
+   "content_hash": "2d17d05922ea4f8a21c1a44428f1b09957f8989953168810fe36cb858b693c42",
+   "ddl_identity_hash": "31cd531a9bae9e9b5de5b95899f442e1b888421a1e97695eba1c25e3f48302b4",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "varbit(100)",
+     "target": "c",
+     "target_type": "varbit(100)"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "varbit100_mysql|existing": {
+   "column_ddl": {
+    "c": "varbit(100)",
+    "id": "BIGINT"
+   },
+   "content_hash": "9ff1c2c7bde0772fe7fa578bc30fee1550849fa11674671db35eddc535e2586a",
+   "ddl_identity_hash": "31cd531a9bae9e9b5de5b95899f442e1b888421a1e97695eba1c25e3f48302b4",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "varbit(100)",
+     "target": "c",
+     "target_type": "varbit(100)"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "varbit_mysql|create_new": {
+   "column_ddl": {
+    "c": "BIT(64)",
+    "id": "BIGINT"
+   },
+   "content_hash": "4be724ad6e8b0452a4f029ebff8198fe7efea3b25a0080da83eaf9030efbd5e6",
+   "ddl_identity_hash": "2592a8c3963868ea30b6411a4d8b8fabd49fc895df389486649ea8380e0a58d4",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": true,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": true,
+     "source": "c",
+     "source_type": "bit varying",
+     "target": "c",
+     "target_type": "bit varying"
+    }
+   ],
+   "source_db": "postgresql"
+  },
+  "varbit_mysql|existing": {
+   "column_ddl": {
+    "c": "BIT(64)",
+    "id": "BIGINT"
+   },
+   "content_hash": "9a356a48beffe27c19c07e63f8b42e6562d1db7bf006432d8eed3aa1c98ec1ae",
+   "ddl_identity_hash": "2592a8c3963868ea30b6411a4d8b8fabd49fc895df389486649ea8380e0a58d4",
+   "dest_db": "mysql",
+   "mappings": [
+    {
+     "confidence": 0.95,
+     "create_new": false,
+     "source": "id",
+     "source_type": "integer",
+     "target": "id",
+     "target_type": "integer"
+    },
+    {
+     "confidence": 0.9,
+     "create_new": false,
+     "source": "c",
+     "source_type": "bit varying",
+     "target": "c",
+     "target_type": "bit varying"
+    }
+   ],
+   "source_db": "postgresql"
+  }
+ },
+ "dest_fingerprint": "0f1e2d3c4b5a6978",
+ "source_fingerprint": "a1b2c3d4e5f60718"
+}

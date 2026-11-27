@@ -64,6 +64,15 @@
       "min_executed": 20,
       "expected_skips": []
     },
+    "mysql-forced-pk": {
+      "proves": [],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["mysql", "postgresql"],
+      "feature": "MySQL 8 with sql_require_primary_key=ON (Aiven's default): servers that force a PRIMARY KEY",
+      "min_executed": 20,
+      "expected_skips": []
+    },
     "cdc-sqlserver": {
       "proves": ["sqlserver"],
       "workflow": ".github/workflows/ci.yml",
@@ -115,6 +124,24 @@
       "min_executed": 10,
       "expected_skips": []
     },
+    "parity-ce-matrix": {
+      "proves": [],
+      "about": "Parity at Scale CE matrix (experimental): CE1 renderings per engine and kind, first-wave pairs copied by the real writer, and the writer/Gate-8 agreement tests, on PostgreSQL, MySQL 8, MariaDB 11 (its own leg) and SQL Server. Certifies CE1, not the engines: other jobs prove those.",
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "sqlserver"],
+      "min_executed": 80,
+      "expected_skips": []
+    },
+    "parity-scale-pg": {
+      "proves": [],
+      "about": "Parity at Scale (experimental, behind DATAWRAP_PARITY_SCALE): CE1 soundness properties at 2,000 examples, the SQLite driver, the live PostgreSQL rendering and fault-injection tests and the 1M-row benchmark. A feature smoke, not the proof of an engine: api-tests proves PostgreSQL and SQLite.",
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "sqlite"],
+      "min_executed": 150,
+      "expected_skips": []
+    },
     "engine-suite": {
       "proves": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
       "workflow": ".github/workflows/full-suite.yml",
@@ -138,6 +165,21 @@
       "min_executed": 1000,
       "measurement": "2026-11-13: the ~3,330 api-tests skips replayed under the shards' exact environment: 284 named a PostgreSQL / MySQL / Mongo / Redis / emulator engine the job starts, the rest (~2,820) are external (SaaS templates, Oracle, SQL Server, Kafka, Iceberg, vector stores, MinIO, MariaDB, real clouds). With .github/ci-live-engines.vars, 104 of the 284 ran and passed locally; see the PR for the rest.",
       "expected_skips": [
+        {
+          "test": "tests/test_d396_require_primary_key_surrogate_e2e.py::*",
+          "reason": "needs a MySQL-family server that forces a PRIMARY KEY",
+          "why": "run in the mysql-forced-pk job (MySQL 8, sql_require_primary_key=ON); api-tests has no such server"
+        },
+        {
+          "test": "tests/test_qa_b1_forced_key_cdc_aux_tables_e2e.py::*",
+          "reason": "needs a MySQL-family server that forces a PRIMARY KEY",
+          "why": "run in the mysql-forced-pk job (MySQL 8, sql_require_primary_key=ON); api-tests has no such server"
+        },
+        {
+          "test": "tests/test_qa_b1_forced_key_array_child_e2e.py::*",
+          "reason": "needs a MySQL-family server that forces a PRIMARY KEY",
+          "why": "run in the mysql-forced-pk job (MySQL 8, sql_require_primary_key=ON); api-tests has no such server"
+        },
         {
           "test": "tests/test_r7_cdc_replica_message_e2e.py::*",
           "reason": "wal_level=replica",

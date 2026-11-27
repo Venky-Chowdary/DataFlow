@@ -57,6 +57,22 @@ trigger incremental reads or upsert writes.
 
 `full_refresh_overwrite` replaces the table. `full_refresh_append` adds to it.
 
+Overwrite of an existing warehouse object keeps its security metadata
+(NF-1). Validate shows, per engine, what is kept and what is not
+(gate `g_overwrite_governance`):
+
+| Destination | How the overwrite runs | Kept | Not kept / caveats |
+|---|---|---|---|
+| Snowflake | The live table is kept. Its grants, policies and tags are read first; a zero-copy `CLONE` (`CREATE TRANSIENT TABLE … CLONE` for a transient table) is the backup and is given the same grants, policies and tags; then the live table is emptied with `TRUNCATE` and loaded in place. | Grants, masking and row access policies, tags, streams, clustering key, comments (the object is never renamed, dropped or recreated). | Grants, policies or tags the connector's role cannot read block Validate (gate `g_overwrite_governance` probes the table) and refuse the overwrite before any change, unless the destination DDL is approved. A `TEMPORARY` table is refused. `TRUNCATE` + reload reaches stream consumers as delete-all and insert-all. A failed run restores the rows with `INSERT OVERWRITE` when the table has no masking or row access policy; otherwise it swaps the governed backup in (`ALTER TABLE ... SWAP WITH`), and a stream on the table then goes stale. If the restore cannot finish, both tables stay and the error gives the exact `SWAP` / `DROP` statements. Columns the run does not write stay (NULL); a type the table cannot take fails the run. |
+| BigQuery | Copy job to a backup, then the table is deleted. A table with access control (table IAM, row access policies, column policy tags) is re-created empty with its schema (policy tags kept), partitioning, clustering, labels and description, then its row access policies, then its IAM policy, before any row is written. The backup carries the same row access policies and IAM while it exists. | Policy tags, row access policies, table IAM, labels, description, partitioning, clustering. | The previous table's time-travel and change history, search / vector indexes and table constraints. A governed table is never copied by query (a query reads through row filters and masking): with rows in the streaming buffer the overwrite is refused until the buffer flushes. Access control the connector cannot read refuses the overwrite, and blocks Validate, unless the destination DDL is approved. A failed run re-applies the access control after copying the backup back (a short window with dataset-level access only). |
+| Elasticsearch | The live index is kept: cloned to a write-blocked backup, emptied with delete-by-query, loaded in place. | Aliases (filtered aliases included), settings, lifecycle policy, mappings. | A field type the mapping cannot take fails the run. A failed run replaces the index with a clone of the backup and re-adds its aliases. |
+
+Proof is unit-level, on fakesnow and in-memory BigQuery / Elasticsearch
+fakes (`tests/test_nf1_overwrite_keeps_security_metadata.py`). It has not
+been run against real Snowflake or BigQuery accounts: fakesnow has no
+roles, grants, policies, tags or `SWAP`, and the BigQuery emulator has no
+IAM or row access policies.
+
 Append and continuity: Gate-8 verifies the rows a run wrote, so rows from
 earlier runs are outside its scope. To cover that gap, after each successful
 run the engine stores a fingerprint of the whole destination table. Before the
@@ -160,12 +176,70 @@ inserts, updates and deletes.
 - One job at a time reads a given replication slot, binlog position or
   capture instance.
 
+## MySQL and MariaDB destinations: bulk loads
+
+The PostgreSQL to MySQL fast copy loads with `LOAD DATA LOCAL INFILE`. On
+MySQL the load runs with `unique_checks=0` and `foreign_key_checks=0`; InnoDB
+still enforces the primary key. On MariaDB 10.6 and later both checks stay
+on.
+
+Why: from 10.6, MariaDB loads an empty InnoDB table in a special bulk mode
+when both checks are off (MDEV-515, MDEV-24621). On MariaDB 10.11.14 we
+measured that a load in that mode into a new table, while another session ran
+`SELECT COUNT(*)` on that table, hung both statements: `KILL` had no effect
+and only a server restart cleared it. Any reader can trigger it, such as a BI
+tool or a row count in the UI. With either check left on, the same load and
+reader completed every time.
+
+- **Cost**: none measured. On MariaDB 10.11.14, 200,000 rows through the copy
+  route ran as fast or faster with both checks on (median rows/s, 5 runs each,
+  4 workers: about 100,000 to 142,000 with checks on, 97,000 to 116,000 with
+  them off).
+- **Inherited settings**: a write session on MariaDB 10.6+ that starts with
+  both checks off (from server defaults) gets `unique_checks=1` before it
+  writes, and again before every `LOAD DATA`. `foreign_key_checks` is left
+  as it was.
+- **Not covered**: Datawrap cannot stop other clients from loading your
+  MariaDB server in this mode. Only MariaDB 10.11.14 was measured. MariaDB
+  before 10.6 has no such mode and keeps the MySQL behaviour.
+
 ## Append-only destinations
 
 Some destinations can only add rows (Kafka topics are the main case). On
 those, only append modes are accepted. Overwrite, upsert, deduped, mirror and
 SCD2 are refused at Validate, because they would run as a plain append and
 publish duplicates that cannot be removed.
+
+## Destinations that require a primary key
+
+Some MySQL servers refuse any `CREATE TABLE` without a primary key
+(`sql_require_primary_key=ON`, as on Aiven; on MariaDB,
+`innodb_force_primary_key=ON`). Validate reads that setting before anything
+is written:
+
+- If the source table has a primary key, the table Datawrap creates uses it,
+  in every sync mode, append included. A later append that would repeat a
+  stored key is then refused at Validate with the keyed modes to use instead.
+- If the source has no key (or a query result is the source, or the append
+  policy lets keys repeat), Validate blocks and shows the fix: Datawrap can
+  add its own row key, `_dw_row_id BIGINT AUTO_INCREMENT PRIMARY KEY`
+  (`INVISIBLE` on MySQL 8.0.23 and later, a plain column on MariaDB). It is
+  added only after you approve that destination change. The job records it as
+  a Datawrap-added column, and parity never compares it.
+- SCD2 history tables are refused on such a server: create the history table
+  yourself with an `AUTO_INCREMENT` primary key and run SCD2 into it.
+- The tables Datawrap creates beside the data (the quarantine table, the
+  mirror key-staging table, the CDC apply table) declare a key too. An array
+  child table (normalize or hybrid array policy) uses its parent key columns
+  plus the ordinal as its PRIMARY KEY there, all NOT NULL; the parent key
+  columns are `VARCHAR` sized to InnoDB's 3,072-byte key (766 characters for
+  one column), and a longer parent key is refused before anything is written.
+- If the probe did not run and the server refuses a `CREATE` anyway (MySQL
+  error 3750), the run stops with that finding and asks you to re-run
+  Validate, instead of the raw driver error.
+
+PostgreSQL and SQL Server have no such server setting, so the check does not
+apply there.
 
 ## Not covered
 
@@ -183,9 +257,16 @@ publish duplicates that cannot be removed.
 - `apps/api/services/execution_engine_contract.py`, `apps/api/services/job_status.py`
 - `apps/api/services/append_continuity.py`
 - `apps/api/connectors/merge_registry.py`
+- `apps/api/services/dest_require_primary_key.py`, `apps/api/connectors/mysql_writer.py`
+  (`tests/test_d396_require_primary_key_surrogate_e2e.py`,
+  `tests/test_qa_b1_forced_key_array_child_e2e.py`, live on MariaDB with
+  `innodb_force_primary_key=ON`)
 - `apps/api/services/mirror_engine.py`
 - `apps/api/services/copy_incremental.py`
 - `apps/api/services/scd2_engine.py`
 - `apps/api/services/cdc_capability.py`, `apps/api/services/cdc_effectively_once.py`,
   `apps/api/services/cdc_lease.py`
+- `apps/api/connectors/mysql_load_data.py` (bulk load session per engine),
+  `apps/api/tests/test_mariadb_bulk_insert_mode_session.py`,
+  `apps/api/tests/test_mariadb_bulk_load_concurrent_reader_live.py`
 - `apps/api/services/connector_capability_registry.py`

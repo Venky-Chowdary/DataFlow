@@ -748,6 +748,9 @@ def _fail_runtime_job(
         if undo_note and undo_note not in display:
             display = f"{display} {undo_note}"
         error_details = {**(error_details or {}), "multi_stream_undo": list(multi_undo)}
+    from .overwrite_outcome import apply_to_job_failure
+
+    display, error_details = apply_to_job_failure(exc, display, error_details)
     status_kwargs: dict[str, Any] = {
         "error": display,
         "phase": status,

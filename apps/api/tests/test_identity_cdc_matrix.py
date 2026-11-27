@@ -414,7 +414,13 @@ def test_cdc_refused_drift_window_is_held_not_lost(engine, fake, tmp_path: Path)
              f"INSERT INTO {table} VALUES (4,'eu','ok',2)"])
         refused = _run(fake, table, dest, "id")
         assert not refused.success
-        assert "fidelity" in (refused.error or "").lower(), refused.error
+        # Refused before any write: the widened source column needs the
+        # operator's approval (an unacknowledged manual_review never widens a
+        # destination column, QA batch 1 widening cluster / the D200 contract).
+        error = refused.error or ""
+        assert "Source type widening needs approval" in error, error
+        assert "widened past the existing destination column (name VARCHAR(32)" in error, error
+        assert "VARCHAR(100)" in error, error
         assert _population(dest) == held, "a refused window must write nothing"
         execute_sql(dest, [_WIDEN[engine].format(t=dest.table)])
         resumed = _run(fake, table, dest, "id")

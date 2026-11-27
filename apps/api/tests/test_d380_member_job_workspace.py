@@ -221,3 +221,8 @@ def test_member_transfer_is_visible_only_in_the_caller_workspace(world):
             cur.execute(f"DROP TABLE IF EXISTS {src}")
             cur.execute(f"DROP TABLE IF EXISTS {dst}")
         conn.close()
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

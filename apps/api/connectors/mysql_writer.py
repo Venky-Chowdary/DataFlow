@@ -101,6 +101,19 @@ class WriteResult(_WriteResult):
     driver: str = "pymysql"
 
 
+def _execute_mysql_create(cursor: Any, sql: str, table_name: str) -> None:
+    """CREATE, translating error 3750 into the plan-time primary-key finding."""
+    try:
+        cursor.execute(sql)
+    except Exception as exc:
+        from services.dest_require_primary_key import mysql_create_primary_key_message
+
+        message = mysql_create_primary_key_message(exc, table=table_name)
+        if message:
+            raise ValueError(message) from exc
+        raise
+
+
 def mysql_type(inferred: str) -> str:
     raw = materialize_dest_ddl("mysql", inferred)
     # MySQL 1064: bare VARCHAR/CHAR/BINARY need a width. LOGICAL_STRING is TEXT.
@@ -656,6 +669,68 @@ def _mysql_materialize_mapped_batch(
     )
 
 
+def _plan_declares_primary_key(plan: Any) -> bool:
+    if plan is None:
+        return False
+    if getattr(plan, "primary_key", None):
+        return True
+    return any(
+        str(c).strip().upper().startswith("PRIMARY KEY")
+        for c in (getattr(plan, "table_constraints", None) or [])
+    )
+
+
+def _settle_forced_primary_key(
+    cursor: Any,
+    plan: Any,
+    *,
+    replan: Any,
+    approved: bool,
+    kwargs: dict[str, Any],
+) -> tuple[Any, str]:
+    """The CREATE's key on a server that forces a PRIMARY KEY (D396 / D377).
+
+    Owner decision: when the server forces a key (``sql_require_primary_key``
+    / ``innodb_force_primary_key``) and the planned CREATE declares none, the
+    source's own key is carried on every write mode (unless the operator's
+    append policy says keys repeat); a keyless source gets Datawrap's
+    surrogate ``_dw_row_id`` only when Validate disclosed it and the operator
+    approved that DDL. Otherwise nothing is added and the server's refusal
+    stands (Validate already blocked it). Returns ``(plan, surrogate_sql)``.
+    """
+    if _plan_declares_primary_key(plan):
+        return plan, ""
+    from services.dest_require_primary_key import (
+        SURROGATE_KEY_COLUMN,
+        server_forces_primary_key_on,
+        surrogate_key_column_sql,
+    )
+
+    forced, version = server_forces_primary_key_on(cursor)
+    if not forced:
+        return plan, ""
+    from services.duplicate_policy import current_duplicates_allowed
+
+    if not current_duplicates_allowed():
+        try:
+            keyed = replan()
+        except Exception as exc:  # noqa: BLE001 — keep the plan Validate judged
+            logger.warning("forced-key re-plan failed: %s", exc)
+            keyed = None
+        if _plan_declares_primary_key(keyed):
+            return keyed, ""
+    if not approved:
+        return plan, ""
+    column_sql = surrogate_key_column_sql(version)
+    kwargs["_datawrap_added_columns"] = [{
+        "name": SURROGATE_KEY_COLUMN,
+        "ddl": column_sql,
+        "reason": "the destination forces a PRIMARY KEY and the source has none",
+        "excluded_from_parity": True,
+    }]
+    return plan, column_sql
+
+
 @writer_restore_guard
 def write_mapped_rows(
     *,
@@ -1021,6 +1096,28 @@ def write_mapped_rows(
                         "create-new emitted column types only."
                     ),
                 ).to_dict()
+            surrogate_sql = ""
+            if not table_existed:
+                fidelity_plan, surrogate_sql = _settle_forced_primary_key(
+                    cursor,
+                    fidelity_plan,
+                    replan=lambda: resolve_create_fidelity_plan(
+                        source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                        mappings=mappings,
+                        target_columns=target_cols,
+                        target_types=target_types,
+                        dest_dialect="mysql",
+                        table_already_exists=False,
+                        dest_table=table_name,
+                        dest_schema="",
+                        **create_key_inputs(
+                            write_mode=write_mode, conflict_columns=conflict_columns,
+                            carry_source_keys=True,
+                        ),
+                    ),
+                    approved=bool(_kwargs.get("upsert_ddl_approved")),
+                    kwargs=_kwargs,
+                )
             if fidelity_plan is not None:
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -1066,6 +1163,8 @@ def write_mapped_rows(
                         col_defs += (
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
                         )
+                if surrogate_sql:
+                    col_defs += f", {surrogate_sql}"
                 suffix = ""
                 if not table_existed:
                     suffix = (fidelity_plan.create_suffix or "").strip()
@@ -1082,7 +1181,11 @@ def write_mapped_rows(
                     # later keyed upsert/quarantine replay needs.
                     from services.brand import new_marker_comment
 
-                    cursor.execute(f"{create_sql} COMMENT='{new_marker_comment(table_name)}'")
+                    _execute_mysql_create(
+                        cursor,
+                        f"{create_sql} COMMENT='{new_marker_comment(table_name)}'",
+                        table_name,
+                    )
                 _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
                     fidelity_plan,
                     dest_dialect="mysql",
@@ -1122,15 +1225,19 @@ def write_mapped_rows(
                         col_defs += (
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
                         )
+                if surrogate_sql and "PRIMARY KEY" not in col_defs.upper():
+                    col_defs += f", {surrogate_sql}"
                 if not table_existed:
                     # 'dataflow:managed' marks a table this run created so the
                     # D101 gate below can tell it from an operator's table on
                     # later upserts/replays.
                     from services.brand import new_marker_comment
 
-                    cursor.execute(
+                    _execute_mysql_create(
+                        cursor,
                         f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}) "
-                        f"COMMENT='{new_marker_comment(table_name)}'"
+                        f"COMMENT='{new_marker_comment(table_name)}'",
+                        table_name,
                     )
                 _kwargs.setdefault(
                     "_schema_fidelity_report",
@@ -2104,7 +2211,16 @@ def write_mapped_rows(
                         else {}
                     ),
                     **(
-                        {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
+                        {"schema_fidelity": {
+                            **_kwargs["_schema_fidelity_report"],
+                            # D396: Datawrap's own row key, disclosed and
+                            # approved at Validate; parity never compares it.
+                            **(
+                                {"datawrap_added_columns": list(_kwargs["_datawrap_added_columns"])}
+                                if _kwargs.get("_datawrap_added_columns")
+                                else {}
+                            ),
+                        }}
                         if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
                         else {}
                     ),

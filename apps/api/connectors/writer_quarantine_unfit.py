@@ -406,6 +406,40 @@ def quarantine_unfit_integers(
     return out
 
 
+def column_contract_action(
+    column: str,
+    policy: str,
+    mappings: list[dict[str, Any]] | None = None,
+) -> tuple[str, str | None, str | None]:
+    """The write action for an unfit cell in one destination column.
+
+    ``(action, execution_policy, risk_id)``: a column whose mapping carries a
+    Migration Risk Contract is governed by that contract
+    (``resolve_write_action_for_mapping``), so a signed ``CAST_AND_CONTINUE``
+    with ``COERCE_NULL`` writes NULL in the write-time type matrix exactly as
+    it does when the cell transform fails. Any other column keeps the job
+    posture ``policy``.
+    """
+    from services.migration_risk_contract import (
+        mapping_declares_risk_contract,
+        resolve_write_action_for_mapping,
+    )
+
+    from connectors.writer_common import _active_quarantine_mappings
+
+    maps = mappings if mappings is not None else _active_quarantine_mappings.get()
+    name = str(column or "").strip().lower()
+    if name:
+        for m in maps or []:
+            if not isinstance(m, dict):
+                continue
+            target = str(m.get("target") or m.get("target_column") or "").strip().lower()
+            if name != target or not mapping_declares_risk_contract(m):
+                continue
+            return resolve_write_action_for_mapping(m, policy)
+    return policy, None, None
+
+
 def quarantine_unfit_decimals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -470,32 +504,45 @@ def quarantine_unfit_decimals(
                 current_type=declared_type,
                 column=target_cols[col_idx],
             )
+            # A signed Migration Risk Contract on this column decides, as it
+            # does for a failed cell transform: CAST_AND_CONTINUE + COERCE_NULL
+            # writes NULL; anything else holds the row out (never rounds).
+            action, exec_pol, risk_id = column_contract_action(target_cols[col_idx], policy)
+            signed_null = action == "coerce_null" and exec_pol is not None
+            label = decimal_reason_label(dialect_label, dest_db, declared_type)
+            if signed_null:
+                outcome = "— written as NULL under the signed Migration Risk Contract"
+            elif rounds:
+                outcome = (
+                    f"— quarantined (would round to the column's scale, {scale} "
+                    "decimal place(s), on write)"
+                )
+            else:
+                outcome = "— quarantined (would truncate/overflow on write)"
+            detail = {
+                "row": row_idx + 1,
+                "column": target_cols[col_idx],
+                "target": target_cols[col_idx],
+                "value": sample,
+                "reason": f"decimal does not fit {label}({precision},{scale}) {outcome}",
+                "policy": "coerce_null" if signed_null else "write_quarantine",
+                "suggested_fix": suggested_fix,
+                "suggested_target_type": suggested_type,
+                "chars": [],
+            }
+            if signed_null:
+                detail["execution_policy"] = exec_pol
+                if risk_id:
+                    detail["risk_id"] = risk_id
             append_write_quarantine_detail(
                 rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    "decimal does not fit "
-                    f"{decimal_reason_label(dialect_label, dest_db, declared_type)}"
-                    f"({precision},{scale}) "
-                    + (
-                        f"— quarantined (would round to the column's scale, {scale} "
-                        "decimal place(s), on write)"
-                        if rounds
-                        else "— quarantined (would truncate/overflow on write)"
-                    )
-                    ),
-                    "policy": "write_quarantine",
-                    "suggested_fix": suggested_fix,
-                    "suggested_target_type": suggested_type,
-                    "chars": [],
-                },
+                detail,
                 mapped_row=cells,
                 target_cols=target_cols,
             )
+            if signed_null:
+                cells[col_idx] = None
+                continue
             if policy == "coerce_null":
                 from services.value_serializer import DF_MISSING_SENTINEL
                 cells[col_idx] = DF_MISSING_SENTINEL

@@ -223,6 +223,14 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _platform_secret() -> bytes:
+    """The login token secret: the LEGACY evidence key, for verification only.
+
+    Packs issued before evidence signing keys existed were HMAC-signed with the
+    login secret under ``key_id`` ``platform_auth_secret``. They verify here,
+    reported as the legacy key, when the legacy evidence register holds their
+    digest (:func:`_legacy_pack_status`). Nothing new is signed with it
+    (:mod:`services.evidence_signing_keys`).
+    """
     from services.platform_config import is_production
 
     production = is_production()
@@ -314,27 +322,72 @@ def hmac_sha256_hex(secret: bytes, text: str) -> str:
     return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
+def sign_body(
+    body: dict[str, Any], *, subject: str, workspace_id: str | None = None,
+) -> dict[str, Any]:
     """Return ``body`` plus its content hash and HMAC over ``hash:subject``.
 
     The subject binds a signature to the thing it describes, so a pack signed
     for one job cannot be replayed as evidence for another.
+
+    The HMAC key is ``workspace_id``'s evidence signing key (the deployment's
+    keyring when there is no workspace), never the login secret; the envelope
+    names the key (``key_id``) and whose keyring holds it, so a rotation keeps
+    this signature verifiable (:mod:`services.evidence_signing_keys`).
     """
+    from services.evidence_signing_keys import signing_key
+
     body = json_ready_body(body)
     content_sha256 = sha256_hex(canonical_json(body))
+    key_id, key, version, scope = signing_key(workspace_id)
+    from services.evidence_signing_keys import DEPLOYMENT_SCOPE
+
     return {
         **body,
         "content_sha256": content_sha256,
         "signature": {
             "alg": "HMAC-SHA256",
-            "key_id": "platform_auth_secret",
-            "value": hmac_sha256_hex(_platform_secret(), f"{content_sha256}:{subject}"),
+            "key_id": key_id,
+            "key_version": version,
+            "key_scope": "deployment" if scope == DEPLOYMENT_SCOPE else "workspace",
+            "workspace_id": "" if scope == DEPLOYMENT_SCOPE else scope,
+            "value": hmac_sha256_hex(key, f"{content_sha256}:{subject}"),
         },
     }
 
 
-def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str]]:
-    """Recompute hash + HMAC for a signed body. Returns (actual_hash, errors)."""
+def signature_key_info(payload: dict[str, Any]) -> dict[str, Any]:
+    """Which key a signed body names: id, keyring, and whether it is the legacy login secret."""
+    from services.evidence_signing_keys import LEGACY_KEY_ID
+
+    sig = payload.get("signature") if isinstance(payload.get("signature"), dict) else {}
+    key_id = str(sig.get("key_id") or "")
+    legacy = key_id in ("", LEGACY_KEY_ID)
+    return {
+        "key_id": key_id or LEGACY_KEY_ID,
+        "key_scope": "legacy_login_secret" if legacy else str(sig.get("key_scope") or ""),
+        "workspace_id": "" if legacy else str(sig.get("workspace_id") or ""),
+        "legacy_key": legacy,
+    }
+
+
+def verify_body_detail(
+    payload: dict[str, Any],
+    *,
+    subject: str,
+    may_use_workspace: Any = None,
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Recompute hash + HMAC for a signed body: ``(actual_hash, errors, key_info)``.
+
+    The key is the one the envelope names: a workspace's evidence key (retired
+    versions included), the deployment's, or — for a pack signed before
+    evidence keys existed — the legacy login secret. ``may_use_workspace``
+    (a callable taking a workspace id) lets a route refuse to verify against a
+    workspace's keyring the caller cannot read; the answer then names the
+    reason instead of confirming or denying the signature.
+    """
+    from services.evidence_signing_keys import key_for
+
     errors: list[str] = []
     body = {k: v for k, v in payload.items() if k not in ("content_sha256", "signature")}
     actual_hash = sha256_hex(canonical_json(body))
@@ -342,9 +395,88 @@ def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str
         errors.append("content_sha256 mismatch")
     sig = payload.get("signature") if isinstance(payload.get("signature"), dict) else {}
     claimed = str(sig.get("value") or "")
-    expected = hmac_sha256_hex(_platform_secret(), f"{actual_hash}:{subject}")
+    info = signature_key_info(payload)
+    if info["legacy_key"]:
+        # T2: the login secret is not a signing key any more. It verifies only
+        # a pack the evidence chain recorded before evidence keys existed.
+        legacy_status, legacy_error = _legacy_pack_status(payload, may_use_workspace)
+        info["legacy_status"] = legacy_status
+        if legacy_error:
+            errors.append(legacy_error)
+            return actual_hash, errors, info
+        key: bytes | None = _platform_secret()
+    else:
+        # T1: the envelope's key_scope is not authenticated. A named workspace
+        # is always the workspace keyring and always the caller's read check;
+        # an empty one is the deployment keyring. The scope reported is where
+        # the key was actually found.
+        workspace = info["workspace_id"]
+        if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+            errors.append(
+                "signed with another workspace's evidence key: it can be verified only "
+                "by someone with access to that workspace"
+            )
+            return actual_hash, errors, info
+        key = key_for(workspace or None, info["key_id"])
+        info["key_scope"] = "workspace" if workspace else "deployment"
+    if key is None:
+        errors.append(
+            f"signing key {info['key_id']} is not in this deployment's evidence keyring"
+        )
+        return actual_hash, errors, info
+    expected = hmac_sha256_hex(key, f"{actual_hash}:{subject}")
     if not claimed or not hmac.compare_digest(claimed, expected):
         errors.append("HMAC signature invalid")
+    return actual_hash, errors, info
+
+
+#: ``signing_key.legacy_status`` values for a login-secret (legacy) signature.
+LEGACY_ON_RECORD = "legacy_on_record_before_cutover"
+LEGACY_NOT_ON_RECORD = "legacy_not_on_record"
+LEGACY_NOT_ON_RECORD_REASON = (
+    "signed with the retired key and not on record before the cutover; it cannot "
+    "be told apart from a forgery"
+)
+
+
+def _legacy_pack_status(payload: dict[str, Any], may_use_workspace: Any = None) -> tuple[str, str]:
+    """``(status, error)`` for a body signed with the legacy login secret.
+
+    Accepted only when the legacy evidence register recorded its content digest
+    before the cutover (:mod:`services.legacy_evidence_register`): anyone holding
+    the login secret can sign a new body, but cannot add a pre-cutover record.
+    """
+    from services.legacy_evidence_register import digest_of, ensure_snapshot, lookup
+
+    try:
+        ensure_snapshot()
+        record = lookup(digest_of(payload)) or lookup(pack_body_digest_excluding_anchor(payload))
+    except Exception:  # noqa: BLE001 - cannot establish it: not accepted
+        record = None
+    if not record:
+        return LEGACY_NOT_ON_RECORD, LEGACY_NOT_ON_RECORD_REASON
+    workspace = str(record.get("workspace_id") or "")
+    if not workspace and record.get("evidence_type") != "exit_evidence_pack":
+        # Recorded from an export filed without a workspace (review 3 item 5):
+        # the job's workspace decides who may verify it.
+        from services.legacy_evidence_register import job_workspace
+
+        workspace = job_workspace(str(record.get("ref_id") or ""))
+    if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+        return LEGACY_NOT_ON_RECORD, (
+            "signed with another workspace's evidence key: it can be verified only "
+            "by someone with access to that workspace"
+        )
+    return LEGACY_ON_RECORD, ""
+
+
+def verify_body(
+    payload: dict[str, Any], *, subject: str, may_use_workspace: Any = None,
+) -> tuple[str, list[str]]:
+    """Recompute hash + HMAC for a signed body. Returns (actual_hash, errors)."""
+    actual_hash, errors, _info = verify_body_detail(
+        payload, subject=subject, may_use_workspace=may_use_workspace
+    )
     return actual_hash, errors
 
 
@@ -551,6 +683,7 @@ def classify_post_write_assurance(
             ),
         }
 
+    reasons = full_checksum_missing_reasons(recon, checksum_match=checksum_match)
     return {
         "claim_level": "none",
         "post_write_verified": False,
@@ -558,11 +691,85 @@ def classify_post_write_assurance(
         "population_proof": False,
         "referential_integrity_proven": ri_proven,
         "checksum_match": checksum_match,
+        "not_proven_reasons": reasons,
         "note": (
-            "Gate-8 lacks eligible whole-transfer scope, independent source re-read "
-            "provenance, or matching digests — refuse migration proven claim."
+            "Not proven: " + " ".join(reasons)
+            if reasons
+            else (
+                "Gate-8 lacks eligible whole-transfer scope, independent source re-read "
+                "provenance, or matching digests — refuse migration proven claim."
+            )
         ),
     }
+
+
+#: How each source-digest provenance was obtained, in an operator's words.
+_PROVENANCE_PLAIN = {
+    "write_pass_fingerprints": (
+        "the source checksum was computed from the rows as Datawrap read them for "
+        "the write, not from a second, independent read of the source after the write"
+    ),
+    "writer_ack": (
+        "the source checksum is the writer's own account of what it wrote, so the "
+        "comparison checks the write against itself"
+    ),
+    "staging_snapshot_digest": (
+        "the source checksum was taken from the staged snapshot of this run, not from "
+        "an independent re-read of the source after the write"
+    ),
+}
+
+
+def full_checksum_missing_reasons(
+    recon: dict[str, Any] | None, *, checksum_match: bool | None = None
+) -> list[str]:
+    """Which conditions of the full-checksum proof this Gate-8 report does not meet.
+
+    Plain sentences, one per missing condition (D381): a certificate that says
+    NOT PROVEN while source and destination agree on every row must say what
+    was not established, not "lacks eligible scope or provenance".
+    """
+    recon = recon if isinstance(recon, dict) else {}
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    if checksum_match is None:
+        checksum_match = bool(src and tgt and src == tgt) and recon.get("checksum_match") is not False
+    out: list[str] = []
+    if recon.get("passed") is not True:
+        out.append("Gate-8 did not pass.")
+    if not checksum_match:
+        out.append(
+            "Source and destination checksums were not both computed and equal."
+            if not (src and tgt)
+            else "The source and destination checksums differ."
+        )
+    coverage = str(recon.get("coverage") or "").lower()
+    if coverage not in {"", "full_checksum"}:
+        out.append(
+            f"The comparison that ran covered {coverage.replace('_', ' ')}, not every "
+            "value of every row."
+        )
+    scope = str(recon.get("checksum_scope") or "")
+    if scope not in {"", "whole_table", "verify_time_population_digest"}:
+        out.append(
+            f"The checksum covered {scope.replace('_', ' ')}, not the whole table."
+        )
+    provenance = str(recon.get("source_checksum_provenance") or "")
+    if provenance != "independent_source_reread":
+        why = _PROVENANCE_PLAIN.get(
+            provenance,
+            (
+                f"the source checksum came from '{provenance}'"
+                if provenance
+                else "no record says how the source checksum was obtained"
+            )
+            + ", not from an independent re-read of the source after the write",
+        )
+        out.append(
+            why[0].upper() + why[1:] + ", so a value the source read itself got wrong "
+            "would be on both sides and still match."
+        )
+    return out
 
 
 def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
@@ -805,8 +1012,12 @@ def build_signed_proof_pack(
     governance_operations: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
     parity: dict[str, Any] | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
+
+    Signed with ``workspace_id``'s evidence signing key (the deployment's when
+    there is none), see :func:`sign_body`.
 
     Always stamps ``assurance`` from Gate-8. Incomplete packs are still signed
     for audit chain integrity — they must not set ``migration_proven``.
@@ -949,7 +1160,7 @@ def build_signed_proof_pack(
                 "migration_proven": bool(assurance.get("migration_proven")),
             },
         )
-    return sign_body(body, subject=job_id)
+    return sign_body(body, subject=job_id, workspace_id=workspace_id)
 
 
 def pack_body_digest_excluding_anchor(pack: dict[str, Any]) -> str:
@@ -966,12 +1177,19 @@ def pack_body_digest_excluding_anchor(pack: dict[str, Any]) -> str:
     return sha256_hex(canonical_json(body))
 
 
-def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
-    """Verify content hash + HMAC. Returns {ok, errors[]}."""
+def verify_signed_proof_pack(pack: dict[str, Any], *, may_use_workspace: Any = None) -> dict[str, Any]:
+    """Verify content hash + HMAC. Returns {ok, errors[], signing_key}.
+
+    ``signing_key`` names the key that signed the pack (id, keyring, legacy or
+    not). ``may_use_workspace`` is the route's read check on the keyring's
+    workspace (see :func:`verify_body_detail`).
+    """
     errors: list[str] = []
     if not isinstance(pack, dict):
         return {"ok": False, "errors": ["pack must be an object"]}
-    actual_hash, sig_errors = verify_body(pack, subject=pack_subject(pack))
+    actual_hash, sig_errors, key_info = verify_body_detail(
+        pack, subject=pack_subject(pack), may_use_workspace=may_use_workspace
+    )
     errors.extend(sig_errors)
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
@@ -999,7 +1217,13 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
     kind = str(pack.get("kind")) if pack.get("kind") in {PARITY_PACK_KIND, EXIT_PACK_KIND} else "proof_pack"
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind}
+    out = {
+        "ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind,
+        "signing_key": key_info,
+    }
+    if key_info.get("legacy_status"):
+        out["legacy_status"] = key_info["legacy_status"]
+    return out
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
@@ -1222,6 +1446,7 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         governance_operations=_collect_governance_for_pack(job),
         timing=_timing_for_pack(dest),
         parity=parity_section_for_pack(job),
+        workspace_id=str(job.get("workspace_id") or "") or None,
     )
 
 
@@ -1260,13 +1485,21 @@ def pack_subject(pack: dict[str, Any]) -> str:
     return f"{PARITY_PACK_KIND}:{job_id}" if pack.get("kind") == PARITY_PACK_KIND else job_id
 
 
-def build_signed_exit_pack(body: dict[str, Any]) -> dict[str, Any]:
-    """Sign an Exit Evidence Pack body (``kind`` exit_evidence) in its own signature domain."""
-    return sign_body({**body, "kind": EXIT_PACK_KIND}, subject=pack_subject({**body, "kind": EXIT_PACK_KIND}))
+def build_signed_exit_pack(body: dict[str, Any], *, workspace_id: str | None = None) -> dict[str, Any]:
+    """Sign an Exit Evidence Pack body (``kind`` exit_evidence) in its own signature domain,
+    with the system's workspace evidence signing key."""
+    return sign_body(
+        {**body, "kind": EXIT_PACK_KIND},
+        subject=pack_subject({**body, "kind": EXIT_PACK_KIND}),
+        workspace_id=workspace_id,
+    )
 
 
-def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
-    """Sign a final parity report with the proof-pack key, in its own signature domain.
+def build_signed_parity_pack(
+    *, job_id: str, report: dict[str, Any], actor: str, workspace_id: str | None = None,
+) -> dict[str, Any]:
+    """Sign a final parity report with the job's workspace evidence signing key,
+    in its own signature domain.
 
     Same envelope as the proof pack (``content_sha256`` + HMAC), so
     ``POST /transfer/proof-pack/verify`` verifies it — but over the subject
@@ -1284,4 +1517,4 @@ def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str)
         "fingerprint_version": FINGERPRINT_VERSION,
         "parity": report,
     }
-    return sign_body(body, subject=pack_subject(body))
+    return sign_body(body, subject=pack_subject(body), workspace_id=workspace_id)

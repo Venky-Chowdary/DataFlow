@@ -650,3 +650,8 @@ def test_null_and_the_sentinel_literal_round_trip_document_destinations(
         assert got == _SENTINEL_ROWS
     finally:
         pg_exec(f'DROP TABLE IF EXISTS public."{src}"')
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

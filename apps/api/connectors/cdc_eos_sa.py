@@ -645,6 +645,39 @@ def _add_column_sql(dialect: str, table_q: str, col: str, typ: str) -> str:
     return f"ALTER TABLE {table_q} ADD COLUMN {col_q} {typ}"
 
 
+def _resolve_key_spelling(
+    dialect: str, columns: list[str], pk_cols: list[str], table_name: str
+) -> list[str]:
+    """Each key column as the destination column list spells it.
+
+    The CREATE compared key names to column names byte for byte, so a key
+    spelled ``id`` beside a column spelled ``Id`` declared no PRIMARY KEY at
+    all: a keyless apply table (no dedupe on replay) and, on a server that
+    forces a key, MySQL 3750 / MariaDB 1173 on a CDC route whose source has a
+    primary key (QA batch 1). MySQL and SQL Server column names are
+    case-insensitive, so the one case-folded match is that column; on the
+    case-sensitive engines only an exact match is. A key column the table does
+    not have is refused rather than silently dropped.
+    """
+    folded = dialect in _MYSQL_LIKE | _MSSQL_LIKE
+    out: list[str] = []
+    for key in pk_cols:
+        if key in columns:
+            out.append(key)
+            continue
+        hits = [c for c in columns if folded and c.lower() == str(key).lower()]
+        if len(hits) != 1:
+            raise ExactlyOnceRouteError(
+                f"CDC apply key column {key!r} is not one of the columns of "
+                f"{table_name!r} ({', '.join(columns)}); the apply table would "
+                "have no primary key. Map the key column, or name the key as "
+                "the destination spells it.",
+                reason="exactly_once_requires_primary_key",
+            )
+        out.append(hits[0])
+    return out
+
+
 def _ensure_dest_table(
     conn: Any,
     dialect: str,
@@ -661,6 +694,7 @@ def _ensure_dest_table(
     until it is recreated; this path does not ALTER those types.
     """
     table_q = _q(table_name, dialect)
+    pk_cols = _resolve_key_spelling(dialect, columns, pk_cols, table_name)
     col_sql = []
     for col in columns:
         typ = _with_collation(

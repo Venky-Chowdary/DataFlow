@@ -225,7 +225,18 @@ def test_a_double_into_real_is_still_a_narrowing_that_blocks(_isolated):
             uuid.uuid4().hex[:24],
         )
         assert result.success is False
-        assert "collapse" in (result.error or "").lower()
+        # Somebody else's REAL column is the ceiling (no grounds to ALTER it):
+        # refused as the collapse, nothing written, the column unchanged.
+        err = (result.error or "").lower()
+        assert "collapse" in err, err
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst_table}"')
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = 'f'", (dst_table,)
+            )
+            assert cur.fetchone()[0] == "real"
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{src_table}"')

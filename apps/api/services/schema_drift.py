@@ -1156,7 +1156,18 @@ def dest_widen_proposal(
     if not is_wider_type(tgt_type, src_type, dest_db=dest_db):
         return None
     if stamp_is_operator_ceiling(mapping):
-        return None
+        stamped = str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
+        # On a table Datawrap created, a stamp that only echoes the live column
+        # is the catalog, not a ceiling the operator drew: schedules drop the
+        # stamp's provenance and then refused a same-family widen (DW-D334).
+        # On anyone else's table the live type is the ceiling (D161).
+        from services.managed_table import destination_is_owned
+
+        if not (
+            stamped and tgt_type and stamped.casefold() == str(tgt_type).casefold()
+            and destination_is_owned()
+        ):
+            return None
     new_type = widened_dest_carrier(tgt_type, src_type)
     # The carrier we would emit must itself be a widen. A bare VARCHAR
     # fallback used to come back here and ALTER NVARCHAR(400) to VARCHAR(1).
@@ -1260,16 +1271,26 @@ def effective_schema_policy(
 
 
 def destination_evolution_approved(
-    schema_policy: str | None, *, acknowledged: bool = False
+    schema_policy: str | None,
+    *,
+    acknowledged: bool = False,
+    managed_table: bool = False,
 ) -> bool:
     """Whether additive destination evolution (widen, ADD COLUMN) is approved.
 
     Propagate policies approve it up front; ``manual_review`` approves it after
     the drift acknowledgement. ``type_locked`` / ``pause_on_change`` /
-    ``block_all`` never ALTER — the run fails closed on bind instead. Validate
-    and Execute both ask this, so they cannot disagree.
+    ``block_all`` never ALTER. A table Datawrap created is no exception: its
+    widen is proposed (``services.managed_table``) and applied under this
+    same policy. Validate and Execute both ask this, so they cannot disagree.
+
+    ``managed_table`` is accepted and ignored so a caller cannot reintroduce
+    a manual_review auto-approval.
     """
+    del managed_table
     policy = normalize_schema_policy(schema_policy)
+    if policy in {"type_locked", "pause_on_change", "block_all"}:
+        return False
     return policy in PROPAGATE_POLICIES or (acknowledged and policy == "manual_review")
 
 

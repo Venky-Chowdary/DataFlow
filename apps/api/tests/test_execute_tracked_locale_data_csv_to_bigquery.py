@@ -33,6 +33,13 @@ class _FakeMongo:
         self.jobs[job_id]["status"] = status
         return True
 
+    def update_job_fields(self, job_id: str, fields: dict, touch_updated_at: bool = True) -> bool:
+        # Real job stores (MongoDB and the in-memory store) both have it: the
+        # reconcile heartbeat stamps heartbeat_at through it.
+        self.jobs.setdefault(job_id, {})
+        self.jobs[job_id].update(fields or {})
+        return True
+
 
 @pytest.fixture(autouse=True)
 def _patch_mongodb_service(monkeypatch):

@@ -1643,6 +1643,35 @@ def incomplete_transfer_run_detail(*, has_source: bool, has_destination: bool) -
     )
 
 
+#: Database formats whose source is a file named by its path, with no host.
+_PATH_DATABASE_FORMATS = frozenset({"sqlite", "sqlite3", "duckdb"})
+
+
+def incomplete_source_detail(*, kind: str, fmt: str, has_file: bool, has_connection: bool, database: str) -> str:
+    """Why a named-but-partial source must not start, or ``""`` (D374 edge).
+
+    A table or collection name alone is not a source: with no file, no stored
+    upload and no connection the run fell back to the form's defaults (a file
+    source with no file) and created a job that failed "File wasn't found".
+    """
+    kind = (kind or "").strip().lower()
+    if has_connection or has_file:
+        return ""
+    if kind == "file":
+        return (
+            "Upload a file, or name a source connector or connection. This request "
+            "names a source table but no file and no connection, so no job was started."
+        )
+    if kind == "database" and not (
+        str(fmt or "").strip().lower() in _PATH_DATABASE_FORMATS and str(database or "").strip()
+    ):
+        return (
+            "Name a source connector, or the source's host or connection string. This "
+            "request names a source table but no connection, so no job was started."
+        )
+    return ""
+
+
 @router.post("/run")
 async def run_universal_transfer(
     background_tasks: BackgroundTasks,
@@ -1925,6 +1954,16 @@ async def run_universal_transfer(
                 filename = filename or str(stored.get("filename") or "upload.csv")
                 if not src_fmt:
                     src_fmt = str(stored.get("format") or "")
+    if partial := incomplete_source_detail(
+        kind=source_kind,
+        fmt=src_fmt,
+        has_file=bool(getattr(file, "filename", None)) or bool(stored_file_id),
+        has_connection=any(
+            str(v or "").strip() for v in (source_connector_id, source_host, source_connection_string)
+        ),
+        database=source_database,
+    ):
+        raise HTTPException(status_code=422, detail=partial)
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -2416,6 +2455,7 @@ def get_transfer_proof_pack(job_id: str, request: Request):
             resource=f"job:{job_id}",
             actor=actor,
             level="info",
+            workspace_id=str(job.get("workspace_id") or "") or None,
             details={"content_sha256": pack.get("content_sha256"), "version": pack.get("version")},
         )
     except Exception as exc:
@@ -2424,16 +2464,24 @@ def get_transfer_proof_pack(job_id: str, request: Request):
 
 
 @router.post("/proof-pack/verify")
-async def verify_transfer_proof_pack(body: Any = Body(...)):
-    """Verify a previously exported signed proof pack against the platform secret.
+async def verify_transfer_proof_pack(request: Request, body: Any = Body(...)):
+    """Verify a previously exported signed proof pack against the evidence key it names.
+
+    A read (``job.read``): anyone who can read the pack's workspace can verify
+    it. The key is that workspace's evidence signing key (retired versions
+    included), or the legacy login secret for a pack signed before evidence
+    keys existed. Only this deployment holds the keys: this is not a
+    third-party or offline verification.
 
     Accepts ``{"pack": <pack>}`` or the pack itself, like ``/audit/verify-pack``;
     a body that is not a pack is a 422 naming the missing keys (PP3).
     """
-    from services.proof_pack_request import pack_from_body
+    from services.proof_pack_request import pack_from_body, workspace_reader
     from services.signed_proof_pack import verify_signed_proof_pack
 
-    return verify_signed_proof_pack(pack_from_body(body))
+    pack = pack_from_body(body)
+    may_use = workspace_reader(request)
+    return await asyncio.to_thread(verify_signed_proof_pack, pack, may_use_workspace=may_use)
 
 
 @router.get("/{job_id}/certificate")
@@ -2474,6 +2522,7 @@ def get_migration_certificate(job_id: str, request: Request, format: str = "json
             resource=f"job:{job_id}",
             actor=actor,
             level="info",
+            workspace_id=str(job.get("workspace_id") or "") or None,
             details={
                 "content_sha256": cert.get("content_sha256"),
                 "verdict": (cert.get("verdict") or {}).get("headline"),
@@ -2507,12 +2556,19 @@ class CertificateVerifyBody(BaseModel):
 
 
 @router.post("/certificate/verify")
-async def verify_migration_certificate_endpoint(body: CertificateVerifyBody):
-    """Verify a Migration Certificate's hash, signature, and claim legitimacy."""
-    from services.migration_certificate import verify_migration_certificate
+async def verify_migration_certificate_endpoint(request: Request, body: CertificateVerifyBody):
+    """Verify a Migration Certificate's hash, signature, and claim legitimacy.
 
-    return verify_migration_certificate(
-        body.certificate if isinstance(body.certificate, dict) else {}
+    A read (``job.read``), against the evidence key the certificate names.
+    """
+    from services.migration_certificate import verify_migration_certificate
+    from services.proof_pack_request import workspace_reader
+
+    may_use = workspace_reader(request)
+    return await asyncio.to_thread(
+        verify_migration_certificate,
+        body.certificate if isinstance(body.certificate, dict) else {},
+        may_use_workspace=may_use,
     )
 
 

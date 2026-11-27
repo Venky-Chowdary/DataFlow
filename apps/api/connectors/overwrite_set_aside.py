@@ -7,17 +7,32 @@ every row (or failed for any other reason) failed with the previous object
 already gone. The owner's rule: no path may destroy a destination when
 nothing valid would replace it.
 
-Each engine here sets the previous generation aside before the load instead:
+The next design set the live object aside under a backup name and let the
+writer create a new one, which lost everything bound to the old object:
+grants, masking and row access policies, tags and streams (Snowflake), the
+table IAM policy, row access policies and policy tags (BigQuery), aliases and
+settings (Elasticsearch) — NF-1. Each engine now keeps the security metadata:
 
-- Snowflake renames the live table to a backup name.
+- Snowflake keeps the live table. The backup is a zero-copy ``CLONE``; the
+  live table is emptied with ``TRUNCATE`` and loaded in place. A failed run
+  restores in place (``INSERT OVERWRITE``) or, on a table with masking or row
+  access policies, swaps in the backup after copying every grant, policy and
+  tag of the live table onto it.
 - BigQuery copies the live table to a backup with a copy job (``CREATE TABLE
-  AS SELECT`` where copy jobs are unavailable), then deletes the live table.
-  ``ALTER TABLE ... RENAME`` is refused while a table has a streaming buffer,
-  and the BigQuery writer streams.
-- Elasticsearch write-blocks the live index, clones it to a backup index,
-  then deletes the live index.
+  AS SELECT`` where copy jobs are unavailable, never on a table with row- or
+  column-level security), then deletes the live table. ``ALTER TABLE ...
+  RENAME`` is refused while a table has a streaming buffer, and the BigQuery
+  writer streams. A table with access control (IAM, row access policies,
+  policy tags) is re-created empty with them before the writer writes, and
+  the backup carries them while it exists. Access control the connector
+  cannot read refuses the overwrite unless the loss was approved at Validate.
+- Elasticsearch keeps the live index: it clones it to a write-blocked backup
+  and empties it with delete-by-query; aliases and settings stay.
 - S3 copies every object of the export (the single object and any part
   objects) under a backup prefix. The writer replaces them as before.
+
+What each engine keeps is disclosed at Validate
+(:mod:`services.overwrite_governance_gate`).
 
 The engine records the backup on ``destination.extra`` (``overwrite_backup`` /
 ``overwrite_backup_engine``). A failed run calls :func:`restore_set_aside`,
@@ -29,10 +44,10 @@ copy (``table_manager.retire_generic_sql_overwrite``), not a set-aside.
 
 A backup left by an earlier run that died before settling is handled before a
 new one is taken. When the live object is missing, the backup is the only
-copy of the pre-run data: it becomes this run's backup, so a failure puts it
-back and a commit drops it. When both exist, nothing can tell a failed
-restore (the backup is the truth) from a failed discard (the live object is
-the truth), so the overwrite is refused with both left in place.
+copy of the pre-run data: it becomes this run's backup (Snowflake renames it
+back first, since it is the original object). When both exist, nothing can
+tell a failed restore (the backup is the truth) from a failed discard (the
+live object is the truth), so the overwrite is refused with both left in place.
 """
 
 from __future__ import annotations
@@ -40,7 +55,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from connectors.sql_identifiers import drop_table_if_exists_sql, rename_table_sql
 from connectors.table_manager import TableDropError
 
 logger = logging.getLogger(__name__)
@@ -80,28 +94,75 @@ def _live_name_from_backup(backup: str, fallback: str) -> str:
     return fallback
 
 
-def _refuse_ambiguous(table_name: str, backup: str) -> TableDropError:
+_AMBIGUOUS_HELP = {
+    "snowflake": (
+        "{backup} is a clone of {table} taken before an earlier overwrite whose restore did "
+        "not finish; {table} holds that run's (possibly partial) load. To go back to the rows "
+        "from before it run: ALTER TABLE {table} SWAP WITH {backup}; DROP TABLE {backup};  "
+        "to keep {table} as it is run: DROP TABLE {backup};  then run again."
+    ),
+    "bigquery": (
+        "{backup} is the copy of {table} taken before an earlier overwrite. If that run "
+        "reported 'rows restored, but ... access control is unverified', {table} already "
+        "holds the previous rows: compare its IAM policy and row access policies with "
+        "{backup}'s, then delete {backup}. Otherwise {table} holds that run's load: delete "
+        "it and copy {backup} back (bq cp {backup} {table}), then delete {backup}."
+    ),
+    "elasticsearch": (
+        "{backup} is a write-blocked copy of {table} taken before an earlier overwrite"
+        "{known}. Which of the two holds the documents you want is not certain: an "
+        "interrupted restore can leave {table} a partial clone, and an application write "
+        "can auto-create {table} after a restore deleted it. Compare document counts "
+        "first (GET {table}/_count and GET {backup}/_count, then sample documents), and "
+        "do not delete {backup} before you have. To go back to {backup}'s documents: "
+        "delete {table} if it exists, clone {backup} to {table}, lift index.blocks.write "
+        "on {table}, re-add the aliases recorded in {backup}'s _meta.dataflow_overwrite, "
+        "delete {backup}. To keep {table} as it is: delete {backup}. Then run again."
+    ),
+    "s3": (
+        "{backup} holds the export objects from before an earlier overwrite; {table} holds "
+        "that run's export. Copy the objects back or delete the prefix, then run again."
+    ),
+}
+
+
+def _refuse_ambiguous(table_name: str, backup: str, engine: str = "", known: str = "") -> TableDropError:
+    """Both a backup and a live object: say what is known of each and what to run.
+
+    ``known``: facts read from the objects (Elasticsearch: the backup's
+    ``_meta`` record and both document counts), never a guess.
+    """
+    detail = _AMBIGUOUS_HELP.get(engine, "").format(table=table_name, backup=backup, known=known)
     return TableDropError(
         table_name,
-        f"backup {backup} from an earlier overwrite is still present next to "
-        f"{table_name}. One of them holds the pre-run data and the other a "
-        "replacement; drop the one you do not need, then run again.",
+        f"backup {backup} from an earlier overwrite is still present next to {table_name}. "
+        + (detail or "One of them holds the pre-run data and the other a replacement; "
+           "drop the one you do not need, then run again."),
     )
 
 
 def retire_set_aside(
-    engine: str, cfg: dict[str, Any], table_name: str, schema: str | None = None
+    engine: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None = None,
+    *,
+    governance_loss_approved: bool = False,
 ) -> str | None:
     """Set the live object aside. Returns the backup name, or ``None`` when absent.
 
     Raises :class:`TableDropError` when the previous generation could not be
-    kept. The overwrite then fails before anything was removed.
+    kept, or when the object's access control could not be carried and the
+    loss was not approved at Validate (``governance_loss_approved``). The
+    overwrite then fails before anything was removed.
     """
     handler = _HANDLERS.get(engine)
     if handler is None:
         raise TableDropError(table_name, f"no set-aside overwrite for {engine!r}")
     try:
-        return handler.retire(cfg, table_name, schema)
+        if engine == "s3":
+            return handler.retire(cfg, table_name, schema)
+        return handler.retire(cfg, table_name, schema, approved=governance_loss_approved)
     except TableDropError:
         raise
     except Exception as exc:  # noqa: BLE001 - any failure must fail the overwrite
@@ -143,6 +204,17 @@ def discard_set_aside(
 # ---------------------------------------------------------------- Snowflake
 
 
+def bigquery_skips_governance(cfg: dict[str, Any]) -> bool:
+    """True for a BigQuery emulator endpoint: it has no IAM or row access policies."""
+    from connectors.google_emulator import looks_like_google_emulator
+
+    return bool(looks_like_google_emulator(
+        endpoint=str(cfg.get("connection_string") or ""),
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 0),
+    ))
+
+
 def _snowflake_connection(cfg: dict[str, Any], schema: str | None) -> Any:
     from connectors.snowflake_conn import get_connection, normalize_account
     from connectors.sql_identifiers import use_warehouse_sql
@@ -166,28 +238,311 @@ def _snowflake_connection(cfg: dict[str, Any], schema: str | None) -> Any:
     return conn
 
 
+# Snowflake statements of the set-aside. Every argument is an identifier
+# already quoted by snowflake_qualified_table / quote_sql_identifier.
+
+
+def _sf_rename(src: str, dst: str) -> str:
+    return f"ALTER TABLE {src} RENAME TO {dst}"
+
+
+def _sf_clone(bak: str, live: str, *, copy_grants: bool, transient: bool = False) -> str:
+    # A TRANSIENT table clones only into a TRANSIENT table.
+    kind = "TRANSIENT TABLE" if transient else "TABLE"
+    return f"CREATE {kind} {bak} CLONE {live}" + (" COPY GRANTS" if copy_grants else "")
+
+
+def _sf_show_tables(like: str, schema_ref: str) -> str:
+    return f"SHOW TABLES LIKE '{like}' IN SCHEMA {schema_ref}"
+
+
+def _sf_count(ref: str) -> str:
+    return f"SELECT COUNT(*) FROM {ref}"  # nosec B608 - quoted ids
+
+
+def _sf_truncate(ref: str) -> str:
+    return f"TRUNCATE TABLE {ref}"
+
+
+def _sf_swap(live: str, bak: str) -> str:
+    return f"ALTER TABLE {live} SWAP WITH {bak}"
+
+
+def _sf_drop(ref: str) -> str:
+    return f"DROP TABLE IF EXISTS {ref}"
+
+
+def _sf_drop_column(ref: str, column: str) -> str:
+    return f"ALTER TABLE {ref} DROP COLUMN {column}"
+
+
+def _sf_insert_overwrite(live: str, bak: str, cols: str) -> str:
+    return f"INSERT OVERWRITE INTO {live} ({cols}) SELECT {cols} FROM {bak}"  # nosec B608 - quoted ids
+
+
+def _sf_recovery(live_ref: str, bak_ref: str) -> str:
+    """Exact operator steps when an automatic Snowflake restore could not finish."""
+    return (
+        f"The rows from before this run are in {bak_ref}; {live_ref} holds this run's "
+        f"partial load. To put the previous rows back run: ALTER TABLE {live_ref} SWAP WITH "
+        f"{bak_ref}; DROP TABLE {bak_ref};  (or, to keep this run's rows: DROP TABLE {bak_ref};)"
+    )
+
+
+#: Final query states (snowflake.connector QueryStatus) in which a statement
+#: certainly did not take effect.
+_SF_QUERY_FAILED = frozenset({"FAILED_WITH_ERROR", "FAILED_WITH_INCIDENT", "ABORTED"})
+
+
 class _Snowflake:
+    """Keep the live table; the backup is a zero-copy clone carrying its governance.
+
+    The success path never renames, drops or recreates the live table, so its
+    grants, masking and row access policies, tags, streams, clustering key and
+    comments stay on it (NF-1).
+
+    retire:  read the table's grants, policies and tags (refuse, before any
+             change, when they cannot be read and the loss was not approved);
+             CREATE [TRANSIENT] TABLE <bak> CLONE <live> [COPY GRANTS]; copy
+             onto <bak> every grant, policy and tag it lacks (so the backup is
+             protected like the table, and a restore needs only a SWAP);
+             TRUNCATE TABLE <live>. Any failure before TRUNCATE drops the clone.
+    discard: DROP TABLE <bak>
+    restore: no masking / row access policy on the table (read now):
+                 INSERT OVERWRITE INTO <live> (cols) SELECT cols FROM <bak>
+             otherwise (or unknown): ALTER TABLE <live> SWAP WITH <bak>, then
+             drop the swapped-out replacement. Reading the backup back through
+             a masking or row access policy could copy masked values; a swap
+             moves the stored data as it is (a stream on the table goes stale).
+             A restore that cannot finish leaves both tables and says exactly
+             which statements put the previous rows back.
+    """
+
     @staticmethod
     def _resolve(cur: Any, schema: str, name: str) -> str | None:
         from connectors.snowflake_conn import resolve_snowflake_table_name
 
         return resolve_snowflake_table_name(cur, schema, name)
 
-    def retire(self, cfg: dict[str, Any], table_name: str, schema: str | None) -> str | None:
+    @staticmethod
+    def _ref(schema: str, name: str) -> str:
+        from connectors.snowflake_conn import snowflake_qualified_table
+
+        return snowflake_qualified_table(schema, name)
+
+    @staticmethod
+    def _columns(cur: Any, schema: str, name: str) -> list[str]:
+        from connectors.snowflake_conn import snowflake_physical_column_rows
+
+        return [str(r[0]) for r in snowflake_physical_column_rows(cur, schema, name) or []]
+
+    @staticmethod
+    def _governance(cur: Any, ref: str, cfg: dict[str, Any], *, emulator: bool = False) -> Any:
+        from connectors.overwrite_governance import SnowflakeGovernance, snowflake_governance
+
+        if emulator:
+            # fakesnow has no roles, grants, policies or tags (and no SHOW
+            # GRANTS / POLICY_REFERENCES): an emulator table governs nothing.
+            return SnowflakeGovernance(grants=[], policies=[], tag_policies=[], tags=[])
+        return snowflake_governance(cur, ref, database=str(cfg.get("database") or ""))
+
+    @staticmethod
+    def _table_row(cur: Any, schema: str, name: str) -> dict[str, Any] | None:
+        """The table's ``SHOW TABLES`` row (kind, owner, ...), or ``None`` when unread.
+
+        ``SHOW TABLES LIKE`` is one object lookup; ``information_schema`` is
+        avoided on this path (D187: it federates on shared catalogs).
+        """
+        from connectors.snowflake_conn import _folded_schema, snowflake_schema_and_table
+        from connectors.sql_identifiers import quote_sql_identifier
+
+        # Fold the schema the way every other reference does (_ref): a config
+        # schema ``public`` is the stored "PUBLIC"; a qualified name's own
+        # schema wins (review N3).
+        own_schema, bare = snowflake_schema_and_table(schema, name)
+        sch = own_schema if bare != name else _folded_schema(schema)
+        try:
+            # Wildcards in the name only widen the match; the exact name is picked below.
+            like = str(bare).replace("\\", "\\\\").replace("'", "''")
+            cur.execute(_sf_show_tables(like, quote_sql_identifier(sch)))
+            names = [str(d[0]).lower() for d in (cur.description or [])]
+            rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001 - callers decide what unknown means
+            logger.info("Snowflake SHOW TABLES for %s unread: %s", name, exc)
+            return None
+        return next((r for r in rows if str(r.get("name")) == str(bare)), None)
+
+    @classmethod
+    def _kind(cls, cur: Any, schema: str, name: str) -> str:
+        """``transient``, ``temporary`` or ``permanent`` (unknown reads as permanent)."""
+        kind = str((cls._table_row(cur, schema, name) or {}).get("kind") or "").upper()
+        if "TEMPORARY" in kind:
+            return "temporary"
+        return "transient" if "TRANSIENT" in kind else "permanent"
+
+    @classmethod
+    def _can_swap(cls, cur: Any, schema: str, name: str) -> tuple[bool, str]:
+        """Whether this session may ``ALTER TABLE <name> SWAP WITH <clone>``.
+
+        Snowflake's ALTER TABLE reference: "To rename a table or swap two
+        tables, the role used to perform the operation must have OWNERSHIP
+        privileges on the table(s)" (docs.snowflake.com/sql-reference/sql/
+        alter-table, access control requirements; read through a search
+        result, the page itself is not reachable from here, and it does not
+        say whether one or both tables). The clone is created, so owned, by
+        this session's role; the live table's owner must be active in the
+        session (IS_ROLE_IN_SESSION: the current role, the roles it inherits,
+        or a secondary role). Unknown means no: the restore could not run.
+        """
+        row = cls._table_row(cur, schema, name)
+        owner = str((row or {}).get("owner") or "").strip()
+        if not owner:
+            return False, "its owner could not be read (SHOW TABLES)"
+        try:
+            cur.execute("SELECT IS_ROLE_IN_SESSION(%s)", (owner,))
+            res = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 - unknown is refused
+            return False, f"whether this role holds its owner {owner} could not be checked ({exc})"
+        if res and str(res[0]).strip().lower() in ("true", "1", "yes"):
+            return True, ""
+        return False, f"it is owned by {owner}, a role this connector's session does not hold"
+
+    @staticmethod
+    def _drop_clone(cur: Any, bak_ref: str, backup: str) -> None:
+        try:
+            cur.execute(_sf_drop(bak_ref))
+        except Exception:  # noqa: BLE001 - report the first failure
+            logger.warning("Could not drop backup clone %s", backup, exc_info=True)
+
+    @staticmethod
+    def _truncate_failed(conn: Any, cur: Any, exc: BaseException, before: Any) -> bool:
+        """True only when Snowflake reports the TRUNCATE's query as failed.
+
+        The query id comes from the error, else from the cursor if it moved
+        past the previous statement's. No id, a status that cannot be read,
+        or any status but a final failure (running, queued, success, ...)
+        is False: the TRUNCATE may have emptied the table, keep the clone.
+        """
+        qid = getattr(exc, "sfqid", None) or getattr(cur, "sfqid", None)
+        if not qid or qid == before:
+            logger.warning("Failed TRUNCATE has no query id of its own; keeping the backup")
+            return False
+        try:
+            status = conn.get_query_status(qid)
+        except Exception as err:  # noqa: BLE001 - unknown means keep both
+            logger.warning("Status of failed TRUNCATE %s unread: %s", qid, err)
+            return False
+        name = str(getattr(status, "name", status) or "").rsplit(".", 1)[-1].upper()
+        return name in _SF_QUERY_FAILED
+
+    @staticmethod
+    def _same_rows(cur: Any, live_ref: str, bak_ref: str) -> bool:
+        """Emulator only: the live table still has exactly the clone's row count."""
+        try:
+            counts = []
+            for ref in (live_ref, bak_ref):
+                cur.execute(_sf_count(ref))
+                row = cur.fetchone()
+                counts.append(int(row[0]) if row else -1)
+        except Exception as exc:  # noqa: BLE001 - unknown means keep both
+            logger.warning("Row counts after a failed TRUNCATE unread: %s", exc)
+            return False
+        return counts[0] == counts[1] and counts[0] >= 0
+
+    @staticmethod
+    def _emulator(conn: Any, cfg: dict[str, Any] | None = None) -> bool:
+        """fakesnow: by its connection class, or a local account in the config."""
+        from connectors.snowflake_conn import _is_local_account, normalize_account
+        from connectors.snowflake_writer import _is_fakesnow_connection
+
+        if conn is not None and _is_fakesnow_connection(conn):
+            return True
+        return bool(cfg) and _is_local_account(normalize_account(str((cfg or {}).get("host") or "")))
+
+    def retire(
+        self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
+    ) -> str | None:
+        from connectors.overwrite_governance import GovernanceNotPreserved, snowflake_reconcile
+
         sch = schema or cfg.get("schema", "PUBLIC")
         conn = _snowflake_connection(cfg, schema)
+        emulator = self._emulator(conn, cfg)
         try:
             with conn.cursor() as cur:
                 live = self._resolve(cur, sch, table_name)
                 backup = set_aside_backup_name("snowflake", live or table_name)
                 stale = self._resolve(cur, sch, backup)
                 if stale and live:
-                    raise _refuse_ambiguous(live, stale)
-                if stale or not live:
-                    # A backup with no live table is the only copy of the
-                    # pre-run rows: it is this run's backup.
-                    return stale
-                cur.execute(rename_table_sql(live, backup))
+                    raise _refuse_ambiguous(self._ref(sch, live), self._ref(sch, stale), "snowflake")
+                if stale:
+                    # A run of the earlier rename-aside design died with the
+                    # live table renamed away. That backup IS the original
+                    # object (its grants and policies are on it): put it back
+                    # under the live name first, then keep it in place.
+                    live = _live_name_from_backup(stale, table_name)
+                    cur.execute(_sf_rename(self._ref(sch, stale), self._ref(sch, live)))
+                    backup = stale
+                if not live:
+                    return None
+                live_ref, bak_ref = self._ref(sch, live), self._ref(sch, backup)
+                kind = "permanent" if emulator else self._kind(cur, sch, live)
+                if kind == "temporary":
+                    raise TableDropError(
+                        live, "a TEMPORARY table's backup would vanish with this session; "
+                        "overwrite into a permanent or transient table",
+                    )
+                # Read before any change: unreadable governance refuses here,
+                # never after the table was emptied.
+                source = self._governance(cur, live_ref, cfg, emulator=emulator)
+                if source.unreadable and not approved:
+                    raise GovernanceNotPreserved(live, [f"unreadable {u}" for u in source.unreadable])
+                if not emulator and source.has_policies is not False:
+                    # A governed (or unknown) table is restored by SWAP, which
+                    # needs OWNERSHIP. Without it a failed run could not put the
+                    # rows back: refuse before any change. The DDL approval
+                    # accepts lost metadata, never an unrestorable table.
+                    can, why = self._can_swap(cur, sch, live)
+                    if not can:
+                        raise TableDropError(
+                            live,
+                            f"a failed run could not be restored: restoring this table needs "
+                            f"ALTER TABLE ... SWAP WITH, which needs OWNERSHIP, and {why}. Run the "
+                            "overwrite with the owning role (or grant it to the connector's role).",
+                        )
+                transient = kind == "transient"
+                try:
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=True, transient=transient))
+                except Exception as exc:  # noqa: BLE001 - a role may not copy grants
+                    logger.info("CLONE ... COPY GRANTS refused for %s (%s); cloning without", live, exc)
+                    cur.execute(_sf_clone(bak_ref, live_ref, copy_grants=False, transient=transient))
+                try:
+                    snowflake_reconcile(
+                        cur, source=source,
+                        target=self._governance(cur, bak_ref, cfg, emulator=emulator),
+                        target_ref=bak_ref, skip_unreadable=approved,
+                    )
+                except Exception:
+                    # Nothing was emptied: drop the clone so the next run is
+                    # not refused for a backup next to a live table.
+                    self._drop_clone(cur, bak_ref, backup)
+                    raise
+                before = getattr(cur, "sfqid", None)
+                try:
+                    cur.execute(_sf_truncate(live_ref))
+                except Exception as exc:
+                    # A TRUNCATE that errored may still have emptied the table
+                    # (a lost reply, a timeout after commit). Row counts cannot
+                    # tell: a TRUNCATE still running commits after they are
+                    # read. Drop the clone only when Snowflake says the query
+                    # FAILED; any other state keeps both (review round 3).
+                    failed = (
+                        self._same_rows(cur, live_ref, bak_ref) if emulator
+                        else self._truncate_failed(conn, cur, exc, before)
+                    )
+                    if failed:
+                        self._drop_clone(cur, bak_ref, backup)
+                        raise
+                    raise TableDropError(live, f"{exc}. {_sf_recovery(live_ref, bak_ref)}") from exc
             return backup
         finally:
             _close_quietly(conn)
@@ -202,20 +557,53 @@ class _Snowflake:
                 if not self._resolve(cur, sch, backup):
                     raise TableDropError(table_name, f"backup {backup} is missing")
                 original = _live_name_from_backup(backup, table_name)
-                replacement = self._resolve(cur, sch, original)
-                if replacement and replacement != backup:
-                    cur.execute(drop_table_if_exists_sql(replacement))
-                cur.execute(rename_table_sql(backup, original))
+                live = self._resolve(cur, sch, original)
+                bak_ref = self._ref(sch, backup)
+                if not live:
+                    cur.execute(_sf_rename(bak_ref, self._ref(sch, original)))
+                    return
+                live_ref = self._ref(sch, live)
+                try:
+                    gov = self._governance(cur, live_ref, cfg, emulator=self._emulator(conn, cfg))
+                    if gov.has_policies is False:
+                        self._restore_in_place(cur, sch, live, backup)
+                        return
+                    # Governed or unknown: the backup carries the table's
+                    # governance since retire; swap the stored data back.
+                    cur.execute(_sf_swap(live_ref, bak_ref))
+                except Exception as exc:
+                    raise TableDropError(live, f"{exc}. {_sf_recovery(live_ref, bak_ref)}") from exc
+                try:
+                    cur.execute(_sf_drop(bak_ref))
+                except Exception as exc:  # noqa: BLE001 - the previous rows are back
+                    logger.warning("Swapped-out replacement %s not dropped: %s", backup, exc)
         finally:
             _close_quietly(conn)
+
+    def _restore_in_place(self, cur: Any, sch: str, live: str, backup: str) -> None:
+        from connectors.sql_identifiers import quote_sql_identifier
+
+        live_ref, bak_ref = self._ref(sch, live), self._ref(sch, backup)
+        kept = self._columns(cur, sch, backup)
+        if not kept:
+            raise TableDropError(live, f"backup {backup} has no readable columns")
+        known = {c.upper() for c in kept}
+        for col in self._columns(cur, sch, live):
+            if col.upper() not in known:
+                # The run added it; the previous table did not have it.
+                cur.execute(_sf_drop_column(live_ref, quote_sql_identifier(col)))
+        cols = ", ".join(quote_sql_identifier(c) for c in kept)
+        cur.execute(_sf_insert_overwrite(live_ref, bak_ref, cols))
+        cur.execute(_sf_drop(bak_ref))
 
     def discard(
         self, cfg: dict[str, Any], table_name: str, backup: str, schema: str | None
     ) -> None:
+        sch = schema or cfg.get("schema", "PUBLIC")
         conn = _snowflake_connection(cfg, schema)
         try:
             with conn.cursor() as cur:
-                cur.execute(drop_table_if_exists_sql(backup))
+                cur.execute(_sf_drop(self._ref(sch, backup)))
         finally:
             _close_quietly(conn)
 
@@ -269,13 +657,31 @@ class _BigQuery:
                 return False
             raise
 
-    def _copy(self, client: Any, src_id: str, dst_id: str, call: dict[str, Any], *, by_query: bool = False) -> None:
+    def _copy(
+        self,
+        client: Any,
+        src_id: str,
+        dst_id: str,
+        call: dict[str, Any],
+        *,
+        by_query: bool = False,
+        query_allowed: bool = True,
+    ) -> None:
         """Copy ``src_id`` to ``dst_id``, which does not exist yet.
 
         A copy job keeps schema, partitioning and clustering; ``CREATE TABLE AS
         SELECT`` is the fallback for a server without copy jobs. A copy job is
         atomic, so a ``dst_id`` present after a failed call is a finished copy.
         """
+        if by_query and not query_allowed:
+            # A copy job would leave the buffered rows out, and a query would
+            # read through row access policies and masking. Neither is a copy.
+            raise TableDropError(
+                dst_id,
+                f"{src_id} has rows in the streaming buffer and row-level or column-level "
+                "security; a query copy would read through them. Run again once the "
+                "buffer has flushed (up to 90 minutes).",
+            )
         try:
             if by_query:
                 raise RuntimeError("rows in the streaming buffer: copying with a query")
@@ -292,6 +698,8 @@ class _BigQuery:
         except Exception as exc:  # noqa: BLE001 - try the SQL copy before refusing
             if self._exists(client, dst_id, call):
                 return
+            if not query_allowed:
+                raise
             logger.warning(
                 "BigQuery copy job %s -> %s failed (%s); copying with CREATE TABLE AS SELECT",
                 src_id,
@@ -321,7 +729,9 @@ class _BigQuery:
             return False
         return getattr(table, "streaming_buffer", None) is not None
 
-    def retire(self, cfg: dict[str, Any], table_name: str, schema: str | None) -> str | None:
+    def retire(
+        self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
+    ) -> str | None:
         client, project, dataset, call = self._open(cfg, schema)
         try:
             live_id = f"{project}.{dataset}.{table_name}"
@@ -330,14 +740,89 @@ class _BigQuery:
             live = self._exists(client, live_id, call)
             stale = self._exists(client, bak_id, call)
             if stale and live:
-                raise _refuse_ambiguous(table_name, backup)
+                raise _refuse_ambiguous(table_name, backup, "bigquery")
             if not live:
                 return backup if stale else None
-            self._copy(client, live_id, bak_id, call, by_query=self._buffered(client, live_id, call))
+            gov = self._governance(cfg, client, live_id, call, approved=approved)
+            # A query copy reads through row access policies and data masking:
+            # a governed table is copied with a copy job or not at all.
+            by_query = self._buffered(client, live_id, call)
+            # Unreadable access control (approved) is treated as governed for
+            # the copy: a query through row access policies backs up a subset.
+            self._copy(
+                client, live_id, bak_id, call, by_query=by_query,
+                query_allowed=gov is None or not (gov.governed or gov.unreadable),
+            )
+            if gov is not None and gov.governed:
+                self._protect_backup(client, bak_id, gov, call, approved=approved)
             client.delete_table(live_id, not_found_ok=True, **call)
+            if gov is not None and gov.governed:
+                # Re-create the live table with its policy tags, row access
+                # policies and IAM before the writer streams a row into it.
+                from connectors.overwrite_governance import (
+                    GovernanceNotPreserved,
+                    bigquery_create_like,
+                )
+
+                try:
+                    bigquery_create_like(client, live_id, gov, call)
+                except GovernanceNotPreserved:
+                    if not approved:
+                        self._put_back(client, live_id, bak_id, gov, call)
+                        raise
+                    logger.warning(
+                        "BigQuery overwrite of %s proceeds without its access control "
+                        "(approved at Validate)", live_id, exc_info=True,
+                    )
             return backup
         finally:
             _close_quietly(client)
+
+    @staticmethod
+    def _governance(
+        cfg: dict[str, Any], client: Any, live_id: str, call: dict[str, Any], *, approved: bool
+    ) -> Any:
+        """The live table's access control, or ``None`` on an emulator (no IAM).
+
+        Unreadable access control refuses the overwrite before anything changes,
+        unless the loss was approved at Validate.
+        """
+        if bigquery_skips_governance(cfg):
+            return None
+        from connectors.overwrite_governance import GovernanceNotPreserved, bigquery_governance
+
+        gov = bigquery_governance(client, live_id, call)
+        if gov.unreadable and not approved:
+            raise GovernanceNotPreserved(live_id, [f"unreadable {item}" for item in gov.unreadable])
+        return gov
+
+    @staticmethod
+    def _protect_backup(
+        client: Any, bak_id: str, gov: Any, call: dict[str, Any], *, approved: bool
+    ) -> None:
+        """The backup gets the live table's row access policies and IAM.
+
+        A copy job copies data and schema, not row access policies or table
+        IAM: dataset readers would read the backup unfiltered for the run.
+        """
+        from connectors.overwrite_governance import GovernanceNotPreserved, bigquery_apply
+
+        try:
+            bigquery_apply(client, bak_id, gov, call)
+        except GovernanceNotPreserved:
+            if not approved:
+                client.delete_table(bak_id, not_found_ok=True, **call)
+                raise
+            logger.warning("BigQuery backup %s left without row access policies", bak_id, exc_info=True)
+
+    def _put_back(self, client: Any, live_id: str, bak_id: str, gov: Any, call: dict[str, Any]) -> None:
+        """Undo a retire whose re-create failed: the backup goes back, governed."""
+        from connectors.overwrite_governance import bigquery_apply
+
+        client.delete_table(live_id, not_found_ok=True, **call)
+        self._copy(client, bak_id, live_id, call, query_allowed=False)
+        bigquery_apply(client, live_id, gov, call)
+        client.delete_table(bak_id, not_found_ok=True, **call)
 
     def restore(
         self, cfg: dict[str, Any], table_name: str, backup: str, schema: str | None
@@ -348,8 +833,40 @@ class _BigQuery:
             bak_id = f"{project}.{dataset}.{backup}"
             if not self._exists(client, bak_id, call):
                 raise TableDropError(table_name, f"backup {backup} is missing")
+            # The live table may be the governed re-create; read its access
+            # control (it is the live table's, also put on the backup) before
+            # it goes, so the restored table gets it back.
+            gov = None
+            if not bigquery_skips_governance(cfg):
+                from connectors.overwrite_governance import bigquery_governance
+
+                source = live_id if self._exists(client, live_id, call) else bak_id
+                gov = bigquery_governance(client, source, call)
+                if gov.unreadable or not gov.governed:
+                    backup_gov = bigquery_governance(client, bak_id, call)
+                    if backup_gov.governed and not backup_gov.unreadable:
+                        gov = backup_gov
+            unknown = list(gov.unreadable) if gov is not None else []
             client.delete_table(live_id, not_found_ok=True, **call)
-            self._copy(client, bak_id, live_id, call)
+            self._copy(
+                client, bak_id, live_id, call,
+                query_allowed=gov is None or not (gov.governed or unknown),
+            )
+            if gov is not None and (gov.governed or unknown):
+                from connectors.overwrite_governance import bigquery_apply
+
+                bigquery_apply(client, live_id, gov, call)
+            if unknown:
+                # The rows are back, but whether the table's access control is
+                # could not be read: keep the backup (it carries what retire
+                # put on it) and say so, instead of reporting a clean restore.
+                raise TableDropError(
+                    table_name,
+                    f"rows restored, but {', '.join(unknown)} could not be read, so the "
+                    f"restored table's access control is unverified. The backup {backup} is "
+                    "kept; compare its IAM and row access policies with the table's, then "
+                    "drop it before the next run.",
+                )
             client.delete_table(bak_id, not_found_ok=True, **call)
         finally:
             _close_quietly(client)
@@ -367,7 +884,32 @@ class _BigQuery:
 # ------------------------------------------------------------ Elasticsearch
 
 
+def _alias_names(actions: Any, limit: int = 20) -> str:
+    """``a, b, ...`` from alias actions: names only, bounded."""
+    names = [
+        str((a.get("add") or {}).get("alias") or "")[:255]
+        for a in actions or [] if isinstance(a, dict) and isinstance(a.get("add"), dict)
+    ]
+    names = [n for n in names if n]
+    if not names:
+        return "none"
+    more = f" and {len(names) - limit} more" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
+
+
 class _Elasticsearch:
+    """Keep the live index; the backup is a write-blocked clone.
+
+    retire:  write-block the live index, clone it to the backup, lift the
+             block, then empty the live index with delete-by-query. Its
+             aliases (filtered aliases included), settings, lifecycle policy
+             and mappings stay; the writer loads into it (NF-1). The earlier
+             design deleted the live index and the writer recreated it with
+             one shard, no replica and no alias.
+    restore: replace the index with a clone of the backup (same settings and
+             mappings) and re-add the aliases the index had.
+    """
+
     _BLOCK = "index.blocks.write"
 
     @staticmethod
@@ -384,42 +926,174 @@ class _Elasticsearch:
     def _unblock(self, client: Any, index: str) -> None:
         client.indices.put_settings(index=index, settings={self._BLOCK: None})
 
-    def _clone_away(self, client: Any, source: str, target: str) -> None:
-        """Clone ``source`` to ``target`` and delete ``source``. ``target`` stays write-blocked."""
+    def _clone_aside(self, client: Any, source: str, target: str) -> None:
+        """Clone ``source`` to ``target``. ``target`` stays write-blocked, ``source`` does not."""
         client.indices.put_settings(index=source, settings={self._BLOCK: True})
         try:
             self._clone(client, source, target)
-        except Exception:
+        finally:
             try:
                 self._unblock(client, source)
             except Exception:  # noqa: BLE001 - report the clone failure
                 logger.warning("Could not lift the write block on %s", source, exc_info=True)
-            raise
-        client.indices.delete(index=source)
 
-    def retire(self, cfg: dict[str, Any], table_name: str, schema: str | None) -> str | None:
+    def _empty(self, client: Any, index: str) -> None:
+        resp = client.delete_by_query(
+            index=index,
+            query={"match_all": {}},
+            conflicts="proceed",
+            refresh=True,
+            wait_for_completion=True,
+        )
+        failures = list((resp or {}).get("failures") or [])
+        if failures:
+            raise RuntimeError(f"delete-by-query on {index} reported failures: {failures[:3]}")
+        left = int((client.count(index=index) or {}).get("count") or 0)
+        if left:
+            raise RuntimeError(f"delete-by-query left {left} document(s) in {index}")
+
+    _META_KEY = "dataflow_overwrite"
+
+    def _meta(self, client: Any, index: str) -> dict[str, Any]:
+        from connectors.overwrite_governance import _es_body
+
+        body = _es_body(client.indices.get_mapping(index=index))
+        entry = _es_body(body.get(index) or (next(iter(body.values())) if len(body) == 1 else {}))
+        return _es_body(_es_body(entry.get("mappings") or {}).get("_meta") or {})
+
+    def _record_aliases(self, client: Any, live: str, backup: str) -> list[dict[str, Any]]:
+        """Keep the live index's alias definitions in the backup's ``_meta``.
+
+        Held only in memory, they were lost when a restore failed after
+        deleting the live index (review N4). ``index.blocks.write`` blocks
+        data writes, not mapping metadata, so the write-blocked backup takes it.
+        """
+        from connectors.overwrite_governance import elasticsearch_aliases
+
+        actions = elasticsearch_aliases(client, live)
+        meta = self._meta(client, backup)
+        meta[self._META_KEY] = {"index": live, "aliases": actions}
+        client.indices.put_mapping(index=backup, meta=meta)
+        return actions
+
+    def _recorded_aliases(self, client: Any, backup: str) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
+        """``(alias actions recorded at retire or None, the index's own _meta)``."""
+        meta = self._meta(client, backup)
+        recorded = meta.pop(self._META_KEY, None)
+        if not isinstance(recorded, dict):
+            return None, meta
+        return list(recorded.get("aliases") or []), meta
+
+    def _known(self, client: Any, live: str, backup: str) -> str:
+        """What can be read about a backup next to its live index (best effort)."""
+        facts: list[str] = []
+        try:
+            recorded, _own = self._recorded_aliases(client, backup)
+            facts.append(
+                "; its _meta.dataflow_overwrite was written when it was taken"
+                + (f" and records the aliases {_alias_names(recorded)}" if recorded else "")
+                if recorded is not None
+                else "; it has no _meta.dataflow_overwrite record (an older version took it)"
+            )
+        except Exception:  # noqa: BLE001 - unknown is said as such
+            facts.append("; its _meta could not be read")
+        for index in (backup, live):
+            try:
+                count = int((client.count(index=index) or {}).get("count") or 0)
+                facts.append(f"; {index} holds {count:,} document(s) now")
+            except Exception:  # noqa: BLE001
+                facts.append(f"; the document count of {index} could not be read")
+        return "".join(facts)
+
+    def retire(
+        self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
+    ) -> str | None:
         client = self._client(cfg)
         backup = set_aside_backup_name("elasticsearch", table_name)
         live = bool(client.indices.exists(index=table_name))
         stale = bool(client.indices.exists(index=backup))
         if stale and live:
-            raise _refuse_ambiguous(table_name, backup)
+            raise _refuse_ambiguous(
+                table_name, backup, "elasticsearch", self._known(client, table_name, backup)
+            )
         if not live:
-            return backup if stale else None
-        self._clone_away(client, table_name, backup)
+            if not stale:
+                return None
+            recorded, _meta = self._recorded_aliases(client, backup)
+            if recorded is None:
+                # Left by the earlier delete-and-recreate design: the only
+                # copy, and it is this run's backup.
+                return backup
+            # A restore of this design failed after deleting the live index:
+            # put the index (and its recorded aliases) back first, instead of
+            # loading into a new index and discarding the backup on success.
+            self.restore(cfg, table_name, backup, schema)
+        self._clone_aside(client, table_name, backup)
+        try:
+            self._record_aliases(client, table_name, backup)
+        except Exception:
+            client.indices.delete(index=backup, ignore_unavailable=True)
+            raise
+        try:
+            self._empty(client, table_name)
+        except Exception:
+            # Partly emptied: put the previous documents back before failing.
+            self.restore(cfg, table_name, backup, schema)
+            raise
         return backup
 
     def restore(
         self, cfg: dict[str, Any], table_name: str, backup: str, schema: str | None
     ) -> None:
+        from connectors.overwrite_governance import (
+            elasticsearch_aliases,
+            elasticsearch_restore_aliases,
+        )
+
         client = self._client(cfg)
         live = _live_name_from_backup(backup, table_name)
         if not client.indices.exists(index=backup):
             raise TableDropError(live, f"backup {backup} is missing")
-        client.indices.delete(index=live, ignore_unavailable=True)
-        # The backup is already write-blocked, which clone requires.
-        self._clone(client, backup, live)
-        self._unblock(client, live)
+        recorded, own_meta = self._recorded_aliases(client, backup)
+        aliases = recorded
+        if aliases is None:
+            aliases = elasticsearch_aliases(client, live) if client.indices.exists(index=live) else []
+        if recorded is None and aliases:
+            try:
+                # Store them before the live index is deleted, so the recovery
+                # text can point at the backup's _meta (review round 3).
+                client.indices.put_mapping(
+                    index=backup, meta={**own_meta, self._META_KEY: {"index": live, "aliases": aliases}}
+                )
+                recorded = aliases
+            except Exception:  # noqa: BLE001 - the restore itself still runs
+                logger.warning("Alias definitions of %s not stored on %s", live, backup, exc_info=True)
+        try:
+            client.indices.delete(index=live, ignore_unavailable=True)
+            # The backup is already write-blocked, which clone requires.
+            self._clone(client, backup, live)
+            self._unblock(client, live)
+            if recorded is not None:
+                # The clone copied the backup's _meta: give back the index's own.
+                client.indices.put_mapping(index=live, meta=own_meta)
+            elasticsearch_restore_aliases(client, live, aliases)
+        except Exception as exc:
+            # Alias names only: a filter can hold data values, and the job
+            # error is shown widely (review round 3). The definitions are in
+            # the backup's _meta.
+            where = (
+                "it had no aliases" if not aliases
+                else f"its _meta.{self._META_KEY} keeps the alias definitions" if recorded is not None
+                else "the alias definitions could not be stored"
+            )
+            raise TableDropError(
+                live,
+                f"{str(exc)[:500]}. The previous documents are in {backup} (write-blocked); "
+                f"{where} (aliases: {_alias_names(aliases)}). To finish by hand: delete {live} "
+                f"if it exists, clone {backup} to {live}, lift index.blocks.write on {live}, "
+                f"then POST _aliases with the actions in {backup}'s _meta.{self._META_KEY}."
+                "aliases; the next overwrite also does it.",
+            ) from exc
         client.indices.delete(index=backup)
 
     def discard(
@@ -525,7 +1199,7 @@ class _S3:
         live = self._export_keys(client, bucket, base)
         stale = self._list(client, bucket, prefix)
         if stale and live:
-            raise _refuse_ambiguous(base, prefix)
+            raise _refuse_ambiguous(base, prefix, "s3")
         if not live:
             return prefix if stale else None
         for key in live:

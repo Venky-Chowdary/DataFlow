@@ -214,3 +214,8 @@ def test_mcp_dataset_transfer_names_birth_date_and_acknowledges(mcp_client, tmp_
     assert req.get("compliance_acknowledged") is True, req
     assert req.get("acknowledgment_actor") == "qa-lead"
     assert req.get("acknowledgment_reason") == "synthetic QA fixture"
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

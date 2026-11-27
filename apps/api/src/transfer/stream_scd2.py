@@ -759,7 +759,14 @@ def _scd2_rolled_back(exc: Exception, target: str, batches: int) -> Exception:
     """The SCD2 merge failed inside its one transaction: say nothing changed (DATA-2)."""
     from services.data_errors import DataPathError
 
-    cause = re.sub(r"^\([\w.]+\)\s*", "", str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__)
+    raw = str(exc).strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    # Snowflake puts "SQL compilation error:" on line 1 and the unexpected
+    # token on line 2: a first line that ends in ":" continues (D47). Any
+    # other later line (PostgreSQL CONTEXT / DETAIL, SQLAlchemy's [SQL: ...])
+    # is not the cause and pushed "rolled back" out of the shown sentence.
+    lines = lines[:2] if lines and lines[0].endswith(":") else lines[:1]
+    cause = re.sub(r"^\([\w.]+\)\s*", "", " ".join(lines) if lines else type(exc).__name__)
     return DataPathError(
         f"The SCD2 history merge into {target} failed after {batches:,} batch(es): {cause}. "
         "The merge runs in one transaction and was rolled back, so no version was "

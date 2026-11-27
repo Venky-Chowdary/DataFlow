@@ -733,6 +733,31 @@ async def copilot_confirm(
             status_code=403,
             detail=confirm_denial_message(role, str(peek.get("kind") or "")),
         )
+    # The human-in-the-loop gate: an approval is spent on the channel the
+    # workspace requires (services.mcp_confirm_policy; default: an
+    # interactive session of the person who staged it, or an admin). Checked
+    # before the claim, so a refused confirm leaves the approval pending.
+    from services.mcp_confirm_policy import ConfirmRefused, check_confirm_channel
+
+    try:
+        check_confirm_channel(
+            http_request,
+            staged_by=str(peek.get("staged_by") or ""),
+            staged_in=staged_in,
+            role=role,
+            actor=session_actor,
+            auth_enforced=auth_service.auth_required(),
+        )
+    except ConfirmRefused as exc:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="pilot.confirm.refused_channel",
+            resource=f"ack/{ack_id}",
+            actor=session_actor or "unknown",
+            details={"kind": str(peek.get("kind") or ""), "workspace_id": staged_in, "reason": str(exc)},
+        )
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     kind = str(peek.get("kind") or "")
     studio_payload: dict | None = None
     if kind == "studio_remediation":
@@ -922,10 +947,21 @@ async def copilot_confirm(
                 detail=connector_name_conflict_message(str(payload.get("name") or "")),
             )
         probe_passed_at = str(payload.get("probe_passed_at") or "")
+        to_save = {k: v for k, v in payload.items() if k != "probe_passed_at"}
+        from services.connector_save_policy import ConnectorRefused, as_http, connector_save_refusal
+
+        # U1: the REST save check, on the payload as it will be saved. Staging
+        # checked only the metadata endpoint, and the ledger is the only copy.
+        refused = connector_save_refusal(to_save)
+        if refused is not None:
+            ledger.release_claim(ack_id)
+            raise as_http(refused)
         try:
-            conn = create_connector(
-                {k: v for k, v in payload.items() if k != "probe_passed_at"}
-            )
+            conn = create_connector(to_save)
+        except ConnectorRefused as exc:
+            ledger.release_claim(ack_id)
+            # The same plain refusal the REST save gives, not "see the API log".
+            raise as_http(exc) from exc
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc

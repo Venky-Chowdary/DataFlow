@@ -195,6 +195,29 @@ These numbers count different things. Quote the first one as "connectors that ca
   and others) are read-only, declare no incremental read, and carry the
   evidence label `synthetic-fixture`.
 
+## SQL Server TLS and Entra ID
+
+SQL Server connectors take these options (top level or under `extra`; the
+Connectors form shows them as text fields). Code:
+`apps/api/connectors/mssql_security.py`.
+
+| Option | Values |
+|---|---|
+| `sqlserver_driver` | `auto` (default): Microsoft ODBC Driver 18/17 when installed, else pymssql (FreeTDS), unless the host sets `DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS=1`, which turns a missing driver into an error. `odbc`: require the Microsoft driver. `freetds`: use FreeTDS on purpose; **TLS certificate not verified**, no Entra ID. |
+| `authentication` | `sql` (default). `entra_service_principal`: username is the application (client) id, password the client secret. `entra_managed_identity`: username empty (system-assigned) or a user-assigned identity's client id; no password. `entra_password`: an Entra user's name and password. `entra_access_token`: an access token for `https://database.windows.net/` in the password field, passed as `SQL_COPT_SS_ACCESS_TOKEN`; tokens expire in about an hour. The ODBC spellings (`ActiveDirectoryServicePrincipal`, `ActiveDirectoryMsi`, `ActiveDirectoryPassword`) are accepted. All Entra modes need the Microsoft driver. |
+| `encrypt` | Sent as `yes` when unset (Driver 17's own default is `no`). `strict` needs Driver 18. `no` / `optional` only when declared. |
+| `trust_server_certificate`, `server_certificate`, `hostname_in_certificate` | Unchanged: skip verification (declared), pin a certificate, or match an alias host name. |
+
+Gate-8 read-back, the verification ladder and target samples follow the same
+choice: they use the Microsoft driver whenever it is installed (unless the
+connector chose `freetds`) and whenever the connector requires encryption, a
+pinned certificate or Entra ID, and the SQL Server-to-SQL Server fast path
+never retries a failed verified handshake over FreeTDS. A `mssql+pymssql://`
+connection string is refused under `MSSQL_REQUIRE_VERIFIED_TLS`,
+`sqlserver_driver=odbc` or Entra ID, like a host/port connector. Read-backs
+send no default `sa` user (a system-assigned managed identity has none). Proven by unit tests (`tests/test_nf2_sqlserver_tls_and_entra.py`);
+Entra ID sign-in has not been run against a tenant.
+
 ## Known inconsistencies
 
 - The catalog id `dynamics365` resolves to the `s3` driver, because driver

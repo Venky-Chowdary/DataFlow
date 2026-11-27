@@ -92,6 +92,9 @@ _KEY_FIELDS = (
     "MultiSubnetFailover",
     "application_intent",
     "ApplicationIntent",
+    # SQL Server DBAPI choice and Entra ID sign-in (connectors.mssql_security).
+    "sqlserver_driver",
+    "authentication",
 )
 
 

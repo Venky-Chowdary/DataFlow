@@ -73,17 +73,22 @@ export interface SignoffPanelProps {
 const PARITY_COPY: SignoffCopy = {
   intro:
     "Each approval is written to the audit log with your role in this job's workspace, which must hold the "
-    + "authority the role needs. When every required role has signed the same report, the pack is signed with "
-    + "the workspace proof key and the report is final.",
+    + "authority the role needs. When every required role has signed the same report, the pack is signed "
+    + "(HMAC-SHA256) with this workspace's evidence signing key, separate from login, and the report is final.",
+  // Exactly what the signed pack holds (apps/api/services/parity_signoff.py seals the public report).
   packItems: [
     "Verdict, parity per table and the confidence statement",
     "Every difference with its cause and how it was resolved",
-    "Transforms applied, PII protection proof, schema changes",
-    "Approvals with names, roles and times",
+    "Each fix proposed or applied, with the change it previews (a Widen column fix shows its ALTER TABLE)",
+    "Evidence status: the Gate-8 result, assurance level, trust score, and whether a transform or PII "
+      + "protection proof passed (the status only; the transforms and the destination schema are not in the pack)",
+    "Approvals with names, roles and times, and the evidence key id that signed it",
   ],
   exportLabel: "Download report (.md)",
   exportTitle: "The trust report as Markdown, as it reads now.",
-  signedNote: "The exported pack carries this signature, so anyone can check it was not changed.",
+  signedNote:
+    "The exported pack carries this signature and its key id. Anyone with access to this workspace can verify "
+    + "it was not changed. Only this deployment holds the key, so the pack cannot yet be checked outside Datawrap.",
   downloadTitle: "The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature.",
   noRoles: "No roles are required to sign this report.",
   denied: "You don't have permission to sign this report.",

@@ -424,6 +424,7 @@ image's packages and those below - is in the companion bundle <tag>-sources:
 
 curl: curl (MIT-style); its libraries' licences are read from their copyright files at build time; source: companion bundle <tag>-sources when its copyright file names a copyleft licence (build-time scan)
 libodbc2: LGPL-2.1; source: companion bundle <tag>-sources
+msodbcsql18: Microsoft Software License Terms (proprietary): MICROSOFT ODBC DRIVER 18 FOR SQL SERVER; source: not applicable: proprietary binary from packages.microsoft.com (debian/12/prod), not installed by default
 unixodbc: LGPL-2.1; source: companion bundle <tag>-sources
 
 ========================================================================

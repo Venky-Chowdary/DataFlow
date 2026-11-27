@@ -16,8 +16,16 @@ import pytest
 from services.document_model import DocumentModelError, model_hash
 
 _GOLDEN = Path(__file__).resolve().parent / "fixtures" / "decision_artifact_v1_golden.json"
-# Computed on origin/feature/Cleanup 8d715d902, before this change.
+# The stamp feature/Cleanup 8d715d902 minted for this artifact. The current
+# content hash leaves per-mapping scores out, so this value is now a legacy
+# stamp: it must stay accepted (accepted_stamps), never re-minted.
 _GOLDEN_CONTENT_HASH = "1e49e084e59f492a3b375bf7c16e372051b32aa39e90b7d0a7b3e458377ffdc4"
+# The same artifact under the current rules (scores, key aliases and the
+# code's classification of each conversion excluded; review Q1).
+_GOLDEN_CURRENT_CONTENT_HASH = "7c07d179446a7b8d9cb38cee6c3510f60061c5d9d0f2b9aac861694d2f31cfdb"
+# PR #435's interim digest of it (also its scored digest): a stamp that build
+# minted, still accepted.
+_GOLDEN_INTERIM_CONTENT_HASH = "21a93b5c987110f9b8da2ce3f7e0d18a337de3298866959c2d2275238405972a"
 _GOLDEN_JSON_SHA256 = "2d87daa2d11a5ec8942b038914c2e206c1e684891fbc2b936a859ee2f31950b4"
 
 
@@ -255,15 +263,29 @@ def _golden_raw() -> dict:
 
 def test_legacy_artifact_hash_and_bytes_are_unchanged():
     from services.decision_kernel import compute_content_hash, decision_artifact_from_dict
+    from services.decision_kernel.models import accepted_stamps, decision_stamps_match
 
+    # A freshly hashed artifact gets the current-rule digest.
     raw = _golden_raw()
-    assert raw["content_hash"] == _GOLDEN_CONTENT_HASH
-    art = decision_artifact_from_dict(raw)
+    assert raw["content_hash"] == _GOLDEN_CURRENT_CONTENT_HASH
+    fresh = decision_artifact_from_dict(raw)
+    assert fresh.document_model_hash == ""
+    assert "document_model_hash" not in fresh.to_dict()
+    assert compute_content_hash(fresh.to_dict()) == _GOLDEN_CURRENT_CONTENT_HASH
+
+    # An artifact stored before the hash change keeps its stamp and its bytes,
+    # and that stamp still names the decision.
+    stored = json.loads(_GOLDEN.read_text(encoding="utf-8"))
+    stored["content_hash"] = _GOLDEN_CONTENT_HASH
+    art = decision_artifact_from_dict(stored)
+    assert art.content_hash == _GOLDEN_CONTENT_HASH
     assert art.document_model_hash == ""
-    as_dict = art.to_dict()
-    assert "document_model_hash" not in as_dict
-    assert compute_content_hash(as_dict) == _GOLDEN_CONTENT_HASH
+    assert "document_model_hash" not in art.to_dict()
     assert hashlib.sha256(art.to_json().encode("utf-8")).hexdigest() == _GOLDEN_JSON_SHA256
+    assert _GOLDEN_CONTENT_HASH in accepted_stamps(art)
+    assert decision_stamps_match(_GOLDEN_CONTENT_HASH, fresh)
+    assert _GOLDEN_INTERIM_CONTENT_HASH in accepted_stamps(fresh)
+    assert decision_stamps_match(_GOLDEN_INTERIM_CONTENT_HASH, fresh)
 
 
 def _built(**kw):

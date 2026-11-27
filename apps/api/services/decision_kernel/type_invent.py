@@ -815,6 +815,16 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     if enum_ddl:
         return enum_ddl
     logical = normalize_logical_type(inferred)
+    # PostgreSQL BIT(1) normalizes to boolean, but MySQL create-new keeps the
+    # one-bit column BIT(1) (DW-D320): BOOLEAN there is TINYINT(1), a
+    # different column. Wider fixed bit(n) and every varying bit string are
+    # type_ddl_specialty's (BIT(n<=64), else 0/1 digit text) — never clamped.
+    from services.decision_kernel.legacy_rules import legacy_rules_active
+
+    if db in {"mysql", "mariadb", "tidb"} and not legacy_rules_active() and re.match(
+        r"^BIT\s*\(\s*1\s*\)$", strip_identity_qualifier(inferred or "").upper()
+    ):
+        return "BIT(1)"
     if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
         return _decimal_ddl_for_dest(db, inferred)
     if logical == LOGICAL_VECTOR:

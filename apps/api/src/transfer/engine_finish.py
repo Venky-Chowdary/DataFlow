@@ -112,6 +112,9 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     # A reversible run: which conditional columns were checked on every row. One checked on fewer rows
     # than were written is never reported as enforced: the job fails with that reason (review 4, H-1).
     shortfall = record_on_success(job_id, fields)
+    warnings = (fields.get("destination_summary") or {}).get("post_commit_warnings")
+    if warnings and "post_commit_warnings" not in fields:
+        fields["post_commit_warnings"] = list(warnings)  # e.g. a backup left behind
     if shortfall:
         status = "failed"
         fields.update(error=shortfall, message=shortfall, phase="failed")
@@ -209,7 +212,7 @@ def _finish_verified_run(
         exc,
         exc_info=exc,
     )
-    _settle_overwrite_backup(request.destination, restore=False)
+    _settle_overwrite_backup(request.destination, restore=False, summary=summary)
     terminal = terminal_status_for(
         summary.get("rejected_rows", 0), summary.get("coerced_null_rows", 0)
     )
@@ -281,6 +284,10 @@ def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) 
     )
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
+    from .overwrite_outcome import carry_onto_exception
+
+    if carry_onto_exception(destination, exc) is not None or getattr(exc, "overwrite_restore", None):
+        return restored  # the job reports the exact recovery (N1)
     if restore and restored:
         # The stream's undo judged the live object before this restore ran
         # ("already held N row(s) ... left in place"). The backup is the
@@ -289,7 +296,9 @@ def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) 
     return restored
 
 
-def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
+def _settle_overwrite_backup(
+    destination: EndpointConfig, *, restore: bool, summary: dict[str, Any] | None = None
+) -> bool:
     """Drop a rename-aside backup after success, or put it back after failure.
 
     MySQL and Mongo leave the previous object under ``__df_bak``; Snowflake,
@@ -299,17 +308,26 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
     refused overwrite (every row quarantined, a failed proof) does not publish
     an empty or partial object. PostgreSQL empties in place inside a
     transaction the writer commits once.
+
+    ``summary`` (a successful run's destination summary): a backup that could
+    not be dropped becomes a job warning there, not only a log line.
     """
     # A multi-table run parks each landed stream's backup under its table
     # until the run's outcome is known: settled with the rest, never early.
     parked = settle_parked_overwrite_backups(destination, restore=restore)
     routed = _settle_route_backups(destination, restore=restore)
     if routed is not None:
-        return routed and parked is not False
-    own = settle_single_overwrite_backup(destination, restore=restore)
-    if own is None:
-        return bool(parked)
-    return own and parked is not False
+        ok = routed and parked is not False
+    else:
+        own = settle_single_overwrite_backup(destination, restore=restore)
+        ok = bool(parked) if own is None else (own and parked is not False)
+    if summary is not None and not restore:
+        from .overwrite_outcome import pop_discard_warning
+
+        warning = pop_discard_warning(destination)
+        if warning is not None:
+            summary["post_commit_warnings"] = list(summary.get("post_commit_warnings") or []) + [warning]
+    return ok
 
 
 def _settle_route_backups(destination: EndpointConfig, *, restore: bool) -> bool | None:
@@ -420,6 +438,10 @@ def settle_single_overwrite_backup(destination: EndpointConfig, *, restore: bool
             exc_info=exc,
         )
         ok = False
+        from .overwrite_outcome import record_settle_failure
+
+        record_settle_failure(extra, engine=engine_name, table=str(destination.table or ""),
+                              backup=str(backup), restore=restore, exc=exc)
     finally:
         extra.pop("overwrite_backup", None)
         extra.pop("overwrite_backup_engine", None)
@@ -460,6 +482,8 @@ def settle_parked_overwrite_backups(
     """
     import dataclasses
 
+    from .overwrite_outcome import OUTCOME_KEY, add_outcome
+
     extra = dict(getattr(destination, "extra", None) or {})
     parked = dict(extra.get(PARKED_BACKUPS_KEY) or {})
     tables = [t for t in parked if only_table is None or t == only_table]
@@ -475,6 +499,8 @@ def settle_parked_overwrite_backups(
         field = "collection" if getattr(destination, "collection", None) else "table"
         view = dataclasses.replace(destination, extra={**view_extra, **pair}, **{field: table})
         ok = bool(settle_single_overwrite_backup(view, restore=restore)) and ok
+        # The view is a copy: its outcome goes back onto the endpoint (review round 3).
+        add_outcome(extra, (view.extra or {}).get(OUTCOME_KEY))
     if parked:
         extra[PARKED_BACKUPS_KEY] = parked
     else:

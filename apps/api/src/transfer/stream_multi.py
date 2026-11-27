@@ -526,6 +526,11 @@ def run_non_cdc_multi_stream_sequential(
                         ) or ""
                     ),
                 )
+                from .overwrite_outcome import carry_onto_exception
+
+                # Every table's failed restore (this one's and the undo's) goes
+                # onto the run's error now, whatever path reports it (review 3).
+                carry_onto_exception(destination, exc)
                 record_stream_health(
                     stream_health,
                     name=stream_name,

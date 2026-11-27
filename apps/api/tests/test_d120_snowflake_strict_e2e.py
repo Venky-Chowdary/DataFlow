@@ -65,6 +65,16 @@ def snowflake_semantics(monkeypatch):
         tables = {str(r[0]) for r in rows}
         columns = {str(r[1]) for r in rows}
         sql = command or ""
+        from tests.snowflake_grammar import snowflake_grammar_violations
+
+        # DuckDB accepts SQL Snowflake's compiler refuses (D47 ``IS TRUE``).
+        broken = snowflake_grammar_violations(sql)
+        if broken:
+            raise snowflake.connector.errors.ProgrammingError(
+                msg=f"SQL compilation error: syntax error ({'; '.join(broken)})",
+                errno=1003,
+                sqlstate="42000",
+            )
         # A CREATE naming a differently-cased table makes a second table on
         # Snowflake rather than failing, so only references are checked.
         creates = sql.lstrip().upper().startswith("CREATE")

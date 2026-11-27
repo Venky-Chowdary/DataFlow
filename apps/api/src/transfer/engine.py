@@ -110,7 +110,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
-from services.create_ddl_gate import refuse_unapproved_create
+from services.overwrite_governance_gate import apply_destination_ddl_approval
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -551,8 +551,7 @@ from .engine_kafka import (  # noqa: E402
     stamp_kafka_source,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
-    _enforce_ddl_identity,
-    _enforce_decision_artifact,
+    _decision_stamped, _enforce_ddl_identity, _enforce_decision_artifact,
     _inline_stamp_ddl_identity,
     decision_artifact_source,
     _operator_contract_maps,
@@ -1793,7 +1792,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -2060,7 +2059,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -2092,6 +2091,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -2941,7 +2941,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             if source_stamp.get("kafka_cursor"):
                 # The buffered read took one poll batch; its offsets commit
                 # with the job, never earlier (D85).
@@ -3295,7 +3295,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3497,7 +3497,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -3529,6 +3529,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -4178,7 +4179,7 @@ class UniversalTransferEngine:
                 )
             else:
                 release_args = None
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             # D85: Kafka is a streaming source, so this is the path that must
             # commit the group offsets; without it every run re-read the topic.
             commit_kafka_offsets_on_accept(request, dest_summary)
@@ -4475,7 +4476,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            refuse_unapproved_create(request, dest_table_exists_flag)
+            apply_destination_ddl_approval(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4650,7 +4651,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
-                preflight_mappings=mappings,
+                preflight_mappings=mappings, legacy_ok=_decision_stamped(request),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4682,6 +4683,7 @@ class UniversalTransferEngine:
                 source_column_types=schema,
                 **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
+                request=request,
             )
             if art_err:
                 mongo.update_job_status(
@@ -5045,7 +5047,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,

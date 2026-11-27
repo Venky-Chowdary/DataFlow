@@ -14,6 +14,7 @@ export type HelpDocId =
   | "help-mcp"
   | "help-query"
   | "help-job-theater"
+  | "help-exit-readiness"
   | "help-enterprise"
   | "help-api"
   | "help-faq";
@@ -91,6 +92,7 @@ export const HELP_DOC_IDS: HelpDocId[] = [
   "help-mcp",
   "help-query",
   "help-job-theater",
+  "help-exit-readiness",
   "help-enterprise",
   "help-api",
   "help-faq",
@@ -125,7 +127,7 @@ export const HELP_DOC_CATEGORIES: HelpDocCategory[] = [
     id: "ops",
     title: "Operations",
     description: "Job space, trust score, reversibility, quarantine, and reconciliation.",
-    docs: ["help-job-theater", "help-transforms"],
+    docs: ["help-job-theater", "help-exit-readiness", "help-transforms"],
   },
   {
     id: "enterprise",
@@ -786,7 +788,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             { n: 4, label: "New schedule", x: "91%", y: "11%" },
           ],
         },
-        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page saves cadence only and stays paused until the route has an approved mapping.",
+        tip: "The simplest way to start is from Transfer Studio: after Validate approves a route, click **Schedule** in the footer. A schedule created on this page is planned the same way: Datawrap maps the columns and runs Validate for the route, and saves the schedule only if that plan would run (otherwise it shows the blockers). A schedule saved earlier without mappings shows **Plan mappings**; Run now on it explains what to do instead of starting a job.",
       },
       {
         id: "create-pipeline",
@@ -814,7 +816,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Set the cadence and sync mode",
             pin: "Cadence → Preset | Cron  ·  Sync mode",
-            body: "In **Cadence** choose **Preset** or **Cron**. The presets are **Hourly**, **Daily**, and **Weekly**. They count from the last run, so Daily means about 24 hours after the previous run, not a fixed time of day. For a fixed time use **Cron** with a timezone, for example `10 10 * * *` for 10:10 every day.\n\nIn **Sync mode** pick how rows move: **Full append**, **Full overwrite**, **Incremental append**, **Incremental deduped**, **CDC**, **SCD Type 2**, or **Mirror**. Which ones are offered depends on the two connectors. Upsert, SCD Type 2, and Mirror need a **Primary key**; incremental modes need a **Cursor column**.",
+            body: "In **Cadence** choose **Preset** or **Cron**. The presets are **Hourly**, **Daily**, and **Weekly**. They count from the last run, so Daily means about 24 hours after the previous run, not a fixed time of day. For a fixed time use **Cron** with a timezone, for example `10 10 * * *` for 10:10 every day.\n\nIn **Sync mode** pick how rows move: **Full append**, **Full overwrite**, **Incremental append**, **Incremental deduped**, **CDC**, **SCD Type 2**, or **Mirror**. Which ones are offered depends on the two connectors. The **Primary key** is required unless **Duplicate policy** is **Append**; for SCD Type 2 and Mirror an empty key uses the source table's primary key, and Validate refuses when there is none. Incremental append and deduped advance on a **Cursor column**: a new schedule's plan picks the table's single change-time column or tells you to name one, and an existing schedule needs it filled in. CDC needs no cursor column (the change log is its position). The disabled **Save** button says what is still missing.",
             figure: {
               src: WORKSPACE_SHOT.schedulesCadenceMode,
               alt: "Cadence presets Hourly, Daily, Weekly and the sync mode tiles",
@@ -1101,7 +1103,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Paste into Cursor Settings → MCP",
             pin: "Cursor → Settings → MCP",
-            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until `confirm_action`. Every confirmed transfer appears in **Job space** with an audit trail. The key's role works like a person's: a Viewer key gets read-only tools, an Operator key can also run and cancel jobs, an Editor key gets everything except deleting connections, and an Admin key gets every tool.",
+            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until a person confirms it. By default that person confirms in Pilot, signed in (the one who staged it, or a workspace admin); an MCP client cannot confirm its own approval unless the workspace's confirm policy is `agent`. Every confirmed transfer appears in **Job space** with an audit trail. The key's role works like a person's: a Viewer key gets read-only tools, an Operator key can also run and cancel jobs, an Editor key gets everything except deleting connections, and an Admin key gets every tool.",
           },
         ],
         code: '{\n  "mcpServers": {\n    "datawrap": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
@@ -1109,7 +1111,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "security",
         title: "Agent security",
-        body: "MCP tools follow workspace roles. Agents cannot read connection secrets; they can only start the operations their key allows. Anything that creates or moves data waits for `confirm_action`, and agent runs pass Validate before they write, like every other run.",
+        body: "MCP tools follow workspace roles. Agents cannot read connection secrets; they can only start the operations their key allows. Anything that creates or moves data waits for a person to confirm it in the product (the workspace confirm policy: `interactive` by default, `four_eyes` for a second admin, `agent` only for unattended automation), and agent runs pass Validate before they write, like every other run.",
       },
     ],
   },
@@ -1239,7 +1241,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Sign for your role",
             pin: "Go to sign-off → Sign as …",
-            body: "Click **Go to sign-off**. **Engineering**, **Data owner**, and **Compliance** each sign the same report version. Choose your role, add a note on what you checked, and click **Sign as** your role. Each approval goes to the audit log. Once every required role has signed, the evidence pack is signed with the workspace proof key. **Download report (.md)** saves it for the audit file.",
+            body: "Click **Go to sign-off**. **Engineering**, **Data owner**, and **Compliance** each sign the same report version. Choose your role, add a note on what you checked, and click **Sign as** your role. Each approval goes to the audit log. Once every required role has signed, the pack is signed (HMAC-SHA256) with this workspace's evidence signing key, which is separate from the login secret; the pack records the key id. **Download report (.md)** saves it for the audit file. Anyone with access to this workspace can verify the signed pack (Verify, or `POST /api/v1/transfer/proof-pack/verify`). Only this deployment holds the key: there is no public or offline verifier yet.",
             figure: {
               src: WORKSPACE_SHOT.jobSignoff,
               alt: "Sign-off panel with Engineering, Data owner, and Compliance waiting, and Sign as Engineering",
@@ -1281,6 +1283,53 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     ],
   },
 
+  "help-exit-readiness": {
+    id: "help-exit-readiness",
+    slug: "exit-readiness",
+    category: "Operations",
+    title: "Reversibility and exit readiness",
+    description: "What the Reversibility analysis checks, what its rollback posture means, and how exit rehearsals prove you can take a system's data out.",
+    readTime: "6 min",
+    icon: "shield",
+    sections: [
+      {
+        id: "what",
+        title: "Two features, no automatic rollback",
+        body: "**Reversibility** analyses a transfer's mapping: for each column, could the source value be recovered from the destination? **Exit readiness** registers the systems you would have to take out and **rehearses** their exit with real extracts. Neither moves data back on its own: Datawrap does not undo committed rows, run a reverse transfer, or fail back to the source.",
+      },
+      {
+        id: "reversibility",
+        title: "Reversibility",
+        body: "Each mapped column is **invertible** (same type, rename, wider column, lossless cast), **lossy** (hash_pii, mask_pii, redact, an omitted or dropped column, a narrower type, rounding, a dropped time zone), or **conditional** (a cast out of text or a normaliser such as trim, which round-trips only for some values). Conditional columns are checked against the rows Validate sampled: a column that fits them is invertible for the data seen, not proven for rows that were not sampled. Turn on **Require reversibility** on the plan and the G24R gate blocks a plan, a run or a schedule that is not reversible, before any row is read.",
+      },
+      {
+        id: "rollback",
+        title: "What the rollback posture means",
+        body: "A reversible table reads **Restore from destination**: the destination holds what is needed to rebuild the source. Otherwise it reads **Keep source as fallback**: keep the source until sign-off. This is advice. The run's rollback plan is a document-only runbook. The Job Reversibility tab is recomputed from the run's stored request; it does not show whether this run's data actually round-tripped.",
+      },
+      {
+        id: "rehearsals",
+        title: "Exit readiness and rehearsals",
+        body: "Open **Platform → Exit readiness**. Declare a system: a saved source connection, the tables to take out, the exit window and what it is based on, any regulatory dates, how often to rehearse, and the sign-off roles. **Run rehearsal** runs one real extract per table to a file, then checks each table on both sides: row counts, a digest of the keys and of every row, and the sum, minimum and maximum of every numeric column. A table is **proven** only when all of these match and the extract file's SHA-256 was confirmed on read. The extracts are sealed with a Merkle root, and the duration is measured against the exit window.",
+        steps: [
+          "Proven: every declared table measured on both sides and equal",
+          "Incomplete: something measured differs (a live source that changes during the rehearsal reads incomplete)",
+          "Not proven: nothing differs, but something could not be measured (no key, a non-SQL source, a value check that was only sampled)",
+          "Failed: an extract failed",
+        ],
+      },
+      {
+        id: "signoff",
+        title: "Sign-off and the evidence pack",
+        body: "Only a proven rehearsal can be signed. Each role signs once, bound to real authority in the workspace. When the last role signs, the Exit Evidence Pack is signed (HMAC-SHA256) with this workspace's evidence signing key, separate from login, and its digest is anchored when the deployment configures S3 Object Lock; otherwise it reads **not anchored**. Anyone with access to the workspace can verify the pack (`POST /api/v1/exit/evidence/verify`). Only this deployment holds the key, so there is no public or offline verifier yet.",
+      },
+      {
+        id: "limits",
+        title: "Limits",
+        body: "Rehearsal completeness is measured for SQL sources only: a MongoDB, file, object-store or SaaS source cannot be proven. SQL Server, Oracle, Snowflake and BigQuery have no live-engine tests for these features. The full description is in docs/use/exit-readiness.md.",
+      },
+    ],
+  },
   "help-enterprise": {
     id: "help-enterprise",
     slug: "enterprise",

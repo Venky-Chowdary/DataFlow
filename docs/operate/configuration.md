@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-591 flags: 510 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
+592 flags: 511 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -120,7 +120,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ASSUME_PRODUCTION` | `0` | `1` turns production policy on for a host that does not set `ENV` (bare metal, Kubernetes). | `apps/api/services/platform_config.py` |
 | `AUDIT_ANCHOR_EVERY` | `1` | Read by `_maybe_anchor_tip()`: Best-effort seal of the chain tip (never fails the audit append) | `apps/api/services/audit_log.py` |
 | `AUDIT_ANCHOR_MIN_INTERVAL_SECONDS` | `""` | Read by `_min_interval()`: External anchoring of digests — the audit chain tip and signed evidence packs | `apps/api/services/audit_anchor.py` |
-| `AUDIT_ANCHOR_PROVIDER` | `stub` | The anchor provider asked for. Only the local anchor file is implemented: any other value is recorded on the receipt as `requested_provider`, the receipt says the request was not met, and a warning is logged. | `apps/api/services/audit_anchor.py` |
+| `AUDIT_ANCHOR_PROVIDER` | `stub` | The anchor provider. `stub` (default, alias `local`) keeps a receipt in the built-in store, which is not write-once, so every receipt reads `not_anchored`. `s3` anchors in S3 Object Lock (compliance mode) and reads `anchored` only after the object and its retention were read back. Any other value (for example `tsa`) is not implemented: the receipt is recorded as `requested_provider` with status `failed`, and a warning is logged. | `apps/api/services/audit_anchor.py` |
 | `AUDIT_ANCHOR_RETENTION_DAYS` | `""` | Read by `retention_days()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
 | `AUDIT_ANCHOR_S3_BUCKET` | `""` | Read by `bucket()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
 | `AUDIT_ANCHOR_S3_PREFIX` | `""` | Read by `prefix()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
@@ -262,8 +262,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ENGINE_CACHE` | `1` | Read by `cache_enabled()`: Whether engines are reused. Off restores per-call construction | `apps/api/services/engine_pool.py` |
 | `ENGINE_CACHE_SIZE` | `32` | Read by `max_engines()`: Process-wide SQLAlchemy Engine cache | `apps/api/services/engine_pool.py` |
 | `ENGINE_DIGEST` | `0` | Read by `_engine_digest_enabled()`: Operator gate — default **off** until two gaps are closed | `apps/api/src/transfer/reconcile_step.py` |
-| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
-| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
+| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
+| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
 | `ES_HOST` | `127.0.0.1` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `ES_PORT` | `9200` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `EXIT_VERIFY_MAX_SECONDS` | `""` | Read by `max_verify_seconds()`: The most a rehearsal's verification may take, all attempts together | `apps/api/services/exit_verify_guard.py` |
@@ -370,6 +370,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `MONGO_SQLITE_COPY_BATCH` | `5000` | Read by `mongo_sqlite_copy_batch()`: MongoDB snapshot find → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlite.py` |
 | `MONGO_SQLSERVER_COPY` | `1` | Read by `mongo_sqlserver_copy_enabled()`: MongoDB snapshot find → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_mongo_sqlserver.py` |
 | `MSSQL_CDC_CAPTURE_WAIT_SEC` | `""` | Read by `_capture_wait_budget_sec()`: SQL Server *native* CDC (cdc schema) — Debezium-class path | `apps/api/connectors/sqlserver_cdc_native.py` |
+| `MSSQL_REQUIRE_VERIFIED_TLS` | `""` | Read by `require_verified_tls()`: Host policy: no silent FreeTDS fallback (set in the image that ships Driver 18) | `apps/api/connectors/mssql_security.py` |
 | `MS_FIT_AGGREGATE_SECONDS` | `""` | Read by `aggregate_timeout_seconds()`: Millisecond narrowing onto a document-store instant, decided on values (D148) | `apps/api/services/millisecond_fit.py` |
 | `MULTI_REPLICA` | `""` | `1` declares that more than one process shares this deployment. Turns on the topology checks that refuse an unsafe process split, and makes the Mongo job queue mandatory. | `apps/api/services/cdc_lease_store.py`, `apps/api/services/process_role.py` +1 more |
 | `MYSQL_ICEBERG_COPY` | `1` | Read by `mysql_iceberg_copy_enabled()`: MySQL SELECT → Iceberg catalog snapshot (cross-engine bulk) | `apps/api/services/copy_mysql_iceberg.py` |
@@ -416,6 +417,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `PARITY_EXPLAIN_TIMEOUT` | `20` | Read by `_timeout_seconds()`: Parity Studio: the plain-language explanation of a parity report | `apps/api/services/parity_explain.py` |
 | `PARITY_READ_CACHE_SECONDS` | `30` | Read by `ttl_seconds()`: Parity Studio: a short-lived, per-process cache of the live reads a report makes | `apps/api/services/parity_cache.py` |
 | `PARITY_REREAD_TIMEOUT` | `30` | Read by `_reread_seconds()`: Parity Studio: one answer a person can sign — does the destination match? | `apps/api/services/parity_report.py` |
+| `PARITY_SCALE` | `0` | Experimental, default **off**. `1` lets the internal Parity at Scale scan driver run (in-engine segment digests, `apps/api/services/parity_scale`). Its evidence is not read by Gate-8, the verdict, the proof pack or the Trust Report yet. | `apps/api/services/parity_scale/__init__.py` |
 | `PARITY_SIGNOFF_AUTHORITY` | `""` | JSON object mapping each Trust Report sign-off role to the gate roles (and optionally people) allowed to sign it. A value that does not parse refuses every signature. | `apps/api/services/parity_authority.py` |
 | `PGOUTPUT_DECODER` | `""` | Read by `_select_plugin()`: Select logical decoding plugin | `apps/api/connectors/postgresql_change_stream.py` |
 | `PGVECTOR_PGVECTOR_COPY` | `1` | Read by `pgvector_pgvector_copy_enabled()`: pgvector → pgvector binary COPY (identity bulk) | `apps/api/services/copy_pgvector_pgvector.py` |
@@ -711,6 +713,7 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 These functions read a variable whose name is built at run time, so the name does not appear in the tables above.
 
+- `apps/api/services/call_lanes.py` — `lane_size()`
 - `apps/api/services/export_object_store.py` — `s3_client_for()`
 - `apps/api/services/integrations_store.py` — `apply_integrations_to_env()`
 - `apps/api/services/integrations_store.py` — `provider_key_state()`

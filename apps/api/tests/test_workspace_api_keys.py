@@ -315,9 +315,7 @@ def test_api_key_role_is_enforced_when_auth_is_required(key_store, monkeypatch):
 
 
 def test_creating_a_key_keeps_the_rest_of_the_integration_file(key_store):
-    data = integrations_store._load_raw()
-    data["sso"]["saml"]["entity_id"] = "https://idp.example/saml"
-    integrations_store._save(data)
+    integrations_store._save_section("sso.saml.entity_id", "https://idp.example/saml")
     created = integrations_store.create_api_key("Beside SSO", "admin@example.com", expires_in="30d")
     stored = integrations_store._load_raw()
     assert stored["sso"]["saml"]["entity_id"] == "https://idp.example/saml"

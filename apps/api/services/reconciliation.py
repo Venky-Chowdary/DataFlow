@@ -2360,6 +2360,13 @@ def verify_mysql_table(
         return -1, ""
 
 
+def _sqlserver_options(dest: dict[str, Any]) -> dict[str, Any]:
+    """The connector's TLS / driver / sign-in options, nested ``extra`` included."""
+    from connectors.generic_sql import connection_options
+
+    return connection_options(dict(dest or {}))
+
+
 def verify_sqlserver_table(
     *,
     host: str,
@@ -2375,27 +2382,24 @@ def verify_sqlserver_table(
     dest_types: dict[str, str] | None = None,
     written_ids: list[str] | None = None,
     pk_column: str | None = None,
+    options: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile.
 
     ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
     """
     try:
-        import pymssql
-        from connectors.mssql_login import PYMSSQL_TDS_VERSION
-
+        from connectors.mssql_security import connect_sqlserver_dbapi
         from connectors.sql_identifiers import quote_table_ref
 
-        conn = pymssql.connect(
-            server=host or "127.0.0.1",
-            port=int(port or 1433),
-            user=username or "sa",
-            password=password or "",
-            database=database or "master",
-            login_timeout=10,
-            tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
-            timeout=30,
-        )
+        # pymssql as before, unless the connector's TLS / Entra ID sign-in
+        # needs the Microsoft driver (never a silent FreeTDS read-back, NF-2).
+        conn = connect_sqlserver_dbapi({
+            **dict(options or {}),
+            "host": host, "port": port, "database": database or "master",
+            "username": username, "password": password,
+            "connection_string": connection_string,
+        })
         sch = (schema or "dbo").strip() or "dbo"
         table_ref = quote_table_ref(table_name, schema=sch, dialect="sqlserver")
         cur = conn.cursor()
@@ -2986,6 +2990,7 @@ def verify_target(
             dest_types=dest_types,
             written_ids=ids,
             pk_column=pk,
+            options=_sqlserver_options(dest),
         )
     elif db_type in {
         "oracle",

@@ -46,6 +46,11 @@ def _governance(job: dict) -> dict:
 
 def test_confirmed_run_schedule_now_records_trigger_and_approval(world, monkeypatch):
     import services.schedule_runner as runner
+    # copilot_router imports the name through the src.services shim, which
+    # binds it at import time: import the shim BEFORE patching the runner.
+    # Imported after, its first import bound the fake, monkeypatch saved the
+    # fake as the "original", and every later test's Run now ran the fake.
+    import src.services.schedule_runner as shim
     from services import schedule_store
 
     sched = SimpleNamespace(id="sched-1", name="nightly", enabled=True,
@@ -63,10 +68,6 @@ def test_confirmed_run_schedule_now_records_trigger_and_approval(world, monkeypa
         })
 
     monkeypatch.setattr(runner, "_run_schedule", _fake_run)
-    # copilot_router imports the name through the src.services shim, which
-    # bound it at import time.
-    import src.services.schedule_runner as shim
-
     monkeypatch.setattr(shim, "_run_schedule", _fake_run)
     ack_id = world.ledger.put(kind="run_schedule", payload={"schedule_id": "sched-1", "name": "nightly"},
                               preview={"name": "nightly"})

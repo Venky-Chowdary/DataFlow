@@ -163,7 +163,10 @@ def sign_off(rehearsal_id: str, *, role: str, actor: str, signer_role: str, note
         if not {a["role"] for a in approvals} >= set(roles):
             return None
         signed_at = now_iso()
-        pack = build_signed_exit_pack(_pack_body(current, approvals, signed_at=signed_at, actor=actor))
+        pack = build_signed_exit_pack(
+            _pack_body(current, approvals, signed_at=signed_at, actor=actor),
+            workspace_id=str(current.get("workspace_id") or "") or None,
+        )
         current["signed"] = {"signature": "hmac-sha256:" + str(pack["signature"]["value"]), "signed_at": signed_at,
                              "content_sha256": pack["content_sha256"], "approvals": approvals, "pack": pack,
                              "anchor": None}
@@ -240,7 +243,7 @@ def _receipt_for(pack: dict[str, Any], digest: str) -> dict[str, Any] | None:
             or stored or local)
 
 
-def verify_pack(pack: Any) -> dict[str, Any]:
+def verify_pack(pack: Any, *, may_use_workspace: Any = None) -> dict[str, Any]:
     """Verify an Exit Evidence Pack: signature, Merkle root, and its anchor read back now (contract 5.2)."""
     from services.audit_anchor import verify_receipt
     from services.exit_completeness import merkle_root
@@ -251,7 +254,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
                 "kind": str((pack or {}).get("kind") or "") if isinstance(pack, dict) else "",
                 "content_sha256": None, "signature_ok": False, "merkle_ok": False, "merkle_root": None,
                 "anchor": verify_receipt(None), "parts_reread": False, "note": PARTS_NOTE}
-    checked = verify_signed_proof_pack(pack)
+    checked = verify_signed_proof_pack(pack, may_use_workspace=may_use_workspace)
     errors = list(checked["errors"])
     claimed = pack.get("merkle_root")
     sealed = ((pack.get("rehearsal") or {}).get("seal") or {}).get("merkle_root")
@@ -267,7 +270,8 @@ def verify_pack(pack: Any) -> dict[str, Any]:
     if anchor["status"] == "failed":
         errors.append(f"the anchor could not be confirmed: {anchor.get('reason')}")
     return {"ok": not errors, "errors": errors, "kind": PACK_KIND, "content_sha256": checked["content_sha256"],
-            "signature_ok": not checked["errors"], "merkle_ok": merkle_ok, "merkle_root": claimed,
+            "signature_ok": not checked["errors"], "signing_key": checked.get("signing_key"),
+            "merkle_ok": merkle_ok, "merkle_root": claimed,
             "anchor": anchor, "parts_reread": False, "note": PARTS_NOTE}
 
 

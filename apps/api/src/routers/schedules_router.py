@@ -196,6 +196,10 @@ class ScheduleCreate(PolicyFieldsModel):
     in_file_dedupe: str = "block"
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
+    #: Schedules page: with no mappings, plan the route server-side (the
+    #: Studio/Pilot plan: live schemas, mapping, Validate) and save only a
+    #: schedule whose plan clears Execute (QA batch 1). Not stored.
+    plan_mappings: bool = False
 
     @field_validator("interval")
     @classmethod
@@ -372,6 +376,9 @@ class ScheduleResponse(BaseModel):
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
     mapping_count: int = 0
+    #: ``missing`` when the schedule has no persisted Map contract. Run now
+    #: must not invent one. ``present`` when at least one mapping row is stored.
+    mapping_contract: str = ""
     # Autopilot: the finding this schedule is parked on, and the standing
     # authority (if any) that lets later identical runs proceed unattended.
     approval_request: dict[str, Any] = Field(default_factory=dict)
@@ -408,6 +415,7 @@ class ScheduleResponse(BaseModel):
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
+        data["mapping_contract"] = "present" if mappings else "missing"
         # Paused / parked schedules do not fire — surface no next run (M24/D96).
         from services.schedule_store import visible_next_run_at
 
@@ -803,6 +811,7 @@ async def create_pipeline_schedule(
 ):
     ws = resolve_write_workspace(request, workspace_id)
     payload = body.model_dump(exclude_none=True)
+    plan_mappings = bool(payload.pop("plan_mappings", False))
     if ws and not payload.get("workspace_id"):
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
@@ -819,6 +828,22 @@ async def create_pipeline_schedule(
     dropped = await asyncio.to_thread(drop_unrecorded_stamp, payload)
     if dropped:
         warnings.append(dropped)
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    if plan_mappings and not persisted_mapping_rows(payload.get("mappings")):
+        # QA batch 1: the Schedules page saved cadence only, and Run now then
+        # had no mappings. Plan the route as Studio does; refuse, unsaved,
+        # when the plan would not run.
+        from services.schedule_planning import SchedulePlanRefused, plan_schedule_route
+
+        try:
+            planned = await asyncio.to_thread(plan_schedule_route, payload)
+        except SchedulePlanRefused as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": str(exc), "blockers": exc.blockers[:8]},
+            ) from exc
+        payload.update(planned)
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
     from services.reversibility_schedule import schedule_reversibility_block
@@ -1435,6 +1460,74 @@ async def sync_pipeline(
         raise HTTPException(status_code=409, detail={"error": str(exc), **exc.details}) from exc
 
 
+@router.post("/{schedule_id}/plan-mappings", response_model=ScheduleResponse)
+async def plan_schedule_mappings(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Plan a mapping-less schedule's route server-side and arm it (QA batch 1).
+
+    The same plan Transfer Studio and the Pilot run (live schemas, mapping,
+    Validate). A plan that does not clear Execute changes nothing (422).
+    """
+    from services.schedule_mapping_contract import persisted_mapping_rows
+    from services.schedule_planning import SchedulePlanRefused, plan_schedule_route
+
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
+    if persisted_mapping_rows(sched.mappings):
+        raise HTTPException(
+            status_code=409,
+            detail="This schedule already has mappings; edit them in Transfer Studio.",
+        )
+    try:
+        planned = await asyncio.to_thread(plan_schedule_route, sched.to_dict())
+    except SchedulePlanRefused as exc:
+        raise HTTPException(
+            status_code=422, detail={"message": str(exc), "blockers": exc.blockers[:8]},
+        ) from exc
+    # The same checks and record as a PATCH of these fields (QA review Q5); the
+    # plan does not change whether the schedule is enabled.
+    merged = {**sched.to_dict(), **planned}
+    await asyncio.to_thread(_assert_upsert_key, merged)
+    from services.reversibility_schedule import schedule_reversibility_block
+
+    reversible = schedule_reversibility_block(merged)
+    if reversible:
+        raise HTTPException(status_code=422, detail=reversible)
+    try:
+        updated = update_schedule(schedule_id, planned, refuse_unrunnable_mappings=True)
+    except ApiError:
+        raise
+    except PermissionError as exc:  # as PATCH: a refused write is 403, not 500
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.update",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "id": updated.id,
+            "source_connector_id": updated.source_connector_id,
+            "source_table": updated.source_table,
+            "dest_connector_id": updated.dest_connector_id,
+            "dest_table": updated.dest_table,
+            "sync_mode": updated.sync_mode,
+            "enabled": bool(updated.enabled),
+            "dest_schema": updated.dest_schema,
+            "dest_database": updated.dest_database,
+            "via": "plan-mappings",
+        },
+    )
+    return ScheduleResponse.from_schedule(updated)
+
+
 @router.post("/{schedule_id}/run")
 async def run_pipeline_now(
     schedule_id: str,
@@ -1452,6 +1545,13 @@ async def run_pipeline_now(
 
     resolve_write_workspace(request, workspace_id)
     sched = _bound_schedule(request, schedule_id, write=True)
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    if not persisted_mapping_rows(sched.mappings):
+        # Refused before any job: say why and the way out (QA batch 1).
+        from services.schedule_planning import NO_MAPPINGS_RUN_REFUSAL
+
+        raise HTTPException(status_code=409, detail=NO_MAPPINGS_RUN_REFUSAL)
     try:
         assert_schedule_run_allowed(sched)
     except ValueError as exc:

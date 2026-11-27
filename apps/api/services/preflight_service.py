@@ -54,6 +54,7 @@ from services.preflight_file_plan import (
 from services.coercion_gate_reconcile import reconcile_coercion_report
 from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
 from services.preflight_policy_gates import blockers_from_gates
+from services.managed_table import with_preflight_destination_ownership
 from services.preflight_file_phases import (
     apply_constraint_findings,
     apply_schema_drift_gate,
@@ -296,6 +297,7 @@ def _policy_source_config(
 
 @_with_date_locale
 @_with_source_engine
+@with_preflight_destination_ownership
 def run_file_preflight(
     *,
     columns: list[str],
@@ -399,11 +401,7 @@ def run_file_preflight(
     staged = staged_preflight_for_bound()
     if staged is not None:
         return staged
-    from services.schema_drift import (
-        PROPAGATE_POLICIES,
-        destination_evolution_approved,
-        effective_schema_policy,
-    )
+    from services.schema_drift import PROPAGATE_POLICIES, effective_schema_policy
     from services.timezone_policy import declared_source_column_types
 
     # ``backfill_new_fields`` is a request for propagate. Resolved once so
@@ -815,14 +813,14 @@ def run_file_preflight(
     # since Validate" compares it with the live table at Execute, which has not
     # been ALTERed yet.
     live_destination_types = dict(destination_column_types or {})
+    from services.schema_drift import destination_evolution_approved
+
     if (
         destination_table_exists is True
         and not dest_recreated
         and destination_column_types
         and dest_declares_column_ddl(destination_db_type)
-        and destination_evolution_approved(
-            schema_policy, acknowledged=schema_drift_acknowledged
-        )
+        and destination_evolution_approved(schema_policy, acknowledged=bool(schema_drift_acknowledged))
     ):
         from services.schema_drift import (
             dest_key_charsets, dest_key_groups, dest_key_limit, plan_destination_evolution,
@@ -2218,14 +2216,28 @@ def run_file_preflight(
         can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
         destination_table=str(destination_table or ""), mappings=write_maps,
     )
-    null_cursor_blocked = bool(
-        null_cursor_gate and null_cursor_gate.get("status") == "block"
+    from services.preflight_dest_gates import build_dest_object_gates  # D396 key gate + NF-1 governance
+
+    require_pk_gate, overwrite_governance_gate = build_dest_object_gates(
+        connected=bool(destination_connected), acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""), dest_db_type=destination_db_type,
+        destination_config=destination_config, table_exists=dest_table_exists, sync_mode=sync_mode,
+        key_hint=contract_primary_key or ",".join(destination_pk_columns or []), mappings=write_maps,
+        source={"config": source_config, "connector_id": source_connector_id, "table": source_table},
+    )
+    null_cursor_blocked = bool(null_cursor_gate and null_cursor_gate.get("status") == "block")
+    overwrite_governance_blocked = bool(
+        overwrite_governance_gate and overwrite_governance_gate.get("status") == "block"
     )
     upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
     upsert_ddl_blocked = upsert_ddl_blocked or dup_dest_gate is not None
+    upsert_ddl_blocked = upsert_ddl_blocked or bool(
+        require_pk_gate and require_pk_gate.get("status") == "block"
+    )
     enriched_blockers.extend(
         blockers_from_gates(
-            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None)
+            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None),
+            (require_pk_gate, None), (overwrite_governance_gate, None),
         )
     )
     extra_gates: list[dict[str, Any]] = (
@@ -2235,6 +2247,8 @@ def run_file_preflight(
         + ([dup_dest_gate] if dup_dest_gate else [])
         + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
+        + ([require_pk_gate] if require_pk_gate else [])
+        + ([overwrite_governance_gate] if overwrite_governance_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )
@@ -2249,7 +2263,7 @@ def run_file_preflight(
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
         and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
-        and not shape_route_blocked,
+        and not shape_route_blocked and not overwrite_governance_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

@@ -7,6 +7,7 @@ import {
   inboxNeedsStudio,
   isCreateNewDestExistsPark,
   isEmptyMappingFinding,
+  NO_MAPPINGS_RUN_MESSAGE,
   persistedMappingRows,
   scheduleNeedsStudio,
   studioIntentConnectorsReady,
@@ -14,6 +15,13 @@ import {
   studioIntentFromSchedule,
 } from "./scheduleApprovalCta";
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
+
+test("Run now on a mapping-less schedule names the fix first and Studio second", () => {
+  const plan = NO_MAPPINGS_RUN_MESSAGE.indexOf("Plan mappings");
+  const studio = NO_MAPPINGS_RUN_MESSAGE.indexOf("open Transfer Studio");
+  assert.ok(NO_MAPPINGS_RUN_MESSAGE.includes("no job was created"));
+  assert.ok(plan >= 0 && studio > plan);
+});
 
 test("empty mapping is a plan change, not a signature", () => {
   assert.equal(isEmptyMappingFinding("EMPTY_MAPPING_CONTRACT", ""), true);
@@ -61,6 +69,7 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
     dest_table: "orders_dw",
   } as PipelineSchedule;
   assert.equal(scheduleNeedsStudio(sched), true);
+  assert.equal(scheduleNeedsStudio({ ...sched, enabled: true, last_status: "ok", needs_approval: false }), true);
   assert.deepEqual(studioIntentFromSchedule(sched), {
     step: "source",
     replaceRoute: true,

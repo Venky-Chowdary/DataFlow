@@ -359,8 +359,7 @@ def _read_destination_sample(
             return [dict(zip(names, row)) for row in rows]
 
         if db_type in {"sqlserver", "mssql", "azure_sql"}:
-            import pymssql
-            from connectors.mssql_login import PYMSSQL_TDS_VERSION
+            from connectors.mssql_security import connect_sqlserver_dbapi
 
             lim = max(1, int(limit or 50))
             if cols == ["*"]:
@@ -377,16 +376,8 @@ def _read_destination_sample(
                 if sort_key
                 else "1"
             )
-            conn = pymssql.connect(
-                server=dest.get("host") or "127.0.0.1",
-                port=int(dest.get("port") or 1433),
-                user=dest.get("username") or "sa",
-                password=dest.get("password") or "",
-                database=dest.get("database") or "master",
-                login_timeout=10,
-                tds_version=PYMSSQL_TDS_VERSION,  # D281: no Sybase re-dial
-                timeout=30,
-            )
+            # The connector's TLS / Entra ID options decide the driver (NF-2).
+            conn = connect_sqlserver_dbapi(dest)
             cur = conn.cursor()
             try:
                 from connectors.sqlserver_tick import full_precision_select_list

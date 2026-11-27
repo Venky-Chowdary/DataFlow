@@ -870,6 +870,46 @@ async def rotate_pii_hash_key(request: Request):
     return status
 
 
+@router.get("/evidence-signing-key")
+async def get_evidence_signing_key_status(request: Request):
+    """Key ids, versions and dates of this workspace's evidence signing keyring — never key material.
+
+    Proof packs, Migration Certificates, signed Trust Reports and Exit Evidence
+    Packs are HMAC-SHA256 signed with this key, not with the login secret.
+    """
+    from services.evidence_signing_keys import key_status
+
+    return await asyncio.to_thread(key_status, tenant_scope(request).workspace_id)
+
+
+@router.post("/evidence-signing-key/rotate")
+async def rotate_evidence_signing_key(request: Request):
+    """Start a new evidence signing key version; earlier versions stay and keep verifying."""
+    from services.audit_log import append_audit_event
+    from services.evidence_signing_keys import EvidenceKeyUnavailable, rotate
+
+    workspace_id = tenant_scope(request).workspace_id
+    try:
+        status = await asyncio.to_thread(rotate, workspace_id, actor=_actor(request))
+    except EvidenceKeyUnavailable as exc:
+        raise safe_http_exception(
+            exc, event="workspace.evidence_signing_key.unavailable",
+            public_message="The evidence signing key service is unavailable.", status_code=503,
+        ) from exc
+    append_audit_event(
+        action="workspace.evidence_signing_key.rotate",
+        resource="/workspace/evidence-signing-key",
+        actor=_actor(request),
+        level="warn",
+        details={
+            "workspace_id": workspace_id,
+            "active_version": status["active_version"],
+            "active_key_id": status["active_key_id"],
+        },
+    )
+    return status
+
+
 @router.put("/pii-hash-key")
 async def set_pii_hash_key(request: Request):
     """Set this workspace's hash_pii key (a new active version; changes future digests).

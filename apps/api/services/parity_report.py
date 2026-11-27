@@ -52,6 +52,13 @@ from services.parity_stats import CONFIDENCE_LEVEL, clopper_pearson_upper, forma
 logger = logging.getLogger(__name__)
 
 _FULL_CHECKS = frozenset({"full_checksum", "key_diff"})
+#: A mirror / SCD2 run whose Gate-8 digests matched: every live destination row
+#: was re-read after the write (a streamed SELECT, D394, proven by
+#: tests/test_trust_d394_mirror_readback_provenance.py) and its digest equals
+#: the digest of the rows this run read from the source. Values were compared,
+#: for every live row, but the source side is this run's own read (not an
+#: independent re-read) and a digest names no row: not proof, never "proven".
+READBACK = "readback"
 #: How a protected value (a key included) is shown.
 PROTECTED = "protected"
 
@@ -501,8 +508,9 @@ def _sample_bound(ev: TableEvidence, k: int, outside: int) -> float | None:
 
 
 def _rows_checked(ev: TableEvidence) -> int:
-    """Rows whose values were compared: every row for a full check, the sample's rows otherwise."""
-    if ev.check in _FULL_CHECKS:
+    """Rows whose values were compared: every row for a full check (and a read-back
+    digest, which covers every live row), the sample's rows otherwise."""
+    if ev.check in _FULL_CHECKS or ev.check == READBACK:
         return int(ev.rows_source or 0)
     return int(ev.sampled_rows or 0) if ev.check == "sampled" else 0
 
@@ -632,14 +640,28 @@ def _full_caveat(full_tables: list[dict[str, Any]]) -> str:
             f"{', '.join(t['name'] for t in capped[:5])}: {found}, and more may differ.")
 
 
+def _readback_sentence(table: dict[str, Any]) -> str:
+    """What a mirror / SCD2 read-back compared, and what it cannot claim."""
+    rows = table.get("rows_destination") if table.get("rows_destination") is not None else table.get("rows_source")
+    live = f"{int(rows):,} live row(s)" if isinstance(rows, int) else "every live row"
+    return (
+        f"{table['name']}: the digest of the destination's {live}, re-read after the write, matches the "
+        "digest of the rows this run read from the source (tombstoned rows are outside the live population). "
+        "The source side is this run's own read, not an independent re-read, and a digest names no row, "
+        "so this is not proof that every row is right"
+    )
+
+
 def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
     kinds = {
-        "full" if t["check"] in _FULL_CHECKS else "sampled" if t["check"] == "sampled" else "none"
+        "full" if t["check"] in _FULL_CHECKS else "sampled" if t["check"] == "sampled"
+        else READBACK if t["check"] == READBACK else "none"
         for t in tables
     } or {"none"}
     method = next(iter(kinds)) if len(kinds) == 1 else "mixed"
     n, k, upper = _pooled_bound(tables)
     unbounded = _unbounded_samples(tables)
+    samples = [t["_sample"] for t in tables if t["_sample"]]
     full_tables = [t for t in tables if t["check"] in _FULL_CHECKS]
     bad_full = sum(t["unexplained"] for t in full_tables)
     least = "at least " if any(t["_at_least"] for t in full_tables) else ""
@@ -657,10 +679,14 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         if not any(t["differences"] for t in full_tables):
             statement = "Every row was compared and no row differs."
         statement = _full_caveat(full_tables) or statement
+    elif method == READBACK:
+        statement = " ".join(f"{_readback_sentence(t)}." for t in tables)
     elif method == "sampled":
         statement = (
             " ".join(f"{_checked_sentence(t)}." for t in unbounded) if unbounded
-            else f"Values were compared on {n:,} sampled row(s). {bound}."
+            else f"Values were compared on {n:,} sampled row(s)"
+            + (f" ({samples[0]['how']})" if len(samples) == 1 and samples[0].get("how") else "")
+            + f". {bound}."
         )
     elif method == "mixed":
         parts = []
@@ -673,6 +699,7 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         elif n:
             parts.append(f"values were compared on {n:,} sampled row(s) elsewhere; {bound[0].lower()}{bound[1:]} "
                          "in those tables")
+        parts += [_readback_sentence(t) for t in tables if t["check"] == READBACK]
         none = [t["name"] for t in tables if t["check"] in {"count_only", "none"}]
         if none:
             parts.append(f"values were not compared for {', '.join(none[:5])}")
@@ -680,7 +707,7 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         statement = statement[:1].upper() + statement[1:] + "."
     else:
         statement = "No value comparison ran for this job, so nothing bounds the difference rate."
-    first = unbounded[0]["_sample"] if unbounded else None
+    first = unbounded[0]["_sample"] if unbounded else (samples[0] if samples else None)
     return {
         "method": method, "sampled_rows": n, "differences_in_sample": k,
         "level": CONFIDENCE_LEVEL, "upper_bound_rate": upper, "statement": statement,
@@ -707,16 +734,6 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
     noted = [t["_note"] for t in tables if t["status"] == "unverifiable" and t.get("_note")]
     if noted:
         return "unverifiable", " ".join(noted)
-    if (
-        tables
-        and all(t["check"] == "readback" for t in tables)
-        and not bad
-    ):
-        return "no_difference_found", (
-            "The destination read-back matched the rows this run wrote, including tombstones. "
-            "The compare is the write-pass fingerprint against the destination, "
-            "not an independent whole-table re-read."
-        )
     blind = [t["name"] for t in tables if t["status"] == "unverifiable"]
     if blind:
         return "unverifiable", (
@@ -724,7 +741,9 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             "recorded), so the evidence cannot decide."
         )
     explained = sum(t["explained"] for t in tables)
-    sampled = [t["name"] for t in tables if t["check"] not in _FULL_CHECKS]
+    sampled = [t["name"] for t in tables if t["check"] == "sampled"]
+    readback = [t for t in tables if t["check"] == READBACK]
+    readback_note = (" " + " ".join(f"{_readback_sentence(t)}." for t in readback)) if readback else ""
     unbounded = _unbounded_samples(tables)
     if unbounded:
         # Not a random draw: the sample says nothing about the rows it did not check.
@@ -732,6 +751,7 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             " ".join(f"{t['name']}: {_checked_sentence(t)}." for t in unbounded)
             + " Nothing bounds the rows that were not checked; run full verification to compare every row."
             + (f" {_explained_split(tables)}." if explained else "")
+            + readback_note
         )
     if sampled:
         # A sample bounds the rate of unexplained differences; it proves nothing, so a
@@ -742,6 +762,14 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             f"{', '.join(sampled[:5])} were compared on a sample of {confidence['sampled_rows']:,} row(s): "
             f"with {int(CONFIDENCE_LEVEL * 100)}% confidence at most {format_rate_pct(upper)} of rows hold "
             "an unexplained difference."
+            + (f" {_explained_split(tables)}." if explained else "")
+            + readback_note
+        )
+    if readback:
+        # Values of every live row were compared by digest, but not against an
+        # independent source re-read: never "proven", never "explained".
+        return "no_difference_found", (
+            f"No {'unexplained ' if explained else ''}difference was found.{readback_note}"
             + (f" {_explained_split(tables)}." if explained else "")
         )
     if explained:

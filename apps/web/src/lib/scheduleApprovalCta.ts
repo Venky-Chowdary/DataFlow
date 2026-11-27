@@ -88,12 +88,21 @@ export function persistedMappingRows(raw: unknown): Array<Record<string, unknown
   return rows;
 }
 
+/**
+ * Run now on a schedule with no mapping contract (the API's 409,
+ * ``NO_MAPPINGS_RUN_REFUSAL`` in services/schedule_planning.py, says the same).
+ */
+export const NO_MAPPINGS_RUN_MESSAGE =
+  "This schedule has no column mappings, so a run cannot start and no job was created. "
+  + "Plan mappings maps the columns and runs Validate for this source and destination; enable the schedule to resume its cadence. "
+  + "Or open Transfer Studio for this schedule, map the columns, run Validate, and Schedule from the Studio footer.";
+
 export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {
   if (isEmptyMappingFinding(sched.approval_code, sched.approval_finding)) return true;
-  const count = sched.mapping_count ?? (Array.isArray(sched.mappings) ? sched.mappings.length : undefined);
-  if (count === 0 && (sched.needs_approval || sched.last_status === "needs_approval" || !sched.enabled)) {
-    return true;
-  }
+  const count = sched.mapping_count ?? (Array.isArray(sched.mappings) ? persistedMappingRows(sched.mappings).length : undefined);
+  // No persisted contract: Run now must not start a job that dies as
+  // EMPTY_MAPPING_CONTRACT. Open Transfer Studio instead.
+  if (count === 0) return true;
   return false;
 }
 

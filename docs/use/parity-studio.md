@@ -31,7 +31,7 @@ decide it.
 | Part | What it shows |
 |---|---|
 | Verdict | One of proven, explained, no difference found, unexplained, unverifiable. See [verification.md](verification.md#reading-the-verdict). |
-| Confidence | Whether every row was compared, a sample, or a mix. For a sample: how many rows, how many differed, and the upper bound. |
+| Confidence | Whether every row was compared, a sample, a mirror/SCD2 read-back, or a mix. For a random sample: how many rows, how many differed, and the upper bound. For any other sample: the rows checked and how they were chosen, and no bound. |
 | Tables | Per table: the check that ran, row counts on each side, rows that differ, how many are explained and unexplained. |
 | Differences | Each difference with its cause and whether that cause explains it. |
 | Fixes | Proposed actions and their state. |
@@ -39,6 +39,12 @@ decide it.
 
 A table shows "unverifiable" when only row counts were compared, when nothing
 was compared, or when the comparison stopped naming keys before the end.
+
+A mirror or SCD2 table whose Gate-8 digests matched shows the check
+`readback`: the digest of every live destination row, re-read after the write
+(a streamed `SELECT`, not the write pass), matched the digest of the rows the
+run read from the source. Its verdict is "no difference found", never
+"proven": the source side is the run's own read and a digest names no row.
 
 ## Asking for an explanation
 
@@ -73,10 +79,16 @@ Sign-off opens only when:
 
 - no unexplained difference remains;
 - the verdict is not "unverifiable";
-- any sample used was a random draw that gives a bound;
+- any sample used was a random draw that gives a bound (see
+  [verification.md](verification.md#which-samples-are-random) for which
+  routes draw one);
 - no fix is in the middle of being applied.
 
 Otherwise the report says why it is blocked.
+
+A mirror or SCD2 report whose check is `readback` can be signed. What is
+signed is the verdict "no difference found", never "proven", with the
+statement that the source side is the run's own read.
 
 ### Who may sign
 
@@ -105,8 +117,16 @@ Rules:
   invalidated and the role signs again.
 
 When every required role has signed the same content, the report is signed
-with the proof-pack key and stored on the job. A signed report is final. No
-later decision changes it.
+(HMAC-SHA256) with the job workspace's evidence signing key and stored on the
+job. The signature records the key id. A signed report is final. No later
+decision changes it.
+
+The signed report holds the verdict, the confidence statement, the tables,
+every difference with its cause, the fixes proposed or applied (a Widen column
+fix with the `ALTER TABLE` it previews), the approvals, and the evidence
+*status*: the Gate-8 result, the assurance level, the trust score and whether a
+transform or PII protection proof passed. It does not hold the transforms
+themselves, the destination schema or the DDL the transfer ran.
 
 ## Exports
 
@@ -115,15 +135,28 @@ download. The Markdown export is rendered from the signed pack and includes
 the verdict, confidence, tables, differences, approvals and signature.
 
 The signed pack uses the same envelope that
-`POST /api/v1/transfer/proof-pack/verify` checks.
+`POST /api/v1/transfer/proof-pack/verify` checks. That route needs `job.read`,
+so anyone with access to the job's workspace can verify the pack. See
+[verification.md](verification.md#how-evidence-is-signed-and-verified).
 
 ## Limits
 
 - The report can only be as strong as the comparison Gate-8 ran. A sampled run
   is never reported as proven.
 - The re-read of cells is bounded. It covers the keys the evidence names.
-- The signing key is the platform's own. The signature shows the report was
-  not changed after signing. It is not an independent third party's signature.
+- The signing key is the workspace's evidence key, a shared secret this
+  deployment holds. The signature shows the report was not changed after
+  signing. Only this deployment can check it: there is no public or offline
+  verifier, and it is not an independent third party's signature. That is
+  planned work (the evidence ledger), not a feature of this code line.
+- Multi-table runs: Gate-8 compares values for the last table only, so every
+  other table is "unverifiable" (count only) and the report cannot be signed.
+- Only the streaming database route draws a random sample. A sample from any
+  other route bounds nothing, so the report cannot be signed until a full
+  compare runs.
+- A busy source drifts: a key Gate-8 named that both sides now hold equal
+  cannot be re-checked and stays unexplained, so a live system's report can
+  be hard to sign. That is deliberate.
 - Sign-off roles are bound to workspace roles, not to an external identity
   system.
 - Internal bookkeeping fields are removed from every response and export.
@@ -133,11 +166,14 @@ The signed pack uses the same envelope that
 - The exact per-fix key limit and the formats the export route accepts.
 - MCP: only reading and explaining a report is available as a tool
   (`explain_parity`). Approving a fix and signing are not.
-- Reversibility or fall-back runs. They are not part of this code line.
+- Reversibility and exit rehearsals. They are part of this code line and
+  described in [exit-readiness.md](exit-readiness.md). An executable rollback
+  or fall-back run is not.
 
 ## Verified against
 
 - `apps/api/src/routers/parity_router.py`
+- `apps/api/services/evidence_signing_keys.py`, `apps/api/services/signed_proof_pack.py`
 - `apps/api/services/parity_report.py`, `apps/api/services/parity_fixes.py`,
   `apps/api/services/parity_signoff.py`, `apps/api/services/parity_authority.py`,
   `apps/api/services/parity_state.py`, `apps/api/services/parity_stats.py`

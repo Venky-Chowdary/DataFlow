@@ -5124,9 +5124,14 @@ def is_bitstring_carrier(inferred: str | None) -> bool:
 
     Bare ``BIT`` / ``BIT(1)`` normalize to boolean and are excluded.
     """
+    text = strip_identity_qualifier(inferred).upper()
+    # BIT(1) is boolean polarity (PG boolean → MySQL BIT(1), SQL Server BIT).
+    # Only BIT(n>1) / BIT VARYING is a bit string. MySQL CREATE still spells
+    # BIT(1) in type_invent; that DDL must not send the column down this path.
+    if text and re.search(r"\bBIT\s*\(\s*1\s*\)", text):
+        return False
     if normalize_logical_type(inferred) != LOGICAL_BINARY:
         return False
-    text = strip_identity_qualifier(inferred).upper()
     if not text:
         return False
     return bool(re.search(r"\b(?:VARBIT|BIT\s+VARYING|BIT)\b", text))
@@ -6499,6 +6504,35 @@ def uuid_carrier_is_dialect_equivalent(
     return False
 
 
+#: Snowflake spells one text type many ways: ``STRING``, ``TEXT`` and a bare
+#: ``VARCHAR`` are all ``VARCHAR(16777216)`` (Snowflake "String & binary data
+#: types": the default and maximum length is 16,777,216).
+_SNOWFLAKE_TEXT_ALIASES: Final[frozenset[str]] = frozenset({
+    "STRING", "TEXT", "VARCHAR", "CHAR VARYING", "CHARACTER VARYING",
+    "NVARCHAR", "NVARCHAR2", "NCHAR VARYING",
+})
+
+
+def _legacy_rules() -> bool:
+    from services.decision_kernel.legacy_rules import legacy_rules_active
+
+    return legacy_rules_active()
+
+
+def snowflake_unbounded_text_alias(target_type: str | None, dest_db: str = "") -> bool:
+    """True when ``target_type`` is Snowflake's ``VARCHAR(16777216)`` under another name.
+
+    D72 ruling: the spellings must never grade differently. Each is a lossless
+    carrier for a canonical UUID (no truncation); none is the exact 36-char
+    contract (:func:`uuid_exact_wire_carrier`).
+    """
+    db = (dest_db or "").strip().lower()
+    if not (db == "snowflake" or db.startswith("snowflake")):
+        return False
+    token = re.sub(r"\s+", " ", strip_identity_qualifier(target_type or "").strip().upper())
+    return token in _SNOWFLAKE_TEXT_ALIASES or token == "VARCHAR(16777216)"
+
+
 def uuid_would_collapse(
     source_type: str, target_type: str, *, dest_db: str = ""
 ) -> bool:
@@ -6518,6 +6552,10 @@ def uuid_would_collapse(
     if uuid_capacity_string_carrier(target_type):
         return False
     if uuid_carrier_is_dialect_equivalent(source_type, target_type, dest_db=dest_db):
+        return False
+    if snowflake_unbounded_text_alias(target_type, dest_db) and not _legacy_rules():
+        # ``STRING`` is ``VARCHAR(16777216)``, a capacity carrier like the
+        # spelled-out width above: grade both spellings the same (D72).
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}

@@ -27,6 +27,7 @@ apps/api/data/*
 !apps/api/data/connector_catalog.json
 !apps/api/data/connector_form_schema.json
 !apps/api/data/connector_ci_evidence.json
+!apps/api/data/parity_ce_certification.json
 apps/api/localhost
 apps/api/exports/
 apps/api/test

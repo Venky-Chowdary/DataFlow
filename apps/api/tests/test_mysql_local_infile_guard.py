@@ -228,18 +228,34 @@ def test_execute_load_data_local_allows_only_its_own_path(tmp_path):
         pass
 
     seen: list[set] = []
+    statements: list[str] = []
 
     class _Cursor:
         connection = _Conn()
+        _row = None
 
         def execute(self, sql):
+            statements.append(sql)
+            if "LOAD DATA" not in sql:
+                # The MariaDB bulk-insert guard reads the session checks
+                # first (unknown server: it asks); both on, nothing to change.
+                assert sql == "SELECT @@SESSION.unique_checks, @@SESSION.foreign_key_checks", sql
+                self._row = (1, 1)
+                return
             assert f"LOCAL INFILE '{staged}'" in sql
-            seen.append(set(self.connection._df_local_infile_allowed))
+            seen.append(set(getattr(self.connection, "_df_local_infile_allowed", set())))
+
+        def fetchone(self):
+            return self._row
 
     cur = _Cursor()
     execute_load_data_local(cur, path=str(staged), table_q="`t`", columns=["a"])
+    # Only the LOAD DATA runs with the file allowed, and only that file.
     assert seen == [{os.fsencode(str(staged))}]
     assert cur.connection._df_local_infile_allowed == set()
+    # The guard ran, before the LOAD DATA.
+    load_at = next(i for i, sql in enumerate(statements) if "LOAD DATA" in sql)
+    assert any("@@SESSION.unique_checks" in sql for sql in statements[:load_at]), statements
 
 
 def test_legacy_load_local_file_hook_is_guarded(monkeypatch, secret_file):

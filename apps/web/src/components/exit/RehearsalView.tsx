@@ -774,7 +774,8 @@ export function RehearsalView({
           intro:
             "Each approval is written to the audit log with your role in this system's workspace, which must hold the "
             + "authority the role needs. Sign-off opens only for a proven rehearsal. When every required role has signed, "
-            + "the Exit Evidence Pack is signed with the workspace proof key and anchored.",
+            + "the Exit Evidence Pack is signed (HMAC-SHA256) with this workspace's evidence signing key, separate "
+            + "from login, and its digest is anchored where an anchor is configured.",
           packItems: [
             "The verdict and completeness of every declared table, with how each value check was measured",
             "The measured duration against the window",
@@ -783,7 +784,8 @@ export function RehearsalView({
           ],
           exportLabel: "Download report (.md)",
           exportTitle: "The rehearsal report as Markdown, as it reads now.",
-          signedNote: "The signed pack carries this signature and the Merkle root; Verify checks both and reads the anchor back.",
+          signedNote: "The signed pack carries this signature, its key id and the Merkle root. Anyone with access to "
+            + "this workspace can verify both and read the anchor back; only this deployment holds the key.",
           downloadTitle: "The signed Exit Evidence Pack (JSON). Verify checks its signature, Merkle root and anchor.",
           noRoles: "No roles are required to sign this rehearsal.",
           denied: "You don't have permission to sign this rehearsal.",

@@ -190,6 +190,13 @@ def _geography_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return None
 
 
+#: MySQL / MariaDB ``BIT(M)``: M is 1..64.
+MYSQL_BIT_MAX_WIDTH = 64
+#: Widest bit string carried as ``VARCHAR(n)`` digit text on MySQL before
+#: ``LONGTEXT`` (utf8mb4 ``VARCHAR(4096)`` is 16 KB of the 64 KB row limit).
+MYSQL_BITSTRING_VARCHAR_MAX = 4096
+
+
 def _bitstring_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Emit native BIT/VARBIT DDL — never invent BYTEA from a bitstring carrier.
 
@@ -205,10 +212,22 @@ def _bitstring_ddl_for_dest(db: str, inferred: str | None) -> str | None:
             return f"BIT VARYING({width})" if width else "BIT VARYING"
         return f"BIT({width})" if width else "BIT"
     if db in {"mysql", "mariadb"}:
-        # MySQL BIT(m) max 64; varying not supported — clamp honestly.
-        if width is None:
-            return "BIT(64)"
-        return f"BIT({min(width, 64)})"
+        # MySQL BIT(m) is a fixed-width number, at most 64 bits. Only a fixed
+        # source of that width fits it value for value. A varying bit string
+        # keeps its length ('1010' and '001010' differ) and an unbounded or
+        # wider one does not fit 64 bits: clamping to BIT(n) quarantined every
+        # value shorter than n (D320: varbit(16) -> BIT(16), 3 of 5 rows).
+        # Those land as the 0/1 digit text every other engine uses.
+        from services.decision_kernel.legacy_rules import legacy_rules_active
+
+        if legacy_rules_active():
+            # The previous release's clamp, only to match its stamps (review Q1).
+            return "BIT(64)" if width is None else f"BIT({min(width, MYSQL_BIT_MAX_WIDTH)})"
+        if width is not None and not varying and width <= MYSQL_BIT_MAX_WIDTH:
+            return f"BIT({width})"
+        if width is not None and width <= MYSQL_BITSTRING_VARCHAR_MAX:
+            return f"VARCHAR({width})"
+        return "LONGTEXT"
     # Engines without bitstring types — lossless text of 0/1 digits (not BYTEA).
     if width is not None:
         return f"VARCHAR({width})"

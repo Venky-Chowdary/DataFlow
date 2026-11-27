@@ -1321,6 +1321,23 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             except ImportError:
                 objectid_text_polarity = False
 
+        if uuid_exact_wire_domain and not uuid_string_create_new:
+            # DW-D72: VARCHAR(36)/CHAR(36) on an engine with no UUID type is the
+            # strictest carrier. It round-trips. Do not force a risk contract
+            # or drop G4. Bare VARCHAR/STRING still blocks below.
+            try:
+                from services.dest_dialect_facts import dest_has_no_uuid_type
+
+                _typeless_uuid = dest_has_no_uuid_type(_dest_db)
+            except Exception:
+                _typeless_uuid = False
+            if _typeless_uuid:
+                warnings.append(
+                    f"{label} — create-new stores UUID as {target.inferred_type} "
+                    "(exact 36-char wire; the engine has no UUID type)"
+                )
+                uuid_exact_wire_domain = False
+                uuid_string_create_new = False
         if uuid_string_create_new or uuid_exact_wire_domain:
             # Domain polarity needs Accept risk — never soft-pass create-new
             # UUID→STRING/CHAR(36) while Map CTA stays silent.

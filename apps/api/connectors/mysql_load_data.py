@@ -19,7 +19,10 @@ weaken conservation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+import weakref
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -161,14 +164,193 @@ def mysql_load_data_session_ready(cursor: Any, conn: Any) -> tuple[bool, str]:
     return mysql_local_infile_on(cursor)
 
 
-def apply_mysql_bulk_load_session(cursor: Any) -> None:
-    """Skip secondary unique/FK maintenance for the LOAD DATA statement.
+# MariaDB 10.6.0 added an InnoDB mode for inserts into an EMPTY table
+# (MDEV-515; MDEV-24621 in 10.7 extended it to sorted index builds): one undo
+# record and an exclusive table lock instead of per-row undo and locks. An
+# INSERT or LOAD DATA uses it only when unique_checks=0 AND
+# foreign_key_checks=0. Measured on MariaDB 10.11.14: a LOAD DATA in that mode
+# plus a concurrent SELECT COUNT(*) on the table hangs both statements for
+# good; KILL has no effect and only a server restart clears it. With either
+# check left on, the mode never starts and the same load + reader completes.
+# MySQL has no such mode (its exclusive-lock bulk load is the explicit,
+# HeatWave-only LOAD DATA ... ALGORITHM=BULK), so MySQL keeps checks off.
+MARIADB_EMPTY_TABLE_BULK_INSERT_SINCE = (10, 6)
 
-    InnoDB still enforces PRIMARY KEY. Callers restore immediately after
-    SHOW WARNINGS so a later MERGE / COUNT session is back to default checks.
+_VERSION_NUMBER = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+_OFF_VALUES = frozenset({"0", "off", "false"})
+
+
+def parse_mysql_family_version(version: Any) -> tuple[bool, tuple[int, int, int] | None]:
+    """``(is_mariadb, (major, minor, patch) or None)`` from a ``VERSION()`` string.
+
+    MariaDB before 11 reports ``5.5.5-10.11.14-MariaDB-...`` in the handshake
+    (a replication-compat prefix); the real version follows it.
     """
-    cursor.execute("SET SESSION unique_checks=0")
-    cursor.execute("SET SESSION foreign_key_checks=0")
+    if isinstance(version, (bytes, bytearray)):
+        version = bytes(version).decode("utf-8", "replace")
+    text = str(version or "").strip()
+    is_mariadb = "mariadb" in text.lower()
+    if is_mariadb and text.startswith("5.5.5-"):
+        text = text[len("5.5.5-"):]
+    match = _VERSION_NUMBER.search(text)
+    if not match:
+        return is_mariadb, None
+    return is_mariadb, (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def mariadb_empty_table_bulk_insert_possible(version: Any) -> bool:
+    """Whether this server can enter MariaDB's empty-table bulk insert mode.
+
+    True for MariaDB 10.6+ and for a MariaDB whose version number cannot be
+    read (fail safe). False for MySQL (Percona, Aurora) and MariaDB < 10.6.
+    """
+    is_mariadb, parsed = parse_mysql_family_version(version)
+    if not is_mariadb:
+        return False
+    if parsed is None:
+        return True
+    return parsed[:2] >= MARIADB_EMPTY_TABLE_BULK_INSERT_SINCE
+
+
+IDENTITY_SQL = "SELECT @@version AS v, @@version_comment AS c"
+_IDENTITY_ATTR = "_dataflow_server_identity"
+_IDENTITY_CACHE: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+_PROXY_MARKERS = ("proxysql", "maxscale")
+
+
+def _cached_identity(connection: Any) -> str | None:
+    cached = getattr(connection, _IDENTITY_ATTR, None)
+    if isinstance(cached, str):
+        return cached
+    try:
+        return _IDENTITY_CACHE.get(connection)
+    except TypeError:  # not weak-referenceable
+        return None
+
+
+def _remember_identity(connection: Any, text: str) -> None:
+    if connection is None:
+        return
+    try:
+        setattr(connection, _IDENTITY_ATTR, text)
+        return
+    except (AttributeError, TypeError):
+        pass
+    try:
+        _IDENTITY_CACHE[connection] = text
+    except TypeError:
+        pass
+
+
+def mysql_server_version_text(cursor: Any, conn: Any | None = None, *, query: bool = True) -> str:
+    """What the server says it is: ``@@version`` plus ``@@version_comment``.
+
+    Asked once per connection and cached on it. The driver's handshake version
+    is not trusted: MariaDB behind ProxySQL or MaxScale can announce an 8.0.x
+    MySQL version there (review of the MariaDB bulk-insert guard). A server
+    that cannot be asked, or whose answer names a proxy, returns ``""``
+    (unknown), which every caller treats as "keep the checks on".
+    ``query`` is kept for callers; the server is always asked once.
+    """
+    del query
+    connection = conn if conn is not None else getattr(cursor, "connection", None)
+    cached = _cached_identity(connection)
+    if cached is not None:
+        return cached
+    text = ""
+    try:
+        cursor.execute(IDENTITY_SQL)
+        row = cursor.fetchone()
+        if isinstance(row, Mapping):
+            # A DictCursor row: iterating it yields the column names (review N8).
+            row = (row.get("v"), row.get("c"))
+        text = " ".join(str(v).strip() for v in (row or ()) if v is not None and str(v).strip())
+    except Exception as exc:  # noqa: BLE001 - unknown version fails safe (checks on)
+        logger.debug("could not read the MySQL-family server version: %s", exc)
+    if any(marker in text.lower() for marker in _PROXY_MARKERS):
+        text = ""  # the proxy answered for itself: the backend is unknown
+    _remember_identity(connection, text)
+    return text
+
+
+def mysql_bulk_load_session_settings(version: str) -> dict[str, int]:
+    """``unique_checks`` / ``foreign_key_checks`` for one bulk LOAD DATA.
+
+    MySQL: both off (unchanged). MariaDB 10.6+, and a server whose version
+    could not be read: both on, so the empty-table bulk insert mode (and its
+    hang under a concurrent reader) cannot start. Measured on MariaDB 10.11
+    with the PG->MySQL COPY route: no throughput cost (docs/use).
+    """
+    if not str(version or "").strip() or mariadb_empty_table_bulk_insert_possible(version):
+        return {"unique_checks": 1, "foreign_key_checks": 1}
+    return {"unique_checks": 0, "foreign_key_checks": 0}
+
+
+def _set_session_check(name: str, value: int) -> str:
+    """``SET SESSION <check>=<0|1>`` for one of the two bulk-load checks (no free text)."""
+    if name not in ("unique_checks", "foreign_key_checks"):
+        raise ValueError(name)
+    return f"SET SESSION {name}={1 if int(value) else 0}"
+
+
+def apply_mysql_bulk_load_session(cursor: Any, conn: Any | None = None) -> dict[str, int]:
+    """Set the session checks for one bulk LOAD DATA; returns what was set.
+
+    MySQL: skip secondary unique/FK maintenance (InnoDB still enforces the
+    PRIMARY KEY). MariaDB 10.6+: both checks stay on, set explicitly so a
+    server whose global defaults are off cannot start the bulk insert mode.
+    Callers restore immediately after SHOW WARNINGS so a later MERGE / COUNT
+    session is back to default checks.
+    """
+    settings = mysql_bulk_load_session_settings(mysql_server_version_text(cursor, conn))
+    for name in ("unique_checks", "foreign_key_checks"):
+        cursor.execute(_set_session_check(name, settings[name]))
+    return settings
+
+
+def guard_mariadb_bulk_insert_session(cursor: Any, conn: Any | None = None) -> bool:
+    """On MariaDB 10.6+, never leave unique_checks and foreign_key_checks both off.
+
+    Both off (a caller's SET, or a server whose global defaults are off) is
+    what starts the empty-table bulk insert mode on the next INSERT or
+    LOAD DATA into an empty table. Turning ``unique_checks`` back on keeps
+    the mode off and only restores a default check. Returns whether the
+    session was changed. An unknown server (no answer, or a proxy answering
+    for itself) is guarded too: setting ``unique_checks=1`` is harmless on MySQL.
+    """
+    version = mysql_server_version_text(cursor, conn)
+    if version and not mariadb_empty_table_bulk_insert_possible(version):
+        return False  # a server known not to be MariaDB 10.6+
+    cursor.execute("SELECT @@SESSION.unique_checks, @@SESSION.foreign_key_checks")
+    row = cursor.fetchone()
+    if not row or len(row) < 2:
+        return False
+    if str(row[0]).strip().lower() not in _OFF_VALUES or str(row[1]).strip().lower() not in _OFF_VALUES:
+        return False
+    cursor.execute("SET SESSION unique_checks=1")
+    logger.warning(
+        "MariaDB session had unique_checks=0 and foreign_key_checks=0; set "
+        "unique_checks=1 so an insert into an empty table cannot start the "
+        "bulk insert mode that hangs under concurrent reads"
+    )
+    return True
+
+
+def guard_mariadb_bulk_insert_pool_session(dbapi_conn: Any) -> None:
+    """Pooled MariaDB 10.6+ sessions never start with unique+FK checks both off.
+
+    Both off is what puts an INSERT into an empty table in InnoDB's bulk
+    insert mode, which hangs the server under a concurrent reader (see
+    connectors.mysql_load_data). Best effort: no SQL on non-MariaDB servers.
+    """
+    try:
+        cur = dbapi_conn.cursor()
+        try:
+            guard_mariadb_bulk_insert_session(cur, dbapi_conn)
+        finally:
+            cur.close()
+    except Exception as exc:  # noqa: BLE001 - a guard must not break the pool
+        logger.debug("MariaDB bulk insert pool guard not applied: %s", exc)
 
 
 def restore_mysql_bulk_load_session(cursor: Any) -> None:
@@ -308,6 +490,9 @@ def execute_load_data_local(
         line_terminator=line_terminator,
     )
     connection = conn if conn is not None else getattr(cursor, "connection", None)
+    # Every LOAD DATA route ends here: whatever the session inherited, a
+    # MariaDB 10.6+ load never runs with both checks off (bulk insert mode).
+    guard_mariadb_bulk_insert_session(cursor, connection)
     with local_infile_allowed(connection, path):
         cursor.execute(sql)
 

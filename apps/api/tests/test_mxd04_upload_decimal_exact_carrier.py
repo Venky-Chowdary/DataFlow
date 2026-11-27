@@ -55,3 +55,10 @@ def test_upload_payments_overwrite_keeps_amount_digits_exact(mcp_client):
     assert cols["AMT"] == "TEXT"
     assert amounts[:2] == ["1500.00", "275.50"]  # scale kept, byte-for-byte the file
     assert round(total, 2) == 146786.24  # QA's own sum still computes
+
+
+# These flows confirm through MCP confirm_action: the workspace opts in to the
+# agent confirm policy (services.mcp_confirm_policy; default is interactive).
+import pytest  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("mcp_confirm_agent_mode")

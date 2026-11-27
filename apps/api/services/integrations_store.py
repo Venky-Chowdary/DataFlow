@@ -111,7 +111,7 @@ def _empty_store() -> dict[str, Any]:
         "sso": _default_sso(),
         "ai_providers": _default_ai(),
         "pilot": _default_pilot(),
-        "mcp_policy": {"enabled": True, "allowed_tools": None},
+        "mcp_policy": {"enabled": True, "allowed_tools": None, "confirm": None},
         "api_keys": [],
     }
 
@@ -127,15 +127,38 @@ def _read_file() -> dict[str, Any] | None:
 
 
 def _load_raw() -> dict[str, Any]:
-    from services.integrations_persistence import load_sections, save_sections
+    return _load_raw_state()[0]
+
+
+def _load_raw_state() -> tuple[dict[str, Any], str]:
+    """The settings as served, and how the database read went.
+
+    - ``ok`` with the one-time file heal done: the database is the only
+      source; this node's file is ignored, so a section deleted (or never
+      written) in the database is not served from a stale copy (review 6).
+    - ``ok`` before the heal is done, or ``absent``: the file's missing paths
+      are copied up, then served database-first over the file.
+    - ``nodb``: the file is the store.
+    - ``error`` (configured database unreadable): served from this node's
+      file as a read-only fallback, never healed from; policy writes refuse
+      (503) on this state.
+    """
+    from services.integrations_persistence import HEAL_MARKER, read_document, save_sections
 
     file_raw = _read_file()
-    durable = load_sections()
-    if durable is None and file_raw is not None:
-        # Heal: a settings file written before the database held them (or while
-        # it was down) is copied up once, so the next restart keeps it.
-        save_sections(file_raw)
-    raw = {**(file_raw or {}), **(durable or {})}
+    state, durable = read_document()
+    if state == "ok" and (durable or {}).get(HEAL_MARKER):
+        return _normalize_raw({k: v for k, v in (durable or {}).items() if k != HEAL_MARKER}), state
+    if state in ("absent", "ok") and file_raw is not None:
+        # Heal: what this node's file holds and the database lacks is copied
+        # up, missing paths only (never over a database value). Never on a
+        # failed read: that is not an empty database.
+        save_sections(file_raw, durable if state == "ok" else None)
+    durable = {k: v for k, v in (durable or {}).items() if k != HEAL_MARKER}
+    return _normalize_raw({**(file_raw or {}), **durable}), state
+
+
+def _normalize_raw(raw: dict[str, Any]) -> dict[str, Any]:
     if not raw:
         return _empty_store()
 
@@ -165,22 +188,113 @@ def _load_raw() -> dict[str, Any]:
     allowed = policy.get("allowed_tools")
     if allowed is not None and not isinstance(allowed, list):
         allowed = None
+    from services.mcp_confirm_policy import normalize_confirm_policy
+
     return {
         "sso": sso,
         "ai_providers": ai,
         "pilot": pilot,
-        "mcp_policy": {"enabled": bool(policy.get("enabled", True)), "allowed_tools": allowed},
+        "mcp_policy": {
+            "enabled": bool(policy.get("enabled", True)),
+            "allowed_tools": allowed,
+            "confirm": normalize_confirm_policy(policy.get("confirm")),
+            "rev": int(policy.get("rev") or 0),
+        },
         "api_keys": api_keys,
     }
 
 
-def _save(data: dict[str, Any]) -> None:
-    from services.integrations_persistence import save_sections
+_FILE_LOCK = threading.RLock()
+_FILE_LOCK_DEPTH = threading.local()
 
+
+class _file_lock:
+    """This process's writers and (``flock``) other processes on the same disk."""
+
+    def __enter__(self) -> None:
+        _FILE_LOCK.acquire()
+        depth = getattr(_FILE_LOCK_DEPTH, "n", 0)
+        _FILE_LOCK_DEPTH.n = depth + 1
+        if depth == 0:
+            self._fh = None
+            try:
+                import fcntl
+
+                STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                self._fh = open(STORE_PATH.with_suffix(".lock"), "a+", encoding="utf-8")  # noqa: SIM115
+                fcntl.flock(self._fh, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                logger.debug("integrations file lock is process-local", exc_info=True)
+
+    def __exit__(self, *exc: Any) -> None:
+        _FILE_LOCK_DEPTH.n -= 1
+        if _FILE_LOCK_DEPTH.n == 0 and getattr(self, "_fh", None) is not None:
+            self._fh.close()  # releases the flock
+        _FILE_LOCK.release()
+
+
+def _write_file_section(path: str, value: Any, updated_at: str) -> None:
+    """Merge one section into the local file under the file lock."""
+    _write_file_paths({path: value}, updated_at)
+
+
+def _write_file_paths(paths: dict[str, Any], updated_at: str) -> None:
+    """Merge these dotted paths into the local file under the file lock."""
+    with _file_lock():
+        current = _read_file() or {}
+        for path, value in paths.items():
+            node = current
+            *parents, leaf = path.split(".")
+            for key in parents:
+                if not isinstance(node.get(key), dict):
+                    node[key] = {}
+                node = node[key]
+            node[leaf] = value
+        current["updated_at"] = updated_at
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(current, indent=2, default=json_default), encoding="utf-8")
+        tmp.replace(STORE_PATH)
+
+
+def _delete_paths(paths: list[str]) -> None:
+    """Remove these dotted paths: ``$unset`` in the database, popped from the file."""
+    from services.integrations_persistence import unset_paths
+
+    _load_raw_state()  # a pending one-time heal runs first, never after the delete
+    now = _now()
+    unset_paths(paths, now)
+    with _file_lock():
+        current = _read_file() or {}
+        for path in paths:
+            node: Any = current
+            *parents, leaf = path.split(".")
+            for key in parents:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict):
+                node.pop(leaf, None)
+        current["updated_at"] = now
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(current, indent=2, default=json_default), encoding="utf-8")
+        tmp.replace(STORE_PATH)
+
+
+def _save_section(path: str, value: Any) -> None:
+    """Persist only ``path`` (e.g. ``pilot.engine``): never another writer's section."""
+    _save_paths({path: value})
+
+
+def _save_paths(paths: dict[str, Any]) -> None:
+    """Persist only these dotted paths, in one database update and one file merge."""
+    from services.integrations_persistence import save_paths
+
+    paths = json.loads(json.dumps(paths, default=json_default))
+    _load_raw_state()  # heals a database that has no document yet, before the upsert
+    now = _now()
     # Database first: it is what survives a restart; the file is a local cache.
-    save_sections(json.loads(json.dumps(data, default=json_default)))
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
+    save_paths(paths, now)
+    _write_file_paths(paths, now)
 
 
 def _mask_secret(value: str) -> str:
@@ -235,7 +349,13 @@ def apply_integrations_to_env() -> None:
 
 
 def get_mcp_policy() -> dict[str, Any]:
-    """Return the organization-level MCP execution policy."""
+    """Return the organization-level MCP execution policy.
+
+    ``confirm`` is who may spend a staged approval, per workspace
+    (:mod:`services.mcp_confirm_policy`; default ``interactive``).
+    """
+    from services.mcp_confirm_policy import normalize_confirm_policy
+
     policy = _load_raw()["mcp_policy"]
     allowed = policy.get("allowed_tools")
     return {
@@ -245,13 +365,37 @@ def get_mcp_policy() -> dict[str, Any]:
             if isinstance(allowed, list)
             else None
         ),
+        "confirm": normalize_confirm_policy(policy.get("confirm")),
     }
 
 
-def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
-    """Persist MCP policy, rejecting unknown registered tools."""
+_MCP_POLICY_LOCK = threading.Lock()
+
+
+def set_mcp_policy(policy: dict[str, Any], *, confirm_merge: Any = None) -> dict[str, Any]:
+    """Persist MCP policy, rejecting unknown registered tools.
+
+    ``confirm`` omitted (``None``) keeps the stored confirm policy;
+    ``confirm_merge(stored_confirm) -> confirm`` computes it from the stored
+    one. The read-merge-write is atomic (review N7): one writer per process
+    (a lock), and a compare-and-swap on ``mcp_policy.rev`` in the database so
+    two replicas cannot lose each other's update (retried on conflict).
+    """
+    from services.control_plane_store import ControlPlaneUnavailable
+    from services.integrations_persistence import save_mcp_policy_if_revision
+    from services.mcp_confirm_policy import normalize_confirm_policy, normalize_mode
     from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 
+    confirm = policy.get("confirm")
+    if confirm is not None and confirm_merge is None:
+        if not isinstance(confirm, dict):
+            raise ValueError("confirm must be an object: {default, workspaces}")
+        normalize_mode(confirm.get("default") or "interactive")
+        if not isinstance(confirm.get("workspaces") or {}, dict):
+            raise ValueError("confirm.workspaces must be an object of workspace id -> mode")
+        for mode in dict(confirm.get("workspaces") or {}).values():
+            normalize_mode(mode)
+        confirm = normalize_confirm_policy(confirm)
     enabled = bool(policy.get("enabled", True))
     allowed = policy.get("allowed_tools")
     if allowed is not None:
@@ -261,11 +405,30 @@ def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"Unknown MCP tools: {', '.join(unknown)}")
         allowed = sorted(set(allowed))
-    data = _load_raw()
-    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed}
-    data["updated_at"] = _now()
-    _save(data)
-    return get_mcp_policy()
+    unavailable = "the settings database is unavailable; the MCP policy was not changed"
+    with _MCP_POLICY_LOCK, _file_lock():
+        for _attempt in range(5):
+            data, state = _load_raw_state()
+            if state == "error":
+                raise ControlPlaneUnavailable(unavailable)
+            stored = data["mcp_policy"]
+            new_confirm = (
+                confirm_merge(stored.get("confirm")) if confirm_merge is not None
+                else confirm if confirm is not None else stored.get("confirm")
+            )
+            rev = int(stored.get("rev") or 0)
+            new_policy = json.loads(json.dumps({
+                "enabled": enabled, "allowed_tools": allowed, "confirm": new_confirm, "rev": rev + 1,
+            }, default=json_default))
+            now = _now()
+            saved = save_mcp_policy_if_revision(new_policy, rev, now)
+            if saved == "conflict":
+                continue  # another replica wrote first: merge onto its version
+            if saved == "unavailable":
+                raise ControlPlaneUnavailable(unavailable)
+            _write_file_section("mcp_policy", new_policy, now)
+            return get_mcp_policy()
+    raise RuntimeError("the MCP policy changed concurrently five times; try again")
 
 
 def get_sso_configs() -> dict[str, dict[str, Any]]:
@@ -378,9 +541,7 @@ def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
             missing=missing,
         )
 
-    data["sso"][sso_type] = cfg
-    data["updated_at"] = _now()
-    _save(data)
+    _save_section(f"sso.{sso_type}", cfg)
     return get_sso_configs()[sso_type]
 
 
@@ -517,19 +678,21 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
 def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     if provider not in _default_ai():
         raise ValueError(f"Unknown AI provider: {provider}")
-    data = _load_raw()
-    cfg = data["ai_providers"][provider]
-    existing_key = cfg.get("api_key", "")
-
-    for key, value in patch.items():
-        if key == "api_key":
-            cfg["api_key"] = _encrypt_field(str(value or ""), existing_key)
-        elif key in cfg or key == "enabled":
-            cfg[key] = value
-
-    data["ai_providers"][provider] = cfg
-    data["updated_at"] = _now()
-    _save(data)
+    with _file_lock():
+        # Field by field under the section lock: a concurrent change to another
+        # field of this provider (or to its key) is not put back (review round 4).
+        cfg = _load_raw()["ai_providers"][provider]
+        existing_key = cfg.get("api_key", "")
+        changed: dict[str, Any] = {}
+        for key, value in patch.items():
+            if key == "api_key":
+                new_key = _encrypt_field(str(value or ""), existing_key)
+                if new_key != existing_key:  # the masked value keeps the stored key
+                    changed[f"ai_providers.{provider}.api_key"] = new_key
+            elif key in cfg or key == "enabled":
+                changed[f"ai_providers.{provider}.{key}"] = value
+        if changed:
+            _save_paths(changed)
     apply_integrations_to_env()
     _OLLAMA_PROBE.clear()
     return get_ai_provider_configs()[provider]
@@ -541,10 +704,7 @@ def delete_ai_provider_key(provider: str) -> dict[str, Any]:
 
     if provider not in _CLOUD_PROVIDERS:
         raise ValueError(f"{provider} has no cloud key to remove")
-    data = _load_raw()
-    data["ai_providers"][provider]["api_key"] = ""
-    data["updated_at"] = _now()
-    _save(data)
+    _delete_paths([f"ai_providers.{provider}.api_key"])
     env_key = _KEY_ENV[provider]
     if env_key in _HYDRATED_ENV:
         os.environ.pop(env_key, None)
@@ -577,10 +737,7 @@ def set_pilot_engine_preference(engine: str) -> str:
         raise ValueError(
             f"Unknown Pilot engine: {engine!r} (expected one of {', '.join(_PILOT_ENGINES)})"
         )
-    data = _load_raw()
-    data["pilot"]["engine"] = normalized
-    data["updated_at"] = _now()
-    _save(data)
+    _save_section("pilot.engine", normalized)
     return normalized
 
 
@@ -772,9 +929,7 @@ def _file_key_records() -> list[dict[str, Any]]:
 
 
 def _save_file_keys(keys: list[dict[str, Any]]) -> None:
-    data = _load_raw()
-    data["api_keys"] = keys
-    _save(data)
+    _save_section("api_keys", keys)
 
 
 def _record_for_store(item: dict[str, Any]) -> dict[str, Any]:
@@ -829,19 +984,28 @@ def load_api_key_records() -> list[dict[str, Any]]:
         elif _is_revoked(current) and not _is_revoked(stored):
             file_rewrites.append(current)
     if file_rewrites:
-        merged = {str(item["id"]): item for item in file_keys}
-        for item in file_rewrites:
-            merged[str(item["id"])] = _record_for_store(item)
-        _save_file_keys(list(merged.values()))
+        _merge_file_keys(file_rewrites)
     return list(by_id.values())
+
+
+def _merge_file_keys(records: list[dict[str, Any]]) -> None:
+    """Replace these records in the file's key list, re-read under the file lock.
+
+    A create and a revoke each used to write back the list they had read, so
+    the later one put the other's version back (a revoked key resurrected).
+    """
+    with _file_lock():
+        merged = {str(item["id"]): item for item in _file_key_records()}
+        for record in records:
+            stored = _record_for_store(record)
+            merged[str(stored["id"])] = stored
+        _save_file_keys(list(merged.values()))
 
 
 def _upsert_api_key_record(record: dict[str, Any]) -> None:
     stored = _record_for_store(record)
     key_id = str(stored["id"])
-    file_keys = [item for item in _file_key_records() if str(item.get("id")) != key_id]
-    file_keys.append(stored)
-    _save_file_keys(file_keys)
+    _merge_file_keys([stored])
     coll = _keys_collection()
     if coll is None:
         return
@@ -852,10 +1016,7 @@ def _upsert_api_key_record(record: dict[str, Any]) -> None:
 
 
 def _save_file_api_key_record(record: dict[str, Any]) -> None:
-    stored = _record_for_store(record)
-    file_keys = [item for item in _file_key_records() if str(item.get("id")) != str(stored["id"])]
-    file_keys.append(stored)
-    _save_file_keys(file_keys)
+    _merge_file_keys([record])
 
 
 class ApiKeyNotFound(LookupError):

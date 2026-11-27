@@ -973,14 +973,43 @@ def _stream_insert_pk_staging(
     return inserted
 
 
+def _forces_primary_key(conn: Any) -> bool:
+    """Whether this MySQL-family connection's CREATE TABLE demands a PRIMARY KEY."""
+    from services.dest_require_primary_key import (
+        PrimaryKeyRequirementUnreadable,
+        server_forces_primary_key_on,
+    )
+
+    try:
+        cursor = conn.connection.cursor()
+    except Exception as exc:  # noqa: BLE001 - re-raised as unreadable
+        # Not "not forced" (review 3 item 7): whether this server forces a
+        # PRIMARY KEY could not be read, like a probe that failed.
+        raise PrimaryKeyRequirementUnreadable(
+            "could not open a cursor to read whether the destination forces a "
+            f"PRIMARY KEY ({type(exc).__name__})"
+        ) from exc
+    try:
+        return server_forces_primary_key_on(cursor)[0]
+    finally:
+        try:
+            cursor.close()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug("cursor close failed: %s", exc)
+
+
 def _create_pk_staging(
     conn: Any,
     stg_qualified: str,
     dest_qualified: str,
     pk_quoted: str,
     dialect_name: str,
-) -> None:
-    """Empty staging table with dest PK column types. Never invent TEXT vs INTEGER."""
+) -> bool:
+    """Empty staging table with dest PK column types. Never invent TEXT vs INTEGER.
+
+    Returns True when the staging table declares a PRIMARY KEY (a MySQL-family
+    server that forces one).
+    """
     import sqlalchemy as sa
     from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -990,12 +1019,22 @@ def _create_pk_staging(
             f"SELECT {pk_quoted} INTO {stg_qualified} "  # nosec B608
             f"FROM {dest_qualified} WHERE 1=0"
         )
+    elif str(dialect_name or "").lower() in {"mysql", "mariadb"} and _forces_primary_key(conn):
+        # Keyed: a server that forces a PRIMARY KEY (sql_require_primary_key /
+        # innodb_force_primary_key) refuses a keyless CREATE ... SELECT (QA
+        # batch 1). The staged census holds each complete key once, and the
+        # destination table it is copied from enforces the same key.
+        sql = (
+            f"CREATE TABLE {stg_qualified} (PRIMARY KEY ({pk_quoted})) AS "  # nosec B608
+            f"SELECT {pk_quoted} FROM {dest_qualified} WHERE 1=0"
+        )
     else:
         sql = (
             f"CREATE TABLE {stg_qualified} AS "  # nosec B608
             f"SELECT {pk_quoted} FROM {dest_qualified} WHERE 1=0"
         )
     conn.execute(sa.text(sql))
+    return "PRIMARY KEY" in sql
 
 
 #: Prefix of the internal key-staging table a mirror run needs. Operator-facing
@@ -1144,8 +1183,16 @@ def apply_inferred_soft_deletes(
             # connection it is given: never the write connection (R11).
             with engine.connect() as reap_conn:
                 _reap_orphan_staging(reap_conn, schema_name or "", dialect_name)
-            _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
+            keyed_staging = _create_pk_staging(
+                conn, stg_qualified, qualified, pk_quoted, dialect_name
+            )
             conn.commit()
+            if keyed_staging:
+                # A repeated source key is legal in the census (EXISTS does not
+                # care); on a keyed staging table it must not be an error.
+                # Only a duplicate key is absorbed — never a conversion error.
+                first = quote_stored_identifier(engine_dialect, pk_physical[0])
+                insert_sql = f"{insert_sql} ON DUPLICATE KEY UPDATE {first} = {first}"
             source_key_rows = _stream_insert_pk_staging(
                 conn,
                 sa.text(insert_sql),

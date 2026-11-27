@@ -9,6 +9,7 @@ the write rather than passing it through unproven.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,13 @@ def _enforce_ddl_identity_once(
     approved_ddl_identity_hash: str = "",
     skip_preflight: bool = False,
     preflight_mappings: list | None = None,
+    legacy_ok: bool = False,
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
+
+    ``legacy_ok``: a Decision Artifact stamp is enforced too (it alone tells a
+    previous-release stamp from a current one), so a previous-release DDL
+    fingerprint may match under that release's type rules (review 2 item 5).
 
     Returns an error message when identity fails.
 
@@ -112,6 +118,7 @@ def _enforce_ddl_identity_once(
             checked,
             dest_db=dest_db or "",
             approved_columns=approved_columns,
+            allow_previous_release=bool(legacy_ok),
         )
     except DdlIdentityError as exc:
         return str(exc)
@@ -119,6 +126,14 @@ def _enforce_ddl_identity_once(
         logger.error("DDL identity check crashed: %s", exc, exc_info=exc)
         return f"DDL identity check failed closed: {exc}"
     return None
+
+
+def _decision_stamped(request) -> bool:
+    """The request carries a Decision Artifact stamp (hash or payload) to enforce."""
+    return bool(
+        str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
+        or _request_decision_artifact_payload(request)
+    )
 
 
 def _request_decision_artifact_payload(request) -> dict | None:
@@ -166,6 +181,22 @@ def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
     return {"source_kind": kind, "source_format": fmt}
 
 
+def destination_created_by_plan(request: Any, table_exists: bool | None) -> bool:
+    """True when this plan's CREATE left the live table (ownership comment).
+
+    A pre-existing table does not carry the Datawrap comment, so a retry
+    into someone else's table is not this exception (DW-D407).
+    """
+    if table_exists is not True:
+        return False
+    try:
+        from src.transfer.engine_schema_propagation import _destination_is_managed
+
+        return bool(_destination_is_managed(request))
+    except Exception:
+        return False
+
+
 def _enforce_decision_artifact_once(
     pf: dict | None,
     mappings: list,
@@ -184,6 +215,10 @@ def _enforce_decision_artifact_once(
     source_kind: str = "",
     source_format: str = "",
     source_connector_id: str = "",
+    approved_ddl_identity_hash: str = "",
+    schema_policy: str = "",
+    plan_created_destination: bool = False,
+    request: Any = None,
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -193,8 +228,26 @@ def _enforce_decision_artifact_once(
     """
     from services.decision_kernel import enforce_decision_artifact
 
+    if request is not None:
+        if not approved_ddl_identity_hash:
+            approved_ddl_identity_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+        if not schema_policy:
+            schema_policy = str(getattr(request, "schema_policy", "") or "")
     approved = (approved_decision_artifact_hash or "").strip()
     payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
+    if (
+        request is not None
+        and not plan_created_destination
+        and payload is not None
+        and not str(payload.get("dest_fingerprint") or "")
+    ):
+        # DW-D407 is about a create-new plan only: probe ownership (a
+        # destination round trip) just for that, not on every Execute.
+        plan_created_destination = destination_created_by_plan(
+            request, destination_table_exists
+        )
     if pf and not payload and not approved:
         proof_bundle = pf.get("proof_bundle") or {}
         stamped = proof_bundle.get("decision_artifact")
@@ -294,8 +347,42 @@ def _enforce_decision_artifact_once(
         destination_table_exists=destination_table_exists,
         dest_column_names=dest_names,
         source_column_names=source_names,
+        approved_ddl_identity_hash=approved_ddl_identity_hash,
+        schema_policy=schema_policy,
+        live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
+        plan_created_destination=bool(plan_created_destination),
+        # The writer adds _dw_row_id only on this run's DDL approval.
+        surrogate_approved=_surrogate_on_own_table(request, destination_column_types),
+        stamp_key_record=(
+            (lambda stamp: _stamp_key_record(request, stamp)) if request is not None else None
+        ),
     )
     return err, (art.to_dict() if art is not None else None)
+
+
+def _stamp_key_record(request: Any, stamp: str) -> frozenset[str] | None:
+    from services.stamp_key_records import lookup_for_request
+
+    return lookup_for_request(request, stamp)
+
+
+def _surrogate_on_own_table(request: Any, live_types: dict | None) -> bool:
+    """Whether a live ``_dw_row_id`` is Datawrap's approved surrogate (review 3 item 7).
+
+    The writer adds it only at CREATE, after the operator approved the
+    disclosed DDL, on a table it marks as its own; so it is the surrogate on
+    a Datawrap-created table, never because this run acknowledged some other
+    DDL change.
+    """
+    from services.dest_require_primary_key import SURROGATE_KEY_COLUMN
+
+    if request is None or not isinstance(live_types, dict):
+        return False
+    if not any(str(k).strip().lower() == SURROGATE_KEY_COLUMN for k in live_types):
+        return False
+    from src.transfer.engine_schema_propagation import _destination_is_managed
+
+    return _destination_is_managed(request)
 
 
 def reuse_approved_validate_population_fit(request) -> bool:

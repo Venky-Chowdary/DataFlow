@@ -174,16 +174,26 @@ def test_policy_put_rejects_unknown_tools_and_audits_actor_and_values(policy_cli
         if event.get("action") == "mcp.policy.updated"
     )
     assert event["actor"] == "admin@example.test"
-    assert event["details"]["old"] == {"enabled": True, "allowed_tools": None}
+    assert event["details"]["old"] == {
+        "enabled": True,
+        "allowed_tools": None,
+        "confirm": {"default": "interactive", "workspaces": {}},
+    }
     assert event["details"]["new"] == updated.json()
 
 
 def test_policy_persists_after_store_reload(policy_client):
     store = policy_client["integrations_store"]
-    expected = {"enabled": True, "allowed_tools": ["list_connectors", "list_jobs"]}
+    expected = {
+        "enabled": True,
+        "allowed_tools": ["list_connectors", "list_jobs"],
+        "confirm": {"default": "interactive", "workspaces": {}},
+    }
 
     assert store.set_mcp_policy(expected) == expected
-    assert store._load_raw()["mcp_policy"] == expected
+    stored = dict(store._load_raw()["mcp_policy"])
+    assert stored.pop("rev") >= 1  # the compare-and-swap revision (review N7)
+    assert stored == expected
     assert store.get_mcp_policy() == expected
 
 

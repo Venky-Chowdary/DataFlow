@@ -47,6 +47,10 @@ class ToolCallRequest(BaseModel):
 class McpPolicyRequest(BaseModel):
     enabled: bool = True
     allowed_tools: list[str] | None = None
+    # Who may confirm a staged approval, per workspace:
+    # {"default": "interactive"|"four_eyes"|"agent", "workspaces": {id: mode}}.
+    # Omitted keeps the stored policy.
+    confirm: dict | None = None
 
 
 def _mcp_authenticated(http_request: Request) -> bool:
@@ -242,10 +246,52 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
 
     _require_mcp_tool_auth(http_request)
     old = get_mcp_policy()
+    if request.confirm is not None:
+        from services.mcp_confirm_policy import credential_kind
+        from src.services.auth_service import auth_required
+
+        # The confirm policy is the human-in-the-loop switch: an API key or
+        # MCP token (the agent it governs) must not be able to turn it off.
+        if auth_required() and credential_kind(http_request) not in {"cookie_session", "session_token"}:
+            raise HTTPException(
+                status_code=403,
+                detail="The confirm policy can only be changed from an interactive sign-in session.",
+            )
+    payload = request.model_dump()
+    confirm_merge = None
+    if request.confirm is not None:
+        from services.mcp_confirm_policy import merge_confirm_change, own_admin_workspace
+        from services.rbac import holds_platform_admin_role
+        from services.effective_role import workspace_id_from_request_headers
+        from src.services.auth_service import auth_required
+
+        user = getattr(http_request.state, "user", None)
+        platform_admin = not auth_required() or holds_platform_admin_role(user)
+        caller_ws = own_admin_workspace(user, workspace_id_from_request_headers(http_request.headers) or "")
+
+        def confirm_merge(stored):  # noqa: ANN001 - runs inside the store's atomic update
+            return merge_confirm_change(
+                stored, request.confirm, platform_admin=platform_admin, caller_workspace=caller_ws,
+            )
+
+        payload["confirm"] = None
+    from services.control_plane_store import ControlPlaneUnavailable
+
     try:
-        new = set_mcp_policy(request.model_dump())
+        new = set_mcp_policy(payload, confirm_merge=confirm_merge)
+    except ControlPlaneUnavailable as exc:  # a RuntimeError: before the 409 below
+        from services.safe_errors import safe_http_exception
+
+        raise safe_http_exception(
+            exc, event="mcp.policy.store_unavailable", status_code=503, logger=logger,
+            public_message="The settings store is unavailable, so the MCP policy was not changed. Try again.",
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     append_audit_event(
         action="mcp.policy.updated",
         resource="/api/v1/mcp/policy",

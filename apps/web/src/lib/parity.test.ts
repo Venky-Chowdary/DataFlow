@@ -91,7 +91,7 @@ describe("verdicts, statuses and causes", () => {
     // A clean sample is not a match of every row (review finding 9).
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
     assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
-    assert.equal(heatCellLabel("sampled"), "No difference in sample");
+    assert.equal(heatCellLabel("sampled"), "No difference found, not proven (sample or read-back)");
     // A re-sync runs as its own job (review finding 10): re-read while it applies, never forever.
     const applyingReport = { fixes: [{ ...unexplainedReport().fixes[0], status: "applying" as const }] };
     assert.equal(shouldPollApplying(applyingReport, 0), true);
@@ -450,5 +450,34 @@ describe("a report where nothing was compared (trust-report polish)", () => {
     const text = noDifferencesText(failedRunReport());
     assert.doesNotMatch(text, /were found|could not cover/);
     assert.match(text, /Nothing was compared/);
+  });
+});
+
+describe("a mirror / SCD2 read-back (trust audit P0-3)", () => {
+  const readback = () => {
+    const base = provenReport({ verdict: "no_difference_found" });
+    return {
+      ...base,
+      confidence: { ...base.confidence, method: "readback" as const, upper_bound_rate: null, bound_valid: true },
+    };
+  };
+
+  it("is never drawn as a sampled bound or a proven match", () => {
+    const pill = verdictPresentation(readback());
+    assert.equal(pill.label, "No difference in read-back (not proven)");
+    assert.equal(pill.tone, "muted");
+    assert.doesNotMatch(pill.label, /sample/i);
+    const text = noDifferencesText(readback());
+    assert.match(text, /re-read after the write/);
+    assert.match(text, /not proof/);
+    assert.doesNotMatch(text, /bound above/);
+  });
+
+  it("labels the check and the table honestly", () => {
+    assert.equal(checkLabel("readback"), "Read-back digest (not proof)");
+    assert.deepEqual(
+      tableStatusPresentation({ status: "match", unexplained: 0, check: "readback" }),
+      { label: "No difference in read-back", tone: "muted" },
+    );
   });
 });

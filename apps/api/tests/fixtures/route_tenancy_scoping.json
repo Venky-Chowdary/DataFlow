@@ -316,6 +316,10 @@
       "scope": "workspace",
       "resource": "schedule"
     },
+    "POST /api/v1/schedules/{schedule_id}/plan-mappings": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
     "GET /api/v1/schedules/{schedule_id}/export": {
       "scope": "workspace",
       "resource": "schedule"

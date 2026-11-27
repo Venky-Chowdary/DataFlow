@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.row_conservation import account_job
-from services.signed_proof_pack import export_proof_pack_for_job, sign_body, verify_body
+from services.signed_proof_pack import export_proof_pack_for_job, sign_body
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +399,61 @@ def _identity_blockers(physical: dict[str, Any]) -> list[str]:
     ]
 
 
+#: Why each assurance level short of full_checksum is not a proof, in plain words (D381).
+_ASSURANCE_WHY = {
+    "row_count": (
+        "only row counts were compared. This run added to (or upserted into) a table "
+        "that already held rows, so a whole-table checksum cannot be compared with the "
+        "source, and the values of every row were not compared."
+    ),
+    "sample": "only a sample of rows was compared value by value, not every row.",
+    "writer_ack": (
+        "the destination was not read back independently; the figures are the "
+        "writer's own acknowledgement of what it wrote."
+    ),
+    "per_stream_checksum": "the checksum covers only the last table of this multi-table job.",
+    "cdc_source_image_values": (
+        "this CDC run proves each source row's values are present in the destination, "
+        "but delivery is at-least-once and extra destination rows are allowed, so it "
+        "is not a whole-table proof."
+    ),
+    "pre_write_only": "only the pre-write simulation ran; the post-write comparison did not.",
+    "none": "no post-write comparison of the whole table is on record.",
+}
+
+
+def _plain_assurance_why(claim_level: str, assurance: dict[str, Any], job: dict[str, Any] | None) -> str:
+    """One plain answer to "why not proven?" for a run with no open findings."""
+    reasons = [str(r) for r in assurance.get("not_proven_reasons") or [] if str(r).strip()]
+    if not reasons and claim_level == "none":
+        from services.signed_proof_pack import full_checksum_missing_reasons
+
+        reasons = full_checksum_missing_reasons(_dict((job or {}).get("reconciliation")))
+    if reasons:
+        return " ".join(reasons)
+    if claim_level in _ASSURANCE_WHY:
+        return _ASSURANCE_WHY[claim_level]
+    note = str(assurance.get("note") or "").strip()
+    return note or f"the reconciliation reached {claim_level!r}, not a full checksum."
+
+
+def _agreement_sentence(job: dict[str, Any] | None) -> str:
+    """What did agree, so NOT PROVEN is not read as "the data is wrong" (D381)."""
+    recon = _dict((job or {}).get("reconciliation"))
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    if not (src and tgt and src == tgt) or recon.get("checksum_match") is False:
+        return ""
+    rows = recon.get("target_rows") if recon.get("target_rows") is not None else recon.get("source_rows")
+    of = recon.get("source_rows")
+    counted = (
+        f" on {rows} of {of} rows" if rows is not None and of is not None else ""
+    )
+    return (
+        f"Source and destination checksums agree{counted} (checksum {src[:12]}). "
+    )
+
+
 def _verdict(
     *,
     pack: dict[str, Any],
@@ -437,12 +492,15 @@ def _verdict(
         )
     elif blockers:
         headline = "NOT PROVEN"
-        detail = "This run carries open findings — see blockers."
+        more = f" (and {len(blockers) - 1} more — see blockers)" if len(blockers) > 1 else ""
+        detail = (
+            f"{_agreement_sentence(job)}Not proven because: {blockers[0].rstrip('.')}{more}."
+        )
     else:
         headline = "COMPLETED — NOT PROVEN"
         detail = (
-            f"Reconciliation assurance is {claim_level!r}. Row counts reconcile at "
-            "that level; per-cell fidelity across the full population is not claimed."
+            f"{_agreement_sentence(job)}Not proven because: "
+            f"{_plain_assurance_why(claim_level, assurance, job)}"
         )
     return {
         "headline": headline,
@@ -567,15 +625,19 @@ def build_migration_certificate(
             "unavailable to someone who already has it.",
         ],
     }
-    return sign_body(body, subject=job_id)
+    return sign_body(body, subject=job_id, workspace_id=str(job.get("workspace_id") or "") or None)
 
 
-def verify_migration_certificate(cert: dict[str, Any]) -> dict[str, Any]:
+def verify_migration_certificate(cert: dict[str, Any], *, may_use_workspace: Any = None) -> dict[str, Any]:
     """Verify certificate content hash + HMAC, and that its claim is legitimate."""
+    from services.signed_proof_pack import verify_body_detail
+
     if not isinstance(cert, dict):
         return {"ok": False, "errors": ["certificate must be an object"]}
     job_id = str(_dict(cert.get("job")).get("job_id") or "")
-    actual_hash, errors = verify_body(cert, subject=job_id)
+    actual_hash, errors, key_info = verify_body_detail(
+        cert, subject=job_id, may_use_workspace=may_use_workspace
+    )
     verdict = _dict(cert.get("verdict"))
     if verdict.get("migration_proven"):
         if verdict.get("assurance_level") != _PROVEN_ASSURANCE:
@@ -584,7 +646,7 @@ def verify_migration_certificate(cert: dict[str, Any]) -> dict[str, Any]:
             errors.append("migration_proven claimed while blockers are present")
         if not _dict(cert.get("row_accounting")).get("balanced"):
             errors.append("migration_proven claimed while row accounting is unbalanced")
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "signing_key": key_info}
 
 
 def render_certificate_markdown(cert: dict[str, Any]) -> str:

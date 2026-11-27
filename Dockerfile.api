@@ -120,6 +120,35 @@ RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
       echo "Vendor drivers not installed (INSTALL_VENDOR_DRIVERS=0)"; \
     fi
 
+# Microsoft ODBC Driver 18 for SQL Server (NF-2): verified TLS
+# (TrustServerCertificate=no), Encrypt=strict and Microsoft Entra ID sign-in.
+# Without it SQL Server is dialled through pymssql/FreeTDS, which never
+# verifies the server certificate. The driver is proprietary (MICROSOFT
+# SOFTWARE LICENSE TERMS, /usr/share/doc/msodbcsql18/LICENSE.txt): its
+# redistribution clauses are an owner decision (licence-policy.json
+# apt_packages.msodbcsql18), so it is NOT installed by default. A build that
+# accepts the terms passes --build-arg INSTALL_MSODBCSQL=1: the image then
+# requires verified TLS for SQL Server (DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS=1)
+# and FreeTDS is only an explicit, labelled connector opt-out.
+# Microsoft's apt repository, signed by the Microsoft (Release signing) key
+# BC528686B50D79E339D3721CEB3E94ADBE1229CF; the key file is pinned by SHA-256.
+ARG INSTALL_MSODBCSQL=0
+ARG MICROSOFT_KEY_SHA256=2fa9c05d591a1582a9aba276272478c262e95ad00acf60eaee1644d93941e3c6
+RUN if [ "$INSTALL_MSODBCSQL" = "1" ]; then \
+      curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /usr/share/keyrings/microsoft-prod.asc \
+      && echo "${MICROSOFT_KEY_SHA256}  /usr/share/keyrings/microsoft-prod.asc" | sha256sum -c - \
+      && echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/microsoft-prod.asc] https://packages.microsoft.com/debian/12/prod bookworm main" \
+         > /etc/apt/sources.list.d/microsoft-prod.list \
+      && apt-get update \
+      && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
+      && rm -rf /var/lib/apt/lists/* \
+      && odbcinst -q -d -n "ODBC Driver 18 for SQL Server" \
+      && python -c "import pyodbc, sys; sys.exit(0 if 'ODBC Driver 18 for SQL Server' in pyodbc.drivers() else 1)"; \
+    else \
+      echo "Microsoft ODBC Driver 18 not installed (INSTALL_MSODBCSQL=0): SQL Server uses FreeTDS, TLS not verified"; \
+    fi
+ENV DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS=${INSTALL_MSODBCSQL}
+
 # The source-step scripts are not part of the running image.
 RUN rm -rf /tmp/lgpl
 
