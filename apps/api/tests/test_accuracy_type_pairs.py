@@ -1,5 +1,9 @@
 """Accuracy Track A item 6: create-new type pairs are never graded safe while lossy.
 
+The sweep below is an internal consistency check (the classifier against the
+product's own lossy predicate), not an oracle. The independent oracle is the
+hand-reviewed, cited table in tests/test_type_fidelity_truth_table.py.
+
 The five pairs audit 12 deferred (C3 fixed the carriers and the Validate verdict)
 are pinned here with the source engine bound, as Map and Validate bind it, and
 the grading is swept over every engine-specific source token x destination: a

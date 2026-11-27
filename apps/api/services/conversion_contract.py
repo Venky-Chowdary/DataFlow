@@ -344,13 +344,65 @@ def classify_conversion(
     # instead of grading it a plain safe path (Accuracy A6).
     from services.decision_kernel.type_invent import temporal_tick_disclosure
 
-    unmeasured = temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population)
+    unmeasured = temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population) or (
+        _value_dependent_loss(src, tgt, dest_db=dest_db) if population is None else ""
+    )
     if unmeasured:
         out["reason"] = (
             f"{src} → {tgt} keeps every value up to the destination's precision; {unmeasured}"
         )
         out["unmeasured_loss"] = unmeasured
     return out
+
+
+def _value_dependent_loss(src: str, tgt: str, *, dest_db: str = "") -> str:
+    """A loss that depends on values nobody measured yet, guarded at write time.
+
+    Graded with this sentence rather than as a plain round trip (accuracy
+    review 8): MongoDB dates keep milliseconds (the writer refuses a value with
+    a finer digit), MySQL JSON keeps numbers as IEEE doubles (preflight refuses
+    a document with a number beyond one), Redshift VARCHAR stops at 65535
+    bytes, MySQL TINYINT(1) is not a boolean. A dropped UTC offset is not
+    value-dependent but is disclosed the same way (the product loads the
+    instant, D136); whether it should need a Risk Contract is an owner call.
+    """
+    import re
+
+    from services.decision_kernel.types import normalize_logical_type
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.document_instant import is_document_instant_token, source_fractional_digits
+    from services.source_engine_scope import active_source_engine
+    from services.type_system import parse_string_carrier_width
+
+    from services.source_engine_semantics import offset_dropped
+
+    dest = _normalize_dest_db(dest_db) if dest_db else ""
+    engine = (active_source_engine() or "").strip().lower()
+    src_l = normalize_logical_type(src)
+    offset = offset_dropped(src, tgt, dest_db=dest_db)
+    if offset:
+        return f"{offset}; the instant is loaded, the offset is not"
+    if is_document_instant_token(dest_db, tgt) and src_l == "datetime":
+        digits = source_fractional_digits(src)
+        if digits is None:
+            digits = 6 if engine in {"postgresql", "postgres"} else 7 if engine in {"sqlserver", "mssql"} else 0
+        if digits > 3:
+            return (f"{src} → {tgt} (milliseconds): sub-millisecond digits were not measured; "
+                    "the write refuses a value that has one")
+    if (src_l == "json" and dest in {"mysql", "mariadb"} and engine not in {"mysql", "mariadb"}
+            and tgt.strip().upper().startswith("JSON")):
+        return (f"{src} → {tgt}: MySQL JSON keeps numbers as IEEE doubles; numbers were not measured, "
+                "and preflight refuses a document holding one a double cannot keep")
+    if (engine in {"mysql", "mariadb"} and "".join(src.upper().split()).startswith("TINYINT(1)")
+            and normalize_logical_type(tgt) == "boolean"):
+        return (f"{src} → {tgt}: MySQL TINYINT(1) holds -128..127 (the (1) is a display width); "
+                "values other than 0 and 1 were not measured")
+    if dest == "redshift" and src_l in {"string", "text"} and parse_string_carrier_width(src) is None:
+        m = re.search(r"\(\s*(\d+)\s*\)", tgt or "")
+        if m and int(m.group(1)) >= 65535:
+            return (f"{src} → {tgt}: Redshift VARCHAR stops at 65535 bytes; longer values were "
+                    "not measured")
+    return ""
 
 
 _CREATE_NEW_CLASS_LABELS: dict[ConversionClass, str] = {
@@ -384,7 +436,7 @@ def create_new_mapping_reason(
     if cls == ConversionClass.NEEDS_USER_APPROVAL:
         label = "projected CREATE — capacity not dest-proven"
     elif classified.get("unmeasured_loss"):
-        label = "keeps values up to the destination precision; a finer digit would be truncated"
+        label = "keeps values within the destination's limits; a value beyond them would be truncated"
     else:
         label = _CREATE_NEW_CLASS_LABELS.get(cls, raw.replace("_", " ") or "projected CREATE")
     return (

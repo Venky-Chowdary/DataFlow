@@ -96,7 +96,86 @@ def create_new_source_type(source_type: str, dest_db: str, source_db: str = "") 
     if engine in _MYSQL and base == "TIMESTAMP" and dest in _PG_FAMILY_DESTS - {"redshift"}:
         fsp = _fsp(source_type)
         return f"TIMESTAMP({fsp}) WITH TIME ZONE" if fsp else "TIMESTAMP WITH TIME ZONE"
+    if engine in _ORACLE and _oracle_decimal_float(source_type) and dest and dest not in _ORACLE:
+        # Oracle FLOAT is a decimal NUMBER of up to 38 digits (accuracy review
+        # finding 8): carry it as NUMBER, never as a binary64 double.
+        return "NUMBER"
+    if engine in _POSTGRES and base == "MONEY" and dest and dest not in _PG_ONLY_MONEY:
+        # money is an int64 count of the smallest unit: up to 19 digits, with
+        # lc_monetary's fraction digits (2 usually, up to 4 here).
+        return "NUMERIC(23,4)"
     return source_type
+
+
+_PG_ONLY_MONEY = frozenset({"postgresql", "postgres"})
+_BINARY64 = frozenset({"DOUBLE", "DOUBLE PRECISION", "FLOAT", "FLOAT8", "FLOAT64", "BINARY_DOUBLE", "REAL",
+                       "FLOAT4", "BINARY_FLOAT"})
+
+
+def _bare(type_text: str) -> str:
+    """The type name without its ``(n)`` arguments: ``TIMESTAMP WITH TIME ZONE``."""
+    from services.type_system import strip_identity_qualifier
+
+    text = re.sub(r"\(\s*[\d,\s]*\)", "", strip_identity_qualifier(type_text or "").upper())
+    return " ".join(text.split())
+
+
+def _oracle_decimal_float(source_type: str) -> bool:
+    """Oracle FLOAT / FLOAT(p) with more binary digits than a double's 53."""
+    base = _base(source_type)
+    if base not in {"FLOAT", "DOUBLE PRECISION"}:
+        return False
+    p = _fsp(source_type)
+    return not p or int(p) > 53
+
+
+def offset_dropped(source_type: str, target_type: str, *, dest_db: str = "", source_db: str = "") -> str:
+    """Why an offset-bearing source loses its UTC offset on this target, or ``""``.
+
+    SQL Server ``datetimeoffset`` and Oracle ``TIMESTAMP WITH TIME ZONE`` store
+    each value's own offset (or zone region); PostgreSQL ``timestamptz``, a
+    BSON date and most instants keep the instant only. The product loads the
+    instant (D136); the classifier discloses the dropped offset instead of
+    grading the pair a round trip (accuracy review finding 8).
+    """
+    from services.decision_kernel.types import normalize_logical_type
+
+    engine = _engine(source_db)
+    dest = _dest(dest_db)
+    if not (
+        (engine in _SQLSERVER and _base(source_type) == "DATETIMEOFFSET")
+        or (engine in _ORACLE and _bare(source_type) == "TIMESTAMP WITH TIME ZONE")
+    ):
+        return ""
+    if normalize_logical_type(target_type) not in {"datetime", "date"} or _keeps_offset(target_type, dest):
+        return ""
+    return (
+        f"{source_type} stores each value's own UTC offset (or zone region); "
+        f"{target_type} keeps the instant but not the offset"
+    )
+
+
+def _offsets_all_utc(population: Any) -> bool:
+    if population is None:
+        return False
+    measured = False
+    for value in population:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        measured = True
+        if not text.endswith(("+00:00", "+0000", "Z", "+00", "-00:00")):
+            return False
+    return measured
+
+
+def _keeps_offset(target_type: str, dest: str) -> bool:
+    text = " ".join((target_type or "").upper().split())
+    if "DATETIMEOFFSET" in text or "TIMESTAMP_TZ" in text:
+        return True
+    return dest in _ORACLE and "WITH TIME ZONE" in text and "LOCAL" not in text
 
 
 def _zone_aware(target_type: str) -> bool:
@@ -152,6 +231,38 @@ def engine_semantic_loss(
             f"MySQL TIMESTAMP is an instant (stored in UTC); {target_type} is a wall "
             "clock with no zone, so the instant's zone is dropped"
         )
+    if engine in _ORACLE and _oracle_decimal_float(source_type) and dest not in _ORACLE:
+        if _base(target_type) in _BINARY64 or tgt_l == "float":
+            return (
+                f"Oracle {source_type} keeps up to 38 significant decimal digits (binary "
+                f"precision 126); {target_type} is a binary double of 15 to 17 digits"
+            )
+        if tgt_l == "decimal":
+            from services.type_system import parse_numeric_precision_scale
+
+            precision, scale = parse_numeric_precision_scale(target_type)
+            if precision is not None and not _decimals_fit(population, precision, scale or 0):
+                return (
+                    f"Oracle {source_type} ranges to 1E+125 with 38 significant digits; "
+                    f"{target_type} keeps {precision - (scale or 0)} integer and {scale or 0} "
+                    "fraction digits"
+                )
+    if engine in _POSTGRES and base == "MONEY" and dest not in _PG_ONLY_MONEY:
+        from services.type_system import parse_numeric_precision_scale
+
+        tgt_base = _base(target_type)
+        if tgt_base in {"MONEY", "SMALLMONEY"}:
+            return (
+                f"PostgreSQL money reaches 92233720368547758.07; {target_type} stops at "
+                f"{'922337203685477.5807' if tgt_base == 'MONEY' else '214748.3647'}"
+            )
+        if tgt_l == "decimal":
+            precision, scale = parse_numeric_precision_scale(target_type)
+            if precision is not None and precision - (scale or 0) < 17:
+                return (
+                    "PostgreSQL money reaches 92233720368547758.07 (17 integer digits); "
+                    f"{target_type} keeps {precision - (scale or 0)}"
+                )
     if engine in _POSTGRES and base in {"NUMERIC", "DECIMAL"} and "(" not in (source_type or ""):
         from services.type_system import parse_numeric_precision_scale
 

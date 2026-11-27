@@ -1,0 +1,537 @@
+{
+ "schema_version": 1,
+ "reviewed": "2026-11-22, hand-reviewed against vendor documentation (one citation or more per row); not derived from the product's classifier",
+ "truth_values": {
+  "keeps": "every value of the source type lands unchanged",
+  "loses": "some legal source value cannot land unchanged",
+  "loses_if_values": "loses only for some values; a safe grade must say so (unmeasured_loss) unless measured",
+  "loses_disclosed": "always loses part of the value (here the UTC offset) where the product deliberately loads the rest; a safe grade must say so (unmeasured_loss)"
+ },
+ "rows": [
+  {
+   "engine": "oracle",
+   "source_type": "FLOAT",
+   "dest": "postgresql",
+   "target": "DOUBLE PRECISION",
+   "truth": "loses",
+   "why": "Oracle FLOAT defaults to binary precision 126 (about 38 decimal digits); PostgreSQL double precision keeps 15 digits.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlqr/Data-Types.html",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Oracle-Compliance-with-FIPS-127-2.html",
+    "https://www.postgresql.org/docs/current/datatype-numeric.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "FLOAT",
+   "dest": "mysql",
+   "target": "DOUBLE",
+   "truth": "loses",
+   "why": "38 significant digits into an 8-byte IEEE double.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlqr/Data-Types.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/floating-point-types.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "FLOAT",
+   "dest": "snowflake",
+   "target": "FLOAT",
+   "truth": "loses",
+   "why": "Snowflake FLOAT is a double-precision IEEE 754 value.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlqr/Data-Types.html",
+    "https://docs.snowflake.com/en/sql-reference/data-types-numeric"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "FLOAT(126)",
+   "dest": "postgresql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Carried as NUMERIC, which holds up to 131072 digits before the point.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlqr/Data-Types.html",
+    "https://www.postgresql.org/docs/current/datatype-numeric.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "FLOAT",
+   "dest": "mysql",
+   "target": "create_new",
+   "truth": "loses_if_values",
+   "why": "MySQL DECIMAL holds at most 65 digits; Oracle FLOAT ranges to about 1E+125.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlqr/Data-Types.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/fixed-point-types.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "NUMBER",
+   "dest": "postgresql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "NUMBER without precision is at most 38 significant digits; NUMERIC holds them.",
+   "citations": [
+    "https://docs.oracle.com/database/122/SQLRF/Data-Types.htm",
+    "https://www.postgresql.org/docs/current/datatype-numeric.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "NUMBER",
+   "dest": "mysql",
+   "target": "create_new",
+   "truth": "loses_if_values",
+   "why": "Unbounded NUMBER into a fixed DECIMAL(p,s).",
+   "citations": [
+    "https://docs.oracle.com/database/122/SQLRF/Data-Types.htm",
+    "https://dev.mysql.com/doc/refman/8.4/en/fixed-point-types.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "numeric",
+   "dest": "mysql",
+   "target": "DECIMAL(38,15)",
+   "truth": "loses_if_values",
+   "why": "PostgreSQL numeric without precision has up to 131072 integer digits.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-numeric.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/fixed-point-types.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "nvarchar(50)",
+   "dest": "redshift",
+   "target": "VARCHAR(50)",
+   "truth": "loses",
+   "why": "Redshift VARCHAR length counts bytes; a character is 1 to 4 bytes.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "VARCHAR2(50 CHAR)",
+   "dest": "redshift",
+   "target": "VARCHAR(50)",
+   "truth": "loses",
+   "why": "50 characters need up to 200 bytes in Redshift.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html",
+    "https://docs.oracle.com/cd/B28359_01/server.111/b28318/datatype.htm"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(50)",
+   "dest": "redshift",
+   "target": "VARCHAR(50)",
+   "truth": "loses",
+   "why": "PostgreSQL varchar(n) counts characters.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html",
+    "https://docs.aws.amazon.com/redshift/latest/dg/t_preparing-input-data.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(50)",
+   "dest": "redshift",
+   "target": "CHAR(50)",
+   "truth": "loses",
+   "why": "Redshift CHAR holds single-byte characters only.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(50)",
+   "dest": "redshift",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created as VARCHAR(200): 4 bytes for each of 50 characters.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html",
+    "https://docs.aws.amazon.com/redshift/latest/dg/t_preparing-input-data.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "VARCHAR2(50 BYTE)",
+   "dest": "redshift",
+   "target": "VARCHAR(50)",
+   "truth": "keeps",
+   "why": "Both count bytes.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html",
+    "https://docs.oracle.com/cd/B28359_01/server.111/b28318/datatype.htm"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "text",
+   "dest": "redshift",
+   "target": "create_new",
+   "truth": "loses_if_values",
+   "why": "Redshift VARCHAR stops at 65535 bytes; PostgreSQL text does not.",
+   "citations": [
+    "https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(10)",
+   "dest": "oracle",
+   "target": "VARCHAR2(10 BYTE)",
+   "truth": "loses",
+   "why": "Byte semantics: 10 characters need up to 40 bytes in AL32UTF8.",
+   "citations": [
+    "https://docs.oracle.com/cd/B28359_01/server.111/b28318/datatype.htm"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(10)",
+   "dest": "oracle",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created with CHAR length semantics.",
+   "citations": [
+    "https://docs.oracle.com/cd/B28359_01/server.111/b28318/datatype.htm"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "varchar(50)",
+   "dest": "mysql",
+   "target": "VARCHAR(50) CHARACTER SET utf8mb3",
+   "truth": "loses_if_values",
+   "why": "utf8mb3 holds Basic Multilingual Plane characters only.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/charset-unicode-utf8mb3.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "text",
+   "dest": "mysql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "LONGTEXT utf8mb4 holds up to 4 GB of any Unicode character.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/storage-requirements.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/charset-unicode-utf8mb3.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "money",
+   "dest": "mysql",
+   "target": "DECIMAL(19,4)",
+   "truth": "loses",
+   "why": "money reaches 92233720368547758.07 (17 integer digits); DECIMAL(19,4) keeps 15.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-money.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/fixed-point-types.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "money",
+   "dest": "sqlserver",
+   "target": "MONEY",
+   "truth": "loses",
+   "why": "SQL Server money stops at 922,337,203,685,477.5807.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-money.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "money",
+   "dest": "mysql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created as DECIMAL(23,4): 19 integer and 4 fraction digits.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-money.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/fixed-point-types.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "money",
+   "dest": "sqlserver",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created as DECIMAL(23,4), not MONEY.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-money.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql"
+   ]
+  },
+  {
+   "engine": "mysql",
+   "source_type": "bigint unsigned",
+   "dest": "postgresql",
+   "target": "BIGINT",
+   "truth": "loses",
+   "why": "0..18446744073709551615 into a signed 64-bit integer.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/numeric-type-syntax.html",
+    "https://www.postgresql.org/docs/current/datatype-numeric.html"
+   ]
+  },
+  {
+   "engine": "mysql",
+   "source_type": "bigint unsigned",
+   "dest": "postgresql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created as NUMERIC(20,0).",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/numeric-type-syntax.html",
+    "https://www.postgresql.org/docs/current/datatype-numeric.html"
+   ]
+  },
+  {
+   "engine": "mysql",
+   "source_type": "int unsigned",
+   "dest": "sqlserver",
+   "target": "INT",
+   "truth": "loses",
+   "why": "0..4294967295 into a signed 32-bit int.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/integer-types.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/int-bigint-smallint-and-tinyint-transact-sql"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "tinyint",
+   "dest": "mysql",
+   "target": "TINYINT",
+   "truth": "loses",
+   "why": "SQL Server tinyint is 0..255; MySQL TINYINT is -128..127.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/int-bigint-smallint-and-tinyint-transact-sql",
+    "https://dev.mysql.com/doc/refman/8.4/en/integer-types.html"
+   ]
+  },
+  {
+   "engine": "mysql",
+   "source_type": "timestamp",
+   "dest": "postgresql",
+   "target": "TIMESTAMP",
+   "truth": "loses",
+   "why": "MySQL TIMESTAMP is an instant stored in UTC; PostgreSQL timestamp has no zone.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetimeoffset(7)",
+   "dest": "postgresql",
+   "target": "TIMESTAMPTZ(6)",
+   "truth": "loses_disclosed",
+   "why": "datetimeoffset preserves each value's offset; timestamptz stores UTC only.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "TIMESTAMP(6) WITH TIME ZONE",
+   "dest": "postgresql",
+   "target": "TIMESTAMPTZ(6)",
+   "truth": "loses_disclosed",
+   "why": "Oracle stores the zone region or offset in the value; timestamptz stores UTC only.",
+   "citations": [
+    "https://docs.oracle.com/en/database/oracle/oracle-database/23/nlspg/datetime-data-types-and-time-zone-support.html",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "sqlserver",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "PostgreSQL timestamptz holds an instant (UTC); datetimeoffset holds it.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-datetime.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "mysql",
+   "target": "DATETIME(6)",
+   "truth": "loses",
+   "why": "DATETIME is a wall clock with no zone.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/datetime.html",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "DATE",
+   "dest": "postgresql",
+   "target": "DATE",
+   "truth": "loses",
+   "why": "Oracle DATE has a time of day; PostgreSQL date does not.",
+   "citations": [
+    "https://docs.oracle.com/database/122/SQLRF/Data-Types.htm",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "oracle",
+   "source_type": "DATE",
+   "dest": "postgresql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Created as TIMESTAMP(0).",
+   "citations": [
+    "https://docs.oracle.com/database/122/SQLRF/Data-Types.htm",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "sqlserver",
+   "source_type": "datetime2(7)",
+   "dest": "postgresql",
+   "target": "TIMESTAMP(6)",
+   "truth": "loses_if_values",
+   "why": "100 ns ticks into microseconds.",
+   "citations": [
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime2-transact-sql",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamptz",
+   "dest": "mongodb",
+   "target": "create_new",
+   "truth": "loses_if_values",
+   "why": "BSON date is milliseconds since the epoch; timestamptz keeps microseconds.",
+   "citations": [
+    "https://www.mongodb.com/docs/manual/reference/bson-types/",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "timestamp(6)",
+   "dest": "mongodb",
+   "target": "create_new",
+   "truth": "loses",
+   "why": "A zoneless microsecond wall clock into a millisecond UTC instant.",
+   "citations": [
+    "https://www.mongodb.com/docs/manual/reference/bson-types/",
+    "https://www.postgresql.org/docs/current/datatype-datetime.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "boolean",
+   "dest": "oracle",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "true/false/NULL into NUMBER(1) 1/0/NULL.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-boolean.html",
+    "https://docs.oracle.com/database/122/SQLRF/Data-Types.htm"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "boolean",
+   "dest": "sqlserver",
+   "target": "BIT",
+   "truth": "keeps",
+   "why": "bit holds 1, 0 and NULL.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-boolean.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/bit-transact-sql"
+   ]
+  },
+  {
+   "engine": "mysql",
+   "source_type": "tinyint(1)",
+   "dest": "postgresql",
+   "target": "BOOLEAN",
+   "truth": "loses_if_values",
+   "why": "TINYINT(1) holds -128..127; the (1) is a display width.",
+   "citations": [
+    "https://dev.mysql.com/doc/refman/8.4/en/integer-types.html",
+    "https://www.postgresql.org/docs/current/datatype-boolean.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "bytea",
+   "dest": "mysql",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "LONGBLOB holds up to 4 GB; bytea up to 1 GB.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-binary.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/blob.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "bytea",
+   "dest": "mysql",
+   "target": "BLOB",
+   "truth": "loses",
+   "why": "MySQL BLOB stops at 65535 bytes.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-binary.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/blob.html"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "jsonb",
+   "dest": "mysql",
+   "target": "JSON",
+   "truth": "loses_if_values",
+   "why": "jsonb keeps numbers as numeric; MySQL JSON keeps them as doubles.",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-json.html",
+    "https://dev.mysql.com/doc/refman/8.4/en/json.html",
+    "https://bugs.mysql.com/bug.php?id=116160"
+   ]
+  },
+  {
+   "engine": "postgresql",
+   "source_type": "jsonb",
+   "dest": "sqlserver",
+   "target": "create_new",
+   "truth": "keeps",
+   "why": "Stored as the JSON text in NVARCHAR(MAX).",
+   "citations": [
+    "https://www.postgresql.org/docs/current/datatype-json.html",
+    "https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql"
+   ]
+  }
+ ]
+}
