@@ -380,6 +380,11 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.append(f"RESUME {stream_name}: {skip_reason(prior)}")
                 continue
 
+            # This table's columns before an overwrite sets it aside: the
+            # per-table verdict judges the table the operator had.
+            from .source_column_coverage import capture_stream_dest_types
+
+            stream_dest_types = capture_stream_dest_types(destination, stream_name)
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
                 request_sync_mode=sync_mode,
@@ -479,6 +484,7 @@ def run_non_cdc_multi_stream_sequential(
                             shape_steps=_steps_for(stream_name),
                             mappings_inherited=not declared_maps,
                             workspace_id=workspace_id,
+                            per_stream_coverage={"dest_types": stream_dest_types},
                         )
                 # The stream landed: park its overwrite backup under its table
                 # (the next stream's clear must not inherit it, and a later
@@ -580,6 +586,9 @@ def run_non_cdc_multi_stream_sequential(
                     # was handed none, else what its route recorded (review 6).
                     "resumed_checkpoint_rows": summary.get("resumed_checkpoint_rows")
                     if handed_rows else 0,
+                    # Which source columns this table added, left out or carried.
+                    "schema_propagation": summary.get("schema_propagation"),
+                    "columns_added_during_run": summary.get("columns_added_during_run"),
                 },
                 sync_mode=sync_mode,
                 source=source,

@@ -54,7 +54,7 @@ def not_migrated_columns(
     acknowledged = _acknowledged_at_validate(preflight)
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for key in ("omitted_columns", "skipped_columns"):
+    for key in ("omitted_columns", "acknowledged_columns", "skipped_columns"):
         for raw in recorded.get(key) or []:
             name = str(raw or "").strip()
             if not name or name.lower() in seen:
@@ -62,10 +62,51 @@ def not_migrated_columns(
             seen.add(name.lower())
             if key == "omitted_columns":
                 reason = REASON_OMITTED
+            elif key == "acknowledged_columns" or name.lower() in acknowledged:
+                reason = REASON_ACKNOWLEDGED
             else:
-                reason = REASON_ACKNOWLEDGED if name.lower() in acknowledged else REASON_UNDECIDED
+                reason = REASON_UNDECIDED
             out.append({"column": name, "reason": reason})
     return out
+
+
+def _run_columns(
+    propagation: dict[str, Any] | None,
+    preflight: dict[str, Any] | None,
+    summary: dict[str, Any] | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str], int]:
+    """(not migrated, carried, added during the run, source column count) for a run.
+
+    A multi-table run records each table on its stream (``table.column``); the
+    request-level record then describes the primary map only, so the tables win.
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    streams = [s for s in summary.get("streams") or [] if isinstance(s, dict)]
+    per_table = [s for s in streams if isinstance(s.get("schema_propagation"), dict)]
+    added = [str(c) for c in summary.get("columns_added_during_run") or [] if str(c).strip()]
+    if not per_table:
+        return (
+            not_migrated_columns(propagation, preflight),
+            carried_inside(propagation),
+            added,
+            int((propagation or {}).get("source_column_count") or 0),
+        )
+    entries: list[dict[str, str]] = []
+    carried: list[dict[str, str]] = []
+    total = 0
+    for s in per_table:
+        table = str(s.get("name") or s["schema_propagation"].get("table") or "").strip()
+        prefix = f"{table}." if table else ""
+        record = s["schema_propagation"]
+        entries += [{**e, "column": prefix + e["column"]} for e in not_migrated_columns(record)]
+        carried += [
+            {"column": prefix + e["column"], "parent": prefix + e["parent"]} for e in carried_inside(record)
+        ]
+        total += int(record.get("source_column_count") or 0)
+    for s in streams:
+        table = str(s.get("name") or "").strip()
+        added += [f"{table}.{c}" if table else str(c) for c in s.get("columns_added_during_run") or []]
+    return entries, carried, added, total
 
 
 def undecided_columns(coverage: dict[str, Any] | None) -> list[str]:
@@ -107,7 +148,10 @@ def carried_inside(propagation: dict[str, Any] | None) -> list[dict[str, str]]:
 
 
 def _coverage(
-    entries: list[dict[str, str]], total: int, carried: list[dict[str, str]] | None = None
+    entries: list[dict[str, str]],
+    total: int,
+    carried: list[dict[str, str]] | None = None,
+    added: list[str] | None = None,
 ) -> dict[str, Any]:
     statement = not_migrated_sentence(entries, source_columns=total)
     if carried:
@@ -117,11 +161,19 @@ def _coverage(
             f"{statement} {len(carried)} source column(s) are written inside their parent "
             f"object, not as columns of their own: {named}{more}."
         ).strip()
+    if added:
+        named = ", ".join(added[:_NAMED_LIMIT])
+        more = f" (+{len(added) - _NAMED_LIMIT} more)" if len(added) > _NAMED_LIMIT else ""
+        statement = (
+            f"{statement} {len(added)} column(s) were added during the run, first seen in a "
+            f"later batch: {named}{more}."
+        ).strip()
     return {
         "source_columns": total or None,
         "columns_written": max(total - len(entries), 0) if total else None,
         "not_migrated": entries,
         "carried_inside": list(carried or []),
+        "added_during_run": list(added or []),
         "statement": statement,
     }
 
@@ -131,16 +183,18 @@ def column_coverage_of(job: dict[str, Any] | None) -> dict[str, Any] | None:
     doc = job if isinstance(job, dict) else {}
     recon = doc.get("reconciliation") if isinstance(doc.get("reconciliation"), dict) else {}
     stored = recon.get("column_coverage")
-    if isinstance(stored, dict) and (stored.get("not_migrated") or stored.get("carried_inside")):
+    if isinstance(stored, dict) and any(
+        stored.get(k) for k in ("not_migrated", "carried_inside", "added_during_run")
+    ):
         return stored
     # A job finished before the coverage was stamped on Gate-8 still names the
     # columns it skipped (D165) on ``schema_propagation``.
-    propagation = doc.get("schema_propagation")
-    entries = not_migrated_columns(propagation, doc.get("preflight"))
-    carried = carried_inside(propagation)
-    if not entries and not carried:
+    entries, carried, added, total = _run_columns(
+        doc.get("schema_propagation"), doc.get("preflight"), doc.get("destination_summary")
+    )
+    if not entries and not carried and not added:
         return None
-    return _coverage(entries, int((propagation or {}).get("source_column_count") or 0), carried)
+    return _coverage(entries, total, carried, added)
 
 
 def stamp_column_coverage(mongo: Any, job_id: str, fields: dict[str, Any]) -> None:
@@ -158,12 +212,12 @@ def stamp_column_coverage(mongo: Any, job_id: str, fields: dict[str, Any]) -> No
     except Exception:  # noqa: BLE001 - the report is additive; the run already succeeded
         return
     job = job if isinstance(job, dict) else {}
-    propagation = job.get("schema_propagation")
-    entries = not_migrated_columns(propagation, job.get("preflight"))
-    carried = carried_inside(propagation)
-    if not entries and not carried:
+    entries, carried, added, total = _run_columns(
+        job.get("schema_propagation"), job.get("preflight"), fields.get("destination_summary")
+    )
+    if not entries and not carried and not added:
         return
-    coverage = _coverage(entries, int((propagation or {}).get("source_column_count") or 0), carried)
+    coverage = _coverage(entries, total, carried, added)
     recon["column_coverage"] = coverage
     statement = coverage["statement"]
     for holder in (recon, fields):

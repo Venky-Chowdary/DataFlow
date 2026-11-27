@@ -987,7 +987,7 @@ def test_mongo_mid_run_field_stops_before_its_batch_and_resumes_under_propagate(
 
     message = str(refused.value)
     assert "neither mapped nor declared omitted: doc" in message
-    assert "First seen in a later batch" in message and "propagate columns" in message
+    assert "First seen in a later batch" in message and "propagate_columns" in message
     assert refused.value.failure_details["guidance"][0]["gate"] == "g13_source_coverage"
     # The first page landed and was checkpointed; nothing of the page with doc did.
     assert (checkpoint.offset, checkpoint.rows_processed) == (_PAGE, _PAGE)
@@ -1283,3 +1283,457 @@ def test_dynamodb_flattened_children_carried_inside_the_parent(
         conn.close()
     assert "nested_city" not in cols
     assert "austin" in str(nested[0]) and "oslo" in str(nested[1])
+
+
+# -- Review of c3ee447e3 ------------------------------------------------------
+# 1. Each table of a multi-table job is judged with the map it writes with.
+
+
+def _own_map_request(src: Path, dst: Path, maps: dict[str, list[dict[str, Any]]], **extra: Any):
+    contracts = [
+        {"name": n, "sync_mode": "full_refresh_append", "primary_key": "id", "selected": True,
+         **({"mappings": maps[n]} if n in maps else {})}
+        for n in ("m1", "m2")
+    ]
+    return TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="m1"),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="m1"),
+        sync_mode="full_refresh_append", validation_mode="strict", stream_contracts=contracts, **extra,
+    )
+
+
+def _m(*cols: str) -> list[dict[str, Any]]:
+    return [{"source": c, "target": c, "confidence": 0.99} for c in cols]
+
+
+def _table_rows(dst: Path, table: str) -> list[tuple] | None:
+    conn = sqlite3.connect(dst)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+            return None
+        return conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()  # noqa: S608 - fixed names
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("skip_preflight", [False, True], ids=["validate", "no_validate"])
+def test_a_tables_own_map_that_leaves_a_column_out_is_refused_for_that_table(
+    tmp_path, isolated, skip_preflight  # noqa: F811
+):
+    src = _multi_sqlite_source(tmp_path)  # m2 has doc
+    dst = tmp_path / "dst.sqlite"
+
+    result, job = _run(isolated, _own_map_request(
+        src, dst, {"m2": _m("id", "name")}, skip_preflight=skip_preflight,
+    ))
+
+    assert not result.success
+    assert "Table m2" in str(result.error) and "neither mapped nor declared omitted: doc" in str(result.error)
+    assert not _table_rows(dst, "m2")  # nothing of m2 was written
+
+
+def test_the_first_tables_own_map_is_judged_too(tmp_path, isolated):  # noqa: F811
+    src = _multi_sqlite_source(tmp_path)
+    conn = sqlite3.connect(src)
+    conn.execute("ALTER TABLE m1 ADD COLUMN doc TEXT")
+    conn.execute("UPDATE m1 SET doc = 'x'")
+    conn.commit()
+    conn.close()
+    dst = tmp_path / "dst.sqlite"
+
+    result, _job = _run(isolated, _own_map_request(
+        src, dst, {"m1": _m("id", "name"), "m2": _m("id", "name", "doc")}, skip_preflight=True,
+    ))
+
+    assert not result.success and "Table m1" in str(result.error)
+    assert _table_rows(dst, "m1") in (None, [])
+
+
+def test_per_table_decisions_are_named_per_table_in_gate8(tmp_path, isolated):  # noqa: F811
+    src = _multi_sqlite_source(tmp_path)
+    dst = tmp_path / "dst.sqlite"
+    omit = {"source": "doc", "target": "", "intentional_omit": True}
+
+    result, job = _run(isolated, _own_map_request(
+        src, dst, {"m1": _m("id", "name"), "m2": [*_m("id", "name"), omit]},
+    ))
+
+    assert result.success, result.error
+    streams = {s["name"]: s for s in job["destination_summary"]["streams"]}
+    assert streams["m2"]["schema_propagation"]["omitted_columns"] == ["doc"]
+    assert "m2.doc (declared omitted)" in result.reconciliation["column_coverage"]["statement"]
+
+
+def test_a_tables_own_map_adding_a_column_to_its_existing_table_needs_approval(
+    tmp_path, isolated  # noqa: F811
+):
+    src = _multi_sqlite_source(tmp_path)
+    dst = tmp_path / "dst.sqlite"
+    conn = sqlite3.connect(dst)
+    conn.execute("CREATE TABLE m2 (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.commit()
+    conn.close()
+    maps = {"m1": _m("id", "name"), "m2": _m("id", "name", "doc")}
+
+    refused, _job = _run(isolated, _own_map_request(src, dst, maps, skip_preflight=True))
+    assert not refused.success and "Table m2" in str(refused.error)
+    assert "Review ADD COLUMN proposals for doc" in str(refused.error)
+
+    approved, _job = _run(isolated, _own_map_request(
+        src, dst, maps, skip_preflight=True, schema_policy="propagate_columns",
+    ))
+    assert approved.success, approved.error
+    assert [r[2] for r in _table_rows(dst, "m2")] == [seed_doc(i) for i in range(1, ROWS + 1)]
+
+
+@pytest.fixture()
+def pg_multi_own_map():
+    from tests.helpers.live_env import pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not reachable")
+    tag = token()
+    names = (f"owc_o1_{tag}", f"owc_o2_{tag}")
+    schema = f"owc_od_{tag}"
+    pg_sql(f'CREATE SCHEMA "{schema}"')
+    for n in names:
+        pg_sql(f'CREATE TABLE public."{n}" (id integer PRIMARY KEY, name text, doc text)')
+        _pg_many(f'INSERT INTO public."{n}" VALUES (%s, %s, %s)', [(i, f"n{i}", seed_doc(i)) for i in range(1, ROWS + 1)])
+    try:
+        yield schema, names
+    finally:
+        pg_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        for n in names:
+            pg_sql(f'DROP TABLE IF EXISTS public."{n}" CASCADE')
+
+
+def test_pg_copy_route_does_not_drop_a_column_a_tables_own_map_leaves_out(isolated, pg_multi_own_map):  # noqa: F811
+    """PG->PG takes the engine COPY; a table's incomplete own map must not ride it."""
+    schema, names = pg_multi_own_map
+    destination = pg_endpoint(names[0])
+    destination.schema = schema
+    contracts = [
+        {"name": n, "sync_mode": "full_refresh_overwrite", "primary_key": "id", "selected": True,
+         "mappings": _m("id", "name") if n == names[1] else _m("id", "name", "doc")}
+        for n in names
+    ]
+    result, _job = _run(isolated, TransferRequest(
+        source=pg_endpoint(names[0]), destination=destination, sync_mode="full_refresh_overwrite",
+        validation_mode="strict", stream_contracts=contracts,
+    ))
+
+    assert not result.success
+    assert f"Table {names[1]}" in str(result.error) and "doc" in str(result.error)
+    assert pg_sql(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
+        (schema, names[1]), fetch=True,
+    )[0][0] == 0 or pg_sql(f'SELECT count(*) FROM "{schema}"."{names[1]}"', fetch=True)[0][0] == 0
+
+
+def test_validate_judges_every_table_with_its_own_map(monkeypatch):
+    import services.stream_coverage_gates as gates_mod
+
+    catalogs = {"m1": ["id", "name"], "m2": ["id", "name", "doc"]}
+    monkeypatch.setattr(
+        gates_mod, "_stream_catalog",
+        lambda *, connector_id, stream, source_type, source_config: (catalogs.get(stream, []), {}),
+    )
+    contracts = [
+        {"name": "m1", "selected": True, "mappings": _m("id", "name")},
+        {"name": "m2", "selected": True, "mappings": _m("id", "name")},
+        {"name": "m3", "selected": True},
+    ]
+
+    gates = gates_mod.per_stream_coverage_gates(
+        stream_contracts=contracts, request_mappings=_m("id", "name"), source_connector_id="c1",
+        source_type="postgresql", source_config={}, dest_type="postgresql",
+        dest_column_types=lambda table: {}, schema_policy="manual_review",
+        backfill_new_fields=False, acknowledged=False,
+    )
+
+    by = {g["details"]["stream"]: g for g in gates}
+    assert by["m1"]["status"] == "pass"
+    assert by["m2"]["status"] == "block" and "Table m2" in by["m2"]["message"]
+    assert by["m3"]["status"] == "warn"  # unreadable: Execute judges it before writing
+    result = {"gates": [], "blockers": [], "passed": True}
+    gates_mod.apply_per_stream_coverage(result, gates)
+    assert result["passed"] is False and result["blockers"][0]["details"]["stream"] == "m2"
+    # A single table is judged by the request's own Validate run.
+    assert gates_mod.per_stream_coverage_gates(
+        stream_contracts=contracts[:1], request_mappings=[], source_connector_id="c1",
+        source_type="postgresql", source_config={}, dest_type="postgresql",
+        dest_column_types=lambda t: {}, schema_policy="manual_review",
+        backfill_new_fields=False, acknowledged=False,
+    ) == []
+
+
+def test_mid_run_check_uses_this_tables_own_destination_columns():
+    """Finding 5: the primary table's columns were used for every table."""
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import (
+        MID_RUN_POLICY_KEY,
+        SourceColumnsUnaccounted,
+        refuse_mid_run_column,
+    )
+
+    stamp = {"adds_columns": False, "policy": "manual_review", "dest_columns": ["id", "doc"], "dest_existed": True}
+    destination = SimpleNamespace(extra={MID_RUN_POLICY_KEY: stamp})
+    maps = _m("id")
+    # The primary table has doc; this table does not.
+    with pytest.raises(SourceColumnsUnaccounted):
+        refuse_mid_run_column(destination, "postgresql", ["doc"], maps, dest_columns=["id"], dest_existed=True)
+    # And the other way round: this table already has doc, so it is no ADD.
+    assert refuse_mid_run_column(
+        SimpleNamespace(extra={MID_RUN_POLICY_KEY: {**stamp, "dest_columns": ["id"]}}),
+        "postgresql", ["doc"], maps, dest_columns=["id", "doc"], dest_existed=True,
+    ) == frozenset()
+
+
+# 3. A table this run created owns its new fields: added and disclosed.
+
+
+def test_mongo_first_load_into_a_new_table_adds_a_late_field_and_says_so(
+    tmp_path, isolated, fake_mongo_pages  # noqa: F811
+):
+    from services.column_coverage_report import column_coverage_of
+
+    dst = tmp_path / "new.sqlite"  # no table: this run creates it
+
+    rows, ddl, summary, _cols = _mongo_stream(dst, "manual_review")
+
+    columns, landed = _docs_state(dst)
+    assert columns == ["id", "name", "doc"]
+    assert [r[2] for r in landed if int(r[0]) >= 4] == [seed_doc(4), seed_doc(5), seed_doc(6)]
+    assert summary["columns_added_during_run"] == ["doc"]
+    assert any("COLUMN doc" in line and "mid-transfer" in line for line in ddl)
+    coverage = column_coverage_of({"reconciliation": {"passed": True}, "destination_summary": summary})
+    assert "added during the run" in coverage["statement"] and "doc" in coverage["statement"]
+
+
+def test_a_table_that_existed_before_the_run_still_stops(tmp_path, isolated, fake_mongo_pages):  # noqa: F811
+    from src.transfer.source_column_coverage import SourceColumnsUnaccounted
+
+    with pytest.raises(SourceColumnsUnaccounted):
+        _mongo_stream(_docs_dest(tmp_path), "manual_review")
+
+
+# 2. Resume with an audited decision, over the HTTP route.
+
+
+@pytest.fixture()
+def resume_env(tmp_path, monkeypatch):
+    import importlib
+
+    import services.mongodb_service as mongo_mod
+    import services.sync_cursor as sc
+    import src.transfer.background as background
+    import src.transfer.engine as engine_mod
+    import src.transfer.stream as stream_mod
+    from services.mongodb_service import MemoryMongoDBService
+
+    store = MemoryMongoDBService()
+    router = importlib.import_module("src.routers.connectors_router")
+    for module in (engine_mod, router, mongo_mod, background):
+        monkeypatch.setattr(module, "get_mongodb_service", lambda: store)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    monkeypatch.setattr(stream_mod, "CHUNK_SIZE", 5)
+    # The route and the engine are real; only the thread-pool hop is synchronous.
+    monkeypatch.setattr(
+        background, "run_transfer_async",
+        lambda job_id, req, resume=False, **_k: UniversalTransferEngine().execute_tracked(
+            req, job_id, resume=resume
+        ),
+    )
+    audited: list[dict[str, Any]] = []
+    import services.audit_log as audit_log
+
+    real_append = audit_log.append_audit_event
+    monkeypatch.setattr(
+        audit_log, "append_audit_event",
+        lambda **kw: (audited.append(kw), real_append(**kw))[1],
+    )
+    return store, audited
+
+
+def _interrupted_job(tmp_path: Path, store: Any, monkeypatch) -> tuple[str, Path]:
+    """A run cancelled after a few batches (a durable checkpoint), then the source
+    gains doc, which the destination table lacks: a resume needs a decision."""
+    import services.cancel_check as cancel_check
+
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    conn = sqlite3.connect(src)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, name TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?,?,?)", [(i, i, f"n{i}") for i in range(1, ROWS + 1)])
+    conn.commit()
+    conn.close()
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="t"),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="t"),
+        sync_mode="incremental_append", validation_mode="strict",
+        stream_contracts=[{
+            "name": "t", "sync_mode": "incremental_append", "cursor_field": "seq",
+            "cursor_semantics": "monotonic_sequence", "primary_key": ["id"], "selected": True,
+        }],
+        source_filter={"column": "id", "op": "gt", "value": 0},  # row path: a cancel point
+    )
+    engine = UniversalTransferEngine()
+    job_id = engine._create_pending_job(request)
+    probes = {"n": 0}
+
+    def cancel_after_a_few_batches(_mongo, _job_id):
+        probes["n"] += 1
+        return probes["n"] >= 4
+
+    with monkeypatch.context() as m:
+        m.setattr(cancel_check, "job_cancel_requested", cancel_after_a_few_batches)
+        first = engine.execute_tracked(request, job_id)
+    assert not first.success and store.get_job(job_id).get("checkpoint")
+    landed = sqlite3.connect(dst).execute("SELECT count(*) FROM t").fetchone()[0]
+    assert 0 < landed < ROWS
+    # The new field appears on records after the ones already landed.
+    conn = sqlite3.connect(src)
+    conn.execute("ALTER TABLE t ADD COLUMN doc TEXT")
+    conn.executemany(
+        "UPDATE t SET doc = ? WHERE id = ?", [(seed_doc(i), i) for i in range(landed + 1, ROWS + 1)]
+    )
+    conn.commit()
+    conn.close()
+    return job_id, dst
+
+
+def _resume(job_id: str, body: dict[str, Any] | None = None):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(__import__("src.main", fromlist=["app"]).app)
+    path = f"/api/v1/connectors/jobs/{job_id}/resume"
+    return client.post(path, json=body) if body is not None else client.post(path)
+
+
+@pytest.mark.parametrize("decision", ["propagate", "omit"])
+def test_resume_with_a_recorded_decision_continues_the_job(tmp_path, resume_env, monkeypatch, decision):
+    store, audited = resume_env
+    job_id, dst = _interrupted_job(tmp_path, store, monkeypatch)
+
+    # Without a decision the resume stops again, before writing anything new.
+    plain = _resume(job_id)
+    assert plain.status_code == 200, plain.text
+    assert store.get_job(job_id)["status"] == "failed"
+    assert "doc" in str(store.get_job(job_id).get("error"))
+
+    body = (
+        {"schema_policy": "propagate_columns", "reason": "doc is a new product field"}
+        if decision == "propagate"
+        else {"omit_columns": ["doc"], "reason": "doc is not needed downstream"}
+    )
+    resp = _resume(job_id, body)
+
+    assert resp.status_code == 200, resp.text
+    job = store.get_job(job_id)
+    assert job["status"] in ("completed", "completed_with_warnings"), job.get("error")
+    record = job["resume_decision"]
+    assert record["reason"] == body["reason"] and record["actor"] and record["action"] == "resume"
+    assert any(e["action"] == "job.resume.schema_decision" for e in audited)
+    conn = sqlite3.connect(dst)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(t)")]
+        ids = [r[0] for r in conn.execute("SELECT id FROM t ORDER BY id")]
+        assert ids == list(range(1, ROWS + 1))  # every row exactly once
+        if decision == "propagate":
+            assert "doc" in columns
+            assert job["transfer_request"]["schema_policy"] == "propagate_columns"
+        else:
+            assert "doc" not in columns
+            assert "doc (declared omitted)" in job["reconciliation"]["column_coverage"]["statement"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ({"schema_policy": "propagate_columns", "reason": "x"}, 400),  # reason too short
+        ({"schema_policy": "manual_review", "reason": "keep reviewing this"}, 400),
+    ],
+)
+def test_resume_decision_is_refused_without_a_reason_or_an_adding_policy(
+    tmp_path, resume_env, monkeypatch, body, status
+):
+    store, _audited = resume_env
+    job_id, _dst = _interrupted_job(tmp_path, store, monkeypatch)
+
+    resp = _resume(job_id, body)
+
+    assert resp.status_code == status, resp.text
+    assert "resume_decision" not in store.get_job(job_id)
+
+
+def test_resume_decision_needs_the_permission_that_approves_destination_changes():
+    from services.resume_decision import SchemaDecision, decision_refusal
+
+    decision = SchemaDecision(schema_policy="propagate_columns", reason="doc is a new product field")
+    assert decision_refusal({"role": "viewer"}, decision)[0] == 403
+    assert decision_refusal({"role": "operator"}, decision) is None
+    assert decision_refusal({"role": "editor"}, decision) is None
+    assert decision_refusal(None, decision) is None  # authentication off
+
+
+def test_the_remedy_reads_exactly_as_the_docs_say():
+    import re
+
+    from src.transfer.source_column_coverage import _MID_RUN_REMEDY
+
+    docs = (Path(__file__).resolve().parents[3] / "docs" / "use" / "verification.md").read_text()
+    assert re.sub(r"\s+", " ", _MID_RUN_REMEDY) in re.sub(r"\s+", " ", docs)
+
+
+# 4. Quarantine replay is judged like any run without Validate.
+
+
+def test_quarantine_replay_does_not_add_a_column_unapproved(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    dest_path = tmp_path / "replay.db"
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", table="users",
+            connection_string=f"sqlite:///{dest_path}", database=str(dest_path),
+        ),
+        source_filename="users.csv", source_content=b"id,age\n1,30\n2,not-a-number\n",
+        sync_mode="full_refresh_overwrite", skip_preflight=True, validation_mode="balanced",
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.95},
+            {"source": "age", "target": "age", "confidence": 0.95, "target_type": "integer"},
+        ],
+        column_types={"id": "string", "age": "string"},
+    )
+    result = UniversalTransferEngine().execute(request)
+    assert result.success
+    client = TestClient(app)
+    quarantine = client.get(f"/api/v1/connectors/jobs/{result.job_id}/quarantine").json()["quarantine"]
+    edited = []
+    for detail in quarantine:
+        d = dict(detail)
+        if str(d.get("value")) == "not-a-number":
+            d["value"] = "25"
+            d["values"] = {**dict(d.get("values") or {}), "age": "25"}
+        edited.append(d)
+    # The destination no longer has age: the replay would have to add it.
+    conn = sqlite3.connect(dest_path)
+    conn.execute("ALTER TABLE users DROP COLUMN age")
+    conn.commit()
+    conn.close()
+
+    replay = client.post(f"/api/v1/connectors/jobs/{result.job_id}/quarantine/replay", json={"rows": edited})
+
+    assert replay.status_code == 409, replay.text
+    assert "Review ADD COLUMN proposals for age" in replay.json()["detail"]
+    conn = sqlite3.connect(dest_path)
+    try:
+        assert [r[1] for r in conn.execute("PRAGMA table_info(users)")] == ["id"]
+    finally:
+        conn.close()

@@ -197,11 +197,13 @@ def refuse_unapproved_add_without_validate(
 #: stream that discovers a field mid-run knows whether the run's policy adds it.
 MID_RUN_POLICY_KEY = "_df_mid_run_columns"
 
+#: The same words as docs/use/verification.md ("Resuming with a decision").
 _MID_RUN_REMEDY = (
-    "Nothing of that batch was written; the run stopped at the batch before it, "
-    "so a resume continues from there. Set the schema policy to propagate columns "
-    "(or turn on backfill new fields) and resume to add the field, or map it or "
-    "declare it omitted."
+    "Nothing of that batch was written; the batches before it are committed. "
+    "Resume the job with schema_policy set to propagate_columns (or "
+    "backfill_new_fields true) to add the field, or with the field in "
+    "omit_columns to leave it out, and a reason; the resume continues from "
+    "that batch."
 )
 
 
@@ -223,10 +225,17 @@ def stamp_mid_run_column_policy(request: Any, dest_schema_types: dict[str, str] 
     )
     if not isinstance(getattr(destination, "extra", None), dict):
         destination.extra = {}
+    extra = destination.extra
     destination.extra[MID_RUN_POLICY_KEY] = {
         "adds_columns": destination_evolution_approved(policy, acknowledged=False),
         "policy": policy,
+        "acknowledged": bool(getattr(request, "schema_drift_acknowledged", False)),
         "dest_columns": sorted({str(c).strip().lower() for c in dest_schema_types or {} if str(c).strip()}),
+        # A table this run creates is the run's own: a field it meets mid-run is
+        # added and disclosed. Only a table that existed before the run stops.
+        "dest_existed": bool(dest_schema_types)
+        or bool(extra.get("overwrite_replaced_column_types"))
+        or extra.get("dest_table_existed_before") is True,
     }
 
 
@@ -247,6 +256,9 @@ def refuse_mid_run_column(
     fields: list[str],
     mappings: list[dict[str, Any]] | None,
     lineage: dict[str, str] | None = None,
+    *,
+    dest_columns: list[str] | None = None,
+    dest_existed: bool | None = None,
 ) -> frozenset[str]:
     """Raise before a batch is written when it brings a field the policy does not add.
 
@@ -256,9 +268,17 @@ def refuse_mid_run_column(
     is neither refused nor added, and is returned so the caller holds it off
     the write. A stream run without the engine's stamp (a benchmark or a direct
     caller) keeps the writer's previous behaviour.
+
+    ``dest_columns`` / ``dest_existed`` are this stream's own table (a
+    multi-table run reads each one); without them the run's stamp answers. A
+    table this run created is the run's own: its new fields are added (and
+    disclosed as added during the run), never refused.
     """
     stamp = (getattr(destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
     if not isinstance(stamp, dict) or stamp.get("adds_columns") is not False:
+        return frozenset()
+    existed = stamp.get("dest_existed", True) if dest_existed is None else dest_existed
+    if existed is False:
         return frozenset()
     from services.db_type_utils import dest_declares_column_ddl
 
@@ -267,7 +287,9 @@ def refuse_mid_run_column(
     from services.mapping_constraints import carried_by_parent
 
     carried = frozenset(f for f in fields if f and carried_by_parent(f, mappings, lineage))
-    live = {str(c) for c in stamp.get("dest_columns") or []}
+    live = {
+        str(c).lower() for c in (stamp.get("dest_columns") if dest_columns is None else dest_columns) or []
+    }
     new = [f for f in fields if f and f not in carried and not _live_has(f, live)]
     if not new:
         return carried
@@ -282,8 +304,199 @@ def refuse_mid_run_column(
     )
 
 
+def stream_coverage_verdict(
+    *,
+    stream: str,
+    source_columns: list[str],
+    mappings: list[dict[str, Any]] | None,
+    lineage: dict[str, str] | None,
+    dest_types: dict[str, str] | None,
+    dest_type: str,
+    policy: str,
+    acknowledged: bool,
+) -> dict[str, Any]:
+    """G13 and the unapproved-ADD rule for ONE table of a run, with its own map.
+
+    The same verdict at Validate (``services.stream_coverage_gates``) and at
+    Execute (:func:`enforce_stream_coverage`), so a multi-table job is judged
+    per table exactly as a single table is. An acknowledged drift records the
+    table's undecided columns as left out under it, the way Validate's
+    acknowledgement does for the primary table.
+    """
+    from services.db_type_utils import dest_declares_column_ddl
+    from services.schema_drift import destination_evolution_approved, schema_review_copy
+    from services.shape_contract import write_ready_mappings
+    from services.source_coverage_gate import build_source_coverage_gate
+
+    coverage, gate = build_source_coverage_gate(
+        source_columns=list(source_columns or []), mappings=list(mappings or []), lineage=lineage
+    )
+    unaccounted = list(coverage["unaccounted"])
+    acknowledged_out = unaccounted if (acknowledged and unaccounted) else []
+    live = {str(c).strip().lower() for c in dest_types or {} if str(c).strip()}
+    names = {str(c).strip().lower() for c in source_columns or []}
+    adds: list[str] = []
+    if live and dest_declares_column_ddl(dest_type):
+        for m in write_ready_mappings(mappings):
+            src = str(m.get("source") or "").strip()
+            if src.lower() in names and not _live_has(str(m.get("target") or ""), live) and src not in adds:
+                adds.append(src)
+    approved = destination_evolution_approved(policy, acknowledged=acknowledged)
+    present = {n for n in names}
+    record = {
+        "table": stream,
+        "added_columns": adds if approved else [],
+        "skipped_columns": [],
+        "acknowledged_columns": acknowledged_out,
+        "omitted_columns": [c for c in coverage["omitted"] if str(c).lower() in present],
+        "carried_columns": list(coverage.get("carried") or []),
+        "source_column_count": len(source_columns or []),
+    }
+    message, gate_id, rule_id, columns = "", "", "", []
+    if unaccounted and not acknowledged_out:
+        message, gate_id, rule_id, columns = (
+            gate["message"], "g13_source_coverage", "g13_source_coverage.unaccounted", unaccounted,
+        )
+    elif adds and not approved:
+        copy = schema_review_copy(
+            {"saved_contract": False, "schema_evolution": {"additive": [{"kind": "add_column", "column": c} for c in adds]}},
+            policy=policy,
+        )
+        message = f"{copy['message']} Schema policy '{policy}' does not add columns."
+        gate_id, rule_id, columns = str(copy["gate_id"]), str(copy["rule_id"]), adds
+    return {
+        "stream": stream,
+        "status": "block" if message else "pass",
+        "message": f"Table {stream}: {message}" if message else "",
+        "gate": gate_id,
+        "rule_id": rule_id,
+        "columns": columns,
+        "record": record,
+    }
+
+
+def _stream_live_types(dest_type: str, dest_cfg: dict[str, Any], table: str) -> dict[str, str]:
+    from .adapters_introspect import _introspect_table_schema
+
+    try:
+        return dict(_introspect_table_schema(dest_type, dest_cfg, table, [], strict_namespace=True) or {})
+    except Exception:  # noqa: BLE001 - an unread table is judged as absent, as a CREATE
+        return {}
+
+
+def capture_stream_dest_types(destination: Any, stream_name: str) -> dict[str, str]:
+    """The stream's destination columns BEFORE an overwrite sets its table aside.
+
+    Only a destination with column DDL can be asked to ADD COLUMN, so only it
+    is read: a topic, a bucket or a key space has no columns to compare, and a
+    catalog read there costs a connect timeout per table for nothing.
+    """
+    from services.db_type_utils import dest_declares_column_ddl
+
+    from .adapters import resolve_connector_config, resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+
+    try:
+        dest_type = resolve_driver_type(str(getattr(destination, "format", "") or ""))
+        if not dest_declares_column_ddl(dest_type):
+            return {}
+        table = resolve_dest_table(dest_type, destination, stream_name)
+        cfg = resolve_connector_config(destination)
+    except Exception:  # noqa: BLE001 - unread: the writer still refuses a missing column
+        return {}
+    return _stream_live_types(dest_type, cfg, str(table or ""))
+
+
+def _run_stamp(cfg: Any) -> dict[str, Any] | None:
+    stamp = (getattr(cfg.destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
+    return stamp if isinstance(stamp, dict) else None
+
+
+def enforce_stream_coverage(run: Any, probe: Any, write_columns: list[str], dest_types: dict[str, str]) -> None:
+    """Execute: judge this table with the map it writes with; record it on its summary."""
+    cfg = run.cfg
+    stamp = _run_stamp(cfg)
+    if stamp is None:
+        return  # not under the engine (a benchmark or a direct caller)
+    from services.flatten_protection import coverage_lineage
+
+    rows = [
+        row if isinstance(row, dict) else dict(zip(getattr(probe, "headers", []) or [], row))
+        for row in (getattr(probe, "rows", None) or [])[:100]
+    ]
+    lineage = coverage_lineage(
+        str(getattr(cfg.source, "format", "") or ""), getattr(cfg.source, "extra", None), rows, cfg.mappings
+    )
+    verdict = stream_coverage_verdict(
+        stream=str(getattr(cfg.source, "table", "") or getattr(cfg.source, "collection", "") or ""),
+        source_columns=list(write_columns or []),
+        mappings=list(cfg.mappings or []),
+        lineage=lineage,
+        dest_types=dest_types,
+        dest_type=str(cfg.dest_type or ""),
+        policy=str(stamp.get("policy") or "manual_review"),
+        acknowledged=bool(stamp.get("acknowledged")),
+    )
+    cfg.dest_live_columns = sorted({str(c).lower() for c in dest_types or {}})
+    cfg.dest_existed = bool(dest_types)
+    # The stream starts its summary after this point; it copies the record in.
+    cfg.coverage_record = verdict["record"]
+    if verdict["status"] == "block":
+        fix = _ADD_REMEDY if verdict["gate"] != "g13_source_coverage" else _REMEDY
+        raise SourceColumnsUnaccounted(
+            f"{verdict['message']} {fix}", columns=verdict["columns"],
+            gate=verdict["gate"], rule_id=verdict["rule_id"], fix=fix,
+        )
+
+
+def copy_declined_for_stream_map(cfg: Any, dest_types: dict[str, str] | None) -> bool:
+    """A table of a multi-table run whose own map is incomplete takes the row path.
+
+    A server-side copy moves the mapped columns only and never reaches the map
+    step, so the per-table verdict runs here on the table's catalog columns: a
+    block keeps the table on the row path (which judges it again with its
+    sampled rows and refuses before any write); a pass lets the copy run and
+    leaves the table's record on ``cfg.coverage_record`` for its summary.
+    """
+    stamp = _run_stamp(cfg)
+    if stamp is None or not getattr(cfg, "mappings", None):
+        return False
+    from services.copy_fast_path import note_copy_decline
+    from services.flatten_protection import stamped_lineage
+
+    from .adapters_introspect import _introspect_table_schema
+
+    table = str(getattr(cfg.source, "table", "") or getattr(cfg.source, "collection", "") or "")
+    try:
+        columns = list(_introspect_table_schema(cfg.src_read_type, cfg.src_cfg, table, []) or {})
+    except Exception:  # noqa: BLE001 - an unread catalog proves nothing, so no copy
+        columns = []
+    verdict = (
+        stream_coverage_verdict(
+            stream=table, source_columns=columns, mappings=list(cfg.mappings),
+            lineage=stamped_lineage(cfg.mappings), dest_types=dest_types,
+            dest_type=str(cfg.dest_type or ""), policy=str(stamp.get("policy") or "manual_review"),
+            acknowledged=bool(stamp.get("acknowledged")),
+        )
+        if columns
+        else None
+    )
+    if verdict is not None and verdict["status"] == "pass":
+        cfg.coverage_record = verdict["record"]
+        return False
+    note_copy_decline(
+        "this table's own column map leaves a column undecided or adds one; the row "
+        "path judges it per table before any write"
+    )
+    return True
+
+
 __all__ = [
     "MID_RUN_POLICY_KEY",
+    "capture_stream_dest_types",
+    "copy_declined_for_stream_map",
+    "enforce_stream_coverage",
+    "stream_coverage_verdict",
     "omitted_source_names",
     "refuse_mid_run_column",
     "stamp_mid_run_column_policy",

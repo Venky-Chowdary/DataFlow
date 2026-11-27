@@ -103,6 +103,12 @@ class RunConfig:
     _schema_absorb_lock: Any = None
     #: Source fields declared omitted; omits leave ``mappings`` before the read.
     omitted_sources: Any = frozenset()
+    #: This table's own destination columns and whether it existed before the
+    #: run (multi-table runs read each); ``None`` defers to the run's stamp.
+    dest_live_columns: Any = None
+    dest_existed: Any = None
+    #: A multi-table run's per-table verdict when the table took a server copy.
+    coverage_record: Any = None
     ddl_log: Any = None
     _RECONCILE_SAMPLE_CAP: Any = None
     resume_write_complete: bool = False

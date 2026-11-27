@@ -212,6 +212,10 @@ export interface ParityColumnCoverage {
   source_columns: number | null;
   columns_written: number | null;
   not_migrated: { column: string; reason: ParityNotMigratedReason }[];
+  /** Flattened children written inside their parent object ("carried inside <parent>"). */
+  carried_inside: { column: string; parent: string }[];
+  /** Columns first seen in a later batch and added during the run. */
+  added_during_run: string[];
   statement: string;
 }
 

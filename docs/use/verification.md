@@ -62,10 +62,31 @@ refused. That holds when the destination table already exists and lacks the
 column, in every sync mode: the column is added when the schema policy approves
 it (propagate columns, or backfill new fields) or the drift is acknowledged for
 the run, and otherwise the run stops before the first write and names the
-column. Under manual review the run never adds a column on its own, including a
-field a document source first shows partway through the run: the run stops
-before that batch and resumes from it once the field is approved. A field you
+column. Under manual review the run never adds a column on its own to a table
+that existed before the run, including a field a document source first shows
+partway through the run: the run stops before that batch. A table the run
+created is the run's own: a field first seen later is added to it and reported
+as "added during the run" in the job summary and the Trust Report. A field you
 declared omitted is never written, even if it first appears late.
+
+In a job that moves several tables, each table is checked with the map it
+writes with, at Validate and before it is written, and the reports name each
+left-out column as `table.column`. A quarantine replay is checked the same way.
+
+### Resuming with a decision
+
+When a run stops on a field, the message ends with: "Nothing of that batch was
+written; the batches before it are committed. Resume the job with schema_policy
+set to propagate_columns (or backfill_new_fields true) to add the field, or with
+the field in omit_columns to leave it out, and a reason; the resume continues
+from that batch."
+
+That is `POST /api/v1/connectors/jobs/{job_id}/resume` with a body such as
+`{"schema_policy": "propagate_columns", "reason": "doc is a new product field"}`
+or `{"omit_columns": ["doc"], "reason": "not needed downstream"}`. It needs the
+job.manage permission (the one that approves destination changes). Who decided,
+the reason and the decision are recorded on the job (`resume_decision`) and in
+the audit log. `/rerun` takes the same decision as `schema_decision`.
 A field flattened out of a document (for example `nested_city` from `nested`)
 counts as carried when its parent object is written whole, and the reports say
 "carried inside nested"; if the parent is transformed or not written, the field

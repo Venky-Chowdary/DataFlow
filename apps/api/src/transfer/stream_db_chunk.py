@@ -69,6 +69,8 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
                     ],
                     cfg.mappings,
                 ),
+                dest_columns=cfg.dest_live_columns,
+                dest_existed=cfg.dest_existed,
             )
             # Carried inside a parent written whole: not a column of its own here.
             new_headers = [h for h in new_headers if h not in held]
@@ -92,6 +94,10 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
                     "assignment_strategy": "create_compatible_new",
                 })
                 mapped_sources.add(h)
+                # Disclosed on the job and the Trust Report as added during the run.
+                if not isinstance(run.tally.dest_summary, dict):
+                    run.tally.dest_summary = {}
+                run.tally.dest_summary.setdefault("columns_added_during_run", []).append(h)
                 cfg.ddl_log.append(
                     f"{cfg.dest_type.upper()} COLUMN {h} {_stream.ddl_type(cfg.dest_type, cfg.schema.get(h, 'string'))} "
                     f"(discovered mid-transfer from {cfg.src_type} — no silent drop)"
