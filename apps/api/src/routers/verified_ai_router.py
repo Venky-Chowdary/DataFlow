@@ -99,13 +99,26 @@ def _endpoint(dto: EndpointDTO | None) -> Any:
     return EndpointConfig.from_dict(dto.kind, dto.model_dump(by_alias=True))
 
 
-async def _off_loop(fn: Any) -> Any:
+_TIMED_OUT = "The mapping check did not finish in time."
+
+
+async def _off_loop(fn: Any, guard: Any = None) -> Any:
+    """``fn`` off the event loop under the deadline. Past it the answer is 504 and ``guard`` closes,
+    so the abandoned worker writes nothing (it checks the guard under the store's write lock)."""
     from ..ai.copilot.tool_deadline import run_off_event_loop
 
     def _timed_out(message: str) -> Any:
-        raise HTTPException(status_code=504, detail="The mapping check did not finish in time.")
+        if guard is not None:
+            guard.cancel()
+        raise HTTPException(status_code=504, detail=_TIMED_OUT)
 
     return await run_off_event_loop("mapping_witness", fn, _timed_out, seconds=WITNESS_DEADLINE_SECONDS)
+
+
+def _guard() -> Any:
+    from services.mapping_witness_service import WriteGuard
+
+    return WriteGuard(WITNESS_DEADLINE_SECONDS)
 
 
 @router.post("/transfer/mapping-witness")
@@ -131,8 +144,9 @@ async def mapping_witness(
     mappings = [m for m in body.mappings if isinstance(m, dict)]
     key = key_pair(mappings, body.target_key_columns, body.key.model_dump() if body.key else None)
     actor = actor_from_request(request)
+    guard = _guard()
 
-    def _run() -> dict[str, Any]:
+    def _run() -> dict[str, Any] | None:
         destination = _endpoint(body.destination)
         identity = destination_identity(destination, workspace)
         report = run_witness(
@@ -149,7 +163,9 @@ async def mapping_witness(
         )
         digest = mapping_digest(mappings, identity)
         saved = save_report(report, workspace_id=workspace, session=body.session_id, identity=identity,
-                            digest=digest, source=source_identity(body.source_ref), actor=actor)
+                            digest=digest, source=source_identity(body.source_ref), actor=actor, guard=guard)
+        if saved is None:
+            return None  # past the deadline: nothing was recorded
         _audit("mapping_witness.recorded", f"mapping:{digest[:16]}", actor, {
             "mode": report.get("mode"), "summary": report.get("summary"), "trigger": report.get("trigger"),
             "report_sha256": saved["report_sha256"],
@@ -158,7 +174,10 @@ async def mapping_witness(
                 "report_sha256": saved["report_sha256"], "recorded_at": saved["recorded_at"],
                 "requested_by": saved["requested_by"]}
 
-    return await _off_loop(_run)
+    out = await _off_loop(_run, guard)
+    if out is None:
+        raise HTTPException(status_code=504, detail=_TIMED_OUT)
+    return out
 
 
 @router.post("/transfer/mapping-witness/review")
@@ -174,19 +193,22 @@ async def review_witness_flag(
         _assert_endpoint_connectors(request, read=(body.destination,))
     workspace = resolve_write_workspace(request, workspace_id)
     actor = actor_from_request(request)
+    guard = _guard()
 
-    def _run() -> dict[str, Any]:
+    def _run() -> dict[str, Any] | None:
         identity = destination_identity(_endpoint(body.destination), workspace)
         return record_review(workspace_id=workspace, session=body.session_id, identity=identity,
                              digest=body.mapping_digest, source=body.source, decision=body.decision, actor=actor,
-                             flag_id=body.flag_id, new_target=body.new_target)
+                             flag_id=body.flag_id, new_target=body.new_target, guard=guard)
 
     try:
-        entry = await _off_loop(_run)
+        entry = await _off_loop(_run, guard)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if entry is None:
+        raise HTTPException(status_code=504, detail=_TIMED_OUT)
     _audit("mapping_witness.reviewed", f"mapping:{body.mapping_digest[:16]}", entry["by"], {
         k: entry.get(k) for k in ("source", "flagged_target", "flag_kind", "flag_id", "decision", "new_target",
                                   "report_sha256")
@@ -208,14 +230,17 @@ async def record_map_decisions_route(
         _assert_endpoint_connectors(request, read=(body.destination,))
     workspace = resolve_write_workspace(request, workspace_id)
     actor = actor_from_request(request)
+    guard = _guard()
 
-    def _run() -> int:
+    def _run() -> int | None:
         identity = destination_identity(_endpoint(body.destination), workspace)
         return record_map_decisions(workspace_id=workspace, session=body.session_id, identity=identity,
                                     mappings=[m.model_dump() for m in body.mappings], actor=actor,
-                                    source=source_identity(body.source_ref))
+                                    source=source_identity(body.source_ref), guard=guard)
 
-    recorded = await _off_loop(_run)
+    recorded = await _off_loop(_run, guard)
+    if recorded is None:
+        raise HTTPException(status_code=504, detail=_TIMED_OUT)
     _audit("mapping.decisions_recorded", "mapping:decisions", actor, {
         "recorded": recorded,
         "approved": sum(1 for m in body.mappings if m.approved),

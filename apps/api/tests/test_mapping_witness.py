@@ -423,11 +423,25 @@ def test_the_route_answers_within_its_deadline(monkeypatch, tmp_path):
     import src.routers.verified_ai_router as router_mod
     from src.main import app
 
+    import threading
+
+    finished = threading.Event()
+    real_save = svc.save_report
+
+    def save(*args, **kwargs):
+        try:
+            return real_save(*args, **kwargs)
+        finally:
+            finished.set()
+
     monkeypatch.setattr(router_mod, "WITNESS_DEADLINE_SECONDS", 0.5)
     monkeypatch.setattr(svc, "run_witness", lambda **kw: _time.sleep(3) or {})
+    monkeypatch.setattr(svc, "save_report", save)
     started = _time.monotonic()
     res = TestClient(app).post("/api/v1/transfer/mapping-witness", json={"mappings": F.CORRECT_MAPPING})
     assert res.status_code == 504 and _time.monotonic() - started < 2.5
+    # The abandoned worker ends here, not inside the next test's store (it writes nothing: round 4).
+    assert finished.wait(15)
 
 
 def test_hostile_cells_through_the_route_are_a_200(monkeypatch, tmp_path):

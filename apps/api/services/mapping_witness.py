@@ -37,6 +37,7 @@ hostile cell cannot stall or crash the check.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -786,8 +787,9 @@ def _profile_candidates(pairs: list[dict[str, Any]], source_rows: list[dict],
 
 
 def _fingerprint(pairs: list[dict[str, Any]], *, mode: str, key: tuple[str, str] | None, date_locale: str,
-                 source_rows: list[dict], dest_rows: list[dict] | None) -> str:
-    """What the witness looked at, without a single value: names, counts and settings."""
+                 source_rows: list[dict], dest_rows: list[dict] | None, source_digest: str = "") -> str:
+    """What the witness looked at, without a single value: names, counts, settings and the caller's
+    keyed digest of the source sample (an edited file with the same name and row count is other inputs)."""
     def counts(rows: list[dict] | None, cols: list[str]) -> dict[str, int]:
         return {c: sum(1 for r in rows or [] if isinstance(r, dict) and norm(_get(r, c)) is not None) for c in cols}
 
@@ -801,6 +803,7 @@ def _fingerprint(pairs: list[dict[str, Any]], *, mode: str, key: tuple[str, str]
         "destination_rows": len(dest_rows or []),
         "source_non_null": counts(source_rows, [p["source"] for p in pairs]),
         "destination_non_null": counts(dest_rows, [p["target"] for p in pairs]),
+        "source_content": str(source_digest or "") or None,
     }
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -814,11 +817,14 @@ def witness_mappings(
     date_locale: str = "",
     generated_at: str | None = None,
     unread: dict[str, str] | None = None,
+    source_digest: str = "",
 ) -> dict[str, Any]:
     """Judge every mapped pair against the data. Pure: same inputs, same report.
 
     ``unread`` names destination columns (any case) the sample did not read, with
     why; a pair onto one is "not read", never judged as an empty column.
+    ``source_digest`` is the caller's keyed digest of the source sample (never a
+    value); it goes into ``inputs_sha256`` and so into every flag id.
     """
     unread = {str(k).casefold(): str(v) for k, v in (unread or {}).items()}
     date_locale = str(date_locale or "").strip().upper()
@@ -895,12 +901,10 @@ def witness_mappings(
     ordered = [results[p["source"]] for p in pairs if p["source"] in results]
     summary = Counter(r["status"] for r in ordered)
     inputs_sha256 = _fingerprint(pairs, mode=mode, key=key, date_locale=date_locale,
-                                 source_rows=source_rows, dest_rows=dest_rows)
+                                 source_rows=source_rows, dest_rows=dest_rows, source_digest=source_digest)
     for res in ordered:
         if res.get("flag"):
-            # A flag's id: what a person reviews ("Keep this mapping") names exactly this flag.
-            res["flag"]["id"] = hashlib.sha256(
-                f"{inputs_sha256}|{res['source']}|{res['target']}|{res['flag']['kind']}".encode()).hexdigest()[:20]
+            res["flag"]["id"] = flag_id(inputs_sha256, res)
     return {
         "version": WITNESS_VERSION,
         "mode": mode,
@@ -952,6 +956,35 @@ def _profile_swaps(results: dict[str, dict[str, Any]], pairs: list[dict[str, Any
             )
             res["flag"]["swapped_with"] = that["source"]
             res["reason"] = res["flag"]["reason"]
+
+
+def source_sample_digest(mappings: list[dict[str, Any]], source_rows: list[dict[str, Any]] | None,
+                         key: tuple[str, str] | None, secret: bytes) -> str:
+    """A keyed digest of the source sample's mapped columns: an edited file is other inputs.
+
+    HMAC under a server-held secret, so the digest cannot be matched against guessed
+    values; nothing here is a value. Row order does not matter.
+    """
+    cols = sorted({p["source"] for p in mapped_pairs(mappings)} | ({key[0]} if key and key[0] else set()))
+    rows = sorted(json.dumps([norm(_get(r, c)) for c in cols], separators=(",", ":"))
+                  for r in (source_rows or [])[:MAX_ROWS] if isinstance(r, dict))
+    body = json.dumps({"columns": cols, "rows": rows}, separators=(",", ":"))
+    return hmac.new(secret, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def flag_id(inputs_sha256: str, res: dict[str, Any]) -> str:
+    """A flag's id: what a person reviews ("Keep this mapping") names exactly this flag.
+
+    It covers the check's inputs (names, counts, settings, the keyed source digest), the
+    pair, and everything the flag says: kind, suggested column, reason, swap partner and
+    the evidence counts. Reasons and evidence carry names and counts, never a value. A
+    flag that says anything else is another flag, and a Keep given to this one does not
+    reach it.
+    """
+    flag = {k: v for k, v in (res.get("flag") or {}).items() if k != "id"}
+    body = {"inputs": inputs_sha256, "source": res.get("source"), "target": res.get("target"), "flag": flag,
+            "evidence": res.get("evidence") or {}}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:20]
 
 
 def flagged_pairs(report: dict[str, Any] | None) -> list[dict[str, Any]]:

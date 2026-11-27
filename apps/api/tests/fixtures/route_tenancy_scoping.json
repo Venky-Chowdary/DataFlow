@@ -216,6 +216,14 @@
       "scope": "workspace",
       "resource": "job"
     },
+    "GET /api/v1/jobs/{job_id}/ai-decisions": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/mapping-witness": {
+      "scope": "workspace",
+      "resource": "job"
+    },
     "GET /api/v1/jobs/{job_id}/parity-report": {
       "scope": "workspace",
       "resource": "job"

@@ -19,7 +19,15 @@
   the sampler cannot address, or one past the read bound is "not read". A
   warehouse is read only on an explicit Check mapping. Reads run under the
   workspace's egress allowlist.
-* **Bounds.** Records are per workspace and session; each is capped. Past
+* **Writes.** Every read-modify-write of the store runs under one lock (and, in
+  file mode, an ``flock`` across processes, then an atomic replace), so two
+  writers never lose each other's update. A request past its deadline (the
+  route already answered 504) writes nothing: :class:`WriteGuard` is checked
+  under that same lock at save time.
+* **Bounds.** Records are per workspace and session; each is capped. A new pair
+  set checked in an open session supersedes that session's earlier record for
+  the same source and destination unless a job was submitted with it; a record
+  keeps its latest report whole and earlier ones by hash only. Past
   :data:`MAX_RECORDS_PER_WORKSPACE`, records older than the evidence window go
   first; a record inside the window (an open Map session) goes only past the
   hard bound :data:`MAX_LIVE_RECORDS_PER_WORKSPACE`, and its session then reads
@@ -28,10 +36,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
 import re
+import secrets
+import threading
+import time
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -41,6 +55,7 @@ from services.mapping_witness import (
     flagged_pairs,
     mapped_pairs,
     report_sha256,
+    source_sample_digest,
     witness_mappings,
 )
 from services.platform_config import data_dir
@@ -98,7 +113,7 @@ def _file_load() -> dict[str, Any]:
 def _file_save(data: dict[str, Any]) -> None:
     from services.atomic_file import write_json_atomic
 
-    write_json_atomic(_store_path(), dict(data))
+    write_json_atomic(_store_path(), dict(data), indent=None)
 
 
 _DOC = SharedRecordSet(
@@ -112,6 +127,74 @@ _DOC = SharedRecordSet(
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── one writer at a time ─────────────────────────────────────────────────────
+
+_WRITE_LOCK = threading.RLock()
+_WRITING = threading.local()
+
+
+@contextlib.contextmanager
+def _writing() -> Iterator[None]:
+    """Hold the store for one read-modify-write: the process lock, and in file mode an ``flock``."""
+    with _WRITE_LOCK:
+        depth = getattr(_WRITING, "depth", 0)
+        _WRITING.depth = depth + 1
+        try:
+            from services.shared_doc_store import control_store_backend
+
+            if depth or control_store_backend() != "file":
+                yield
+                return
+            path = _store_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(f"{path}.lock", "a+") as handle:
+                try:
+                    import fcntl
+
+                    fcntl.flock(handle, fcntl.LOCK_EX)
+                except (ImportError, OSError):  # no flock here: the process lock still serialises
+                    logger.debug("mapping witness: file lock unavailable")
+                yield
+        finally:
+            _WRITING.depth = depth
+
+
+def _serialised(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a writer under :func:`_writing`, read again and re-applied when another node's write won the swap."""
+    retried = _DOC.retrying(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with _writing():
+            return retried(*args, **kwargs)
+
+    return wrapper
+
+
+class WriteGuard:
+    """A request's leave to write: gone once its deadline passed or the route gave up on it (504).
+
+    :meth:`open` is read under the store's write lock, at save time, and :meth:`cancel`
+    takes the same lock, so a check the caller was told "did not finish" is never recorded.
+    The cutoff sits a little before the deadline, so a save never lands as the 504 goes out.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self._cutoff = time.monotonic() + max(0.0, seconds - min(1.0, seconds / 10))
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        with _WRITE_LOCK:
+            self._cancelled = True
+
+    def open(self) -> bool:
+        return not self._cancelled and time.monotonic() < self._cutoff
+
+
+def _closed(guard: WriteGuard | None) -> bool:
+    return guard is not None and not guard.open()
 
 
 def _sha(body: Any) -> str:
@@ -210,21 +293,55 @@ def destination_identity(endpoint: Any, workspace_id: str = "") -> str:
     return "|".join([driver, owner, database.casefold(), schema, obj])
 
 
+#: Text a statement keeps verbatim: string literals, quoted identifiers, dollar quotes, comments.
+_VERBATIM = re.compile(
+    r"'(?:[^']|'')*'?|\"(?:[^\"]|\"\")*\"?|`(?:[^`]|``)*`?|\[[^\]]*\]?"
+    r"|\$(\w*)\$.*?(?:\$\1\$|\Z)|--[^\n]*|/\*.*?(?:\*/|\Z)",
+    re.S,
+)
+_SPACE = re.compile(r"\s+")
+_AROUND_PUNCT = re.compile(r" ?([,();=]) ?")
+
+
+def statement_form(statement: Any) -> str:
+    """A statement in the form two spellings of one query share.
+
+    Case and whitespace are folded only outside literals, quoted identifiers and
+    comments: ``'ACME'`` is not ``'acme'``, ``"Orders"`` is not ``"orders"``, and
+    ``'a  b'`` is not ``'a b'``; ``SELECT a,b`` and ``select a , b`` are one query.
+    """
+    text = str(statement or "")
+    out: list[str] = []
+    at = 0
+    for m in _VERBATIM.finditer(text):
+        out.append(_AROUND_PUNCT.sub(r"\1", _SPACE.sub(" ", text[at:m.start()]).casefold()))
+        out.append(m.group(0))
+        at = m.end()
+    out.append(_AROUND_PUNCT.sub(r"\1", _SPACE.sub(" ", text[at:]).casefold()))
+    return "".join(out).strip().rstrip(";").strip()
+
+
+def _object_path(name: str) -> str:
+    """A file or object by its whole path (``2023/customers.csv`` is not ``2024/customers.csv``)."""
+    path = re.sub(r"/{2,}", "/", name.replace("\\", "/"))
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def source_identity(source: dict[str, Any] | None) -> str:
     """What the sample came from, the one normal form both Map and the job are compared in.
 
-    ``file|<file name>`` (no folder), or ``database|<table or collection>`` for every
-    other source kind (a cloud object is named by its path). A query or procedure
-    source adds ``#`` and a digest of its statement (whitespace and case folded),
-    so two different extracts of one stream are two sources.
+    ``file|<path>``, or ``database|<table or collection>`` for every other source
+    kind (a cloud object is named by its path). Paths are kept whole. A query or
+    procedure source adds ``#`` and a digest of its :func:`statement_form`, so two
+    different extracts of one stream are two sources.
     """
     src = dict(source or {})
     raw_kind = str(src.get("kind") or "").strip().casefold()
-    name = str(src.get("name") or "").strip()
+    name = _object_path(str(src.get("name") or "").strip())
     kind = "file" if raw_kind == "file" else ("database" if raw_kind or name else "")
-    if kind == "file":
-        name = name.replace("\\", "/").rsplit("/", 1)[-1]
-    text = " ".join(str(src.get("statement") or "").split()).casefold()
+    text = statement_form(src.get("statement"))
     ident = f"{kind}|{name.casefold()}" if kind or name else ""
     return f"{ident}#{hashlib.sha256(text.encode()).hexdigest()[:16]}" if text else ident
 
@@ -270,11 +387,21 @@ def _load(key: str, workspace_id: str) -> tuple[Any, dict[str, Any] | None]:
     return data, record
 
 
-def _save(data: Any, key: str, record: dict[str, Any], *, new: bool) -> None:
-    data[key] = record
+def _commit(data: Any, guard: WriteGuard | None = None) -> bool:
+    """Write ``data`` back unless the request's guard has closed (checked under the write lock)."""
+    if _closed(guard):
+        return False
     _DOC.save(tracked(data, getattr(data, "rev", None)))
+    return True
+
+
+def _save(data: Any, key: str, record: dict[str, Any], *, new: bool, guard: WriteGuard | None = None) -> bool:
+    data[key] = record
+    if not _commit(data, guard):
+        return False
     if new:
         prune_workspace(str(record.get("workspace_id") or ""))
+    return True
 
 
 def _expired_key(workspace_id: str) -> str:
@@ -288,36 +415,44 @@ def _is_old(updated_at: str, now: datetime) -> bool:
         return True
 
 
+def _prune_in(data: Any, workspace_id: str, keep: int | None = None, live_keep: int | None = None) -> int:
+    """Drop past-bound records from loaded ``data`` (see :func:`prune_workspace`); returns how many went."""
+    keep = MAX_RECORDS_PER_WORKSPACE if keep is None else keep
+    live_keep = MAX_LIVE_RECORDS_PER_WORKSPACE if live_keep is None else live_keep
+    mine = sorted((str((r or {}).get("updated_at") or ""), k) for k, r in data.items()
+                  if isinstance(r, dict) and str(r.get("workspace_id") or "") == workspace_id
+                  and str(k).startswith(("witness::", "activity::")))
+    if len(mine) <= keep:
+        return 0
+    now = datetime.now(timezone.utc)
+    old = [k for at, k in mine if _is_old(at, now)]
+    drop = old[: len(mine) - keep]
+    live = [k for at, k in mine if not _is_old(at, now)]
+    drop += live[: max(0, len(live) - live_keep)]
+    if not drop:
+        return 0
+    expired_key = _expired_key(workspace_id)
+    expired = dict((data.get(expired_key) or {}).get("sessions") or {})
+    stamp = now.isoformat()
+    for k in drop:
+        expired[str(data[k].get("session") or "")] = stamp
+        del data[k]
+    expired.pop("", None)
+    newest = sorted(expired.items(), key=lambda kv: kv[1])[-MAX_EXPIRED_SESSIONS:]
+    data[expired_key] = {"workspace_id": workspace_id, "sessions": dict(newest), "updated_at": stamp}
+    return len(drop)
+
+
+@_serialised
 def prune_workspace(workspace_id: str, keep: int | None = None, live_keep: int | None = None) -> int:
     """Past ``keep`` records, drop those older than the evidence window (oldest first); drop a record
     inside the window only past ``live_keep``. Pruned sessions are remembered as expired. Returns how many went."""
-    keep = MAX_RECORDS_PER_WORKSPACE if keep is None else keep
-    live_keep = MAX_LIVE_RECORDS_PER_WORKSPACE if live_keep is None else live_keep
     try:
         data = _DOC.load(part=workspace_id)
-        mine = sorted((str((r or {}).get("updated_at") or ""), k) for k, r in data.items()
-                      if isinstance(r, dict) and str(r.get("workspace_id") or "") == workspace_id
-                      and str(k).startswith(("witness::", "activity::")))
-        if len(mine) <= keep:
-            return 0
-        now = datetime.now(timezone.utc)
-        old = [k for at, k in mine if _is_old(at, now)]
-        drop = old[: len(mine) - keep]
-        live = [k for at, k in mine if not _is_old(at, now)]
-        drop += live[: max(0, len(live) - live_keep)]
-        if not drop:
-            return 0
-        expired_key = _expired_key(workspace_id)
-        expired = dict((data.get(expired_key) or {}).get("sessions") or {})
-        stamp = now.isoformat()
-        for k in drop:
-            expired[str(data[k].get("session") or "")] = stamp
-            del data[k]
-        expired.pop("", None)
-        newest = sorted(expired.items(), key=lambda kv: kv[1])[-MAX_EXPIRED_SESSIONS:]
-        data[expired_key] = {"workspace_id": workspace_id, "sessions": dict(newest), "updated_at": stamp}
-        _DOC.save(tracked(data, getattr(data, "rev", None)))
-        return len(drop)
+        dropped = _prune_in(data, workspace_id, keep, live_keep)
+        if dropped:
+            _DOC.save(tracked(data, getattr(data, "rev", None)))
+        return dropped
     except Exception as exc:  # noqa: BLE001 - pruning is housekeeping; the evidence is already stored
         logger.info("mapping witness prune skipped: %s", type(exc).__name__)
         return 0
@@ -325,22 +460,118 @@ def prune_workspace(workspace_id: str, keep: int | None = None, live_keep: int |
 
 # ── writes ───────────────────────────────────────────────────────────────────
 
+_SALT_KEY = "salt::"
 
+
+@_serialised
+def _new_salt(workspace_id: str) -> str:
+    key = _SALT_KEY + workspace_id
+    data, record = _load(key, workspace_id)
+    if record and record.get("salt"):
+        return str(record["salt"])
+    salt = secrets.token_hex(32)
+    data[key] = {"workspace_id": workspace_id, "salt": salt, "updated_at": _now()}
+    _DOC.save(tracked(data, getattr(data, "rev", None)))
+    return salt
+
+
+def workspace_sample_key(workspace_id: str) -> bytes:
+    """The workspace's server-held secret for :func:`source_sample_digest` (never leaves the store)."""
+    _data, record = _load(_SALT_KEY + workspace_id, workspace_id)
+    salt = str((record or {}).get("salt") or "") or _new_salt(workspace_id)
+    return bytes.fromhex(salt)
+
+
+def _compact(entry: dict[str, Any]) -> dict[str, Any]:
+    """An earlier report kept by reference: its hash and who/when, not the report again."""
+    return {k: entry[k] for k in ("report_sha256", "source_identity", "requested_by", "recorded_at") if k in entry}
+
+
+def _supersede(data: Any, keep_key: str, *, workspace_id: str, session: str, identity: str,
+               source: str) -> list[dict[str, Any]]:
+    """Drop this session's earlier records for the same source and destination that no job was submitted with.
+
+    Returns what a late review of one of them still needs (its digest, report hash and flagged
+    pairs, nothing else), newest last: a "changed" answer sent just before the edit's check landed.
+    """
+    gone: list[tuple[str, list[dict[str, Any]]]] = []
+    for k in [k for k in data.keys() if str(k).startswith("witness::") and k != keep_key]:
+        r = data.get(k)
+        if not isinstance(r, dict) or str(r.get("workspace_id") or "") != workspace_id or r.get("submitted_at"):
+            continue
+        reports = [e for e in r.get("reports") or [] if isinstance(e, dict)]
+        if (r.get("session") == session and r.get("destination_identity") == identity and reports
+                and all(e.get("source_identity") == source for e in reports)):
+            stub = {"digest": r.get("mapping_digest"), "report_sha256": reports[-1].get("report_sha256"),
+                    "source_identity": source,
+                    "flagged": [{"source": f["source"], "target": f["target"], "status": f["status"],
+                                 "flag": {"id": (f.get("flag") or {}).get("id"),
+                                          "kind": (f.get("flag") or {}).get("kind")}}
+                                for f in flagged_pairs(reports[-1].get("report") or {})]}
+            gone.append((str(r.get("updated_at") or ""), [*(r.get("previous") or []), stub]))
+            del data[k]
+    return [p for _at, chain in sorted(gone, key=lambda g: g[0]) for p in chain if isinstance(p, dict)]
+
+
+def _superseded_report(workspace_id: str, session: str, digest: str) -> dict[str, Any] | None:
+    """The flagged pairs of a report an edit in this session superseded, for a review sent before it landed."""
+    data = _DOC.load(part=workspace_id)
+    for k, r in data.items():
+        if not (str(k).startswith("witness::") and isinstance(r, dict) and r.get("session") == session
+                and str(r.get("workspace_id") or "") == workspace_id):
+            continue
+        for p in r.get("previous") or []:
+            if isinstance(p, dict) and p.get("digest") == digest:
+                return {"report": {"pairs": list(p.get("flagged") or [])}, "report_sha256": p.get("report_sha256"),
+                        "source_identity": p.get("source_identity") or ""}
+    return None
+
+
+@_serialised
 def save_report(report: dict[str, Any], *, workspace_id: str, session: str, identity: str, digest: str,
-                source: str = "", actor: str = "") -> dict[str, Any]:
-    """Append a report for this session and mapping (latest :data:`MAX_REPORTS` kept)."""
+                source: str = "", actor: str = "", guard: WriteGuard | None = None) -> dict[str, Any] | None:
+    """Record a report for this session and mapping; None when ``guard`` closed first (nothing written).
+
+    The latest report is kept whole, the ones before it (up to :data:`MAX_REPORTS`) by hash. A new pair
+    set in an open session supersedes that session's unsubmitted record for this source and destination.
+    """
     session = clean_session(session)
     key = _report_key(workspace_id, session, digest)
     data, record = _load(key, workspace_id)
     new = record is None
+    if new:
+        from services.shared_doc_store import control_store_backend
+
+        if control_store_backend() != "file":
+            data = _DOC.load(part=workspace_id)  # one read for the session's siblings and the bound
+        previous = _supersede(data, key, workspace_id=workspace_id, session=session, identity=identity,
+                              source=source) if session else []
     record = record or {"workspace_id": workspace_id, "session": session, "mapping_digest": digest,
                         "destination_identity": identity, "reports": []}
+    if new and previous:
+        record["previous"] = previous[-MAX_REPORTS:]
     entry = {"report": report, "report_sha256": report_sha256(report), "source_identity": source,
              "requested_by": str(actor or "")[:256], "recorded_at": _now()}
-    record = {**record, "reports": [*list(record.get("reports") or []), entry][-MAX_REPORTS:],
-              "updated_at": entry["recorded_at"]}
-    _save(data, key, record, new=new)
+    earlier = [_compact(e) for e in record.get("reports") or [] if isinstance(e, dict)]
+    data[key] = {**record, "reports": [*earlier, entry][-MAX_REPORTS:], "updated_at": entry["recorded_at"]}
+    if new:
+        _prune_in(data, workspace_id)
+    if not _commit(data, guard):
+        return None
     return {"mapping_digest": digest, "session": session, **entry}
+
+
+@_serialised
+def mark_submitted(*, workspace_id: str, session: str, digest: str, report_digest: str) -> bool:
+    """A job was submitted with this record's report: a later pair-set edit no longer supersedes it."""
+    key = _report_key(workspace_id, clean_session(session), digest)
+    data, record = _load(key, workspace_id)
+    if not record or record.get("submitted_at"):
+        return False
+    if not any(isinstance(e, dict) and e.get("report_sha256") == report_digest for e in record.get("reports") or []):
+        return False
+    data[key] = {**record, "submitted_at": _now()}
+    return _commit(data)
 
 
 def latest_report(*, workspace_id: str, session: str, digest: str) -> dict[str, Any] | None:
@@ -371,8 +602,10 @@ def _bounded_sources(table: dict[str, list[dict[str, Any]]]) -> dict[str, list[d
     return dict(ranked[-MAX_SOURCES:])
 
 
+@_serialised
 def record_review(*, workspace_id: str, session: str, identity: str, digest: str, source: str, decision: str,
-                  actor: str, flag_id: str = "", new_target: str = "") -> dict[str, Any]:
+                  actor: str, flag_id: str = "", new_target: str = "", guard: WriteGuard | None = None,
+                  ) -> dict[str, Any] | None:
     """A person's answer to one flag of this session's latest report.
 
     ``kept`` is an explicit "Keep this mapping" on the flag named by ``flag_id``;
@@ -384,7 +617,8 @@ def record_review(*, workspace_id: str, session: str, identity: str, digest: str
         raise ValueError("A review belongs to a Map session.")
     if decision not in (*REVIEW_DECISIONS, CONTINUED):
         raise ValueError("decision must be kept, changed or continued")
-    latest = latest_report(workspace_id=workspace_id, session=session, digest=digest)
+    latest = (latest_report(workspace_id=workspace_id, session=session, digest=digest)
+              or _superseded_report(workspace_id, session, digest))
     if not latest:
         raise LookupError("No witness report for this mapping in this session")
     flagged = {p["source"].casefold(): p for p in flagged_pairs(latest["report"])}
@@ -412,12 +646,14 @@ def record_review(*, workspace_id: str, session: str, identity: str, digest: str
     }
     data, key, record, new = _activity(workspace_id, session, identity)
     reviews = [*list(record.get("flag_reviews") or []), entry][-MAX_REVIEWS:]
-    _save(data, key, {**record, "flag_reviews": reviews, "updated_at": entry["at"]}, new=new)
+    if not _save(data, key, {**record, "flag_reviews": reviews, "updated_at": entry["at"]}, new=new, guard=guard):
+        return None
     return entry
 
 
+@_serialised
 def record_map_decisions(*, workspace_id: str, session: str, identity: str, mappings: list[dict[str, Any]],
-                         actor: str, source: str = "") -> int:
+                         actor: str, source: str = "", guard: WriteGuard | None = None) -> int | None:
     """Who approved or changed each pair in Map, in this session, for this source (the caller is authenticated)."""
     session = clean_session(session)
     if not session:
@@ -437,11 +673,13 @@ def record_map_decisions(*, workspace_id: str, session: str, identity: str, mapp
         history = [e for e in decisions.get(column.casefold(), []) if isinstance(e, dict)]
         decisions[column.casefold()] = [*history, entry][-MAX_PER_SOURCE:]
         recorded += 1
-    if recorded:
-        _save(data, key, {**record, "map_decisions": _bounded_sources(decisions), "updated_at": at}, new=new)
+    if recorded and not _save(data, key, {**record, "map_decisions": _bounded_sources(decisions), "updated_at": at},
+                              new=new, guard=guard):
+        return None
     return recorded
 
 
+@_serialised
 def record_model_suggestions(*, workspace_id: str, session: str, identity: str, mappings: list[dict[str, Any]],
                              llm: dict[str, Any] | None) -> int:
     """Model suggestions Map received (engine_suggestion from a named provider), in this session."""
@@ -571,7 +809,7 @@ def snapshot_for_request(request: Any) -> dict[str, Any]:
     workspace_id = str(getattr(request, "workspace_id", "") or "")
     try:
         identity = destination_identity(getattr(request, "destination", None), workspace_id)
-        return build_snapshot(workspace_id=workspace_id, session=getattr(request, "witness_session_id", "") or "",
+        snap = build_snapshot(workspace_id=workspace_id, session=getattr(request, "witness_session_id", "") or "",
                               identity=identity, source=request_source_identity(request),
                               mappings=list(getattr(request, "mappings", None) or []))
     except Exception as exc:  # noqa: BLE001 - submitting a job never depends on evidence
@@ -579,6 +817,13 @@ def snapshot_for_request(request: Any) -> dict[str, Any]:
         body = {"version": SNAPSHOT_VERSION, "status": "unavailable", "taken_at": _now(),
                 "reason": "The mapping evidence store could not be read when the job was submitted."}
         return {**body, "sha256": _sha(body)}
+    if snap.get("report_sha256"):
+        try:  # the job holds its own copy; this only stops a later edit superseding the record
+            mark_submitted(workspace_id=workspace_id, session=snap.get("session") or "",
+                           digest=snap["mapping_digest"], report_digest=snap["report_sha256"])
+        except Exception as exc:  # noqa: BLE001 - submitting a job never depends on evidence housekeeping
+            logger.info("mapping witness: record not marked submitted (%s)", type(exc).__name__)
+    return snap
 
 
 def snapshot_of(job: dict[str, Any]) -> dict[str, Any] | None:
@@ -690,13 +935,14 @@ def read_destination(endpoint: Any, *, workspace_id: str, key: tuple[str, str], 
     targets = {p["target"].casefold() for p in mapped_pairs(mappings)}
     read_any = False
     for batch in batches:
+        rows: list[dict[str, Any]] | None = None
         try:
             rows = read_rows(endpoint, workspace_id=workspace_id, key_column=key[1], keys=keys, columns=batch)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - not silent: every target of the batch is reported "not read"
             logger.info("mapping witness: a destination read batch failed (%s)", type(exc).__name__)
-            for col in batch[1:]:
-                if col.casefold() in targets:
-                    unread[col] = "the destination could not be read for this column."
+            unread.update({col: "the destination could not be read for this column." for col in batch[1:]
+                           if col.casefold() in targets})
+        if rows is None:
             continue
         read_any = True
         for row in rows:
@@ -744,7 +990,9 @@ def run_witness(
                                              source_rows=rows, mappings=mappings, candidates=candidate_columns)
         if dest_rows is None:
             notes.append("The destination could not be read, so only source values were checked.")
-    report = witness_mappings(mappings, rows, dest_rows, key=key, date_locale=date_locale, unread=unread)
+    digest = source_sample_digest(mappings, rows, key, workspace_sample_key(workspace_id)) if rows else ""
+    report = witness_mappings(mappings, rows, dest_rows, key=key, date_locale=date_locale, unread=unread,
+                              source_digest=digest)
     report["notes"] = notes
     report["trigger"] = trigger if trigger in (TRIGGER_AUTO, TRIGGER_EXPLICIT) else TRIGGER_AUTO
     return report
