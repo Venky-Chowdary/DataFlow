@@ -2220,12 +2220,11 @@ def stream_file_to_database(
     if in_file_dedupe == "keep_last":
         from services.duplicate_policy import declared_dedupe_columns, iter_keep_last
 
-        keep_last_key = list(contract.primary_key_columns()) if contract else []
-        if not keep_last_key:
-            keep_last_key = declared_dedupe_columns(
-                dict(getattr(destination, "extra", None) or {}),
-                dict(dest_cfg or {}),
-            )
+        # The operator's dedupe_key first, as keep_last_key_columns (D402).
+        keep_last_key = declared_dedupe_columns(
+            dict(getattr(destination, "extra", None) or {}),
+            dict(dest_cfg or {}),
+        ) or (list(contract.primary_key_columns()) if contract else [])
         if not keep_last_key:
             raise ValueError(
                 "in_file_dedupe=keep_last was set but no dedupe key is declared, "

@@ -441,6 +441,10 @@ def build_schedule_request(
     src_extra["duplicate_policy"] = policy
     in_file = str(getattr(sched, "in_file_dedupe", "") or "block").strip().lower()
     src_extra["in_file_dedupe"] = in_file
+    # D402: the key keep_last collapses on, exactly as the one-off plan stamps it.
+    dedupe_key = str(getattr(sched, "dedupe_key", "") or "").strip()
+    if dedupe_key:
+        src_extra["dedupe_key"] = dedupe_key
     sched_id = str(getattr(sched, "id", "") or "")
     if sched_id:
         src_extra["schedule_id"] = sched_id
@@ -449,6 +453,8 @@ def build_schedule_request(
     if policy:
         dst_extra["duplicate_policy"] = policy
     dst_extra["in_file_dedupe"] = in_file
+    if dedupe_key:
+        dst_extra["dedupe_key"] = dedupe_key
     if sched_id:
         dst_extra["schedule_id"] = sched_id
     if schedule_pk:

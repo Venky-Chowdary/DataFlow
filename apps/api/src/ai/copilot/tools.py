@@ -1203,7 +1203,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "enum": ["block", "keep_last"],
                     "description": (
                         "Duplicates inside one file. block refuses the file. "
-                        "keep_last writes the last row for each key."
+                        "keep_last writes the last row for each key. Unset follows "
+                        "the plan: dedupe_key on a file overwrite is keep_last."
                     ),
                 },
                 "file_wait_seconds": {
@@ -4898,7 +4899,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
         duplicate_policy: str = "",
-        in_file_dedupe: str = "block",
+        in_file_dedupe: str = "",
         file_wait_seconds: int = 0,
         risk_acceptance: dict | None = None,
         require_reversibility: bool = False,

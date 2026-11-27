@@ -88,7 +88,7 @@ def create_schedule(
     schema_drift_acknowledged: bool = False,
     pii_acknowledgement: dict[str, Any] | None = None,
     duplicate_policy: str = "",
-    in_file_dedupe: str = "block",
+    in_file_dedupe: str = "",
     file_wait_seconds: int = 0,
     shared_destination_acknowledged: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
@@ -273,7 +273,17 @@ def create_schedule(
     source = plan["source"]
     destination = plan["destination"]
     resolved_mode = str(plan.get("sync_mode") or "full_refresh_append")
-    upsert = str((plan.get("data_rules") or {}).get("upsert_key") or "")
+    from services.duplicate_policy import DuplicatePolicyError, schedule_dedupe_from_plan
+
+    try:
+        # D402: the schedule stores the plan's dedupe answer, so a run does what it said.
+        dedupe_fields = schedule_dedupe_from_plan(
+            plan, in_file_dedupe=in_file_dedupe, dedupe_key=dedupe_key,
+            primary_key=str(upsert_key or primary_key or ""),
+        )
+    except DuplicatePolicyError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+    upsert = dedupe_fields["primary_key"]
     label_name = (name or "").strip() or _schedule_name(
         source.get("table") or "", destination.get("table") or "", spec
     )
@@ -337,7 +347,8 @@ def create_schedule(
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
         "enabled": True,
         "duplicate_policy": str(duplicate_policy or ""),
-        "in_file_dedupe": str(in_file_dedupe or "block"),
+        "in_file_dedupe": dedupe_fields["in_file_dedupe"],
+        "dedupe_key": dedupe_fields["dedupe_key"],
         "file_wait_seconds": max(0, int(file_wait_seconds or 0)),
     }
     try:
@@ -352,6 +363,11 @@ def create_schedule(
         return _tool_result(tool, success=False, error=str(exc))
     payload["duplicate_policy"] = policy
     payload["in_file_dedupe"] = dedupe
+    from services.duplicate_policy import schedule_dedupe_key_refusal
+
+    dedupe_refusal = schedule_dedupe_key_refusal(payload)
+    if dedupe_refusal:
+        return _tool_result(tool, success=False, error=dedupe_refusal)
     if pii_acknowledgement:
         from .transfer_tools import _pii_acknowledgement
 
@@ -408,6 +424,8 @@ def create_schedule(
     if policy:
         preview["duplicate_policy"] = policy
     preview["in_file_dedupe"] = dedupe
+    if payload["dedupe_key"]:
+        preview["dedupe_key"] = payload["dedupe_key"]
     if payload["require_reversibility"]:
         preview["require_reversibility"] = True
         preview["reversibility_note"] = (

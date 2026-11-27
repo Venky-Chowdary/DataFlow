@@ -194,6 +194,7 @@ class ScheduleCreate(PolicyFieldsModel):
     file_wait_seconds: int = Field(default=0, ge=0, le=86400)
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
     #: Schedules page: with no mappings, plan the route server-side (the
@@ -283,6 +284,7 @@ class ScheduleUpdate(PolicyFieldsModel):
     file_wait_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
     duplicate_policy: Optional[str] = None
     in_file_dedupe: Optional[str] = None
+    dedupe_key: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -350,6 +352,7 @@ class ScheduleResponse(BaseModel):
     file_wait_seconds: int = 0
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -477,6 +480,7 @@ class ScheduleSummaryResponse(BaseModel):
     file_wait_seconds: int = 0
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -812,6 +816,8 @@ async def create_pipeline_schedule(
     ws = resolve_write_workspace(request, workspace_id)
     payload = body.model_dump(exclude_none=True)
     plan_mappings = bool(payload.pop("plan_mappings", False))
+    if plan_mappings and "in_file_dedupe" not in body.model_fields_set:
+        payload["in_file_dedupe"] = ""  # follow the plan's dedupe answer (D402)
     if ws and not payload.get("workspace_id"):
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):

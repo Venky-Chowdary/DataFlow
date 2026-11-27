@@ -1610,10 +1610,12 @@ def _transform_applied_proof_impl(
         sync_collapses_in_file_duplicates(sync_mode)
         or str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
     ):
+        _keep_last = str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
         _collapse_keys = [
             str(c)
             for c in (
-                scope_pk
+                (_keep_last and dest_summary.get("dedupe_key_columns"))
+                or scope_pk
                 or dest_summary.get("primary_key_columns")
                 or dest_summary.get("conflict_columns")
                 or dest_summary.get("dedupe_key_columns")
