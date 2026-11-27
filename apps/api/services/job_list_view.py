@@ -215,12 +215,25 @@ def _stream_names_for_list(job: dict[str, Any]) -> list[str]:
 
 
 def parity_stamp(job: dict[str, Any] | None) -> str:
-    """The parity state's version and stored-summary time: changes whenever the verdict can."""
+    """The parity state's version and stored-summary time: changes whenever the verdict can.
+
+    Verification after the write (Parity at Scale) ends without touching
+    ``updated_at`` or the parity state, so its effective state and finish time
+    are part of the stamp, as in ``parity_report.summary_stamp``: an open Jobs
+    grid re-reads the verdict instead of keeping "Verification running".
+    A job never verified after the write keeps exactly the stamp it had.
+    """
+    from services.parity_scale.verification import effective_block
+
     state = (job or {}).get("parity")
-    if not isinstance(state, dict) or not state:
-        return ""
-    summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
-    return f"{int(state.get('version') or 0)}:{summary.get('at') or ''}"
+    stamp = ""
+    if isinstance(state, dict) and state:
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        stamp = f"{int(state.get('version') or 0)}:{summary.get('at') or ''}"
+    block = effective_block(job)
+    if block:
+        stamp = f"{stamp}|{block.get('state') or ''}:{block.get('finished_at') or ''}"
+    return stamp
 
 
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
