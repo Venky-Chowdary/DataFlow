@@ -104,6 +104,13 @@
   },
   {
    "fields": {
+    "remediation_kind": "retry_validate",
+    "unmeasured": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::_host_gate_to_result"
+  },
+  {
+   "fields": {
     "unmeasured": true
    },
    "site": "packages/preflight/src/preflight/gates.py::gate_g13_source_coverage"

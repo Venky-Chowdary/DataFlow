@@ -4194,7 +4194,14 @@ _HOST_GATE_STATUS = {
     "block": GateStatus.BLOCK,
     "skip": GateStatus.SKIP,
     "warn": GateStatus.WARN,
+    # A host that reports its own failure refused the check: Run stays locked.
+    "error": GateStatus.BLOCK,
+    "fail": GateStatus.BLOCK,
+    "failed": GateStatus.BLOCK,
 }
+#: Fields that say why a skip happened (apps/web/src/lib/gateChecklist.ts gateOutcome).
+_SKIP_REASON_FIELDS = ("unmeasured", "remediation_kind", "error", "declared", "applicable",
+                       "schemaless", "dest_recreated", "rule_id")
 
 
 def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float) -> GateResult:
@@ -4203,9 +4210,13 @@ def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float)
     A payload with no status, or one this package does not know, proved
     nothing: it is a skip that says so in structured fields (``unmeasured``,
     ``skip_reason``), never a skip carrying whatever details the host sent.
+    A host status of error / fail is a block. A host skip that names no
+    reason is kept, with ``unmeasured`` and ``skip_reason`` added.
     """
     raw = str(payload.get("status") or "").strip().lower()
     status = _HOST_GATE_STATUS.get(raw)
+    host_details = payload.get("details")
+    details = dict(host_details) if isinstance(host_details, dict) else {}
     if status is None:
         return GateResult(
             gate_id=gate_id,
@@ -4222,11 +4233,28 @@ def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float)
             },
             duration_ms=(time.perf_counter() - start) * 1000,
         )
+    message = str(payload.get("message") or "")
+    if status is GateStatus.BLOCK and raw != "block":
+        details["host_status"] = raw
+        message = message or "This check failed in the service that runs it."
+    if status is GateStatus.SKIP and not any(k in details for k in _SKIP_REASON_FIELDS):
+        return GateResult(
+            gate_id=gate_id,
+            status=GateStatus.SKIP,
+            message=message or "This check could not run: the service that runs it gave no reason.",
+            details={
+                **details,
+                "unmeasured": True,
+                "remediation_kind": "retry_validate",
+                "skip_reason": "host_skip_unexplained",
+            },
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
     return GateResult(
         gate_id=gate_id,
         status=status,
-        message=str(payload.get("message") or ""),
-        details=dict(payload.get("details") or {}),
+        message=message,
+        details=details,
         duration_ms=(time.perf_counter() - start) * 1000,
     )
 
