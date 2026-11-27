@@ -106,7 +106,8 @@ def _live_lease(job_id: str, *, owner: str = "another-worker:1") -> None:
     now = datetime.now(timezone.utc)
     get_mongodb_service().update_job_fields(job_id, {"parity_scale_lease": {
         "token": "other", "owner": owner, "claimed_at": now.isoformat(),
-        "heartbeat_at": now.isoformat(), "expires_at": (now + timedelta(minutes=10)).isoformat()}})
+        "heartbeat_at": now.isoformat(), "expires_at": (now + timedelta(minutes=10)).isoformat(),
+        "expires_epoch": (now + timedelta(minutes=10)).timestamp()}})
 
 
 def _report(job_id: str) -> dict[str, Any]:

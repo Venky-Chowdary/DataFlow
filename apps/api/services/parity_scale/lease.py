@@ -78,6 +78,8 @@ def _record(token: str, owner: str, claimed_at: str | None = None) -> dict[str, 
         "claimed_at": claimed_at or now.isoformat(),
         "heartbeat_at": now.isoformat(),
         "expires_at": (now + timedelta(seconds=LEASE_TTL_S)).isoformat(),
+        # The same instant as a number, for the sweeper's indexed query.
+        "expires_epoch": (now + timedelta(seconds=LEASE_TTL_S)).timestamp(),
     }
 
 

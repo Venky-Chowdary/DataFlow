@@ -30,7 +30,8 @@ def _job(workspace_id: str, name: str) -> str:
                          "tables": [{"name": "payments", "status": "running", "scan_id": "s1",
                                      "progress": {"items_done": 2, "items_queued": 6}}]},
         "parity_scale_lease": {"token": "w", "owner": "worker:1",
-                               "expires_at": (now + timedelta(minutes=10)).isoformat()},
+                               "expires_at": (now + timedelta(minutes=10)).isoformat(),
+                               "expires_epoch": (now + timedelta(minutes=10)).timestamp()},
     })
     # Completing the job runs its terminal effects: a job that already has a
     # verification keeps it (the hook starts one only once).
@@ -72,3 +73,16 @@ def test_explorer_waits_for_a_finished_scan_and_reverify_needs_job_run(world) ->
     # Already running: a second start is refused rather than doubled.
     assert editor.post(f"/api/v1/jobs/{job}/verification/tables/payments").status_code == 409
     assert editor.post(f"/api/v1/jobs/{world['foreign']}/verification/tables/payments").status_code == 404
+
+
+def test_the_sweepers_query_is_indexed_and_skips_live_leases(world) -> None:
+    """Review 2, N7, on MongoDB: a partial index on parity_scale.state; live-leased jobs are not listed."""
+    import time
+
+    from services.mongodb_service import get_mongodb_service
+
+    store = get_mongodb_service()
+    assert store.list_job_ids_where({"parity_scale.state": ("running", "queued")},
+                                    lease_expired_before=time.time()) == []  # both jobs hold live leases
+    indexes = store.get_database()["transfer_jobs"].index_information()
+    assert "by_parity_scale_state" in indexes

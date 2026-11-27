@@ -46,6 +46,7 @@ def _expire_lease(job_id: str) -> None:
 
     lease = dict(_svc().get_job(job_id).get("parity_scale_lease") or {"token": "dead", "owner": "gone:1"})
     lease["expires_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    lease["expires_epoch"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
     _svc().update_job_fields(job_id, {"parity_scale_lease": lease})
 
 
@@ -438,3 +439,25 @@ def test_a_streamed_read_runs_under_a_server_side_timeout(tables) -> None:
         assert side.execute("SELECT 1", [])[0][0] == 1
     finally:
         side.close()
+
+
+def test_resume_reads_the_job_again_after_claiming(monkeypatch) -> None:
+    """Review 2, N7: what another worker wrote before the lease changed hands counts."""
+    from services.parity_scale import lease, verification
+
+    job_id = _svc().create_transfer_job({"status": "completed"})
+    _svc().update_job_fields(job_id, {"parity_scale": {"state": "running", "tables": [
+        {"name": "t", "status": "running", "scan_id": "s"}]}})
+    _expire_lease(job_id)
+    real_claim = lease.claim
+
+    def claim_after_a_finish(jid: str):
+        # The previous worker's last write lands just before this claim.
+        _svc().update_job_fields(jid, {"parity_scale": {"state": "passed", "tables": [
+            {"name": "t", "status": "done", "scan_id": "s", "evidence": {"outcome": "match"}}]}})
+        return real_claim(jid)
+
+    monkeypatch.setattr(lease, "claim", claim_after_a_finish)
+    assert verification.resume_job(job_id, background=False) is False
+    assert _svc().get_job(job_id)["parity_scale"]["state"] == "passed"  # not overwritten as stopped
+    assert _svc().get_job(job_id).get("parity_scale_lease") is None

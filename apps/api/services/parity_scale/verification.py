@@ -755,6 +755,14 @@ def resume_job(job_id: str, *, background: bool = True) -> bool:
     if token is None:
         _unregister(job_id, worker)
         return False
+    # Re-read after claiming: what another worker wrote before the lease changed hands counts.
+    job = _service().get_job(job_id) or {}
+    if block_of(job).get("state") not in ACTIVE:
+        from services.parity_scale.lease import release
+
+        release(job_id, token)
+        _unregister(job_id, worker)
+        return False
     spec, why = table_spec(job)
     table = next((t for t in block_of(job).get("tables") or [] if t.get("status") in ACTIVE), None)
     checkpoint = (job.get(CHECKPOINTS) or {}).get(str((table or {}).get("scan_id") or ""))
@@ -785,7 +793,11 @@ def sweep_once(limit: int = 50, *, background: bool = True) -> int:
     if not parity_scale_enabled():
         return 0
     resumed = 0
-    for job_id in _service().list_job_ids_where({"parity_scale.state": (RUNNING, QUEUED)}, limit=limit):
+    import time
+
+    # Only jobs no live worker holds: a stopped one is never hidden behind healthy ones.
+    for job_id in _service().list_job_ids_where({"parity_scale.state": (RUNNING, QUEUED)}, limit=limit,
+                                                lease_expired_before=time.time()):
         try:
             resumed += bool(resume_job(job_id, background=background))
         except Exception:  # noqa: BLE001 — one bad job must not stop the sweep

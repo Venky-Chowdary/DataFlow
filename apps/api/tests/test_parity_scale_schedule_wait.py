@@ -32,7 +32,8 @@ def _running_job(*, lease_minutes: int = 10) -> str:
     svc.update_job_fields(job_id, {
         "parity_scale": {"state": "running", "tables": [{"name": "t", "status": "running", "scan_id": "s"}]},
         "parity_scale_lease": {"token": "w", "owner": "worker:1",
-                               "expires_at": (now + timedelta(minutes=lease_minutes)).isoformat()},
+                               "expires_at": (now + timedelta(minutes=lease_minutes)).isoformat(),
+                               "expires_epoch": (now + timedelta(minutes=lease_minutes)).timestamp()},
     })
     return job_id
 
@@ -82,3 +83,17 @@ def test_a_stopped_verification_does_not_hold_the_schedule() -> None:
         wait_for_verification = True
 
     assert schedule_waits_for_verification(Sched()) == ""
+
+
+def test_the_sweep_finds_a_stopped_job_behind_many_healthy_ones() -> None:
+    """Review 2, N7: only jobs without a live lease are listed, so a stopped one is never crowded out."""
+    import time
+
+    from services.mongodb_service import get_mongodb_service
+
+    healthy = [_running_job() for _ in range(55)]
+    stopped = _running_job(lease_minutes=-1)
+    found = get_mongodb_service().list_job_ids_where({"parity_scale.state": ("running", "queued")}, limit=50,
+                                                     lease_expired_before=time.time())
+    assert found == [stopped]
+    assert not set(found) & set(healthy)
