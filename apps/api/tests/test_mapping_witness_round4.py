@@ -160,6 +160,34 @@ SOURCE_PAIRS = [
     ({"kind": "file", "name": "2023\\customers.csv"}, {"kind": "file", "name": "2023/customers.csv"}, True,
      "one path, either separator"),
     ({"kind": "file", "name": "customers.csv"}, {"kind": "file", "name": "customers.csv"}, True, "one file"),
+    # Unquoted names fold only where the source engine folds them; paths never fold.
+    ({"statement": "SELECT * FROM Orders", "engine": "postgres"},
+     {"statement": "select * from orders", "engine": "postgresql"}, True, "postgres folds unquoted names"),
+    ({"statement": "SELECT * FROM Orders", "engine": "oracle"},
+     {"statement": "SELECT * FROM ORDERS", "engine": "oracle"}, True, "oracle folds unquoted names"),
+    ({"statement": "SELECT * FROM Orders", "engine": "snowflake"},
+     {"statement": "SELECT * FROM orders", "engine": "snowflake"}, True, "snowflake folds unquoted names"),
+    ({"statement": "SELECT * FROM Orders", "engine": "mssql"},
+     {"statement": "SELECT * FROM orders", "engine": "sqlserver"}, True, "sql server ignores name case"),
+    ({"statement": "SELECT * FROM Orders", "engine": "sqlite"},
+     {"statement": "SELECT * FROM orders", "engine": "sqlite"}, True, "sqlite ignores name case"),
+    ({"statement": "SELECT * FROM Orders", "engine": "mysql"},
+     {"statement": "SELECT * FROM orders", "engine": "mysql"}, False, "mysql keeps table-name case"),
+    ({"statement": "SELECT * FROM Orders", "engine": "mariadb"},
+     {"statement": "select *  from Orders", "engine": "mysql"}, True, "mysql still folds keywords and spacing"),
+    ({"statement": "SELECT * FROM Orders"}, {"statement": "SELECT * FROM orders"}, False,
+     "an engine not named keeps name case"),
+    ({"statement": 'SELECT * FROM "Orders"', "engine": "postgresql"},
+     {"statement": 'SELECT * FROM "orders"', "engine": "postgresql"}, False, "postgres quoted names keep case"),
+    ({"name": "Orders", "engine": "postgresql"}, {"name": "orders", "engine": "postgresql"}, True,
+     "a postgres table in either case"),
+    ({"name": "Orders", "engine": "mysql"}, {"name": "orders", "engine": "mysql"}, False,
+     "two mysql tables by case"),
+    ({"name": "s3://b/Data/a.csv", "engine": "s3"}, {"name": "s3://b/data/a.csv", "engine": "s3"}, False,
+     "s3 keys by case"),
+    ({"name": "Data/a.csv", "engine": "azure_blob"}, {"name": "data/a.csv", "engine": "azure_blob"}, False,
+     "azure blobs by case"),
+    ({"kind": "file", "name": "Data/a.csv"}, {"kind": "file", "name": "data/a.csv"}, False, "local files by case"),
 ]
 
 
@@ -168,7 +196,8 @@ def test_source_identity_collides_only_for_the_same_source(left, right, collide,
     from services.mapping_witness_service import source_identity
 
     def ref(r):
-        return {"kind": r.get("kind", "database"), "name": r.get("name", ""), "statement": r.get("statement", "")}
+        return {"kind": r.get("kind", "database"), "name": r.get("name", ""), "statement": r.get("statement", ""),
+                "engine": r.get("engine", "")}
 
     assert (source_identity(ref(left)) == source_identity(ref(right))) is collide, why
 
@@ -206,6 +235,39 @@ def test_a_check_past_its_deadline_writes_nothing(monkeypatch, tmp_path):
     assert outcome == [None]
     records = [k for k in svc._DOC.load() if str(k).startswith("witness::")]
     assert records == []
+
+
+def test_a_save_that_lands_just_before_the_deadline_is_answered_with_what_was_saved(monkeypatch, tmp_path):
+    """The save passed the guard, then the deadline fired before the worker returned: the reply is the
+    record that exists (200), never "did not finish"."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+
+    import services.mapping_witness_service as svc
+    import src.routers.verified_ai_router as router_mod
+    from src.main import app
+
+    done = threading.Event()
+    real_save = svc.save_report
+
+    def save_then_stall(*args, **kwargs):
+        try:
+            saved = real_save(*args, **kwargs)
+            time.sleep(1.0)  # past the 0.5 s deadline, after the save landed
+            return saved
+        finally:
+            done.set()
+
+    monkeypatch.setattr(router_mod, "WITNESS_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(svc, "save_report", save_then_stall)
+    src, _ = F.customers()
+    res = TestClient(app).post("/api/v1/transfer/mapping-witness", json={
+        "mappings": F.LOGIN_INTO_EMAIL_ONLY, "source_rows": src, "destination_table_exists": False,
+        "session_id": "map-session-land1", "source_ref": {"kind": "file", "name": "customers.csv"}})
+    assert done.wait(10)
+    assert res.status_code == 200, res.text
+    stored = svc.latest_report(workspace_id="", session="map-session-land1", digest=res.json()["mapping_digest"])
+    assert stored is not None and stored["report_sha256"] == res.json()["report_sha256"]
 
 
 def test_concurrent_writers_to_the_file_store_both_land(monkeypatch, tmp_path):

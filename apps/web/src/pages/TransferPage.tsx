@@ -7653,6 +7653,7 @@ export function TransferPage({
             primaryStream: primarySourceStream,
             readMode: sourceReadMode,
             statement: procedureCall,
+            engine: sourceConnector?.type,
           })}
           hideFooter={studioFlags.canvas}
           analysis={analysis}

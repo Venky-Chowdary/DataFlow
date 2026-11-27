@@ -176,18 +176,28 @@ def _serialised(fn: Callable[..., Any]) -> Callable[..., Any]:
 class WriteGuard:
     """A request's leave to write: gone once its deadline passed or the route gave up on it (504).
 
-    :meth:`open` is read under the store's write lock, at save time, and :meth:`cancel`
-    takes the same lock, so a check the caller was told "did not finish" is never recorded.
-    The cutoff sits a little before the deadline, so a save never lands as the 504 goes out.
+    :meth:`open` is read under the store's write lock, at save time, and a writer whose save
+    landed calls :meth:`land` before it lets go of that lock. :meth:`cancel` takes the same lock
+    and says whether a save already landed: the route then answers with what was saved, and 504
+    only when nothing was written. The cutoff sits a little before the deadline.
     """
 
     def __init__(self, seconds: float) -> None:
         self._cutoff = time.monotonic() + max(0.0, seconds - min(1.0, seconds / 10))
         self._cancelled = False
+        self._landed = False
+        self._value: Any = None
 
-    def cancel(self) -> None:
+    def land(self, value: Any) -> Any:
+        """Called under the write lock right after the commit; returns ``value``."""
+        self._landed, self._value = True, value
+        return value
+
+    def cancel(self) -> tuple[bool, Any]:
+        """Close the guard; (whether a save landed first, what it saved)."""
         with _WRITE_LOCK:
             self._cancelled = True
+            return self._landed, self._value
 
     def open(self) -> bool:
         return not self._cancelled and time.monotonic() < self._cutoff
@@ -195,6 +205,10 @@ class WriteGuard:
 
 def _closed(guard: WriteGuard | None) -> bool:
     return guard is not None and not guard.open()
+
+
+def _landed(guard: WriteGuard | None, value: Any) -> Any:
+    return guard.land(value) if guard is not None else value
 
 
 def _sha(body: Any) -> str:
@@ -303,21 +317,58 @@ _SPACE = re.compile(r"\s+")
 _AROUND_PUNCT = re.compile(r" ?([,();=]) ?")
 
 
-def statement_form(statement: Any) -> str:
+#: Source engines whose unquoted identifiers fold to one case (PostgreSQL and Redshift to lower, Oracle and
+#: Snowflake to upper; SQL Server and SQLite compare names case-insensitively): ``Orders`` is ``orders`` there.
+#: Everywhere else (MySQL/MariaDB on a case-sensitive file system, BigQuery, MongoDB, object stores, an
+#: engine not named) a name keeps its case: two spellings are two sources unless proven the same.
+FOLDS_UNQUOTED = frozenset({"postgresql", "redshift", "oracle", "snowflake", "sqlserver", "sqlite"})
+#: Words that are the same in any case on every engine: keywords and common functions.
+_SQL_WORDS = frozenset("""
+select from where and or not in is null as join on left right inner outer full cross natural using group by
+order having limit offset fetch first next rows row only top union intersect except all distinct case when
+then else end asc desc between like ilike exists call exec execute with recursive interval cast convert true
+false date time timestamp count sum min max avg coalesce nullif lower upper trim concat substring now
+current_date current_timestamp extract over partition into values set lateral window filter escape
+""".split())
+_WORD = re.compile(r"[^\W\d][\w$#]*")
+
+
+def source_engine(value: Any) -> str:
+    """The source engine named the way both Map and the run name it (``postgres`` is ``postgresql``)."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return resolve_driver_type(text).lower()
+
+
+def _fold_unquoted(text: str, folds: bool) -> str:
+    text = _SPACE.sub(" ", text)
+    if folds:
+        text = text.casefold()
+    else:
+        text = _WORD.sub(lambda m: m.group(0).casefold() if m.group(0).casefold() in _SQL_WORDS else m.group(0), text)
+    return _AROUND_PUNCT.sub(r"\1", text)
+
+
+def statement_form(statement: Any, engine: str = "") -> str:
     """A statement in the form two spellings of one query share.
 
-    Case and whitespace are folded only outside literals, quoted identifiers and
+    Whitespace and keyword case fold only outside literals, quoted identifiers and
     comments: ``'ACME'`` is not ``'acme'``, ``"Orders"`` is not ``"orders"``, and
     ``'a  b'`` is not ``'a b'``; ``SELECT a,b`` and ``select a , b`` are one query.
+    An unquoted name folds only on an engine that folds it (:data:`FOLDS_UNQUOTED`).
     """
+    folds = source_engine(engine) in FOLDS_UNQUOTED
     text = str(statement or "")
     out: list[str] = []
     at = 0
     for m in _VERBATIM.finditer(text):
-        out.append(_AROUND_PUNCT.sub(r"\1", _SPACE.sub(" ", text[at:m.start()]).casefold()))
+        out.append(_fold_unquoted(text[at:m.start()], folds))
         out.append(m.group(0))
         at = m.end()
-    out.append(_AROUND_PUNCT.sub(r"\1", _SPACE.sub(" ", text[at:]).casefold()))
+    out.append(_fold_unquoted(text[at:], folds))
     return "".join(out).strip().rstrip(";").strip()
 
 
@@ -333,16 +384,21 @@ def source_identity(source: dict[str, Any] | None) -> str:
     """What the sample came from, the one normal form both Map and the job are compared in.
 
     ``file|<path>``, or ``database|<table or collection>`` for every other source
-    kind (a cloud object is named by its path). Paths are kept whole. A query or
-    procedure source adds ``#`` and a digest of its :func:`statement_form`, so two
-    different extracts of one stream are two sources.
+    kind (a cloud object is named by its path). Paths are kept whole and keep their
+    case (object stores and file systems are case-sensitive); a table name folds only
+    on an engine that folds unquoted names (``engine``, :data:`FOLDS_UNQUOTED`). A
+    query or procedure source adds ``#`` and a digest of its :func:`statement_form`,
+    so two different extracts of one stream are two sources.
     """
     src = dict(source or {})
     raw_kind = str(src.get("kind") or "").strip().casefold()
     name = _object_path(str(src.get("name") or "").strip())
     kind = "file" if raw_kind == "file" else ("database" if raw_kind or name else "")
-    text = statement_form(src.get("statement"))
-    ident = f"{kind}|{name.casefold()}" if kind or name else ""
+    engine = "" if kind == "file" else source_engine(src.get("engine"))
+    text = statement_form(src.get("statement"), engine)
+    if engine in FOLDS_UNQUOTED:
+        name = name.casefold()
+    ident = f"{kind}|{name}" if kind or name else ""
     return f"{ident}#{hashlib.sha256(text.encode()).hexdigest()[:16]}" if text else ident
 
 
@@ -362,7 +418,11 @@ def request_source_identity(request: Any) -> str:
     kind = str(getattr(src, "kind", "") or "")
     name = (getattr(request, "source_filename", "") or "") if kind == "file" else (
         getattr(src, "table", "") or getattr(src, "collection", "") or "")
-    return source_identity({"kind": kind, "name": name, "statement": _callable_statement(getattr(src, "extra", None))})
+    engine = getattr(src, "format", "") or ""
+    if not engine and kind != "file" and getattr(src, "connector_id", None):
+        engine = engine_of(src, str(getattr(request, "workspace_id", "") or ""))  # a saved connector's own type
+    return source_identity({"kind": kind, "name": name, "engine": engine,
+                            "statement": _callable_statement(getattr(src, "extra", None))})
 
 
 def mapping_digest(mappings: list[dict[str, Any]] | None, identity: str) -> str:
@@ -558,7 +618,7 @@ def save_report(report: dict[str, Any], *, workspace_id: str, session: str, iden
         _prune_in(data, workspace_id)
     if not _commit(data, guard):
         return None
-    return {"mapping_digest": digest, "session": session, **entry}
+    return _landed(guard, {"mapping_digest": digest, "session": session, **entry})
 
 
 @_serialised
@@ -648,7 +708,7 @@ def record_review(*, workspace_id: str, session: str, identity: str, digest: str
     reviews = [*list(record.get("flag_reviews") or []), entry][-MAX_REVIEWS:]
     if not _save(data, key, {**record, "flag_reviews": reviews, "updated_at": entry["at"]}, new=new, guard=guard):
         return None
-    return entry
+    return _landed(guard, entry)
 
 
 @_serialised
@@ -676,7 +736,7 @@ def record_map_decisions(*, workspace_id: str, session: str, identity: str, mapp
     if recorded and not _save(data, key, {**record, "map_decisions": _bounded_sources(decisions), "updated_at": at},
                               new=new, guard=guard):
         return None
-    return recorded
+    return _landed(guard, recorded) if recorded else recorded
 
 
 @_serialised

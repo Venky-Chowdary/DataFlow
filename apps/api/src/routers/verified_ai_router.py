@@ -102,14 +102,18 @@ def _endpoint(dto: EndpointDTO | None) -> Any:
 _TIMED_OUT = "The mapping check did not finish in time."
 
 
-async def _off_loop(fn: Any, guard: Any = None) -> Any:
-    """``fn`` off the event loop under the deadline. Past it the answer is 504 and ``guard`` closes,
-    so the abandoned worker writes nothing (it checks the guard under the store's write lock)."""
+async def _off_loop(fn: Any, guard: Any = None, landed: Any = None) -> Any:
+    """``fn`` off the event loop under the deadline. Past it ``guard`` closes, so the abandoned
+    worker writes nothing (it checks the guard under the store's write lock). The answer is honest:
+    if the save landed before the guard closed, the reply is what was saved (``landed(value)``);
+    504 only when nothing was written."""
     from ..ai.copilot.tool_deadline import run_off_event_loop
 
     def _timed_out(message: str) -> Any:
         if guard is not None:
-            guard.cancel()
+            saved, value = guard.cancel()
+            if saved:
+                return landed(value) if landed is not None else value
         raise HTTPException(status_code=504, detail=_TIMED_OUT)
 
     return await run_off_event_loop("mapping_witness", fn, _timed_out, seconds=WITNESS_DEADLINE_SECONDS)
@@ -119,6 +123,13 @@ def _guard() -> Any:
     from services.mapping_witness_service import WriteGuard
 
     return WriteGuard(WITNESS_DEADLINE_SECONDS)
+
+
+def _reply(saved: dict[str, Any]) -> dict[str, Any]:
+    """The answer for a recorded check, built from what was saved."""
+    return {"mapping_digest": saved["mapping_digest"], "session": saved["session"] or None,
+            "report": saved["report"], "report_sha256": saved["report_sha256"],
+            "recorded_at": saved["recorded_at"], "requested_by": saved["requested_by"]}
 
 
 @router.post("/transfer/mapping-witness")
@@ -170,11 +181,9 @@ async def mapping_witness(
             "mode": report.get("mode"), "summary": report.get("summary"), "trigger": report.get("trigger"),
             "report_sha256": saved["report_sha256"],
         }, workspace)
-        return {"mapping_digest": digest, "session": saved["session"] or None, "report": report,
-                "report_sha256": saved["report_sha256"], "recorded_at": saved["recorded_at"],
-                "requested_by": saved["requested_by"]}
+        return _reply(saved)
 
-    out = await _off_loop(_run, guard)
+    out = await _off_loop(_run, guard, _reply)
     if out is None:
         raise HTTPException(status_code=504, detail=_TIMED_OUT)
     return out

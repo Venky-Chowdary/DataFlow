@@ -155,6 +155,8 @@ export interface WitnessSourceRef {
   name: string;
   /** A query or procedure source: its statement (two extracts of one stream are two sources). */
   statement?: string;
+  /** The source connector's type, as the run submits it: unquoted names fold only where that engine folds them. */
+  engine?: string;
 }
 
 /**
@@ -171,14 +173,17 @@ export function witnessSourceRef(state: {
   primaryStream?: string | null;
   readMode?: string | null;
   statement?: string | null;
+  engine?: string | null;
 }): WitnessSourceRef {
-  if (state.sourceKind === "file") return { kind: "file", name: state.fileName || "", statement: "" };
-  if (state.sourceKind === "cloud") return { kind: "database", name: state.cloudPath || "", statement: "" };
+  if (state.sourceKind === "file") return { kind: "file", name: state.fileName || "", statement: "", engine: "" };
+  const engine = state.engine || "";
+  if (state.sourceKind === "cloud") return { kind: "database", name: state.cloudPath || "", statement: "", engine };
   const callable = state.sourceKind === "database" && isCallableSourceMode(state.readMode || undefined);
   return {
     kind: "database",
     name: state.activeStream || state.primaryStream || "",
     statement: callable ? String(state.statement || "").trim() : "",
+    engine,
   };
 }
 

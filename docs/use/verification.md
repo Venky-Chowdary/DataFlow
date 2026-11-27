@@ -147,8 +147,10 @@ mapping on it; continuing past it is recorded as not reviewed. A Keep stays
 with its flag when the same inputs are checked again, and only then: a flag
 that points at another column, gives another reason or other counts, or comes
 from an edited source (same file name and row count, other contents) is a new
-flag and shows again. A source is named by its whole path, and a query by its
-text with case and spacing folded only outside quotes. Map approvals and
+flag and shows again. A file or object is named by its whole path, letter case
+included; a table or query by its text, where spacing and keyword case fold
+outside quotes and a name's case folds only on engines that fold unquoted names
+(PostgreSQL, Redshift, Oracle, Snowflake, SQL Server, SQLite). Map approvals and
 changed flags count only for the source they were given on: switching the
 file or table in one session starts them over. The session is only a key:
 the people named are the ones who checked, approved and ran.
@@ -158,7 +160,8 @@ checks; older evidence goes first. If a workspace's hard limit ever removes
 it, the job says "Evidence expired", not that no check matched. Editing the
 pairs in an open session replaces that session's earlier check of the same
 source and destination, unless a job was already submitted with it. A check
-that ran past its time limit is not recorded.
+that ran past its time limit is not recorded; if it was recorded just before
+the limit, you get its result rather than a time-out.
 
 Measured on a synthetic benchmark written for the witness (120 rows per table,
 at least 30 distinct values per column, the destination holding the same rows
