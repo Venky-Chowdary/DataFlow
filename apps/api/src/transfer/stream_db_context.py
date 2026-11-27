@@ -101,6 +101,8 @@ class RunConfig:
     write_mode: Any = None
     chunks: Any = None
     _schema_absorb_lock: Any = None
+    #: Source fields declared omitted; omits leave ``mappings`` before the read.
+    omitted_sources: Any = frozenset()
     ddl_log: Any = None
     _RECONCILE_SAMPLE_CAP: Any = None
     resume_write_complete: bool = False

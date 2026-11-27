@@ -188,7 +188,91 @@ def refuse_unapproved_add_without_validate(
     )
 
 
+#: Stamped on ``destination.extra`` by the engine before the first write, so a
+#: stream that discovers a field mid-run knows whether the run's policy adds it.
+MID_RUN_POLICY_KEY = "_df_mid_run_columns"
+
+_MID_RUN_REMEDY = (
+    "Nothing of that batch was written; the run stopped at the batch before it, "
+    "so a resume continues from there. Set the schema policy to propagate columns "
+    "(or turn on backfill new fields) and resume to add the field, or map it or "
+    "declare it omitted."
+)
+
+
+def stamp_mid_run_column_policy(request: Any, dest_schema_types: dict[str, str] | None) -> None:
+    """Record, for the stream, whether this run may add a field first seen mid-run.
+
+    Only a propagate policy or backfill new fields approves it. An acknowledged
+    drift approves the columns Validate disclosed, and a field no page had shown
+    yet was not among them.
+    """
+    destination = getattr(request, "destination", None)
+    if destination is None:
+        return
+    from services.schema_drift import destination_evolution_approved, effective_schema_policy
+
+    policy = effective_schema_policy(
+        getattr(request, "schema_policy", None),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+    )
+    if not isinstance(getattr(destination, "extra", None), dict):
+        destination.extra = {}
+    destination.extra[MID_RUN_POLICY_KEY] = {
+        "adds_columns": destination_evolution_approved(policy, acknowledged=False),
+        "policy": policy,
+        "dest_columns": sorted({str(c).strip().lower() for c in dest_schema_types or {} if str(c).strip()}),
+    }
+
+
+def omitted_source_names(mappings: list[dict[str, Any]] | None) -> frozenset[str]:
+    """Source fields the operator declared omitted (kept before omits leave the write map)."""
+    from services.mapping_constraints import is_intentional_omit
+
+    return frozenset(
+        str(m.get("source") or "").strip().lower()
+        for m in mappings or []
+        if isinstance(m, dict) and is_intentional_omit(m) and str(m.get("source") or "").strip()
+    )
+
+
+def refuse_mid_run_column(
+    destination: Any, dest_type: str, fields: list[str], mappings: list[dict[str, Any]] | None
+) -> None:
+    """Raise before a batch is written when it brings a field the policy does not add.
+
+    ``fields`` are the batch's new, unmapped, not-omitted fields. A field whose
+    name the destination table already has is not an ADD COLUMN. A stream run
+    without the engine's stamp (a benchmark or a direct caller) keeps the
+    writer's previous behaviour.
+    """
+    stamp = (getattr(destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
+    if not isinstance(stamp, dict) or stamp.get("adds_columns") is not False:
+        return
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if not dest_declares_column_ddl(str(dest_type or "")):
+        return
+    live = {str(c) for c in stamp.get("dest_columns") or []}
+    new = [f for f in fields if f and not _live_has(f, live)]
+    if not new:
+        return
+    from services.source_coverage_gate import build_source_coverage_gate
+
+    _coverage, gate = build_source_coverage_gate(source_columns=new, mappings=list(mappings or []))
+    raise SourceColumnsUnaccounted(
+        f"{gate['message']} First seen in a later batch; schema policy "
+        f"'{stamp.get('policy') or 'manual_review'}' does not add columns. {_MID_RUN_REMEDY}",
+        columns=new,
+        fix=_MID_RUN_REMEDY,
+    )
+
+
 __all__ = [
+    "MID_RUN_POLICY_KEY",
+    "omitted_source_names",
+    "refuse_mid_run_column",
+    "stamp_mid_run_column_policy",
     "SourceColumnsUnaccounted",
     "refuse_unaccounted_without_validate",
     "refuse_unapproved_add_without_validate",

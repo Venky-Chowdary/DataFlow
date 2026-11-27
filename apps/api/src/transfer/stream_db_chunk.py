@@ -44,9 +44,22 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
 
     with cfg._schema_absorb_lock:
         known = set(cfg.columns)
-        new_headers = [h for h in batch.headers if h and h not in known]
+        # A field the operator declared omitted stays off the write, however
+        # late it appears: it is never adopted as a new column.
+        omitted = getattr(cfg, "omitted_sources", None) or frozenset()
+        new_headers = [
+            h for h in batch.headers if h and h not in known and str(h).lower() not in omitted
+        ]
         if not new_headers and set(batch.headers).issubset(known):
             return
+        if new_headers:
+            from .source_column_coverage import refuse_mid_run_column
+
+            already = {str(m.get("source") or "") for m in cfg.mappings}
+            refuse_mid_run_column(
+                cfg.destination, cfg.dest_type,
+                [h for h in new_headers if h not in already], cfg.mappings,
+            )
         cfg.columns = union_attribute_keys(cfg.columns, batch.headers)
         mapped_sources = {str(m.get("source") or "") for m in cfg.mappings}
         meta = getattr(batch, "meta", None) or {}

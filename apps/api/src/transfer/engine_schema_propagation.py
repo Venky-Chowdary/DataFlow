@@ -57,7 +57,11 @@ def _record_schema_propagation(
         refuse_unaccounted_without_validate,
         refuse_unapproved_add_without_validate,
         source_column_coverage,
+        stamp_mid_run_column_policy,
     )
+
+    if request is not None:
+        stamp_mid_run_column_policy(request, dest_schema_types)
 
     live = {str(c).lower() for c in (dest_schema_types or {})}
     added = (

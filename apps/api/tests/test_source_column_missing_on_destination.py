@@ -884,3 +884,222 @@ def test_sqlite_publish_that_fails_after_the_add_rolls_the_add_back(tmp_path):
         assert _live(conn) == (["id", "name"], [(1001, "old")])
     finally:
         conn.close()
+
+
+# -- A field first seen mid-run (schemaless and record-batch sources) ---------
+#
+# Under manual_review the writer must not add a field a later page introduces:
+# the run stops before writing that page, resumable from the batch before it.
+# Under propagate / backfill it is added. MongoDB is driven here by a fake page
+# reader under the real stream (src.transfer.stream); live MongoDB is CI-only.
+
+_MONGO_DOCS = [
+    *({"id": i, "name": f"n{i}"} for i in range(1, 4)),
+    *({"id": i, "name": f"n{i}", "doc": seed_doc(i)} for i in range(4, 7)),
+]
+_PAGE = 3
+
+
+class _FakePage:
+    def __init__(self, docs: list[dict[str, Any]], more: bool) -> None:
+        headers: list[str] = []
+        for doc in docs:
+            headers += [k for k in doc if k not in headers]
+        self.headers = headers
+        self.rows = [[doc.get(h) for h in headers] for doc in docs]
+        self.total_rows = len(_MONGO_DOCS)
+        self.meta: dict[str, Any] = {}
+        self.has_more = more
+
+
+@pytest.fixture()
+def fake_mongo_pages(monkeypatch):
+    import src.transfer.batch_readers as batch_readers
+    import src.transfer.stream as stream_mod
+
+    def read(_src_type, _cfg, _table, _columns, offset, _limit, *_a, **_kw):
+        docs = _MONGO_DOCS[offset: offset + _PAGE]
+        return _FakePage(docs, offset + _PAGE < len(_MONGO_DOCS))
+
+    monkeypatch.setattr(batch_readers, "_read_batch_impl", read)
+    monkeypatch.setattr(stream_mod, "_read_batch_impl", read)
+
+
+def _mongo_stream(dst: Path, policy: str, *, checkpoint=None, service=None, mappings=None):
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import stamp_mid_run_column_policy
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig(
+        kind="database", format="mongodb", connection_string="mongodb://127.0.0.1:1",
+        database="db", table="docs",
+    )
+    destination = EndpointConfig(kind="database", format="sqlite", database=str(dst), table="docs")
+    conn = sqlite3.connect(dst)
+    live = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(docs)")}
+    conn.close()
+    # What the engine stamps before the first write (_record_schema_propagation).
+    stamp_mid_run_column_policy(
+        SimpleNamespace(destination=destination, schema_policy=policy, backfill_new_fields=False),
+        live,
+    )
+    contracts = [{"name": "docs", "sync_mode": "full_refresh_append", "primary_key": "id", "selected": True}]
+    return stream_database_transfer(
+        source, destination, list(mappings or []), {}, None, sync_mode="full_refresh_append",
+        stream_contracts=contracts, job_id="mid-run", checkpoint=checkpoint,
+        checkpoint_service=service,
+    )
+
+
+def _docs_dest(tmp_path: Path) -> Path:
+    dst = tmp_path / "dst.sqlite"
+    conn = sqlite3.connect(dst)
+    conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute(f"INSERT INTO docs VALUES ({EXISTING_ID}, 'old')")
+    conn.commit()
+    conn.close()
+    return dst
+
+
+def _docs_state(dst: Path) -> tuple[list[str], list[tuple]]:
+    conn = sqlite3.connect(dst)
+    try:
+        return (
+            [r[1] for r in conn.execute("PRAGMA table_info(docs)")],
+            conn.execute("SELECT * FROM docs ORDER BY id").fetchall(),
+        )
+    finally:
+        conn.close()
+
+
+def test_mongo_mid_run_field_stops_before_its_batch_and_resumes_under_propagate(
+    tmp_path, isolated, fake_mongo_pages  # noqa: F811
+):
+    from services.checkpoint_service import Checkpoint, CheckpointService
+    from src.transfer.source_column_coverage import SourceColumnsUnaccounted
+
+    dst = _docs_dest(tmp_path)
+    checkpoint, service = Checkpoint(job_id="mid-run"), CheckpointService(mongo=isolated)
+
+    with pytest.raises(SourceColumnsUnaccounted) as refused:
+        _mongo_stream(dst, "manual_review", checkpoint=checkpoint, service=service)
+
+    message = str(refused.value)
+    assert "neither mapped nor declared omitted: doc" in message
+    assert "First seen in a later batch" in message and "propagate columns" in message
+    assert refused.value.failure_details["guidance"][0]["gate"] == "g13_source_coverage"
+    # The first page landed and was checkpointed; nothing of the page with doc did.
+    assert (checkpoint.offset, checkpoint.rows_processed) == (_PAGE, _PAGE)
+    assert _docs_state(dst) == (
+        ["id", "name"], [(1, "n1"), (2, "n2"), (3, "n3"), (EXISTING_ID, "old")]
+    )
+
+    # The operator approves the column and resumes from the same checkpoint.
+    _mongo_stream(dst, "propagate_columns", checkpoint=checkpoint, service=service)
+
+    columns, rows = _docs_state(dst)
+    assert columns == ["id", "name", "doc"]
+    assert rows == [
+        *((i, f"n{i}", None) for i in range(1, 4)),
+        *((i, f"n{i}", seed_doc(i)) for i in range(4, 7)),
+        (EXISTING_ID, "old", None),
+    ]
+
+
+def test_mongo_mid_run_field_is_added_under_propagate(tmp_path, isolated, fake_mongo_pages):  # noqa: F811
+    dst = _docs_dest(tmp_path)
+
+    _mongo_stream(dst, "propagate_columns")
+
+    columns, rows = _docs_state(dst)
+    assert columns == ["id", "name", "doc"]
+    assert [r[2] for r in rows if r[0] in (4, 5, 6)] == [seed_doc(4), seed_doc(5), seed_doc(6)]
+
+
+@pytest.mark.parametrize("policy", ["manual_review", "propagate_columns"])
+def test_a_field_declared_omitted_is_never_written_when_it_appears_mid_run(
+    tmp_path, isolated, fake_mongo_pages, policy  # noqa: F811
+):
+    """Omits leave the write map before the read; a late omitted field was adopted as new."""
+    dst = _docs_dest(tmp_path)
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "name", "target": "name", "confidence": 0.99},
+        {"source": "doc", "target": "", "intentional_omit": True, "transform": "omit"},
+    ]
+
+    _mongo_stream(dst, policy, mappings=mappings)
+
+    columns, rows = _docs_state(dst)
+    assert columns == ["id", "name"]
+    assert len(rows) == len(_MONGO_DOCS) + 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "backfill", "acknowledged", "adds"),
+    [
+        ("manual_review", False, False, False),
+        ("manual_review", False, True, False),  # an ack covers only what Validate disclosed
+        ("manual_review", True, False, True),
+        ("propagate_columns", False, False, True),
+        ("type_locked", False, False, False),
+    ],
+)
+def test_the_engine_stamps_whether_a_mid_run_field_may_be_added(policy, backfill, acknowledged, adds):
+    from src.transfer.engine_schema_propagation import _record_schema_propagation
+    from src.transfer.source_column_coverage import MID_RUN_POLICY_KEY
+
+    class _Store:
+        def update_job_status(self, *_a, **_k):
+            return True
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="mongodb", table="docs"),
+        destination=EndpointConfig(kind="database", format="sqlite", database="x", table="docs"),
+        schema_policy=policy, backfill_new_fields=backfill, schema_drift_acknowledged=acknowledged,
+    )
+    mappings = [{"source": c, "target": c} for c in ("id", "name")]
+
+    _record_schema_propagation(_Store(), "j", ["id", "name"], mappings, {"id": "INTEGER", "name": "TEXT"}, request)
+
+    stamp = request.destination.extra[MID_RUN_POLICY_KEY]
+    assert stamp["adds_columns"] is adds
+    assert stamp["dest_columns"] == ["id", "name"]
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "json"])
+@pytest.mark.parametrize(
+    ("variant", "expect"),
+    [("validate_manual_review", "blocked"), ("no_validate_automap", "blocked"),
+     ("no_validate_automap_backfill", "added")],
+)
+def test_json_file_whose_last_record_adds_a_field(tmp_path, isolated, monkeypatch, fmt, variant, expect):  # noqa: F811
+    """A later record introduces doc; small batches put it past the first write."""
+    import json
+
+    import src.transfer.file_stream as file_stream
+
+    monkeypatch.setattr(file_stream, "CHUNK_SIZE", 5)
+    records = [{"id": i, "name": f"n{i}", "updated_at": f"2026-01-{i:02d}"} for i in range(1, ROWS)]
+    records.append({"id": ROWS, "name": f"n{ROWS}", "updated_at": "2026-01-30", "doc": "late"})
+    path = tmp_path / f"t.{fmt}"
+    path.write_text(
+        "".join(json.dumps(r) + "\n" for r in records) if fmt == "jsonl" else json.dumps(records)
+    )
+    dst = tmp_path / "dst.sqlite"
+    request = _request(
+        EndpointConfig(kind="file", format=fmt), _sqlite_dest(dst), "t", "full_refresh_append",
+        "default", variant,
+    )
+    request.source_path, request.source_filename = str(path), path.name
+
+    result, job = _run(isolated, request)
+
+    columns, rows = _sqlite_state(dst)
+    if expect == "added":
+        assert result.success, result.error
+        assert "doc" in columns
+        assert rows[-1] == (ROWS, "late") and rows[0] == (1, None)
+        return
+    _assert_blocked(result, job, columns, rows)

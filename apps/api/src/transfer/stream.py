@@ -1568,6 +1568,9 @@ def _stream_database_transfer_impl(
     from services.shape_contract import write_ready_mappings
 
     # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
+    from .source_column_coverage import omitted_source_names
+
+    run.cfg.omitted_sources = omitted_source_names(run.cfg.mappings)
     run.cfg.mappings = write_ready_mappings(run.cfg.mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if run.cfg.src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
