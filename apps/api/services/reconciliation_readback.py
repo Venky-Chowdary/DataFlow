@@ -821,6 +821,7 @@ def verify_kafka_topic(
             topic=topic,
             columns=target_columns,
             limit=_saas_readback_limit(limit),
+            written_image=True,
         )
         headers = list(batch.headers or target_columns or [])
         rows = list(batch.rows or [])

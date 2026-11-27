@@ -1187,6 +1187,7 @@ def _read_destination_sample(
             return out_rows
 
         if db_type == "kafka":
+            from connectors.kafka_debezium_bridge import WRITTEN_IMAGE_FLAG
             from connectors.kafka_reader import read_topic_batch
             from services.copy_kafka_common import kafka_security_options
 
@@ -1194,6 +1195,7 @@ def _read_destination_sample(
                 cfg={
                     # The destination's SASL listener (D83).
                     **kafka_security_options(dest),
+                    WRITTEN_IMAGE_FLAG: True,  # D428: lineage fields as written
                     "host": dest.get("host", ""),
                     "port": int(dest.get("port") or 9092),
                     "username": dest.get("username", ""),

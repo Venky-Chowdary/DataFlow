@@ -602,6 +602,7 @@ def read_topic_to_end(
     columns: list[str] | None = None,
     limit: int,
     skip_poison: bool = False,
+    written_image: bool = False,
 ) -> tuple[ReadBatch, bool]:
     """Every message from the log start to the end offsets at call time.
 
@@ -615,6 +616,8 @@ def read_topic_to_end(
     offset. Returns ``(batch, complete)``; ``complete`` is False when ``limit``
     or the time budget stopped the read first, so the caller reports the
     topic unverified instead of under-counted. No group, no commit.
+    ``written_image``: body fields named like envelope columns are kept as
+    written (``WRITTEN_IMAGE_FLAG``).
     """
     topic_name = (topic or cfg.get("database") or cfg.get("table") or "").strip()
     if not topic_name:
@@ -641,7 +644,9 @@ def read_topic_to_end(
                     if stop is None or int(msg.offset) >= stop:
                         break
                     row = kafka_value_to_row(
-                        msg.value, registry_url=registry_url, meta=kafka_message_meta(msg)
+                        msg.value,
+                        registry_url=registry_url,
+                        meta=kafka_message_meta(msg, written_image=written_image),
                     )
                     if row:
                         records.append(row)

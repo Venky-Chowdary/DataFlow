@@ -119,7 +119,15 @@ KAFKA_ENVELOPE_TYPES = {
 }
 
 
-def kafka_message_meta(msg: Any) -> dict[str, Any]:
+#: Reader config flag: a read-back of what Datawrap produced. A body field named
+#: like an envelope column is then the value that was written, not shadowed by
+#: this broker's coordinates (D428: a Kafka → Kafka copy carries the source
+#: topic's ``_kafka_topic`` as data; the destination read-back replaced it with
+#: the destination topic and failed every exact copy).
+WRITTEN_IMAGE_FLAG = "_df_kafka_written_image"
+
+
+def kafka_message_meta(msg: Any, *, written_image: bool = False) -> dict[str, Any]:
     """Broker coordinates of one consumed message, for :func:`kafka_value_to_row`."""
     key = msg.key
     return {
@@ -127,6 +135,7 @@ def kafka_message_meta(msg: Any) -> dict[str, Any]:
         "partition": int(msg.partition),
         "offset": int(msg.offset),
         "key": key.decode("utf-8", "replace") if isinstance(key, (bytes, bytearray)) else key,
+        **({WRITTEN_IMAGE_FLAG: True} if written_image else {}),
     }
 
 
@@ -142,6 +151,7 @@ def _kafka_row(
     it to the rejected-rows channel instead of writing an all-NULL row.
     """
     meta = meta or {}
+    written_image = bool(meta.get(WRITTEN_IMAGE_FLAG))
     for _k, _col in (
         ("topic", "_kafka_topic"),
         ("partition", "_kafka_partition"),
@@ -150,7 +160,7 @@ def _kafka_row(
     ):
         # A message without a key still has the column (NULL): the row shape
         # must not depend on whether the producer set one.
-        if _k in meta:
+        if _k in meta and not (written_image and _col in row):
             row[_col] = meta[_k]
     if poison:
         row["_kafka_poison"] = poison
@@ -421,7 +431,9 @@ class KafkaDebeziumConsumer:
                 row = kafka_value_to_row(
                     msg.value,
                     registry_url=registry_url,
-                    meta=kafka_message_meta(msg),
+                    meta=kafka_message_meta(
+                        msg, written_image=bool(self.config.get(WRITTEN_IMAGE_FLAG))
+                    ),
                 )
                 if row:
                     yield row

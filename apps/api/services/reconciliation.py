@@ -4745,10 +4745,14 @@ def sample_compare_rows(
         # holding its key is not corruption evidence.
         if not isinstance(src, dict):
             return False
+        from services.mapping_constraints import is_intentional_omit
+
         for m in mappings:
             src_col = str(m.get("source") or "")
             tgt_col = str(m.get("target") or "")
-            if not src_col or not tgt_col:
+            if not src_col or not tgt_col or is_intentional_omit(m):
+                # An omit is never written: its "intentional omit" error is not
+                # a refusal (it excluded every row and left the sample empty).
                 continue
             if src_col not in src:
                 # Sparse documents may legitimately lack a column — keep the
