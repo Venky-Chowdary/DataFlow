@@ -2534,6 +2534,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
 
     transfer_req = transfer_request_from_dict(payload)
+    transfer_req.workspace_id = str(job.get("workspace_id") or "")
+    # D413: write through the destination connector as it is saved now, never
+    # the host frozen on the parent job (retry/rerun already do, D172).
+    from ..transfer.endpoint_refresh import (
+        ReplayConnectorMissing,
+        refresh_replay_destination,
+        replay_endpoint_note,
+    )
+
+    try:
+        endpoint_resolution = refresh_replay_destination(job_id, payload, transfer_req)
+    except ReplayConnectorMissing as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     mappings = list(transfer_req.mappings or [])
     if body.transform_overrides:
         from services.transform_engine import transform_override_refusal
@@ -2732,6 +2745,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     child_payload["sync_mode"] = replay_sync_mode
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
+    child_req.destination = transfer_req.destination  # the refreshed endpoint (D413)
     from src.transfer.contract_engine import enforce_bound_contract, stamp_request_contract
 
     try:
@@ -2770,6 +2784,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         phase="writing",
         message=f"Quarantine replay of job {job_id}",
         operation="quarantine_replay",
+        endpoint_refresh=endpoint_resolution,
     )
 
     try:
@@ -3102,7 +3117,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             raise HTTPException(status_code=409, detail=typed_refusal) from e
         # A refused replay is a failed run: the job record's words, with a reference.
         raise run_failure_http_exception(
-            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write"
+            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write",
+            note=replay_endpoint_note(endpoint_resolution),
         ) from e
 
 

@@ -256,15 +256,20 @@ def run_failure_http_exception(
     event: str,
     side: str = "",
     phase: str = "",
+    note: str = "",
 ) -> HTTPException:
-    """A failed run answered over HTTP in the job record's words (``humanize_transfer_failure``)."""
+    """A failed run answered over HTTP in the job record's words (``humanize_transfer_failure``).
+
+    ``note`` is route context the failure text cannot know, e.g. which endpoint
+    a replay dialled and whether it came from the saved connection (D413).
+    """
     from services.error_handling import humanize_transfer_failure
 
     cid = tracing.get_correlation_id() or uuid.uuid4().hex
     emit_event(_LOG, event, outcome="failed", level=logging.WARNING, error=exc,
                correlation_id=cid, http_status=status_code)
     human = humanize_transfer_failure(exc, side=side, phase=phase)
-    text = " ".join(p for p in (str(human.get("message") or ""), str(human.get("fix") or "")) if p)
+    text = " ".join(p for p in (str(human.get("message") or ""), str(human.get("fix") or ""), note) if p)
     envelope = {
         "error": {
             "code": human.get("code"), "title": human.get("title"), "message": human.get("message"),
@@ -276,6 +281,8 @@ def run_failure_http_exception(
     }
     if human.get("legacy_code"):
         envelope["error"]["legacy_code"] = human["legacy_code"]  # deprecated, one release
+    if note:
+        envelope["error"]["note"] = note
     return EnvelopeHTTPException(status_code, envelope, headers={"X-Correlation-ID": cid})
 
 
