@@ -92,6 +92,10 @@ class Side(ABC):
         """
         return {"kind": "not_established", "reason": f"snapshot pinning is not implemented for {type(self).__name__}"}
 
+    def unpin(self) -> None:
+        """Leave the pinned snapshot (or a failed attempt) and read statement by statement."""
+        self.pinned = False
+
     # column lists in plan order -------------------------------------------------
     def column_name(self, col: ColumnPlan) -> str:
         return col.source if self.role == "source" else col.target

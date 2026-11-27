@@ -214,3 +214,42 @@ def test_a_hashed_key_is_not_eligible_and_never_errors(tables) -> None:
     block = verification.start_for_job(job_id, background=False)
     assert block["state"] == "not_eligible", block
     assert "key is a protected column" in block["reason"]
+
+
+@pg
+def test_postgresql_before_13_pins_with_txid_current_snapshot(tables) -> None:
+    """Review 2, N3: pg_current_snapshot() is 13+; 10 to 12 use txid_current_snapshot()."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    side = verification.side_opener(spec)("source", verification.plan_for(spec))
+    try:
+        side.server_version_num = 120000
+        info = side.pin()
+        assert info["kind"] == "pinned" and ":" in info["snapshot"]
+        assert info["function"] == "txid_current_snapshot"  # pg_current_snapshot() does not exist before 13
+    finally:
+        side.close()
+
+
+@pg
+def test_a_pin_that_fails_falls_back_and_never_errors_the_scan(tables, monkeypatch) -> None:
+    """Review 2, N3: a failed pin left the transaction aborted and the scan ended in error."""
+    from services.parity_scale import verification
+    from services.parity_scale.dialects.postgresql import PostgresSide
+
+    def broken_pin(self, max_hold_s=None) -> dict[str, Any]:
+        with self.conn.cursor() as cur:
+            try:
+                cur.execute("SELECT no_such_snapshot_function()")  # leaves the transaction aborted
+            except Exception:  # noqa: BLE001 — the point of the test
+                pass
+        raise RuntimeError("could not pin")
+
+    monkeypatch.setattr(PostgresSide, "pin", broken_pin)
+    job_id = _job(*tables)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    consistency = _svc().get_job(job_id)["reconciliation"]["parity_at_scale"]["consistency"]
+    assert consistency["kind"] == "not_established"
+    assert _report(job_id)["verdict"] == "no_difference_found"

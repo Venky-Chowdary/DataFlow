@@ -210,6 +210,7 @@ class PostgresSide(SqlSide):
             raise ValueError(f"Parity at Scale needs a UTF8 database (this one is {encoding})")
         if version < 140000:
             raise ValueError("Parity at Scale needs PostgreSQL 14 or later (exact extract(epoch))")
+        self.server_version_num = version
         self.server = "postgresql"
         self.conn.autocommit = True
         with self.conn.cursor() as cur:
@@ -266,13 +267,29 @@ class PostgresSide(SqlSide):
         Each statement then runs under a savepoint, so a statement that times
         out is rolled back to it and the snapshot is kept.
         """
-        self.conn.rollback()
-        self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT pg_current_snapshot()::text, now()::text")
-            snapshot, at = cur.fetchone()
+        # pg_current_snapshot() is PostgreSQL 13+; txid_current_snapshot() serves 10 to 12.
+        function = "pg_current_snapshot" if int(getattr(self, "server_version_num", 0) or 0) >= 130000 \
+            else "txid_current_snapshot"
+        try:
+            self.conn.rollback()
+            self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
+            with self.conn.cursor() as cur:
+                cur.execute(f"SELECT {function}()::text, now()::text")
+                snapshot, at = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
+            self.unpin()
+            return {"kind": "not_established", "reason": f"the snapshot could not be taken ({type(exc).__name__})"}
         self.pinned = True
-        return {"kind": "pinned", "method": "repeatable_read_transaction", "snapshot": str(snapshot), "at": str(at)}
+        return {"kind": "pinned", "method": "repeatable_read_transaction", "function": function,
+                "snapshot": str(snapshot), "at": str(at)}
+
+    def unpin(self) -> None:
+        """Back to one transaction per statement (default isolation), whatever state the connection is in."""
+        self.pinned = False
+        with contextlib.suppress(Exception):
+            self.conn.rollback()
+        with contextlib.suppress(Exception):
+            self.conn.set_session(isolation_level="DEFAULT", readonly="DEFAULT")
 
     def _execute_pinned(self, sql: str, params: Sequence[Any]) -> list[tuple[Any, ...]]:
         import psycopg2

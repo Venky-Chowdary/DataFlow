@@ -210,6 +210,20 @@ class MySQLSide(SqlSide):
         not pinned. A statement error (a timeout) rolls back the statement
         only, so the snapshot is kept.
         """
+        try:
+            return self._pin()
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
+            self.unpin()
+            return {"kind": "not_established", "reason": f"the snapshot could not be taken ({type(exc).__name__})"}
+
+    def unpin(self) -> None:
+        self.pinned = False
+        try:
+            self.conn.rollback()
+        except Exception:  # noqa: BLE001 — a broken connection fails its next statement instead
+            return
+
+    def _pin(self) -> dict[str, Any]:
         self.conn.rollback()
         with self.conn.cursor() as cur:
             cur.execute(

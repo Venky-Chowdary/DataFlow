@@ -247,6 +247,8 @@ class ParityScan:
         try:
             consistency[role] = side.pin()
         except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is recorded, not fatal
+            # Roll back whatever the attempt left (an aborted transaction): never an errored scan.
+            side.unpin()
             consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
 
     def close(self) -> None:
