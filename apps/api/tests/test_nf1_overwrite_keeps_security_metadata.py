@@ -1165,6 +1165,9 @@ def test_multi_table_failed_restore_of_an_earlier_table_reaches_the_job(tmp_path
     assert result.success is False
     job = mongo.get_job(result.job_id)
     assert 'SWAP WITH "PUBLIC"."PEOPLE__DF_BAK"' in str(job.get("error")), job.get("error")
+    # Review 4: the restore's recovery is added to the multi-table undo's note,
+    # never in its place.
+    assert "Every table this failed run reached was undone" in str(job.get("error")), job.get("error")
     outcome = (job.get("error_details") or {}).get("overwrite_restore") or {}
     assert outcome.get("status") == "restore_failed"
     assert "PEOPLE" in str(outcome.get("table")).upper()

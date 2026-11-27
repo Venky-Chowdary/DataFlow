@@ -234,8 +234,9 @@ def merge_confirm_change(
             continue
         new_mode = None if mode is None else normalize_mode(mode)
         if new_mode == current["workspaces"].get(key):
-            if platform_admin and new_mode is not None:
-                platform_set.add(key)  # a platform admin re-affirmed it
+            # Unchanged: a GET + PUT round trip of the whole policy marks
+            # nothing (review round 4). To exempt an existing entry, a platform
+            # admin names it in ``set_by_platform_admin``.
             continue
         if key != own and not platform_admin:
             raise PermissionError(
@@ -260,6 +261,14 @@ def merge_confirm_change(
             platform_set.add(key)
         else:
             platform_set.discard(key)
+    explicit = requested.get(PLATFORM_SET)
+    if explicit is not None:
+        if not isinstance(explicit, list):
+            raise ValueError("confirm.set_by_platform_admin must be a list of workspace ids")
+        named = {str(ws or "").strip() for ws in explicit} - platform_set
+        if named and not platform_admin:
+            raise PermissionError("Only a platform admin can exempt a workspace from the default.")
+        platform_set |= named
     merged[PLATFORM_SET] = sorted(platform_set)
     return normalize_confirm_policy(merged)
 

@@ -110,12 +110,13 @@ def carry_onto_exception(destination: Any, exc: BaseException) -> dict[str, Any]
         merged: dict[str, Any] = {OUTCOME_KEY: dict(earlier)}
         add_outcome(merged, outcome)
         setattr(exc, "overwrite_restore", merged[OUTCOME_KEY])
-        own = str(getattr(exc, "failed_batch_undo_note", "") or "")
-        message = str(outcome.get("message") or "")
-        setattr(exc, "failed_batch_undo_note", own if message in own else f"{own} {message}".strip())
-        return outcome
-    setattr(exc, "overwrite_restore", dict(outcome))
-    setattr(exc, "failed_batch_undo_note", str(outcome.get("message") or ""))
+    else:
+        setattr(exc, "overwrite_restore", dict(outcome))
+    # Added to what the run already says (the multi-table undo's note, the
+    # stream's own undo), never in place of it (review round 4).
+    own = str(getattr(exc, "failed_batch_undo_note", "") or "")
+    message = str(outcome.get("message") or "")
+    setattr(exc, "failed_batch_undo_note", own if message in own else f"{own} {message}".strip())
     return outcome
 
 

@@ -220,15 +220,21 @@ class _file_lock:
 
 def _write_file_section(path: str, value: Any, updated_at: str) -> None:
     """Merge one section into the local file under the file lock."""
+    _write_file_paths({path: value}, updated_at)
+
+
+def _write_file_paths(paths: dict[str, Any], updated_at: str) -> None:
+    """Merge these dotted paths into the local file under the file lock."""
     with _file_lock():
         current = _read_file() or {}
-        node = current
-        *parents, leaf = path.split(".")
-        for key in parents:
-            if not isinstance(node.get(key), dict):
-                node[key] = {}
-            node = node[key]
-        node[leaf] = value
+        for path, value in paths.items():
+            node = current
+            *parents, leaf = path.split(".")
+            for key in parents:
+                if not isinstance(node.get(key), dict):
+                    node[key] = {}
+                node = node[key]
+            node[leaf] = value
         current["updated_at"] = updated_at
         STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = STORE_PATH.with_suffix(".tmp")
@@ -238,14 +244,19 @@ def _write_file_section(path: str, value: Any, updated_at: str) -> None:
 
 def _save_section(path: str, value: Any) -> None:
     """Persist only ``path`` (e.g. ``pilot.engine``): never another writer's section."""
-    from services.integrations_persistence import save_section
+    _save_paths({path: value})
 
-    value = json.loads(json.dumps(value, default=json_default))
+
+def _save_paths(paths: dict[str, Any]) -> None:
+    """Persist only these dotted paths, in one database update and one file merge."""
+    from services.integrations_persistence import save_paths
+
+    paths = json.loads(json.dumps(paths, default=json_default))
     _load_raw_state()  # heals a database that has no document yet, before the upsert
     now = _now()
     # Database first: it is what survives a restart; the file is a local cache.
-    save_section(path, value, now)
-    _write_file_section(path, value, now)
+    save_paths(paths, now)
+    _write_file_paths(paths, now)
 
 
 def _mask_secret(value: str) -> str:
@@ -629,17 +640,21 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
 def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     if provider not in _default_ai():
         raise ValueError(f"Unknown AI provider: {provider}")
-    data = _load_raw()
-    cfg = data["ai_providers"][provider]
-    existing_key = cfg.get("api_key", "")
-
-    for key, value in patch.items():
-        if key == "api_key":
-            cfg["api_key"] = _encrypt_field(str(value or ""), existing_key)
-        elif key in cfg or key == "enabled":
-            cfg[key] = value
-
-    _save_section(f"ai_providers.{provider}", cfg)
+    with _file_lock():
+        # Field by field under the section lock: a concurrent change to another
+        # field of this provider (or to its key) is not put back (review round 4).
+        cfg = _load_raw()["ai_providers"][provider]
+        existing_key = cfg.get("api_key", "")
+        changed: dict[str, Any] = {}
+        for key, value in patch.items():
+            if key == "api_key":
+                new_key = _encrypt_field(str(value or ""), existing_key)
+                if new_key != existing_key:  # the masked value keeps the stored key
+                    changed[f"ai_providers.{provider}.api_key"] = new_key
+            elif key in cfg or key == "enabled":
+                changed[f"ai_providers.{provider}.{key}"] = value
+        if changed:
+            _save_paths(changed)
     apply_integrations_to_env()
     _OLLAMA_PROBE.clear()
     return get_ai_provider_configs()[provider]
@@ -931,19 +946,28 @@ def load_api_key_records() -> list[dict[str, Any]]:
         elif _is_revoked(current) and not _is_revoked(stored):
             file_rewrites.append(current)
     if file_rewrites:
-        merged = {str(item["id"]): item for item in file_keys}
-        for item in file_rewrites:
-            merged[str(item["id"])] = _record_for_store(item)
-        _save_file_keys(list(merged.values()))
+        _merge_file_keys(file_rewrites)
     return list(by_id.values())
+
+
+def _merge_file_keys(records: list[dict[str, Any]]) -> None:
+    """Replace these records in the file's key list, re-read under the file lock.
+
+    A create and a revoke each used to write back the list they had read, so
+    the later one put the other's version back (a revoked key resurrected).
+    """
+    with _file_lock():
+        merged = {str(item["id"]): item for item in _file_key_records()}
+        for record in records:
+            stored = _record_for_store(record)
+            merged[str(stored["id"])] = stored
+        _save_file_keys(list(merged.values()))
 
 
 def _upsert_api_key_record(record: dict[str, Any]) -> None:
     stored = _record_for_store(record)
     key_id = str(stored["id"])
-    file_keys = [item for item in _file_key_records() if str(item.get("id")) != key_id]
-    file_keys.append(stored)
-    _save_file_keys(file_keys)
+    _merge_file_keys([stored])
     coll = _keys_collection()
     if coll is None:
         return
@@ -954,10 +978,7 @@ def _upsert_api_key_record(record: dict[str, Any]) -> None:
 
 
 def _save_file_api_key_record(record: dict[str, Any]) -> None:
-    stored = _record_for_store(record)
-    file_keys = [item for item in _file_key_records() if str(item.get("id")) != str(stored["id"])]
-    file_keys.append(stored)
-    _save_file_keys(file_keys)
+    _merge_file_keys([record])
 
 
 class ApiKeyNotFound(LookupError):

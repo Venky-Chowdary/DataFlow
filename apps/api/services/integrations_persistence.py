@@ -74,34 +74,65 @@ def load_sections() -> dict[str, Any] | None:
     return read_document()[1]
 
 
+#: Sections whose entries are written one by one (``sso.oidc``,
+#: ``ai_providers.openai``): healed entry by entry too.
+_KEYED_SECTIONS = ("sso", "ai_providers")
+
+
 def save_sections(data: dict[str, Any]) -> bool:
-    """Write a whole document: only for healing a database that has none yet."""
+    """Heal a database with no document from the local file, never over a writer.
+
+    Each section (each entry of a keyed section) is set only where the
+    document does not have it yet, so a concurrent writer's upsert of one
+    section — before or after this — keeps its value and loses no other
+    section of the file (review round 4).
+    """
     coll = _collection()
     if coll is None:
         return False
-    doc = {k: data[k] for k in SECTIONS if k in data}
+    paths: dict[str, Any] = {}
+    for section in SECTIONS:
+        if section not in data or section == "updated_at":
+            continue
+        value = data[section]
+        if section in _KEYED_SECTIONS and isinstance(value, dict):
+            paths.update({f"{section}.{key}": item for key, item in value.items()})
+        else:
+            paths[section] = value
     try:
-        coll.insert_one({"_id": DOC_ID, **doc})
-    except Exception as exc:  # noqa: BLE001 - a concurrent first write is fine
-        logger.warning("integrations settings heal not written: %s", exc)
+        coll.update_one(
+            {"_id": DOC_ID},
+            {"$setOnInsert": {"updated_at": data.get("updated_at") or ""}},
+            upsert=True,
+        )
+        for path, value in paths.items():
+            coll.update_one({"_id": DOC_ID, path: {"$exists": False}}, {"$set": {path: value}})
+    except Exception as exc:  # noqa: BLE001 - the next read tries again
+        logger.warning("integrations settings heal not finished: %s", exc)
         return False
     return True
 
 
 def save_section(path: str, value: Any, updated_at: str) -> bool | None:
-    """``$set`` one section (dotted ``path``) and ``updated_at``; nothing else.
+    """``$set`` one section (dotted ``path``) and ``updated_at``; nothing else."""
+    return save_paths({path: value}, updated_at)
+
+
+def save_paths(paths: dict[str, Any], updated_at: str) -> bool | None:
+    """``$set`` these dotted paths and ``updated_at`` in one update; nothing else.
 
     Each writer owns its section, so a writer holding a stale copy of another
     section (the MCP policy and its ``rev``) cannot put it back (review round 3).
-    ``None`` when the path does not live in the database or there is none.
+    ``None`` when no path lives in the database or there is none.
     """
-    if path.split(".", 1)[0] not in SECTIONS:
+    paths = {k: v for k, v in paths.items() if k.split(".", 1)[0] in SECTIONS}
+    if not paths:
         return None
     coll = _collection()
     if coll is None:
         return None
     try:
-        coll.update_one({"_id": DOC_ID}, {"$set": {path: value, "updated_at": updated_at}}, upsert=True)
+        coll.update_one({"_id": DOC_ID}, {"$set": {**paths, "updated_at": updated_at}}, upsert=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("integrations settings write failed; local file kept: %s", exc)
         return False
