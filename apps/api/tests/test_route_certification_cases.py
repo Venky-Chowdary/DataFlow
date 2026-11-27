@@ -225,14 +225,8 @@ def test_overwrite_typed_cases(route, tmp_path, local_object_store, local_sftp, 
             schema_drift_acknowledged=True,
         )
     )
-    if destination.format == "sqlite":
-        # The SQLite overwrite stage refuses a column the live table lacks.
-        # Fail-closed with the prior rows untouched; schema_drift stays unproven.
-        assert not drifted.success
-        assert "missing mapped field(s) 'added'" in (drifted.error or "")
-        assert drifted.records_transferred == 0
-        assert _at_rest(destination, TYPED_COLUMNS) == expected
-        return
+    # SQLite included: its overwrite stage adds an approved column to the live
+    # table (in a savepoint) before the publish.
     assert drifted.success, f"{route} schema drift: {drifted.error}"
     assert _at_rest(destination, drift_columns) == canonical_rows(drift_records, drift_columns)
     evidence.prove(cases=("schema_drift",))

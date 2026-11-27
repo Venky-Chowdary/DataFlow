@@ -193,6 +193,9 @@ def refuse_unapproved_add_without_validate(
     )
 
 
+#: The engine's pre-write existence probe of the destination table (True /
+#: False / None). False means this run creates the table.
+DEST_EXISTED_PROBE_KEY = "_df_dest_table_existed_probe"
 #: Stamped on ``destination.extra`` by the engine before the first write, so a
 #: stream that discovers a field mid-run knows whether the run's policy adds it.
 MID_RUN_POLICY_KEY = "_df_mid_run_columns"
@@ -232,10 +235,11 @@ def stamp_mid_run_column_policy(request: Any, dest_schema_types: dict[str, str] 
         "acknowledged": bool(getattr(request, "schema_drift_acknowledged", False)),
         "dest_columns": sorted({str(c).strip().lower() for c in dest_schema_types or {} if str(c).strip()}),
         # A table this run creates is the run's own: a field it meets mid-run is
-        # added and disclosed. Only a table that existed before the run stops.
+        # added and disclosed. Only a table that existed before the run stops,
+        # and a table whose existence cannot be told counts as existing.
         "dest_existed": bool(dest_schema_types)
         or bool(extra.get("overwrite_replaced_column_types"))
-        or extra.get("dest_table_existed_before") is True,
+        or extra.get(DEST_EXISTED_PROBE_KEY) is not False,
     }
 
 
@@ -407,14 +411,114 @@ def capture_stream_dest_types(destination: Any, stream_name: str) -> dict[str, s
     return _stream_live_types(dest_type, cfg, str(table or ""))
 
 
+def table_existed_before(destination: Any, stream_name: str = "") -> bool | None:
+    """Whether this table existed before the run: ``None`` when it cannot be told.
+
+    Asked before anything is written or set aside, so ``False`` means this run
+    creates the table. Callers treat ``None`` as existing (fail closed): a table
+    whose existence is unknown is never assumed to be the run's own.
+    """
+    try:
+        from services.db_type_utils import dest_declares_column_ddl
+        from services.dest_precount import destination_table_exists
+        from services.dialect_profiles import schema_from_cfg
+
+        from .adapters import resolve_connector_config, resolve_dest_table
+        from .connector_capabilities import resolve_driver_type
+
+        dest_type = resolve_driver_type(str(getattr(destination, "format", "") or ""))
+        if not dest_declares_column_ddl(dest_type):
+            return None
+        cfg = resolve_connector_config(destination)
+        table = resolve_dest_table(dest_type, destination, stream_name or "import")
+        return destination_table_exists(
+            dest_type, cfg, schema=schema_from_cfg(dest_type, cfg), table_name=str(table or "")
+        )
+    except Exception:  # noqa: BLE001 - unknown existence is never "created by this run"
+        return None
+
+
+def judge_tables_before_any_write(
+    *,
+    source: Any,
+    destination: Any,
+    streams: list[tuple[str, list[dict[str, Any]] | None]],
+    request_mappings: list[dict[str, Any]] | None,
+    original: tuple[Any, Any, Any, Any],
+) -> dict[str, dict[str, Any]]:
+    """Judge every listed table of a multi-table run before the first is written.
+
+    For the routes that do not reach the stream's map step (SCD2 / mirror
+    staging merges, CDC): each table's catalog columns (read the way Validate
+    reads them), its own map (or the identity map a table without one gets),
+    its destination columns and whether it existed. A blocked table stops the
+    run before any table is touched; an unreadable one too (fail closed).
+    Returns ``{table: {record, dest_types, existed}}``.
+    """
+    stamp = (getattr(destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
+    if not isinstance(stamp, dict):
+        return {}
+    import copy as _copy
+
+    from services.flatten_protection import source_flattens, stamped_lineage
+    from services.multi_stream_plan import adopt_inherited_mappings
+    from services.multi_stream_targets import bind_endpoint_to_stream
+    from services.source_schema_authority import _endpoint_catalog_info
+
+    src_table, src_collection, dest_table, dest_collection = original
+    judged: dict[str, dict[str, Any]] = {}
+    for name, own in streams:
+        src = _copy.copy(source)
+        src.extra = dict(getattr(source, "extra", None) or {})
+        bind_endpoint_to_stream(src, name, table=src_table, collection=src_collection)
+        dst = _copy.copy(destination)
+        dst.extra = dict(getattr(destination, "extra", None) or {})
+        if dest_table is not None or dest_collection is not None:
+            bind_endpoint_to_stream(dst, name, table=dest_table, collection=dest_collection)
+        info = _endpoint_catalog_info(src)
+        schema = info.get("schema") if isinstance(info.get("schema"), dict) else {}
+        columns = [str(c) for c in schema]
+        if not columns:
+            raise SourceColumnsUnaccounted(
+                f"Table {name}: its source columns could not be read before the run, so "
+                "Datawrap cannot show that each one is mapped or declared omitted. Nothing "
+                "was written. Check the source connection, then run again.",
+                columns=[],
+            )
+        mappings = list(own) if own else adopt_inherited_mappings(request_mappings, columns)[0]
+        lineage = stamped_lineage(mappings)
+        if source_flattens(str(getattr(src, "format", "") or ""), src.extra):
+            lineage.update(info.get("flatten_lineage") or {})
+        dest_types = capture_stream_dest_types(dst, name)
+        verdict = stream_coverage_verdict(
+            stream=name, source_columns=columns, mappings=mappings, lineage=lineage,
+            dest_types=dest_types, dest_type=str(getattr(dst, "format", "") or ""),
+            policy=str(stamp.get("policy") or "manual_review"),
+            acknowledged=bool(stamp.get("acknowledged")),
+        )
+        if verdict["status"] == "block":
+            fix = _ADD_REMEDY if verdict["gate"] != "g13_source_coverage" else _REMEDY
+            raise SourceColumnsUnaccounted(
+                f"{verdict['message']} {fix}", columns=verdict["columns"],
+                gate=verdict["gate"], rule_id=verdict["rule_id"], fix=fix,
+            )
+        judged[name] = {
+            "record": verdict["record"],
+            "dest_types": dest_types,
+            "existed": table_existed_before(dst, name),
+        }
+    return judged
+
+
 def _run_stamp(cfg: Any) -> dict[str, Any] | None:
     stamp = (getattr(cfg.destination, "extra", None) or {}).get(MID_RUN_POLICY_KEY)
     return stamp if isinstance(stamp, dict) else None
 
 
-def enforce_stream_coverage(run: Any, probe: Any, write_columns: list[str], dest_types: dict[str, str]) -> None:
+def enforce_stream_coverage(run: Any, probe: Any, write_columns: list[str], per_stream: dict[str, Any]) -> None:
     """Execute: judge this table with the map it writes with; record it on its summary."""
     cfg = run.cfg
+    dest_types = dict((per_stream or {}).get("dest_types") or {})
     stamp = _run_stamp(cfg)
     if stamp is None:
         return  # not under the engine (a benchmark or a direct caller)
@@ -438,7 +542,8 @@ def enforce_stream_coverage(run: Any, probe: Any, write_columns: list[str], dest
         acknowledged=bool(stamp.get("acknowledged")),
     )
     cfg.dest_live_columns = sorted({str(c).lower() for c in dest_types or {}})
-    cfg.dest_existed = bool(dest_types)
+    # Probed before the run touched the table; unknown counts as existing.
+    cfg.dest_existed = (per_stream or {}).get("existed") is not False
     # The stream starts its summary after this point; it copies the record in.
     cfg.coverage_record = verdict["record"]
     if verdict["status"] == "block":

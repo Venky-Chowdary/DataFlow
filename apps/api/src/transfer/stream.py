@@ -1579,7 +1579,7 @@ def _stream_database_transfer_impl(
     from .source_column_coverage import enforce_stream_coverage, omitted_source_names
 
     if per_stream_coverage is not None:  # one table of a multi-table run: its own map
-        enforce_stream_coverage(run, probe, write_columns, per_stream_coverage.get("dest_types") or {})
+        enforce_stream_coverage(run, probe, write_columns, per_stream_coverage)
     run.cfg.omitted_sources = omitted_source_names(run.cfg.mappings)
     run.cfg.mappings = write_ready_mappings(run.cfg.mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.

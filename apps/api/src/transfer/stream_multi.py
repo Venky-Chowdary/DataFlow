@@ -283,6 +283,24 @@ def run_non_cdc_multi_stream_sequential(
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
+    # SCD2 / mirror tables never reach the stream's map step: each is judged,
+    # with the map it writes with, before the first table is touched.
+    from .source_column_coverage import judge_tables_before_any_write
+
+    staged_tables = []
+    for contract in selected_list:
+        name = (contract.name or "").strip() or "stream"
+        own = contract_for_stream(stream_contracts, name).get("mappings")
+        if resolve_effective_sync_mode(sync_mode, contract.sync_mode or sync_mode).lower() in (
+            "full_refresh_mirror", "mirror", "scd2"
+        ):
+            staged_tables.append((name, (own if isinstance(own, list) and own else mappings) or None))
+    judged = judge_tables_before_any_write(
+        source=source, destination=destination, streams=staged_tables,
+        request_mappings=mappings,
+        original=(original_table, original_collection, original_dest_table, original_dest_collection),
+    ) if staged_tables else {}
+
     session_before, session_after = endpoint_session_hooks(destination)
     session_plan = None
     if session_before or session_after:
@@ -382,9 +400,11 @@ def run_non_cdc_multi_stream_sequential(
 
             # This table's columns before an overwrite sets it aside: the
             # per-table verdict judges the table the operator had.
-            from .source_column_coverage import capture_stream_dest_types
+            from .source_column_coverage import capture_stream_dest_types, table_existed_before
 
             stream_dest_types = capture_stream_dest_types(destination, stream_name)
+            # Asked before the set-aside: False is a table this run creates.
+            stream_existed = table_existed_before(destination, stream_name)
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
                 request_sync_mode=sync_mode,
@@ -463,6 +483,8 @@ def run_non_cdc_multi_stream_sequential(
                                 ),
                             )
                         )
+                        if stream_name in judged:
+                            summary = {**(summary or {}), "schema_propagation": judged[stream_name]["record"]}
                     else:
                         rows, stream_ddl, summary, headers = stream_database_transfer(
                             source,
@@ -484,7 +506,9 @@ def run_non_cdc_multi_stream_sequential(
                             shape_steps=_steps_for(stream_name),
                             mappings_inherited=not declared_maps,
                             workspace_id=workspace_id,
-                            per_stream_coverage={"dest_types": stream_dest_types},
+                            per_stream_coverage={
+                                "dest_types": stream_dest_types, "existed": stream_existed,
+                            },
                         )
                 # The stream landed: park its overwrite backup under its table
                 # (the next stream's clear must not inherit it, and a later

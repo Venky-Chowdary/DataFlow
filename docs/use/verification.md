@@ -87,6 +87,15 @@ or `{"omit_columns": ["doc"], "reason": "not needed downstream"}`. It needs the
 job.manage permission (the one that approves destination changes). Who decided,
 the reason and the decision are recorded on the job (`resume_decision`) and in
 the audit log. `/rerun` takes the same decision as `schema_decision`.
+`omit_columns` may name only the columns the stop named (the job's
+`error_details.unaccounted_sources`); any other column is refused with 422,
+because leaving out a column the job already writes would write the remaining
+rows without its values. `/retry` runs the job as it was and refuses a
+`schema_decision` with 422. A field met mid-run is added without a decision
+only to a table this run created; a table whose existence could not be read
+before the run counts as existing, so the run stops. In a multi-table job,
+every SCD2, mirror and CDC table is judged with its own column map before the
+first table is written.
 A field flattened out of a document (for example `nested_city` from `nested`)
 counts as carried when its parent object is written whole, and the reports say
 "carried inside nested"; if the parent is transformed or not written, the field

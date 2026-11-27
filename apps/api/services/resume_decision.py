@@ -59,6 +59,59 @@ def decision_refusal(user: dict[str, Any] | None, decision: SchemaDecision) -> t
     return None
 
 
+def _named_by(details: Any) -> list[Any]:
+    if not isinstance(details, dict):
+        return []
+    evolution = details.get("schema_evolution") if isinstance(details.get("schema_evolution"), dict) else {}
+    return [
+        *(details.get("unaccounted_sources") or []),
+        *(evolution.get("unmapped_sources") or []),
+        *(a.get("source") or a.get("column") for a in evolution.get("additive") or [] if isinstance(a, dict)),
+    ]
+
+
+def stop_named_columns(job: dict[str, Any] | None) -> list[str]:
+    """The source columns this job's stop named.
+
+    An Execute stop names them in ``error_details.unaccounted_sources``; a
+    stop at the run's own preflight names them in its blocking gate (the
+    columns it could not account for, or the ADD COLUMN it may not make).
+    """
+    doc = job or {}
+    named = _named_by(doc.get("error_details"))
+    preflight = doc.get("preflight") if isinstance(doc.get("preflight"), dict) else {}
+    for gate in [*(preflight.get("blockers") or []), *(preflight.get("gates") or [])]:
+        if isinstance(gate, dict) and (gate in (preflight.get("blockers") or []) or gate.get("status") == "block"):
+            named.extend(_named_by(gate.get("details")))
+    return list(dict.fromkeys(str(c).strip() for c in named if str(c or "").strip()))
+
+
+def omit_refusal(job: dict[str, Any] | None, decision: SchemaDecision) -> tuple[int, str] | None:
+    """``(422, reason)`` when ``omit_columns`` names a column the stop did not name.
+
+    Leaving out a column the job already writes would write the rows still to
+    come without it (a blanked value reported only as "declared omitted"). The
+    stop names the columns it could not account for; only those can be left
+    out by a decision here. Any other change of the map is a new plan (Studio).
+    """
+    asked = [str(c).strip() for c in decision.omit_columns if str(c or "").strip()]
+    if not asked:
+        return None
+    named = stop_named_columns(job)
+    allowed = {c.lower() for c in named}
+    others = [c for c in asked if c.lower() not in allowed]
+    if not others:
+        return None
+    stated = ", ".join(named) if named else "none"
+    return 422, (
+        f"omit_columns may name only the source columns this job stopped on "
+        f"(unaccounted_sources: {stated}); {', '.join(others)} "
+        f"{'is' if len(others) == 1 else 'are'} not among them. Leaving out a column "
+        "the job already writes would write the remaining rows without its values. "
+        "To change the column map, plan the transfer again in Transfer Studio."
+    )
+
+
 def _omit_rows(columns: list[str], actor: str) -> list[dict[str, Any]]:
     return [
         {"source": c, "target": "", "confidence": 0.0, "intentional_omit": True, "decided_by": actor}

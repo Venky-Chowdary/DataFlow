@@ -978,6 +978,17 @@ def retry_transfer_job(
     quarantined and the valid rows load (QA r12 D2) — the way out of a
     cast-failure block for a job that failed.
     """
+    if body is not None and body.schema_decision is not None:
+        # Retry means "the same job as before": a decision it ignored would read
+        # as applied. The decision goes with /resume (or /rerun).
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "retry runs the job as it was and takes no schema_decision. Send the "
+                f"decision with POST /api/v1/connectors/jobs/{job_id}/resume, which "
+                "continues the job from its last committed batch."
+            ),
+        )
     force = bool(force or (body is not None and body.force))
     acceptance = _body_acceptance(body)
     try:
@@ -1268,9 +1279,11 @@ def rerun_transfer_job(
                 apply_schema_decision,
                 decision_record,
                 decision_refusal,
+                omit_refusal,
             )
 
             refusal = decision_refusal(getattr(request.state, "user", None), decision_body)
+            refusal = refusal or omit_refusal(job, decision_body)
             if refusal:
                 raise HTTPException(status_code=refusal[0], detail=refusal[1])
             apply_schema_decision(xfer_req, decision_body, actor=actor or "anonymous")
@@ -1500,9 +1513,11 @@ async def resume_transfer_job(
                 apply_schema_decision,
                 decision_record,
                 decision_refusal,
+                omit_refusal,
             )
 
             refusal = decision_refusal(getattr(request.state, "user", None), body)
+            refusal = refusal or omit_refusal(job, body)
             if refusal:
                 raise HTTPException(status_code=refusal[0], detail=refusal[1])
             decided_by = _actor_email(request) or "anonymous"

@@ -925,7 +925,12 @@ def fake_mongo_pages(monkeypatch):
     monkeypatch.setattr(stream_mod, "_read_batch_impl", read)
 
 
-def _mongo_stream(dst: Path, policy: str, *, checkpoint=None, service=None, mappings=None):
+_PROBED = object()
+
+
+def _mongo_stream(
+    dst: Path, policy: str, *, checkpoint=None, service=None, mappings=None, exists=_PROBED, per_stream=None
+):
     from types import SimpleNamespace
 
     from src.transfer.source_column_coverage import stamp_mid_run_column_policy
@@ -936,10 +941,17 @@ def _mongo_stream(dst: Path, policy: str, *, checkpoint=None, service=None, mapp
         database="db", table="docs",
     )
     destination = EndpointConfig(kind="database", format="sqlite", database=str(dst), table="docs")
+    from src.transfer.source_column_coverage import DEST_EXISTED_PROBE_KEY
+
     conn = sqlite3.connect(dst)
     live = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(docs)")}
     conn.close()
-    # What the engine stamps before the first write (_record_schema_propagation).
+    # The engine's first contact records whether the table exists (None: it
+    # could not tell), then it stamps before the first write
+    # (_record_schema_propagation).
+    destination.extra = {DEST_EXISTED_PROBE_KEY: bool(live) if exists is _PROBED else exists}
+    if exists is None:
+        live = {}  # an unreadable table: no columns read either
     stamp_mid_run_column_policy(
         SimpleNamespace(destination=destination, schema_policy=policy, backfill_new_fields=False),
         live,
@@ -948,7 +960,7 @@ def _mongo_stream(dst: Path, policy: str, *, checkpoint=None, service=None, mapp
     return stream_database_transfer(
         source, destination, list(mappings or []), {}, None, sync_mode="full_refresh_append",
         stream_contracts=contracts, job_id="mid-run", checkpoint=checkpoint,
-        checkpoint_service=service,
+        checkpoint_service=service, per_stream_coverage=per_stream,
     )
 
 
@@ -1737,3 +1749,299 @@ def test_quarantine_replay_does_not_add_a_column_unapproved(tmp_path):
         assert [r[1] for r in conn.execute("PRAGMA table_info(users)")] == ["id"]
     finally:
         conn.close()
+
+
+# -- Re-review of 23c061ed5 ---------------------------------------------------
+# 1. SCD2 / mirror / CDC tables of a multi-table run are judged before any write.
+
+
+def _staged_request(src: Path, dst: Path, mode: str, maps: dict[str, list[dict[str, Any]]], **extra: Any):
+    contracts = [
+        {"name": n, "sync_mode": mode, "primary_key": "id", "selected": True,
+         **({"mappings": maps[n]} if n in maps else {})}
+        for n in ("m1", "m2")
+    ]
+    return TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="m1"),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="m1"),
+        sync_mode=mode, validation_mode="strict", stream_contracts=contracts, **extra,
+    )
+
+
+def _sqlite_tables(dst: Path) -> list[str]:
+    if not dst.exists():
+        return []
+    conn = sqlite3.connect(dst)
+    try:
+        return [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["scd2", "mirror"])
+def test_staged_merge_tables_own_map_leaving_a_column_out_is_refused_before_any_write(
+    tmp_path, isolated, mode  # noqa: F811
+):
+    src = _multi_sqlite_source(tmp_path)  # m2 has doc
+    dst = tmp_path / "dst.sqlite"
+
+    result, job = _run(isolated, _staged_request(
+        src, dst, mode, {"m1": _m("id", "name"), "m2": _m("id", "name")}, skip_preflight=True,
+    ))
+
+    assert not result.success
+    assert "Table m2" in str(result.error) and "neither mapped nor declared omitted: doc" in str(result.error)
+    assert (job.get("error_details") or {}).get("unaccounted_sources") == ["doc"]
+    # Judged before the first table was touched: m1 was not written either.
+    assert not [t for t in _sqlite_tables(dst) if t in ("m1", "m2") and _table_rows(dst, t)]
+
+
+@pytest.mark.parametrize("mode", ["scd2", "mirror"])
+def test_staged_merge_tables_that_account_for_every_column_land_and_say_so(
+    tmp_path, isolated, mode  # noqa: F811
+):
+    src = _multi_sqlite_source(tmp_path)
+    dst = tmp_path / "dst.sqlite"
+
+    result, job = _run(isolated, _staged_request(
+        src, dst, mode, {"m1": _m("id", "name"), "m2": _m("id", "name", "doc")}, skip_preflight=True,
+    ))
+
+    assert result.success, result.error
+    conn = sqlite3.connect(dst)
+    try:
+        assert "doc" in [r[1] for r in conn.execute("PRAGMA table_info(m2)")]
+        assert conn.execute("SELECT count(*) FROM m2 WHERE doc IS NOT NULL").fetchone()[0] > 0
+    finally:
+        conn.close()
+    streams = (job.get("destination_summary") or {}).get("streams") or []
+    records = {s["name"]: s.get("schema_propagation") for s in streams if isinstance(s, dict)}
+    assert records["m2"]["table"] == "m2" and records["m2"]["source_column_count"] == 3
+
+
+def _cdc_endpoints(src: Path, dst: Path, policy: str = "manual_review"):
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import stamp_mid_run_column_policy
+
+    source = EndpointConfig(kind="database", format="sqlite", database=str(src), table="m1")
+    destination = EndpointConfig(kind="database", format="sqlite", database=str(dst), table="m1")
+    stamp_mid_run_column_policy(
+        SimpleNamespace(destination=destination, schema_policy=policy, backfill_new_fields=False), {},
+    )
+    return source, destination
+
+
+def _run_cdc_multi(source, destination, maps: dict[str, list[dict[str, Any]]]):
+    from unittest.mock import patch
+
+    from services.sync_cursor import SyncContract
+    from src.transfer.cdc_transfer import _run_cdc_multi_stream
+
+    contracts = [
+        {"name": n, "selected": True, "sync_mode": "cdc", "primary_key": "id",
+         **({"mappings": maps[n]} if n in maps else {})}
+        for n in ("m1", "m2")
+    ]
+    opened: list[str] = []
+
+    def _reader(src, _dest, _mappings, *_a, **_k):
+        opened.append(str(src.table))
+        return 1, [], {"cdc": {}}, ["id"]
+
+    with patch("src.transfer.cdc_transfer._run_cdc_single_stream", side_effect=_reader):
+        try:
+            result = _run_cdc_multi_stream(
+                source, destination, [], {}, None, sync_mode="cdc", stream_contracts=contracts,
+                selected=[SyncContract(name=n, sync_mode="cdc", primary_key="id") for n in ("m1", "m2")],
+                job_id="cdc-multi", checkpoint=None, checkpoint_service=None,
+                backfill_new_fields=False, validation_mode="strict", limit=0,
+            )
+        except Exception as exc:  # noqa: BLE001 - returned for the assertions
+            return exc, opened
+    return result, opened
+
+
+def test_cdc_multi_table_own_map_leaving_a_column_out_is_refused_before_any_reader(tmp_path):
+    from src.transfer.source_column_coverage import SourceColumnsUnaccounted
+
+    source, destination = _cdc_endpoints(_multi_sqlite_source(tmp_path), tmp_path / "dst.sqlite")
+
+    outcome, opened = _run_cdc_multi(source, destination, {"m1": _m("id", "name"), "m2": _m("id", "name")})
+
+    assert isinstance(outcome, SourceColumnsUnaccounted), outcome
+    assert "Table m2" in str(outcome) and outcome.failure_details["unaccounted_sources"] == ["doc"]
+    assert opened == []  # no table's reader opened, so nothing was applied
+
+
+def test_cdc_multi_table_records_each_tables_verdict(tmp_path):
+    source, destination = _cdc_endpoints(_multi_sqlite_source(tmp_path), tmp_path / "dst.sqlite")
+
+    outcome, opened = _run_cdc_multi(source, destination, {"m2": _m("id", "name", "doc")})
+
+    assert not isinstance(outcome, Exception), outcome
+    assert opened == ["m1", "m2"]
+    records = {s["name"]: s.get("schema_propagation") for s in outcome[2]["streams"]}
+    assert records["m1"]["source_column_count"] == 2 and records["m2"]["source_column_count"] == 3
+
+
+# 4. "Created by this run" is the engine's pre-write existence probe; unknown stops.
+
+
+def test_the_engine_probe_records_whether_the_table_existed(tmp_path, monkeypatch):
+    import src.transfer.endpoint_intelligence as intel
+    from src.transfer.engine_destination import _destination_schema_probe
+    from src.transfer.source_column_coverage import DEST_EXISTED_PROBE_KEY
+
+    dst = _docs_dest(tmp_path)
+    for table, expected in (("docs", True), ("nope", False)):
+        endpoint = EndpointConfig(kind="database", format="sqlite", database=str(dst), table=table)
+        _destination_schema_probe(endpoint, sync_mode="full_refresh_append")
+        assert endpoint.extra[DEST_EXISTED_PROBE_KEY] is expected
+
+    endpoint = EndpointConfig(
+        kind="database", format="sqlite", database=str(dst), table="docs",
+        extra={DEST_EXISTED_PROBE_KEY: False},  # a stale answer from an earlier run
+    )
+    monkeypatch.setattr(intel, "introspect_endpoint", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
+    _destination_schema_probe(endpoint, sync_mode="full_refresh_append")
+    assert DEST_EXISTED_PROBE_KEY not in endpoint.extra  # unknown, never "created"
+
+
+@pytest.mark.parametrize(("probed", "existed"), [(True, True), (False, False), (None, True)])
+def test_the_stamp_takes_existence_from_the_probe_and_unknown_counts_as_existing(probed, existed):
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import (
+        DEST_EXISTED_PROBE_KEY,
+        MID_RUN_POLICY_KEY,
+        stamp_mid_run_column_policy,
+    )
+
+    destination = SimpleNamespace(extra={DEST_EXISTED_PROBE_KEY: probed} if probed is not None else {})
+    stamp_mid_run_column_policy(
+        SimpleNamespace(destination=destination, schema_policy="manual_review", backfill_new_fields=False), {},
+    )
+    assert destination.extra[MID_RUN_POLICY_KEY]["dest_existed"] is existed
+
+
+def test_an_existing_table_that_cannot_be_read_stops_a_late_field(
+    tmp_path, isolated, fake_mongo_pages  # noqa: F811
+):
+    from src.transfer.source_column_coverage import SourceColumnsUnaccounted
+
+    dst = _docs_dest(tmp_path)  # the table exists; the probe could not tell
+
+    with pytest.raises(SourceColumnsUnaccounted):
+        _mongo_stream(dst, "manual_review", exists=None)
+    assert _docs_state(dst)[0] == ["id", "name"]  # nothing added
+
+
+@pytest.mark.parametrize(("existed", "expected"), [(None, True), (False, False), (True, True)])
+def test_a_multi_table_stream_takes_existence_from_its_pre_run_probe(existed, expected):
+    from types import SimpleNamespace
+
+    from src.transfer.source_column_coverage import MID_RUN_POLICY_KEY, enforce_stream_coverage
+
+    stamp = {"adds_columns": False, "policy": "manual_review", "acknowledged": False}
+    cfg = SimpleNamespace(
+        destination=SimpleNamespace(extra={MID_RUN_POLICY_KEY: stamp}), dest_type="sqlite",
+        source=SimpleNamespace(table="m1"), mappings=_m("id"), dest_live_columns=None,
+        dest_existed=None, coverage_record=None,
+    )
+    run = SimpleNamespace(cfg=cfg)
+    probe = SimpleNamespace(table="m1")
+    # An unreadable table has no columns, whatever its existence.
+    enforce_stream_coverage(run, probe, ["id"], {"dest_types": {}, "existed": existed})
+    assert cfg.dest_existed is expected
+
+
+# 2. A resume may leave out only a column its stop named.
+
+
+@pytest.mark.parametrize("omit", [["name"], ["doc", "name"]])
+def test_resume_cannot_leave_out_a_column_the_job_already_writes(tmp_path, resume_env, monkeypatch, omit):
+    store, _audited = resume_env
+    job_id, dst = _interrupted_job(tmp_path, store, monkeypatch)
+    assert _resume(job_id).status_code == 200  # stops on doc
+    from services.resume_decision import stop_named_columns
+
+    assert stop_named_columns(store.get_job(job_id)) == ["doc"]
+    landed = sqlite3.connect(dst).execute("SELECT count(*) FROM t").fetchone()[0]
+
+    resp = _resume(job_id, {"omit_columns": omit, "reason": "name is not needed downstream"})
+
+    assert resp.status_code == 422, resp.text
+    assert "unaccounted_sources: doc" in resp.text and "name" in resp.json()["detail"]
+    job = store.get_job(job_id)
+    assert "resume_decision" not in job and job["status"] == "failed"
+    conn = sqlite3.connect(dst)
+    try:
+        assert conn.execute("SELECT count(*) FROM t").fetchone()[0] == landed
+        assert conn.execute("SELECT count(*) FROM t WHERE name IS NULL").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_omit_columns_are_judged_against_the_columns_the_stop_named():
+    from services.resume_decision import SchemaDecision, omit_refusal
+
+    job = {"error_details": {"unaccounted_sources": ["Doc"]}}
+    assert omit_refusal(job, SchemaDecision(omit_columns=["doc"], reason="r" * 12)) is None
+    assert omit_refusal(job, SchemaDecision(omit_columns=["name"], reason="r" * 12))[0] == 422
+    assert omit_refusal({}, SchemaDecision(omit_columns=["doc"], reason="r" * 12))[0] == 422
+    assert omit_refusal({}, SchemaDecision(schema_policy="propagate_columns", reason="r" * 12)) is None
+    # A stop at the run's own preflight names the ADD COLUMN it may not make.
+    preflight_stop = {"preflight": {"blockers": [{"id": "schema_drift", "details": {
+        "schema_evolution": {"additive": [{"kind": "add_column", "source": "doc", "column": "doc"}]},
+    }}], "gates": [{"id": "g15_dest_exists_shape", "status": "warn", "details": {"unaccounted_sources": ["name"]}}]}}
+    assert omit_refusal(preflight_stop, SchemaDecision(omit_columns=["doc"], reason="r" * 12)) is None
+    assert omit_refusal(preflight_stop, SchemaDecision(omit_columns=["name"], reason="r" * 12))[0] == 422
+
+
+# 3. Retry is "the same job as before": it takes no schema decision.
+
+
+def test_retry_refuses_a_schema_decision(tmp_path, resume_env, monkeypatch):
+    store, audited = resume_env
+    job_id, _dst = _interrupted_job(tmp_path, store, monkeypatch)
+    from fastapi.testclient import TestClient
+
+    client = TestClient(__import__("src.main", fromlist=["app"]).app)
+    before = set(store._jobs)
+
+    resp = client.post(
+        f"/api/v1/connectors/jobs/{job_id}/retry",
+        json={"schema_decision": {"schema_policy": "propagate_columns", "reason": "doc is a new product field"}},
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "/resume" in resp.json()["detail"]
+    assert set(store._jobs) == before  # no new job
+    assert not any("schema_decision" in e["action"] for e in audited)
+
+
+def test_a_multi_table_stream_whose_existing_table_cannot_be_read_stops_a_late_field(
+    tmp_path, isolated, fake_mongo_pages  # noqa: F811
+):
+    """One table of a multi-table run: no columns read and existence unknown."""
+    from src.transfer.source_column_coverage import SourceColumnsUnaccounted
+
+    dst = _docs_dest(tmp_path)
+
+    with pytest.raises(SourceColumnsUnaccounted):
+        _mongo_stream(dst, "manual_review", per_stream={"dest_types": {}, "existed": None})
+    assert _docs_state(dst)[0] == ["id", "name"]
+
+
+def test_a_multi_table_stream_creating_its_table_still_adds_a_late_field(
+    tmp_path, isolated, fake_mongo_pages  # noqa: F811
+):
+    dst = tmp_path / "new.sqlite"
+
+    _rows, _ddl, summary, _cols = _mongo_stream(
+        dst, "manual_review", per_stream={"dest_types": {}, "existed": False}
+    )
+
+    assert _docs_state(dst)[0] == ["id", "name", "doc"]
+    assert summary["columns_added_during_run"] == ["doc"]
