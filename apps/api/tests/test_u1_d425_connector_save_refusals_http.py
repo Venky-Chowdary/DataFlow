@@ -101,6 +101,11 @@ def _pg_body(name: str, connection_string: str, extra: dict) -> dict:
 
 
 # ------------------------------------------------------------------ create
+#
+# Controls: for these forms the egress guard (connector_save_refusal) already
+# answered 400 on build 70cb for create, PUT and PATCH, before the store was
+# reached, so they pass there too. They pin every save route to the refusal;
+# the store-only refusals further down are the ones 70cb got wrong.
 
 
 @pytest.mark.parametrize("conn_str,extra,words", REFUSED)

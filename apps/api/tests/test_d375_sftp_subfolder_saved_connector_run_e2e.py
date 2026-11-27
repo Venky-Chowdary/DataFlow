@@ -95,6 +95,7 @@ def test_right_pin_runs_into_a_new_sub_folder(stores, server, name):
 
 
 def test_wrong_pin_fails_on_the_host_key_and_writes_nothing(stores, server):
+    """AC-2 on the engine path. A control: build 70cb already refused it."""
     nested = NESTED.format(uuid.uuid4().hex[:6])
     result = _run(_saved_sftp(server, _wrong_key()), nested)
     assert result.success is False

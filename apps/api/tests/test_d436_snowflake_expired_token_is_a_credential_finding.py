@@ -63,8 +63,8 @@ def _sqlite(tmp_path):
                              "database": str(path), "workspace_id": ""})
 
 
-def _mcp(client, name: str, arguments: dict) -> tuple[bool, str]:
-    r = client.post(
+def _mcp(api, name: str, arguments: dict) -> tuple[bool, str]:
+    r = api.post(
         "/api/v1/mcp",
         headers={"Accept": "application/json, text/event-stream"},
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
