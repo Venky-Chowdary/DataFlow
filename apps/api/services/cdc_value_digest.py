@@ -224,6 +224,7 @@ def _fingerprint_row(
 def stamp_cdc_instant_carriers(
     dest_types: dict[str, str] | None,
     mappings: list[dict[str, Any]] | None,
+    engine: str = "",
 ) -> dict[str, str]:
     """Mark a text column that carries a source datetime so both spellings match.
 
@@ -232,10 +233,21 @@ def stamp_cdc_instant_carriers(
     (D403). The fingerprint already folds a carried instant; the CDC proof
     was comparing the destination's physical VARCHAR, so the two texts
     differed. A text column whose source is not a datetime stays text, and a
-    different instant still differs.
+    different instant still differs. With ``engine``, a type the fingerprint
+    materializes as text there counts too: the CDC scan's types are the source
+    schema, and ``datetimeoffset`` lands on MySQL as ``VARCHAR(64)``.
     """
     from services.fingerprint_rules import CARRIES_INSTANT, carrying, is_text_family
     from services.type_system import normalize_logical_type
+
+    def _lands_as_text(ddl: str) -> bool:
+        if is_text_family(ddl):
+            return True
+        if not engine:
+            return False
+        from services.decision_kernel.types import materialize_dest_ddl
+
+        return is_text_family(str(materialize_dest_ddl(engine, ddl) or ""))
 
     out = {str(k): str(v or "") for k, v in (dest_types or {}).items()}
     for raw in mappings or []:
@@ -247,7 +259,7 @@ def stamp_cdc_instant_carriers(
         if normalize_logical_type(str(raw.get("source_type") or "")) != "datetime":
             continue
         physical = out.get(target) or str(raw.get("target_type") or "")
-        if physical and is_text_family(physical):
+        if physical and _lands_as_text(physical):
             out[target] = carrying(physical, CARRIES_INSTANT)
     return out
 
@@ -444,7 +456,7 @@ def prove_cdc_values(
         source_rows = inside
     source_named = _apply_carries(_rename(source_rows, pairs), carries)
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
-    compared_types = stamp_cdc_instant_carriers(dest_types, mappings)
+    compared_types = stamp_cdc_instant_carriers(dest_types, mappings, dest_type)
     proof = compare_row_sets(
         source_named,
         dest_named,
@@ -565,6 +577,9 @@ def identity_rows_missing_on_dest(
         _rename(source_rows, pairs), _declared_carries(mappings)
     )
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
+    # D403: the drift scan compares instants on a text carrier exactly as the
+    # CDC value proof does — DATETIMEOFFSET as MySQL VARCHAR(64) ISO text.
+    dest_types = stamp_cdc_instant_carriers(dest_types, mappings, dest_type)
     uuid_cols = _uuid_columns(columns, dest_types, mappings)
     present = {
         _fingerprint_row(row, columns, engine=dest_type, dest_types=dest_types, uuid_columns=uuid_cols)
