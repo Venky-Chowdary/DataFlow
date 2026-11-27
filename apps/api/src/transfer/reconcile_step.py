@@ -348,6 +348,18 @@ def _proof_source_batches(
             read_cols=read_cols,
         )
         return
+    from .proof_source_reader import iter_writer_wire_batches, rereads_through_writer
+
+    if rereads_through_writer(src_type):
+        # D331: Oracle is re-read by the stream's own reader, not a raw SELECT
+        # (zone-bearing timestamps, JSON, catalog spellings).
+        yield from iter_writer_wire_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        )
+        return
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import quote_sql_identifier
@@ -1736,12 +1748,18 @@ def _transform_applied_proof_impl(
             src_cfg=src_cfg,
             read_cols=read_cols + _extra,
         ):
+            from .proof_source_reader import decode_wire_rows, is_wire_page
+
+            _wire = is_wire_page(batch)
             if _proof_filter:
                 # D331: the write applied this filter. Rows it excluded are
                 # not "changed in source during run".
                 from services.row_filter import apply_row_filter
 
                 batch = apply_row_filter(list(batch), _proof_filter)
+            if _wire:
+                # Filtered on the wire text, as the write's page was.
+                batch = decode_wire_rows(list(batch), _src_ddl)
             if _proof_window is not None:
                 batch = [
                     {k: v for k, v in r.items() if k not in _extra}
@@ -2263,16 +2281,19 @@ def _transform_applied_proof_impl(
                             qc0 = _oracle_projection(
                                 c0, endpoint, dst_cfg0, sel_cols0
                             )[0]
+                        _q0 = f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
+                        _fix0 = None
+                        if dest_db_type == "oracle":
+                            # D331: zone-bearing columns as instants, not as
+                            # the driver's naive wall clock.
+                            from .proof_source_reader import oracle_zone_safe_rows
+
+                            _q0, _fix0 = oracle_zone_safe_rows(c0, _q0, sel_cols0)
+                        _rows0 = iter_select_row_dicts(c0, sa.text(_q0), sel_cols0)
+                        if _fix0 is not None:
+                            _rows0 = ([_fix0(r) for r in b] for b in _rows0)
                         actual_checksum = canonical_checksum_from_iter(
-                            _scoped_gen(
-                                iter_select_row_dicts(
-                                    c0,
-                                    sa.text(
-                                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
-                                    ),
-                                    sel_cols0,
-                                )
-                            ),
+                            _scoped_gen(_rows0),
                             digest_cols,
                             dest_db_type=dest_db_type,
                             dest_types=dest_types,
@@ -2637,9 +2658,17 @@ def _transform_applied_proof_impl(
                                 else ""
                             )
                         )
+                    _fixd = None
+                    if dest_db_type == "oracle":
+                        from .proof_source_reader import oracle_zone_safe_rows
+
+                        _qd, _fixd = oracle_zone_safe_rows(dconn, str(stmt), sel_cols)
+                        stmt = sa.text(_qd)
                     for batch in iter_select_row_dicts(
                         dconn, stmt, sel_cols
                     ):
+                        if _fixd is not None:
+                            batch = [_fixd(r) for r in batch]
                         for r in batch:
                             if not _dest_in_this_run(r):
                                 continue
@@ -9793,6 +9822,14 @@ def run_reconciliation(
             recon["transform_applied"] = proof
             if proof.get("status") == "failed":
                 steps_txt = ", ".join(proof.get("culprit_steps") or [])
+                from services.proof_failure_retention import (
+                    TRANSFORM_PROOF,
+                    mark_proof_layer_failure,
+                )
+
+                mark_proof_layer_failure(
+                    recon, TRANSFORM_PROOF, was_passing=bool(recon.get("passed", True))
+                )
                 recon["passed"] = False
                 recon["verification_verdict"] = "failed"
                 non_recipe = list(proof.get("non_recipe_drift_columns") or [])
