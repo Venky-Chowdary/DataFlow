@@ -110,3 +110,32 @@ def test_plan_mappings_runs_the_patch_checks_and_records_the_update(client, monk
         assert events[0][1]["id"] == sched_id and events[0][1]["via"] == "plan-mappings"
     finally:
         h.drop_table("postgresql", t)
+
+
+def test_validate_probes_the_plans_own_database_too():
+    """Review 2 item 6: the destination probe got dest_schema but not dest_database."""
+    from src.ai.copilot.transfer_tools import _dest_probe_target, _with_dest_location
+
+    conn = _with_dest_location({"id": "c1", "type": "postgresql", "schema": "public",
+                                "database": "db0"}, "analytics", "dw")
+    target = _dest_probe_target(conn, "postgresql", "orders")
+    assert target["dest_schema"] == "analytics" and target["dest_database"] == "dw"
+
+
+def test_plan_mappings_answers_a_refused_write_like_patch(client, monkeypatch):
+    """Review 2 item 6: PermissionError from the store is 403, as on PATCH, not 500."""
+    from services import schedule_planning as sp
+    import src.routers.schedules_router as router
+
+    monkeypatch.setattr(sp, "plan_schedule_route", lambda payload: dict(_PLANNED))
+    monkeypatch.setattr(router, "_assert_upsert_key", lambda plan: None)
+    sched_id, t = _draft(client)
+    try:
+        def refuse(*a, **k):
+            raise PermissionError("this schedule belongs to another owner")
+
+        monkeypatch.setattr(router, "update_schedule", refuse)
+        r = client.post(f"/api/v1/schedules/{sched_id}/plan-mappings")
+        assert r.status_code == 403, r.text
+    finally:
+        h.drop_table("postgresql", t)

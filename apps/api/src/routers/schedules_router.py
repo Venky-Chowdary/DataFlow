@@ -1500,6 +1500,8 @@ async def plan_schedule_mappings(
         updated = update_schedule(schedule_id, planned, refuse_unrunnable_mappings=True)
     except ApiError:
         raise
+    except PermissionError as exc:  # as PATCH: a refused write is 403, not 500
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:

@@ -894,6 +894,23 @@ def _engine_format(info: dict[str, Any]) -> str:
     return fmt or str(info.get("db_type") or "")
 
 
+def _dest_probe_target(dst_conn: dict[str, Any], dest_db_type: str, dst_table: str) -> dict[str, Any]:
+    """Where Validate probes: the plan's destination schema *and* database.
+
+    ``dst_conn`` carries a schedule's own dest_schema / dest_database
+    (:func:`_with_dest_location`); probing the connector's default database
+    checked a different table than the runs write (review 2, item 6).
+    """
+    return {
+        "connector_id": str(dst_conn.get("id") or ""),
+        "dest_type": dest_db_type,
+        "dest_table": dst_table,
+        "dest_collection": dst_table,
+        "dest_schema": str(dst_conn.get("schema") or ""),
+        "dest_database": str(dst_conn.get("database") or ""),
+    }
+
+
 def _with_dest_location(conn: dict[str, Any], schema: str, database: str) -> dict[str, Any]:
     """``conn`` aimed at an explicit destination schema / database (empty = its own)."""
     from services.dialect_profiles import schema_from_cfg
@@ -2344,11 +2361,7 @@ def _run_preflight(
     def _probe_destination() -> dict[str, Any]:
         try:
             return inspect_destination_for_preflight(
-                connector_id=str(dst_conn.get("id") or ""),
-                dest_type=dest_db_type,
-                dest_table=dst_table,
-                dest_collection=dst_table,
-                dest_schema=str(dst_conn.get("schema") or ""),
+                **_dest_probe_target(dst_conn, dest_db_type, dst_table)
             )
         except Exception as exc:
             _LOG.warning("destination probe failed: %s", exc, exc_info=True)
