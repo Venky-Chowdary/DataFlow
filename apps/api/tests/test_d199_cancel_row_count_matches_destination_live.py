@@ -153,6 +153,11 @@ def _run_and_cancel(
             store.request_job_cancel(job_id)
             store.update_job_status(job_id, "cancelled", operator_command=True)
         worker.join(120)
+        if worker.is_alive() and (store.get_job(job_id) or {}).get("cancel_note"):
+            # The cancel came after the load had committed: the job said so at
+            # once and is finishing verification of the rows it wrote, which
+            # the cancel does not cut short (the result reports them exactly).
+            worker.join(600)
         assert not worker.is_alive(), "the cancelled job is still running"
         time.sleep(1)
         settled = dest_count()

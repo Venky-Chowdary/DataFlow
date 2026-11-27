@@ -555,6 +555,16 @@ def restore_generic_sql_overwrite(
         if _is_clickhouse(dialect, engine):
             _restore_clickhouse_overwrite(engine, table_name, live_ref, bak_ref)
             return
+        from connectors.overwrite_restore_steps import generic_catalog, generic_restore_refusal
+
+        # Only an exact restore runs automatically (D302 review): triggers,
+        # identity counters or an unreadable catalog keep the backup.
+        with engine.connect() as conn:
+            catalog = generic_catalog(conn, dialect, schema or gcfg.get("schema"), table_name)
+        refusal = generic_restore_refusal(dialect, catalog)
+        if refusal:
+            raise TableRestoreRefused(table_name, f"{table_name}: {refusal}")
+        generated = {c.casefold() for c in catalog.get("generated") or []}
         if dialect in {"sqlserver", "mssql"}:
             from services.dest_overwrite_swap import sqlserver_swap_staged_dest
 
@@ -584,7 +594,12 @@ def restore_generic_sql_overwrite(
                 str(c).casefold(): str(c)
                 for c in conn.execute(sa.text(f"SELECT * FROM {bak_ref} WHERE 1=0")).keys()  # nosec B608
             }
-            pairs = [(bak_cols[c.casefold()], c) for c in live_cols if c.casefold() in bak_cols]
+            # Generated columns compute themselves; inserting them fails.
+            pairs = [
+                (bak_cols[c.casefold()], c)
+                for c in live_cols
+                if c.casefold() in bak_cols and c.casefold() not in generated
+            ]
             quote = _generic_column_quoter(dialect)
             try:
                 conn.execute(sa.text(f"DELETE FROM {live_ref}"))  # nosec B608

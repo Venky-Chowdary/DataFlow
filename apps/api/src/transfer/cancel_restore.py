@@ -34,6 +34,8 @@ counts, and the tables that keep the rows this run committed.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -48,10 +50,71 @@ RESTORING_MESSAGE = (
 WRITE_COMPLETE_KEY = "overwrite_write_complete_tables"
 
 
+#: Shown at once when the operator cancels after the load already landed:
+#: the run still finishes verifying what it wrote (can take minutes).
+LATE_CANCEL_MESSAGE = (
+    "Cancel received after the load had finished: the rows are committed; "
+    "finishing verification of what was written…"
+)
+
+#: Job ids whose late-cancel note is being watched (one watcher per run).
+_LATE_WATCHED: set[str] = set()
+_LATE_LOCK = threading.Lock()
+
+
+def _watch_for_late_cancel(interval: float = 2.0, budget: float = 3600.0) -> None:
+    """Say on the job, as soon as it happens, that a cancel came after the write.
+
+    Post-write verification does not stop for a cancel (the rows are
+    committed; the run reports them exactly when it ends), so the job showed
+    nothing for a minute or more after the operator pressed Cancel.
+    """
+    from services.cancel_check import active_job_store
+
+    bound = active_job_store()
+    if bound is None:
+        return
+    mongo, job_id = bound
+    with _LATE_LOCK:
+        if job_id in _LATE_WATCHED:
+            return
+        _LATE_WATCHED.add(job_id)
+
+    def run() -> None:
+        try:
+            _poll()
+        finally:
+            with _LATE_LOCK:
+                _LATE_WATCHED.discard(job_id)
+
+    def _poll() -> None:
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            try:
+                job = mongo.get_job(job_id) or {}
+            except Exception:  # noqa: BLE001 - a missed read is retried
+                job = {}
+            status = str(job.get("status") or "")
+            if job.get("cancel_outcome") or status in {"completed", "failed"}:
+                return
+            if job.get("cancel_requested") or status == "cancelled":
+                try:
+                    mongo.update_job_fields(
+                        job_id, {"message": LATE_CANCEL_MESSAGE, "cancel_note": LATE_CANCEL_MESSAGE}
+                    )
+                except Exception:  # noqa: BLE001 - a note never fails the run
+                    logger.warning("late-cancel note not written for %s", job_id, exc_info=True)
+                return
+            time.sleep(interval)
+
+    threading.Thread(target=run, name="df-late-cancel-note", daemon=True).start()
+
+
 def mark_write_complete(destination: Any, table: str = "") -> None:
     """Record that ``table``'s load is fully committed (a cancel keeps it)."""
     if destination is None:
         return
+    _watch_for_late_cancel()
     name = str(table or "") or _table_of(destination)
     extra = dict(getattr(destination, "extra", None) or {})
     done = list(extra.get(WRITE_COMPLETE_KEY) or [])
