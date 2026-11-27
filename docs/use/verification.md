@@ -148,7 +148,16 @@ comparing every row inside both databases (see
   few milliseconds apart; the report states the gap.
 - What Gate-8 explained stays explained: quarantined rows, rows skipped by
   the duplicate policy and rows that were in the destination before an
-  append are not turned into differences.
+  append are not turned into differences. A missing row is explained by
+  quarantine only when its key is one the run recorded as quarantined; a
+  missing row whose key the run did not record stays unexplained (the held
+  row may be one the destination still has). Only missing rows beyond the
+  keys the report keeps are matched to held rows by count, and the report
+  says so.
+- Rows whose key is NULL fall in no key range: they are compared as whole
+  rows (content), reported as "rows without key", and never attributed to a
+  key. Before any match, each side's units must add up to its row count;
+  if they do not, the table is not fully compared and the report says why.
 - A table with no key is compared as content: the check reads
   **Content match (no key)**, and a difference cannot be attributed to a key.
 - A verification that found differences makes the report **unexplained** and

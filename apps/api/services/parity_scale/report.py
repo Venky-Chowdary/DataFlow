@@ -101,6 +101,14 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
     diff = evidence.get("differences") or {}
     at_least = bool(diff.get("at_least"))
     obs: list[Observation] = []
+    # Missing rows the scan could not name (beyond the stored-key cap): only these may be
+    # set against held rows by count (services.parity_scale.scope.merge_explained).
+    unnamed_missing: int | None = None
+    if not keyless:
+        named = len(diff.get("missing_keys") or [])
+        without_key = int((diff.get("rows_without_key") or {}).get("missing_in_destination") or 0)
+        beyond_cap = int(diff.get("missing_in_destination") or 0) - named - without_key
+        unnamed_missing = max(0, beyond_cap) if diff.get("keys_capped") else 0
     # Missing and extra rows (content counts for a keyless table).
     for kind, count_field, keys_field in (
         ("missing_in_destination", "missing_in_destination", "missing_keys"),
@@ -161,7 +169,8 @@ def _apply_done(ev: TableEvidence, evidence: dict[str, Any]) -> None:
     # an append, transforms): that stays explained (services.parity_scale.scope).
     from services.parity_scale.scope import merge_explained
 
-    ev.observations = merge_explained(list(ev.observations), obs, fit_excluded=fit_excluded, table=ev.name)
+    ev.observations = merge_explained(list(ev.observations), obs, fit_excluded=fit_excluded, table=ev.name,
+                                      unnamed_missing=unnamed_missing)
     ev.gate8_unaccounted = False
     ev.capped = False
     ev.note = ""

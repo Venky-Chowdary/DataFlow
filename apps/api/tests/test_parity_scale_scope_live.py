@@ -46,6 +46,11 @@ def _job(src: str, dst: str, *, request: dict[str, Any] | None = None, recon: di
     })
 
 
+def _rejected(*ids: int) -> dict[str, Any]:
+    """What a run records for the rows it quarantined (their keys)."""
+    return {"rejected_details": [{"row": {"id": i}, "error": "failed validation"} for i in ids]}
+
+
 @pytest.mark.parametrize("request_over, summary_over, words", [
     ({"sync_mode": "incremental_append", "cursor_column": "ts"}, {}, "window of the source"),
     ({"limit": 500}, {}, "limited number of rows"),
@@ -81,7 +86,7 @@ def test_quarantined_rows_stay_explained(tables) -> None:
 
     src, dst = tables
     _sql(f'DELETE FROM "{dst}" WHERE id IN (5, 6)')  # the two rows the run quarantined
-    job_id = _job(src, dst, recon={"rejected_rows": 2, "target_rows": N - 2})
+    job_id = _job(src, dst, recon={"rejected_rows": 2, "target_rows": N - 2}, summary=_rejected(5, 6))
     assert start_for_job(job_id, background=False)["state"] == "failed"  # the scan counts them missing
     report = _report(job_id)
     assert report["verdict"] == "explained", report["verdict_reason"]  # never unexplained, never proven
@@ -94,11 +99,68 @@ def test_a_real_loss_beside_quarantine_is_still_unexplained(tables) -> None:
 
     src, dst = tables
     _sql(f'DELETE FROM "{dst}" WHERE id IN (5, 6, 9)')  # two quarantined, one lost
-    job_id = _job(src, dst, recon={"rejected_rows": 2, "target_rows": N - 3})
+    job_id = _job(src, dst, recon={"rejected_rows": 2, "target_rows": N - 3}, summary=_rejected(5, 6))
     start_for_job(job_id, background=False)
     report = _report(job_id)
     assert report["verdict"] == "unexplained"
     assert report["parity"]["unexplained"] == 1 and report["parity"]["explained"] == 2
+
+
+@live
+def test_a_quarantined_key_never_excuses_another_lost_key(tables) -> None:
+    """Review 3, item 2: quarantined key 5 (its row still in the destination) + lost key 9 read
+    "explained": the held count was set against the missing count, not matched by key."""
+    from services.parity_scale.verification import start_for_job
+
+    src, dst = tables
+    _sql(f'DELETE FROM "{dst}" WHERE id = 9')
+    job_id = _job(src, dst, recon={"rejected_rows": 1, "target_rows": N - 1}, summary=_rejected(5))
+    start_for_job(job_id, background=False)
+    report = _report(job_id)
+    assert report["verdict"] == "unexplained", report["verdict_reason"]
+    assert report["parity"]["unexplained"] == 1
+
+
+@live
+def test_held_rows_without_keys_are_not_set_against_named_missing_rows(tables) -> None:
+    """A run that recorded only a count of quarantined rows: the scan's named missing keys cannot
+    be matched to them, so they stay unexplained — and nothing is counted twice."""
+    from services.parity_scale.verification import start_for_job
+
+    src, dst = tables
+    _sql(f'DELETE FROM "{dst}" WHERE id IN (5, 6, 9)')
+    job_id = _job(src, dst, recon={"rejected_rows": 2, "target_rows": N - 3})
+    start_for_job(job_id, background=False)
+    report = _report(job_id)
+    assert report["verdict"] == "unexplained"
+    assert report["parity"]["unexplained"] == 3 and report["parity"]["rows_differ"] == 3
+
+
+def _missing(rows: int, *, explained: bool, origin: str = "parity_scale", keys=()):
+    from services.parity_evidence import Observation
+
+    return Observation(table="t", kind="missing_in_destination", rows=rows, origin=origin,
+                       keys_sample=list(keys),
+                       cause={"code": "quarantined" if explained else "unexplained", "label": "x",
+                              "explained": explained, "detail": ""})
+
+
+def test_only_rows_beyond_the_stored_key_cap_are_set_against_held_rows_by_count() -> None:
+    from services.parity_scale.scope import merge_explained
+
+    # 5 held (count only); the scan found 12 missing: 2 named and open, 10 beyond its key cap.
+    merged = merge_explained([_missing(5, explained=True, origin="quarantine")],
+                             [_missing(12, explained=False, keys=["9", "11"])], unnamed_missing=10)
+    held = [o for o in merged if o.cause["explained"]]
+    open_ = [o for o in merged if not o.cause["explained"]]
+    assert sum(o.rows for o in held) == 5 and sum(o.rows for o in open_) == 7
+    assert "5 missing rows beyond the keys the report keeps were set against these held rows by count" \
+        in held[0].cause["detail"]
+    # Nothing beyond the cap: no offset at all, and the held count is not counted twice.
+    merged = merge_explained([_missing(5, explained=True, origin="quarantine")],
+                             [_missing(2, explained=False, keys=["9", "11"])], unnamed_missing=0)
+    assert sum(o.rows for o in merged if o.cause["explained"]) == 0
+    assert sum(o.rows for o in merged if not o.cause["explained"]) == 2
 
 
 @live
@@ -161,10 +223,16 @@ def test_quarantined_rows_are_counted_exactly_when_only_some_are_named(tables) -
 
     src, dst = tables
     _sql(f'DELETE FROM "{dst}" WHERE id IN (5, 6, 7)')
-    job_id = _job(src, dst, recon={"rejected_rows": 3, "target_rows": N - 3},
-                  summary={"rejected_details": [{"row": {"id": 5}, "error": "failed validation"}]})
+    job_id = _job(src, dst, recon={"rejected_rows": 3, "target_rows": N - 3}, summary=_rejected(5))
+    start_for_job(job_id, background=False)
+    report = _report(job_id)
+    # Review 3, item 2: only the named key 5 is matched; 6 and 7 cannot be matched by key.
+    assert report["verdict"] == "unexplained", report["verdict_reason"]
+    assert report["parity"]["rows_differ"] == 3
+    assert report["parity"]["explained"] == 1 and report["parity"]["unexplained"] == 2
+    assert report["parity"]["rows_source"] == report["parity"]["rows_destination"] + 3
+    job_id = _job(src, dst, recon={"rejected_rows": 3, "target_rows": N - 3}, summary=_rejected(5, 6, 7))
     start_for_job(job_id, background=False)
     report = _report(job_id)
     assert report["verdict"] == "explained", report["verdict_reason"]
     assert report["parity"]["rows_differ"] == 3 and report["parity"]["explained"] == 3
-    assert report["parity"]["rows_source"] == report["parity"]["rows_destination"] + 3

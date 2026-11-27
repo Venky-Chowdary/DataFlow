@@ -81,15 +81,22 @@ def _explained(obs: Any) -> bool:
 HELD_ORIGINS = frozenset({"quarantine", "writer_policy", "recipe_effect"})
 
 
-def merge_explained(prior: list[Any], scan: list[Any], *, fit_excluded: int = 0, table: str = "") -> list[Any]:
+def merge_explained(prior: list[Any], scan: list[Any], *, fit_excluded: int = 0, table: str = "",
+                    unnamed_missing: int | None = None) -> list[Any]:
     """The scan's observations with Gate-8's explained ones kept, counted exactly.
 
     * Rows the run held back (quarantined, skipped by policy, held by the
-      write contract) are kept in full, whatever the scan found: they are why
-      the run is at most "explained", never "proven". The scan does not see a
-      row the write contract held out (it is excluded on the source side), so
-      only the held rows it can see are taken off its missing count; the rest
-      of its missing rows stay its own (unexplained unless it named a cause).
+      write contract) are kept, so the run is at most "explained", never
+      "proven"; they are only trimmed where the scan found unexplained missing
+      rows they could not be matched to (never counted twice). The scan does
+      not see a row the write contract held out (it is excluded on the source
+      side).
+      A missing row the scan named is explained only when its key is a
+      quarantined key (the report classifies it); a named key that is not
+      quarantined is never set against a held count. Only missing rows the
+      scan could not name (``unnamed_missing``: beyond its stored-key cap; a
+      keyless table's rows, ``None``) may be set against the held rows not
+      already matched by key — by count, which is disclosed on the held rows.
     * Extra rows: Gate-8's explained rows (a destination's rows from before an
       append) account for the scan's extra rows first, trimmed to what the
       scan counted.
@@ -100,33 +107,62 @@ def merge_explained(prior: list[Any], scan: list[Any], *, fit_excluded: int = 0,
     from services.parity_evidence import Observation
 
     out: list[Any] = []
-    # Missing: held rows first, in full.
+    tbl = table
+    # Missing. Rows the run held back are explained only as far as the scan's missing rows
+    # are matched to them: by key (a quarantined key the scan named), or — for missing rows
+    # the scan could not name — by count, disclosed. A named key that is not a quarantined
+    # key is never set against a held count: the held row may be one the destination still has.
     held = [o for o in prior if o.kind == "missing_in_destination" and _explained(o) and o.origin in HELD_ORIGINS]
     found = [o for o in scan if o.kind == "missing_in_destination"]
-    named = [o for o in found if _explained(o)]
+    named = [o for o in found if _explained(o)]  # missing rows whose key is a quarantined key
+    open_found = [o for o in found if not _explained(o)]
+    named_rows = sum(int(o.rows) for o in named)
+    open_rows = sum(int(o.rows) for o in open_found)
     held_rows = sum(int(o.rows) for o in held)
+    fit = int(fit_excluded)
+    # Held rows the scan cannot see (the write contract held them out of its source side).
+    visible_held = max(0, held_rows - fit) if held else named_rows
+    unnamed = open_rows if unnamed_missing is None else min(max(0, int(unnamed_missing)), open_rows)
+    offset = min(max(0, visible_held - named_rows), unnamed)
     if held:
         named_keys = [k for o in named for k in o.keys_sample]
+        unmatched = max(0, held_rows - fit - named_rows - offset)
+        if open_rows - offset > 0 and unmatched:
+            # Not counted twice: those held rows may be among the scan's unexplained missing rows.
+            budget = held_rows - unmatched
+            for o in held:
+                o.rows = min(int(o.rows), max(0, budget))
+                budget -= o.rows
+            for o in open_found:
+                o.cause = {**o.cause, "detail": (str(o.cause.get("detail") or "") + (
+                    f" The run held back {unmatched:,} more rows that could not be matched to these by key, "
+                    "so these are not explained by them.")).strip()}
         for o in held:
             if o.origin == "quarantine" and not o.keys_sample and named_keys:
                 o.keys_sample = list(named_keys)
-        out.extend(held)
+        out.extend(o for o in held if int(o.rows) > 0)
     else:
         out.extend(named)  # quarantined keys the scan named, when Gate-8 recorded no count
-        held_rows = sum(int(o.rows) for o in named)
-    if fit_excluded > held_rows:
+        held_rows = named_rows
+    if fit > (held_rows if held else 0) and fit > 0:
         out.append(Observation(
-            table=table or (found[0].table if found else ""), kind="missing_in_destination",
-            rows=fit_excluded - held_rows, origin="quarantine",
+            table=tbl or (found[0].table if found else ""), kind="missing_in_destination",
+            rows=fit - (held_rows if held else 0), origin="quarantine",
             cause=cause(QUARANTINED, "Rows the write contract held out (they do not fit the destination column).",
                         explained=True),
         ))
-        held_rows = fit_excluded
-    visible_held = max(0, held_rows - int(fit_excluded))
-    left = max(0, sum(int(o.rows) for o in found) - visible_held)
-    for o in found:
-        if _explained(o) or left <= 0:
-            continue
+    if offset:
+        how = ("rows of content" if unnamed_missing is None
+               else "missing rows beyond the keys the report keeps")
+        targets = [o for o in out if o.kind == "missing_in_destination" and _explained(o)]
+        for o in targets[:1]:
+            o.cause = {**o.cause, "detail": (str(o.cause.get("detail") or "") + (
+                f" {offset:,} {how} were set against these held rows by count, not matched by key"
+                + (" (the table has no key)." if unnamed_missing is None else "."))).strip()}
+    left = open_rows - offset
+    for o in open_found:
+        if left <= 0:
+            break
         o.rows = min(int(o.rows), left)
         left -= o.rows
         out.append(o)
