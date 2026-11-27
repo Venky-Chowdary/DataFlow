@@ -59,6 +59,19 @@ def promote_rows_skipped(updates: dict[str, Any], previous: dict[str, Any] | Non
         return
 
 
+def job_rows_skipped(job: dict[str, Any] | None) -> int:
+    """Rows the run kept as already stored: the job's count, else its summary's."""
+    doc = job if isinstance(job, dict) else {}
+    summary = doc.get("destination_summary") if isinstance(doc.get("destination_summary"), dict) else {}
+    for raw in (doc.get("rows_skipped"), summary.get("rows_skipped")):
+        try:
+            if raw is not None:
+                return max(int(raw), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def refuse_job_status_write(
     *,
     previous_status: str | None,

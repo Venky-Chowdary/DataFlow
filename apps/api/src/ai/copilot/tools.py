@@ -2722,7 +2722,7 @@ class DataPilotTools:
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from services.job_status import job_timestamp_iso
+        from services.job_status import job_rows_skipped, job_timestamp_iso
 
         from services.phase_profile import job_phase_timings
 
@@ -2832,6 +2832,9 @@ class DataPilotTools:
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
+                # D376(a): rows a skip_duplicates run kept as stored. Without it
+                # a correct skip read as "0 processed" on the tool QA reads.
+                "rows_skipped": job_rows_skipped(job),
                 "rejected_rows": reported_rejected,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
                 "quarantine_issue_count": len(quarantine),
