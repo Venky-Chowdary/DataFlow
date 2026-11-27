@@ -219,38 +219,87 @@ def count_empty_strings(
     return {"counts": counts, "rows_scanned": scanned, "truncated": truncated, "error": error}
 
 
+def destination_binding(*, connector_id: Any = "", config: Any = None, table: Any = "") -> dict[str, str]:
+    """What an approval or a Check-now request is bound to: connector, schema, table.
+
+    ``connector`` is the saved destination connector's id, or ``host:port/database``
+    for an inline one; ``schema`` the configured (or table-qualified) schema;
+    ``table`` the bare table name. All lower case.
+    """
+    cfg = config if isinstance(config, Mapping) else {}
+    conn = str(connector_id or cfg.get("connector_id") or "").strip()
+    if not conn and (cfg.get("host") or cfg.get("database")):
+        conn = f"{cfg.get('host') or ''}:{cfg.get('port') or ''}/{cfg.get('database') or ''}"
+    raw_table = str(table or "").strip()
+    schema = str(cfg.get("schema") or "").strip()
+    if "." in raw_table and not schema:
+        schema = raw_table.rsplit(".", 1)[0]
+    return {"connector": conn.lower(), "schema": schema.strip('"').lower(), "table": _bare(raw_table)}
+
+
+def binding_matches(bound: Any, here: Mapping[str, str] | None) -> bool:
+    """Same connector and table; same schema when both name one."""
+    if here is None:
+        return True
+    if not isinstance(bound, Mapping):
+        return False
+    if str(bound.get("table") or "") != here["table"] or str(bound.get("connector") or "") != here["connector"]:
+        return False
+    a, b = str(bound.get("schema") or ""), here["schema"]
+    return not (a and b and a != b)
+
+
+def contract_refusal(
+    mapping: Mapping[str, Any] | None,
+    *,
+    table: str = "",
+    workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
+) -> str:
+    """Why the mapping's empty-as-NULL contract is not an approval here ("" when it is, or none)."""
+    raw = (mapping or {}).get(CONTRACT_KEY) if isinstance(mapping, Mapping) else None
+    if not isinstance(raw, dict):
+        return ""
+    from services.migration_risk_contract import REAPPROVE_MESSAGE, verify_risk_contract
+
+    if str(raw.get("loss_classification") or "") != RISK_KIND or not verify_risk_contract(raw):
+        return REAPPROVE_MESSAGE
+    source, target = str(mapping.get("source") or ""), str(mapping.get("target") or "")
+    if str(raw.get("column") or "").lower() != source.lower() \
+            or str(raw.get("target") or "").lower() != (target or source).lower():
+        return "the approval was signed for another column; re-approve this risk"
+    if table and str(raw.get("table") or "") and _bare(raw.get("table")) != _bare(table):
+        return "the approval was signed for another table; re-approve this risk"
+    meta = raw.get("metadata") or {}
+    here = current_workspace() if workspace is None else str(workspace or "")
+    if str(meta.get("workspace_id") or "") != here:
+        return "the approval was signed in another workspace; re-approve this risk"
+    bound = meta.get("destination")
+    legacy = str(raw.get("signature") or "").startswith("mrc-sha256:")
+    if destination is not None and not (legacy and bound is None) and not binding_matches(bound, destination):
+        return "the approval was signed for another destination; re-approve this risk"
+    return ""
+
+
 def approved_contract(
     mapping: Mapping[str, Any] | None,
     *,
     table: str = "",
     workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    """The mapping's signed, intact empty-as-NULL contract, or ``None``.
+    """The mapping's server-signed, intact empty-as-NULL contract, or ``None``.
 
     The contract is bound to what it was signed for: the (source, target)
-    pair, the destination table and the workspace. One pasted onto another
-    column, signed for another table or carried into another workspace is
-    not an approval.
+    pair, the destination (connector, schema, table) and the workspace,
+    exactly (an empty workspace binds only where there is none). One pasted
+    onto another column, signed for another table or connector, carried into
+    another workspace, or not signed by this server is not an approval.
     """
+    if contract_refusal(mapping, table=table, workspace=workspace, destination=destination):
+        return None
     raw = (mapping or {}).get(CONTRACT_KEY) if isinstance(mapping, Mapping) else None
-    if not isinstance(raw, dict):
-        return None
-    from services.migration_risk_contract import verify_risk_contract
-
-    if str(raw.get("loss_classification") or "") != RISK_KIND or not verify_risk_contract(raw):
-        return None
-    source, target = str(mapping.get("source") or ""), str(mapping.get("target") or "")
-    if str(raw.get("column") or "").lower() != source.lower():
-        return None
-    if str(raw.get("target") or "").lower() != (target or source).lower():
-        return None
-    if table and str(raw.get("table") or "") and _bare(raw.get("table")) != _bare(table):
-        return None
-    bound = str((raw.get("metadata") or {}).get("workspace_id") or "")
-    here = current_workspace() if workspace is None else str(workspace or "")
-    if bound and here and bound != here:
-        return None
-    return raw
+    return raw if isinstance(raw, dict) else None
 
 
 def written_value_is_never_empty(transform: str) -> bool:
@@ -319,9 +368,14 @@ def _count_words(t: Mapping[str, Any]) -> str:
     return "at least one empty string (the count did not finish in time)"
 
 
-def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """At least one action that works on this source, for every blocked column."""
+def _actions(blocked: list[dict[str, Any]], *, destination: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """At least one action that works on this source, for every blocked column.
+
+    The approval and Check-now actions carry the destination they will be
+    bound to (``risk_acceptance.destination``): send them back as given.
+    """
     actions: list[dict[str, Any]] = []
+    bound = {"destination": dict(destination)} if destination is not None else {}
     approvable = [b for b in blocked if b["approvable"]]
     if approvable:
         actions.append({
@@ -329,7 +383,7 @@ def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "label": "; ".join(f"Create {b['target']} as NULL-able; empty strings land as NULL"
                                for b in approvable),
             "risk_acceptance": {"option": OPTION, "columns": [b["target"] for b in approvable],
-                                "approved_by": "<who approves>", "reason": "<why>"},
+                                "approved_by": "<who approves>", "reason": "<why>", **bound},
         })
     unknown = [b for b in blocked if not b.get("found") and b.get("why") != "catalog"]
     if unknown:
@@ -341,7 +395,7 @@ def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
             + (" (the warehouse bills the scan)" if billed else ""),
             "budget_seconds": CHECK_NOW_SECONDS,
             "risk_acceptance": {"option": CHECK_OPTION, "columns": [b["target"] for b in unknown],
-                                "approved_by": "<who asks>"},
+                                "approved_by": "<who asks>", **bound},
         })
     catalog = [b for b in blocked if b.get("why") == "catalog"]
     if catalog:
@@ -350,12 +404,23 @@ def _actions(blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "label": "Fix the source connection, then validate again: " + str(catalog[0].get("error") or ""),
         })
     for b in blocked:
-        actions.append({
-            "id": "oracle_default_transform", "kind": "oracle_default_transform",
-            "label": (f"Map the transform {DEFAULT_TRANSFORM_HINT} on {b['source']}: empty and blank "
-                      f"values are written as <value>, every other value is unchanged"),
-            "column": b["target"], "transform": DEFAULT_TRANSFORM_HINT,
-        })
+        existing = str(b.get("transform") or "")
+        if _no_transform(existing) or existing.lower().startswith("default:"):
+            actions.append({
+                "id": "oracle_default_transform", "kind": "oracle_default_transform",
+                "label": (f"Map the transform {DEFAULT_TRANSFORM_HINT} on {b['source']}: empty and blank "
+                          f"values are written as <value>, every other value is unchanged"),
+                "column": b["target"], "transform": DEFAULT_TRANSFORM_HINT,
+            })
+        else:
+            # Transforms do not chain: default:<value> would replace this one.
+            actions.append({
+                "id": "oracle_default_transform", "kind": "oracle_default_transform",
+                "label": (f"{b['source']} already maps the transform {existing}, and Datawrap applies one "
+                          f"transform per column: {DEFAULT_TRANSFORM_HINT} would stop {existing}. Change "
+                          "the transform in Map first if a default is what you want"),
+                "column": b["target"], "transform": DEFAULT_TRANSFORM_HINT, "existing_transform": existing,
+            })
         if b.get("found"):
             actions.append({
                 "id": "oracle_fix_source_values", "kind": "oracle_fix_source_values",
@@ -371,12 +436,16 @@ def _fix_text(action: Mapping[str, Any]) -> str:
     return str(action["label"])
 
 
-def _reuse_notice(reused: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+def _reuse_notice(
+    reused: list[dict[str, Any]], *, destination: Mapping[str, str] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
     """The plain words and the action for "Check now" results this run reuses.
 
     A billed warehouse's Check now result is reused for CHECK_REUSE_SECONDS so
     a schedule does not re-bill the scan; the gate says so, with when the
-    column was checked and how to check it again.
+    column was checked and how to check it again. While a column's Check now
+    is cooling down (CHECK_NOW_COOLDOWN_SECONDS) the action says when it can
+    be asked again instead of offering a request that would be refused.
     """
     if not reused:
         return "", None
@@ -389,14 +458,27 @@ def _reuse_notice(reused: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | N
                      f"{t['reused_check']['until']}" + (", so the warehouse does not bill the scan again"
                                                        if billed else ", because this check stopped first"))
     billed_any = any(t["reused_check"].get("billed", True) for t in reused)
+    bound = dict(destination) if destination is not None else None
+    cooling = {t["target"]: _check_now_cooldown({"workspace_id": current_workspace(), "source": t["source"],
+                                                  "target": t["target"], "destination": bound})
+               for t in reused}
+    ready = [t for t in reused if not cooling[t["target"]]]
+    if not ready:
+        later = max(cooling.values())
+        again = {
+            "id": "oracle_empty_check_again_later", "kind": "oracle_empty_check_again_later",
+            "label": "Check " + ", ".join(t["source"] for t in reused) + f" again after the {CHECK_NOW_COOLDOWN_SECONDS // 60}"
+            f"-minute pause that follows the Check now asked at {later} (a warehouse bills each scan)",
+        }
+        return "; ".join(parts) + ". " + again["label"] + ".", again
     again = {
         "id": "oracle_empty_check_again", "kind": CHECK_OPTION,
-        "label": "Check " + ", ".join(t["source"] for t in reused) + " again now: Datawrap reads the "
+        "label": "Check " + ", ".join(t["source"] for t in ready) + " again now: Datawrap reads the "
         f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check"
         + (" (the warehouse bills the scan)" if billed_any else ""),
         "budget_seconds": CHECK_NOW_SECONDS,
-        "risk_acceptance": {"option": CHECK_OPTION, "columns": [t["target"] for t in reused],
-                            "approved_by": "<who asks>"},
+        "risk_acceptance": {"option": CHECK_OPTION, "columns": [t["target"] for t in ready],
+                            "approved_by": "<who asks>", **({"destination": bound} if bound else {})},
     }
     return "; ".join(parts) + ". To check again: " + _fix_text(again) + ".", again
 
@@ -407,6 +489,7 @@ def build_gate(
     mappings: Iterable[Mapping[str, Any]] | None,
     table: str = "",
     workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """``(gate, blockers)`` from targets carrying ``count``, ``found``, ``exact`` and ``how``.
 
@@ -425,9 +508,12 @@ def build_gate(
         if not t["found"] and t.get("exact"):
             continue
         contract = (
-            approved_contract(by_pair.get(t["key"]), table=table, workspace=workspace)
+            approved_contract(by_pair.get(t["key"]), table=table, workspace=workspace, destination=destination)
             if t["approvable"] else None
         )
+        if not contract and (why := contract_refusal(by_pair.get(t["key"]), table=table, workspace=workspace,
+                                                     destination=destination)):
+            t["contract_refused"] = why
         if contract:
             approved.append({**t, "risk_id": contract.get("risk_id"),
                              "approved_by": contract.get("approved_by")})
@@ -436,7 +522,7 @@ def build_gate(
     reused = [t for t in targets if t.get("reused_check")]
     if not blocked and not approved and not reused:
         return None, []
-    notice, again = _reuse_notice(reused)
+    notice, again = _reuse_notice(reused, destination=destination)
     details: dict[str, Any] = {"columns": blocked, "approved": approved, "option": OPTION}
     if reused:
         details["reused"] = reused
@@ -451,16 +537,18 @@ def build_gate(
         # A reused result is stated, never silent: the gate warns (it does not block).
         return {"id": GATE_ID, "status": "warn" if reused else "pass", "duration_ms": 0,
                 "details": details, "message": message}, []
-    actions = _actions(blocked) + ([again] if again else [])
+    actions = _actions(blocked, destination=destination) + ([again] if again else [])
 
     def _part(b: Mapping[str, Any]) -> str:
         what = "existing NOT NULL column" if b["kind"] == "existing" else (
             "key column" if not b["approvable"] else "NOT NULL from the source")
+        refused = f" (its NULL-able approval is not honoured: {b['contract_refused']})" \
+            if b.get("contract_refused") else ""
         if b["found"]:
             return (f"{b['target']} ({what}) would receive {_count_words(b)} from {b['source']} "
-                    f"({_measured(b)})")
+                    f"({_measured(b)}){refused}")
         return (f"{b['target']} ({what}): Datawrap could not rule out empty strings in "
-                f"{b['source']}, because {_unknown_why(b)}")
+                f"{b['source']}, because {_unknown_why(b)}{refused}")
 
     message = (
         "Oracle stores '' as NULL, so a NOT NULL column refuses it (ORA-01400): "
@@ -985,7 +1073,7 @@ def _recall_found(key: str) -> dict[str, Any] | None:
 
 
 _STAMP_FIELDS = ("requested_by", "at", "expires_at", "workspace_id", "budget_seconds",
-                 "source", "target", "table", "key_id")
+                 "source", "target", "table", "destination", "key_id")
 _STAMP_LABEL = b"datawrap-oracle-empty-check-now\x00"
 
 
@@ -1000,7 +1088,9 @@ def _stamp_mac(stamp: Mapping[str, Any], key: bytes) -> str:
     return hmac.new(sub, body.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _check_now_asked(mapping: Mapping[str, Any], *, table: str = "") -> bool:
+def _check_now_asked(
+    mapping: Mapping[str, Any], *, table: str = "", destination: Mapping[str, str] | None = None,
+) -> bool:
     """An unexpired "Check this column now" request this server issued for this mapping.
 
     The stamp travels with the mapping through the client, so nothing in it is
@@ -1017,9 +1107,9 @@ def _check_now_asked(mapping: Mapping[str, Any], *, table: str = "") -> bool:
     if not isinstance(stamp, Mapping) or not stamp.get("key_id") or not stamp.get("signature"):
         return False
     try:
-        from services.audit_chain_keys import key_for
+        from services.audit_chain_keys import server_key_for
 
-        key = key_for(str(stamp.get("key_id")))
+        key = server_key_for(str(stamp.get("key_id")))
         if key is None or not hmac.compare_digest(_stamp_mac(stamp, key), str(stamp.get("signature"))):
             return False
         issued = datetime.fromisoformat(str(stamp.get("at") or ""))
@@ -1030,6 +1120,8 @@ def _check_now_asked(mapping: Mapping[str, Any], *, table: str = "") -> bool:
             or str(stamp.get("target") or "").lower() != str(mapping.get("target") or "").lower():
         return False
     if _bare(stamp.get("table")) != _bare(table):
+        return False
+    if destination is not None and not binding_matches(stamp.get("destination"), destination):
         return False
     if str(stamp.get("workspace_id") or "") != current_workspace():
         return False
@@ -1120,8 +1212,11 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
 
     _cfg, src_engine = _normalize_source_cfg(str(ctx.get("source_connector_id") or ""), ctx.get("source_config"))
     src_engine = (src_engine or str(ctx.get("source_format") or "")).lower()
-    asked = [str(m.get("target") or m.get("source") or "") for m in maps
-             if _check_now_asked(m, table=str(ctx.get("destination_table") or ""))]
+    here = destination_binding(connector_id=ctx.get("destination_connector_id"),
+                               config=ctx.get("destination_config"), table=ctx.get("destination_table"))
+    asked_maps = [m for m in maps
+                  if _check_now_asked(m, table=str(ctx.get("destination_table") or ""), destination=here)]
+    asked = [str(m.get("target") or m.get("source") or "") for m in asked_maps]
 
     def walk(cols: list[str]) -> Any:
         if filter_error:
@@ -1170,6 +1265,11 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
             _remember(key, kept, checked_now=t["target"] in asked)
         elif t.get("why") != "catalog" and t["target"] not in asked and (earlier := _recall_found(key)):
             done[i] = {**t, **earlier, "reused": True}
+    ran_out = {t["target"] for t in done if t["target"] in asked and not t.get("exact") and not t.get("found")
+               and t.get("why") in {"budget", "time", "timeout", "rows"}}
+    for m in asked_maps:
+        if str(m.get("target") or m.get("source") or "") in ran_out:
+            _check_now_cooldown(m.get(CHECK_KEY) or {}, clear=True)  # it may be asked again at once
     measured += done
     needs_decision = [t for t in measured if t["kind"] == "create_new" and t["approvable"]
                       and (int(t.get("count") or 0) > 0 or t.get("found") or not t.get("exact"))]
@@ -1180,7 +1280,7 @@ def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         for t in measured:
             if t["source"].lower() in pk or t["target"].lower() in pk:
                 t["approvable"] = False
-    return build_gate(measured, mappings=maps, table=str(ctx.get("destination_table") or ""))
+    return build_gate(measured, mappings=maps, table=str(ctx.get("destination_table") or ""), destination=here)
 
 
 def preflight_gate(
@@ -1217,8 +1317,36 @@ def preflight_gate(
     return build_gate(measured, mappings=mappings, table=destination_table)
 
 
+#: One Check-now request per workspace, column pair and destination in this
+#: window (a billed warehouse bills each scan), unless the last one ran out of
+#: its budget before it could answer.
+CHECK_NOW_COOLDOWN_SECONDS = 600
+#: Namespaces the cooldown keys (tests give each test its own).
+_COOLDOWN_SCOPE = ""
+
+
+def _check_now_cooldown(stamp: Mapping[str, Any], *, clear: bool = False, at: str = "") -> str:
+    """The time the cooldown key was set (``""`` when free); sets it with ``at``, clears with ``clear``."""
+    import hashlib
+
+    from services.auth_state import get_auth_state
+
+    raw = json.dumps([_COOLDOWN_SCOPE, stamp.get("workspace_id"), str(stamp.get("source") or "").lower(),
+                      str(stamp.get("target") or "").lower(), stamp.get("destination")], sort_keys=True, default=str)
+    key = "oracle-check-now:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    state = get_auth_state()
+    if clear:
+        state.clear_marker(key)
+        return ""
+    if at:
+        state.set_marker(key, at, CHECK_NOW_COOLDOWN_SECONDS)
+        return at
+    return state.get_marker(key) or ""
+
+
 def stamp_check_now(
     mappings: list[dict[str, Any]], acceptance: Mapping[str, Any], *, table: str = "",
+    destination: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Record "Check this column now" on the named columns' mappings (not a risk: no contract).
 
@@ -1226,11 +1354,16 @@ def stamp_check_now(
     risk acceptance (the calling route or tool checks it). With authentication
     on, the request records the signed-in user, never free text, and is
     refused without one. The stamp is issued by this server: it names the
-    mapping pair, the destination ``table``, the workspace and the user, and
-    is signed (HMAC under the deployment's signing key, services.audit_chain_keys),
-    so a stamp written by a client is never honoured (:func:`_check_now_asked`).
-    It is honoured for CHECK_NOW_VALID_SECONDS; the measurement it produces is
-    kept and reused as described at _MEASURED.
+    mapping pair, the destination (connector, schema, ``table``: the
+    acceptance's ``destination`` as the gate listed it, else ``destination``),
+    the workspace and the user, and is signed (HMAC under the deployment's
+    signing key, services.audit_chain_keys), so a stamp written by a client is
+    never honoured (:func:`_check_now_asked`). It is honoured for
+    CHECK_NOW_VALID_SECONDS; the measurement it produces is kept and reused as
+    described at _MEASURED. A pair that already carries a valid request keeps
+    it; a new one is issued at most once per CHECK_NOW_COOLDOWN_SECONDS for
+    the same workspace, pair and destination, unless the last one ran out of
+    its budget.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -1247,27 +1380,56 @@ def stamp_check_now(
             raise ValueError(f"risk_acceptance option {CHECK_OPTION} needs a signed-in user. "
                              "Nothing was recorded.")
         actor = "local operator (authentication is off)"
+    asked_dest = acceptance.get("destination")
+    bound = dict(asked_dest) if isinstance(asked_dest, Mapping) else dict(
+        destination or destination_binding(table=table))
+    bound = {k: str(bound.get(k) or "").lower() for k in ("connector", "schema", "table")}
+    if not bound["table"]:
+        bound["table"] = _bare(table)
     now = datetime.now(timezone.utc)
     key_id, key, _source = signing_key()
-    out, hit = [], set()
+    out, hit, issue = [], set(), []
     for raw in mappings or []:
         row = dict(raw)
         source, target = str(row.get("source") or ""), str(row.get("target") or "")
         name = next((n for n in (target.lower(), pair_key(source, target).lower(), source.lower())
                      if n in named), "")
         if name:
-            stamp = {
-                "requested_by": actor, "at": now.isoformat(),
-                "expires_at": (now + timedelta(seconds=CHECK_NOW_VALID_SECONDS)).isoformat(),
-                "workspace_id": current_workspace(), "budget_seconds": CHECK_NOW_SECONDS,
-                "source": source, "target": target, "table": str(table or ""), "key_id": key_id,
-            }
-            row[CHECK_KEY] = {**stamp, "signature": _stamp_mac(stamp, key)}
             hit.add(name)
+            if not _check_now_asked(row, table=table, destination=bound):
+                issue.append(row)
         out.append(row)
     if mappings and named - hit:
         raise ValueError(f"risk_acceptance option {CHECK_OPTION} named unmapped column(s) "
                          f"{', '.join(sorted(named - hit))}. Nothing was recorded.")
+    stamps = []
+    for row in issue:
+        stamp = {
+            "requested_by": actor, "at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=CHECK_NOW_VALID_SECONDS)).isoformat(),
+            "workspace_id": current_workspace(), "budget_seconds": CHECK_NOW_SECONDS,
+            "source": str(row.get("source") or ""), "target": str(row.get("target") or ""),
+            "table": str(table or ""), "destination": bound, "key_id": key_id,
+        }
+        if (last := _check_now_cooldown(stamp)):
+            raise ValueError(
+                f"{stamp['target']} was already checked now at {last}: Datawrap reads a column this way at "
+                f"most once every {CHECK_NOW_COOLDOWN_SECONDS // 60} minutes per destination table (a "
+                "warehouse bills each scan), unless the last check ran out of time. Validate again to see "
+                "that result, or ask again later. Nothing was recorded.")
+        stamps.append((row, stamp))
+    from services.audit_log import append_audit_event
+
+    for row, stamp in stamps:
+        _check_now_cooldown(stamp, at=now.isoformat(timespec="seconds"))
+        row[CHECK_KEY] = {**stamp, "signature": _stamp_mac(stamp, key)}
+        append_audit_event(
+            action="oracle_empty.check_now.issued", resource=f"check_now:{stamp['target']}",
+            actor=actor, workspace_id=stamp["workspace_id"] or None,
+            details={"kind": CHECK_OPTION, "route": pair_key(stamp["source"], stamp["target"]),
+                     "table": stamp["table"], "destination": bound, "expires_at": stamp["expires_at"],
+                     "digest": row[CHECK_KEY]["signature"]},
+        )
     return out
 
 
@@ -1276,6 +1438,7 @@ def sign_empty_as_null(
     acceptance: Mapping[str, Any],
     *,
     table: str,
+    destination: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sign the empty-as-NULL contract on the named columns' mappings.
 
@@ -1302,6 +1465,12 @@ def sign_empty_as_null(
     for m in rows:
         feeds[str(m.get("source") or "").lower()] = feeds.get(str(m.get("source") or "").lower(), 0) + 1
     workspace = current_workspace()
+    asked_dest = acceptance.get("destination")
+    bound = dict(asked_dest) if isinstance(asked_dest, Mapping) else dict(
+        destination or destination_binding(table=table))
+    bound = {k: str(bound.get(k) or "").lower() for k in ("connector", "schema", "table")}
+    if not bound["table"]:
+        bound["table"] = _bare(table)
     out, signed = [], set()
     for raw in mappings or []:
         row = dict(raw)
@@ -1313,7 +1482,7 @@ def sign_empty_as_null(
         if not hit and source.lower() in wanted and feeds.get(source.lower()) == 1 \
                 and source.lower() not in targets_named - {target.lower()}:
             hit = source.lower()
-        if hit and approved_contract(row, table=table) is None:
+        if hit and approved_contract(row, table=table, destination=bound) is None:
             contract = create_migration_risk_contract(
                 column=source or target,
                 source_type=str(row.get("source_type") or ""),
@@ -1333,7 +1502,8 @@ def sign_empty_as_null(
                 target=target or source,
                 table=table,
                 loss_classification=RISK_KIND,
-                metadata={"option": OPTION, "workspace_id": workspace},
+                metadata={"option": OPTION, "workspace_id": workspace, "destination": bound,
+                          "route": pair_key(source, target)},
             )
             row[CONTRACT_KEY] = contract.to_dict()
         if hit:

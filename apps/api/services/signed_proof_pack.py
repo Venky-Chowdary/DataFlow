@@ -605,9 +605,13 @@ def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
 
+    from services.migration_risk_contract import verify_risk_contract
+
     def _absorb(raw: Any) -> None:
         if not isinstance(raw, dict):
             return
+        if not verify_risk_contract(raw):
+            return  # a contract this server did not sign is not an accepted risk
         rid = str(raw.get("risk_id") or "").strip()
         key = rid or canonical_json(raw)
         if key in seen:

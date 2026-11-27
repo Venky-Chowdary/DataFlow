@@ -19,7 +19,10 @@ _MAPS = [{"source": c, "target": c.upper(), "confidence": 0.99, "target_type": "
 
 @pytest.fixture(autouse=True)
 def _fresh_measurements(monkeypatch):
+    import uuid as _uuid
+
     monkeypatch.setattr(oe, "_MEASURED", {})
+    monkeypatch.setattr(oe, "_COOLDOWN_SCOPE", _uuid.uuid4().hex)
 
 
 @pytest.fixture
@@ -92,6 +95,7 @@ def test_studio_create_nullable_request_is_accepted_and_clears_the_block(client,
         "mappings": [{"source": m["source"], "target": m["target"], "target_type": m["target_type"]}
                      for m in _MAPS],
         "risk_acceptance": {"option": oe.OPTION, "columns": action["risk_acceptance"]["columns"],
+                            "destination": action["risk_acceptance"]["destination"],
                             "reason": "legacy rows carry '' for unknown"},
         "dest_table": "DEST",
     })
@@ -191,8 +195,10 @@ def test_a_found_empty_string_is_not_downgraded_by_a_later_shorter_check(tmp_pat
     assert "NOTE (NOT NULL from the source) would receive 1 empty string(s)" in second["message"]
     assert "was checked for empty strings at" in second["message"] and "being reused until" in second["message"]
     ids = {a["id"] for b in blockers for a in b["suggested_actions"]}
-    assert "oracle_empty_check_again" in ids
+    assert "oracle_empty_check_again_later" in ids  # the Check now of run 1 is still in its pause
     # Checking again is a fresh check: a check that cannot finish is never answered from memory.
+    oe._check_now_cooldown({"workspace_id": oe.current_workspace(), "source": "note", "target": "NOTE",
+                            "destination": {"connector": "", "schema": "", "table": "dest"}}, clear=True)
     monkeypatch.setattr(oe, "CHECK_NOW_SECONDS", 0.0)
     again, _ = oe.preflight_hook({**ctx, "write_maps": oe.stamp_check_now(
         [dict(m) for m in maps], {"option": oe.CHECK_OPTION, "columns": ["NOTE"]}, table="DEST")})

@@ -15,7 +15,10 @@ _MAPS = [{"source": c, "target": c, "confidence": 0.99, "target_type": "TEXT"} f
 
 @pytest.fixture(autouse=True)
 def _fresh_measurements(monkeypatch):
+    import uuid as _uuid
+
     monkeypatch.setattr(oe, "_MEASURED", {})
+    monkeypatch.setattr(oe, "_COOLDOWN_SCOPE", _uuid.uuid4().hex)
 
 
 @pytest.fixture

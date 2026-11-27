@@ -46,4 +46,4 @@ def test_hydrate_signs_unsigned_draft():
     }
     out = _hydrate_risk_contract({"source": "amt", "risk_contract": draft})
     assert out is not None
-    assert str(out.get("signature") or "").startswith("mrc-sha256:")
+    assert str(out.get("signature") or "").startswith("mrc-hmac:")

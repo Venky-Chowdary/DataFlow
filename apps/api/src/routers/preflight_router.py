@@ -704,6 +704,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             source_config=body.source_config,
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
+            destination_connector_id=str(body.connector_id or ""),
             source_filename="",
             source_file_id=source_file_id,
             population_rows=stored_population,
@@ -999,6 +1000,9 @@ class OracleEmptySignRequest(BaseModel):
     risk_acceptance: dict[str, Any] = Field(default_factory=dict)
     #: The destination table the contract or the Check now request is bound to.
     dest_table: str = ""
+    #: The destination binding (connector, schema, table) the gate listed in its
+    #: action's ``risk_acceptance.destination``; Studio sends it back as given.
+    destination: dict[str, str] | None = None
 
 
 _SIGN_FIELDS = ("source", "target", "target_type", "source_type", "transform")
@@ -1036,6 +1040,8 @@ def sign_oracle_empty_action(body: OracleEmptySignRequest):
     if not maps:
         raise HTTPException(status_code=400, detail="Send the mappings to sign. Nothing was signed.")
     key = oe.CONTRACT_KEY if option == oe.OPTION else oe.CHECK_KEY
+    if body.destination and not acceptance.get("destination"):
+        acceptance["destination"] = dict(body.destination)
     try:
         signed = (oe.sign_empty_as_null(maps, acceptance, table=body.dest_table) if option == oe.OPTION
                   else oe.stamp_check_now(maps, acceptance, table=body.dest_table))

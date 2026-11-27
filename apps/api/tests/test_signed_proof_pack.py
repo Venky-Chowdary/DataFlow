@@ -323,8 +323,14 @@ def test_export_includes_accepted_risks_policies_and_rollback():
         "rollback_strategy": "DOCUMENT_ONLY",
         "approved_by": "ops@example.com",
         "reason": "legacy cast",
-        "signature": "mrc-sha256:deadbeef",
     }
+    # Server-signed (keyed). A contract this server did not sign (here: an
+    # unkeyed digest a client can compute) is not listed as an accepted risk.
+    from services.migration_risk_contract import legacy_digest, sign_risk_contract
+
+    contract["signature"] = sign_risk_contract(contract)
+    forged = {**contract, "risk_id": "mrc-forged", "approved_by": "cfo@example.com"}
+    forged["signature"] = legacy_digest(forged)
     job = {
         "_id": "job-risks",
         "mappings": [
@@ -332,7 +338,8 @@ def test_export_includes_accepted_risks_policies_and_rollback():
                 "source": "amount",
                 "target": "amount",
                 "risk_contract": contract,
-            }
+            },
+            {"source": "qty", "target": "qty", "risk_contract": forged},
         ],
         "reconciliation": {
             "passed": True,

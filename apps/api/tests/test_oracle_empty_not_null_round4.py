@@ -26,7 +26,10 @@ from services import oracle_empty_not_null as oe
 
 @pytest.fixture(autouse=True)
 def _fresh_measurements(monkeypatch):
+    import uuid as _uuid
+
     monkeypatch.setattr(oe, "_MEASURED", {})
+    monkeypatch.setattr(oe, "_COOLDOWN_SCOPE", _uuid.uuid4().hex)
 
 
 @pytest.fixture
@@ -387,10 +390,20 @@ def test_4_a_reused_billed_check_now_result_is_stated_with_the_way_to_check_agai
     msg = later["message"]
     today = datetime.now(timezone.utc).date().isoformat()
     assert f"NOTE was checked for empty strings by Check now at {today}" in msg and "being reused until" in msg
-    assert "no empty strings" in msg and "To check again" in msg
+    assert "no empty strings" in msg
+    # Within the 10-minute pause after a Check now, the gate says when it can be
+    # asked again instead of offering a request the server would refuse.
+    wait = later["details"]["suggested_actions"][0]
+    assert wait["kind"] == "oracle_empty_check_again_later" and "again after the 10-minute pause" in msg
+    with pytest.raises(ValueError, match="at most once every 10 minutes"):
+        oe.stamp_check_now([dict(_MAP)], {"option": oe.CHECK_OPTION, "columns": ["NOTE"]}, table="D")
+    # After the pause (cleared here) the action is offered, and it works: a fresh, billed check.
+    oe._check_now_cooldown({"workspace_id": oe.current_workspace(), "source": "note", "target": "NOTE",
+                            "destination": {"connector": "", "schema": "", "table": "d"}}, clear=True)
+    later, _ = oe.preflight_hook(_hook_ctx(cfg, t, [dict(_MAP)]))
     again = later["details"]["suggested_actions"][0]
     assert again["kind"] == oe.CHECK_OPTION and again["risk_acceptance"]["columns"] == ["NOTE"]
-    # The action works: asking again measures again (a fresh, billed check).
+    assert "To check again" in later["message"]
     maps = oe.stamp_check_now([dict(_MAP)], again["risk_acceptance"], table="D")
     oe.preflight_hook(_hook_ctx(cfg, t, maps))
     assert len(calls) > before and calls[-1] is True

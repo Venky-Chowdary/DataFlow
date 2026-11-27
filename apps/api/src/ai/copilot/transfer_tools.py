@@ -579,8 +579,12 @@ def _sign_required_risk_contracts(
     *,
     table: str,
     force_columns: set[str] | None = None,
+    destination: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sign a continue-policy contract only on mappings a gate already requires.
+
+    ``destination`` (connector, schema, table) binds the Oracle '' approvals and
+    Check-now requests when the acceptance does not carry the gate's own.
 
     Omitted acceptance signs nothing. A partial acceptance is refused: the
     operator named the action and left out who approved it or why. Safe
@@ -592,10 +596,10 @@ def _sign_required_risk_contracts(
 
     if str(acceptance.get("option") or "").strip() == _oe.OPTION:
         # "Create <col> as NULL-able; empty strings land as NULL" (Oracle).
-        return _oe.sign_empty_as_null(list(mappings or []), acceptance, table=table)
+        return _oe.sign_empty_as_null(list(mappings or []), acceptance, table=table, destination=destination)
     if str(acceptance.get("option") or "").strip() == _oe.CHECK_OPTION:
         # "Check this column now": a longer, asked-for scan (not a risk).
-        return _oe.stamp_check_now(list(mappings or []), acceptance, table=table)
+        return _oe.stamp_check_now(list(mappings or []), acceptance, table=table, destination=destination)
     from preflight.risk_contract import (
         mapping_is_structural_review,
         mapping_requires_risk_contract,
@@ -1491,11 +1495,14 @@ def plan_transfer(
     for _contract_pass in (1, 2):
         if risk_acceptance:
             try:
+                from services.oracle_empty_not_null import destination_binding
+
                 mappings = _sign_required_risk_contracts(
                     mappings,
                     risk_acceptance,
                     table=dst_table,
                     force_columns=blocked_for_contract or None,
+                    destination=destination_binding(connector_id=dst_conn.get("id"), table=dst_table),
                 )
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))

@@ -37,12 +37,20 @@ export const STUDIO_ORACLE_EMPTY_KINDS: ReadonlySet<string> = new Set([
 export interface OracleEmptyAction extends ValidationSuggestedAction {
   id?: string;
   budget_seconds?: number;
-  risk_acceptance?: { option: string; columns: string[]; [key: string]: unknown };
+  /** Set when the column already maps a transform `default:<value>` would replace (transforms do not chain). */
+  existing_transform?: string;
+  risk_acceptance?: {
+    option: string;
+    columns: string[];
+    /** The destination (connector, schema, table) the server binds the approval to; sent back as given. */
+    destination?: Record<string, string>;
+    [key: string]: unknown;
+  };
 }
 
 export interface OracleEmptySignBody {
   mappings: { source: string; target: string; target_type?: string; transform?: string }[];
-  risk_acceptance: { option: string; columns: string[]; reason?: string };
+  risk_acceptance: { option: string; columns: string[]; reason?: string; destination?: Record<string, string> };
   dest_table: string;
 }
 
@@ -73,7 +81,8 @@ export function oracleEmptyActions(preflight: PreflightResult | null | undefined
     const key = `${action.id ?? action.kind}|${action.column ?? ""}|${action.label ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (STUDIO_ORACLE_EMPTY_KINDS.has(String(action.kind))) buttons.push(action);
+    // A default that would replace an existing transform is explained, not offered.
+    if (STUDIO_ORACLE_EMPTY_KINDS.has(String(action.kind)) && !action.existing_transform) buttons.push(action);
     else if (action.label) notes.push(action.label);
   }
   return { buttons, notes };
@@ -102,7 +111,12 @@ export function oracleSignBody(
       target_type: m.destType || undefined,
       transform: uiTransformToEngine(m.transform, m.engineTransform),
     })),
-    risk_acceptance: { option, columns, ...(reason ? { reason } : {}) },
+    risk_acceptance: {
+      option,
+      columns,
+      ...(reason ? { reason } : {}),
+      ...(action.risk_acceptance?.destination ? { destination: action.risk_acceptance.destination } : {}),
+    },
     dest_table: destTable,
   };
 }
@@ -129,13 +143,27 @@ export function mergeOracleSigned(
   return { next, hit };
 }
 
-/** Map `default:<value>` on the named target. A blank value is refused (it would not be "non-empty"). */
+/** The transform a mapping already applies that `default:<value>` would replace, or "". */
+export function transformDefaultWouldReplace(m: EditableMapping): string {
+  const engine = uiTransformToEngine(m.transform, m.engineTransform) || "";
+  if (!engine || engine === "none" || engine === "identity" || engine.toLowerCase().startsWith("default:")) return "";
+  return engine;
+}
+
+/**
+ * Map `default:<value>` on the named target. A blank value is refused (it would
+ * not be "non-empty"), and so is a column that already maps another transform:
+ * a mapping applies one transform, so the default would silently stop it.
+ */
 export function applyOracleDefaultValue(
   mappings: EditableMapping[],
   target: string,
   value: string,
-): { next: EditableMapping[]; hit: number } {
+): { next: EditableMapping[]; hit: number; replaces?: string } {
   if (!value.trim()) return { next: mappings, hit: 0 };
+  const row = mappings.find((m) => target && m.target.toLowerCase() === target.toLowerCase());
+  const replaces = row ? transformDefaultWouldReplace(row) : "";
+  if (replaces) return { next: mappings, hit: 0, replaces };
   let hit = 0;
   const next = mappings.map((m) => {
     if (!target || m.target.toLowerCase() !== target.toLowerCase()) return m;
@@ -182,7 +210,14 @@ export async function performOracleEmptyAction(
     if (!value.trim()) {
       return { status: "failed", title: "No value", message: "Name a non-blank value; nothing was changed." };
     }
-    const { next, hit } = applyOracleDefaultValue(deps.mappings, target, value);
+    const { next, hit, replaces } = applyOracleDefaultValue(deps.mappings, target, value);
+    if (replaces) {
+      return {
+        status: "failed", title: "Default not mapped",
+        message: `${target} already maps the transform ${replaces}; a mapping applies one transform, so `
+          + `default:${value} would stop ${replaces}. Change the transform in Map first. Nothing was changed.`,
+      };
+    }
     if (!hit) {
       return { status: "failed", title: "Column not found", message: `No mapping writes ${target}; nothing was changed.` };
     }

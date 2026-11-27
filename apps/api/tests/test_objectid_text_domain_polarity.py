@@ -9,8 +9,6 @@ signs a Migration Risk Contract, and must stay quiet for pinned hex wires
 
 from __future__ import annotations
 
-import hashlib
-import json
 
 import pytest
 from preflight.gates import gate_g3_schema_contract
@@ -32,9 +30,10 @@ def _signed_contract() -> dict:
         "reason": "ObjectId hex is joined downstream as text",
         "execution_policy": "CAST_AND_CONTINUE",
     }
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    return {**payload, "signature": f"mrc-sha256:{digest}"}
+    # Server-signed (keyed): an unkeyed digest a client computes clears nothing.
+    from services.migration_risk_contract import sign_risk_contract
+
+    return {**payload, "signature": sign_risk_contract(payload)}
 
 
 @pytest.mark.parametrize(

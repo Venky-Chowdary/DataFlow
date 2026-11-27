@@ -306,6 +306,8 @@ def _validate(mappings, rows, **kw):
         source_kind="database",
         source_format="postgresql",
         sync_mode="full_refresh_overwrite",
+        # The approval is bound to the destination table it was signed for.
+        destination_table="T",
     )
     args.update(kw)
     return run_file_preflight(**args)
@@ -351,4 +353,5 @@ def test_the_refusal_carries_the_exact_approval_and_the_alternative():
     fix = gate["details"]["recommended_fix"]
     assert '"option": "oracle_empty_as_null", "columns": ["note"]' in fix
     assert "code (key column) would receive 1 empty string(s)" in gate["message"]
-    assert "default:<value> on code" in fix
+    # code already maps trim and transforms do not chain: default:<value> is not offered as a fix.
+    assert "code already maps the transform trim" in fix and "default:<value> on code" not in fix

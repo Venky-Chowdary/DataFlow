@@ -352,6 +352,17 @@ async def lifespan(app: FastAPI):
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
+            # Unkeyed risk contracts the server stored before the keyed signature
+            # stay honoured (services.risk_contract_store); never fatal.
+            try:
+                from services.risk_contract_store import backfill_legacy_contracts
+
+                adopted = await asyncio.to_thread(backfill_legacy_contracts)
+                if adopted:
+                    print(f"[+] Recorded {adopted} pre-cutover risk contract(s) from stored schedules/plans/jobs")
+            except Exception as contract_exc:  # noqa: BLE001 - unrecorded legacy contracts are refused, not trusted
+                print(f"[!] Legacy risk contract backfill skipped: {contract_exc}")
+
             # QA Snowflake D12: report schedules no workspace can see (dry run
             # unless DATAFLOW_SCHEDULE_ORPHAN_REPAIR=apply). Never fatal.
             try:

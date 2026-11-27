@@ -28,10 +28,11 @@ const MAPS: EditableMapping[] = [
   { source: "note", target: "NOTE", confidence: 0.99, destType: "VARCHAR2(200)", transform: "none" },
 ] as EditableMapping[];
 
+const DEST = { connector: "conn-ora-1", schema: "app", table: "dest" };
 const AS_NULL: OracleEmptyAction = {
   id: "oracle_empty_as_null", kind: "oracle_empty_as_null",
   label: "Create NOTE as NULL-able; empty strings land as NULL",
-  risk_acceptance: { option: "oracle_empty_as_null", columns: ["NOTE"] },
+  risk_acceptance: { option: "oracle_empty_as_null", columns: ["NOTE"], destination: DEST },
 };
 const CHECK_NOW: OracleEmptyAction = {
   id: "oracle_empty_check_now", kind: "oracle_empty_check_now",
@@ -115,7 +116,7 @@ test("Create NULL-able asks for a reason, has the API sign it and sends the sign
   const out = await performOracleEmptyAction(AS_NULL, d);
   assert.deepEqual(sent, [{
     mappings: [{ source: "note", target: "NOTE", target_type: "VARCHAR2(200)", transform: undefined }],
-    risk_acceptance: { option: "oracle_empty_as_null", columns: ["NOTE"], reason: "legacy rows" },
+    risk_acceptance: { option: "oracle_empty_as_null", columns: ["NOTE"], reason: "legacy rows", destination: DEST },
     dest_table: "DEST",
   }]);
   assert.equal(out.status, "applied");
@@ -173,4 +174,23 @@ test("an action kind Studio does not perform is never a button and never 'Applie
   const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
   assert.match(page, /STUDIO_ORACLE_EMPTY_KINDS\.has\(String\(action\.kind\)\)\) \{\n\s*void applyOracleEmptyAction\(action\)/);
   assert.match(page, /default:\n\s*\/\/ Nothing was done: say so, never "Applied"\./);
+});
+
+test("Map default is refused, naming it, when the column already maps another transform", async () => {
+  const upper = MAPS.map((m) => (m.target === "NOTE" ? { ...m, transform: "upper" as const } : m));
+  const d = { ...deps({ value: "NA" }).deps, mappings: upper };
+  const out = await performOracleEmptyAction(DEFAULT, d);
+  assert.equal(out.status, "failed");
+  if (out.status === "failed") assert.match(out.message, /already maps the transform upper/);
+  // The gate's own action for such a column is explained as text, never a button.
+  const { buttons, notes } = oracleEmptyActions(preflight("block", [
+    { ...DEFAULT, existing_transform: "upper", label: "note already maps the transform upper…" },
+  ]));
+  assert.equal(buttons.length, 0);
+  assert.deepEqual(notes, ["note already maps the transform upper…"]);
+  // A column whose transform is already a default may change its value.
+  const withDefault = MAPS.map((m) => (m.target === "NOTE" ? { ...m, transform: "default_value" as const,
+    engineTransform: "default:old" } : m));
+  const again = await performOracleEmptyAction(DEFAULT, { ...deps({ value: "NA" }).deps, mappings: withDefault });
+  assert.equal(again.status, "applied");
 });

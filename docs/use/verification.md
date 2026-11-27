@@ -51,6 +51,17 @@ truncation, nulls), what the writer must do, the quarantine and rollback
 posture, and who approved it, when and why. The default policy when a risk is
 not approved is to fail the job, never to continue silently.
 
+Only the server signs a contract: the signature is keyed with the
+deployment's signing key, so a contract written or edited by a client (for
+example one naming someone else as the approver) is refused wherever it is
+read: Validate, Execute, a schedule run and the proof pack. With a signed-in
+user, the contract names that user as the approver, whatever the request
+says. Each signing writes an audit event (who, workspace, column, table,
+kind, reason and the signature; no data values). Contracts signed before the
+keyed signature are honoured only if the server stored them before the
+cutover (in a schedule, plan or job). It records them at startup. Any other
+such contract is refused with "re-approve this risk".
+
 **Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
 cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is
 Oracle, Validate counts the empty strings in each source text column that will
@@ -81,14 +92,19 @@ the time does not reach is blocked with the reason and the actions below.
 Every block lists what you can do:
 
 - **Map `default:<value>`** on the column: empty and blank values are written
-  as `<value>`, everything else is unchanged; Validate then needs no read.
+  as `<value>`, everything else is unchanged; Validate then needs no read. A
+  mapping applies one transform, so this is not offered on a column that
+  already maps another transform (it would stop that transform). Change the
+  transform in Map first.
 - **Check this column now** (`risk_acceptance: {"option":
   "oracle_empty_check_now", "columns": [...]}`): a longer read, within a total
   of 5 minutes for the check, the asked columns first. Datawrap issues the
-  request itself, signed and bound to the column pair, the destination table,
-  the workspace and your signed-in user; it lasts at most an hour from when it
-  was issued. A request written by hand (or edited) in the API body is
-  ignored. Not offered when the source catalog cannot be read: fix the
+  request itself, signed and bound to the column pair, the destination
+  (connector, schema and table), the workspace and your signed-in user; it
+  lasts at most an hour from when it was issued. A request written by hand
+  (or edited) in the API body is ignored. A column can be checked this way
+  once every 10 minutes per destination table, unless the last check ran out
+  of time; until then the gate says when it can be asked again. Not offered when the source catalog cannot be read: fix the
   connection. On BigQuery, Snowflake, Databricks, ClickHouse and Trino this
   is the only way Validate reads the column, because the warehouse bills the
   scan. There, the result is reused for 24 hours so a schedule does not pay
@@ -125,8 +141,8 @@ And, per table:
   with the contract's id, and the proof pack lists the contract. When the
   run's rows cannot be named (an append without a key list), Gate-8 reports
   "NULL cells in this column: N (table-wide)" and does not call them
-  explained. A contract applies only to the column pair, table and workspace
-  it was signed for.
+  explained. A contract applies only to the column pair, the workspace, and the
+  destination connector, schema and table it was signed for.
 - **Existing table:** Datawrap never alters the column; use one of the
   actions above, then validate again.
 - **Key column** (the run's key, or the destination's or source's primary
