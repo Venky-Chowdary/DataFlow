@@ -21,6 +21,10 @@ import uuid
 import pytest
 
 
+#: Seconds a destination COUNT may take before the test fails instead of hanging.
+_COUNT_TIMEOUT_S = 30
+
+
 def _run_and_cancel(
     monkeypatch, *, source: str, rows: int, prefill: int = 0, operator_cancel: bool = True,
     sync: str = "", row_path: bool = True,
@@ -50,6 +54,9 @@ def _run_and_cancel(
     my = pymysql.connect(
         host=c["host"], port=int(c["port"]), user=c["username"],
         password=c["password"], database=c["database"], autocommit=True,
+        # A COUNT that does not answer must fail the test, not hang the shard
+        # (see dest_count).
+        read_timeout=_COUNT_TIMEOUT_S,
     )
     seed = [(i, f"a{i}" if i % 5 else ("" if i % 2 else None), i % 97) for i in range(1, rows + 1)]
     pg = None
@@ -96,6 +103,18 @@ def _run_and_cancel(
             with my.cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM `{dst_t}`")  # nosec B608
                 return int(cur.fetchone()[0])
+        except pymysql.err.OperationalError as exc:
+            if exc.args and exc.args[0] == 2013:
+                # MariaDB 10.6+: a LOAD DATA into an empty table with
+                # unique_checks=0 / foreign_key_checks=0 runs as a bulk insert,
+                # and a concurrent COUNT(*) on that table can deadlock inside
+                # InnoDB for good (the LOAD hangs too, KILL does not end it).
+                pytest.fail(
+                    f"destination COUNT(*) gave no answer within {_COUNT_TIMEOUT_S}s "
+                    "while the job was loading (MariaDB empty-table bulk-insert "
+                    f"deadlock?): {exc}"
+                )
+            return None
         except Exception:  # noqa: BLE001 - table not created yet
             return None
 
@@ -118,7 +137,9 @@ def _run_and_cancel(
     worker = threading.Thread(
         target=lambda: result.setdefault(
             "r", UniversalTransferEngine().execute_tracked(request, job_id)
-        )
+        ),
+        # A job stuck on a frozen destination must not keep the run alive.
+        daemon=True,
     )
     try:
         worker.start()

@@ -561,6 +561,8 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                         "table": _rtbl,
                         "backup": _rbak,
                         "schema": _rschema,
+                        # D134 / D302: a cancel restores only an overwrite's.
+                        "sync_mode": str(cfg.effective_sync or ""),
                     }
                 except Exception as _rbak_exc:
                     _stream.logger.warning(

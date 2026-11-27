@@ -82,6 +82,14 @@ class TableDropError(RuntimeError):
         )
 
 
+class TableRestoreRefused(TableDropError):
+    """An automatic restore would not reproduce the pre-run table; the backup stays."""
+
+    def __init__(self, table_name: str, reason: str) -> None:
+        super().__init__(table_name, RuntimeError(reason))
+        self.reason = reason
+
+
 class DestinationDeleteError(RuntimeError):
     """A destination DELETE by primary key was attempted and failed.
 
@@ -1056,6 +1064,10 @@ def retire_mysql_overwrite(
             cur.execute(f"CREATE TABLE {bak_q} LIKE {src_q}")
             cur.execute(f"ALTER TABLE {bak_q} COMMENT = %s", (MYSQL_ROW_BACKUP_MARK,))
             cur.execute(f"INSERT INTO {bak_q} ({cols}) SELECT {cols} FROM {src_q}")  # nosec B608
+            from connectors.overwrite_restore_steps import carry_mysql_auto_increment
+
+            # Read before the empty statements reset it: a restore puts it back.
+            carry_mysql_auto_increment(cur, table_name, backup)
 
             def _run(sql: str) -> None:
                 cur.execute(sql)
@@ -1096,12 +1108,25 @@ def restore_mysql_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -
                 table_name in present
                 and _mysql_table_comment(cur, backup) == MYSQL_ROW_BACKUP_MARK
             ):
+                from connectors.overwrite_restore_steps import (
+                    mysql_restore_refusal,
+                    restore_mysql_auto_increment,
+                )
+
+                # Only an exact restore runs automatically: the backup stays
+                # (and the operator gets the steps) when it would not be.
+                refusal = mysql_restore_refusal(cur, table_name)
+                if refusal:
+                    raise TableRestoreRefused(table_name, refusal)
                 _mysql_copy_rows_back(cur, table_name, backup)
+                restore_mysql_auto_increment(cur, table_name, backup)
                 cur.execute(f"DROP TABLE {bak_q}")
                 return
             if table_name in present:
                 cur.execute(f"DROP TABLE {src_q}")
             cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+    except TableRestoreRefused:
+        raise
     except Exception as exc:  # noqa: BLE001 - restore must surface every DDL failure
         raise TableDropError(table_name, exc) from exc
     finally:
@@ -1312,11 +1337,10 @@ def restore_mongodb_overwrite(cfg: dict[str, Any], table_name: str, backup: str)
     """Drop a partial replacement and rename the backup back to the live name."""
     try:
         db = _mongo_db(cfg)
-        names = set(db.list_collection_names())
-        if table_name in names:
-            db.drop_collection(table_name)
-        if backup in names:
-            db[backup].rename(table_name)
+        if backup in set(db.list_collection_names()):
+            # One step: dropping the partial replacement first left a window
+            # with no collection at all, and a missing backup dropped it anyway.
+            db[backup].rename(table_name, dropTarget=True)
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
 

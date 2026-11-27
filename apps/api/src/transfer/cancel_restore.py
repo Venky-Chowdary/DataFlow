@@ -16,11 +16,19 @@ restarts from the first row), so putting its pre-run rows back is safe, and
 is what the owner decided: a cancel must not leave the destination empty
 while Datawrap still holds the rows it had.
 
-Only backups an overwrite clear creates are restored on a cancel:
-``overwrite_backup`` (set by the overwrite clear alone), the parked backups
-of a multi-table overwrite, and ``route_backups`` only when the run's sync
-mode is known to be an overwrite (strict keyed incremental writes also keep
-``route_backups``, D111, and D134 still applies to them).
+The decision is per table, from that table's own stream:
+
+* the stream's backup is restored only when that stream is an overwrite
+  (``overwrite_backup`` is made by the overwrite clear alone; a route backup
+  carries the ``sync_mode`` of the stream that armed it, and one without it
+  is never restored), and
+* only while that table's write is incomplete: once every source row of the
+  table is committed (:func:`mark_write_complete`) a cancel is "after the
+  write" and keeps the rows, as the COPY route does;
+* a multi-table run's finished streams (parked backups) keep what they wrote.
+
+The record says per table what happened: the tables put back, with their
+counts, and the tables that keep the rows this run committed.
 """
 
 from __future__ import annotations
@@ -36,106 +44,152 @@ RESTORING_MESSAGE = (
     "Cancelling: putting back the rows the destination had before this run…"
 )
 
+#: ``destination.extra``: tables whose every source row is committed.
+WRITE_COMPLETE_KEY = "overwrite_write_complete_tables"
 
-def effective_sync_mode(request: Any) -> str:
-    """The run's sync mode as the stream applied it (stream contract first)."""
+
+def mark_write_complete(destination: Any, table: str = "") -> None:
+    """Record that ``table``'s load is fully committed (a cancel keeps it)."""
+    if destination is None:
+        return
+    name = str(table or "") or _table_of(destination)
+    extra = dict(getattr(destination, "extra", None) or {})
+    done = list(extra.get(WRITE_COMPLETE_KEY) or [])
+    if name not in done:
+        done.append(name)
+    extra[WRITE_COMPLETE_KEY] = done
+    try:
+        destination.extra = extra
+    except Exception:  # noqa: BLE001 - a frozen endpoint simply is not marked
+        logger.debug("write-complete mark skipped", exc_info=True)
+
+
+def _stream_modes(destination: Any, request: Any) -> dict[str, str]:
+    """``{table: sync_mode}`` for every stream of the run that pinned one."""
+    from services.multi_stream_cancel import ROWS_BEFORE_KEY
+
+    extra = dict(getattr(destination, "extra", None) or {})
+    modes: dict[str, str] = {}
+    for table, pinned in dict(extra.get(ROWS_BEFORE_KEY) or {}).items():
+        if isinstance(pinned, dict) and pinned.get("sync_mode"):
+            modes[str(table)] = str(pinned["sync_mode"])
+    return modes
+
+
+def _single_stream_mode(request: Any) -> str:
+    """The mode of a one-stream run ('' for none, unknown or several streams)."""
     if request is None:
         return ""
     try:
-        from services.sync_cursor import resolve_effective_sync_mode, resolve_sync_contract
+        from services.sync_cursor import resolve_effective_sync_mode, resolve_selected_sync_contracts
 
-        contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+        contracts = resolve_selected_sync_contracts(getattr(request, "stream_contracts", None))
+        if len(contracts) > 1:
+            return ""
         return str(
             resolve_effective_sync_mode(
-                getattr(request, "sync_mode", ""), contract.sync_mode if contract else None
+                getattr(request, "sync_mode", ""), contracts[0].sync_mode if contracts else None
             )
             or ""
         )
-    except Exception:  # noqa: BLE001 - fall back to the declared mode
-        logger.debug("effective sync mode unavailable", exc_info=True)
-        return str(getattr(request, "sync_mode", "") or "")
+    except Exception:  # noqa: BLE001 - unknown: only overwrite-clear backups count
+        logger.debug("sync mode unavailable", exc_info=True)
+        return ""
 
 
-def restorable_on_cancel(destination: Any, sync_mode: str) -> list[dict[str, str]]:
+def restorable_on_cancel(destination: Any, request: Any = None) -> list[dict[str, str]]:
     """The pre-run backups a cancel of this run puts back (``[]``: none).
 
-    Each entry is ``{"table", "backup", "engine"}``. ``sync_mode`` empty means
-    unknown: then only the backups an overwrite clear alone creates count.
+    Each entry is ``{"table", "backup", "engine", "kind"}`` with ``kind`` one
+    of ``own`` (the overwrite clear's backup of the stream the cancel stopped)
+    or ``route`` (a route backup armed by an overwrite stream).
     """
     from services.sync_cursor import is_overwrite_sync
 
-    from .engine_finish import PARKED_BACKUPS_KEY, RESTORABLE_BACKUP_ENGINES
+    from .engine_finish import RESTORABLE_BACKUP_ENGINES
 
-    overwrite = is_overwrite_sync(sync_mode) if sync_mode else None
-    if overwrite is False:
-        return []
     extra = dict(getattr(destination, "extra", None) or {})
+    complete = {str(t) for t in (extra.get(WRITE_COMPLETE_KEY) or [])}
+    modes = _stream_modes(destination, request)
+    single = _single_stream_mode(request)
+
+    def overwrite_table(table: str, stamped: str = "") -> bool:
+        mode = stamped or modes.get(table) or single
+        return bool(mode) and is_overwrite_sync(mode) and table not in complete
+
     held: list[dict[str, str]] = []
     own, engine = extra.get("overwrite_backup"), str(extra.get("overwrite_backup_engine") or "")
     if own and engine in RESTORABLE_BACKUP_ENGINES:
-        held.append({"table": _table_of(destination), "backup": str(own), "engine": engine})
-    for table, pair in dict(extra.get(PARKED_BACKUPS_KEY) or {}).items():
+        table = _table_of(destination)
+        # Only the overwrite clear makes this backup: the stream is an
+        # overwrite whatever the other streams declare.
+        if table not in complete:
+            held.append({"table": table, "backup": str(own), "engine": engine, "kind": "own"})
+    for key, pair in dict(extra.get("route_backups") or {}).items():
         pair = dict(pair or {})
-        if pair.get("overwrite_backup"):
+        table = str(pair.get("table") or key)
+        if pair.get("backup") and overwrite_table(table, str(pair.get("sync_mode") or "")) and pair.get("sync_mode"):
             held.append({
-                "table": str(table),
-                "backup": str(pair["overwrite_backup"]),
-                "engine": str(pair.get("overwrite_backup_engine") or ""),
-            })
-    if overwrite is True:
-        for table, pair in dict(extra.get("route_backups") or {}).items():
-            pair = dict(pair or {})
-            held.append({
-                "table": str(pair.get("table") or table),
-                "backup": str(pair.get("backup") or pair.get("backup_table") or ""),
-                "engine": "route",
+                "table": table, "backup": str(pair["backup"]), "engine": "route", "kind": "route",
+                "route_key": str(key),
             })
     return held
 
 
-def restore_on_cancel(destination: Any, exc: BaseException, held: list[dict[str, str]]) -> bool:
-    """Put ``held`` back after a cancel and stamp the outcome on ``exc``.
-
-    The job record then reads, from :func:`stamp_cancel_outcome`: on success
-    "Cancelled. The destination holds the rows it had before this run (N
-    rows)." with exact counts; on failure where the pre-run rows are and how
-    to put them back (the backup is kept, as after a failed run).
-    """
+def restore_on_cancel(
+    destination: Any, exc: BaseException, held: list[dict[str, str]], request: Any = None
+) -> bool:
+    """Put ``held`` back after a cancel, discard every other backup, stamp ``exc``."""
     from services.cancel_check import note_on_job
 
-    from .engine_finish import (
-        _settle_route_backups,
-        settle_parked_overwrite_backups,
-        settle_single_overwrite_backup,
-    )
+    from .adapters import resolve_connector_config
+    from .engine_finish import _settle_overwrite_backup, settle_single_overwrite_backup
 
     note_on_job({"message": RESTORING_MESSAGE})
-    # Each kind on its own: route backups of a strict keyed (resumable) write
-    # keep D134's discard; only an overwrite's are put back.
-    routes_back = any(entry["engine"] == "route" for entry in held)
-    parked = settle_parked_overwrite_backups(destination, restore=True)
-    routed = _settle_route_backups(destination, restore=routes_back)
-    own = settle_single_overwrite_backup(destination, restore=True)
-    restored = parked is not False and own is not False and (
-        routed is not False or not routes_back
-    )
-    counts = {entry["table"]: _count(destination, entry["table"]) for entry in held}
-    exc.cancel_restore = {  # type: ignore[attr-defined]
-        "restored": restored,
-        "tables": [
-            {**entry, "rows_now": counts.get(entry["table"])} for entry in held
-        ],
-    }
-    if restored and all(n is not None for n in counts.values()):
-        total = sum(int(n) for n in counts.values())
-        exc.destination_rows_now = total  # type: ignore[attr-defined]
+    results: dict[str, bool] = {}
+    if any(e["kind"] == "own" for e in held):
+        results["own"] = settle_single_overwrite_backup(destination, restore=True) is not False
+    routes = [e for e in held if e["kind"] == "route"]
+    if routes:
+        from connectors.table_manager import restore_route_backups
+
+        extra = dict(getattr(destination, "extra", None) or {})
+        all_routes = dict(extra.get("route_backups") or {})
+        chosen = {e["route_key"]: all_routes[e["route_key"]] for e in routes if e["route_key"] in all_routes}
+        try:
+            restored = restore_route_backups(resolve_connector_config(destination), chosen)
+            results["route"] = len(restored) == len(chosen)
+        except Exception:  # noqa: BLE001 - reported on the job with the backups kept
+            logger.error("route backup restore after cancel failed", exc_info=True)
+            results["route"] = False
+        for key in chosen:
+            all_routes.pop(key, None)
+        extra["route_backups"] = all_routes
+        destination.extra = extra
+    # What is left (finished streams, resumable writes, complete tables)
+    # keeps this run's rows: D134's discard.
+    _settle_overwrite_backup(destination, restore=False)
+    ok = all(results.values())
+    tables = []
+    for entry in held:
+        tables.append({
+            **entry,
+            "restored": bool(results.get(entry["kind"])),
+            "rows_now": _count(destination, entry["table"]),
+            "steps": "" if results.get(entry["kind"]) else _steps(destination, entry),
+        })
+    exc.cancel_restore = {"restored": ok, "tables": tables}  # type: ignore[attr-defined]
+    stopped = _table_of(destination)
+    mine = next((t for t in tables if t["table"] == stopped and t["restored"]), None)
+    if mine is not None and mine["rows_now"] is not None:
+        # The stream the cancel stopped is back to its pre-run rows: nothing
+        # of this run is in it. Other streams are measured on their own.
+        exc.destination_rows_now = int(mine["rows_now"])  # type: ignore[attr-defined]
         exc.destination_rows_by_run = 0  # type: ignore[attr-defined]
         exc.write_rolled_back = True  # type: ignore[attr-defined]
         if getattr(exc, "destination_rows_before", None) is None:
-            # The backup is the pre-run object: what it put back is the
-            # pre-run count.
-            exc.destination_rows_before = total  # type: ignore[attr-defined]
-    return restored
+            exc.destination_rows_before = int(mine["rows_now"])  # type: ignore[attr-defined]
+    return ok
 
 
 def stamp_cancel_outcome(exc: BaseException, outcome: dict[str, Any]) -> dict[str, Any]:
@@ -145,55 +199,86 @@ def stamp_cancel_outcome(exc: BaseException, outcome: dict[str, Any]) -> dict[st
         return outcome
     tables = list(info.get("tables") or [])
     out = dict(outcome)
-    if info.get("restored"):
-        out["message"] = restored_message(tables)
-        out["pre_run_rows_restored"] = True
-    else:
-        out["message"] = restore_failed_message(tables)
-        out["pre_run_rows_restored"] = False
+    restored = [t for t in tables if t.get("restored")]
+    failed = [t for t in tables if not t.get("restored")]
+    back = {t["table"] for t in tables}
+    kept = [
+        s for s in (outcome.get("streams") or [])
+        if s.get("table") not in back and s.get("rows_by_run")
+    ]
+    parts: list[str] = []
+    if restored:
+        parts.append(_restored_sentence(restored, several=bool(kept or failed)))
+    if kept:
+        parts.append(
+            "This run's committed rows were kept in "
+            + ", ".join(f"{s['table']} ({int(s['rows_by_run']):,} rows)" for s in kept)
+            + " (those streams keep what they wrote; Resume continues after it)."
+        )
+    if failed:
+        parts.append(restore_failed_message(failed))
+    if not parts:
+        return outcome
+    out["message"] = "Cancelled. " + " ".join(parts)
+    out["pre_run_rows_restored"] = bool(restored) and not failed
+    out["restored_tables"] = [
+        {"table": t["table"], "rows_now": t.get("rows_now")} for t in restored
+    ]
+    if failed:
         out["pre_run_backups"] = [
-            {"table": t["table"], "backup": t["backup"]} for t in tables if t.get("backup")
+            {"table": t["table"], "backup": t["backup"]} for t in failed if t.get("backup")
         ]
     return out
 
 
-def restored_message(tables: list[dict[str, Any]]) -> str:
-    if len(tables) == 1:
+def _restored_sentence(tables: list[dict[str, Any]], *, several: bool) -> str:
+    if len(tables) == 1 and not several:
         n = tables[0].get("rows_now")
         held = f" ({int(n):,} rows)" if n is not None else ""
-        return f"Cancelled. The destination holds the rows it had before this run{held}."
-    parts = ", ".join(
-        f"{t['table']}: {int(t['rows_now']):,} rows" if t.get("rows_now") is not None else str(t["table"])
+        return f"The destination holds the rows it had before this run{held}."
+    return "Put back to the rows they had before this run: " + ", ".join(
+        f"{t['table']} ({int(t['rows_now']):,} rows)" if t.get("rows_now") is not None else str(t["table"])
         for t in tables
-    )
-    return (
-        "Cancelled. Every destination table holds the rows it had before this run "
-        f"({parts})."
-    )
+    ) + "."
+
+
+def restored_message(tables: list[dict[str, Any]]) -> str:
+    return "Cancelled. " + _restored_sentence(tables, several=False)
 
 
 def restore_failed_message(tables: list[dict[str, Any]]) -> str:
-    """Where the pre-run rows are and how to put them back, per table."""
-    steps = []
+    """Where the pre-run rows are and the exact statements that put them back."""
+    lines = []
     for t in tables:
-        table, backup, engine = t["table"], t.get("backup") or "", t.get("engine") or ""
+        backup = t.get("backup") or ""
         if not backup:
-            steps.append(f"{table}: its backup could not be located")
-        elif engine == "mongodb":
-            steps.append(
-                f"{table}: the rows are in the collection {backup}; copy its documents "
-                f"back into {table} (or rename {backup} to {table}), then drop {backup}"
-            )
-        else:
-            steps.append(
-                f"{table}: the rows are in the table {backup} in the same database; "
-                f"replace {table}'s rows with them (DELETE FROM {table}; "
-                f"INSERT INTO {table} SELECT * FROM {backup}), then drop {backup}"
-            )
+            lines.append(f"{t['table']}: its backup could not be located.")
+            continue
+        steps = t.get("steps") or f"copy the rows of {backup} back into {t['table']}"
+        lines.append(f"{t['table']}: the pre-run rows are kept in {backup}. To put them back: {steps}.")
     return (
-        "Cancelled. The destination could not be put back to the rows it had "
-        "before this run; the pre-run rows were kept. " + "; ".join(steps) + "."
+        "The destination could not be put back automatically to the rows it had "
+        "before this run, so the pre-run rows were kept. " + " ".join(lines)
     )
+
+
+def _steps(destination: Any, entry: dict[str, str]) -> str:
+    try:
+        from connectors.overwrite_restore_steps import manual_restore_steps
+
+        from .adapters import resolve_connector_config
+        from .connector_capabilities import resolve_driver_type
+
+        cfg = resolve_connector_config(destination)
+        return manual_restore_steps(
+            engine=entry.get("engine") or "",
+            dest_type=resolve_driver_type(destination.format),
+            cfg=cfg, table=entry["table"], backup=entry["backup"],
+            schema=cfg.get("schema"),
+        )
+    except Exception:  # noqa: BLE001 - the message still names the backup
+        logger.warning("restore steps unavailable for %s", entry.get("table"), exc_info=True)
+        return ""
 
 
 def _table_of(destination: Any) -> str:

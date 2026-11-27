@@ -437,11 +437,11 @@ def _fifo_copy_into_mysql(
     def _stop_source_copy() -> None:
         # PQcancel is thread-safe: a COPY waiting inside libpq for the next
         # source rows returns (and leaves libpq) instead of holding the pump.
-        if src_conn is None or getattr(src_conn, "closed", 0):
-            return  # a D302 cancel already ended the source session
-        cancel = getattr(src_conn, "cancel", None)
-        if cancel is not None:
-            cancel()
+        # Never at the same moment as the D302 watch's close (one lock).
+        if src_conn is not None:
+            from services.source_read_cancel import cancel_connection
+
+            cancel_connection(src_conn)
 
     stream_between_cursors(
         prefix="df_pg_mysql_",

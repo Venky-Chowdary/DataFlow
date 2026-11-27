@@ -33,6 +33,7 @@ import contextvars
 import logging
 import threading
 import time
+import weakref
 from typing import Any, Callable
 
 from services.error_handling import TransferCancelled
@@ -168,19 +169,56 @@ def _note_source_still_open(pid: int | None) -> None:
     note_on_job({"source_session_warning": message})
 
 
+#: Per-connection lock around ``cancel()`` / ``close()`` from any thread.
+_CANCEL_CLOSE_LOCKS: "weakref.WeakKeyDictionary[Any, threading.Lock]" = weakref.WeakKeyDictionary()
+_CANCEL_CLOSE_GUARD = threading.Lock()
+
+
+def _cancel_close_lock(conn: Any) -> threading.Lock | None:
+    try:
+        with _CANCEL_CLOSE_GUARD:
+            lock = _CANCEL_CLOSE_LOCKS.get(conn)
+            if lock is None:
+                lock = _CANCEL_CLOSE_LOCKS[conn] = threading.Lock()
+            return lock
+    except TypeError:
+        return None
+
+
 def _call(conn: Any, step: str) -> bool:
+    """``conn.cancel()`` / ``conn.close()``, never both at once.
+
+    psycopg2's close frees the connection's cancel handle (``PGcancel``); a
+    ``cancel()`` from another thread at that moment used it after the free.
+    Both run under one per-connection lock, and a cancel of a closed
+    connection is skipped.
+    """
     fn = getattr(conn, step, None)
     if fn is None:
         return True
+    lock = _cancel_close_lock(conn)
     try:
-        fn()
-        return True
+        if lock is not None:
+            lock.acquire()
+        try:
+            if step == "cancel" and getattr(conn, "closed", 0):
+                return True
+            fn()
+            return True
+        finally:
+            if lock is not None:
+                lock.release()
     except Exception as exc:  # noqa: BLE001 - best effort on a cancelled run
         # A cancel that fails leaves the session open: say so. A failing
         # close of an already broken session is routine.
         log = logger.warning if step == "cancel" else logger.debug
         log("source read %s on cancel failed: %s", step, exc)
         return False
+
+
+def cancel_connection(conn: Any) -> bool:
+    """Thread-safe ``PQcancel`` of ``conn``'s running statement (see :func:`_call`)."""
+    return _call(conn, "cancel")
 
 
 def _detach_from_pool(conn: Any) -> None:

@@ -109,7 +109,7 @@ def _drop_dest(kind: str, my, pgd, dst_t: str) -> None:
                 cur.execute(f'DROP TABLE IF EXISTS "{name}"')
 
 
-def _run_and_cancel_mid_load(monkeypatch, dest: str, route: str):
+def _run_and_cancel_mid_load(monkeypatch, dest: str, route: str, make=None):
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import TransferRequest
 
@@ -117,7 +117,7 @@ def _run_and_cancel_mid_load(monkeypatch, dest: str, route: str):
     p, c, pg, my, src_t, dst_t = _setup(150_000)
     view = _paced_source(pg, src_t)
     pgd = _pg_dest(p)
-    _make_dest(dest, my, pgd, dst_t)
+    (make or _make_dest)(dest, my, pgd, dst_t)
     request = TransferRequest(
         source=_endpoint("postgresql", p, view),
         destination=_endpoint(dest, p if dest == "postgresql" else c, dst_t),
@@ -235,3 +235,194 @@ def test_a_cancel_after_the_overwrite_committed_keeps_the_new_rows(monkeypatch):
         _drop_dest("mysql", my, pgd, dst_t)
         pgd.close()
         _teardown(pg, my, src_t, dst_t)
+
+
+def test_a_cancel_at_the_final_progress_write_keeps_the_complete_load(monkeypatch):
+    """Review 3: the row path's last batch is committed and the cancel lands
+    at the final progress write. The load is complete: it must stay (as on
+    the COPY route), never be put back to the pre-run rows."""
+    import src.transfer.engine as engine_mod
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    store = _engine(monkeypatch)
+    p, c, pg, my, src_t, dst_t = _setup(3000)
+    pgd = _pg_dest(p)
+    _make_dest("mysql", my, pgd, dst_t)
+    job_id = uuid.uuid4().hex[:24]
+    real = engine_mod._progress_write_or_cancel
+
+    def cancel_at_the_last_write(mongo, jid, **update):
+        if int(update.get("records_processed") or 0) >= 3000:
+            store.request_job_cancel(job_id)
+            store.update_job_status(job_id, "cancelled", operator_command=True)
+        return real(mongo, jid, **update)
+
+    monkeypatch.setattr(engine_mod, "_progress_write_or_cancel", cancel_at_the_last_write)
+    request = TransferRequest(
+        source=_endpoint("postgresql", p, src_t),
+        destination=_endpoint("mysql", c, dst_t),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="balanced",
+        source_filter={"column": "id", "op": "gt", "value": 0},
+        skip_preflight=True,
+    )
+    store.update_job_status(job_id, "pending", transfer_request={})
+    try:
+        UniversalTransferEngine().execute_tracked(request, job_id)
+        job = store.get_job(job_id) or {}
+        assert job.get("status") == "cancelled", job.get("status")
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*), MIN(id), MAX(id) FROM `{dst_t}`")  # nosec B608
+            assert cur.fetchone() == (3000, 1, 3000)
+        assert _leftovers("mysql", my, pgd, dst_t) == []
+        outcome = job.get("cancel_outcome") or {}
+        assert outcome.get("rows_committed") == 3000, outcome
+        assert not outcome.get("pre_run_rows_restored"), outcome
+    finally:
+        _drop_dest("mysql", my, pgd, dst_t)
+        pgd.close()
+        _teardown(pg, my, src_t, dst_t)
+
+
+def _make_auto_increment_dest(kind, my, pgd, dst_t):
+    with my.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE `{dst_t}` (id INT AUTO_INCREMENT PRIMARY KEY, a VARCHAR(40), n INT)"
+        )
+        cur.executemany(f"INSERT INTO `{dst_t}` VALUES (%s, %s, %s)", PRE_RUN)  # nosec B608
+        cur.execute(f"ALTER TABLE `{dst_t}` AUTO_INCREMENT = 700")
+
+
+def _auto_increment(my, table: str) -> int:
+    with my.cursor() as cur:
+        cur.execute(
+            "SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+            (table,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def test_a_restore_puts_the_pre_run_auto_increment_back(monkeypatch):
+    """Review 4: the cancelled load moved AUTO_INCREMENT past its own keys;
+    an exact restore puts the pre-run counter back too."""
+    store, job_id, result, alive, worker, env = _run_and_cancel_mid_load(
+        monkeypatch, "mysql", "row", make=_make_auto_increment_dest
+    )
+    p, c, pg, my, src_t, dst_t, pgd = env
+    try:
+        assert alive, f"the cancel did not land mid-load: {result}"
+        job = store.get_job(job_id) or {}
+        assert job.get("message") == RESTORED_MESSAGE, job.get("message")
+        assert _dest_rows("mysql", my, pgd, dst_t) == PRE_RUN
+        assert _auto_increment(my, dst_t) == 700
+    finally:
+        worker.join(30)
+        _drop_dest("mysql", my, pgd, dst_t)
+        pgd.close()
+        _teardown(pg, my, src_t, dst_t)
+
+
+def _make_trigger_dest(kind, my, pgd, dst_t):
+    with my.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE `{dst_t}` (id INT PRIMARY KEY, a VARCHAR(40), n INT, "
+            "n2 INT AS (n * 2) STORED)"
+        )
+        cur.executemany(f"INSERT INTO `{dst_t}` (id, a, n) VALUES (%s, %s, %s)", PRE_RUN)  # nosec B608
+        cur.execute(f"CREATE TABLE `{dst_t}_audit` (id INT)")
+        cur.execute(
+            f"CREATE TRIGGER `{dst_t}_ai` AFTER INSERT ON `{dst_t}` "
+            f"FOR EACH ROW INSERT INTO `{dst_t}_audit` VALUES (NEW.id)"
+        )
+
+
+def test_a_table_with_triggers_is_not_restored_blindly_and_gets_exact_steps(monkeypatch):
+    """Review 4/5: copying rows back would fire the table's triggers again
+    (audit rows, rewritten values). The backup is kept and the job gives
+    statements that work on the real table: quoted identifiers, the stored
+    columns only (the generated n2 cannot be inserted: MariaDB 1906)."""
+    store, job_id, result, alive, worker, env = _run_and_cancel_mid_load(
+        monkeypatch, "mysql", "row", make=_make_trigger_dest
+    )
+    p, c, pg, my, src_t, dst_t, pgd = env
+    backup = f"{dst_t}__df_bak"
+    try:
+        assert alive, f"the cancel did not land mid-load: {result}"
+        job = store.get_job(job_id) or {}
+        msg = str(job.get("message"))
+        outcome = job.get("cancel_outcome") or {}
+        assert outcome.get("pre_run_rows_restored") is False, outcome
+        assert outcome.get("pre_run_backups") == [{"table": dst_t, "backup": backup}], outcome
+        assert f"the pre-run rows are kept in {backup}" in msg, msg
+        assert f"DROP TRIGGER `{dst_t}_ai`" in msg, msg
+        insert = f"INSERT INTO `{dst_t}` (`id`, `a`, `n`) SELECT `id`, `a`, `n` FROM `{backup}`"
+        assert insert in msg, msg
+        # The kept backup holds exactly the pre-run rows.
+        with my.cursor() as cur:
+            cur.execute(f"SELECT id, a, n FROM `{backup}` ORDER BY id")  # nosec B608
+            assert [tuple(r) for r in cur.fetchall()] == PRE_RUN
+            # The steps work: run them as given (trigger saved and re-created).
+            cur.execute(f"SHOW CREATE TRIGGER `{dst_t}_ai`")
+            trigger_sql = cur.fetchone()[2]
+            cur.execute(f"DROP TRIGGER `{dst_t}_ai`")
+            cur.execute(f"DELETE FROM `{dst_t}_audit`")
+            for stmt in ("START TRANSACTION", f"DELETE FROM `{dst_t}`", insert, "COMMIT"):
+                cur.execute(stmt)
+            cur.execute(trigger_sql)
+            cur.execute(f"DROP TABLE `{backup}`")
+            cur.execute(f"SELECT id, a, n, n2 FROM `{dst_t}` ORDER BY id")  # nosec B608
+            assert [tuple(r) for r in cur.fetchall()] == [(i, a, n, n * 2) for i, a, n in PRE_RUN]
+            cur.execute(f"SELECT COUNT(*) FROM `{dst_t}_audit`")  # nosec B608
+            assert cur.fetchone()[0] == 0, "the manual steps fired the trigger"
+    finally:
+        worker.join(30)
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst_t}_audit`")
+        _drop_dest("mysql", my, pgd, dst_t)
+        pgd.close()
+        _teardown(pg, my, src_t, dst_t)
+
+
+def test_pg_manual_restore_steps_handle_identity_and_generated_columns():
+    """Review 5: ``INSERT INTO t SELECT * FROM bak`` fails on a GENERATED
+    ALWAYS identity and on a generated column. The steps list the stored
+    columns, quote them and say OVERRIDING SYSTEM VALUE; run as given they
+    put the pre-run rows back exactly."""
+    from connectors.overwrite_restore_steps import _pg_steps
+    from tests.helpers.live_env import pg_creds, pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not configured")
+    pgd = _pg_dest(pg_creds())
+    t = f"D302_Steps_{uuid.uuid4().hex[:6]}"
+    bak = f"{t}__df_bak"
+    try:
+        with pgd.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE "{t}" (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, '
+                '"Mixed Case" TEXT, n INT, n2 INT GENERATED ALWAYS AS (n * 2) STORED)'
+            )
+            cur.execute(f'INSERT INTO "{t}" ("Mixed Case", n) VALUES (\'x\', 1), (\'y\', 2)')
+            cur.execute(f'CREATE TABLE "{bak}" (LIKE "{t}" INCLUDING ALL)')
+            cur.execute(f'SELECT id, "Mixed Case", n, n2 FROM "{t}" ORDER BY id')
+            pre = cur.fetchall()
+            cur.execute(
+                f'INSERT INTO "{bak}" (id, "Mixed Case", n) OVERRIDING SYSTEM VALUE '
+                f'SELECT id, "Mixed Case", n FROM "{t}"'
+            )
+            cur.execute(f'DELETE FROM "{t}"')
+            cur.execute(f'INSERT INTO "{t}" ("Mixed Case", n) VALUES (\'partial\', 9)')
+            steps = _pg_steps(cur, "public", t, bak)
+            assert 'OVERRIDING SYSTEM VALUE' in steps[0] and '"Mixed Case"' in steps[0], steps
+            assert '"n2"' not in steps[0], steps
+            for step in steps:
+                cur.execute(step)
+            cur.execute(f'SELECT id, "Mixed Case", n, n2 FROM "{t}" ORDER BY id')
+            assert cur.fetchall() == pre
+    finally:
+        with pgd.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{bak}"')
+            cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+        pgd.close()

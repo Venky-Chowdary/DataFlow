@@ -57,7 +57,9 @@ def test_failed_mongo_overwrite_renames_aside_instead_of_dropping():
             self.db = db
             self.name = name
 
-        def rename(self, new):
+        def rename(self, new, dropTarget=False):  # noqa: N803 - pymongo's keyword
+            # pymongo: renaming onto an existing name fails unless dropTarget.
+            assert dropTarget or new not in self.db.cols, "rename onto an existing collection"
             self.db.cols[new] = self.db.cols.pop(self.name)
             self.name = new
 
@@ -117,7 +119,9 @@ def test_failed_mongo_overwrite_renames_aside_instead_of_dropping():
         restore_mongodb_overwrite({}, "orders", backup)
     assert "orders__df_bak" not in db.cols
     assert db.cols["orders"]["docs"] == [{"_id": 1, "sku": "A"}]
-    assert db.dropped == ["orders"]
+    # One server-side step (rename with dropTarget): never a moment with no
+    # collection named "orders" (D302 review).
+    assert db.dropped == []
 
     with patch("connectors.table_manager._mongo_db", return_value=db):
         backup = retire_mongodb_overwrite({}, "orders")

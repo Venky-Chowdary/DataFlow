@@ -286,11 +286,11 @@ def _settle_backup_after_error(
         _settle_overwrite_backup,
     )
     if isinstance(exc, TransferCancelled):
-        from .cancel_restore import effective_sync_mode, restorable_on_cancel, restore_on_cancel
+        from .cancel_restore import restorable_on_cancel, restore_on_cancel
 
-        held = restorable_on_cancel(destination, effective_sync_mode(request))
+        held = restorable_on_cancel(destination, request)
         if held:
-            return restore_on_cancel(destination, exc, held)
+            return restore_on_cancel(destination, exc, held, request)
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
     if restore and restored:

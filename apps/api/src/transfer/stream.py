@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 _stream = sys.modules[__name__]
 
+from .cancel_restore import mark_write_complete
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
@@ -778,6 +779,7 @@ def _stream_database_transfer_impl(
             dest_cfg=run.cfg.dest_cfg,
             dest_table=resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
             job_id=str(run.cfg.job_id or ""),
+            sync_mode=str(run.cfg.effective_sync or ""),
         )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
@@ -838,6 +840,7 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns = fast
         run.tally.dest_summary["copy_fast_path"] = "used"
+        mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # D302: kept on a later cancel
         if run.cfg.pk_target_cols:
             run.tally.dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))
             run.tally.dest_summary.setdefault("primary_key_columns", list(run.cfg.pk_target_cols))
@@ -1863,6 +1866,7 @@ def _stream_database_transfer_impl(
             dest_cfg=run.cfg.dest_cfg,
             dest_table=str(run.cfg.dest_table),
             job_id=str(run.cfg.job_id or ""),
+            sync_mode=str(run.cfg.effective_sync or ""),
         )
         if _route_backups:
             run.tally.dest_summary["route_backups"] = dict(_route_backups)
@@ -2614,6 +2618,8 @@ def _stream_database_transfer_impl(
             run.cur.kafka_cursor = _kafka_accumulate_offsets(run.tally.dest_summary, run.cur.kafka_cursor)
             checkpoint.kafka_cursor = run.cur.kafka_cursor
             checkpoint_service.require_save(checkpoint)
+        if run.cfg.total_rows and int(run.tally.written or 0) >= int(run.cfg.total_rows):
+            mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # every row committed (D302)
         if on_checkpoint:
             on_checkpoint(idx, run.cfg.chunks, run.tally.written, _checkpoint_for_job(run, checkpoint))
 
@@ -2680,6 +2686,8 @@ def _stream_database_transfer_impl(
             or not run.tally.rejected_total
             or run.tally.dest_summary.get("skipped_identity_keys")
         )
+        if row_path_ok:
+            mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # reader exhausted (D302)
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
         # reject must not leave committed batches.
