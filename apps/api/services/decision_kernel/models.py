@@ -405,22 +405,126 @@ def stamp_is_previous_release_format(art: DecisionArtifact) -> bool:
     return bool(stamp) and stamp != compute_content_hash(_payload(art))
 
 
-def decision_stamps_match(approved: str, art: DecisionArtifact, *, previous_formats_only: bool = False) -> bool:
+#: Plain reasons for a key-blind stamp the key rule refuses (review 3 item 1).
+NO_KEY_RECORD_REASON = (
+    "re-Validate this route — the approval predates key tracking: it does not "
+    "record which columns were the key, so a keyed Map cannot be run on it."
+)
+KEY_CHANGED_REASON = (
+    "re-Validate this route — the key columns changed since this approval."
+)
+
+#: Digest formats that cover the key flag on each row.
+_KEY_AWARE_FORMATS = frozenset({"current", "scored"})
+
+
+def decision_key_columns(artifact: DecisionArtifact | Mapping[str, Any]) -> frozenset[str]:
+    """The destination columns the decision marks as key (lower case)."""
+    rows = _payload(artifact).get("mappings") or []
+    return frozenset(
+        str(row.get("target") or row.get("source") or "").strip().lower()
+        for row in rows
+        if isinstance(row, Mapping) and _row_is_key(row)
+    )
+
+
+def stamp_format(stamp: str, artifact: DecisionArtifact | Mapping[str, Any]) -> str:
+    """Which digest of ``artifact`` ``stamp`` is: current, scored, base, interim, or ''.
+
+    For an unkeyed decision a key-aware digest can equal a key-blind one (PR
+    #435's interim digest of a Map keyed on ``id`` equals the scored digest of
+    the same Map without the key). The stamp is then treated as key-blind, so
+    the key rule (:func:`stamp_key_refusal`) decides with the stamp's record.
+    """
+    value = (stamp or "").strip().lower()
+    if not value:
+        return ""
+    payload = _payload(artifact)
+    matches = [
+        name for name, digest in (
+            ("current", compute_content_hash),
+            ("scored", scored_structural_hash),
+            ("base", base_content_hash),
+            ("interim", interim_content_hash),
+        )
+        if value == digest(payload)
+    ]
+    blind = [name for name in matches if name not in _KEY_AWARE_FORMATS]
+    return (blind or matches or [""])[0]
+
+
+def stamp_key_refusal(
+    fmt: str,
+    stamped: DecisionArtifact | Mapping[str, Any],
+    current_keys: frozenset[str],
+    recorded_keys: frozenset[str] | None,
+) -> str:
+    """Why a stamp of format ``fmt`` may not approve a run keyed on ``current_keys``.
+
+    The current and PR #435 scored digests cover each row's key flag, so the
+    stamped key set is the stamped decision's own. The feature/Cleanup (base)
+    and PR #435 interim digests drop key flags: the key set they were taken
+    over is known only from ``recorded_keys`` (the schedule's rows when the
+    stamp was recorded, :mod:`services.stamp_key_records`), ``None`` when
+    there is no record.
+
+    * interim: only when neither the stamped nor the current decision is keyed;
+    * base: a keyed decision only when the recorded key set is the current one
+      (no record: :data:`NO_KEY_RECORD_REASON`); an unkeyed decision unless the
+      record says the stamp was keyed.
+    """
+    if fmt in _KEY_AWARE_FORMATS:
+        return "" if decision_key_columns(stamped) == current_keys else KEY_CHANGED_REASON
+    if fmt == "interim":
+        if current_keys:
+            return NO_KEY_RECORD_REASON if recorded_keys is None else KEY_CHANGED_REASON
+        return KEY_CHANGED_REASON if recorded_keys else ""
+    if fmt == "base":
+        if current_keys:
+            if recorded_keys is None:
+                return NO_KEY_RECORD_REASON
+            return "" if recorded_keys == current_keys else KEY_CHANGED_REASON
+        return KEY_CHANGED_REASON if recorded_keys else ""
+    return ""
+
+
+def stamp_refusal(
+    approved: str,
+    art: DecisionArtifact,
+    *,
+    recorded_keys: frozenset[str] | None = None,
+    previous_formats_only: bool = False,
+) -> str:
+    """'' when ``approved`` names ``art``, else 'mismatch' or the key rule's reason."""
+    fmt = stamp_format(approved, art)
+    if not fmt or (
+        previous_formats_only
+        and (approved or "").strip().lower() == compute_content_hash(_payload(art))
+    ):
+        return "mismatch"
+    return stamp_key_refusal(fmt, art, decision_key_columns(art), recorded_keys)
+
+
+def decision_stamps_match(
+    approved: str,
+    art: DecisionArtifact,
+    *,
+    previous_formats_only: bool = False,
+    recorded_keys: frozenset[str] | None = None,
+) -> bool:
     """True when a stored stamp names this artifact.
 
-    The current content hash, the feature/Cleanup digest, or PR #435's interim
-    digest of this artifact. None of these accepts a different type, key,
-    fingerprint, sync mode, or error policy. A base stamp still moves with the
-    score it was taken at (that digest held it); a current stamp does not.
+    The current content hash, PR #435's scored digest, the feature/Cleanup
+    digest, or PR #435's interim digest of this artifact, subject to the key
+    rule (:func:`stamp_key_refusal`): a key-blind stamp never approves a key
+    change. None of these accepts a different type, fingerprint, sync mode or
+    error policy. ``previous_formats_only``: only a digest the previous release
+    minted (matching under its type rules).
     """
-    stamp = (approved or "").strip().lower()
-    if not stamp:
-        return False
-    if previous_formats_only:
-        return stamp in previous_release_stamps(art)
-    if stamp == (art.content_hash or "").strip().lower():
-        return True
-    return stamp in accepted_stamps(art)
+    return not stamp_refusal(
+        approved, art, recorded_keys=recorded_keys,
+        previous_formats_only=previous_formats_only,
+    )
 
 
 def build_decision_artifact(

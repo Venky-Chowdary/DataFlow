@@ -171,6 +171,23 @@ backfill code that runs at start (for example
 - **Flag names.** `DATAFLOW_` names keep working. See the prefix rule in
   [configuration.md](configuration.md).
 - **API keys.** Keys starting `dfk_` stay valid.
+- **Map approvals that do not record the key.** Approvals made by the
+  previous releases (the feature/Cleanup format, and PR #435's interim
+  format) do not cover which columns are the key. On this release:
+  - A Map with no key keeps running on such an approval.
+  - A Map with a key runs on it only when Datawrap holds a record of the key
+    the approval was taken over. For a schedule saved before the upgrade, that
+    record is made from its stored rows the first time this release reads the
+    schedule, before any edit (a scheduled run, or a save). The record is kept
+    in the MongoDB collection `decision_stamp_key_records`, or in
+    `decision_stamp_key_records.json` in the data directory.
+  - A change of key (one added, removed or moved) on such an approval is
+    refused with "re-Validate this route".
+  - Studio and API runs that send such an approval for a keyed Map, and
+    schedules created on this release with one, have no record. They are
+    refused with "re-Validate this route — the approval predates key
+    tracking".
+  - Run Validate again; the new approval covers the key.
 
 
 #### Workspace isolation and residency (PR 403)

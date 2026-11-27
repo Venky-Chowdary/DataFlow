@@ -710,7 +710,16 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
     from contextlib import nullcontext
 
     from services.decision_kernel.legacy_rules import legacy_plan_rules
+    from services.stamp_key_records import lookup
 
+    try:
+        recorded = lookup(
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""), stamp=approved,
+            dest_connector_id=str(getattr(sched, "dest_connector_id", "") or ""),
+            dest_table=str(getattr(sched, "dest_table", "") or ""),
+        )
+    except Exception:  # noqa: BLE001 - no record: a keyed Map re-validates
+        recorded = None
     # Review Q1: a stamp minted under the previous release's type rules.
     for legacy in (False, True):
         with legacy_plan_rules() if legacy else nullcontext():
@@ -727,7 +736,8 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
                     artifact_id="da_inline",
                     created_at="1970-01-01T00:00:00+00:00",
                 )
-                if decision_stamps_match(approved, art, previous_formats_only=legacy):
+                if decision_stamps_match(approved, art, previous_formats_only=legacy,
+                                         recorded_keys=recorded):
                     return True
     return False
 

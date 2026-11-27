@@ -1821,6 +1821,10 @@ def create_schedule(
         from services.schedule_decision_stamp import align_schedule_decision_hash
 
         align_schedule_decision_hash(created_payload)
+        from services.stamp_key_records import record_schedule
+
+        # Review 3 item 1: a stamp brought by a new schedule names no key set.
+        record_schedule(created_payload, trusted_rows=False)
         sched = PipelineSchedule.from_dict(created_payload)
         _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
         _assert_dest_pipeline_ownership(payload)
@@ -2154,6 +2158,11 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         cadence_changed = "timezone" in data or (interval, cron) != (s.interval, s.cron)
         sync_mode = _validate_cadence(interval, cron, tz, sync_mode, check_zone=cadence_changed)
         data = {**data, "sync_mode": sync_mode}
+        from services.stamp_key_records import record_schedule
+
+        # Review 3 item 1: before this edit, the stored rows are the rows
+        # saved with the stored stamp; pin their key set for key-blind stamps.
+        record_schedule(s, trusted_rows=True)
         merged = {**s.to_dict(), **data, "id": schedule_id}
         # Pausing or renaming a schedule must work while taps are disabled; only
         # enabling it, or pointing it at other connectors, needs a usable tap.
@@ -2313,6 +2322,11 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         from services.schedule_decision_stamp import align_schedule_decision_hash
 
         align_schedule_decision_hash(merged)
+        if str(merged.get("approved_decision_artifact_hash") or "").strip().lower() != str(
+            s.approved_decision_artifact_hash or ""
+        ).strip().lower():
+            # A stamp this edit brings: no record shows the key it was taken over.
+            record_schedule(merged, trusted_rows=False)
         updated = PipelineSchedule.from_dict(merged)
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):

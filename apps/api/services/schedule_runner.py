@@ -602,6 +602,11 @@ def build_schedule_request(
     from services.schedule_mapping_contract import assert_schedule_mappings_replayable
 
     mappings = assert_schedule_mappings_replayable(sched.mappings)
+    from services.stamp_key_records import record_schedule
+
+    # Review 3 item 1: unedited since it was stored, the schedule's rows are
+    # the rows saved with its stamp (a no-op once a record exists).
+    record_schedule(sched, trusted_rows=True)
     schema_policy = sched.schema_policy or "manual_review"
     sched_shape_recipe = (
         dict(getattr(sched, "shape_recipe", None) or {})

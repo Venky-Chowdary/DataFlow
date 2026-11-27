@@ -660,27 +660,35 @@ def test_d407_retry_of_own_create_is_not_dest_schema_drift():
     assert err is None, err
     assert art is not None
 
-    # The exact-DDL test is the D407 retry exception's own condition (review
-    # Q3): a widened or extra column does not qualify for it. What such a
-    # table gets is then the create-new dest-exists hold's answer, as before
-    # #435 (it judges the mapped shape, not the carriers).
-    from services.decision_kernel.execute_gate import _planned_create_still_holds
+    widened = {**live, "name": "varchar(80)"}
+    err_w, art_w = _gate(widened)
+    assert err_w and "drifted" in err_w.lower()
+    assert art_w is None
 
-    def _exception_holds(types: dict[str, str]) -> bool:
-        return _planned_create_still_holds(
-            planned=planned, live_column_types=types, destination_table_exists=True,
-            mappings=maps, dest_column_names=list(types), source_column_names=["id", "name", "qty"],
-            column_nullability=None, column_defaults=None, identity_columns=None,
-            generated_columns=None, schema_policy="", dest_db="mysql",
-        )[0]
+    extra = {**live, "note": "int"}
+    err_x, art_x = _gate(extra)
+    assert err_x and "drifted" in err_x.lower()
+    assert art_x is None
 
-    assert _exception_holds(live)
-    assert not _exception_holds({**live, "name": "varchar(80)"})
-    assert not _exception_holds({**live, "note": "int"})
-    for drifted in ({**live, "name": "varchar(80)"}, {**live, "note": "int"}):
-        hold, _ = _gate(drifted, plan_created_destination=False)
-        held, _ = _gate(drifted)
-        assert (hold is None) == (held is None), (drifted, hold, held)
+    # Review 3 item 2: a live table that is not the planned DDL is drift on
+    # the supplied-payload path and on the stamp-only path, whether or not
+    # this job created it: a narrowed column, a changed type, an extra column.
+    drifted_tables = [
+        {**live, "name": "varchar(5)"},
+        {**live, "qty": "int"},
+        {**live, "qty": "text"},
+        {**live, "note": "int"},
+    ]
+    for drifted in drifted_tables:
+        for created in (True, False):
+            err_d, art_d = _gate(drifted, plan_created_destination=created)
+            assert err_d and "drifted" in err_d.lower(), (drifted, created, err_d)
+            assert art_d is None
+            err_s, art_s = _gate(drifted, plan_created_destination=created, artifact_payload=None)
+            assert err_s and "drifted" in err_s.lower(), (drifted, created, err_s)
+            assert art_s is None
+    # The table as planned still runs on both paths.
+    assert _gate(live, artifact_payload=None)[0] is None
 
     err_src, art_src = _gate(live, source_fingerprint="1122334455667788")
     assert err_src and "source schema" in err_src.lower()

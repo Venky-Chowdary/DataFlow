@@ -9,7 +9,7 @@ an inline artifact (same pattern as DDL identity inline stamp).
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from services.decision_kernel.ddl import approved_mapping_ddl_fingerprint
 from contextlib import nullcontext
@@ -26,9 +26,13 @@ from services.decision_kernel.models import (
     ProofPlan,
     build_decision_artifact,
     decision_artifact_from_dict,
+    decision_key_columns,
     decision_stamps_match,
     same_structural_decision,
+    stamp_format,
     stamp_is_previous_release_format,
+    stamp_key_refusal,
+    stamp_refusal,
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
@@ -467,6 +471,7 @@ def create_new_validate_holds_after_dest_exists(
     route_id: str = "",
     schema_policy: str = "",
     reference: DecisionArtifact | None = None,
+    recorded_keys: frozenset[str] | None = None,
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -530,7 +535,8 @@ def create_new_validate_holds_after_dest_exists(
                             created_at="1970-01-01T00:00:00+00:00",
                         )
                         if decision_stamps_match(
-                            approved, create_new, previous_formats_only=legacy
+                            approved, create_new, previous_formats_only=legacy,
+                            recorded_keys=recorded_keys,
                         ) or (
                             not legacy and reference is not None
                             and same_structural_decision(reference, create_new)
@@ -587,6 +593,7 @@ def enforce_decision_artifact(
     live_column_types: dict[str, str] | None = None,
     plan_created_destination: bool = False,
     surrogate_approved: bool = False,
+    stamp_key_record: Callable[[str], frozenset[str] | None] | None = None,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -599,6 +606,29 @@ def enforce_decision_artifact(
     """
     has_maps = bool(mappings)
     approved = (approved_content_hash or "").strip().lower()
+    owned = _datawrap_owned_columns(sync_mode, surrogate_approved=surrogate_approved)
+
+    def _recorded(stamp: str) -> frozenset[str] | None:
+        """The key set recorded with ``stamp`` (review 3 item 1), or None."""
+        if stamp_key_record is None or not stamp:
+            return None
+        return stamp_key_record(stamp)
+
+    def _live_drifted(planned: Mapping[str, str] | None) -> bool:
+        """The live table is not the DDL this create-new plan would make (review 3 item 2).
+
+        Datawrap's own bookkeeping columns for this plan and the catalog's
+        spelling of a planned type are not drift; a narrowed or changed type
+        and any other extra column are.
+        """
+        return bool(
+            destination_table_exists is True and live_column_types and planned
+            and not planned_ddl_matches_live(planned, live_column_types,
+                                             dest_db=dest_db, owned_columns=owned)
+        )
+
+    drift_msg = ("Decision Artifact dest schema drifted since Validate — "
+                 "re-run Validate before Execute.")
 
     def _dest_exists_hold(
         stamp: str,
@@ -625,6 +655,7 @@ def enforce_decision_artifact(
             tenant_id=tenant_id,
             route_id=route_id,
             schema_policy=schema_policy,
+            recorded_keys=_recorded(stamp),
         )
 
     if artifact_payload:
@@ -678,7 +709,17 @@ def enforce_decision_artifact(
                     "re-run Validate before Execute.",
                     None,
                 )
+            # Review 3 item 1: the run's key is the current Map's; a stamp
+            # that does not cover key flags approves no key change.
+            key_reason = stamp_key_refusal(
+                stamp_format(supplied.content_hash, supplied), supplied,
+                decision_key_columns(current), _recorded(supplied.content_hash),
+            )
+            if key_reason:
+                return (f"Decision Artifact refused: {key_reason}", None)
             if dest_fp and supplied.dest_fingerprint != dest_fp:
+                if _live_drifted(dict(supplied.ddl.column_ddl or {})):
+                    return (drift_msg, None)
                 if not supplied.dest_fingerprint:
                     holds, hold_err = _dest_exists_hold(supplied.content_hash, supplied)
                     if holds:
@@ -753,10 +794,7 @@ def enforce_decision_artifact(
                         generated_columns=generated_columns,
                         schema_policy=schema_policy,
                         dest_db=dest_db,
-                        owned_columns=_datawrap_owned_columns(
-                            sync_mode or supplied.sync_mode,
-                            surrogate_approved=surrogate_approved,
-                        ),
+                        owned_columns=owned,
                     )
                     if shape_err:
                         return (shape_err, None)
@@ -819,19 +857,34 @@ def enforce_decision_artifact(
     current = _rebuild(route_candidates[0], dest_fp_now)
 
     if approved:
+        recorded = _recorded(approved)
+        key_reason = ""
         for rid in route_candidates:
             candidate = _rebuild(rid, dest_fp_now)
-            if decision_stamps_match(approved, candidate):
+            why = stamp_refusal(approved, candidate, recorded_keys=recorded)
+            if not why:
                 return (None, candidate)
+            if why != "mismatch":
+                key_reason = key_reason or why
         for rid in route_candidates:
             # Review Q1: the same Map stamped by the previous release, whose
             # type rules graded or spelled a few pairs differently.
             with legacy_plan_rules():
                 legacy = _rebuild(rid, dest_fp_now)
-            if decision_stamps_match(approved, legacy, previous_formats_only=True) and _legacy_plan_holds(
+            why = stamp_refusal(approved, legacy, recorded_keys=recorded,
+                                previous_formats_only=True)
+            if not why and _legacy_plan_holds(
                 legacy, current, live_column_types, destination_table_exists
             ):
                 return (None, current)
+            if why not in ("", "mismatch"):
+                key_reason = key_reason or why
+        if key_reason:
+            return (f"Decision Artifact refused: {key_reason}", None)
+        if _live_drifted(dict(current.ddl.column_ddl or {})):
+            # Review 3 item 2: the create-new hold below judges the mapped
+            # shape only; a live table that is not the planned DDL is drift.
+            return (drift_msg, None)
         holds, hold_err = _dest_exists_hold(approved)
         if holds:
             return (None, current)

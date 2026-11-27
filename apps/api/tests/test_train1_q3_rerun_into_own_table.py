@@ -31,22 +31,22 @@ _MAPS = [
 ]
 
 
-def _artifact():
+def _artifact(mode: str = "incremental_append"):
     return build_artifact_from_mappings(
         _MAPS, dest_db="postgresql", source_db="postgresql", source_fingerprint="",
-        dest_fingerprint="", sync_mode="incremental_append", route_id="validate:postgresql",
+        dest_fingerprint="", sync_mode=mode, route_id="validate:postgresql",
         artifact_id="da_inline", created_at="1970-01-01T00:00:00+00:00",
     )
 
 
-def _gate(live: dict[str, str], **extra):
-    art = _artifact()
+def _gate(live: dict[str, str], mode: str = "incremental_append", **extra):
+    art = _artifact(mode)
     args = dict(
         mappings=_MAPS, dest_db="postgresql", source_db="postgresql",
         approved_content_hash=art.content_hash, artifact_payload=art.to_dict(),
         dest_fingerprint=fingerprint_schema(list(live), live), destination_table_exists=True,
         dest_column_names=list(live), source_column_names=["id", "at", "amt"],
-        live_column_types=live, sync_mode="incremental_append", error_policy="quarantine",
+        live_column_types=live, sync_mode=mode, error_policy="quarantine",
     )
     args.update(extra)
     return enforce_decision_artifact(**args)
@@ -55,16 +55,24 @@ def _gate(live: dict[str, str], **extra):
 _CATALOG = {"id": "bigint", "at": "timestamp with time zone", "amt": "numeric(10, 2)"}
 
 
-@pytest.mark.parametrize("owned", [
-    {"_dw_row_id": "bigint"}, {"_deleted": "boolean"}, {"_deleted": "boolean", "_deleted_at": "timestamptz"},
+@pytest.mark.parametrize("owned, mode, surrogate", [
+    ({"_dw_row_id": "bigint"}, "incremental_append", True),
+    ({"_deleted": "boolean"}, "mirror", False),
+    ({"_deleted": "boolean", "_deleted_at": "timestamptz"}, "mirror", False),
 ])
-def test_a_create_new_artifact_runs_into_its_table_with_datawrap_columns(owned):
-    err, art = _gate({**_CATALOG, **owned})
+def test_a_create_new_artifact_runs_into_its_table_with_datawrap_columns(owned, mode, surrogate):
+    err, art = _gate({**_CATALOG, **owned}, mode, surrogate_approved=surrogate)
     assert err is None, err
     assert art is not None
     # And the D407 retry exception holds on its own terms too.
-    err, art = _gate({**_CATALOG, **owned}, plan_created_destination=True)
+    err, art = _gate({**_CATALOG, **owned}, mode, surrogate_approved=surrogate,
+                     plan_created_destination=True)
     assert err is None, err
+    # The same column where this plan does not add it is drift (review 3 item 2).
+    other = "incremental_append" if mode == "mirror" else "mirror"
+    err, art = _gate({**_CATALOG, **owned}, other)
+    assert err and "drifted" in err.lower(), err
+    assert art is None
 
 
 def test_each_bookkeeping_column_is_ignored_only_in_the_mode_that_adds_it():

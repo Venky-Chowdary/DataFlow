@@ -352,9 +352,37 @@ def _enforce_decision_artifact_once(
         live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
         plan_created_destination=bool(plan_created_destination),
         # The writer adds _dw_row_id only on this run's DDL approval.
-        surrogate_approved=bool(getattr(request, "ddl_changes_acknowledged", False)),
+        surrogate_approved=_surrogate_on_own_table(request, destination_column_types),
+        stamp_key_record=(
+            (lambda stamp: _stamp_key_record(request, stamp)) if request is not None else None
+        ),
     )
     return err, (art.to_dict() if art is not None else None)
+
+
+def _stamp_key_record(request: Any, stamp: str) -> frozenset[str] | None:
+    from services.stamp_key_records import lookup_for_request
+
+    return lookup_for_request(request, stamp)
+
+
+def _surrogate_on_own_table(request: Any, live_types: dict | None) -> bool:
+    """Whether a live ``_dw_row_id`` is Datawrap's approved surrogate (review 3 item 7).
+
+    The writer adds it only at CREATE, after the operator approved the
+    disclosed DDL, on a table it marks as its own; so it is the surrogate on
+    a Datawrap-created table, never because this run acknowledged some other
+    DDL change.
+    """
+    from services.dest_require_primary_key import SURROGATE_KEY_COLUMN
+
+    if request is None or not isinstance(live_types, dict):
+        return False
+    if not any(str(k).strip().lower() == SURROGATE_KEY_COLUMN for k in live_types):
+        return False
+    from src.transfer.engine_schema_propagation import _destination_is_managed
+
+    return _destination_is_managed(request)
 
 
 def reuse_approved_validate_population_fit(request) -> bool:
