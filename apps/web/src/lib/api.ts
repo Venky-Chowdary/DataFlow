@@ -5209,6 +5209,10 @@ export type Tenant = {
   enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
+  /** Parity at Scale for this workspace: null = the deployment's setting. */
+  verification_snapshot?: boolean | null;
+  /** Longest snapshot hold in minutes (never above the deployment's cap); null = the deployment's. */
+  verification_snapshot_max_minutes?: number | null;
   created_at: string;
   updated_at: string;
   /** What is enforced now (read and save responses; same source as the posture). */

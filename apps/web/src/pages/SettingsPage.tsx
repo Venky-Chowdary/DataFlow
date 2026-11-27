@@ -942,13 +942,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             setVerificationSnapshot(e.target.checked);
                           }}
                         />
-                        <p className="df2-label-hint">
-                          Holds an open transaction on both databases while every row is compared. Needed for a
-                          proven result; it delays clean-up on the source while held.
+                        <p className="df2-label-hint" data-testid="verification-snapshot-hint">
+                          The deployment-wide default: each workspace can turn it on or off for its own runs (its
+                          workspace settings), and a schedule can too. Holds an open read-only transaction on both
+                          databases while every row is compared — needed for a proven result; it delays clean-up on
+                          the source while held and is let go at once if another session waits on the table.
                         </p>
                       </div>
                       <div className="df2-settings-field">
-                        <label htmlFor="verification-snapshot-minutes">Longest snapshot hold (minutes)</label>
+                        <label htmlFor="verification-snapshot-minutes">Longest snapshot hold, any workspace (minutes)</label>
                         <input
                           id="verification-snapshot-minutes"
                           className="df2-input"
@@ -956,7 +958,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           min={1}
                           max={1440}
                           value={snapshotMinutes}
-                          disabled={!generalEditable || !verificationSnapshot}
+                          disabled={!generalEditable}
                           title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;

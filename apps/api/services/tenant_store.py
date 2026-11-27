@@ -213,6 +213,11 @@ class Tenant:
     # Connector egress. Empty means private ranges stay refused. This is not
     # the inbound API allowlist, and it is not a deploy setting.
     egress_allowlist: list[str] = field(default_factory=list)
+    # Parity at Scale: hold one snapshot per side while verifying this workspace's runs
+    # (None: the deployment default), and for at most this many minutes (never above the
+    # deployment's cap; see services.parity_scale.verification.snapshot_policy).
+    verification_snapshot: bool | None = None
+    verification_snapshot_max_minutes: int | None = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -238,6 +243,10 @@ class Tenant:
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
             sso_enforced=bool(data.get("sso_enforced", False)),
             egress_allowlist=list(data.get("egress_allowlist", []) or []),
+            verification_snapshot=(None if data.get("verification_snapshot") is None
+                                   else bool(data.get("verification_snapshot"))),
+            verification_snapshot_max_minutes=(int(data["verification_snapshot_max_minutes"])
+                                               if data.get("verification_snapshot_max_minutes") else None),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
         )
@@ -427,6 +436,13 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["egress_allowlist"] = _validate_egress_allowlist(kwargs["egress_allowlist"])
             if "sso_enforced" in kwargs:
                 raw["sso_enforced"] = bool(kwargs["sso_enforced"])
+            # None: back to the deployment's setting.
+            if "verification_snapshot" in kwargs:
+                value = kwargs["verification_snapshot"]
+                raw["verification_snapshot"] = None if value is None else bool(value)
+            if "verification_snapshot_max_minutes" in kwargs:
+                value = kwargs["verification_snapshot_max_minutes"]
+                raw["verification_snapshot_max_minutes"] = None if value is None else max(1, min(1440, int(value)))
             raw["updated_at"] = _now()
             _save(data)
             return Tenant.from_dict(raw)

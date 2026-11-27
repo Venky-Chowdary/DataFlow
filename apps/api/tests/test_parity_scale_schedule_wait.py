@@ -97,3 +97,29 @@ def test_the_sweep_finds_a_stopped_job_behind_many_healthy_ones() -> None:
                                                      lease_expired_before=time.time())
     assert found == [stopped]
     assert not set(found) & set(healthy)
+
+
+def test_a_schedule_or_workspace_never_raises_the_snapshot_cap(monkeypatch) -> None:
+    """Review 3, item 6: a schedule's longer hold replaced the admin's cap."""
+    import services.workspace_store as workspace_store
+
+    from services.parity_scale import verification
+
+    monkeypatch.setattr(workspace_store, "get_workspace_settings",
+                        lambda: {"verification_snapshot": True, "verification_snapshot_max_minutes": 30})
+
+    class Tenant:
+        verification_snapshot = None
+        verification_snapshot_max_minutes = 240
+
+    class Sched:
+        verification_snapshot = None
+        verification_snapshot_max_minutes = 120
+
+    monkeypatch.setattr(verification, "_tenant_of", lambda job: Tenant(), raising=False)
+    monkeypatch.setattr(verification, "_schedule_of", lambda job: Sched())
+    assert verification.snapshot_policy({})["max_hold_s"] == 1800.0
+    Sched.verification_snapshot_max_minutes = 5
+    assert verification.snapshot_policy({})["max_hold_s"] == 300.0
+    Tenant.verification_snapshot_max_minutes = 2
+    assert verification.snapshot_policy({})["max_hold_s"] == 120.0

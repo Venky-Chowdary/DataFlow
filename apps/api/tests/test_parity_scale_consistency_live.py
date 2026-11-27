@@ -273,7 +273,7 @@ def test_a_hold_past_its_maximum_lets_go_and_says_why(tables, monkeypatch) -> No
 
 @pg
 def test_the_snapshot_setting_turns_pinning_off_and_a_schedule_overrides_it(tables, monkeypatch) -> None:
-    """Review 2, N2: "Consistent snapshot during verification" is a workspace and schedule option."""
+    """Review 2, N2: "Consistent snapshot during verification" is a deployment, workspace and schedule option."""
     import services.workspace_store as workspace_store
 
     from services.parity_scale import verification
@@ -282,11 +282,11 @@ def test_the_snapshot_setting_turns_pinning_off_and_a_schedule_overrides_it(tabl
                         lambda: {"verification_snapshot": False, "verification_snapshot_max_minutes": 30})
     job_id = _job(*tables)
     assert verification.snapshot_policy(_svc().get_job(job_id)) == {
-        "enabled": False, "max_hold_s": 1800.0, "source": "workspace"}
+        "enabled": False, "max_hold_s": 1800.0, "source": "deployment"}
     assert verification.start_for_job(job_id, background=False)["state"] == "passed"
     report = _report(job_id)
     assert report["verdict"] == "no_difference_found"
-    assert "turned off (workspace setting)" in report["verdict_reason"]
+    assert "turned off (deployment setting)" in report["verdict_reason"]
 
     class Sched:
         verification_snapshot = True

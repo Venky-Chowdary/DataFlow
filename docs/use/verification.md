@@ -129,9 +129,14 @@ comparing every row inside both databases (see
   proof in the signed proof pack, and only where Gate-8 itself passed with
   no fidelity veto.
 - **What a held snapshot costs.** The setting "Consistent snapshot during
-  verification" (Settings, on by default; a schedule can override it) keeps
-  one read-only transaction open on each database for the whole comparison,
-  for at most "Longest snapshot hold" (default 30 minutes). While it is open:
+  verification" keeps one read-only transaction open on each database for
+  the whole comparison, for at most "Longest snapshot hold". The
+  deployment-wide default (on, 30 minutes) is a platform admin's, under
+  Settings, General; each workspace can turn it on or off for its own runs
+  and set a shorter hold (Settings, workspace enterprise settings), and a
+  schedule can do the same. The hold used is the shortest one set: a
+  workspace or schedule can never hold a snapshot longer than the
+  deployment's cap. While it is open:
   - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
     xmin horizon is held back), so tables with heavy writes grow until it
     ends;

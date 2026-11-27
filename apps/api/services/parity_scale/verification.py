@@ -223,15 +223,17 @@ def _schedule_of(job: dict[str, Any]) -> Any:
         from services.schedule_store import get_schedule
 
         return get_schedule(sid)
-    except Exception:  # noqa: BLE001 — no schedule store: the workspace setting decides
+    except Exception:  # noqa: BLE001 — no schedule store: the workspace or deployment setting decides
         return None
 
 
 def snapshot_policy(job: dict[str, Any]) -> dict[str, Any]:
     """Whether to hold one snapshot per side while verifying, and for how long at most.
 
-    The schedule's own option wins; otherwise the workspace setting
-    "Consistent snapshot during verification" (default on, 30 minutes).
+    "Consistent snapshot during verification": the deployment's setting (platform admins)
+    is the default and the cap; the job's workspace may turn it on or off and lower the cap
+    (its own settings); the job's schedule may do the same. A longer hold than the cap above
+    it is never used: the hold is the least of the caps set.
     """
     enabled, minutes, source = True, 30, "default"
     try:
@@ -240,15 +242,33 @@ def snapshot_policy(job: dict[str, Any]) -> dict[str, Any]:
         settings = get_workspace_settings()
         enabled = settings.get("verification_snapshot") is not False
         minutes = int(settings.get("verification_snapshot_max_minutes") or 30)
-        source = "workspace"
+        source = "deployment"
     except Exception:  # noqa: BLE001 — settings unavailable: the defaults
-        logger.warning("Workspace settings unavailable; verification uses the default snapshot policy")
+        logger.warning("Deployment settings unavailable; verification uses the default snapshot policy")
+    tenant = _tenant_of(job)
+    if tenant is not None and getattr(tenant, "verification_snapshot", None) is not None:
+        enabled, source = bool(tenant.verification_snapshot), "workspace"
+    if tenant is not None and getattr(tenant, "verification_snapshot_max_minutes", None):
+        minutes = min(minutes, int(tenant.verification_snapshot_max_minutes))
     sched = _schedule_of(job)
     if sched is not None and getattr(sched, "verification_snapshot", None) is not None:
         enabled, source = bool(sched.verification_snapshot), "schedule"
     if sched is not None and getattr(sched, "verification_snapshot_max_minutes", None):
-        minutes = int(sched.verification_snapshot_max_minutes)
-    return {"enabled": enabled, "max_hold_s": float(minutes) * 60.0, "source": source}
+        minutes = min(minutes, int(sched.verification_snapshot_max_minutes))
+    return {"enabled": enabled, "max_hold_s": float(max(1, minutes)) * 60.0, "source": source}
+
+
+def _tenant_of(job: dict[str, Any]) -> Any:
+    workspace_id = _workspace_of(job)
+    if not workspace_id:
+        return None
+    try:
+        from services.tenant_store import get_tenant_for_workspace
+
+        return get_tenant_for_workspace(workspace_id)
+    except Exception:  # noqa: BLE001 — no tenant store: the deployment setting decides
+        logger.warning("Workspace settings unavailable; verification uses the deployment snapshot policy")
+        return None
 
 
 # ── connections and catalog types ────────────────────────────────────────────

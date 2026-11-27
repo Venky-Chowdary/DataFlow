@@ -51,7 +51,8 @@ class WorkspaceSettingsBody(BaseModel):
     cdc_orphan_auto_drop: bool | None = None
     studio_schema_browser: bool | None = None
     studio_canvas: bool | None = None
-    # Parity at Scale: hold one snapshot per side while verifying, for at most N minutes.
+    # Parity at Scale, the deployment default and cap (platform admins; each workspace may
+    # override the default and lower the cap on its own settings, a schedule lower it again).
     verification_snapshot: bool | None = None
     verification_snapshot_max_minutes: int | None = Field(default=None, ge=1, le=1440)
 
@@ -136,6 +137,10 @@ class TenantUpdateBody(_TenantFieldChecks):
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
     sso_enforced: bool | None = Field(default=None)
+    # Parity at Scale, this workspace: hold one snapshot per side while verifying, for at most
+    # N minutes (never above the deployment's cap).
+    verification_snapshot: bool | None = Field(default=None)
+    verification_snapshot_max_minutes: int | None = Field(default=None, ge=1, le=1440)
 
 
 class BYOKKeyCreateBody(BaseModel):
@@ -1394,8 +1399,12 @@ def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
         from services.body_id_ownership import assert_byok_key_in_workspace
 
         assert_byok_key_in_workspace(body.byok_key_id, tenant.workspace_id)  # review 3, Low
+    fields = body.model_dump(exclude_none=True)
+    for name in ("verification_snapshot", "verification_snapshot_max_minutes"):
+        if name in body.model_fields_set and getattr(body, name) is None:
+            fields[name] = None  # sent as null: back to the deployment's setting
     try:
-        updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
+        updated = update_tenant(tenant_id, **fields)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
