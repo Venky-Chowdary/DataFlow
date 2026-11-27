@@ -54,6 +54,14 @@ async function mount(props: Record<string, unknown>) {
 const times = (host: HTMLElement) => [...host.querySelectorAll("time")].map((t) => t.getAttribute("datetime"));
 
 describe("NextRunsPreview asks the scheduler", () => {
+  it("an answer that is not a preview (an older API) is treated as no answer", async () => {
+    answer = { id: "sched-1", name: "not a preview" };
+    const { host, root } = await mount({ timeZone: "UTC" });
+    assert.equal(host.querySelectorAll("time").length, 5);
+    assert.match(host.textContent || "", /could not be reached/);
+    await act(async () => root.unmount());
+  });
+
   it("shows the scheduler's times, not the browser's, when they differ", async () => {
     const server = ["2026-11-22T01:30:00+00:00", "2026-11-23T01:30:00+00:00", "2026-11-24T01:30:00+00:00", "2026-11-25T01:30:00+00:00", "2026-11-26T01:30:00+00:00"];
     answer = { kind: "clock", timezone: "Africa/Casablanca", runs: server };

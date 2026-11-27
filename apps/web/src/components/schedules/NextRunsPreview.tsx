@@ -10,6 +10,7 @@ import {
   describeEvery,
   formatRunTime,
   previewNextRuns,
+  isServerPreview,
   withServerPreview,
   type ServerPreview,
 } from "../../lib/scheduleNextRuns";
@@ -69,7 +70,10 @@ export function NextRunsPreview({
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       previewScheduleNextRuns(request, { signal: controller.signal })
-        .then((answer) => setServer({ key: requestKey, answer, failed: false }))
+        // An answer that is not a preview (an older API) counts as no answer.
+        .then((answer) => setServer(isServerPreview(answer)
+          ? { key: requestKey, answer, failed: false }
+          : { key: requestKey, answer: null, failed: true }))
         .catch(() => {
           if (!controller.signal.aborted) setServer({ key: requestKey, answer: null, failed: true });
         });

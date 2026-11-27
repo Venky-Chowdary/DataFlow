@@ -339,8 +339,14 @@ export interface ServerPreview {
 }
 
 /** The scheduler's answer replaces the browser's; the browser's stands only while there is none. */
+export function isServerPreview(value: unknown): value is ServerPreview {
+  const v = value as ServerPreview | null;
+  return Boolean(v) && typeof v === "object" && ["clock", "rolling", "paused", "invalid"].includes(String(v!.kind))
+    && Array.isArray(v!.runs) && v!.runs.every((r) => typeof r === "string");
+}
+
 export function withServerPreview(local: NextRunsPreview, server: ServerPreview | null, timeZone: string): NextRunsPreview {
-  if (!server) {
+  if (!server || !isServerPreview(server)) {
     return local.kind === "clock" || local.kind === "rolling" ? { ...local, source: "browser" } : local;
   }
   if (server.kind === "paused") return { kind: "paused" };
