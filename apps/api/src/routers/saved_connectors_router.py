@@ -589,7 +589,23 @@ class BoundaryDuplicatesAckBody(BaseModel):
     """Accept possible boundary duplicates for one table of this destination."""
 
     table: str = Field(min_length=1, max_length=512)
+    schema_name: str = Field(default="", max_length=256, alias="schema")
     reason: str = Field(min_length=10, max_length=500)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+def _boundary_ack_route(connector_id: str, request: Request, workspace_id: str) -> tuple[Any, str]:
+    """The writable connector and the signed-in actor (401 when there is none)."""
+    from services.audit_log import actor_from_request
+
+    conn = _writable_connector_or_404(
+        request, get_connector(connector_id, workspace_id=_resolve_workspace(request, workspace_id))
+    )
+    actor = actor_from_request(request)
+    if actor in ("", "anonymous"):
+        raise HTTPException(status_code=401, detail="Sign in to decide on boundary duplicates")
+    return conn, actor
 
 
 @router.post("/{connector_id}/boundary-duplicates-acknowledgement")
@@ -599,23 +615,19 @@ def acknowledge_boundary_duplicates(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Record that an incremental append into ``table`` may append its watermark row again (D335).
+    """Record that an incremental append into ``schema.table`` may append its watermark row again (D335).
 
     Only for a route whose boundary cannot be checked; ``job.manage`` (as for
     approving DDL), the actor from the session, an audit event. Runs into the
     table then complete with warnings and name the accepted duplicates.
     """
-    from services.audit_log import actor_from_request, append_audit_event
+    from services.audit_log import append_audit_event
     from services.boundary_ack_store import record
 
-    conn = _writable_connector_or_404(
-        request, get_connector(connector_id, workspace_id=_resolve_workspace(request, workspace_id))
-    )
-    actor = actor_from_request(request)
-    if actor in ("", "anonymous"):
-        raise HTTPException(status_code=401, detail="Sign in to accept boundary duplicates")
+    conn, actor = _boundary_ack_route(connector_id, request, workspace_id)
+    schema = body.schema_name.strip() or str(getattr(conn, "schema", "") or "")
     ack = record(
-        connector_id, body.table, actor=actor, reason=body.reason.strip(),
+        connector_id, schema, body.table, actor=actor, reason=body.reason.strip(),
         workspace_id=str(conn.workspace_id or ""),
     )
     append_audit_event(
@@ -624,9 +636,35 @@ def acknowledge_boundary_duplicates(
         actor=actor,
         level="warning",
         workspace_id=str(conn.workspace_id or "") or None,
-        details={"table": body.table, "reason": body.reason.strip()},
+        details={"schema": schema, "table": body.table, "reason": body.reason.strip()},
     )
     return ack
+
+
+@router.delete("/{connector_id}/boundary-duplicates-acknowledgement")
+def revoke_boundary_duplicates(
+    connector_id: str,
+    table: str,
+    request: Request,
+    schema: str = "",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Withdraw the acknowledgement: the route's boundary must be checkable again."""
+    from services.audit_log import append_audit_event
+    from services.boundary_ack_store import revoke
+
+    conn, actor = _boundary_ack_route(connector_id, request, workspace_id)
+    schema = schema.strip() or str(getattr(conn, "schema", "") or "")
+    removed = revoke(connector_id, schema, table)
+    append_audit_event(
+        action="route.boundary_duplicates_acceptance_withdrawn",
+        resource=f"connector:{connector_id}",
+        actor=actor,
+        level="warning",
+        workspace_id=str(conn.workspace_id or "") or None,
+        details={"schema": schema, "table": table, "removed": removed},
+    )
+    return {"connector_id": connector_id, "schema": schema, "table": table, "removed": removed}
 
 
 @router.post("/{connector_id}/test")

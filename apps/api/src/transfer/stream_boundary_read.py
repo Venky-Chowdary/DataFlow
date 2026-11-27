@@ -47,7 +47,8 @@ STRUCTURAL_REMEDY = (
     "matched by key), or record the per-route acknowledgement "
     "'accept possible boundary duplicates' (recorded by a user with job.manage "
     "through POST /api/v1/connectors/saved/{connector_id}/"
-    "boundary-duplicates-acknowledgement)."
+    "boundary-duplicates-acknowledgement with this route's table and schema; "
+    "DELETE on the same path withdraws it)."
 )
 
 

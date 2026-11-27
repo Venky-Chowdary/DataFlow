@@ -677,6 +677,7 @@ _BODIES: dict[str, Any] = {
 }
 _QUERY: dict[str, dict[str, str]] = {
     "POST /api/v1/connectors/jobs/{job_id}/resume": {"request": "{}"},
+    "DELETE /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {"table": "orders"},
 }
 #: Statuses that mean "refused for who is asking".
 _REFUSED = {403, 404}

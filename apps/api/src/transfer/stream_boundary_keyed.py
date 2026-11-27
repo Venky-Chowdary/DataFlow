@@ -91,7 +91,7 @@ def _refused_message(reason: str) -> str:
     )
 
 
-def _accepted(destination: Any, table: str) -> dict[str, str] | None:
+def _accepted(destination: Any, table: str, schema: str = "") -> dict[str, str] | None:
     """The route's recorded acknowledgement (``services.boundary_ack_store``).
 
     Only one recorded through the audited API counts; ``accept_boundary_duplicates``
@@ -99,7 +99,8 @@ def _accepted(destination: Any, table: str) -> dict[str, str] | None:
     """
     from services.boundary_ack_store import lookup
 
-    ack = lookup(str(getattr(destination, "connector_id", "") or ""), str(table or ""))
+    schema = str(getattr(destination, "schema", "") or schema or "")
+    ack = lookup(str(getattr(destination, "connector_id", "") or ""), schema, str(table or ""))
     if not ack or not str(ack.get("actor") or "").strip():
         return None
     return {"actor": str(ack["actor"]), "reason": str(ack.get("reason") or ""), "at": str(ack.get("at") or "")}
@@ -192,7 +193,9 @@ def append_boundary_rows_landed(
             _holdbacks(run, failed=False)
         return landed
     except BoundaryStructural as exc:
-        ack = _accepted(getattr(run.cfg, "destination", None), run.cfg.dest_table)
+        ack = _accepted(
+            getattr(run.cfg, "destination", None), run.cfg.dest_table, str(run.cfg.dest_cfg.get("schema") or "")
+        )
         summary = _summary(run)
         if ack is None:
             raise BoundaryRefused(_refused_message(str(exc))) from exc
@@ -210,6 +213,8 @@ def append_boundary_rows_landed(
             f"the destination read failed ({type(exc).__name__})"
         )
         summary = _summary(run)
+        if verify and ((summary or {}).get(BOUNDARY_TIE_KEY) or {}).get("accepted"):
+            return set()  # the write pass proceeded under the acknowledgement
         count = _holdbacks(run, failed=True) if not verify else 0
         if summary is not None:
             summary.setdefault(BOUNDARY_TIE_KEY, {})["held_back"] = {
@@ -217,7 +222,18 @@ def append_boundary_rows_landed(
             }
         if count >= HOLDBACK_LIMIT:
             # A deterministic failure (an unindexed cursor timing out) would
-            # hold back forever: from the third run on it is structural.
+            # hold back forever: from the third run on it is structural - and
+            # the acknowledgement the refusal offers then lets the run proceed.
+            ack = _accepted(
+                getattr(run.cfg, "destination", None), run.cfg.dest_table,
+                str(run.cfg.dest_cfg.get("schema") or ""),
+            )
+            if ack is not None:
+                if summary is not None:
+                    summary.setdefault(BOUNDARY_TIE_KEY, {})["accepted"] = {
+                        **ack, "why": f"the watermark check did not answer on {count} consecutive runs ({reason})",
+                    }
+                return set()
             raise BoundaryRefused(
                 f"The destination did not answer the watermark check on {count} consecutive "
                 f"runs ({reason}). Add an index on {cursor_dest_col} (or declare a key) so "

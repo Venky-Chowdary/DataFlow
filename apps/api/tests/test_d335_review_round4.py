@@ -11,7 +11,11 @@
 * the acknowledgement is recorded only through the API by a user holding
   job.manage, with the session's actor and an audit event; a value typed into
   the destination's options is ignored;
-* copies of one key split across a 5,000-row page are all counted.
+* copies of one key split across a 5,000-row page are all counted;
+* round 7: NUMERIC/TIMESTAMP keys are compared typed on BigQuery (and cast to
+  the column type on Snowflake), the acknowledgement unblocks a route the
+  third hold-back escalated, and it is keyed by connection + schema + table
+  and withdrawn through an audited DELETE (job.manage).
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,12 +103,32 @@ class _FakeBigQuery:
     def get_table(self, _table_id):
         fields = [SimpleNamespace(name="id", field_type="INT64"),
                   SimpleNamespace(name="note", field_type="STRING"),
+                  SimpleNamespace(name="amount", field_type="NUMERIC"),
+                  SimpleNamespace(name="seen_at", field_type="TIMESTAMP"),
                   SimpleNamespace(name="updated_at", field_type="TIMESTAMP")]
         return SimpleNamespace(schema=fields)
 
-    def query(self, sql, job_config=None):
+    @staticmethod
+    def _as_string(value):
+        """BigQuery's CAST(x AS STRING): NUMERIC normalised, TIMESTAMP ``…+00``."""
+        if isinstance(value, datetime):
+            return _bq_text(value)
+        if isinstance(value, Decimal):
+            return format(value.normalize(), "f")
+        return str(value)
+
+    def _key_match(self, sql, named, row):
         import re
 
+        terms: dict[str, list[bool]] = {}
+        for cast_col, col, n, m in re.findall(r"(?:CAST\(`(\w+)` AS STRING\)|`(\w+)`) = @k(\d+)_(\d+)", sql):
+            value = named[f"k{n}_{m}"].value
+            stored = row[cast_col or col]
+            terms.setdefault(n, []).append(
+                self._as_string(stored) == value if cast_col else stored == value)
+        return None if not terms else any(all(t) for t in terms.values())
+
+    def query(self, sql, job_config=None):
         self.sql.append(sql)
         params = list(getattr(job_config, "query_parameters", None) or [])
         named = {p.name: p for p in params if getattr(p, "name", None)}
@@ -116,9 +141,9 @@ class _FakeBigQuery:
                 ok = _bq_text(r["updated_at"]) in texts
             else:
                 ok = True
-            keys = re.findall(r"CAST\(`id` AS STRING\) = @(k\d+_0)", sql)
-            if ok and keys:
-                ok = str(r["id"]) in {str(named[k].value) for k in keys}
+            keyed = self._key_match(sql, named, r)
+            if ok and keyed is not None:
+                ok = keyed
             if ok:
                 out.append(SimpleNamespace(items=lambda r=r: list(r.items())))
         return SimpleNamespace(result=lambda timeout=None: iter(out))
@@ -129,7 +154,8 @@ _BQ_WM = "2026-11-24T10:10:00.123456+00:00"
 
 def _bq_rows(copies: int):
     ts = datetime(2026, 11, 24, 10, 10, 0, 123456, tzinfo=timezone.utc)
-    return [{"id": 30, "note": "n", "updated_at": ts} for _ in range(copies)]
+    return [{"id": 30, "note": "n", "amount": Decimal("30.1"), "seen_at": datetime(2026, 11, 24, 9, tzinfo=timezone.utc),
+             "updated_at": ts} for _ in range(copies)]
 
 
 def test_bigquery_keyless_boundary_read_finds_the_stored_row(monkeypatch):
@@ -178,10 +204,29 @@ def test_bigquery_seventh_digit_is_cut_like_the_writer(monkeypatch):
     assert len(found) == 1, client.sql
 
 
+@pytest.mark.parametrize("key", [{"amount": "30.10"}, {"seen_at": "2026-11-24T09:00:00+00:00"},
+                                 {"id": "30", "amount": "30.100", "seen_at": "2026-11-24 09:00:00.000000Z"}])
+def test_bigquery_numeric_and_timestamp_keys_compare_typed(monkeypatch, key):
+    """A NUMERIC key "30.10" is the stored 30.1; a TIMESTAMP key in ISO is the stored instant."""
+    import connectors.bigquery_conn as bqc
+    from src.transfer.stream_boundary_keyed import read_boundary_candidates
+
+    client = _FakeBigQuery(_bq_rows(1))
+    monkeypatch.setattr(bqc, "get_client", lambda **_k: client)
+    found = read_boundary_candidates(
+        dialect="bigquery", dest_cfg={"database": "proj", "schema": "ds"}, table="t",
+        cursor_col="updated_at", watermark=_BQ_WM, key_cols=list(key), keys=[key],
+        columns=["id", "amount", "seen_at", "updated_at"], ddl="TIMESTAMP",
+    )
+    assert [r["id"] for r in found] == [30], client.sql
+    assert "AS STRING) = @k" not in client.sql[-1], client.sql[-1]
+
+
 # --- 1b. Snowflake through the engine (fakesnow) ----------------------------------
 
 
-def test_snowflake_keyless_append_lands_each_row_once(tmp_path, isolated, monkeypatch):
+@pytest.mark.parametrize("keys", [(), ("id",)])
+def test_snowflake_keyless_append_lands_each_row_once(tmp_path, isolated, monkeypatch, keys):
     pytest.importorskip("fakesnow")
     import src.transfer.stream_boundary_warehouse as wh
     from tests import typed_fidelity_helpers as tf
@@ -201,12 +246,12 @@ def test_snowflake_keyless_append_lands_each_row_once(tmp_path, isolated, monkey
         c.execute("CREATE TABLE t (id INTEGER, note TEXT, updated_at TEXT)")
         c.executemany("INSERT INTO t VALUES (?,?,?)",
                       [(i, f"n{i}", f"2026-11-24 10:{i:02d}:00.{i * 1111:06d}") for i in range(1, 11)])
-    first = _run(isolated, _req(src, tf.snowflake_endpoint(table), mode="balanced"))
+    first = _run(isolated, _req(src, tf.snowflake_endpoint(table), keys=keys, mode="balanced"))
     assert first.success, first.error
     with sqlite3.connect(src) as c:
         c.execute("INSERT INTO t VALUES (11, 'n11', '2026-11-24 10:10:00.011110')")  # tie peer
         c.execute("INSERT INTO t VALUES (12, 'n12', '2026-11-24 10:12:00.013332')")
-    second = _run(isolated, _req(src, tf.snowflake_endpoint(table), mode="balanced"))
+    second = _run(isolated, _req(src, tf.snowflake_endpoint(table), keys=keys, mode="balanced"))
     assert second.success, second.error
     assert typed_sql, "the boundary was not read through the typed Snowflake path"
     import snowflake.connector
@@ -257,6 +302,78 @@ def test_third_consecutive_hold_back_names_the_remedy(tmp_path, isolated, monkey
         _pg(f'DROP TABLE IF EXISTS public."{dst}"')
 
 
+def _saved_pg(tmp_path, monkeypatch, dst):
+    """A saved PostgreSQL connection (file store) for ``dst``; its endpoint factory."""
+    from tests import typed_fidelity_helpers as tf
+
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    from services.connector_store import create_connector
+
+    p = tf.pg_endpoint(dst)
+    saved = create_connector({
+        "name": f"pg-{dst}", "type": "postgresql", "host": p.host, "port": p.port,
+        "database": p.database, "username": p.username, "password": p.password, "schema": "public",
+    })
+
+    def _dest() -> EndpointConfig:
+        d = tf.pg_endpoint(dst)
+        d.connector_id = saved.id
+        return d
+
+    return saved, _dest
+
+
+def test_the_acknowledgement_unblocks_a_route_escalated_after_three_hold_backs(tmp_path, isolated, monkeypatch):
+    """3 timeouts (the third refused, offering the acknowledgement) -> recorded -> the next run proceeds."""
+    import inspect
+
+    import src.transfer.stream_boundary_keyed as sbk
+    from services import boundary_ack_store
+
+    src = tmp_path / "s.sqlite"
+    dst = f"d335e_{uuid.uuid4().hex[:8]}"
+    _pg(f'CREATE TABLE public."{dst}" (id BIGINT, note TEXT, updated_at TIMESTAMP(6))')
+    try:
+        saved, dest = _saved_pg(tmp_path, monkeypatch, dst)
+        with sqlite3.connect(src) as c:
+            c.execute("CREATE TABLE t (id INTEGER, note TEXT, updated_at TEXT)")
+            c.executemany("INSERT INTO t VALUES (?,?,?)", [(i, "n", f"2026-11-24 10:{i:02d}:00") for i in range(1, 11)])
+        assert _run(isolated, _req(src, dest())).success
+        real = sbk.read_candidates
+
+        def _write_pass_times_out(**kw):
+            # The write pass's watermark lookup times out on every run (an
+            # unindexed cursor); the post-write count answers.
+            if any(f.function == "append_boundary_rows_landed" for f in inspect.stack()):
+                raise RuntimeError("canceling statement due to statement timeout (fake)")
+            return real(**kw)
+
+        monkeypatch.setattr(sbk, "read_candidates", _write_pass_times_out)
+        with sqlite3.connect(src) as c:
+            c.execute("INSERT INTO t VALUES (11, 'n', '2026-11-24 10:11:00')")
+        three = [_run(isolated, _req(src, dest())) for _ in range(3)]
+        refusal = str(three[2].error or "")
+        assert "3 consecutive runs" in refusal and "accept boundary duplicates" in refusal, refusal
+        assert _pg(f'SELECT count(*) FROM public."{dst}"', fetch=True)[0][0] == 10
+
+        boundary_ack_store.record(saved.id, "public", dst, actor="ops-lead", reason="append log; dupes ok",
+                                  workspace_id="ws")
+        fourth = _run(isolated, _req(src, dest()))
+        assert fourth.success, fourth.error
+        job = isolated.jobs[fourth.job_id]
+        assert job["status"] == "completed_with_warnings", job["status"]
+        msg = str((fourth.reconciliation or {}).get("message") or "")
+        assert "Boundary duplicates accepted by ops-lead: 1 this run" in msg, msg
+        assert (fourth.reconciliation or {}).get("verification_verdict") == "explained"
+        # The watermark row again (accepted) and row 11: 12 rows, one duplicate.
+        assert _pg(f'SELECT count(*) FROM public."{dst}"', fetch=True)[0][0] == 12
+        assert _pg(f'SELECT id, count(*) FROM public."{dst}" GROUP BY id HAVING count(*) > 1',
+                   fetch=True) == [(10, 2)]
+    finally:
+        _pg(f'DROP TABLE IF EXISTS public."{dst}"')
+
+
 # --- 3. the acknowledgement is an audited API decision ------------------------------
 
 
@@ -302,7 +419,7 @@ def test_options_typed_into_the_destination_are_not_an_acknowledgement(tmp_path,
         refused = _run(isolated, _req(src, typed))
         assert not refused.success and "Declare a primary key" in str(refused.error), refused.error
 
-        boundary_ack_store.record(saved.id, dst, actor="ops-lead", reason="append log; dupes ok",
+        boundary_ack_store.record(saved.id, "public", dst, actor="ops-lead", reason="append log; dupes ok",
                                   workspace_id="ws")
         accepted = _run(isolated, _req(src, _dest()))
         assert accepted.success, accepted.error
@@ -340,10 +457,35 @@ def test_the_acknowledgement_route_needs_job_manage_and_records_the_session_acto
     assert viewer.post(path, json=body).status_code == 403
     ok = world.admin_a.post(path, json={**body, "actor": "someone-else"})
     assert ok.status_code == 200, ok.text
-    recorded = boundary_ack_store.lookup(connector_id, "orders")
+    recorded = boundary_ack_store.lookup(connector_id, "public", "orders")
     assert recorded["actor"] == "admin-a@tenancy.example.com", recorded
     assert any(e.get("action") == "route.boundary_duplicates_accepted" and e.get("actor") == recorded["actor"]
                for e in events), events
+
+
+def test_the_acknowledgement_is_keyed_by_schema_and_withdrawn_by_job_manage(world, monkeypatch, tmp_path):
+    from services import audit_log, boundary_ack_store
+    from tests.test_tenancy_route_scoping import _seed_saved_connector
+
+    monkeypatch.setattr(boundary_ack_store, "STORE_PATH", tmp_path / "acks.json")
+    monkeypatch.setattr(boundary_ack_store, "_db", lambda: None)
+    events = []
+    real = audit_log.append_audit_event
+    monkeypatch.setattr(audit_log, "append_audit_event", lambda **kw: events.append(kw) or real(**kw))
+    connector_id = _seed_saved_connector(world).params["connector_id"]
+    path = f"/api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement"
+    body = {"table": "orders", "schema": "sales", "reason": "append-only event log; duplicates are tolerated"}
+    assert world.admin_a.post(path, json=body).status_code == 200
+    assert boundary_ack_store.lookup(connector_id, "sales", "orders")
+    assert boundary_ack_store.lookup(connector_id, "public", "orders") is None  # another schema's table
+    viewer = world.member("viewer-ack2@tenancy.example.com", world.workspace_a, "viewer")
+    assert viewer.delete(path, params={"table": "orders", "schema": "sales"}).status_code == 403
+    assert boundary_ack_store.lookup(connector_id, "sales", "orders")
+    gone = world.admin_a.delete(path, params={"table": "orders", "schema": "sales"})
+    assert gone.status_code == 200 and gone.json()["removed"] is True, gone.text
+    assert boundary_ack_store.lookup(connector_id, "sales", "orders") is None
+    assert any(e.get("action") == "route.boundary_duplicates_acceptance_withdrawn"
+               and e.get("actor") == "admin-a@tenancy.example.com" for e in events), events
 
 
 # --- 4. a key's copies split across a page are all counted ---------------------------

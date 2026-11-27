@@ -29,8 +29,9 @@ def _path() -> Path:
     return STORE_PATH
 
 
-def _id(connector_id: str, table: str) -> str:
-    return f"{str(connector_id).strip()}:{str(table).strip().casefold()}"
+def _id(connector_id: str, schema: str, table: str) -> str:
+    """One route: the saved destination, its schema and its table."""
+    return f"{str(connector_id).strip()}:{str(schema or '').strip().casefold()}:{str(table).strip().casefold()}"
 
 
 def _db() -> Any:
@@ -39,11 +40,14 @@ def _db() -> Any:
     return mongo_database()
 
 
-def record(connector_id: str, table: str, *, actor: str, reason: str, workspace_id: str) -> dict[str, Any]:
-    """Store the acknowledgement for one route (a saved destination and its table)."""
+def record(
+    connector_id: str, schema: str, table: str, *, actor: str, reason: str, workspace_id: str
+) -> dict[str, Any]:
+    """Store the acknowledgement for one route (a saved destination, schema and table)."""
     doc = {
-        "id": _id(connector_id, table),
+        "id": _id(connector_id, schema, table),
         "connector_id": str(connector_id),
+        "schema": str(schema or ""),
         "table": str(table),
         "actor": str(actor),
         "reason": str(reason),
@@ -61,11 +65,23 @@ def record(connector_id: str, table: str, *, actor: str, reason: str, workspace_
     return doc
 
 
-def lookup(connector_id: str, table: str) -> dict[str, Any] | None:
+def revoke(connector_id: str, schema: str, table: str) -> bool:
+    """Withdraw the route's acknowledgement; True when one was stored."""
+    key = _id(connector_id, schema, table)
+    db = _db()
+    if db is not None:
+        return bool(db[COLLECTION].delete_one({"id": key}).deleted_count)
+    from services.metadata_backend import json_doc_transaction
+
+    with json_doc_transaction(_path(), {"acks": {}}) as data:
+        return data.setdefault("acks", {}).pop(key, None) is not None
+
+
+def lookup(connector_id: str, schema: str, table: str) -> dict[str, Any] | None:
     """The route's acknowledgement, or None."""
     if not str(connector_id or "").strip() or not str(table or "").strip():
         return None
-    key = _id(connector_id, table)
+    key = _id(connector_id, schema, table)
     db = _db()
     if db is not None:
         found = db[COLLECTION].find_one({"id": key})

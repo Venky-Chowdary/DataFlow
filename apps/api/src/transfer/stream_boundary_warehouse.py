@@ -123,13 +123,38 @@ def bigquery_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols, 
                     if key.get(c) is None:
                         parts.append(f"{ref} IS NULL")
                     else:
-                        parts.append(f"CAST({ref} AS STRING) = @k{n}_{m}")
-                        chunk_params.append(_bq.ScalarQueryParameter(f"k{n}_{m}", "STRING", str(key[c])))
+                        # Typed, like the cursor: CAST(NUMERIC AS STRING) is
+                        # "30.1" for a "30.10" key, a TIMESTAMP is "...+00".
+                        ktype, kvalue = _bigquery_key_param(schema[c.lower()][1], str(key[c]))
+                        parts.append(f"{ref} = @k{n}_{m}")
+                        chunk_params.append(_bq.ScalarQueryParameter(f"k{n}_{m}", ktype, kvalue))
                 terms.append("(" + " AND ".join(parts) + ")")
             sql = f"{base} AND (" + " OR ".join(terms) + ")"
         job = client.query(sql, job_config=_bq.QueryJobConfig(query_parameters=chunk_params))
         for row in job.result(timeout=120):
             yield {str(k).lower(): v for k, v in dict(row.items()).items()}
+
+
+def _bigquery_key_param(ctype: str, text: str) -> tuple[str, Any]:
+    """``(parameter type, value)`` comparing a key's source text with a BigQuery column."""
+    if ctype in {"INT64", "INTEGER"}:
+        return "INT64", int(Decimal(text))
+    if ctype in {"NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL"}:
+        return ("BIGNUMERIC" if ctype.startswith("BIG") else "NUMERIC"), Decimal(text)
+    if ctype in {"FLOAT64", "FLOAT"}:
+        return "FLOAT64", float(text)
+    if ctype in {"BOOL", "BOOLEAN"}:
+        return "BOOL", text.strip().lower() in {"1", "true", "t", "yes"}
+    if ctype in {"TIMESTAMP", "DATETIME", "DATE"}:
+        inst = instant(text)
+        if inst is None:
+            raise BoundaryStructural(f"the key value {text!r} is not a {ctype}")
+        seconds = inst[0] if (ctype == "TIMESTAMP" or not inst[1]) else instant(civil(text))[0]
+        value = _dt(carrier_values(seconds, ctype, "bigquery")[0])
+        if ctype == "TIMESTAMP":
+            return ctype, value.replace(tzinfo=timezone.utc)
+        return ctype, (value.date() if ctype == "DATE" else value)
+    return "STRING", text
 
 
 # --- Snowflake -----------------------------------------------------------------
@@ -148,6 +173,16 @@ def _snowflake_kind(ddl: str) -> str:
     if text.startswith(("VARCHAR", "TEXT", "STRING", "CHAR")):
         return "text"
     return ""
+
+
+def _snowflake_cast(ctype: str) -> str:
+    """A cast target for a key column, from DESC's type text (a safe subset only)."""
+    import re
+
+    text = str(ctype or "").upper().strip()
+    if re.fullmatch(r"[A-Z_]+(\(\s*\d+(\s*,\s*\d+)?\s*\))?", text):
+        return text
+    return "VARCHAR"
 
 
 def snowflake_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols, keys, columns, ddl=""):
@@ -221,7 +256,8 @@ def snowflake_rows(*, dialect, dest_cfg, table, cursor_col, watermark, key_cols,
                         if key.get(c) is None:
                             parts.append(f"{ref[c]} IS NULL")
                         else:
-                            parts.append(f"{ref[c]} = %s")
+                            # Typed: cast the source text to the column's own type.
+                            parts.append(f"{ref[c]} = %s::{_snowflake_cast(types[c.upper()][1])}")
                             chunk_args.append(str(key[c]))
                     terms.append("(" + " AND ".join(parts) + ")")
                 sql = f"{base} AND (" + " OR ".join(terms) + ")"
