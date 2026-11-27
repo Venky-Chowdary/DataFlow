@@ -238,3 +238,51 @@ def test_composite_low_cardinality_first_key(tmp_path, isolated):
         assert not got
     finally:
         _pg(f'DROP TABLE IF EXISTS public."{dst}"')
+
+
+def test_held_back_boundary_rows_keep_the_cursor_and_land_once_next_run(tmp_path, isolated, monkeypatch):
+    """Non-strict run, the destination lookup errors: the run is not green, says
+    the boundary rows were held back, writes nothing past the watermark and keeps
+    the stored watermark at the boundary. The next run (lookup working) lands
+    every boundary row - and every later row - exactly once."""
+    import services.sync_cursor as sc
+    import src.transfer.stream_boundary_keyed as sbk
+
+    src = tmp_path / "s.sqlite"
+    dst = f"revh_{uuid.uuid4().hex[:8]}"
+    _pg(f'CREATE TABLE public."{dst}" (id BIGINT, k2 BIGINT, note TEXT, updated_at TIMESTAMP(6))')
+
+    def req():
+        r = _pgreq(src, dst)
+        r.validation_mode = "balanced"
+        return r
+
+    try:
+        with sqlite3.connect(src) as c:
+            c.execute("CREATE TABLE t (id INTEGER, k2 INTEGER, note TEXT, updated_at TEXT)")
+            c.executemany("INSERT INTO t VALUES (?,?,?,?)", [(i, 1, f"n{i}", _ts(i)) for i in range(1, 11)])
+        assert _run(isolated, req()).success
+        key = sc.list_cursor_keys()[0]
+        mark_before = sc.get_watermark_record(key)[0]
+        with sqlite3.connect(src) as c:
+            c.execute("INSERT INTO t VALUES (11, 1, 'n11', ?)", (_ts(10),))  # unread tie peer
+            c.execute("INSERT INTO t VALUES (12, 1, 'n12', ?)", (_ts(12),))
+        real = sbk.read_boundary_candidates
+
+        def _boom(*a, **k):
+            raise RuntimeError("connection reset (fake)")
+
+        monkeypatch.setattr(sbk, "read_boundary_candidates", _boom)
+        held = _run(isolated, req())
+        assert not held.success
+        assert "boundary row(s) held back; the next run will retry them" in str(held.error or ""), held.error
+        assert sorted(r[0] for r in _pg(f'SELECT id FROM public."{dst}"', fetch=True)) == list(range(1, 11))
+        assert sc.get_watermark_record(key)[0] == mark_before, "the cursor moved past held-back rows"
+
+        monkeypatch.setattr(sbk, "read_boundary_candidates", real)
+        retry = _run(isolated, req())
+        assert retry.success, retry.error
+        ids = sorted(r[0] for r in _pg(f'SELECT id FROM public."{dst}"', fetch=True))
+        assert ids == list(range(1, 13)), ids
+    finally:
+        _pg(f'DROP TABLE IF EXISTS public."{dst}"')

@@ -181,20 +181,25 @@ def _boundary_rows_already_landed(
                 )
         return {boundary_idx[i] for i in drop}
     except Exception as exc:
+        from .stream_boundary_keyed import BoundaryHeldBack
+
+        if isinstance(exc, BoundaryHeldBack):
+            raise
         if requires_upsert(cfg.effective_sync):
             # An upsert rewrites a re-read peer by key: appending it is harmless.
             _stream.logger.warning("Boundary dedupe skipped (upsert, fail-open): %s", exc)
             return set()
-        # D335: an append fails closed - the run is told, Gate-8 will not pass it.
-        from .stream_boundary_keyed import BOUNDARY_TIE_KEY
+        # D335: an append fails closed. The tie group could not even be told
+        # apart, so the run stops before writing it and keeps its cursor.
+        from .stream_boundary_keyed import held_back_message
 
         _stream.logger.warning("Boundary dedupe unmeasured (append, fail-closed): %s", exc)
-        summary = getattr(run.tally, "dest_summary", None)
-        if isinstance(summary, dict):
-            summary.setdefault(BOUNDARY_TIE_KEY, {})["unmeasured"] = (
-                f"the watermark's tie group could not be identified ({type(exc).__name__})"
+        raise BoundaryHeldBack(
+            held_back_message(
+                len(rows), cfg.watermark,
+                f"the watermark's tie group could not be identified ({type(exc).__name__})",
             )
-        return set()
+        ) from exc
 
 
 #: dest_summary list of ``{target key column: value}`` for keyed-append tie

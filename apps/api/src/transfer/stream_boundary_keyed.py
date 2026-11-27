@@ -53,6 +53,17 @@ class BoundaryUnmeasured(RuntimeError):
     """The destination could not tell whether the tie peers are already there."""
 
 
+class BoundaryHeldBack(ValueError):
+    """The run stops before writing an unproven tie group; its cursor stays put.
+
+    Raised at the tie group, which an incremental read meets first (it is read
+    in cursor order from ``cursor >= watermark``): nothing past the stored
+    watermark has been written, the failed run does not advance the cursor, so
+    the next run re-reads the same tie group and checks it again. Withholding
+    the rows while the cursor moved past them would lose them for good.
+    """
+
+
 # --- cursor values as exact instants ------------------------------------------
 
 
@@ -343,11 +354,22 @@ def append_boundary_rows_landed(
                 tie["withheld_rows"] = int(tie.get("withheld_rows") or 0) + len(rows)
         import logging
 
-        logging.getLogger(__name__).warning("Boundary dedupe unmeasured, rows withheld: %s", reason)
+        logging.getLogger(__name__).warning("Boundary dedupe unmeasured, rows held back: %s", reason)
+        if not verify:
+            raise BoundaryHeldBack(held_back_message(len(rows), watermark, reason)) from exc
         landed = set(range(len(rows)))
     if state.get("fps") is None:
         state["fps"] = set()  # the re-read digest asks the same question of its page
     return landed
+
+
+def held_back_message(n: int, watermark: Any, reason: str) -> str:
+    return (
+        f"{n} boundary row(s) held back; the next run will retry them. The destination "
+        f"could not be read to tell whether the rows at the stored watermark {watermark} "
+        f"were already there ({reason}), so this run stopped before writing them and its "
+        "cursor stays at that watermark."
+    )
 
 
 def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
