@@ -50,8 +50,17 @@ _ROWS = [
 
 
 @pytest.fixture
-def world(live, monkeypatch, tmp_path):
-    """``live`` + isolation enforced + a fakesnow destination in the workspace."""
+def world(live, monkeypatch, tmp_path, request):
+    """``live`` + isolation enforced + a fakesnow destination in the workspace.
+
+    These flows confirm through MCP ``confirm_action``: the deployment opts in
+    to the ``agent`` confirm policy, set as a platform admin would. It is set
+    here, after ``live`` swapped in this test's own database and settings file
+    — as a module ``usefixtures`` it ran before that swap, so the policy went
+    to the previous store (or failed on its unconnected client) and this test
+    read the interactive default.
+    """
+    request.getfixturevalue("mcp_confirm_agent_mode")
     monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "1")
     monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "0")
     monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path / "fakesnow"))
@@ -606,7 +615,3 @@ def test_d2_quantities_counts_and_labels_are_not_pii_but_real_pii_still_is(world
     finally:
         drop_pg(benign, real)
 
-
-# These flows confirm through MCP confirm_action: the workspace opts in to the
-# agent confirm policy (services.mcp_confirm_policy; default is interactive).
-pytestmark = [pytestmark, pytest.mark.usefixtures("mcp_confirm_agent_mode")]

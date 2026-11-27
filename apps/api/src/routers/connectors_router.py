@@ -528,8 +528,15 @@ def create_connector(
     except ConnectorRefused:
         raise
     except ConnectorStoreError as exc:
-        # Credential-masked by the store; the same 503 the app handler gives.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # A 503 with a plain sentence and a reference; the store's own text
+        # (masked, but naming the store) goes to the log only (ERR-29).
+        from services.safe_errors import safe_http_exception
+
+        raise safe_http_exception(
+            exc, event="connectors.create.store_unavailable", status_code=503, logger=logger,
+            public_message="The connector store could not save this connector, so nothing was saved. "
+            "Try again; if it keeps failing, ask your administrator to check the connector store.",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as e:
