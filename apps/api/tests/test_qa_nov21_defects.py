@@ -110,7 +110,10 @@ def test_mysql_boolean_and_json_are_the_planned_ddl():
         {"flag": "BOOLEAN", "payload": "JSON"},
         {"flag": "tinyint(1)", "payload": "json"},
     )
-    assert planned_ddl_matches_live({"flag": "BOOLEAN"}, {"flag": "bit(1)"})
+    # BIT(1) is a different MySQL column than BOOLEAN (tinyint(1)); PostgreSQL
+    # json is not jsonb (review 2 item 9).
+    assert not planned_ddl_matches_live({"flag": "BOOLEAN"}, {"flag": "bit(1)"})
+    assert not planned_ddl_matches_live({"doc": "JSON"}, {"doc": "jsonb"})
     assert not planned_ddl_matches_live({"flag": "BOOLEAN"}, {"flag": "tinyint(4)"})
     assert not planned_ddl_matches_live(
         {"name": "VARCHAR(40)"}, {"name": "varchar(80)"}

@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from services.decision_kernel.execute_gate import (
+    _datawrap_owned_columns,
     build_artifact_from_mappings,
     enforce_decision_artifact,
     planned_ddl_matches_live,
@@ -66,13 +67,44 @@ def test_a_create_new_artifact_runs_into_its_table_with_datawrap_columns(owned):
     assert err is None, err
 
 
+def test_each_bookkeeping_column_is_ignored_only_in_the_mode_that_adds_it():
+    """Review 2 item 9: SCD2 columns for scd2, soft-delete columns for mirror,
+    the surrogate only when this run's DDL approval let the writer add it."""
+    planned = {"id": "BIGINT", "v": "TEXT"}
+    base = {"id": "bigint", "v": "text"}
+    cases = [
+        ({"is_current": "boolean", "valid_from": "timestamptz", "valid_to": "timestamptz",
+          "row_hash": "text"}, "scd2", False),
+        ({"_deleted": "boolean", "_deleted_at": "timestamptz"}, "mirror", False),
+        ({"_dw_row_id": "bigint"}, "incremental_append", True),
+    ]
+    for extra, mode, surrogate in cases:
+        live = {**base, **extra}
+        owned = _datawrap_owned_columns(mode, surrogate_approved=surrogate)
+        assert planned_ddl_matches_live(planned, live, dest_db="postgresql", owned_columns=owned), mode
+        for other in ("incremental_append", "upsert", "scd2", "mirror"):
+            if other == mode:
+                continue
+            assert not planned_ddl_matches_live(
+                planned, live, dest_db="postgresql", owned_columns=_datawrap_owned_columns(other)
+            ), (mode, other)
+    assert not planned_ddl_matches_live(
+        planned, {**base, "_dw_row_id": "bigint"}, dest_db="postgresql",
+        owned_columns=_datawrap_owned_columns("incremental_append"),
+    )
+
+
 def test_catalog_spellings_of_the_planned_types_match():
     planned = dict(_artifact().ddl.column_ddl)
     assert planned_ddl_matches_live(planned, _CATALOG, dest_db="postgresql")
+    # Not folded for this check: json vs jsonb, BIT(1) vs tinyint(1).
+    assert not planned_ddl_matches_live({"j": "JSON"}, {"j": "jsonb"}, dest_db="postgresql")
+    assert not planned_ddl_matches_live({"b": "BIT(1)"}, {"b": "tinyint(1)"}, dest_db="mysql")
     assert planned_ddl_matches_live({"d": "DECIMAL(10,2)"}, {"d": "decimal(10, 2)"}, dest_db="mysql")
     assert planned_ddl_matches_live({"f": "BOOLEAN"}, {"f": "tinyint(1)"}, dest_db="mysql")
     # Widths and scales are still compared; a user column is still drift.
     assert not planned_ddl_matches_live({"d": "DECIMAL(10,2)"}, {"d": "decimal(12,2)"}, dest_db="mysql")
     assert not planned_ddl_matches_live(planned, {**_CATALOG, "note": "text"}, dest_db="postgresql")
     # A Datawrap column the plan maps itself is compared like any other.
-    assert not planned_ddl_matches_live({"_deleted": "BOOLEAN"}, {"_deleted": "text"}, dest_db="postgresql")
+    assert not planned_ddl_matches_live({"_deleted": "BOOLEAN"}, {"_deleted": "text"}, dest_db="postgresql",
+                                        owned_columns=_datawrap_owned_columns("mirror"))

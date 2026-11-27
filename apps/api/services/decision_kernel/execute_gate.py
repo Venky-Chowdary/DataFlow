@@ -202,14 +202,13 @@ def _ddl_compare_token(type_sql: str) -> str:
     unsigned = bool(re.search(r"\bUNSIGNED\b", text))
     text = re.sub(r"\bUNSIGNED\b", "", text)
     text = re.sub(r"\s+", " ", text).strip()
-    # MySQL reports BOOLEAN as tinyint(1) and sometimes BIT(1). JSON is json.
-    # tinyint(1) unsigned is not that boolean spelling.
+    # MySQL's BOOLEAN is tinyint(1) (the same column). BIT(1) is a different
+    # column, and PostgreSQL's json is not jsonb: neither is folded (review 2
+    # item 9). tinyint(1) unsigned is not that boolean spelling.
     if not unsigned and (
-        re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}
+        re.fullmatch(r"TINYINT\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}
     ):
         return "BOOLEAN"
-    if text in {"JSON", "JSONB"}:
-        return "JSON"
     shown = _INT_DISPLAY_WIDTH.match(text)
     if shown:
         base = shown.group(1).upper()
@@ -261,19 +260,27 @@ def _legacy_plan_holds(
     return True
 
 
-def _datawrap_owned_columns() -> frozenset[str]:
-    """Columns Datawrap itself adds to a table it writes (never a Map target)."""
+def _datawrap_owned_columns(sync_mode: str = "", *, surrogate_approved: bool = False) -> frozenset[str]:
+    """Columns Datawrap itself adds to a table this plan writes (never a Map target).
+
+    Only the ones the plan's own mode adds (review 2 item 9): the SCD2 history
+    columns for scd2, the soft-delete columns for mirror, the ``_dw_row_id``
+    surrogate only when this run's DDL approval let the writer add it.
+    """
     from services.dest_require_primary_key import SURROGATE_KEY_COLUMN
     from services.mirror_engine import SOFT_DELETE_AT_COLUMN, SOFT_DELETE_COLUMN
     from services.scd2_engine import SCD2_COLUMNS
-    from services.shape_models import ROUTE_COLUMN
+    from services.sync_cursor import normalize_sync_mode
 
-    return frozenset(
-        c.lower() for c in (
-            SURROGATE_KEY_COLUMN, SOFT_DELETE_COLUMN, SOFT_DELETE_AT_COLUMN,
-            *SCD2_COLUMNS, ROUTE_COLUMN, "_df_lsn", "df_lsn",
-        )
-    )
+    mode = normalize_sync_mode(str(sync_mode or ""), default="")
+    owned: list[str] = []
+    if mode == "scd2":
+        owned.extend(SCD2_COLUMNS)
+    if mode == "mirror":
+        owned.extend((SOFT_DELETE_COLUMN, SOFT_DELETE_AT_COLUMN))
+    if surrogate_approved:
+        owned.append(SURROGATE_KEY_COLUMN)
+    return frozenset(c.lower() for c in owned)
 
 
 def _catalog_token(type_sql: str, dest_db: str) -> str:
@@ -296,13 +303,14 @@ def planned_ddl_matches_live(
     live: Mapping[str, str] | None,
     *,
     dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
 ) -> bool:
     """True when the live table is exactly the DDL this plan would create.
 
     Same column set, same carrier. An added column or a widened VARCHAR is
-    drift. A column Datawrap adds itself (the approved ``_dw_row_id``, mirror
-    ``_deleted`` / ``_deleted_at``, SCD2 history columns, ``_df_route``) is
-    not, unless the plan maps it. Empty on either side is not a match.
+    drift. A column Datawrap adds itself for this plan (``owned_columns``,
+    from :func:`_datawrap_owned_columns`) is not, unless the plan maps it.
+    Empty on either side is not a match.
     """
     if not planned or not live:
         return False
@@ -311,7 +319,7 @@ def planned_ddl_matches_live(
         for name, typ in planned.items()
         if str(name).strip()
     }
-    owned = _datawrap_owned_columns()
+    owned = owned_columns
     have = {
         str(name).strip().lower(): _catalog_token(typ, dest_db)
         for name, typ in live.items()
@@ -337,6 +345,7 @@ def _planned_create_still_holds(
     generated_columns: list[str] | None,
     schema_policy: str,
     dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
     """(holds, shape_error). Shape error is a real contract break.
 
@@ -345,7 +354,8 @@ def _planned_create_still_holds(
     """
     if destination_table_exists is not True:
         return False, ""
-    if not planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db):
+    if not planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db,
+                                    owned_columns=owned_columns):
         return False, ""
     shape_err = dest_exists_shape_error(
         mappings=mappings,
@@ -576,6 +586,7 @@ def enforce_decision_artifact(
     schema_policy: str = "",
     live_column_types: dict[str, str] | None = None,
     plan_created_destination: bool = False,
+    surrogate_approved: bool = False,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -742,6 +753,10 @@ def enforce_decision_artifact(
                         generated_columns=generated_columns,
                         schema_policy=schema_policy,
                         dest_db=dest_db,
+                        owned_columns=_datawrap_owned_columns(
+                            sync_mode or supplied.sync_mode,
+                            surrogate_approved=surrogate_approved,
+                        ),
                     )
                     if shape_err:
                         return (shape_err, None)

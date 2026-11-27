@@ -351,6 +351,8 @@ def _enforce_decision_artifact_once(
         schema_policy=schema_policy,
         live_column_types=destination_column_types if isinstance(destination_column_types, dict) else None,
         plan_created_destination=bool(plan_created_destination),
+        # The writer adds _dw_row_id only on this run's DDL approval.
+        surrogate_approved=bool(getattr(request, "ddl_changes_acknowledged", False)),
     )
     return err, (art.to_dict() if art is not None else None)
 
