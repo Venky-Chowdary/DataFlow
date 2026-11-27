@@ -1028,13 +1028,13 @@ async def http_exception_reference(request: Request, exc: StarletteHTTPException
     from services.safe_errors import _platform_envelope
     from services.tracing import get_correlation_id
 
+    from services.refusal_cause import refusal_message
+
     raw = exc.detail
     if isinstance(raw, (dict, list)):
         detail_body = jsonable_encoder(raw)
-        if isinstance(raw, dict):
-            message = str(raw.get("message") or raw.get("detail") or raw.get("code") or "Request refused")
-        else:
-            message = "Request refused"
+        # D424: the cause in detail.error / reasons, not "Request refused".
+        message = refusal_message(raw, exc.status_code)
     else:
         detail_body = raw if isinstance(raw, str) else str(raw)
         message = detail_body

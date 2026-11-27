@@ -1463,7 +1463,11 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "error": "Resume refused — checkpoint not safe",
+                    # D424: the remedy is Retry, and the message says so.
+                    "error": (
+                        "Resume refused: the checkpoint is not safe to continue from. "
+                        "Use Retry to run the job again from the start."
+                    ),
                     "reasons": safety.get("reasons") or [],
                     "warnings": safety.get("warnings") or [],
                     "age_hours": safety.get("age_hours"),
