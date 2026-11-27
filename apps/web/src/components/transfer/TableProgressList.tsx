@@ -29,6 +29,7 @@ const STATE_ICON: Record<TableState, IconName> = {
   mismatch: "verdict-unexplained",
   failed: "error",
   rolled_back: "undo",
+  restore_failed: "warning",
   stopped: "pause",
   not_run: "minus",
 };
@@ -58,6 +59,7 @@ function Row({ row }: { row: TableProgressRow }) {
       <span className="df2-tp-state">
         <DtIcon name={STATE_ICON[row.state]} size={14} chrome="product" className={row.state === "loading" ? "df2-tp-icon is-live" : "df2-tp-icon"} />
         {TABLE_STATE_WORD[row.state]}
+        {row.note && row.state === "restore_failed" && <span className="df2-tp-note">: {row.note}</span>}
       </span>
       <span className="df2-tp-stages">
         {STAGES.map((s) => <Stage key={s.id} label={s.label} state={row[s.id]} />)}

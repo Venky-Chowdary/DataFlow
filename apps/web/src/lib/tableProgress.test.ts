@@ -41,10 +41,14 @@ describe("tableProgressRows", () => {
     assert.equal(rows[1].rows, null);
   });
 
-  it("Verify runs for every loaded table during reconcile", () => {
+  it("during reconcile only the table Gate-8 is comparing reads Verifying; the others Not compared", () => {
     const loaded = { people: { status: "completed", rows: 6 }, orders: { status: "completed", rows: 3 }, items: { status: "completed", rows: 5 } };
     const verifying = tableProgressRows({ ...base, status: "running", phase: "reconcile", stream_progress: loaded }, { reconciling: true });
-    assert.ok(verifying.every((r) => r.state === "verifying" && r.verify === "active"));
+    assert.deepEqual(states(verifying), [
+      "people:loaded:done/done/not_compared:6",
+      "orders:loaded:done/done/not_compared:3",
+      "items:verifying:done/done/active:5",
+    ]);
   });
 
   // Review UI2 #1: Gate-8 compares the last table of a multi-table run only.
@@ -70,13 +74,33 @@ describe("tableProgressRows", () => {
   });
 
   // Review UI2 #7: undo drops earlier tables' records; the stopped table is named.
-  it("blames the table the run stopped on, and shows rolled-back tables", () => {
-    const rows = tableProgressRows({ ...base, status: "failed", stopped_stream: "orders", undone_streams: ["people"], stream_progress: {} });
+  it("blames the table the run stopped on, from the record written with the failed status", () => {
+    const rows = tableProgressRows({ ...base, status: "failed", stream_progress: {}, error_details: {
+      stopped_stream: "orders",
+      multi_stream_undo: [{ table: "people", stream: "people", decision: "restored", note: "restored from its pre-run backup" }],
+    } });
     assert.deepEqual(states(rows), [
       "people:rolled_back:done/undone/not_run:-",
       "orders:failed:failed/failed/not_run:-",
       "items:not_run:not_run/not_run/not_run:-",
     ]);
+  });
+
+  it("a backup that could not be restored reads Restore failed with the reason, never Rolled back", () => {
+    const rows = tableProgressRows({ ...base, status: "failed", stream_progress: {}, error_details: {
+      stopped_stream: "orders",
+      multi_stream_undo: [{ table: "people", decision: "restore_failed", note: "its pre-run backup could not be restored; the backup was kept" }],
+    } });
+    assert.equal(rows[0].state, "restore_failed");
+    assert.match(rows[0].note || "", /could not be restored/);
+  });
+
+  it("an older job's undo entries (destination tables only) are matched to stream names", () => {
+    const rows = tableProgressRows({ ...base, status: "failed", stream_progress: {}, error_details: {
+      stopped_stream: "orders",
+      multi_stream_undo: [{ table: "public.people", decision: "cleared" }],
+    } });
+    assert.equal(rows[0].state, "rolled_back");
   });
 
   it("after a failure with no stop record, stages after the stop read Not run, never Done", () => {
@@ -86,7 +110,7 @@ describe("tableProgressRows", () => {
       "orders:failed:failed/failed/not_run:-",
       "items:not_run:not_run/not_run/not_run:-",
     ]);
-    const cancelled = tableProgressRows({ ...base, status: "cancelled", stopped_stream: "orders", stream_progress: { people: { status: "completed", rows: 6 } } });
+    const cancelled = tableProgressRows({ ...base, status: "cancelled", error_details: { stopped_stream: "orders" }, stream_progress: { people: { status: "completed", rows: 6 } } });
     assert.equal(cancelled[1].state, "stopped");
   });
 });

@@ -68,3 +68,5 @@
   .df2-tp-stages { grid-column: 1 / -1; }
   .df2-tp-rows { grid-column: 1 / -1; text-align: left; }
 }
+.df2-tp-row[data-state="restore_failed"] .df2-tp-state { color: var(--df-danger-text); }
+.df2-tp-note { color: var(--df-text-secondary); }

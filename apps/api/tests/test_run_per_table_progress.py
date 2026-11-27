@@ -92,8 +92,14 @@ def test_a_failed_pass_names_the_table_it_stopped_on(tmp_path, _resumable, monke
     result = engine.execute_tracked(_request(src, dst, specs), job)
     assert result.success is False
     doc = get_mongodb_service().get_job(job) or {}
-    assert doc.get("stopped_stream") == "orders"
-    assert isinstance(doc.get("undone_streams"), list)
+    details = doc.get("error_details") or {}
+    # Re-review D: written with the failed status (one update), not a separate field write.
+    assert doc.get("status") == "failed"
+    assert details.get("stopped_stream") == "orders"
+    assert "stopped_stream" not in doc and "undone_streams" not in doc
+    undo = details.get("multi_stream_undo") or []
+    assert undo, "the undo of the finished table is on the record"
+    assert all(e.get("stream") in {"people", "orders"} for e in undo), undo
     assert "orders" not in (doc.get("stream_progress") or {}), "no running entry is left behind"
 
 

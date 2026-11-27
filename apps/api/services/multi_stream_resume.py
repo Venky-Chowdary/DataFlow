@@ -22,10 +22,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 PROGRESS_FIELD = "stream_progress"
-#: The table a multi-table pass stopped on (it failed or was cancelled there).
-STOPPED_FIELD = "stopped_stream"
-#: Tables whose rows that stop undid (their stream_progress records are dropped).
-UNDONE_FIELD = "undone_streams"
+
 
 
 def _store() -> Any:
@@ -139,25 +136,6 @@ def forget_stream_started(job_id: str, stream_name: str) -> None:
         logger.warning("stream start not cleared for %s (job %s)", stream_name, job_id, exc_info=True)
 
 
-def record_stream_stopped(job_id: str, stream_name: str, undone: list[dict[str, Any]] | None = None) -> None:
-    """Name the table the pass stopped on, and the tables its undo emptied (never raises).
-
-    The Run screen blames the right table: undo drops the finished tables'
-    records, so "the first table without a record" was an earlier, undone
-    table, not the one that failed (review UI2 #7).
-    """
-    if not job_id or not stream_name:
-        return
-    tables = sorted({
-        str(e.get("table") or "") for e in (undone or [])
-        if isinstance(e, dict) and e.get("decision") != "retained" and str(e.get("table") or "")
-    })
-    try:
-        _store().update_job_fields(job_id, {STOPPED_FIELD: stream_name, UNDONE_FIELD: tables}, touch_updated_at=False)
-    except Exception:  # noqa: BLE001 — progress display only
-        logger.warning("stopped stream not recorded for job %s", job_id, exc_info=True)
-
-
 def forget_streams(job_id: str, tables: list[str]) -> None:
     """Drop the records of tables whose rows were undone (never raises).
 
@@ -187,8 +165,6 @@ def forget_all_progress(job_id: str) -> None:
         job = _store().get_job(job_id) or {}
         if job.get(PROGRESS_FIELD):
             _write(job_id, {})
-        if job.get(STOPPED_FIELD) or job.get(UNDONE_FIELD):
-            _store().update_job_fields(job_id, {STOPPED_FIELD: None, UNDONE_FIELD: []}, touch_updated_at=False)
     except Exception:  # noqa: BLE001 — a stale record is only read on a resume
         logger.warning("stream progress not reset for job %s", job_id, exc_info=True)
 

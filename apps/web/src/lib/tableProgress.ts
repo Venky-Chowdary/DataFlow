@@ -20,7 +20,8 @@ import { isJobSuccess, isJobTerminal } from "./uiUtils";
 
 export type StageState = "waiting" | "active" | "done" | "failed" | "not_run" | "not_compared" | "undone";
 export type TableState =
-  | "queued" | "loading" | "verifying" | "loaded" | "checked" | "mismatch" | "failed" | "stopped" | "rolled_back" | "not_run";
+  | "queued" | "loading" | "verifying" | "loaded" | "checked" | "mismatch" | "failed" | "stopped" | "rolled_back"
+  | "restore_failed" | "not_run";
 
 export interface TableProgressRow {
   name: string;
@@ -32,6 +33,8 @@ export interface TableProgressRow {
   rows: number | null;
   /** The rows were written by an earlier pass this run resumed after. */
   rowsFromEarlierPass?: boolean;
+  /** Why, in the engine's words (a restore that failed). */
+  note?: string;
 }
 
 const key = (name: string) => name.trim().toLowerCase();
@@ -46,6 +49,7 @@ export const TABLE_STATE_WORD: Record<TableState, string> = {
   failed: "Failed",
   stopped: "Stopped",
   rolled_back: "Rolled back",
+  restore_failed: "Restore failed",
   not_run: "Not run",
 };
 
@@ -77,9 +81,33 @@ function streamRecords(summary: unknown): Map<string, StreamRecord> {
   return out;
 }
 
-type ProgressJob = Pick<JobProgress, "status" | "phase" | "records_processed" | "stream_progress" | "reconciliation">
-  & Parameters<typeof readJobStreamNames>[0]
-  & { stopped_stream?: string | null; undone_streams?: string[] | null };
+type ProgressJob = Pick<JobProgress, "status" | "phase" | "records_processed" | "stream_progress" | "reconciliation" | "error_details">
+  & Parameters<typeof readJobStreamNames>[0];
+
+interface UndoEntry { stream: string; decision: string; note: string }
+
+/**
+ * The failed pass's record, written with the failed status (error_details):
+ * the table it stopped on, and what the undo did to each table. Entries name
+ * their stream; an older job's entries name only the destination table,
+ * matched to a stream name here (re-review D).
+ */
+function stopRecord(job: ProgressJob, names: string[]): { stopped: string | null; undo: Map<string, UndoEntry> } {
+  const details = job.error_details && typeof job.error_details === "object" ? job.error_details as Record<string, unknown> : {};
+  const stopped = typeof details.stopped_stream === "string" && details.stopped_stream ? key(details.stopped_stream) : null;
+  const undo = new Map<string, UndoEntry>();
+  const entries = Array.isArray(details.multi_stream_undo) ? details.multi_stream_undo : [];
+  for (const raw of entries) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    const table = key(String(e.table ?? ""));
+    const named = key(String(e.stream ?? ""));
+    const stream = named || names.map(key).find((n) => n === table || table.endsWith(`.${n}`) || n.endsWith(`.${table}`)) || "";
+    if (!stream) continue;
+    undo.set(stream, { stream, decision: String(e.decision ?? ""), note: String(e.note ?? "") });
+  }
+  return { stopped, undo };
+}
 
 /**
  * The table Gate-8 compared. On a multi-table run Gate-8 runs once, on the
@@ -107,8 +135,9 @@ export function tableProgressRows(job: ProgressJob, options: { reconciling?: boo
   const compared = success ? comparedTable(job, names) : null;
   const progress = job.stream_progress || {};
   const records = streamRecords(job.destination_summary);
-  const stopped = job.stopped_stream ? key(job.stopped_stream) : null;
-  const undone = new Set((job.undone_streams || []).map(key));
+  const { stopped, undo } = terminal && !success ? stopRecord(job, names) : { stopped: null, undo: new Map<string, UndoEntry>() };
+  // While Gate-8 runs it is comparing the run's last table (reconcile_coverage binds it there).
+  const verifyingTable = reconciling ? key(names[names.length - 1]) : null;
   let stopMarked = false;
   let pastStop = false;
 
@@ -124,9 +153,11 @@ export function tableProgressRows(job: ProgressJob, options: { reconciling?: boo
 
     if (!terminal) {
       if (entry?.status === "completed") {
-        return reconciling
+        if (!reconciling) return { name, state: "loaded", read: "done", write: "done", verify: "waiting", rows: finishedRows, ...extra };
+        // Gate-8 compares one table, the last; the others are not compared (re-review residual #1).
+        return k === verifyingTable
           ? { name, state: "verifying", read: "done", write: "done", verify: "active", rows: finishedRows, ...extra }
-          : { name, state: "loaded", read: "done", write: "done", verify: "waiting", rows: finishedRows, ...extra };
+          : { name, state: "loaded", read: "done", write: "done", verify: "not_compared", rows: finishedRows, ...extra };
       }
       if (entry?.status === "running") {
         const counter = Number(job.records_processed ?? 0);
@@ -162,7 +193,13 @@ export function tableProgressRows(job: ProgressJob, options: { reconciling?: boo
           ? { name, state: "failed", read: "failed", write: "failed", verify: "not_run", rows: null }
           : { name, state: "stopped", read: "not_run", write: "not_run", verify: "not_run", rows: null };
       }
-      if (undone.has(k)) return { name, state: "rolled_back", read: "done", write: "undone", verify: "not_run", rows: null };
+      const undone = undo.get(k);
+      if (undone && undone.decision === "restore_failed") {
+        return { name, state: "restore_failed", read: "done", write: "failed", verify: "not_run", rows: null, note: undone.note };
+      }
+      if (undone && undone.decision && undone.decision !== "retained") {
+        return { name, state: "rolled_back", read: "done", write: "undone", verify: "not_run", rows: null, note: undone.note };
+      }
       if (!pastStop && entry?.status === "completed") {
         return { name, state: "loaded", read: "done", write: "done", verify: "not_run", rows: finishedRows, ...extra };
       }
@@ -188,7 +225,7 @@ export function tableProgressRows(job: ProgressJob, options: { reconciling?: boo
 }
 
 const ORDER: Record<TableState, number> = {
-  failed: 0, mismatch: 1, loading: 2, verifying: 3, stopped: 4, rolled_back: 5, queued: 6, not_run: 7, loaded: 8, checked: 9,
+  failed: 0, restore_failed: 1, mismatch: 2, loading: 3, verifying: 4, stopped: 5, rolled_back: 6, queued: 7, not_run: 8, loaded: 9, checked: 10,
 };
 
 /** Active first, then queued, then done (the done ones collapse under "N done"). */

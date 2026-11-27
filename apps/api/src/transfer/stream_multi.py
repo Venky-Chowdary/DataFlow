@@ -242,7 +242,6 @@ def run_non_cdc_multi_stream_sequential(
         record_stream_completed,
         forget_stream_started,
         record_stream_started,
-        record_stream_stopped,
         skip_reason,
     )
 
@@ -262,6 +261,8 @@ def run_non_cdc_multi_stream_sequential(
     begin_undo_pass(destination)  # C4: undo facts belong to this pass only
     total_rows = 0
     shaped_out = 0
+    #: Destination table (folded) -> the stream that wrote it, for the stop record.
+    landed_streams: dict[str, str] = {}
     ddl_log: list[str] = [
         f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
         "each stream has its own watermark; at-least-once)"
@@ -505,6 +506,9 @@ def run_non_cdc_multi_stream_sequential(
                         str(job_id or ""), str((summary or {}).get("table") or stream_name)
                     ),
                 )
+                landed_table = str((summary or {}).get("table") or "")
+                if landed_table:
+                    landed_streams[landed_table.lower()] = stream_name
                 last_stream_mappings = list(use_mappings or [])
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
@@ -532,9 +536,22 @@ def run_non_cdc_multi_stream_sequential(
                         ) or ""
                     ),
                 )
-                record_stream_stopped(
-                    str(job_id or ""), stream_name, list(getattr(exc, "multi_stream_undo", None) or [])
+                # The stop record rides on the exception: job_failure writes it into
+                # error_details in the same update as the failed status, with each
+                # undo entry named by its stream (re-review D).
+                failed_dest = str(
+                    resolve_dest_table(
+                        str(getattr(destination, "format", "") or ""), destination, stream_name
+                    ) or ""
                 )
+                if failed_dest:
+                    landed_streams.setdefault(failed_dest.lower(), stream_name)
+                undo_entries = [dict(e) for e in (getattr(exc, "multi_stream_undo", None) or []) if isinstance(e, dict)]
+                for entry in undo_entries:
+                    entry.setdefault("stream", landed_streams.get(str(entry.get("table") or "").lower(), ""))
+                if undo_entries:
+                    setattr(exc, "multi_stream_undo", undo_entries)
+                setattr(exc, "stopped_stream", stream_name)
                 record_stream_health(
                     stream_health,
                     name=stream_name,
