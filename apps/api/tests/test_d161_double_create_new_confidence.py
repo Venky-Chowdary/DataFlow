@@ -225,12 +225,10 @@ def test_a_double_into_real_is_still_a_narrowing_that_blocks(_isolated):
             uuid.uuid4().hex[:24],
         )
         assert result.success is False
-        # Refused as a collapse, or (since PR #435 stopped reading a stamp that
-        # only echoes the live column as an operator ceiling) as a widen of the
-        # destination that needs approval. Either way nothing is written and
-        # the REAL column is not silently fed doubles.
+        # Somebody else's REAL column is the ceiling (no grounds to ALTER it):
+        # refused as the collapse, nothing written, the column unchanged.
         err = (result.error or "").lower()
-        assert "collapse" in err or "widening needs approval" in err, err
+        assert "collapse" in err, err
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst_table}"')
             assert cur.fetchone()[0] == 0

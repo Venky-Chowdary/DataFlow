@@ -498,24 +498,21 @@ def test_sync_now_still_refuses_a_real_map_edit_and_unaccounted_column():
 
 
 def test_d334_managed_table_widens_non_key_columns_only():
+    """A widen on a table Datawrap created is proposed even when the stored
+    stamp only echoes the live column, and applied under the schema policy
+    (propagate, or manual_review with the acknowledgement) — never under an
+    unacknowledged manual_review (QA batch 1 item 13 / the D200 contract). On
+    anyone else's table the live type stays the ceiling (D161)."""
+    from services.managed_table import destination_ownership
     from services.schema_drift import (
         destination_evolution_approved,
-        managed_non_key_widen_only,
         plan_destination_evolution,
     )
 
     assert not destination_evolution_approved("manual_review", managed_table=True)
+    assert destination_evolution_approved("manual_review", acknowledged=True)
     assert not destination_evolution_approved("type_locked", managed_table=True)
     assert destination_evolution_approved("propagate_columns")
-    assert managed_non_key_widen_only(
-        "manual_review", managed_table=True, acknowledged=False
-    )
-    assert not managed_non_key_widen_only(
-        "manual_review", managed_table=False, acknowledged=False
-    )
-    assert not managed_non_key_widen_only(
-        "propagate_columns", managed_table=True, acknowledged=False
-    )
     maps = [{
         "source": "status",
         "target": "status",
@@ -529,21 +526,30 @@ def test_d334_managed_table_widens_non_key_columns_only():
         "target_type": "varchar(10)",
         "confidence": 0.99,
     }]
-    # Propagate adds the new column. manual_review on an owned table does not.
-    _planned, types, applied = plan_destination_evolution(
-        maps,
-        source_columns=["status", "id", "tier"],
-        source_schema={"status": "varchar(30)", "id": "varchar(20)", "tier": "integer"},
-        dest_types={"status": "varchar(10)", "id": "varchar(10)"},
-        dest_db="postgresql",
-        adopt_unmapped=False,
-        key_groups=[["id"]],
-        key_widens_approved=False,
-    )
+
+    def _plan():
+        return plan_destination_evolution(
+            maps,
+            source_columns=["status", "id", "tier"],
+            source_schema={"status": "varchar(30)", "id": "varchar(20)", "tier": "integer"},
+            dest_types={"status": "varchar(10)", "id": "varchar(10)"},
+            dest_db="postgresql",
+            adopt_unmapped=False,
+            key_groups=[["id"]],
+            key_widens_approved=False,
+        )
+
+    with destination_ownership(lambda: True):
+        _planned, types, applied = _plan()
     assert types["status"].lower().startswith("varchar(30)")
     assert types["id"].lower().startswith("varchar(10)")
     assert not any(a.get("source") == "tier" for a in applied)
     assert not any(str(a.get("target") or "").lower() == "id" and a.get("kind") == "widen_type" for a in applied)
+    # Someone else's table: the echoed live type is the ceiling.
+    with destination_ownership(lambda: False):
+        _planned, types, applied = _plan()
+    assert types["status"].lower() == "varchar(10)"
+    assert not any(a.get("kind") == "widen_type" for a in applied)
 
 
 def test_d335_add_column_does_not_keep_the_boundary_row_on_append():

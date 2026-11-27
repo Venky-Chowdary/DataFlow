@@ -54,6 +54,7 @@ from services.preflight_file_plan import (
 from services.coercion_gate_reconcile import reconcile_coercion_report
 from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
 from services.preflight_policy_gates import blockers_from_gates
+from services.managed_table import with_preflight_destination_ownership
 from services.preflight_file_phases import (
     apply_constraint_findings,
     apply_schema_drift_gate,
@@ -296,6 +297,7 @@ def _policy_source_config(
 
 @_with_date_locale
 @_with_source_engine
+@with_preflight_destination_ownership
 def run_file_preflight(
     *,
     columns: list[str],
@@ -811,19 +813,14 @@ def run_file_preflight(
     # since Validate" compares it with the live table at Execute, which has not
     # been ALTERed yet.
     live_destination_types = dict(destination_column_types or {})
-    from services.managed_table import evolution_allowed
+    from services.schema_drift import destination_evolution_approved
 
     if (
         destination_table_exists is True
         and not dest_recreated
         and destination_column_types
         and dest_declares_column_ddl(destination_db_type)
-        and evolution_allowed(  # propagate / acknowledged, or DW-D334 on a Datawrap table
-            str(destination_db_type or ""), destination_config, schema_policy=schema_policy,
-            acknowledged=bool(schema_drift_acknowledged), table=str(destination_table or ""),
-            schema=str((destination_config or {}).get("schema") or ""),
-            table_exists=destination_table_exists, dest_recreated=bool(dest_recreated),
-        )
+        and destination_evolution_approved(schema_policy, acknowledged=bool(schema_drift_acknowledged))
     ):
         from services.schema_drift import (
             dest_key_charsets, dest_key_groups, dest_key_limit, plan_destination_evolution,

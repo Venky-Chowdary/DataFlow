@@ -1,14 +1,72 @@
 """Whether a destination table was created by Datawrap.
 
 The ownership comment (``datawrap:managed`` or the legacy ``dataflow:managed``)
-is the signal. An owned table may widen non-key columns in the same type
-family (DW-D334). ADD COLUMN still requires propagate. A probe that cannot
-read the comment answers false — an operator-owned table is not altered.
+is the signal. On a table Datawrap created, a Map stamp that only echoes the
+live column type is the catalog, not a ceiling the operator drew, so a
+same-family source widening is proposed as a widen (DW-D334); it is applied
+under the schema policy like any widen (propagate, or manual_review with the
+acknowledgement). On anyone else's table the live type stays the ceiling
+(D161). A probe that cannot read the comment answers false.
 """
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Mapping
+
+_OWNED: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "datawrap_destination_owned", default=None
+)
+
+
+@contextmanager
+def destination_ownership(resolve: Callable[[], bool]) -> Iterator[None]:
+    """Answer :func:`destination_is_owned` with ``resolve()`` (asked once, lazily)."""
+    answer: list[bool] = []
+
+    def _once() -> bool:
+        if not answer:
+            try:
+                answer.append(bool(resolve()))
+            except Exception:  # noqa: BLE001 - unreadable ownership: not owned
+                answer.append(False)
+        return answer[0]
+
+    token = _OWNED.set(_once)
+    try:
+        yield
+    finally:
+        _OWNED.reset(token)
+
+
+def destination_is_owned() -> bool:
+    """Whether the destination being planned is a table Datawrap created."""
+    resolve = _OWNED.get()
+    return bool(resolve and resolve())
+
+
+def with_preflight_destination_ownership(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a preflight with its destination's ownership answerable (probed on demand)."""
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        config = kwargs.get("destination_config")
+
+        def _resolve() -> bool:
+            return owned_for_evolution(
+                str(kwargs.get("destination_db_type") or ""), config,
+                schema=str((config or {}).get("schema") or ""),
+                table=str(kwargs.get("destination_table") or ""),
+                table_exists=kwargs.get("destination_table_exists"),
+            )
+
+        with destination_ownership(_resolve):
+            return fn(*args, **kwargs)
+
+    return wrapped
 
 
 def owned_for_evolution(
@@ -32,36 +90,6 @@ def owned_for_evolution(
         )
     except Exception:
         return False
-
-
-def evolution_allowed(
-    db_type: str,
-    config: Mapping[str, Any] | None,
-    *,
-    schema_policy: str | None,
-    acknowledged: bool = False,
-    schema: str = "",
-    table: str = "",
-    table_exists: bool | None = None,
-    dest_recreated: bool = False,
-) -> bool:
-    """Whether Validate plans destination evolution for this table.
-
-    The policy approves it (propagate, or manual_review acknowledged), or the
-    table is Datawrap's own and only non-key same-family widens apply
-    (DW-D334). The ownership probe runs only when the policy alone does not
-    decide, so an approved or locked policy costs no extra connection.
-    """
-    from services.schema_drift import destination_evolution_approved, managed_non_key_widen_only
-
-    if destination_evolution_approved(schema_policy, acknowledged=acknowledged):
-        return True
-    if not managed_non_key_widen_only(schema_policy, acknowledged=acknowledged, managed_table=True):
-        return False
-    return owned_for_evolution(
-        db_type, config, schema=schema, table=table,
-        table_exists=table_exists, dest_recreated=dest_recreated,
-    )
 
 
 def destination_table_is_managed(
