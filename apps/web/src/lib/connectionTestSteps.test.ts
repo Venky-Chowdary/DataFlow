@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConnectionTestChecklist } from "../components/connections/ConnectionTestChecklist.tsx";
-import { connectionTestSteps, grantFixes, isSqlGrantEngine } from "./connectionTestSteps.ts";
+import { connectionTestSteps, grantFixes, isSqlGrantEngine, schemaFromMessage } from "./connectionTestSteps.ts";
 
 const states = (r: Parameters<typeof connectionTestSteps>[0]) => connectionTestSteps(r).map((s) => `${s.id}:${s.state}`);
 
@@ -80,5 +80,73 @@ describe("ConnectionTestChecklist", () => {
     const ok = renderToStaticMarkup(React.createElement(ConnectionTestChecklist, { result: { success: true }, connection: { type: "postgresql" } }));
     assert.match(ok, /Not checked by Test/);
     assert.match(ok, /<details class="df2-ctest-grants">/);
+  });
+});
+
+describe("schemaFromMessage reads only the engine's own phrasing (re-review C)", () => {
+  it("finds the schema in known error texts", () => {
+    assert.equal(schemaFromMessage("permission denied for schema raw", "postgresql"), "raw");
+    assert.equal(schemaFromMessage('ERROR: schema "Sales Q1" does not exist', "postgresql"), "Sales Q1");
+    assert.equal(schemaFromMessage('The specified schema name "stage" either does not exist or you do not have permission to use it.', "sqlserver"), "stage");
+    assert.equal(schemaFromMessage("Schema 'ANALYTICS.RAW' does not exist or not authorized.", "snowflake"), "RAW");
+  });
+  it("never guesses a word out of prose", () => {
+    assert.equal(schemaFromMessage("no schema has been selected to create in", "postgresql"), "");
+    assert.equal(schemaFromMessage('Invalid schema name "dbo" in this context', "postgresql"), "");
+    assert.equal(schemaFromMessage('schema name "dbo"', "sqlserver"), "");
+    assert.equal(schemaFromMessage("Schema does not exist", "snowflake"), "");
+    assert.equal(schemaFromMessage("permission denied for schema raw", "mysql"), "", "only the engine that says it");
+    assert.match(grantFixes({ type: "postgresql", username: "etl", database: "d", message: "no schema has been selected to create in" })[0].sql, /ON SCHEMA <schema>/);
+  });
+});
+
+/** Re-review A: whatever is typed, every snippet is exactly the statements intended. */
+describe("grant snippets cannot be injected (property test)", () => {
+  // Per-engine tokenizers: a quoted identifier or string literal is one opaque value.
+  const TOKENS: Record<string, RegExp> = {
+    postgresql: /"(?:[^"]|"")*"/g,
+    redshift: /"(?:[^"]|"")*"/g,
+    oracle: /"(?:[^"]|"")*"/g,
+    snowflake: /"(?:[^"]|"")*"/g,
+    mysql: /`(?:[^`]|``)*`|'(?:[^'\\]|''|\\.)*'/g,
+    sqlserver: /\[(?:[^\]]|\]\])*\]/g,
+  };
+  const skeleton = (engine: string, sql: string, bare: string[]) => {
+    // Quoted tokens and Datawrap's own placeholders are both one opaque value.
+    let out = sql.replace(TOKENS[engine], "\u0001").replace(/<[a-z]+>/g, "\u0001");
+    // Snowflake leaves a plain typed identifier bare: one word of [A-Za-z0-9_$], equal to the input.
+    if (engine === "snowflake") out = out.replace(/[A-Za-z_][A-Za-z0-9_$]*/g, (w) => (bare.includes(w) ? "\u0001" : w));
+    return out;
+  };
+  const alphabet = ["a", "Z", "_", "$", " ", ";", "'", '"', "`", "[", "]", "\\", "-", "--", "/*", "*/", "\n", "\r", "\t", "\u0000",
+    "<", ">", "<u>", "é", "名", "🙂", " ", "%", "@", "DROP", "ALTER ROLE etl SUPERUSER", ".", ","];
+  let seed = 20261127;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const randomText = () => Array.from({ length: 1 + Math.floor(rand() * 8) }, () => alphabet[Math.floor(rand() * alphabet.length)]).join("");
+  const engines = ["postgresql", "redshift", "mysql", "sqlserver", "oracle", "snowflake"];
+  const plain = { username: "u", database: "d", schema: "s", warehouse: "w", role: "r" };
+
+  it("the named injection stays inside a quoted value on every engine", () => {
+    const evil = "<u>; ALTER ROLE etl SUPERUSER; --";
+    for (const engine of engines) {
+      const sql = grantFixes({ type: engine, username: evil, database: evil, schema: evil, warehouse: evil, role: evil }).map((f) => f.sql).join("\n");
+      assert.doesNotMatch(skeleton(engine, sql, []), /ALTER ROLE etl SUPERUSER/, engine);
+    }
+  });
+
+  it("for 600 random inputs per engine, the snippet has the same statements as for plain names", () => {
+    for (const engine of engines) {
+      const want = grantFixes({ type: engine, ...plain }).map((f) => skeleton(engine, f.sql, Object.values(plain)));
+      for (let i = 0; i < 600; i += 1) {
+        const input = { username: randomText(), database: randomText(), schema: randomText(), warehouse: randomText(), role: randomText() };
+        grantFixes({ type: engine, ...input }).forEach((fix, j) => {
+          assert.equal(fix.sql.split("\n").length, want[j].split("\n").length, `${engine} one statement per line: ${JSON.stringify(input)}`);
+          assert.equal(skeleton(engine, fix.sql, Object.values(input).map((v) => v.trim())), want[j], `${engine} ${JSON.stringify(input)}`);
+        });
+      }
+    }
   });
 });

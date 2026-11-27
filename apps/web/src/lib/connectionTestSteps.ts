@@ -121,35 +121,66 @@ export function isSqlGrantEngine(type: string): boolean {
   return SQL_GRANT_ENGINES.has(resolveDriverType(type));
 }
 
-const filled = (value: string | undefined, fallback: string) => (value && value.trim() ? value.trim() : fallback);
+/**
+ * A value in a grant: typed by a person (always quoted / escaped for the
+ * engine, whatever it holds) or a placeholder Datawrap writes (never from
+ * input). The kind is a flag, never read from the text (re-review A: a value
+ * starting with "<" was emitted raw).
+ */
+export type GrantValue = { kind: "typed"; text: string } | { kind: "placeholder"; name: string };
 
-function pgIdent(name: string): string {
-  return name.startsWith("<") ? name : `"${name.replace(/"/g, '""')}"`;
+/**
+ * A typed value is used only when it can sit on one line as one quoted token:
+ * a control character (newline, NUL, line separator …) would split the
+ * snippet's lines, so the placeholder is shown and the person fills it in.
+ */
+export function grantValue(text: string | undefined | null, placeholder: string): GrantValue {
+  const t = String(text ?? "").trim();
+  // eslint-disable-next-line no-control-regex
+  if (!t || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(t) || t.length > 256) return { kind: "placeholder", name: placeholder };
+  return { kind: "typed", text: t };
 }
-function myIdent(name: string): string {
-  return name.startsWith("<") ? name : `\`${name.replace(/`/g, "``")}\``;
-}
-function myString(value: string): string {
-  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
-}
-function msIdent(name: string): string {
-  return name.startsWith("<") ? name : `[${name.replace(/]/g, "]]")}]`;
-}
+
+const show = (v: GrantValue, quote: (text: string) => string): string => (v.kind === "placeholder" ? `<${v.name}>` : quote(v.text));
+const dq = (text: string) => `"${text.replace(/"/g, '""')}"`;
+const bq = (text: string) => `\`${text.replace(/`/g, "``")}\``;
+const br = (text: string) => `[${text.replace(/]/g, "]]")}]`;
+/** A MySQL string literal, safe with or without NO_BACKSLASH_ESCAPES (backslash and quote doubled). */
+const sq = (text: string) => `'${text.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 /**
  * Snowflake folds an unquoted identifier to upper case and treats a quoted
- * one as case-sensitive (https://docs.snowflake.com/en/sql-reference/identifiers-syntax).
- * A plain name someone typed (compute_wh) is left unquoted so it resolves to
- * the object they mean (COMPUTE_WH); only a name that needs quotes gets them.
+ * one as case-sensitive (https://docs.snowflake.com/en/sql-reference/identifiers-syntax):
+ * a plain name someone typed (compute_wh) stays unquoted so it resolves to
+ * COMPUTE_WH; anything else is double-quoted.
  */
-function sfIdent(name: string): string {
-  if (name.startsWith("<")) return name;
-  return /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
-}
+const sf = (text: string) => (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(text) ? text : dq(text));
 
-/** The schema the failure named ("permission denied for schema raw"), if any. */
-export function schemaFromMessage(message: string | undefined): string {
-  const m = /\bschema\s+["`[]?([A-Za-z_][\w$]*)["`\]]?/i.exec(String(message || ""));
-  return m ? m[1] : "";
+/**
+ * The schema a failure named, read only from the engine's own phrasing of
+ * that error (re-review C), never a word guessed out of prose:
+ * - PostgreSQL / Redshift: `permission denied for schema raw`,
+ *   `schema "raw" does not exist`
+ * - SQL Server: `The specified schema name "raw" either does not exist or you
+ *   do not have permission to use it.`
+ * - Snowflake: `Schema 'DB.RAW' does not exist or not authorized.`
+ */
+export function schemaFromMessage(message: string | undefined, type: string): string {
+  const said = String(message || "");
+  const driver = resolveDriverType(type);
+  const patterns: RegExp[] = driver === "postgresql" || driver === "redshift"
+    ? [/\bpermission denied for schema ("(?:[^"]|"")+"|[A-Za-z_][\w$]*)(?=$|[\s.,;:)])/, /\bschema ("(?:[^"]|"")+") does not exist\b/]
+    : driver === "sqlserver"
+      ? [/\bThe specified schema name "((?:[^"]|"")+)" either does not exist or you do not have permission to use it\b/]
+      : driver === "snowflake"
+        ? [/\bSchema '(?:[^'.]+\.)?([^'.]+)' does not exist or not authorized\b/]
+        : [];
+  for (const re of patterns) {
+    const m = re.exec(said);
+    if (!m) continue;
+    const raw = m[1];
+    return raw.startsWith('"') ? raw.slice(1, -1).replace(/""/g, '"') : raw.replace(/""/g, '"');
+  }
+  return "";
 }
 
 /**
@@ -173,58 +204,62 @@ export function grantFixes(input: {
   type: string; username?: string; database?: string; schema?: string; warehouse?: string; role?: string; message?: string;
 }): GrantFix[] {
   const driver = resolveDriverType(input.type);
-  const user = filled(input.username, "<user>");
-  const db = filled(input.database, "<database>");
-  const schema = filled(input.schema, schemaFromMessage(input.message) || "<schema>");
+  const user = grantValue(input.username, "user");
+  const db = grantValue(input.database, "database");
+  const schema = grantValue(input.schema || schemaFromMessage(input.message, input.type), "schema");
+  const line = (...parts: string[]) => parts.join("\n");
   switch (driver) {
     case "postgresql": {
-      const u = pgIdent(user);
-      const s = pgIdent(schema);
+      const u = show(user, dq);
+      const s = show(schema, dq);
       return [
-        { engine: driver, purpose: "To read (source)", sql: `GRANT CONNECT ON DATABASE ${pgIdent(db)} TO ${u};\nGRANT USAGE ON SCHEMA ${s} TO ${u};\nGRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};` },
-        { engine: driver, purpose: "To write (destination)", sql: `GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};\nGRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};` },
+        { engine: driver, purpose: "To read (source)", sql: line(`GRANT CONNECT ON DATABASE ${show(db, dq)} TO ${u};`, `GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
       ];
     }
     case "redshift": {
-      const u = pgIdent(user);
-      const s = pgIdent(schema);
+      const u = show(user, dq);
+      const s = show(schema, dq);
       return [
-        { engine: driver, purpose: "To read (source)", sql: `GRANT USAGE ON SCHEMA ${s} TO ${u};\nGRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};` },
-        { engine: driver, purpose: "To write (destination)", sql: `GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};\nGRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};` },
+        { engine: driver, purpose: "To read (source)", sql: line(`GRANT USAGE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
+        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT USAGE, CREATE ON SCHEMA ${s} TO ${u};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${s} TO ${u};`) },
       ];
     }
     case "mysql":
     case "mariadb": {
-      const target = `${myIdent(db)}.*`;
-      const who = user.startsWith("<") ? `${user}@'%'` : `${myString(user)}@'%'`;
+      const target = `${show(db, bq)}.*`;
+      const who = `${show(user, sq)}@'%'`;
       return [
         { engine: driver, purpose: "To read (source)", sql: `GRANT SELECT, SHOW VIEW ON ${target} TO ${who};` },
         { engine: driver, purpose: "To write (destination)", sql: `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX ON ${target} TO ${who};` },
       ];
     }
     case "sqlserver": {
-      const u = msIdent(user);
+      const u = show(user, br);
+      const d = show(db, br);
       return [
-        { engine: driver, purpose: "To read (source)", sql: `USE ${msIdent(db)};\nALTER ROLE db_datareader ADD MEMBER ${u};\nGRANT VIEW DEFINITION TO ${u};` },
-        { engine: driver, purpose: "To write (destination)", sql: `USE ${msIdent(db)};\nALTER ROLE db_datareader ADD MEMBER ${u};\nALTER ROLE db_datawriter ADD MEMBER ${u};\nGRANT CREATE TABLE TO ${u};\nGRANT ALTER ON SCHEMA::${msIdent(schema)} TO ${u};` },
+        { engine: driver, purpose: "To read (source)", sql: line(`USE ${d};`, `ALTER ROLE db_datareader ADD MEMBER ${u};`, `GRANT VIEW DEFINITION TO ${u};`) },
+        { engine: driver, purpose: "To write (destination)", sql: line(`USE ${d};`, `ALTER ROLE db_datareader ADD MEMBER ${u};`, `ALTER ROLE db_datawriter ADD MEMBER ${u};`, `GRANT CREATE TABLE TO ${u};`, `GRANT ALTER ON SCHEMA::${show(schema, br)} TO ${u};`) },
       ];
     }
     case "oracle": {
-      const u = user.startsWith("<") ? user : pgIdent(user.toUpperCase());
-      const owner = schema.startsWith("<") ? "<owner>" : pgIdent(schema.toUpperCase());
+      // Oracle stores unquoted names in upper case; the quoted form names exactly that.
+      const up = (v: GrantValue): GrantValue => (v.kind === "typed" ? { kind: "typed", text: v.text.toUpperCase() } : v);
+      const u = show(up(user), dq);
+      const owner = show(schema.kind === "typed" ? up(schema) : { kind: "placeholder", name: "owner" }, dq);
       return [
-        { engine: driver, purpose: "To read (source)", sql: `GRANT CREATE SESSION TO ${u};\n-- once per table the transfer reads:\nGRANT SELECT ON ${owner}.<table> TO ${u};` },
-        { engine: driver, purpose: "To write (destination)", sql: `GRANT CREATE SESSION, CREATE TABLE TO ${u};\nALTER USER ${u} QUOTA UNLIMITED ON <tablespace>;` },
+        { engine: driver, purpose: "To read (source)", sql: line(`GRANT CREATE SESSION TO ${u};`, `GRANT SELECT ON ${owner}.<table> TO ${u}; -- once per table the transfer reads`) },
+        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT CREATE SESSION, CREATE TABLE TO ${u};`, `ALTER USER ${u} QUOTA UNLIMITED ON <tablespace>;`) },
       ];
     }
     case "snowflake": {
-      const r = sfIdent(filled(input.role, "<role>"));
-      const wh = sfIdent(filled(input.warehouse, "<warehouse>"));
-      const d = sfIdent(db);
-      const sch = `${d}.${sfIdent(schema)}`;
+      const r = show(grantValue(input.role, "role"), sf);
+      const wh = show(grantValue(input.warehouse, "warehouse"), sf);
+      const d = show(db, sf);
+      const sch = `${d}.${show(schema, sf)}`;
       return [
-        { engine: driver, purpose: "To read (source)", sql: `GRANT USAGE ON WAREHOUSE ${wh} TO ROLE ${r};\nGRANT USAGE ON DATABASE ${d} TO ROLE ${r};\nGRANT USAGE ON SCHEMA ${sch} TO ROLE ${r};\nGRANT SELECT ON ALL TABLES IN SCHEMA ${sch} TO ROLE ${r};` },
-        { engine: driver, purpose: "To write (destination)", sql: `GRANT USAGE ON WAREHOUSE ${wh} TO ROLE ${r};\nGRANT USAGE ON DATABASE ${d} TO ROLE ${r};\nGRANT USAGE, CREATE TABLE ON SCHEMA ${sch} TO ROLE ${r};\nGRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${sch} TO ROLE ${r};` },
+        { engine: driver, purpose: "To read (source)", sql: line(`GRANT USAGE ON WAREHOUSE ${wh} TO ROLE ${r};`, `GRANT USAGE ON DATABASE ${d} TO ROLE ${r};`, `GRANT USAGE ON SCHEMA ${sch} TO ROLE ${r};`, `GRANT SELECT ON ALL TABLES IN SCHEMA ${sch} TO ROLE ${r};`) },
+        { engine: driver, purpose: "To write (destination)", sql: line(`GRANT USAGE ON WAREHOUSE ${wh} TO ROLE ${r};`, `GRANT USAGE ON DATABASE ${d} TO ROLE ${r};`, `GRANT USAGE, CREATE TABLE ON SCHEMA ${sch} TO ROLE ${r};`, `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${sch} TO ROLE ${r};`) },
       ];
     }
     default:
