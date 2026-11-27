@@ -346,3 +346,52 @@ def test_pyodbc_and_plain_mssql_schemes_pass_the_host_policy(monkeypatch, odbc):
     for scheme in ("mssql+pyodbc", "mssql"):
         url = gs._build_url_unconfined({"type": "sqlserver", "connection_string": f"{scheme}://u:p@h:1433/d"})
         assert str(url).startswith(scheme)
+
+
+_FREETDS_ODBC = "odbc_connect=" + "DRIVER%3D%7BFreeTDS%7D%3BSERVER%3Dh%3BPORT%3D1433%3BDATABASE%3Dd"
+
+
+@pytest.mark.parametrize(("query", "refused"), [
+    # In the SQLAlchemy URL query (any key case).
+    ("driver=FreeTDS", "driver=FreeTDS"),
+    ("Driver=%2Fusr%2Flib%2Fx86_64-linux-gnu%2Fodbc%2Flibtdsodbc.so", "driver="),
+    ("driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes", "TrustServerCertificate=yes"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&trustservercertificate=True", "TrustServerCertificate=True"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=no", "Encrypt=no"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&ENCRYPT=Optional", "Encrypt=Optional"),
+    # Inside odbc_connect, URL-encoded, keys in any case, braces honoured.
+    (_FREETDS_ODBC, "driver=FreeTDS"),
+    ("odbc_connect=" + "Driver%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BServer%3Dh%3B"
+     "trustServerCertificate%3Dyes", "TrustServerCertificate=yes"),
+    ("odbc_connect=" + "DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BPWD%3D%7Ba%3BEncrypt%3Dno%7D%3B"
+     "encrypt%3Doptional", "Encrypt=optional"),
+    # Accepted: Driver 18, verification on.
+    ("driver=ODBC+Driver+18+for+SQL+Server", None),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=strict&TrustServerCertificate=no", None),
+    ("odbc_connect=" + "DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BPWD%3D%7Ba%3BEncrypt%3Dno%7D", None),
+])
+def test_pyodbc_strings_that_turn_verification_off_obey_the_host_policy(monkeypatch, odbc, query, refused):
+    """Review 3: every mssql+pyodbc string passed as verified, whatever it said."""
+    from connectors.mssql_security import check_mssql_url
+
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    for scheme in ("mssql+pyodbc", "mssql"):
+        raw = f"{scheme}://u:p@db.example.test:1433/sales?{query}"
+        if refused is None:
+            check_mssql_url(raw, {})
+            continue
+        with pytest.raises(SqlServerSecurityError, match=refused.split("=")[0]) as caught:
+            check_mssql_url(raw, {})
+        assert refused.lower() in str(caught.value).lower()
+        check_mssql_url(raw, {"sqlserver_driver": "freetds"})  # the labelled opt-out
+    monkeypatch.delenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS")
+    check_mssql_url(f"mssql+pyodbc://u:p@h/d?{query}", {})  # no policy: as before
+
+
+def test_connection_string_with_trust_server_certificate_is_refused_end_to_end(monkeypatch, odbc):
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    cfg = {"type": "sqlserver", "connection_string":
+           "mssql+pyodbc://u:p@db.example.test:1433/sales?driver=ODBC+Driver+18+for+SQL+Server"
+           "&TrustServerCertificate=yes"}
+    with pytest.raises(SqlServerSecurityError, match="TrustServerCertificate"):
+        gs._build_url_unconfined(dict(cfg))

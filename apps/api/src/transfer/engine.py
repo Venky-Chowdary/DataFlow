@@ -2942,7 +2942,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             if source_stamp.get("kafka_cursor"):
                 # The buffered read took one poll batch; its offsets commit
                 # with the job, never earlier (D85).
@@ -4180,7 +4180,7 @@ class UniversalTransferEngine:
                 )
             else:
                 release_args = None
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             # D85: Kafka is a streaming source, so this is the path that must
             # commit the group offsets; without it every run re-read the topic.
             commit_kafka_offsets_on_accept(request, dest_summary)
@@ -5048,7 +5048,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
-            _settle_overwrite_backup(request.destination, restore=False)
+            _settle_overwrite_backup(request.destination, restore=False, summary=dest_summary)
             commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,

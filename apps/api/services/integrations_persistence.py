@@ -39,57 +39,100 @@ def durable() -> bool:
     return _collection() is not None
 
 
-def load_sections() -> dict[str, Any] | None:
-    """The stored sections, or ``None`` when there is no database (or no doc yet)."""
+def read_document() -> tuple[str, dict[str, Any] | None]:
+    """``("ok", sections)``, ``("absent", None)``, ``("nodb", None)`` or ``("error", None)``.
+
+    ``error`` covers a configured control plane that is unreachable or a read
+    that failed: the document may well exist, so nothing may be healed over it
+    and no policy may be written against a guess (review round 3).
+    """
     coll = _collection()
     if coll is None:
-        return None
+        return ("error" if _control_plane_configured() else "nodb"), None
     try:
         doc = coll.find_one({"_id": DOC_ID})
     except Exception as exc:  # noqa: BLE001
         logger.warning("integrations settings read failed; using the local file: %s", exc)
-        return None
+        return "error", None
     if not isinstance(doc, dict):
-        return None
-    return {k: doc[k] for k in SECTIONS if k in doc}
+        return "absent", None
+    return "ok", {k: doc[k] for k in SECTIONS if k in doc}
+
+
+def _control_plane_configured() -> bool:
+    try:
+        from services.control_plane_store import control_plane_configured
+
+        return control_plane_configured()
+    except Exception:  # noqa: BLE001
+        logger.debug("control-plane configuration unknown", exc_info=True)
+        return False
+
+
+def load_sections() -> dict[str, Any] | None:
+    """The stored sections, or ``None`` when there is no database, no doc, or no read."""
+    return read_document()[1]
 
 
 def save_sections(data: dict[str, Any]) -> bool:
+    """Write a whole document: only for healing a database that has none yet."""
     coll = _collection()
     if coll is None:
         return False
     doc = {k: data[k] for k in SECTIONS if k in data}
     try:
-        coll.replace_one({"_id": DOC_ID}, {"_id": DOC_ID, **doc}, upsert=True)
+        coll.insert_one({"_id": DOC_ID, **doc})
+    except Exception as exc:  # noqa: BLE001 - a concurrent first write is fine
+        logger.warning("integrations settings heal not written: %s", exc)
+        return False
+    return True
+
+
+def save_section(path: str, value: Any, updated_at: str) -> bool | None:
+    """``$set`` one section (dotted ``path``) and ``updated_at``; nothing else.
+
+    Each writer owns its section, so a writer holding a stale copy of another
+    section (the MCP policy and its ``rev``) cannot put it back (review round 3).
+    ``None`` when the path does not live in the database or there is none.
+    """
+    if path.split(".", 1)[0] not in SECTIONS:
+        return None
+    coll = _collection()
+    if coll is None:
+        return None
+    try:
+        coll.update_one({"_id": DOC_ID}, {"$set": {path: value, "updated_at": updated_at}}, upsert=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("integrations settings write failed; local file kept: %s", exc)
         return False
     return True
 
 
-def save_sections_if_revision(data: dict[str, Any], expected_rev: int) -> bool | None:
-    """Save only if the stored ``mcp_policy.rev`` is still ``expected_rev``.
+def save_mcp_policy_if_revision(policy: dict[str, Any], expected_rev: int, updated_at: str) -> str:
+    """Compare-and-swap ``mcp_policy`` on its ``rev``; other sections are not touched.
 
-    ``None`` when there is no database (the caller's process lock is then the
-    only writer guard); ``False`` when another writer got there first.
+    ``saved``; ``conflict`` (another writer got there first); ``nodb`` (no
+    database: the caller's locks are the only writer guard); ``unavailable``
+    (a configured database cannot be written: the caller answers 503).
     """
     coll = _collection()
     if coll is None:
-        return None
-    doc = {k: data[k] for k in SECTIONS if k in data}
+        return "unavailable" if _control_plane_configured() else "nodb"
     match: dict[str, Any] = {"_id": DOC_ID}
     if expected_rev:
         match["mcp_policy.rev"] = expected_rev
     else:
         match["$or"] = [{"mcp_policy.rev": {"$exists": False}}, {"mcp_policy.rev": 0}]
+    update = {"$set": {"mcp_policy": policy, "updated_at": updated_at}}
     try:
-        result = coll.replace_one(match, {"_id": DOC_ID, **doc}, upsert=False)
-        if getattr(result, "matched_count", 0):
-            return True
+        if getattr(coll.update_one(match, update), "matched_count", 0):
+            return "saved"
         if expected_rev or coll.find_one({"_id": DOC_ID}) is not None:
-            return False
-        coll.insert_one({"_id": DOC_ID, **doc})
-        return True
-    except Exception as exc:  # noqa: BLE001 - a duplicate insert is a lost race
+            return "conflict"
+        coll.insert_one({"_id": DOC_ID, "mcp_policy": policy, "updated_at": updated_at})
+        return "saved"
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ == "DuplicateKeyError":
+            return "conflict"  # lost the race to create the document
         logger.warning("integrations settings compare-and-swap failed: %s", exc)
-        return False
+        return "unavailable"

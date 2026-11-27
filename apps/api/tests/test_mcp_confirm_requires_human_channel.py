@@ -73,7 +73,8 @@ def test_per_workspace_mode_overrides_the_default(monkeypatch):
     import services.integrations_store as store
 
     monkeypatch.setattr(store, "get_mcp_policy", lambda: {"confirm": {
-        "default": "interactive", "workspaces": {"ops": "agent", "fin": "four_eyes", "bad": "yolo"}}})
+        "default": "interactive", "workspaces": {"ops": "agent", "fin": "four_eyes", "bad": "yolo"},
+        "set_by_platform_admin": ["ops"]}})
     assert policy.confirm_mode_for("ops") == "agent"
     assert policy.confirm_mode_for("fin") == "four_eyes"
     assert policy.confirm_mode_for("bad") == "interactive"
@@ -238,7 +239,8 @@ def test_workspace_admin_changes_only_their_own_entry_and_b_survives():
 
 def test_platform_admin_may_change_the_default_and_any_workspace():
     merged = _merge({"default": "four_eyes", "workspaces": {"B": "interactive"}}, admin=True)
-    assert merged == {"default": "four_eyes", "workspaces": {"B": "interactive"}}
+    assert merged == {"default": "four_eyes", "workspaces": {"B": "interactive"},
+                      "set_by_platform_admin": ["B"]}
 
 
 def test_workspace_admin_put_merges_and_cannot_touch_b(app_client, monkeypatch):
@@ -326,7 +328,7 @@ def test_compare_and_swap_conflict_merges_onto_the_newer_version(app_client, mon
     store = app_client["integrations_store"]
     calls = {"n": 0}
 
-    def cas(data, expected_rev):
+    def cas(new_policy, expected_rev, updated_at):
         calls["n"] += 1
         if calls["n"] == 1:
             # The other replica's write lands now (B -> four_eyes).
@@ -334,27 +336,15 @@ def test_compare_and_swap_conflict_merges_onto_the_newer_version(app_client, mon
             raw["mcp_policy"]["confirm"]["workspaces"]["B"] = "four_eyes"
             raw["mcp_policy"]["rev"] = expected_rev + 1
             store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
-            return False
-        return None
+            return "conflict"
+        return "nodb"
 
-    monkeypatch.setattr(persistence, "save_sections_if_revision", cas)
+    monkeypatch.setattr(persistence, "save_mcp_policy_if_revision", cas)
     store.set_mcp_policy({"enabled": True}, confirm_merge=lambda stored: policy.merge_confirm_change(
         stored, {"workspaces": {"A": "four_eyes"}}, platform_admin=False, caller_workspace="A"))
 
     assert calls["n"] == 2
     assert store.get_mcp_policy()["confirm"]["workspaces"] == {"A": "four_eyes", "B": "four_eyes"}
-
-
-def test_single_workspace_admin_without_header_resolves_to_their_workspace(monkeypatch):
-    import services.team_store as team_store
-
-    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
-        {"workspace_id": "ws-a", "role": "admin"}, {"workspace_id": "ws-b", "role": "viewer"}])
-    assert policy.own_admin_workspace({"email": "a@x"}, "") == "ws-a"
-    assert policy.own_admin_workspace({"email": "a@x"}, "ws-z") == "ws-z"
-    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
-        {"workspace_id": "ws-a", "role": "admin"}, {"workspace_id": "ws-b", "role": "owner"}])
-    assert policy.own_admin_workspace({"email": "a@x"}, "") == ""
 
 
 def test_put_with_non_mapping_workspaces_is_422(app_client, monkeypatch):
@@ -363,3 +353,214 @@ def test_put_with_non_mapping_workspaces_is_422(app_client, monkeypatch):
     resp = client.put("/api/v1/mcp/policy", headers={"Authorization": f"Bearer {admin}"},
                       json={"enabled": True, "confirm": {"workspaces": ["A"]}})
     assert resp.status_code == 422, resp.text
+
+
+# ------------------------------------------ review 3: per-section writes, outages
+
+
+class _FakeSettingsCollection:
+    """Enough of a Mongo collection for the integrations document (no server)."""
+
+    def __init__(self, *, down: bool = False):
+        self.doc: dict | None = None
+        self.down = down
+        self.writes: list[str] = []
+
+    def _check(self):
+        if self.down:
+            raise ConnectionError("server selection timed out")
+
+    @staticmethod
+    def _get(doc, path):
+        for key in path.split("."):
+            if not isinstance(doc, dict) or key not in doc:
+                return None
+            doc = doc[key]
+        return doc
+
+    def _matches(self, match):
+        if self.doc is None:
+            return False
+        for key, want in match.items():
+            if key == "_id":
+                continue
+            if key == "$or":
+                if not any(self._matches(alt) for alt in want):
+                    return False
+            elif isinstance(want, dict) and "$exists" in want:
+                if (self._get(self.doc, key) is not None) != want["$exists"]:
+                    return False
+            elif self._get(self.doc, key) != want:
+                return False
+        return True
+
+    def find_one(self, match):
+        self._check()
+        import copy
+
+        return copy.deepcopy(self.doc)
+
+    def insert_one(self, doc):
+        self._check()
+        self.writes.append("insert")
+        if self.doc is not None:
+            raise type("DuplicateKeyError", (Exception,), {})("dup")
+        import copy
+
+        self.doc = copy.deepcopy(doc)
+
+    def replace_one(self, match, doc, upsert=False):
+        self._check()
+        self.writes.append("replace")
+        import copy
+
+        hit = self._matches(match) or (upsert and self.doc is None)
+        if hit:
+            self.doc = copy.deepcopy(doc)
+        return SimpleNamespace(matched_count=int(hit))
+
+    def update_one(self, match, update, upsert=False):
+        self._check()
+        self.writes.append("update")
+        import copy
+
+        if self.doc is None and upsert:
+            self.doc = {"_id": match["_id"]}
+        if not self._matches(match):
+            return SimpleNamespace(matched_count=0)
+        for path, value in update["$set"].items():
+            node = self.doc
+            *parents, leaf = path.split(".")
+            for key in parents:
+                node = node.setdefault(key, {})
+            node[leaf] = copy.deepcopy(value)
+        return SimpleNamespace(matched_count=1)
+
+
+def _policy_change(store, ws: str):
+    store.set_mcp_policy({"enabled": True}, confirm_merge=lambda stored: policy.merge_confirm_change(
+        stored, {"workspaces": {ws: "four_eyes"}}, platform_admin=False, caller_workspace=ws))
+
+
+@pytest.mark.parametrize("database", [True, False], ids=["database", "file"])
+def test_another_section_writer_does_not_revert_a_concurrent_policy_change(app_client, monkeypatch, database):
+    """Review 3: set_pilot_engine_preference read the whole document, a policy
+    change landed, and the Pilot write put the stale policy (and rev) back."""
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    coll = _FakeSettingsCollection()
+    monkeypatch.setattr(persistence, "_collection", lambda: coll if database else None)
+    real_now = store._now
+    fired = {"n": 0}
+
+    def race_then_now():
+        # The Pilot writer stamps updated_at after any read, just before it
+        # writes: the policy change lands exactly there.
+        if not fired["n"]:
+            fired["n"] = 1
+            _policy_change(store, "A")
+        return real_now()
+
+    monkeypatch.setattr(store, "_now", race_then_now)
+    store.set_pilot_engine_preference("cloud")
+    monkeypatch.setattr(store, "_now", real_now)
+
+    assert fired["n"] == 1
+    assert store.get_mcp_policy()["confirm"]["workspaces"] == {"A": "four_eyes"}
+    assert store.get_pilot_engine_preference() == "cloud"
+
+    # And the other way round: a policy write carries no stale Pilot section.
+    def merge_with_race(stored):
+        store.set_pilot_engine_preference("local")
+        return policy.merge_confirm_change(stored, {"workspaces": {"B": "four_eyes"}},
+                                           platform_admin=False, caller_workspace="B")
+
+    store.set_mcp_policy({"enabled": True}, confirm_merge=merge_with_race)
+    assert store.get_pilot_engine_preference() == "local"
+    assert store.get_mcp_policy()["confirm"]["workspaces"] == {"A": "four_eyes", "B": "four_eyes"}
+    if database:
+        assert coll.writes.count("replace") == 0, "no writer replaces the whole document"
+
+
+def test_a_failed_read_never_heals_the_local_file_over_the_database(app_client, monkeypatch):
+    import json
+
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    store.STORE_PATH.write_text(json.dumps({"pilot": {"engine": "ollama"}}), encoding="utf-8")
+    coll = _FakeSettingsCollection(down=True)
+    coll.doc = {"_id": persistence.DOC_ID, "pilot": {"engine": "anthropic"}}
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+    store._load_raw()
+    assert coll.writes == [], "a transient read error is not an absent document"
+
+    coll.down, coll.doc = False, None
+    store._load_raw()
+    assert coll.writes == ["insert"] and coll.doc["pilot"] == {"engine": "ollama"}
+
+
+def test_policy_write_while_the_database_is_down_is_503_not_409(app_client, monkeypatch):
+    import services.integrations_persistence as persistence
+
+    client, admin = app_client["client"], app_client["tokens"]["admin"]
+    coll = _FakeSettingsCollection(down=True)
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+    resp = client.put("/api/v1/mcp/policy", headers={"Authorization": f"Bearer {admin}"},
+                      json={"enabled": False, "allowed_tools": None})
+    assert resp.status_code == 503, resp.text
+    assert "unavailable" in resp.text
+
+    import services.control_plane_store as cps
+
+    monkeypatch.setattr(persistence, "_collection", lambda: None)
+    monkeypatch.setattr(cps, "control_plane_configured", lambda: True)
+    resp = client.put("/api/v1/mcp/policy", headers={"Authorization": f"Bearer {admin}"},
+                      json={"enabled": False, "allowed_tools": None})
+    assert resp.status_code == 503, resp.text
+
+
+def test_a_stored_entry_looser_than_the_default_is_clamped_when_read(app_client):
+    """Review 3: the floor was enforced only when a workspace admin wrote."""
+    store = app_client["integrations_store"]
+    store.set_mcp_policy({"enabled": True, "confirm": {"default": "four_eyes",
+                                                       "workspaces": {"A": "agent", "C": "four_eyes"}}})
+    assert policy.confirm_mode_for("A") == "four_eyes"
+    assert policy.confirm_mode_for("C") == "four_eyes"
+    # A platform admin's own choice stays in force, and is recorded as theirs.
+    store.set_mcp_policy({"enabled": True}, confirm_merge=lambda stored: policy.merge_confirm_change(
+        stored, {"workspaces": {"A": "agent"}}, platform_admin=True, caller_workspace=""))
+    assert policy.confirm_mode_for("A") == "agent"
+    assert store.get_mcp_policy()["confirm"]["set_by_platform_admin"] == ["A"]
+    # A workspace admin rewriting the entry takes the platform admin's mark off.
+    store.set_mcp_policy({"enabled": True}, confirm_merge=lambda stored: policy.merge_confirm_change(
+        stored, {"workspaces": {"A": "four_eyes"}}, platform_admin=False, caller_workspace="A"))
+    assert "set_by_platform_admin" not in store.get_mcp_policy()["confirm"]
+
+
+def test_headerless_policy_change_uses_the_workspace_the_rbac_gate_used(app_client, monkeypatch):
+    """Review 3: the gate resolves a headerless request only for exactly one
+    membership; the policy route picked the one *admin* membership among several."""
+    import services.rbac as rbac
+    import services.team_store as team_store
+
+    client, admin = app_client["client"], app_client["tokens"]["admin"]
+    store = app_client["integrations_store"]
+    store.set_mcp_policy({"enabled": True, "confirm": {"default": "interactive", "workspaces": {}}})
+    monkeypatch.setattr(policy, "credential_kind", lambda request: "session_token")
+    monkeypatch.setattr(rbac, "holds_platform_admin_role", lambda user: False)
+    body = {"enabled": True, "confirm": {"workspaces": {"ws-a": "four_eyes"}}}
+    headers = {"Authorization": f"Bearer {admin}"}
+
+    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
+        {"workspace_id": "ws-a", "role": "admin"}, {"workspace_id": "ws-b", "role": "viewer"}])
+    refused = client.put("/api/v1/mcp/policy", headers=headers, json=body)
+    assert refused.status_code == 403, refused.text
+    assert store.get_mcp_policy()["confirm"]["workspaces"] == {}
+
+    monkeypatch.setattr(team_store, "list_memberships_for_user", lambda email: [
+        {"workspace_id": "ws-a", "role": "admin"}])
+    ok = client.put("/api/v1/mcp/policy", headers=headers, json=body)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["confirm"]["workspaces"] == {"ws-a": "four_eyes"}

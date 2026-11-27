@@ -283,29 +283,88 @@ def with_access_token(connect_args: dict[str, Any], cfg: Mapping[str, Any]) -> d
     return {**connect_args, "attrs_before": {**dict(connect_args.get("attrs_before") or {}), **token}}
 
 
+def _odbc_pairs(text: str) -> list[tuple[str, str]]:
+    """``KEY=value;KEY={va;lue}`` -> ``[(key lower-cased, value)]`` (braces honoured)."""
+    pairs: list[tuple[str, str]] = []
+    key, buf, depth, in_value = "", "", 0, False
+    for ch in str(text or "") + ";":
+        if in_value and ch == "{":
+            depth += 1
+        elif in_value and ch == "}" and depth:
+            depth -= 1
+        if ch == ";" and not depth:
+            if in_value or buf.strip():
+                pairs.append((key.strip().lower(), buf.strip().strip("{}").strip()))
+            key, buf, in_value = "", "", False
+        elif ch == "=" and not in_value:
+            key, buf, in_value = buf, "", True
+        else:
+            buf += ch
+    return pairs
+
+
+def _url_odbc_keywords(raw: str) -> list[tuple[str, str]]:
+    """The ODBC keywords a SQLAlchemy mssql URL passes: its query and ``odbc_connect``."""
+    from urllib.parse import parse_qsl
+
+    query = str(raw or "").split("?", 1)[1] if "?" in str(raw or "") else ""
+    pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query, keep_blank_values=True):  # URL-decoded
+        name = key.strip().lower()
+        if name == "odbc_connect":
+            pairs.extend(_odbc_pairs(value))
+        else:
+            pairs.append((name, value.strip()))
+    return pairs
+
+
+def _unverified_odbc_keyword(raw: str) -> str:
+    """The first keyword that turns off certificate verification, or ``""``."""
+    for key, value in _url_odbc_keywords(raw):
+        low = value.lower()
+        if key == "driver" and ("freetds" in low or "tdsodbc" in low):
+            return f"driver={value}"
+        if key == "trustservercertificate" and low in _TRUTHY:
+            return f"TrustServerCertificate={value}"
+        if key == "encrypt" and low in ("no", "false", "0", "optional", "off"):
+            return f"Encrypt={value}"
+    return ""
+
+
 def check_mssql_url(raw: str, cfg: Mapping[str, Any]) -> None:
     """A SQL Server connection string obeys the same driver policy as host/port.
 
     ``mssql+pymssql://`` (FreeTDS, no certificate verification) is refused
     when the host requires verified TLS or the connector needs the Microsoft
-    driver, unless the connector chose ``sqlserver_driver=freetds``.
+    driver, unless the connector chose ``sqlserver_driver=freetds``. So is an
+    ``mssql+pyodbc`` string that turns verification off itself — a FreeTDS
+    ``driver``, ``TrustServerCertificate=yes`` or ``Encrypt=no|optional`` —
+    in its query or inside ``odbc_connect`` (review round 3).
     """
     scheme = str(raw or "").split("://", 1)[0].strip().lower()
     dialect, _, dbapi = scheme.partition("+")
-    if dialect != "mssql" or dbapi in ("", "pyodbc"):
+    if dialect != "mssql" or driver_choice(cfg) == "freetds":
+        return
+    if not (require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg)):
+        return
+    fix = (
+        "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
+        "an unverified connection."
+    )
+    if dbapi not in ("", "pyodbc"):
         # Plain mssql:// is SQLAlchemy's pyodbc default. Every other SQL
         # Server DBAPI (pymssql, pytds, ...) is outside the Microsoft driver's
         # certificate verification (review N9).
-        return
-    if driver_choice(cfg) == "freetds":
-        return
-    if require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg):
         raise SqlServerSecurityError(
             f"This SQL Server connection string uses {scheme}, not mssql+pyodbc (the only SQL "
             "Server path whose certificate verification Datawrap configures), and this host or "
-            "connector requires verified TLS. "
-            "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
-            "an unverified connection."
+            f"connector requires verified TLS. {fix}"
+        )
+    keyword = _unverified_odbc_keyword(raw)
+    if keyword:
+        raise SqlServerSecurityError(
+            f"This SQL Server connection string sets {keyword}, which turns off certificate "
+            f"verification, and this host or connector requires verified TLS. {fix}"
         )
 
 

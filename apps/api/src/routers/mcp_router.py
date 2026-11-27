@@ -275,8 +275,12 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
             )
 
         payload["confirm"] = None
+    from services.control_plane_store import ControlPlaneUnavailable
+
     try:
         new = set_mcp_policy(payload, confirm_merge=confirm_merge)
+    except ControlPlaneUnavailable as exc:  # a RuntimeError: before the 409 below
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
