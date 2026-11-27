@@ -848,8 +848,9 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
             raw = rebuild_url(parsed, user=user, password=password)
         from connectors.mssql_security import check_mssql_url
 
-        check_mssql_url(raw, cfg)  # a mssql+pymssql:// string obeys the TLS policy too
-        return _normalize_sqlalchemy_url_string(raw, db_type)
+        url = _normalize_sqlalchemy_url_string(raw, db_type)
+        check_mssql_url(str(url), cfg)  # a non-pyodbc mssql string obeys the TLS policy too
+        return url
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")

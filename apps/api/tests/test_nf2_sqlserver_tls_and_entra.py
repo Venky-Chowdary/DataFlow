@@ -327,3 +327,22 @@ def test_managed_identity_read_back_sends_no_default_username(monkeypatch):
     })) if gs._mssql_odbc_driver() else None
     if url is not None:
         assert url.username is None
+
+
+
+@pytest.mark.parametrize("scheme", ["mssql+pytds", "mssql+pymssql", "mssql+aioodbc"])
+def test_every_non_pyodbc_mssql_scheme_obeys_the_host_policy(monkeypatch, no_odbc, scheme):
+    """Review N9: only mssql+pymssql was refused; mssql+pytds (FreeTDS-style) passed."""
+    import re
+
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    cfg = {"type": "sqlserver", "connection_string": f"{scheme}://u:p@db.example.test:1433/sales"}
+    with pytest.raises(SqlServerSecurityError, match=re.escape(scheme)):
+        gs._build_url_unconfined(dict(cfg))
+
+
+def test_pyodbc_and_plain_mssql_schemes_pass_the_host_policy(monkeypatch, odbc):
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    for scheme in ("mssql+pyodbc", "mssql"):
+        url = gs._build_url_unconfined({"type": "sqlserver", "connection_string": f"{scheme}://u:p@h:1433/d"})
+        assert str(url).startswith(scheme)

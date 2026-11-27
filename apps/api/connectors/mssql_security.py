@@ -291,14 +291,19 @@ def check_mssql_url(raw: str, cfg: Mapping[str, Any]) -> None:
     driver, unless the connector chose ``sqlserver_driver=freetds``.
     """
     scheme = str(raw or "").split("://", 1)[0].strip().lower()
-    if scheme != "mssql+pymssql":
+    dialect, _, dbapi = scheme.partition("+")
+    if dialect != "mssql" or dbapi in ("", "pyodbc"):
+        # Plain mssql:// is SQLAlchemy's pyodbc default. Every other SQL
+        # Server DBAPI (pymssql, pytds, ...) is outside the Microsoft driver's
+        # certificate verification (review N9).
         return
     if driver_choice(cfg) == "freetds":
         return
     if require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg):
         raise SqlServerSecurityError(
-            "This SQL Server connection string uses mssql+pymssql (FreeTDS, which does not "
-            "verify the server certificate), and this host or connector requires verified TLS. "
+            f"This SQL Server connection string uses {scheme}, not mssql+pyodbc (the only SQL "
+            "Server path whose certificate verification Datawrap configures), and this host or "
+            "connector requires verified TLS. "
             "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
             "an unverified connection."
         )
