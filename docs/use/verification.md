@@ -205,7 +205,12 @@ the verification. **Re-verify this table** compares every row again.
 **Copy repair SQL** shows statements that make the destination match the
 source for the named keys, with the run's transforms applied; it leaves out
 quarantined rows, rows outside the run and protected columns, and says so.
-Datawrap never runs them.
+Each UPDATE and DELETE carries the destination row's values as read when
+the statements were generated, so a row changed since is left alone; an
+extra row is deleted only if the source still does not hold its key when
+the statements are generated. MySQL / MariaDB string literals that hold a
+quote or backslash are written in hex, so they mean the same with or
+without `NO_BACKSLASH_ESCAPES`. Datawrap never runs them.
 
 Tested end to end on PostgreSQL to PostgreSQL. Other engine pairs use the same
 comparison but are not yet tested end to end in this mode.

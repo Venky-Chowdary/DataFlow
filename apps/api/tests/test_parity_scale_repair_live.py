@@ -96,7 +96,7 @@ def test_extras_outside_the_run_and_quarantined_rows_are_left_out(upper_tables) 
                   summary={"rejected_details": [{"row": {"id": 7}, "error": "failed validation"}]})
     assert _verify(job_id)["state"] == "failed"
     sql = _repair(job_id, dst)["sql"]
-    assert "DELETE" not in sql
+    assert not any(s.startswith("DELETE") for s in _statements(sql))
     assert "1 extra row left alone" in sql
     inserts = [s for s in _statements(sql) if s.startswith("INSERT")]
     assert len(inserts) == 1 and "VALUES (8," in inserts[0]
@@ -226,3 +226,59 @@ def test_the_runs_locales_are_replayed_by_the_judge_the_explorer_and_the_repair(
         assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
     finally:
         _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')
+
+
+def test_repair_statements_never_overwrite_a_row_changed_since_they_were_generated(upper_tables) -> None:
+    """Review 3, item 9: UPDATE carried no old-value guard and DELETE no re-check of the source."""
+    src, dst = upper_tables
+    _sql(f"UPDATE \"{dst}\" SET name = 'WRONG' WHERE id IN (30, 31)",
+         f"INSERT INTO \"{dst}\" VALUES (-5, 'EXTRA', 1), (-6, 'EXTRA', 2)")
+    job_id = _job(src, dst)
+    assert _verify(job_id)["state"] == "failed"
+    # Since the comparison: the source now holds key -6 (so it is not an extra row any more) ...
+    _sql(f"INSERT INTO \"{src}\" VALUES (-6, 'extra', 2)")
+    sql = _repair(job_id, dst)["sql"]
+    statements = _statements(sql)
+    deletes = [s for s in statements if s.startswith("DELETE")]
+    assert len(deletes) == 1 and '"id" = -5' in deletes[0] and "\"name\" = 'EXTRA'" in deletes[0]
+    assert "1 extra row left alone: the source holds that key now" in sql
+    updates = [s for s in statements if s.startswith("UPDATE")]
+    assert all("\"name\" = 'WRONG'" in u.split(" WHERE ", 1)[1] for u in updates), updates
+    # ... and someone fixed row 31 (differently) in the destination before the reviewer ran them.
+    _sql(f"UPDATE \"{dst}\" SET name = 'FIXED BY HAND' WHERE id = 31", f'DELETE FROM "{src}" WHERE id = -6')
+    _sql(*statements)
+    conn = parity_engines.connect("postgresql")
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT id, name FROM "{dst}" WHERE id IN (30, 31, -5, -6) ORDER BY id')
+        rows = cur.fetchall()
+    conn.close()
+    assert rows == [(-6, "EXTRA"), (30, "NAME 30"), (31, "FIXED BY HAND")]
+
+
+def _mysql_usable() -> bool:
+    if not parity_engines.available("mysql"):
+        return False
+    try:
+        parity_engines.connect("mysql").close()
+        return True
+    except Exception:  # noqa: BLE001 — a reachable port with other credentials is not usable here
+        return False
+
+
+@pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
+@pytest.mark.parametrize("sql_mode", ["", "NO_BACKSLASH_ESCAPES"])
+def test_mysql_literals_mean_the_same_under_every_sql_mode(sql_mode: str) -> None:
+    """Review 3, item 9: a doubled backslash is two backslashes under NO_BACKSLASH_ESCAPES."""
+    from services.parity_scale.explorer import literal
+
+    values = ["C:\\temp\\new", "it's", "both \\' here", "plain", "naïve ünïcode \\n"]
+    conn = parity_engines.connect("mysql")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION sql_mode = %s", (sql_mode,))
+            for value in values:
+                cur.execute(f"SELECT {literal('mysql', value)}")
+                got = cur.fetchone()[0]
+                assert (got.decode("utf-8") if isinstance(got, bytes) else got) == value, (sql_mode, value)
+    finally:
+        conn.close()
